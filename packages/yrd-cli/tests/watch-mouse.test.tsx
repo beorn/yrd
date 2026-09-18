@@ -43,13 +43,17 @@ const SNAPSHOT: WatchSnapshot = {
   queue: "example.test/repo#main",
   queues: [{ branch: "main", label: "main", path: "/repo" }],
   rows: ROWS.map((item) => ({ row: item })),
+  unfiltered: ROWS.map((item) => ({ row: item })),
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** The screen row a branch is drawn on, or a failure naming the screen. */
+/**
+ * The table row a branch is drawn on, or a failure naming the screen. Read by the branch AND its subject:
+ * the queue line above the table names a branch too, as the last merge (24196).
+ */
 function rowOf(lines: readonly string[], branch: string): number {
-  const index = lines.findIndex((line) => line.includes(branch))
+  const index = lines.findIndex((line) => line.includes(`${branch} work on ${branch}`))
   expect(index, lines.join("\n")).toBeGreaterThanOrEqual(0)
   return index
 }

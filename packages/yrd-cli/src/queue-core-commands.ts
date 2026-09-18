@@ -14,11 +14,13 @@
  */
 
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { hostname } from "node:os"
 import { dirname, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
+import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
-import { adaptProcessGit, createProcess, gitFailure } from "@yrd/process"
+import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import {
   CHANGE_REF_DIAGNOSTICS,
   directMergeCommits,
@@ -43,6 +45,7 @@ import {
   readJournals,
   readHistories,
   readQueue,
+  readRunLog,
   remoteUrl,
   subjects,
   targetName,
@@ -52,7 +55,9 @@ import {
   freshnessLine,
   readRemoteCommit,
   refAt,
-  queueRefPrefix,
+  readDrafts,
+  DRAFT_WINDOW_MS,
+  endingInstants,
   submit,
   withdraw,
   NothingToWithdraw,
@@ -62,6 +67,7 @@ import {
   HEARTBEAT_INTERVAL_MS,
   QUEUE_HEALTH_DOCUMENT,
   ROUND_BUDGET_MS,
+  ROUND_LOCK,
   relaunchStalledHealthDocument,
   roundHealthDocument,
   writtenHealthDocument,
@@ -92,24 +98,35 @@ import {
   type PauseRecord,
   type RuntimeGitlinkOff,
   type ChangeRecord,
+  type Change,
+  type DraftReading,
   type Row,
+  type StopFact,
 } from "@yrd/queue-core"
-import { clocksLine, noticeLine } from "./watch-notice.ts"
+import { noticeLine } from "./watch-notice.ts"
 import { FILTER_FIELDS, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
 
-import type { WatchQueue } from "./watch-list.tsx"
+import type { DraftWindow, WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
-import { CHECK_GLYPH, clock, diagnosticLines, firstLine, mediaDuration } from "./watch-format.ts"
+import {
+  CHECK_GLYPH,
+  STATE_WORDS,
+  clock,
+  diagnosticLines,
+  firstLine,
+  mediaDuration,
+  timingLine,
+} from "./watch-format.ts"
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
+  DEFAULT_WINDOW_MS,
   formatQueueStats,
   parseSince,
   queueStats,
-  type PushedRef,
   type SinceOrigin,
   type StatsBy,
 } from "./queue-stats.ts"
@@ -195,6 +212,19 @@ export type CoreQueueCommand =
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string }>
   | Readonly<{ command: "run" }>
   | Readonly<{
+      command: "merge"
+      branch: string
+      submitter: string
+      issue?: string
+      rebase?: boolean
+      /**
+       * The author's checkout, which a change that is not open is submitted
+       * from; absent when the command runs outside a clone, which can merge
+       * only a change already in line.
+       */
+      author?: Readonly<{ repo: string; selection: GitSelection; remote?: string }>
+    }>
+  | Readonly<{
       command: "up"
       intervalSeconds?: number
       stop?: AbortSignal
@@ -214,6 +244,13 @@ export type CoreQueueCommand =
        * at 50ms and at ten minutes.
        */
       relaunchWaitCapMs?: number
+      /**
+       * How long the loop waits on another round's lock before it logs the wait
+       * as long. Defaults to `ROUND_BUDGET_MS`. A test names it for the reason
+       * it names `relaunchWaitCapMs`: the behaviour past the budget is the same
+       * at 50ms and at ten minutes.
+       */
+      roundLockStallMs?: number
       /**
        * How often the loop restates its health document. Defaults to
        * {@link HEARTBEAT_INTERVAL_MS}.
@@ -281,6 +318,7 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   check: "check",
   pause: "queue pause",
   list: "queue list",
+  merge: "merge",
   run: "queue run",
   show: "queue show",
   stats: "queue stats",
@@ -390,12 +428,13 @@ export async function coreQueueCommand(
    * cannot be read — is stuck, has no change to stop the line on, and has
    * already said so.
    */
-  const oneRound = async (declared: CapturedDeclaration): Promise<QueueRunOutcome | undefined> => {
+  const oneRound = async (declared: CapturedDeclaration, only?: Change): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
       outcome = await queueRun({
         ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
-        foreground: request.command === "run",
+        foreground: request.command === "run" || request.command === "merge",
+        ...(only === undefined ? {} : { only }),
       })
     } catch (error) {
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
@@ -427,6 +466,174 @@ export async function coreQueueCommand(
       `yrd: accepted while the line is stopped — ${pauseLine(stop)}; ` +
         `the change waits in line and is judged once the stop lifts; ${liftLine(stop, config.target.remote, config.target.branch)}\n`,
     )
+  }
+
+  /**
+   * This process as the round lock's body names it, beside when it took the
+   * lock: diagnostic bytes for a waiter, judged nowhere. The start is the
+   * runtime's own, as the health document's writer states it; the boot and
+   * start tick are the pair a supervisor compares by equality (24340).
+   */
+  const lockHolder: Omit<RoundLockHolder, "since"> = {
+    command: process.argv.join(" "),
+    host: hostname(),
+    pid: process.pid,
+    startedAt: new Date(performance.timeOrigin).toISOString(),
+    ...processStartIdentity(process.pid),
+  }
+
+  /**
+   * ONE ROUND AT A TIME in this workdir (andon phase 2, the round lock). Every
+   * round-runner — `queue up`, `queue run` and `merge` — runs its round
+   * through here, and this is the whole order, with no branch for whether it
+   * waited: take the lock, read the declaration, `before` (the service's
+   * reload), run the round, release. `only` scopes the round to one change.
+   *
+   * The lock is a kernel flock on the workdir's {@link ROUND_LOCK} file, held
+   * on one descriptor for the round. The kernel releases it when that
+   * descriptor closes, which a holder that exits or dies does whatever it
+   * leaves running, so nothing here judges whether a holder is alive. The
+   * file's body names the holder (command, pid, host, start, and when it took
+   * the lock) only so a waiter can say whose round it waits for; it is judged
+   * nowhere. Between a take and its body's write, a waiter can read the body
+   * of the holder before, and says the new holder once it reads it.
+   *
+   * The declaration is read under the lock, so a round never judges a target
+   * captured before it waited. The lock is released before the caller does
+   * anything with the outcome, so a document, a hook or a sleep after a round
+   * never holds the next runner up.
+   *
+   * A runner in the foreground names the holder on stderr when it starts
+   * waiting, and once more past the round budget; the service passes
+   * `waiting` to put the wait on its health document as a fact instead, and
+   * stays healthy. Neither ever takes the lock over.
+   */
+  const lockedRound = async (
+    round: Readonly<{
+      before?: (declared: CapturedDeclaration) => Promise<YrdCliExitCode | undefined>
+      only?: Change
+      stallMs?: number
+      stop?: AbortSignal
+      waiting?: Readonly<{
+        onWait: (wait: RoundLockWait) => void
+        onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>) => void
+      }>
+    }> = {},
+  ): Promise<Readonly<{ declared: CapturedDeclaration; outcome: QueueRunOutcome }> | YrdCliExitCode> => {
+    // Read through a call each time: the signal flips while the lock is waited for.
+    const stopped = (): boolean => round.stop?.aborted === true
+    if (stopped()) return 0
+    const lockPath = join(workdir, ROUND_LOCK)
+    const take = (): FlockHandle | null =>
+      tryAcquireFlock(lockPath, { body: `${JSON.stringify({ ...lockHolder, since: new Date().toISOString() })}\n` })
+    let lock = take()
+    if (lock === null) {
+      const onWait =
+        round.waiting?.onWait ??
+        ((wait: RoundLockWait) => {
+          io.stderr(
+            `yrd: waiting for the round lock in ${workdir}: ${lockHolderLine(wait)}; this round runs when that one ends\n`,
+          )
+        })
+      const onStall =
+        round.waiting?.onStall ??
+        ((wait: RoundLockWait & Readonly<{ waitedMs: number }>) => {
+          io.stderr(
+            `yrd: still waiting after ${mediaDuration(wait.waitedMs)} for the round lock in ${workdir}: ` +
+              `${lockHolderLine(wait)}. A round that runs this long is still judging or is wedged, and its own ` +
+              "output says which; nothing takes the lock over, so this waits until that process releases it or exits\n",
+          )
+        })
+      const stallMs = round.stallMs ?? ROUND_BUDGET_MS
+      const waitingSince = new Date()
+      let named: string | undefined
+      let stalled = false
+      try {
+        while (lock === null) {
+          const holder = lockHolderOf(lockBody(lockPath))
+          const wait: RoundLockWait = { holder, waitingSince }
+          // Said once for each holder a waiter reads, not once per look.
+          const reading = holder === undefined ? "unnamed" : `${String(holder.pid)} ${holder.since}`
+          if (reading !== named) {
+            named = reading
+            onWait(wait)
+          }
+          const waitedMs = Date.now() - waitingSince.getTime()
+          if (!stalled && waitedMs >= stallMs) {
+            stalled = true
+            onStall({ ...wait, waitedMs })
+          }
+          await delay(ROUND_LOCK_POLL_MS, undefined, { signal: round.stop })
+          lock = take()
+        }
+      } catch (error) {
+        if (stopped()) return 0
+        throw error
+      }
+    }
+    try {
+      let declared: CapturedDeclaration | undefined
+      try {
+        declared = await declaration()
+      } catch (error) {
+        return stuck(
+          `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      if (declared === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
+      const before = await round.before?.(declared)
+      if (before !== undefined) return before
+      const outcome = await oneRound(declared, round.only)
+      return outcome === undefined ? 2 : { declared, outcome }
+    } finally {
+      lock.release()
+    }
+  }
+
+  /** Where one change stands now, and the stop that same reading derives. */
+  const readChangeNow = async (change: Change) => {
+    const target = await readRemoteCommit(git, config.target.remote, `refs/heads/${config.target.branch}`)
+    if (target === undefined) throw new Error(`the target ${targetLabel} is not at ${config.target.remote}`)
+    const now = await readQueue(git, config.target.remote, config.target.branch, target)
+    const entry = now.changes.find(
+      (candidate) => candidate.change.branch === change.branch && candidate.change.head === change.head,
+    )
+    if (entry === undefined) {
+      throw new Error(`${changeName(change)} is not at ${targetLabel} after its round: its change ref is gone`)
+    }
+    return { entry, stop: now.stop }
+  }
+
+  /**
+   * Why a round that worked one change left it in line, from that round's own
+   * journal: the lease that moved when the merge was pushed, naming which one,
+   * or that the round never reached it.
+   */
+  const notMerged = (outcome: QueueRunOutcome, change: Change): string => {
+    const decided = readRunLog(join(workdir, "logs"), outcome.run).findLast(
+      (record) =>
+        record.kind === "change" &&
+        record.branch === change.branch &&
+        record.head === change.head &&
+        typeof record.reason === "string",
+    )
+    const saw = typeof decided?.saw === "string" && decided.saw !== "gone" ? ` to ${decided.saw.slice(0, 12)}` : ""
+    switch (decided?.reason) {
+      case "target-moved":
+        return `the target ${targetLabel} moved${saw} after this round read it at ${outcome.base.slice(0, 12)}, so the merge was not pushed`
+      case "branch-moved":
+        return `the branch ${change.branch} moved off ${change.head.slice(0, 12)} after this round read it, so the merge was not pushed`
+      case "change-ref-moved":
+        return "the change's own record ref moved after this round read it, so the merge was not pushed"
+      case "pause-moved":
+        return "the queue's pause record moved after this round read it, so the merge was not pushed"
+      case undefined:
+        return outcome.stopped === undefined
+          ? "this round did not reach it"
+          : `this round stopped before it: ${outcome.stopped.says}`
+      default:
+        return `this round left it there (${String(decided?.reason)})`
+    }
   }
 
   switch (request.command) {
@@ -547,10 +754,115 @@ export async function coreQueueCommand(
       // the contract — a round a stuck change stopped, doing no other work,
       // ends 2 here (run.ts's on-submit and on-merge steps set `exitCode: 2`
       // the moment anything comes back stuck, never 0). A run that could not
-      // even judge is `undefined` here, and `?? 2` is that same stuck, already
+      // even judge answers 2 from the locked round, that same stuck, already
       // said by `stuck()` above (@i/10-yrd/24141 AC1).
-      const outcome = await oneRound(captured)
-      return outcome?.exitCode ?? 2
+      const ran = await lockedRound()
+      return typeof ran === "number" ? ran : ran.outcome.exitCode
+    }
+    case "merge": {
+      // `yrd merge <branch>`: the branch's change merged NOW, ahead of the line
+      // and on a stopped line too, in a foreground round that judges and merges
+      // that change and no other (ADR-0015 decision 5).
+      //
+      // Merge is submit, idempotent. A change already open is merged on its
+      // standing, so a checked verdict is kept rather than dropped by a
+      // same-head retry. A merged change is an answer: exit 0, nothing written
+      // and no round run. Anything else is submitted first, from the author's
+      // checkout, exactly as `yrd submit` would.
+      const { branch } = request
+      const author =
+        request.author === undefined
+          ? undefined
+          : gitIn(request.author.repo, undefined, request.author.selection, { env: options.env })
+      const local = author === undefined ? undefined : await refAt(author, `refs/heads/${branch}`)
+      const read = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
+      const own = read.changes.filter((entry) => entry.change.branch === branch)
+      // A local branch names its head's change; with none, the change of this
+      // branch that holds a place in line is the one.
+      const standing =
+        local === undefined
+          ? own.find((entry) => inLineState(entry.reading.state))
+          : own.find((entry) => entry.change.head === local)
+      if (standing?.reading.state === "merged") {
+        emit(
+          io,
+          options.json,
+          { branch, change: changeName(standing.change), exitCode: 0, state: "merged" },
+          `${changeName(standing.change)} is already merged into ${targetName(config.target)}; nothing to merge`,
+        )
+        return 0
+      }
+      let change: Change
+      if (standing !== undefined && inLineState(standing.reading.state)) {
+        change = { branch, head: standing.change.head }
+      } else {
+        if (author === undefined || request.author === undefined) {
+          io.stderr(
+            `yrd: merge needs ${branch} submitted, and no change of it is in line on ${targetName(config.target)}; ` +
+              `submitting needs a clone that has ${branch}: run yrd merge ${branch} inside one\n`,
+          )
+          return 2
+        }
+        const remote = request.author.remote ?? "origin"
+        const submitted = await submit(author, remote, {
+          branch,
+          submitter: request.submitter,
+          target: { branch: config.target.branch, remote },
+          ...(request.issue === undefined ? {} : { issue: request.issue }),
+          ...(request.rebase === true ? { rebase: true } : {}),
+        })
+        // The stop the submit was accepted under is not echoed here: this
+        // command does not wait for it to lift, and the stop that still stands
+        // once its rounds are done is said below.
+        const { stop: _acceptedUnder, ...accepted } = submitted
+        emit(
+          io,
+          options.json,
+          { ...accepted, ...issueOutput(io, branch, submitted.issue) },
+          `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}; ${freshnessLine(submitted.targetHead)}`,
+        )
+        change = { branch, head: submitted.head }
+      }
+
+      const merging = await lockedRound({ only: change })
+      if (typeof merging === "number") return merging
+      let after = await readChangeNow(change)
+      // A stopped line waits on a stuck change, and a change merged past it may
+      // be the repair it waited for: its head is judged once more, in a round
+      // of its own under a fresh declaration. Its verdict is its own; this
+      // command's exit stays the named change's.
+      const waitsOn = after.stop?.cause === "stuck" ? after.stop.change : undefined
+      if (after.entry.reading.state === "merged" && waitsOn !== undefined && waitsOn.branch !== branch) {
+        await lockedRound({ only: waitsOn })
+        after = await readChangeNow(change)
+      }
+
+      // A stop that still stands is said, with the command that merges what it
+      // waits on: the named change's exit never hides a stopped line.
+      if (after.stop !== undefined) {
+        const stuckOn = after.stop.cause === "stuck" ? after.stop.change : undefined
+        io.stderr(
+          `yrd: the line is still stopped — ${pauseLine(after.stop)}; ` +
+            (stuckOn === undefined ? "" : `once it is repaired, merge it with yrd merge ${stuckOn.branch}; `) +
+            `${liftLine(after.stop, config.target.remote, config.target.branch)}\n`,
+        )
+      }
+      const state = after.entry.reading.state
+      const ending = endingCode([state])
+      emit(
+        io,
+        options.json,
+        { branch, change: changeName(change), exitCode: ending ?? 2, state, stopped: stopFact(after.stop) },
+        `${changeName(change)} ${state}`,
+      )
+      if (ending !== undefined) return ending
+      // Still in line: checked and not merged, or never reached. Exit 2 and no
+      // retry, naming why and the command that tries again.
+      io.stderr(
+        `yrd: ${changeName(change)} is still in line, ${state}: ${notMerged(merging.outcome, change)}; ` +
+          `it keeps its place and the queue merges it in turn, or run yrd merge ${branch} again\n`,
+      )
+      return 2
     }
     case "up": {
       // The service: the same round on a loop, what hab runs. A STUCK CHANGE
@@ -865,26 +1177,47 @@ export async function coreQueueCommand(
       const beat = setInterval(() => {
         if (stated !== undefined) writeHealth(stated)
       }, heartbeat.intervalMs)
+      /**
+       * A round the service waits for — a `yrd merge` or `yrd queue run` in the
+       * same workdir — is stated where the service is read: the holder as a
+       * fact on the document when the wait begins, cleared by the round this
+       * service then runs. The document stays HEALTHY however long the wait
+       * lasts. A long round is not a fault, whoever runs it (24523 F4: round
+       * length is not a deadline), so past the budget the wait is logged and
+       * pages nobody.
+       */
+      let lockWaitStated = false
+      const waiting = {
+        onWait: (wait: RoundLockWait): void => {
+          lockWaitStated = true
+          log?.info?.(`waiting for the round lock in ${workdir}: ${lockHolderLine(wait)}`)
+          const alive = lineDocument(lastStop, 0)
+          writeHealth({ ...alive, facts: { ...alive.facts, waitingForRoundLock: lockWaitFact(wait) } })
+        },
+        onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>): void => {
+          log?.warn?.(
+            `waited ${mediaDuration(wait.waitedMs)} for the round lock in ${workdir}: ${lockHolderLine(wait)}`,
+          )
+        },
+      }
       try {
-        let current = captured
-        for (let round = 1; ; round += 1) {
-          // The declaration again, as the target holds it now: a correct edit at
-          // the target is the next round's, never a restart's.
-          if (round > 1) {
-            let why: string | undefined
-            try {
-              const next = await declaration()
-              if (next === undefined) why = `${targetLabel} no longer carries a .yrd.yml`
-              else current = next
-            } catch (error) {
-              why = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
-            }
-            if (why !== undefined) return stuck(why)
-          }
-          const before = await reload(current.oid)
-          if (before !== undefined) return before
-          const outcome = await oneRound(current)
-          if (outcome === undefined) return 2
+        for (;;) {
+          // The declaration again under the lock, as the target holds it now: a
+          // correct edit at the target is the next round's, never a restart's.
+          const ran = await lockedRound({
+            before: async (declared) => {
+              if (lockWaitStated) {
+                lockWaitStated = false
+                writeHealth(lineDocument(lastStop, 0))
+              }
+              return reload(declared.oid)
+            },
+            stallMs: request.roundLockStallMs,
+            stop: request.stop,
+            waiting,
+          })
+          if (typeof ran === "number") return ran
+          const { outcome } = ran
 
           // The round derived whether the line is stopped and said so on its
           // outcome; the document states that and nothing more. A stuck stop is
@@ -930,9 +1263,14 @@ export async function coreQueueCommand(
        */
       const round = async (
         declared: CapturedDeclaration,
+        draftWindow: DraftWindow = "7d",
       ): Promise<
         Readonly<{
           rows: readonly WatchRow[]
+          /** Every row of the reading in the same lens, whatever the selector narrowed `rows` to. */
+          unfiltered: readonly WatchRow[]
+          /** The rows that are changes: every row but the drafts, which the document, the selector and the ending never count. */
+          changes: readonly WatchRow[]
           observation: GitObservation
           data: unknown
           queue: string
@@ -948,14 +1286,37 @@ export async function coreQueueCommand(
           /** The queue read the rows came from, so a detail opened later reads the same tip. */
           entries: QueueEntries
           journals: Journals
+          /** The stop that stands, as the reading derived it. */
+          stopped: StopFact | null
+          /** Which drafts the rows list, and the heads of the drafts this repository has not read. */
+          drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
         }>
       > => {
-        const { queue, journals, all, observation } = await readListing(git, declared.config, workdir, declared.oid)
-        if (options.json !== true) narrateMalformed(io, journals, said)
-        const rows = filterRows(
-          watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
-          request.terms ?? [],
+        // The ending instants a notice hides and the drafts are what a person
+        // reads; `--json` reads neither, so its document is the one it was.
+        const { queue, journals, all, drafts, observation } = await readListing(
+          git,
+          declared.config,
+          workdir,
+          declared.oid,
+          options.json === true ? {} : { shown: { draftWindow } },
         )
+        if (options.json !== true) narrateMalformed(io, journals, said)
+        // TWO LENSES OVER ONE READING, and which is which is the whole of S1.
+        //
+        // `unfiltered` is one row per RUN: what the queue DID. The document
+        // keeps it, because the spec keeps runs in `--json` and a machine
+        // reader that has always had a row per judgement must not silently get
+        // one per change; the queue line and STATS count from it too, and both
+        // already fold a change's runs into one themselves.
+        //
+        // `rows` is the TABLE's, one row per change: where each change STANDS.
+        // The operator read their own queue on 2026-09-17 and saw one branch
+        // on two rows, which is what the old default did wherever a run
+        // journal could be read.
+        const unfiltered = watchRows(all, { journals, perRun: true })
+        const changes = filterRows(unfiltered, request.terms ?? []).filter((item) => item.row.state !== "draft")
+        const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = queue.stop
@@ -968,13 +1329,13 @@ export async function coreQueueCommand(
         const scope =
           request.terms === undefined || request.terms.length === 0
             ? undefined
-            : `${String(rows.length)} of ${String(all.length)} change(s) match ${request.terms.join(" or ")}` +
-              (rows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
+            : `${String(changes.length)} of ${String(all.filter((row) => row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
+              (changes.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
         return {
           observation,
           data: {
             observation,
-            changes: rows.map((row) => row.row),
+            changes: changes.map((row) => row.row),
             journal: journalFact(journals),
             pause: pause ?? null,
             // The everyday reader of a stopped line: always present, null while
@@ -988,14 +1349,90 @@ export async function coreQueueCommand(
           // Pre-M8 a repository has exactly one queue: the target's branch, on
           // this repository. M8 turns this list of one into N.
           queues: [{ branch: config.target.branch, label: config.target.branch, path: repo }],
-          runner: readRunnerFacts(workdir),
-          // Every row, per run, whatever the filter and the lens: the box counts the queue, not the view.
-          decisions: decisionsOfRows(watchRows(all, { journals })),
+          runner: await readRunnerFacts(workdir),
+          // Every row, per run, whatever the filter: the box counts the queue,
+          // not the view, and a change checked twice made two decisions.
+          decisions: decisionsOfRows(unfiltered),
           ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
           ...(journals.absent === undefined ? {} : { journalAbsent: journals.absent }),
           ...(scope === undefined ? {} : { scope }),
           rows,
+          unfiltered,
+          changes,
+          stopped: stopFact(pause),
+          ...(drafts === undefined
+            ? {}
+            : { drafts: { unread: drafts.undated.map((draft) => draft.head), window: draftWindow } }),
         }
+      }
+      /**
+       * The first sight of the draft heads this repository has not read:
+       * fetched ONCE, here in the watch's loader and never in a redraw, so the
+       * next round can say who pushed them and when. A head is tried once
+       * whether the fetch works or not, so one that cannot be fetched stays
+       * "not yet read" rather than failing every round.
+       *
+       * The heads go in one fetch. One head the remote will not serve (a
+       * branch deleted since the round read it) fails that whole fetch, so a
+       * failed batch is split in two and each half fetched apart, down to one
+       * head: that head alone stays unread, at about two fetches per halving.
+       * Two halves that both fail may be the remote's failure rather than a
+       * head's, so the remote is asked whether it answers at all before either
+       * is split again: a remote that went away costs three fetches and one
+       * question, however many heads there are. What stays unread is thrown as
+       * ONE error, for the caller to say once. `yrd list` and `yrd queue stats`
+       * fetch nothing.
+       */
+      const sighted = new Set<string>()
+      const sightDrafts = async (one: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }>) => {
+        const fresh = (one.drafts?.unread ?? []).filter((head) => !sighted.has(head))
+        if (fresh.length === 0) return
+        for (const head of fresh) sighted.add(head)
+        let why: unknown
+        const worked = async (argv: readonly string[]): Promise<boolean> => {
+          try {
+            await git(argv)
+            return true
+          } catch (error) {
+            why = error
+            return false
+          }
+        }
+        const fetched = (heads: readonly string[]): Promise<boolean> =>
+          worked([
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--refmap=",
+            config.target.remote,
+            ...heads,
+          ])
+        const answers = (): Promise<boolean> =>
+          worked(["ls-remote", "--refs", config.target.remote, `refs/heads/${config.target.branch}`])
+        /** The heads of a batch that failed which the remote will not serve, each half tried on its own. */
+        const refused = async (heads: readonly string[]): Promise<readonly string[]> => {
+          if (heads.length === 1) return heads
+          const middle = Math.ceil(heads.length / 2)
+          const failed: (readonly string[])[] = []
+          for (const half of [heads.slice(0, middle), heads.slice(middle)]) {
+            if (!(await fetched(half))) failed.push(half)
+          }
+          if (failed.length === 2 && !(await answers())) return heads
+          const unread: string[] = []
+          for (const half of failed) unread.push(...(await refused(half)))
+          return unread
+        }
+        if (await fetched(fresh)) return
+        const unread = await refused(fresh)
+        if (unread.length === 0) return
+        const named = unread.slice(0, 3).map((head) => head.slice(0, 12))
+        throw new Error(
+          `${String(unread.length)} draft head(s) could not be fetched and stay not yet read ` +
+            `(${named.join(", ")}${unread.length > named.length ? ", …" : ""}): ${firstLine(why)}`,
+          { cause: why },
+        )
       }
       /**
        * The page a human reads, drawn by the watch's own components once
@@ -1007,14 +1444,16 @@ export async function coreQueueCommand(
       const page = async (one: Awaited<ReturnType<typeof round>>): Promise<string> => {
         const { printListing } = await import("./watch-print.tsx")
         const single = one.rows.length === 1 ? one.rows[0] : undefined
-        const listing = await printListing(snapshotOf(one), {
+        const snapshot = snapshotOf(one)
+        const listing = await printListing(snapshot, {
           color: io.color === true,
           columns: io.columns ?? 120,
           ...(one.scope === undefined ? {} : { scope: one.scope }),
           ...(single === undefined
             ? {}
             : {
-                trailer: [noticeLine(single.row, single.run !== undefined), clocksLine(single.row)].filter(
+                // Timed at the reading's own instant, as the row's cell is, so the two say one number.
+                trailer: [noticeLine(single.row, single.run !== undefined), timingLine(single.row, snapshot.at)].filter(
                   (part) => part !== "",
                 ),
               }),
@@ -1034,7 +1473,7 @@ export async function coreQueueCommand(
         // backward compatible, and reversible with one flag rather than a
         // silent break for every existing caller. `--require-match` is that
         // flag, opting a caller into treating the same zero as failure.
-        if (request.requireMatch === true && selectedNothing(request.terms, one.rows)) return 1
+        if (request.requireMatch === true && selectedNothing(request.terms, one.changes)) return 1
         return 0
       }
 
@@ -1049,8 +1488,8 @@ export async function coreQueueCommand(
           io.stderr(`${first.observation.message}\n`)
           return 2
         }
-        if (selectedNothing(request.terms, first.rows)) {
-          io.stderr(missedSelector(request.terms ?? [], first.queue, first.rows.length))
+        if (selectedNothing(request.terms, first.changes)) {
+          io.stderr(missedSelector(request.terms ?? [], first.queue, first.changes.length))
           return 2
         }
         const { WatchPane } = await import("./watch-pane.tsx")
@@ -1062,13 +1501,16 @@ export async function coreQueueCommand(
         // reads the same tips the table shows, never a fresher or staler one.
         let entries: QueueEntries = first.entries
         let journals = first.journals
+        let seen: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }> = first
         const app = await run(
           createElement(WatchPane, {
             intervalMs: Math.max(1, request.intervalSeconds ?? 5) * 1000,
-            load: async () => {
+            load: async (asked) => {
               const refreshed = await declaration()
               if (refreshed === undefined) throw new Error(`${targetLabel} no longer carries a .yrd.yml`)
-              const next = await round(refreshed)
+              await sightDrafts(seen)
+              const next = await round(refreshed, asked?.draftWindow)
+              seen = next
               if (next.observation.contract === "root-v1" && next.observation.outcome === "invalid") {
                 ending = 2
                 app.unmount()
@@ -1110,8 +1552,8 @@ export async function coreQueueCommand(
         // A selector that matches nothing would otherwise wait forever for a
         // change that is not there. It is refused loudly, with what was asked
         // for and where it was looked for.
-        if (first && selectedNothing(request.terms, one.rows)) {
-          io.stderr(missedSelector(request.terms ?? [], one.queue, one.rows.length))
+        if (first && selectedNothing(request.terms, one.changes)) {
+          io.stderr(missedSelector(request.terms ?? [], one.queue, one.changes.length))
           return 2
         }
         first = false
@@ -1125,7 +1567,7 @@ export async function coreQueueCommand(
         else io.stdout(`${stampRound(await page(one), one.queue, new Date())}\n`)
         if (one.observation.contract === "root-v1" && one.observation.outcome === "invalid") return 2
         if (selected) {
-          const ending = endingCode(one.rows)
+          const ending = endingCode(one.changes.map((row) => row.row.state))
           if (ending !== undefined) return ending
         }
         if (stopped()) return 0
@@ -1136,6 +1578,11 @@ export async function coreQueueCommand(
         const refreshed = await declaration()
         if (refreshed === undefined) return noQueueOnTarget(targetLabel)
         declared = refreshed
+        // The drafts are not what a selector waits on: a head that cannot be
+        // fetched is said, once, and never ends the watch or changes its code.
+        await sightDrafts(one).catch((error: unknown) => {
+          io.stderr(`yrd: ${firstLine(error)}\n`)
+        })
       }
     }
     case "check": {
@@ -1311,13 +1758,20 @@ export async function coreQueueCommand(
           window = { since: committed, sinceFrom: { asked: request.since, kind: "commit" } }
         }
       }
-      const { journals, all } = await readListing(git, config, workdir, captured.oid)
+      const { journals, all, queue } = await readListing(git, config, workdir, captured.oid)
       // The counts below are read from the same rows; a row the journal could
       // not be read for must not make an understated stat look measured.
       if (options.json !== true) narrateMalformed(io, journals, new Set())
-      const rows = watchRows(all, { journals })
-      const refs = await pushedRefs(git, config.target.remote, config.target.branch)
-      const stats = queueStats(rows, refs, {
+      // Per RUN: `queue stats` counts decisions, and one change can carry several.
+      const rows = watchRows(all, { journals, perRun: true })
+      // Pushed, never submitted: the drafts (the KPI ruling on 24163), from the
+      // one derivation over this same reading and the same window. Nothing is
+      // fetched, so a head never read here counts as undated.
+      const drafts = await readDrafts(git, queue, {
+        since: window?.since ?? new Date(now.getTime() - DEFAULT_WINDOW_MS),
+        targetSha: captured.oid,
+      })
+      const stats = queueStats(rows, [...drafts.dated, ...drafts.undated], {
         now,
         ...window,
         ...(request.by === undefined ? {} : { by: request.by }),
@@ -1667,9 +2121,9 @@ function describeRun(
 ): string {
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
   const parts = [
-    outcome.merged.length > 0 ? `merged ${outcome.merged.join(", ")}` : undefined,
-    outcome.failed.length > 0 ? `failed ${outcome.failed.join(", ")}` : undefined,
-    outcome.stuck.length > 0 ? `stuck ${outcome.stuck.join(", ")}` : undefined,
+    outcome.merged.length > 0 ? `${STATE_WORDS.merged.word} ${outcome.merged.join(", ")}` : undefined,
+    outcome.failed.length > 0 ? `${STATE_WORDS.failed.word} ${outcome.failed.join(", ")}` : undefined,
+    outcome.stuck.length > 0 ? `${STATE_WORDS.stuck.word} ${outcome.stuck.join(", ")}` : undefined,
     outcome.directMerges.length > 0
       ? `${String(outcome.directMerges.length)} ${outcome.directMerges.length === 1 ? "commit" : "commits"} around the queue at ${outcome.directMerges.map((sha) => sha.slice(0, 12)).join(", ")}`
       : undefined,
@@ -1801,15 +2255,22 @@ export async function openDetail(
   const histories = own.length === 0 ? [] : await readHistories(git, own, config.target.remote, config.target.branch)
   const shown = histories.flatMap((entry) => show([entry], entry.change.branch))
   const records = shown.flatMap((change) => change.records)
-  // ONE JUDGEMENT PER ROW. A change judged more than once has one row per run
-  // — a stuck change the line re-took after a resume and that stuck again (the
-  // andon) — and every run's `Check:` trailers sit on its records. Folding them
-  // all opened the OLD row on the newest run's checks. So a row opens on the
-  // judgement its own run ended, found by that run's id in each trailer's
-  // create-only log path; within it, the records stay the full account (a
-  // merged change's submit-phase checks can come from an earlier run,
-  // 1fca452c). A row whose run no judgement names keeps the whole fold.
-  const packed = judgementOf(records, row.run).flatMap((record) => trailers(record, "Check"))
+  // ONE JUDGEMENT PER ROW, scoped by THE RUN THIS ROW IS ABOUT and never by the
+  // newest run the change carries. A row a journal split (`item.run`) opens on
+  // the judgement that run ended, found by its id in each trailer's create-only
+  // log path: folding them all opened the OLD row on the newest run's checks
+  // (the andon — a stuck change the line re-took after a resume and that stuck
+  // again). Within a judgement the records stay the full account, because a
+  // merged change's submit-phase checks can come from an earlier run
+  // (1fca452c).
+  //
+  // A row that stands for its WHOLE change splits by nothing and so keeps the
+  // whole fold — every run's `Check:` trailers, which is the only place the
+  // older run's output is still reachable now that the table is one row per
+  // change (S1). Reading `row.run` here instead would scope that row to the
+  // newest run and drop the rest in silence, which is the same defect as the
+  // incident above with the rows the other way round.
+  const packed = judgementOf(records, item.run?.id).flatMap((record) => trailers(record, "Check"))
   const declared = await declarationFor(git, config, row.base)
   const ending = endingOf(row)
   // A DECIDED change's records are its full account: `packed` (folded from
@@ -1938,6 +2399,7 @@ async function readDiff(git: Git, config: QueueConfig, item: WatchRow): Promise<
 function snapshotOf(
   round: Readonly<{
     rows: readonly WatchRow[]
+    unfiltered: readonly WatchRow[]
     queue: string
     queues: readonly WatchQueue[]
     pause?: string
@@ -1945,6 +2407,8 @@ function snapshotOf(
     observation: GitObservation
     runner: RunnerFacts
     decisions: readonly RunDecision[]
+    stopped: StopFact | null
+    drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
   }>,
 ): WatchSnapshot {
   return {
@@ -1954,7 +2418,12 @@ function snapshotOf(
     queue: round.queue,
     queues: round.queues,
     rows: round.rows,
+    unfiltered: round.unfiltered,
     runner: round.runner,
+    stopped: round.stopped,
+    ...(round.drafts === undefined
+      ? {}
+      : { drafts: { unread: round.drafts.unread.length, window: round.drafts.window } }),
     ...(round.pause === undefined ? {} : { pause: round.pause }),
     ...(round.journalAbsent === undefined ? {} : { journalAbsent: round.journalAbsent }),
   }
@@ -2009,6 +2478,90 @@ function readOutput(check: CheckView): CheckPanel {
   }
 }
 
+/** Whether a change in this state holds a place in line: queued, checked or stuck. */
+function inLineState(state: Row["state"]): boolean {
+  return state === "queued" || state === "checked" || state === "stuck"
+}
+
+/** How often a waiter tries the round lock again: well inside the service's shortest sleep, so a waiter wins the gap between two rounds. */
+const ROUND_LOCK_POLL_MS = 200
+
+/** The process holding the round lock, as the lock's body names it. */
+type RoundLockHolder = Readonly<{
+  command: string
+  pid: number
+  /** When it took the lock. */
+  since: string
+  host?: string
+  /** The runtime's own start. */
+  startedAt?: string
+  /** `/proc/sys/kernel/random/boot_id`, when it could be read. */
+  boot?: string
+  /** The clock tick it started at, when it could be read. */
+  tick?: number
+}>
+
+/** A wait for the round lock: the holder its body names, when it names one, and when the wait began. */
+type RoundLockWait = Readonly<{ holder?: RoundLockHolder; waitingSince: Date }>
+
+/** The round lock's body as a waiter reads it; undefined when the file is not there. */
+function lockBody(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw error
+  }
+}
+
+/**
+ * The holder a round lock body names, or undefined when it names none: the
+ * body is empty or half-written between a take and its write, and the waiter
+ * says so and reads it again on its next look.
+ */
+function lockHolderOf(body: string | undefined): RoundLockHolder | undefined {
+  if (body === undefined || body.trim() === "") return undefined
+  let value: unknown
+  try {
+    value = JSON.parse(body)
+  } catch {
+    // silent-fallback-allow: a body caught mid-write names no holder yet; the
+    // wait is stated as unnamed and the next look reads the body again.
+    return undefined
+  }
+  const holder = value as Partial<Record<keyof RoundLockHolder, unknown>> | null
+  if (
+    typeof holder !== "object" ||
+    holder === null ||
+    typeof holder.command !== "string" ||
+    typeof holder.pid !== "number" ||
+    typeof holder.since !== "string"
+  ) {
+    return undefined
+  }
+  return holder as RoundLockHolder
+}
+
+/** The holder of the round lock, as a waiter names it. */
+function lockHolderLine(wait: RoundLockWait): string {
+  const { holder } = wait
+  if (holder === undefined) return "a process holds it whose name the lock file does not carry yet"
+  return `pid ${String(holder.pid)} (${holder.command}) has held it since ${holder.since}`
+}
+
+/**
+ * The wait for the round lock, as the service's health document carries it,
+ * and the one place it is shaped: the holder's command and pid, when it took
+ * the lock, and when this service began waiting on it. A holder the body does
+ * not name yet leaves only the wait's start.
+ */
+function lockWaitFact(wait: RoundLockWait): Readonly<Record<string, unknown>> {
+  const waitingSince = wait.waitingSince.toISOString()
+  if (wait.holder === undefined) return { waitingSince }
+  const { command, pid, since } = wait.holder
+  return { holder: { command, pid }, since, waitingSince }
+}
+
 /**
  * The code a watched set of changes ended with, or undefined while any of them
  * is still in line. It is `yrd check`'s own ladder — stuck beats failed beats
@@ -2017,8 +2570,7 @@ function readOutput(check: CheckView): CheckPanel {
  * withdrawn change stands on the failed rung: it did not land, and the next
  * move is its submitter's (@i/10-yrd/24492).
  */
-function endingCode(rows: readonly WatchRow[]): YrdCliExitCode | undefined {
-  const states = rows.map((row) => row.row.state)
+function endingCode(states: readonly Row["state"][]): YrdCliExitCode | undefined {
   if (states.some((state) => state === "queued" || state === "checked")) return undefined
   if (states.some((state) => state === "stuck")) return 2
   if (states.some((state) => state === "failed" || state === "withdrawn")) return 1
@@ -2151,17 +2703,26 @@ function checkLines(check: CheckView): readonly string[] {
  * machine that runs no queue has no journal, and `journals.absent` is the
  * sentence that says so rather than a row that reads as if nothing were
  * running. Nothing here derives a state: `list()` does, once, for everyone.
+ *
+ * `shown` asks for what only a person reads (@i/10-yrd/24196): the instants of
+ * the endings a notice hides, which the table times and orders ended rows by,
+ * and the drafts of one window (queue-core drafts.ts), both in batched reads
+ * made here and never in a redraw. `--json` and `yrd queue stats` ask for
+ * neither.
  */
 export async function readListing(
   git: GitRunner,
   config: QueueConfig,
   workdir: string,
   targetOid: string,
+  options: Readonly<{ shown?: Readonly<{ draftWindow: DraftWindow }> }> = {},
 ): Promise<
   Readonly<{
     queue: Awaited<ReturnType<typeof readQueue>>
     journals: Journals
     all: readonly Row[]
+    /** The drafts of the window asked for; absent when none was. */
+    drafts?: DraftReading
     observation: GitObservation
   }>
 > {
@@ -2176,6 +2737,14 @@ export async function readListing(
     ...queue.observation,
   })
   const journals = readJournals(join(workdir, "logs"))
+  const window = options.shown?.draftWindow
+  const drafts =
+    window === undefined
+      ? undefined
+      : await readDrafts(git, queue, {
+          targetSha: targetOid,
+          ...(window === "7d" ? { since: new Date(Date.now() - DRAFT_WINDOW_MS) } : {}),
+        })
   const all = list(queue.changes, {
     directMerges: await directMergeCommits(git, config.target.branch, targetOid, queue.changes),
     journals,
@@ -2183,8 +2752,11 @@ export async function readListing(
       git,
       queue.changes.map((entry) => entry.change.head),
     ),
+    ...(options.shown === undefined ? {} : { endings: await endingInstants(git, queue.changes) }),
+    // Seven days lists the drafts it can date and counts the rest; every draft lists them all, marked.
+    ...(drafts === undefined ? {} : { drafts: window === "all" ? [...drafts.dated, ...drafts.undated] : drafts.dated }),
   })
-  return { all, journals, queue, observation }
+  return { all, journals, queue, observation, ...(drafts === undefined ? {} : { drafts }) }
 }
 
 /** A commit's committer instant; undefined only when the name is absent, while unreadable or malformed commits throw. */
@@ -2201,56 +2773,6 @@ async function instantOfCommit(git: Git, text: string): Promise<Date | undefined
     throw new Error(`commit ${commit}: git returned invalid committer timestamp ${JSON.stringify(seconds)}`)
   }
   return instant
-}
-
-/**
- * Every branch at the remote but the target, with whether a change ref names it
- * (plan E2: a push without a submit is not a change) and the tip's committer
- * instant when the commit is here — the queue read fetches the submitted heads
- * and the target, never the rest, so an unsubmitted tip is dated only when
- * some earlier fetch brought it, and the stats say how many it could not date.
- * One `ls-remote`, the same list the queue read itself starts from.
- */
-async function pushedRefs(git: Git, remote: string, target: string): Promise<readonly PushedRef[]> {
-  const listed = (await git(["ls-remote", "--refs", remote])).split("\n")
-  const heads = new Map<string, string>()
-  const submitted = new Set<string>()
-  for (const line of listed) {
-    const [sha, ref] = line.trim().split(/\s+/u)
-    if (sha === undefined || ref === undefined) continue
-    if (ref.startsWith("refs/heads/")) heads.set(ref.slice("refs/heads/".length), sha)
-    else if (ref.startsWith(`${queueRefPrefix(target)}/`)) {
-      const name = ref.slice(`${queueRefPrefix(target)}/`.length)
-      const at = name.lastIndexOf("@")
-      submitted.add(at === -1 ? name : name.slice(0, at))
-    }
-  }
-  heads.delete(target)
-  // The committer instants of the tips this repository has, in one batched
-  // read; a sha git does not have answers `missing` and stays undated.
-  const dated = new Map<string, Date>()
-  const shas = [...new Set(heads.values())]
-  if (shas.length > 0) {
-    const answer = await git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], `${shas.join("\n")}\n`)
-    const present = answer
-      .split("\n")
-      .map((line) => line.trim().split(" "))
-      .filter((parts) => parts[1] === "commit")
-      .map((parts) => parts[0] ?? "")
-    if (present.length > 0) {
-      const stamps = await git(["log", "--no-walk=unsorted", "--format=%H %ct", ...present, "--"])
-      for (const line of stamps.split("\n")) {
-        const [sha, seconds] = line.trim().split(" ")
-        if (sha !== undefined && seconds !== undefined && seconds !== "") {
-          dated.set(sha, new Date(Number(seconds) * 1000))
-        }
-      }
-    }
-  }
-  return [...heads.entries()].map(([branch, head]) => {
-    const committedAt = dated.get(head)
-    return { branch, head, submitted: submitted.has(branch), ...(committedAt === undefined ? {} : { committedAt }) }
-  })
 }
 
 function emit(io: YrdCliIO, json: boolean | undefined, data: unknown, human: string): void {

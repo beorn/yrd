@@ -91,6 +91,11 @@ export async function readQueue(
     /** The stop that stands, derived from this same reading ({@link lineStop}); undefined while the line runs. */
     stop: PauseRecord | undefined
     observation: QueueObservation
+    /**
+     * Every branch this advertisement names but the target, at its advertised head: what a draft is read
+     * from (drafts.ts), so drafts and changes share one reading of the remote and never a second one.
+     */
+    heads: ReadonlyMap<string, string>
   }>
 > {
   const pause = pauseRef(target)
@@ -209,6 +214,7 @@ export async function readQueue(
   )
   return {
     changes: entries,
+    heads,
     pause: capturedPause,
     stop,
     observation: {

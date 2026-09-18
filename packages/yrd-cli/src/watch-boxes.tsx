@@ -1,254 +1,33 @@
 /**
- * The boxes under the table: RUNNER (watch-redesign items 13, 14, 16, 17,
- * 27, 29, 29a, 37) and STATS (items 18–22).
+ * The STATS box under the table (watch-redesign items 18–22).
  *
- *   ╭─ RUNNER ──────────────────────────────────────────── run 0:42 ─╮
- *   │ $ yrd queue run · main#170406 [pid 1712479]                     │  ← blue, `$` pulses while a run executes;
- *   │   target main · gitlink 3c285a41af46 · checks typecheck, tests  │    the other rails muted (14), hanging off
- *   │   progress 17:04:45 · 2s ago                                    │    the marker's gutter (29, 29a)
- *   ╰─────────────────────────────────────────────────────────────────╯
- *
- * Five words drive it, from `runnerHealth` and nothing else (27: severity is
- * never muted): `running` blue and pulsing, `idle` grey and pulsing slowly,
- * `silent` solid red with the reason on its own line, `unstarted` solid red for
- * a run that threw in its Git preamble, naming the journal that holds the
- * failing call (24470), and `absent` grey with the sentence that says where the
- * journal was looked for. One `RUNNER` frame, as item 37 rules; per-queue lines
- * arrive with M8's queues.
+ * RUNNER was a box here until the flow page (S1): four rails for the service
+ * command, the round header, a file mtime printed twice and a silence verdict
+ * derived from that mtime, in a frame of its own above a table it was not part
+ * of. The one useful line is now a ROW, in the table's own columns, between
+ * what waits and what is done — so the runner's word sits in the same STATUS
+ * column as every change's and reads from the same table (watch-words.ts).
+ * The rest — pid, command, code version, check list, round id — is repair
+ * detail, and it belongs to `yrd queue show`, `--json` and the detail view.
+ * The row is built by `runnerLine` (watch-runner.ts) and drawn by `RunnerRow`
+ * (watch-list.tsx), placed by `bandPlan` (watch-frame.tsx).
  */
 
-import { join } from "node:path"
-import { Box, Pulse, Text } from "silvery"
-import { useMinute, useNow } from "./watch-clock.ts"
-import { boundedHangingLines, clock, mediaDuration, runShortName } from "./watch-format.ts"
-import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
-import { runnerHealth, type RunnerFacts, type RunnerHealth } from "./watch-runner.ts"
+import { Box, Text } from "silvery"
+import { useMinute } from "./watch-clock.ts"
 import {
-  STATS_ROWS,
-  STATS_TIME_ROWS,
   countCell,
   statsBuckets,
   timeCell,
+  STATS_ROWS,
+  STATS_TIME_ROWS,
   type RunDecision,
   type StatsBucket,
 } from "./watch-stats.ts"
+import { TitledBox } from "./watch-primitives.tsx"
 
-/** Gutter 2 + borders 2 + the box's paddingX 2: what the command text cannot have (the retired box's own accounting). */
-const RUNNER_CHROME = 6
-// Row caps for the rails that can run long (the retired pane capped its pause
-// banner the same way: wraps, never truncates below the cap, elides past it).
-const PAUSE_MAX_ROWS = 4
-const ABSENT_MAX_ROWS = 3
-const SILENT_MAX_ROWS = 3
-const UNSTARTED_MAX_ROWS = 3
-
-const HEALTH_COLOR: Readonly<Record<RunnerHealth, string>> = {
-  absent: "$fg-muted",
-  idle: "$fg-muted",
-  processing: "$fg-info",
-  silent: "$fg-error",
-  unstarted: "$fg-error",
-}
-
-/**
- * The one health marker, `$`, colored and pulsed by the word (item 13). Both
- * live branches swing foreground-vs-BACKGROUND (`$bg-surface-default`), never
- * foreground-vs-foreground: two foreground tokens read too close in lightness
- * to actually flicker (the running branch's old `$fg-muted` second color
- * measured ~1.12:1 against `$fg-info`, imperceptible), while a background
- * token behind the glyph reliably clears a visible swing. `intervalMs={900}`
- * restores the pre-port rate (item 13's own ag-code reference).
- */
-function HealthMarker({ health, live }: { health: RunnerHealth; live: boolean }) {
-  const color = HEALTH_COLOR[health]
-  if (live && health === "processing") {
-    return (
-      <Pulse synchronized colors={["$fg-info", "$bg-surface-default"]} intervalMs={900} bold flexShrink={0}>
-        $
-      </Pulse>
-    )
-  }
-  if (live && health === "idle") {
-    return (
-      <Pulse synchronized colors={["$fg-muted", "$bg-surface-default"]} intervalMs={900} flexShrink={0}>
-        $
-      </Pulse>
-    )
-  }
-  return (
-    <Text color={color} bold={health === "silent"} flexShrink={0}>
-      $
-    </Text>
-  )
-}
-
-export function RunnerBox({
-  facts,
-  label,
-  inLine,
-  underCheck,
-  columns,
-  pause,
-  live = true,
-}: {
-  facts: RunnerFacts
-  /** The queue's name, for the run's short form. */
-  label: string
-  /** How many changes wait in line. Silence is decided without it; the rail says which of the two silences this is. */
-  inLine: number
-  /**
-   * Is a change under a check RIGHT NOW — the marker's actual predicate (items
-   * 1 and 5). Passed in rather than derived here, because the caller holds the
-   * rows and the status pills already answer this exact question; two
-   * derivations of one fact is how the marker and the list come to disagree.
-   */
-  underCheck: boolean
-  /** The pane's width, so the command wraps with a hanging indent bounded to three rows (item 29). */
-  columns: number
-  /** The pause line, when the queue is paused: the box's border and its last rail say so (item 27). */
-  pause?: string
-  live?: boolean
-}) {
-  const now = useNow()
-  const health = runnerHealth(facts, now, underCheck)
-  const color = HEALTH_COLOR[health]
-  const latest = facts.latest
-  const sinceWrite = latest === undefined ? undefined : now.getTime() - latest.lastWriteAt.getTime()
-  const timer =
-    latest === undefined
-      ? undefined
-      : health === "processing"
-        ? // ITEM 1 -- THE WORD. Every other health renders its own word beside its
-          // duration; this one said `run`, so the marker never actually showed the
-          // state it was in. The word is the spec's, and it names the predicate
-          // above it. The DURATION still differs on purpose: for `processing` the
-          // useful age is how long the run has been going, not how long since the
-          // last write.
-          `processing ${mediaDuration(now.getTime() - latest.startedAt.getTime())}`
-        : `${health} ${mediaDuration(sinceWrite ?? 0)}`
-  const border =
-    health === "silent" || health === "unstarted" ? "$fg-error" : pause === undefined ? undefined : "$fg-warning"
-  const command =
-    latest === undefined
-      ? "yrd queue up"
-      : health === "processing"
-        ? `yrd queue run · ${runShortName(label, latest.id)}${latest.pid === undefined ? "" : ` [pid ${String(latest.pid)}]`}`
-        : `yrd queue up · last run ${runShortName(label, latest.id)} wrote ${mediaDuration(sinceWrite ?? 0)} ago`
-  // Every rail that can run long is pre-wrapped into rows, like the command
-  // rail: a `wrap="wrap"` text inside a marker row under-reports its height to
-  // the column's flex pass by exactly the lines it wraps to, and every box below
-  // RUNNER is then laid out that many rows too high (the STATS border on the
-  // footer row, the pills row off screen; 2026-09-05, reproduced in isolation).
-  const railWidth = Math.max(8, columns - RUNNER_CHROME)
-  const commandRows = boundedHangingLines(command, railWidth, 3)
-  const absentRows =
-    latest === undefined
-      ? boundedHangingLines(facts.absent ?? `no run journal was read: ${facts.journalDir}`, railWidth, ABSENT_MAX_ROWS)
-      : []
-  const silentRows =
-    latest !== undefined && health === "silent"
-      ? boundedHangingLines(
-          `RUNNER SILENT — no journal write for ${mediaDuration(sinceWrite ?? 0)}${
-            inLine === 0
-              ? " and nothing is in line, so a change submitted now would not be picked up"
-              : ` while ${String(inLine)} ${inLine === 1 ? "change waits" : "changes wait"} in line`
-          }; is yrd-service up? (hab ps yrd-service)`,
-          railWidth,
-          SILENT_MAX_ROWS,
-        )
-      : []
-  // 24470: the run threw before it reached the queue it was for. Name the state
-  // and point at the evidence — the journal's last Git row IS the failing call,
-  // which is a different hand from the one `hab ps` sends you to for silence.
-  const unstartedRows =
-    latest !== undefined && health === "unstarted"
-      ? boundedHangingLines(
-          `RUNNER UNSTARTED — run ${latest.id} died in its Git preamble before it could read its queue; ` +
-            `its last Git row names the call that failed (${join(facts.journalDir, `${latest.id}.jsonl`)})`,
-          railWidth,
-          UNSTARTED_MAX_ROWS,
-        )
-      : []
-  const pauseRows = pause === undefined ? [] : boundedHangingLines(pause, railWidth, PAUSE_MAX_ROWS)
-  // Item 14: while a run executes the informational rails go muted so the
-  // activity line carries the eye; item 27: an error rail keeps its color.
-  const rail = "$fg-muted"
-  return (
-    <TitledBox
-      title="RUNNER"
-      {...(timer === undefined ? {} : { titleRight: timer })}
-      {...(border === undefined ? {} : { borderColor: border })}
-    >
-      <MarkerRow marker={<HealthMarker health={health} live={live} />}>
-        {commandRows.map((row) => (
-          <Text key={row} color={color} wrap="truncate" minWidth={0}>
-            {row}
-          </Text>
-        ))}
-      </MarkerRow>
-      {latest === undefined ? (
-        <MarkerRow>
-          {absentRows.map((row) => (
-            <Text key={row} color={rail} wrap="truncate" minWidth={0}>
-              {row}
-            </Text>
-          ))}
-        </MarkerRow>
-      ) : (
-        <>
-          <MarkerRow>
-            <Text color={rail} wrap="truncate" minWidth={0}>
-              {[
-                latest.target === undefined ? undefined : `target ${latest.target}`,
-                latest.gitlink === undefined ? undefined : `gitlink ${latest.gitlink.slice(0, 12)}`,
-                latest.checks === undefined ? undefined : `checks ${latest.checks.join(", ")}`,
-              ]
-                .filter((part): part is string => part !== undefined)
-                .join(" · ") || "the run's header record was not read"}
-            </Text>
-          </MarkerRow>
-          {/* Item 16: the absolute measured-at clock beside the relative age, so
-              a heartbeat that legitimately oscillates never READS frozen. */}
-          <MarkerRow>
-            <Text color={rail} wrap="truncate" minWidth={0}>
-              progress {clock(latest.lastWriteAt, { seconds: true })} · {mediaDuration(sinceWrite ?? 0)} ago
-            </Text>
-          </MarkerRow>
-          {silentRows.length === 0 ? null : (
-            <MarkerRow>
-              {silentRows.map((row) => (
-                <Text key={row} color="$fg-error" bold wrap="truncate" minWidth={0}>
-                  {row}
-                </Text>
-              ))}
-            </MarkerRow>
-          )}
-          {unstartedRows.length === 0 ? null : (
-            <MarkerRow>
-              {unstartedRows.map((row) => (
-                <Text key={row} color="$fg-error" bold wrap="truncate" minWidth={0}>
-                  {row}
-                </Text>
-              ))}
-            </MarkerRow>
-          )}
-        </>
-      )}
-      {pauseRows.length === 0 ? null : (
-        <>
-          <Box height={1} flexShrink={0} />
-          <MarkerRow marker={<Text color="$fg-warning">⚠︎</Text>}>
-            {pauseRows.map((row) => (
-              <Text key={row} color="$fg-warning" bold wrap="truncate" minWidth={0}>
-                {row}
-              </Text>
-            ))}
-          </MarkerRow>
-        </>
-      )}
-    </TitledBox>
-  )
-}
+/** Gutter 2 + borders 2 + the box's paddingX 2: what a box's own content cannot have (the retired box's accounting). */
+const BOX_CHROME = 6
 
 /** The label column of the STATS box, wide enough for `QUEUING` and a space. */
 const STATS_LABEL_WIDTH = 8
@@ -260,7 +39,7 @@ const STATS_PERIODS_WIDTH = Object.values(STATS_PERIOD_WIDTHS).reduce((sum, widt
 
 /** How many hour buckets fit beside the label and the four calendar columns, between 6 and 24. */
 export function statsHoursFor(columns: number): number {
-  const fixed = RUNNER_CHROME + STATS_LABEL_WIDTH + STATS_PERIODS_WIDTH + 2
+  const fixed = BOX_CHROME + STATS_LABEL_WIDTH + STATS_PERIODS_WIDTH + 2
   return Math.max(6, Math.min(24, Math.floor((columns - fixed) / STATS_HOUR_WIDTH)))
 }
 

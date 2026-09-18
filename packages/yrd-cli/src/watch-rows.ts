@@ -15,7 +15,7 @@
  */
 
 import type { Row, WatchRow } from "@yrd/queue-core"
-import { stateGlyph } from "./watch-format.ts"
+import { stateGlyph, stateWord } from "./watch-format.ts"
 export { watchRows, watchRowKey, type WatchRow, type WatchRowOptions } from "@yrd/queue-core"
 
 /**
@@ -43,7 +43,9 @@ export function matchesTerm(row: WatchRow, term: string): boolean {
   // the word can mean. Without it the term fell through to branch and subject
   // text, so a state name matched whatever happened to contain it — one row on
   // a branch called `task/merged-…` while every genuinely merged change was
-  // excluded (a-state-name-filters-to-zero-rows-and-exit-zero).
+  // excluded (a-state-name-filters-to-zero-rows-and-exit-zero). The word the
+  // table SHOWS for that state is in it too (@i/10-yrd/24196): a reader who
+  // sees `pending` on the screen and types it means the same rows as `checked`.
   return [
     row.row.branch,
     row.row.subject,
@@ -51,6 +53,7 @@ export function matchesTerm(row: WatchRow, term: string): boolean {
     row.row.result,
     row.row.reason,
     row.row.state,
+    stateWord({ state: row.row.state }),
   ].some((field) => field?.toLocaleLowerCase().includes(wanted) === true)
 }
 
@@ -82,7 +85,7 @@ export function rowLine(row: WatchRow): string {
   // now — which is the run, whatever else is known.
   const run = row.run?.id ?? row.row.run ?? row.row.live?.run
   return [
-    `${position} ${row.row.state.padEnd(7)} ${row.row.branch} ${row.row.head.slice(0, 12)} ${result}`,
+    `${position} ${stateWord({ state: row.row.state }).padEnd(9)} ${row.row.branch} ${row.row.head.slice(0, 12)} ${result}`,
     row.row.issue === undefined ? "" : ` ${row.row.issue}`,
     // A direct merge's whole line IS its reason, subject and all, so adding
     // the subject beside it printed it twice. Anything the result already

@@ -31,6 +31,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, describe, expect, it, vi } from "vitest"
+import { tryAcquireFlock } from "@bearly/flock"
 import {
   appendRecord,
   changeRef,
@@ -40,18 +41,23 @@ import {
   readRecords,
   readRemoteCommit,
   readRunLog,
+  ROUND_LOCK,
   runId,
   submit,
   trailer,
   watchRows,
+  type ChangeRecord,
   type Git,
   type QueueHealthDocument,
+  type QueueRunOutcome,
   type GitRunner,
 } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
+import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand, openDetail, readListing } from "../src/queue-core-commands.ts"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
-import type { YrdCliIO } from "../src/types.ts"
+import { resolveQueueLocation } from "../src/queue-location.ts"
+import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
 
 // A mutable facade, so a test can catch each health document at the rename
@@ -123,6 +129,31 @@ function logRows(): Readonly<{
 }
 
 const DECLARATION = "{}\n"
+
+/**
+ * How many 0.05 s turns a fixture shell waits to be released before it gives up
+ * and exits: 120 s, above this file's longest test timeout (60 s). A fixture
+ * that waits without a bound outlives the run whenever the test dies before
+ * releasing it, and that leak is what km-infra's test-fixture-process-leaks
+ * guard reads; a bound under the timeout would cut a legitimate wait short
+ * instead.
+ */
+const FIXTURE_WAIT_TURNS = 2400
+
+/** The lines of a fixture's bounded wait: turn until `test` stops holding, then give up loudly. */
+function waitingFor(test: string, why: string): readonly string[] {
+  return [
+    "turns=0",
+    `while ${test}; do`,
+    "  turns=$((turns + 1))",
+    `  if [ "$turns" -gt ${String(FIXTURE_WAIT_TURNS)} ]; then`,
+    `    echo "${why}" >&2`,
+    "    exit 1",
+    "  fi",
+    "  sleep 0.05",
+    "done",
+  ]
+}
 
 async function identity(git: Git): Promise<void> {
   await git(["config", "user.email", "queue@yrd.test"])
@@ -479,13 +510,24 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
 
     const listed = capture(w.work)
     expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    // The pause rides the RUNNER box's last rail, once — under the title, not above it (watch-frame.tsx).
+    // The pause is the loudest state on the page and it LEADS it, once; the
+    // runner's row says the WORD paused and what lifts the stop, never the
+    // record's own sentence a second time (watch-frame.tsx).
     const page = listed.stdout().split("\n")
     expect(page.filter((line) => line.includes("paused by @chief"))).toHaveLength(1)
-    expect(page.findIndex((line) => line.includes("paused by @chief"))).toBeGreaterThan(
+    expect(page.findIndex((line) => line.includes("paused by @chief"))).toBeLessThan(
       page.findIndex((line) => line.includes("RUNNER")),
     )
-    expect(page.findIndex((line) => line.includes("RUNNER"))).toBeGreaterThan(-1)
+    // There is no run journal and no health document in this workdir, and the
+    // row still says `paused`: a stop record is a GIT fact and reads from any
+    // clone, so it outranks every host-only rung. `?` here would hide the one
+    // thing an operator most needs to see behind "I am not on that machine".
+    // The row says the WORD and the cure; the record's own sentence is the loud
+    // line above and is said exactly once.
+    const runnerRow = page.find((line) => line.includes("RUNNER"))
+    expect(runnerRow, listed.stdout()).toContain("paused")
+    expect(runnerRow, listed.stdout()).toContain("resume: yrd queue resume")
+    expect(runnerRow, listed.stdout()).not.toContain("refs/yrd/main/runner")
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
       0,
@@ -624,8 +666,10 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     })
 
     // B exists at the remote but is not main yet. The upload-pack wrapper
-    // advances main after declaration A is captured and fetched, immediately
-    // before the queue's broad advertisement.
+    // advances main after the round's declaration A is captured and fetched,
+    // immediately before the queue's broad advertisement. A round reads its
+    // declaration once it holds the round lock, so what the service reads
+    // before that — its start-up declaration and stop — is not counted.
     writeFileSync(join(w.work, ".yrd.yml"), `checks:\n  - fixed:\n      run: ${checkB}\n      on: submit\n`)
     await w.git(["commit", "--quiet", "-am", "declaration B"])
     const b = (await w.git(["rev-parse", "HEAD"])).trim()
@@ -637,6 +681,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       wrapper,
       [
         "#!/bin/sh",
+        `test -e "${join(w.workdir, ROUND_LOCK)}" || exec git-upload-pack "$@"`,
         `count=0; test ! -f "${calls}" || count=$(cat "${calls}")`,
         "count=$((count + 1))",
         `printf '%s\\n' "$count" > "${calls}"`,
@@ -1896,7 +1941,7 @@ describe("yrd watch's own detail pane (openDetail), one change's evidence", () =
     // `world()` actually hands out comes from `gitIn()`, declared `GitRunner`
     // (the same value the CLI's own `readListing` call site is given).
     const { all, journals, queue } = await readListing(w.git as GitRunner, config, w.workdir, oid)
-    const rows = watchRows(all, { journals })
+    const rows = watchRows(all, { journals, perRun: true })
     const item = rows.find((row) => row.row.branch === change.branch)
     if (item === undefined) throw new Error("test setup: the change did not appear in the watch rows")
 
@@ -2380,7 +2425,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       [
         "#!/bin/sh",
         `echo "$(pwd)" >> ${started}`,
-        `while [ ! -f ${released} ]; do sleep 0.05; done`,
+        ...waitingFor(`[ ! -f ${released} ]`, "held-setup: the test never released this round; giving up"),
         "exit 0",
         "",
       ].join("\n"),
@@ -2854,4 +2899,630 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
     await roundWithSetup(w, "task/answered-404", failingSetup(w.workdir, "answered-404", line))
     expect((await reasonFor(w, "task/answered-404")).reason).toBe("yrd-setup-unusable")
   })
+})
+
+/**
+ * @failure  A stopped line has no way out but a person's hand. The fix that
+ *           would unstick it waits in line BEHIND the stuck change, which a
+ *           stopped line never reaches; the one verb that runs work out of turn,
+ *           `yrd queue run`, takes the whole line in order; so the operator
+ *           either resumes a queue that is still broken or pushes the fix around
+ *           the queue.
+ * @level    l2 (a real remote and a clone; the CLI driven as the shell runs it,
+ *           argv in and exit code out, with the queue's workdir named inside the
+ *           world)
+ * @consumer the operator, who asked to "run yrd merge without even running a
+ *           queue" (2026-09-16) · every seat unsticking a stopped line · every
+ *           submitter whose change waits behind a stuck one
+ */
+describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
+  type Ran = Readonly<{ exitCode: YrdCliExitCode; stdout: string; stderr: string; report: string }>
+
+  /** The CLI as the shell runs it, standing in the world's clone: argv in, exit code and both streams out. */
+  async function yrd(w: World, ...args: string[]): Promise<Ran> {
+    const run = capture(w.work)
+    const exitCode = await runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...args], run.io)
+    return {
+      exitCode,
+      report: `yrd ${args.join(" ")} exited ${String(exitCode)}\n--- stdout ---\n${run.stdout()}\n--- stderr ---\n${run.stderr()}`,
+      stderr: run.stderr(),
+      stdout: run.stdout(),
+    }
+  }
+
+  /**
+   * This file's world with the queue's workdir named in the clone's own config,
+   * so every queue command the shell runs keeps its owned clone, journal and
+   * worktrees inside the world and never under the host's state directory.
+   */
+  async function verbWorld(): Promise<World> {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    return w
+  }
+
+  /** A branch off main carrying one file of its own, not submitted; answers its head. */
+  async function branchWith(w: World, branch: string, file: string): Promise<string> {
+    await w.git(["checkout", "--quiet", "-b", branch, "main"])
+    writeFileSync(join(w.work, file), `${file}\n`)
+    await w.git(["add", file])
+    await w.git(["commit", "--quiet", "-m", `${branch}: ${file}`])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    return head
+  }
+
+  /** The same branch, submitted. */
+  async function submitted(w: World, branch: string, file: string): Promise<string> {
+    const head = await branchWith(w, branch, file)
+    await submit(w.git, "origin", { branch, submitter: "@dev/4", target: { branch: "main", remote: "origin" } })
+    return head
+  }
+
+  /** One change's records at the remote, oldest first; none when the remote holds no such change. */
+  async function recordsAt(w: World, branch: string, head: string): Promise<readonly ChangeRecord[]> {
+    const ref = changeRef("main", { branch, head })
+    if ((await w.git(["ls-remote", "--refs", "origin", ref])).trim() === "") return []
+    await w.git(["fetch", "--quiet", "origin", `+${ref}:${ref}`])
+    return readRecords(w.git, (await w.git(["rev-parse", "--verify", `${ref}^{commit}`])).trim())
+  }
+
+  async function kindsOf(w: World, branch: string, head: string): Promise<readonly string[]> {
+    return (await recordsAt(w, branch, head)).map((record) => record.kind)
+  }
+
+  /** The remote's main, fetched. */
+  async function mainAt(w: World): Promise<string> {
+    const tip = await readRemoteCommit(w.git, "origin", "refs/heads/main")
+    if (tip === undefined) throw new Error("the world's remote carries no main")
+    return tip
+  }
+
+  /** Whether the remote's main carries `head`: the one reading of merged that no record can fake. */
+  async function onMain(w: World, head: string): Promise<boolean> {
+    return (await w.git(["merge-base", head, await mainAt(w)])).trim() === head
+  }
+
+  /** The stop `yrd list --json` reads: `null` while the line runs. */
+  async function stopOf(w: World): Promise<unknown> {
+    const listed = await yrd(w, "list", "--json")
+    expect(listed.exitCode, listed.report).toBe(0)
+    return (JSON.parse(listed.stdout) as { stopped: unknown }).stopped
+  }
+
+  /**
+   * A check the target declares at submit whose verdict the tree decides: it
+   * fails (exit 1) while the tree carries `fails.txt`, cannot judge (exit 2,
+   * stuck) until the tree carries `repaired.txt`, and never while the tree
+   * carries `sticks-again.txt`. Every judgement appends the worktree it ran in,
+   * so a case can count how often one head was judged.
+   */
+  function gate(w: World): Readonly<{ declaration: string; judgements: (head: string) => number }> {
+    const log = join(dirname(w.workdir), "gate-judgements.log")
+    const script = join(dirname(w.workdir), "gate.sh")
+    writeFileSync(log, "")
+    writeFileSync(
+      script,
+      [
+        "#!/bin/sh",
+        `pwd >> "${log}"`,
+        "if [ -f fails.txt ]; then echo 'this tree fails the gate' >&2; exit 1; fi",
+        "if [ -f repaired.txt ] && [ ! -f sticks-again.txt ]; then exit 0; fi",
+        "echo 'the gate cannot judge this tree: it needs repaired.txt and no sticks-again.txt' >&2",
+        "exit 2",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(script, 0o755)
+    return {
+      declaration: `checks:\n  - gate:\n      on: [submit]\n      run: ${script}\n`,
+      judgements: (head) =>
+        readFileSync(log, "utf8")
+          .split("\n")
+          .filter((line) => line.endsWith(`/submit/${head.slice(0, 12)}`)).length,
+    }
+  }
+
+  // ACCEPTANCE (stuck-stops-the-line, the rows naming yrd merge): no service is
+  // running, and the change asked for is merged out of turn, through every
+  // check, while the checked change ahead of it keeps its place and its verdict.
+  it("with no service running, merges the named change while an older checked change stays in line", async () => {
+    const w = await verbWorld()
+    await submitted(w, "task/first", "first.txt")
+    const olderHead = await submitted(w, "task/older", "older.txt")
+    const namedHead = await submitted(w, "task/named", "named.txt")
+    // One round judges all three and merges only the first in line, so two checked changes wait.
+    const round = await yrd(w, "queue", "run", "--json")
+    expect(round.exitCode, round.report).toBe(0)
+    expect(await kindsOf(w, "task/older", olderHead)).toEqual(["opened", "checked"])
+    expect(await kindsOf(w, "task/named", namedHead)).toEqual(["opened", "checked"])
+
+    const merged = await yrd(w, "merge", "task/named")
+
+    // The target's newest merge names the change asked for, not the one first in line.
+    const tip = await mainAt(w)
+    expect((await w.git(["log", "-1", "--format=%(trailers:key=Change,valueonly)", tip])).trim(), merged.report).toBe(
+      `task/named@${namedHead}`,
+    )
+    expect(await onMain(w, namedHead)).toBe(true)
+    // The older checked change is untouched: not merged, not re-judged, still checked.
+    expect(await onMain(w, olderHead)).toBe(false)
+    expect(await kindsOf(w, "task/older", olderHead)).toEqual(["opened", "checked"])
+    expect(merged.exitCode, merged.report).toBe(0)
+  })
+
+  // ACCEPTANCE: merge is submit, idempotent. A change already checked is merged
+  // on that verdict, never reopened by a same-head retry, and merging a merged
+  // change again is an answer (exit 0) that writes and merges nothing.
+  it("merging a change the line already checked adds no retry, and merging it again exits 0 and changes nothing", async () => {
+    const w = await verbWorld()
+    await submitted(w, "task/first", "first.txt")
+    const head = await submitted(w, "task/checked", "checked.txt")
+    const round = await yrd(w, "queue", "run", "--json")
+    expect(round.exitCode, round.report).toBe(0)
+    expect(await kindsOf(w, "task/checked", head)).toEqual(["opened", "checked"])
+
+    const merged = await yrd(w, "merge", "task/checked")
+
+    const kinds = await kindsOf(w, "task/checked", head)
+    expect(kinds.slice(0, 3), merged.report).toEqual(["opened", "checked", "merged"])
+    expect(kinds.filter((kind) => kind === "opened")).toHaveLength(1)
+    expect(merged.exitCode, merged.report).toBe(0)
+
+    const ref = changeRef("main", { branch: "task/checked", head })
+    const tipBefore = (await w.git(["ls-remote", "--refs", "origin", ref])).trim()
+    const mainBefore = await mainAt(w)
+    const again = await yrd(w, "merge", "task/checked")
+    expect(again.exitCode, again.report).toBe(0)
+    expect((await w.git(["ls-remote", "--refs", "origin", ref])).trim()).toBe(tipBefore)
+    expect(await mainAt(w)).toBe(mainBefore)
+  })
+
+  // ACCEPTANCE: the exit is the named change's state once merge is done — 1 when
+  // it ended failed, 0 when its head is on the target, 2 for anything else.
+  it.each([
+    { file: "fails.txt", ending: "failed", exit: 1, verdict: "fails its check" },
+    { file: "cannot-judge.txt", ending: "stuck", exit: 2, verdict: "has a check that cannot judge it" },
+    { file: "passes.txt", ending: "merged", exit: 0, verdict: "passes" },
+  ])("a change that $verdict ends $ending, and yrd merge exits $exit", async ({ file, ending, exit }) => {
+    const w = await verbWorld()
+    const script = join(dirname(w.workdir), "verdict.sh")
+    writeFileSync(
+      script,
+      [
+        "#!/bin/sh",
+        "if [ -f fails.txt ]; then echo 'this change fails the verdict' >&2; exit 1; fi",
+        "if [ -f cannot-judge.txt ]; then echo 'the verdict cannot judge this change' >&2; exit 2; fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(script, 0o755)
+    await redeclare(w, `checks:\n  - verdict:\n      on: [submit]\n      run: ${script}\n`)
+    const head = await branchWith(w, "task/judged", file)
+
+    // Never submitted: merge opens the change itself, then judges it.
+    const merged = await yrd(w, "merge", "task/judged")
+
+    expect(await kindsOf(w, "task/judged", head), merged.report).toContain(ending)
+    expect(merged.exitCode, merged.report).toBe(exit)
+  })
+
+  // ACCEPTANCE: on a line a stuck change stopped, the fix that sits BEHIND it
+  // merges through every check, then the stuck head is judged exactly once more
+  // on the repaired target, and its passing lifts the stop.
+  it("merging the fix re-judges the stuck head once, and the stop lifts when it passes", async () => {
+    const w = await verbWorld()
+    const check = gate(w)
+    await redeclare(w, check.declaration)
+    const stuckHead = await submitted(w, "task/stuck", "stuck.txt")
+    const fixHead = await branchWith(w, "task/fix", "repaired.txt")
+    const stuck = await yrd(w, "queue", "run", "--json")
+    expect(stuck.exitCode, stuck.report).toBe(2)
+    expect(await stopOf(w)).toMatchObject({ by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` })
+    expect(check.judgements(stuckHead)).toBe(1)
+
+    const merged = await yrd(w, "merge", "task/fix")
+
+    expect(await onMain(w, fixHead), merged.report).toBe(true)
+    expect(check.judgements(stuckHead), merged.report).toBe(2)
+    expect(await onMain(w, stuckHead), merged.report).toBe(true)
+    expect(await stopOf(w)).toBeNull()
+    expect(merged.exitCode, merged.report).toBe(0)
+  })
+
+  // ACCEPTANCE, the other half: a stuck head that sticks again on the repaired
+  // target keeps the line stopped, counted, and is not judged a third time. The
+  // exit is the fix's own: it merged.
+  it("a stuck head that sticks again once the fix merged keeps the stop, and the fix's merge still exits 0", async () => {
+    const w = await verbWorld()
+    const check = gate(w)
+    await redeclare(w, check.declaration)
+    const stuckHead = await submitted(w, "task/stuck", "sticks-again.txt")
+    const fixHead = await branchWith(w, "task/fix", "repaired.txt")
+    const stuck = await yrd(w, "queue", "run", "--json")
+    expect(stuck.exitCode, stuck.report).toBe(2)
+    expect(check.judgements(stuckHead)).toBe(1)
+
+    const merged = await yrd(w, "merge", "task/fix")
+
+    expect(await onMain(w, fixHead), merged.report).toBe(true)
+    expect(check.judgements(stuckHead), merged.report).toBe(2)
+    expect((await kindsOf(w, "task/stuck", stuckHead)).filter((kind) => kind === "stuck")).toHaveLength(2)
+    expect(await stopOf(w)).toMatchObject({ by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` })
+    expect(merged.exitCode, merged.report).toBe(0)
+  })
+
+  // ACCEPTANCE (rows 2 and 4 together, @chief c5c33f8e): the verdict merge keeps
+  // is keyed on the head, never on the branch. A branch that moved on after its
+  // change was checked is submitted again at its new head, and that head is
+  // judged before anything merges: the old verdict never lands the new head.
+  it("a head that moved after its change was checked is judged again, and never merges on the old verdict", async () => {
+    const w = await verbWorld()
+    const check = gate(w)
+    await redeclare(w, check.declaration)
+    await submitted(w, "task/first", "repaired.txt")
+    const checkedHead = await submitted(w, "task/moved", "repaired.txt")
+    // One round merges the first change in line and leaves this one checked.
+    const round = await yrd(w, "queue", "run", "--json")
+    expect(round.exitCode, round.report).toBe(0)
+    expect(await kindsOf(w, "task/moved", checkedHead)).toEqual(["opened", "checked"])
+    expect(check.judgements(checkedHead)).toBe(1)
+    // The branch moves on after its verdict, the way the workflow says: onto the
+    // target as it is now, then one commit more, whose tree fails the gate.
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["checkout", "--quiet", "task/moved"])
+    await w.git(["rebase", "--quiet", "FETCH_HEAD"])
+    writeFileSync(join(w.work, "fails.txt"), "fails.txt\n")
+    await w.git(["add", "fails.txt"])
+    await w.git(["commit", "--quiet", "-m", "task/moved: fails.txt"])
+    const movedHead = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+
+    const merged = await yrd(w, "merge", "task/moved")
+
+    expect(check.judgements(movedHead), merged.report).toBe(1)
+    expect(await kindsOf(w, "task/moved", movedHead), merged.report).toContain("failed")
+    expect(await onMain(w, movedHead), merged.report).toBe(false)
+    expect(await onMain(w, checkedHead), merged.report).toBe(false)
+    expect(merged.exitCode, merged.report).toBe(1)
+  })
+
+  // ACCEPTANCE (row 7): a merge that fails on a stopped line ends failed, goes
+  // back to the submitter through the notify entry that wants failed, and the
+  // stop stays where it was: main does not move and the stuck head is not judged
+  // again.
+  it("a fix that fails on a stopped line ends failed, is sent back to its submitter, and the line stays stopped", async () => {
+    const w = await verbWorld()
+    const check = gate(w)
+    const told = join(dirname(w.workdir), "told.jsonl")
+    const notifier = join(dirname(w.workdir), "notifier.sh")
+    writeFileSync(told, "")
+    writeFileSync(notifier, ["#!/bin/sh", `cat >> "${told}"`, ""].join("\n"))
+    chmodSync(notifier, 0o755)
+    await redeclare(w, `${check.declaration}notify:\n  - submitter:\n      on: [failed]\n      run: ${notifier}\n`)
+    const stuckHead = await submitted(w, "task/stuck", "stuck.txt")
+    const fixHead = await branchWith(w, "task/fix", "fails.txt")
+    const stuck = await yrd(w, "queue", "run", "--json")
+    expect(stuck.exitCode, stuck.report).toBe(2)
+    const stop = { by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` }
+    expect(await stopOf(w)).toMatchObject(stop)
+    const mainBefore = await mainAt(w)
+
+    const merged = await yrd(w, "merge", "task/fix", "--notify", "@dev/4")
+
+    expect(await kindsOf(w, "task/fix", fixHead), merged.report).toContain("failed")
+    expect(merged.exitCode, merged.report).toBe(1)
+    const messages = readFileSync(told, "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(messages, merged.report).toEqual([
+      expect.objectContaining({ change: `task/fix@${fixHead}`, record: "failed", submitter: "@dev/4" }),
+    ])
+    expect(await stopOf(w)).toMatchObject(stop)
+    expect(check.judgements(stuckHead), merged.report).toBe(1)
+    expect(await mainAt(w), merged.report).toBe(mainBefore)
+  })
+
+  // ACCEPTANCE (Q6): a merge that loses the target at the lease is not retried
+  // by this command. It exits 2, says what moved, and names the command that
+  // tries again; the change keeps its place and its verdict.
+  it("when the target moves at the lease, yrd merge exits 2 naming what moved and the command to run again", async () => {
+    const w = await verbWorld()
+    // A commit made around the queue, ready to land on main.
+    const around = await branchWith(w, "around", "around.txt")
+    const head = await branchWith(w, "task/moved", "moved.txt")
+    const before = await mainAt(w)
+    // The window the lease exists for: the merge's own atomic push has reached
+    // the remote, its checks all passed and its reads are done, and main moves
+    // before the refs update. The remote's pre-receive hook lands the commit
+    // around the queue once, for the first push that moves main; that push of
+    // its own moves main too, and finds the mark.
+    const root = dirname(w.workdir)
+    const moved = join(root, "target-moved-at-the-lease")
+    const hook = join(root, "remote.git", "hooks", "pre-receive")
+    mkdirSync(dirname(hook), { recursive: true })
+    writeFileSync(
+      hook,
+      [
+        "#!/bin/sh",
+        "updates=$(cat)",
+        `printf '%s\\n' "$updates" | grep -q ' refs/heads/main$' || exit 0`,
+        `[ -e "${moved}" ] && exit 0`,
+        `touch "${moved}"`,
+        "env -u GIT_DIR -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \\",
+        `  git -C "${w.work}" push --quiet origin ${around}:refs/heads/main`,
+        "",
+      ].join("\n"),
+    )
+    chmodSync(hook, 0o755)
+
+    const merged = await yrd(w, "merge", "task/moved")
+
+    // The instrument, before anything is concluded from it: the lease saw the
+    // move, and the target is the commit around the queue, not this merge.
+    expect(existsSync(moved), merged.report).toBe(true)
+    expect(await mainAt(w), merged.report).toBe(around)
+    expect(await onMain(w, head)).toBe(false)
+    expect(await kindsOf(w, "task/moved", head)).toEqual(["opened", "checked"])
+    expect(merged.stderr, merged.report).toContain(
+      `yrd: task/moved@${head} is still in line, checked: the target origin/main moved to ${around.slice(0, 12)} ` +
+        `after this round read it at ${before.slice(0, 12)}, so the merge was not pushed; `,
+    )
+    expect(merged.stderr, merged.report).toContain("or run yrd merge task/moved again")
+    expect(merged.exitCode, merged.report).toBe(2)
+  })
+})
+
+/**
+ * @failure  Two rounds run at once in one queue workdir: the service's round and
+ *           a foreground `yrd queue run` or `yrd merge` beside it judge the same
+ *           change twice, race each other's records and lose at the lease, and a
+ *           round that lost can exit 0 having merged nothing. Exclusion was prose
+ *           in a skill, never a lock (andon phase 2 plan, finding D).
+ * @level    l2 (a real remote and a clone; two rounds driven concurrently through
+ *           `coreQueueCommand`, sharing one workdir as the service and a
+ *           foreground command do)
+ * @consumer the service and every seat that runs `yrd merge` or `yrd queue run`
+ *           while it is up
+ */
+describe("one round at a time in a queue workdir (andon phase 2, the queue lock)", () => {
+  it("two rounds started together never overlap, and each merges the first change it finds", async () => {
+    const w = await world()
+    const root = dirname(w.workdir)
+    const inside = join(root, "a-round-is-inside")
+    const holds = join(root, "holds.log")
+    const overlaps = join(root, "overlaps.log")
+    const hold = join(root, "hold.sh")
+    writeFileSync(holds, "")
+    writeFileSync(overlaps, "")
+    // A merge-phase check that holds its round for a while and records any other
+    // round's check that arrives while it is inside.
+    writeFileSync(
+      hold,
+      [
+        "#!/bin/sh",
+        `pwd >> "${holds}"`,
+        `if ! mkdir "${inside}" 2>/dev/null; then pwd >> "${overlaps}"; exit 0; fi`,
+        "sleep 3",
+        `rmdir "${inside}"`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(hold, 0o755)
+    await redeclare(w, `checks:\n  - hold:\n      run: ${hold}\n`)
+    for (const name of ["one", "two"]) {
+      await w.git(["checkout", "--quiet", "-b", `task/${name}`, "main"])
+      writeFileSync(join(w.work, `${name}.txt`), `${name}\n`)
+      await w.git(["add", `${name}.txt`])
+      await w.git(["commit", "--quiet", "-m", name])
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", {
+        branch: `task/${name}`,
+        submitter: "@dev/4",
+        target: { branch: "main", remote: "origin" },
+      })
+    }
+
+    const runs = [capture(w.work), capture(w.work)]
+    const exits = await Promise.all(
+      runs.map((run) => coreQueueCommand(w.work, run.io, { command: "run" }, { json: true, workdir: w.workdir })),
+    )
+    const said = runs.map((run) => `${run.stdout()}${run.stderr()}`).join("\n---\n")
+
+    expect(readFileSync(overlaps, "utf8"), said).toBe("")
+    // Positive control: each round did a round's work in turn, one merge check and one merge each.
+    expect(readFileSync(holds, "utf8").split("\n").filter(Boolean), said).toHaveLength(2)
+    expect(exits, said).toEqual([0, 0])
+    expect(runs.flatMap((run) => (records(run)[0]?.merged ?? []) as string[]).sort(), said).toEqual([
+      "task/one",
+      "task/two",
+    ])
+  }, 60_000)
+
+  // O1 (phase B review). A round the service waits for is someone's work, not a
+  // fault: the probe reads healthy for the whole wait, past the budget included,
+  // and the document says whose round it waits for.
+  it("while up waits on a held lock, its health document reads healthy and its facts name the holder", async () => {
+    const w = await world()
+    const holder = { command: "yrd merge task/elsewhere", pid: process.pid }
+    const since = new Date().toISOString()
+    // A holder in this process: the flock is taken once per process, so the service below waits on it.
+    const held = tryAcquireFlock(join(w.workdir, ROUND_LOCK), { body: `${JSON.stringify({ ...holder, since })}\n` })
+    if (held === null) throw new Error(`the round lock in ${w.workdir} is already held`)
+    const { log, rows } = logRows()
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    const stallMs = 50
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        // Heartbeats well inside the wait, so the fact is seen to survive them.
+        heartbeatIntervalMs: 100,
+        heartbeatGraceMs: 500,
+        intervalSeconds: 0,
+        roundLockStallMs: stallMs,
+        stop: stop.signal,
+        afterHealth: (document) => {
+          seen.push(document)
+          stop.abort()
+        },
+      },
+      { json: true, log, workdir: w.workdir },
+    )
+    try {
+      const waiting = { holder, since, waitingSince: expect.any(String) }
+      await vi.waitFor(
+        async () =>
+          expect((await readQueueHealth(w.workdir, SERVICE)).facts?.waitingForRoundLock, run.stderr()).toEqual(waiting),
+        { timeout: 20_000 },
+      )
+      const readings: QueueHealthDocument[] = []
+      const from = Date.now()
+      while (Date.now() - from < 10 * stallMs) {
+        readings.push(await readQueueHealth(w.workdir, SERVICE))
+        await delay(25)
+      }
+      // The instrument, before anything is concluded from it: the wait did run past its budget.
+      expect(rows.filter((row) => row.level === "warn" && row.message.includes("for the round lock"))).toHaveLength(1)
+      expect(seen, "round 1 has not run").toHaveLength(0)
+      for (const reading of readings) {
+        expect(reading, JSON.stringify(reading)).toMatchObject({
+          facts: { waitingForRoundLock: waiting },
+          state: "healthy",
+          verdict: { kind: "running" },
+        })
+        expect(reading.error, JSON.stringify(reading)).toBeUndefined()
+      }
+
+      held.release()
+      expect(await service, run.stderr()).toBe(0)
+      // The round it waited for ran, and that round's document names no wait.
+      expect(seen).toHaveLength(1)
+      expect(seen[0]?.facts, JSON.stringify(seen[0])).not.toHaveProperty("waitingForRoundLock")
+    } finally {
+      held.release()
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 30_000)
+
+  // THE SCENARIO THE LOCK IS FOR: the service is inside a round with a slow
+  // merge check, and a person merges another change beside it. The merge waits
+  // and names what it waits on, runs its round only once the service's round has
+  // ended, and its change is on the target before the service's next round
+  // begins. The service's hook awaits the merge: the service released its lock
+  // before the hook, and cannot start its next round until the hook returns.
+  it("a yrd merge beside the service waits out the service's round, and lands before the service's next one", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const root = dirname(w.workdir)
+    const holding = join(root, "the-service-round-holds")
+    const entered = join(root, "the-slow-check-entered")
+    const slow = join(root, "slow.sh")
+    // A merge-phase check that holds the round merging task/first while `holding`
+    // exists, and says it began; every other merge it passes at once.
+    writeFileSync(
+      slow,
+      [
+        "#!/bin/sh",
+        "[ -f first.txt ] || exit 0",
+        `touch "${entered}"`,
+        ...waitingFor(`[ -f "${holding}" ]`, "slow check: the test never stopped holding this round; giving up"),
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(slow, 0o755)
+    writeFileSync(holding, "")
+    await redeclare(w, `checks:\n  - slow:\n      run: ${slow}\n`)
+    const heads = new Map<string, string>()
+    for (const name of ["first", "second"]) {
+      await w.git(["checkout", "--quiet", "-b", `task/${name}`, "main"])
+      writeFileSync(join(w.work, `${name}.txt`), `${name}\n`)
+      await w.git(["add", `${name}.txt`])
+      await w.git(["commit", "--quiet", "-m", name])
+      heads.set(name, (await w.git(["rev-parse", "HEAD"])).trim())
+      await w.git(["checkout", "--quiet", "main"])
+    }
+    await submit(w.git, "origin", {
+      branch: "task/first",
+      submitter: "@dev/4",
+      target: { branch: "main", remote: "origin" },
+    })
+    const second = heads.get("second") ?? ""
+    const carries = async (commit: string, head: string): Promise<boolean> =>
+      (await w.git(["merge-base", head, commit])).trim() === head
+
+    // The service where `yrd merge` finds it: the queue's own clone and workdir.
+    const location = await resolveQueueLocation(w.work, undefined, process.env)
+    const stop = new AbortController()
+    const service = capture(w.work)
+    const merge = capture(w.work)
+    let merging: Promise<YrdCliExitCode> | undefined
+    const rounds: QueueRunOutcome[] = []
+    let merged: YrdCliExitCode | undefined
+    let landedBeforeNextRound: boolean | undefined
+    const running = coreQueueCommand(
+      location.repo,
+      service.io,
+      {
+        afterRound: async (outcome) => {
+          rounds.push(outcome)
+          if (rounds.length === 1) {
+            merged = await merging
+            const tip = await readRemoteCommit(w.git, "origin", "refs/heads/main")
+            landedBeforeNextRound = tip !== undefined && (await carries(tip, second))
+          } else {
+            stop.abort()
+          }
+        },
+        command: "up",
+        // Long, so the service's own cadence is never what lets the merge in.
+        intervalSeconds: 3600,
+        stop: stop.signal,
+      },
+      {
+        json: true,
+        populateReference: location.owned,
+        queue: location.queue,
+        selection: location.selection,
+        workdir: location.workdir,
+      },
+    )
+
+    // The service's round is inside its slow merge check, holding the lock.
+    await vi.waitFor(() => expect(existsSync(entered), service.stderr()).toBe(true), { timeout: 20_000 })
+    let settled = false
+    merging = runYrdProcess([process.execPath, "/usr/local/bin/yrd", "merge", "task/second"], merge.io).finally(() => {
+      settled = true
+    })
+    await vi.waitFor(
+      () => expect(settled || merge.stderr().includes("waiting for the round lock"), merge.stderr()).toBe(true),
+      { timeout: 20_000 },
+    )
+    const said = (): string =>
+      `--- service ---\n${service.stdout()}${service.stderr()}\n--- merge ---\n${merge.stdout()}${merge.stderr()}`
+    // Waiting, not merged beside the service's round, and saying whom it waits on.
+    expect(settled, said()).toBe(false)
+    expect(merge.stderr()).toMatch(/waiting for the round lock in .+: pid \d+ \(.+\) has held it since \d{4}-/u)
+    const tip = await readRemoteCommit(w.git, "origin", "refs/heads/main")
+    expect(tip !== undefined && (await carries(tip, second)), said()).toBe(false)
+
+    rmSync(holding)
+    expect(await running, said()).toBe(0)
+    expect(
+      rounds.map((round) => round.merged),
+      said(),
+    ).toEqual([["task/first"], []])
+    expect(merged, said()).toBe(0)
+    expect(landedBeforeNextRound, said()).toBe(true)
+    // The service's next round judged a target that already carried the merge.
+    expect(await carries(rounds[1]?.base ?? "", second), said()).toBe(true)
+  }, 60_000)
 })

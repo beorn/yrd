@@ -9,7 +9,42 @@
  */
 
 import { homedir } from "node:os"
-import { runStartedAt, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
+import { clocks, runStartedAt, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
+import { STATE_WORDS, type DisplayState } from "./watch-words.ts"
+
+export {
+  LEGEND_STATES,
+  RUNNER_STATES,
+  STATE_WORDS,
+  legendLines,
+  type DisplayState,
+  type RunnerState,
+  type WordEntry,
+} from "./watch-words.ts"
+
+/**
+ * The word a row's state reads as (watch-words.ts): a check running on it now
+ * reads checking whatever its records say; otherwise the core's state, in the
+ * operator's word.
+ */
+export function displayState(row: Pick<Row, "state" | "live">): DisplayState {
+  if (row.live !== undefined) return "checking"
+  switch (row.state) {
+    case "queued":
+      return "submitted"
+    case "checked":
+      return "pending"
+    case "withdrawn":
+      return "cancelled"
+    default:
+      return row.state
+  }
+}
+
+/** The word for a row, read from the one table when it draws. */
+export function stateWord(row: Pick<Row, "state" | "live">): string {
+  return STATE_WORDS[displayState(row)].word
+}
 
 /** Full recorded warnings, shared by plain output and the selected change detail. */
 export function diagnosticLines(
@@ -58,6 +93,7 @@ export function diagnosticLines(
 export const STATE_GLYPH: Readonly<Record<Row["state"], string>> = {
   checked: "◉",
   direct: "→",
+  draft: "◇",
   failed: "×",
   merged: "✓",
   queued: "○",
@@ -68,24 +104,18 @@ export const STATE_GLYPH: Readonly<Record<Row["state"], string>> = {
 /** The glyph a check running RIGHT NOW overlays on any state: the overlay reads live, the word still reads the state. */
 export const RUNNING_GLYPH = "◉"
 
+/**
+ * The runner's own marker, on its own row: the one row in the table that is not
+ * a change. U+25B8 and not the solid U+25B6, which is an emoji base: a terminal
+ * with an emoji font draws that one two cells wide and every cell to its right
+ * on that row lands one column off the column above it.
+ */
+export const RUNNER_GLYPH = "▸"
+
 /** The glyph for a row: the running one while a check runs on it, else its state's. */
 export function stateGlyph(row: Pick<Row, "state" | "live">): string {
   return row.live === undefined ? STATE_GLYPH[row.state] : RUNNING_GLYPH
 }
-
-/** The one severity color per state: the retired presentation's ladder, kept — open is accent, working is info, done is success, fail is error, stuck is warning. */
-export const STATE_COLOR: Readonly<Record<Row["state"], string>> = {
-  checked: "$fg-warning",
-  direct: "$fg-muted",
-  failed: "$fg-error",
-  merged: "$fg-success",
-  queued: "$fg-accent",
-  stuck: "$fg-warning",
-  withdrawn: "$fg-muted",
-}
-
-/** The working color a live check overlays on any state. */
-export const RUNNING_COLOR = "$fg-info"
 
 /** The one glyph per check state, so the tab strip, the step lines and the one-shot print cannot disagree about a check. */
 export const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
@@ -107,9 +137,16 @@ export const CHECK_COLOR: Readonly<Record<CheckView["state"], string>> = {
   unmeasured: "$fg-warning",
 }
 
-/** The color for a row: the working one while a check runs on it, else its state's. */
+/**
+ * The colour for a row, read from the SAME entry its word came from
+ * (watch-words.ts): the retired presentation's ladder, kept — open is accent,
+ * working is info, done is success, fail is error, stuck is warning. A check
+ * running now carries the working colour because it carries the word
+ * `checking`, rather than through a second overlay nobody could see in the
+ * table beside it.
+ */
 export function stateColor(row: Pick<Row, "state" | "live">): string {
-  return row.live === undefined ? STATE_COLOR[row.state] : RUNNING_COLOR
+  return STATE_WORDS[displayState(row)].color
 }
 
 /**
@@ -197,6 +234,39 @@ export function mediaDuration(milliseconds: number): string {
   const totalDays = Math.floor(totalHours / 24)
   if (totalDays < 100) return `${String(totalDays)}d${String(totalHours % 24).padStart(2, "0")}h`
   return `${String(totalDays)}d`
+}
+
+/**
+ * A row's one duration, its word naming its basis (queue-core `clocks`): how
+ * long the check running now has run, how long a stuck change has been stuck,
+ * how long a change in line has waited since it was submitted, or how long an
+ * ended change took. A draft has none. The table cell draws it, and the
+ * timing line under a change leads with it, so the two say one number.
+ */
+export function durationText(row: Row, now: Date): string {
+  const measured = clocks(row, now)
+  if (measured.checkingMs !== undefined) return `${STATE_WORDS.checking.word} ${mediaDuration(measured.checkingMs)}`
+  if (measured.stuckMs !== undefined) return `${STATE_WORDS.stuck.word} ${mediaDuration(measured.stuckMs)}`
+  // A stuck change keeps its place in line, and so a wait, but its cell is stuck's alone: with no instant for its
+  // stuck record it says nothing rather than borrow the waiting word (A2-set-v4).
+  if (row.state === "stuck") return ""
+  if (measured.waitingMs !== undefined) return `${STATE_WORDS.waiting.word} ${mediaDuration(measured.waitingMs)}`
+  if (measured.tookMs !== undefined) return `${STATE_WORDS.took.word} ${mediaDuration(measured.tookMs)}`
+  return ""
+}
+
+/**
+ * The timing line the detail and a one-row page print for a change
+ * (@i/10-yrd/24196): its one duration, word and basis exactly as its table
+ * cell says it, then the attempt's runtime under its own name, which counts
+ * on only while a check holds the row. A clock nothing measured is left out,
+ * never printed as zero.
+ */
+export function timingLine(row: Row, now: Date): string {
+  const { runtimeMs } = clocks(row, now)
+  return [durationText(row, now), runtimeMs === undefined ? "" : `runtime ${mediaDuration(runtimeMs)}`]
+    .filter((part) => part !== "")
+    .join(" · ")
 }
 
 /** A local wall-clock time, `HH:MM` or `HH:MM:SS`, for the absolute half of every time on screen. */

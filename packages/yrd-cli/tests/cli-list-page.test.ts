@@ -141,22 +141,33 @@ describe("`yrd list` prints the watch's page, once", () => {
     const plain = await yrd(work, { color: false }, "list")
     expect(plain.exitCode, plain.report).toBe(0)
     expect(plain.stdout, plain.report).not.toContain(ESC)
-    expect(plain.stdout, plain.report).toContain("Child observation is not configured")
+    // The native contract has nothing to say every round, so the page says nothing (24196); `--json` carries it.
+    expect(plain.stdout, plain.report).not.toContain("Child observation is not configured")
     const lines = plain.stdout.split("\n")
-    // The queue's name first, then the identity pills, then (past the journal
+    // The queue's name first, then the identity pills, then the queue line, then (past the journal
     // notice a machine that runs no queue prints, G5) the header the pane draws.
     expect(lines[0]).toMatch(/remote\.git#main$/u)
     expect(lines[1]).toContain("YRD QUEUES")
     expect(lines[1]).toContain("⎇ main")
-    const header = lines.findIndex((line) => /^TIME\s+STATUS\s+RUN\s+CHANGES\s+BY\s+AGE\s+RUNTIME/u.test(line))
+    // The RUN column is retired with the RUNNER box (S1): a run id in local-time
+    // digits, on a page whose rows are changes.
+    const header = lines.findIndex((line) => /^TIME\s+STATUS\s+CHANGES\b.*\bBY\s*$/u.test(line))
     expect(header, plain.report).toBeGreaterThan(1)
+    expect(lines[header], plain.report).not.toContain("RUN ")
     expect(lines.slice(2, header).join("\n")).toContain("no run journal was read")
-    const row = lines.find((line) => line.includes("task/one"))
+    const row = lines.find((line) => line.includes("task/one") && !line.includes("RUNNER"))
     expect(row, plain.report).toBeDefined()
-    expect(row).toContain("○ queued")
+    expect(row).toContain("○ submitted")
     expect(row).toContain("task/one does its work")
     expect(row).toContain("@dev/10")
     expect(plain.stdout).toContain("1 change(s)")
+    // The runner is a ROW between what waits and what is done, always there:
+    // off the queue's own machine it says its status is not published rather
+    // than guessing, and nothing invents one to avoid printing `?`.
+    const runnerRow = lines.find((line) => line.includes("RUNNER"))
+    expect(runnerRow, plain.report).toBeDefined()
+    expect(runnerRow, plain.report).toContain("?")
+    expect(lines.indexOf(runnerRow!), plain.report).toBeGreaterThan(header)
     // Nothing the retired bare line printed and the page does not: no `[run]` suffix in the row.
     expect(row).not.toMatch(/\[q-/u)
   })
@@ -173,8 +184,8 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(trimmed(stripAnsi(colored.stdout))).toEqual(trimmed(plain.stdout))
     const row = colored.stdout.split("\n").find((line) => stripAnsi(line).includes("task/one"))
     expect(row, colored.report).toBeDefined()
-    // The STATUS cell — glyph and word — is painted: an SGR sequence opens before `queued`.
-    expect(row).toMatch(/\[[0-9;]*m[^]*○ queued/u)
+    // The STATUS cell — glyph and word — is painted: an SGR sequence opens before `submitted`.
+    expect(row).toMatch(/\[[0-9;]*m[^]*○ submitted/u)
   })
 
   it("lays the page out to the terminal's width, and to 120 columns for a pipe", async () => {
@@ -187,7 +198,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(widest(wide.stdout)).toBeLessThanOrEqual(160)
     expect(widest(piped.stdout)).toBeLessThanOrEqual(120)
     // The header keeps every column at every width.
-    for (const ran of [narrow, wide, piped]) expect(ran.stdout, ran.report).toMatch(/^TIME\s+STATUS\s+RUN\s+CHANGES/mu)
+    for (const ran of [narrow, wide, piped]) expect(ran.stdout, ran.report).toMatch(/^TIME\s+STATUS\s+CHANGES/mu)
   })
 
   it("leaves `--json` exactly as it was: the same document with or without colour, and never a colour byte", async () => {

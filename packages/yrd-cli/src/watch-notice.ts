@@ -12,12 +12,14 @@
  * `~1477`, and the cure was never a better comparison — it was having only one
  * place that decides.
  *
- * So every mapping here is a TABLE keyed by the state the core handed over. A
- * new state added to the core is a compile error here, which is the point.
+ * So nothing here maps a state to a word. The word is the one word table's
+ * (`stateWord`, watch-format.ts), read when the notice is made, so the notice
+ * and the table cannot disagree about which word a state reads
+ * (@i/10-yrd/24196).
  */
 
-import { incidentLine, clocks, type Row } from "@yrd/queue-core"
-import { mediaDuration, stateGlyph } from "./watch-format.ts"
+import { incidentLine, type Row } from "@yrd/queue-core"
+import { STATE_WORDS, stateGlyph, stateWord } from "./watch-format.ts"
 
 export type Notice = Readonly<{
   glyph: string
@@ -29,21 +31,6 @@ export type Notice = Readonly<{
   next?: string
 }>
 
-/**
- * How each state reads in a notice. The core's six words plus `direct` stand
- * as they are — renaming a state at the edge is how two surfaces come to
- * disagree about one change — and only the parenthetical is ours.
- */
-const WORD: Readonly<Record<Row["state"], string>> = {
-  checked: "checked",
-  direct: "went around the queue",
-  failed: "failed",
-  merged: "merged",
-  queued: "queued",
-  stuck: "stuck",
-  withdrawn: "withdrawn",
-}
-
 export function watchNotice(row: Row, joinedRun = false): Notice {
   const live = row.live
   const position = row.position === undefined ? "" : ` #${String(row.position)}`
@@ -53,7 +40,9 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
       : joinedRun && row.result !== undefined
         ? `run result: ${row.result}`
         : (row.reason ?? row.result)
-  const state = joinedRun ? `change ${WORD[row.state]}` : WORD[row.state]
+  // The state's own word, the check overlay apart below; `direct` is no change and says what happened instead.
+  const word = row.state === "direct" ? "went around the queue" : stateWord({ state: row.state })
+  const state = joinedRun ? `change ${word}` : word
   const next =
     row.incident !== undefined
       ? row.incident.next
@@ -64,9 +53,10 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
     glyph: stateGlyph(row),
     // The overlay says what is happening RIGHT NOW; the state still says what
     // the records say, and both are on the line, because a change under a
-    // check reads `queued` until its checked record merges and that is an
+    // check reads submitted until its checked record merges and that is an
     // answer, not a bug to paper over.
-    word: live === undefined ? `${state}${position}` : `${state}${position}, checking ${live.check}`,
+    word:
+      live === undefined ? `${state}${position}` : `${state}${position}, ${STATE_WORDS.checking.word} ${live.check}`,
     ...(cause === undefined ? {} : { cause }),
     ...(next === undefined ? {} : { next }),
   }
@@ -82,25 +72,4 @@ export function noticeLine(row: Row, joinedRun = false): string {
   ]
     .filter((part): part is string => part !== undefined)
     .join("  ·  ")
-}
-
-/**
- * The clocks line (watch-redesign item 1, S2.16): `Age · Runtime · Wait time`,
- * in the operator's own order, separator and duration form (`34:23`, not `34m`).
- *
- * A clock nothing measured is LEFT OUT, never printed as zero: off the queue's
- * own machine there is no run journal, so a queued change has no instant
- * checking began and therefore no wait and no runtime. An empty line is the
- * honest answer and the caller says why (the journal reading carries the
- * sentence).
- */
-export function clocksLine(row: Row, now: Date = new Date()): string {
-  const measured = clocks(row, now)
-  return [
-    measured.ageMs === undefined ? undefined : `Age ${mediaDuration(measured.ageMs)}`,
-    measured.runtimeMs === undefined ? undefined : `Runtime ${mediaDuration(measured.runtimeMs)}`,
-    measured.waitMs === undefined ? undefined : `Wait time ${mediaDuration(measured.waitMs)}`,
-  ]
-    .filter((part): part is string => part !== undefined)
-    .join(" · ")
 }

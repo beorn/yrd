@@ -48,13 +48,15 @@ function row(branch: string, state: Row["state"]): Row {
 }
 
 function snapshot(): WatchSnapshot {
+  const rows = [row("task/one", "queued"), row("task/two", "checked"), row("task/three", "merged")].map((each) => ({
+    row: each,
+  }))
   return {
     at: new Date(NOW),
     queue: "example.test/repo#main",
     queues: [{ branch: "main", label: "main", path: "/repo" }],
-    rows: [row("task/one", "queued"), row("task/two", "checked"), row("task/three", "merged")].map((each) => ({
-      row: each,
-    })),
+    rows,
+    unfiltered: rows,
   }
 }
 

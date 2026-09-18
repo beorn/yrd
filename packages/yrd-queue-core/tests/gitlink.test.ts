@@ -965,7 +965,9 @@ describe("settling gitlinks", () => {
       // deciding artifact, nor collapse its two measured phase occurrences.
       const journals = readJournals(dirname(outcome.log))
       const queue = await readQueue(w.git, "origin", "main", outcome.target)
-      const shown = watchRows(list(queue.changes, { journals }), { journals }).find((row) => row.row.head === head)!
+      const shown = watchRows(list(queue.changes, { journals }), { journals, perRun: true }).find(
+        (row) => row.row.head === head,
+      )!
       expect(shown.row.result).toBe("fail submodule-check")
       expect(readFileSync(shown.row.log!, "utf8")).toBe("CANDIDATE_FAIL\n")
       const detail = checksOf([], "failed", [], shown.run?.running, shown.run?.checks)

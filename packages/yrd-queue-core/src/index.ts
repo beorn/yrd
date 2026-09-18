@@ -93,9 +93,11 @@ export { queueRun } from "./run.ts"
 export type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
 export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from "./config.ts"
 export type { Ending, Notifier, QueueConfig, Target } from "./config.ts"
-export { clocks, list, show, subjects, watchRows, watchRowKey } from "./table.ts"
+export { clocks, endingInstants, list, show, subjects, watchRows, watchRowKey } from "./table.ts"
 export type { Clocks, ListOptions, Row, WatchRow, WatchRowOptions } from "./table.ts"
 export { readHistories, readQueue, readStop, resolveRemote } from "./remote.ts"
+export { DRAFT_EXCLUDED_PREFIXES, DRAFT_WINDOW_MS, readDrafts } from "./drafts.ts"
+export type { Draft, DraftReading } from "./drafts.ts"
 export { directMergeCommits, directMergeLine } from "./direct.ts"
 export { refuseTarget, inspectSubmit, refuseDivergedMovedPins, freshnessLine, submit, issueOf } from "./submit.ts"
 export type { IssueResolution } from "./submit.ts"
@@ -128,6 +130,7 @@ export {
   queueHealthExitCode,
   relaunchStalledHealthDocument,
   ROUND_BUDGET_MS,
+  ROUND_LOCK,
   roundHealthDocument,
   STUCK_RECORD_CODE,
   unreadableHealthDocument,

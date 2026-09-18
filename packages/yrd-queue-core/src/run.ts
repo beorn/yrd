@@ -93,7 +93,7 @@ import { stuckCures, type PauseRecord } from "./pause.ts"
 import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { narrowingOf } from "./narrowing.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
-import { changeName, changeRef } from "./refs.ts"
+import { changeName, changeRef, type Change } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
 import {
   CapturedQueueObjectsUnavailable,
@@ -136,6 +136,12 @@ export type QueueRunOptions = Readonly<{
   target: Target
   /** The target commit whose declaration supplied this round's config and checks. */
   targetSha: string
+  /**
+   * The one change this round works, and no other: `yrd merge`. It is judged
+   * and merged wherever it stands in line, so a stuck change ahead of it does
+   * not cut its line; the line this round works holds only the change named.
+   */
+  only?: Change
   /** The checks the target declares, read from the target commit by the caller. A check with no `on` runs at merge. */
   checks: readonly CheckSpec[]
   /** The target's `setup:`: one shell command run in every worktree this run makes, before any check runs in it. */
@@ -607,7 +613,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // the one it names). A judge that ends stuck ENDS THE ROUND: nothing behind
   // it is judged, nothing is merged, and the line stops on it (the andon,
   // operator 2026-09-16, which overruled @i/10-yrd/24492's step-over).
-  for (const entry of ordered(entries, "queued", "stuck", "checked").filter(
+  for (const entry of ordered(entries, options.only, "queued", "stuck", "checked").filter(
     (entry) => entry.reading.state !== "checked" || staleChecked(run, entry),
   )) {
     const outcome = await judged(run, entry, () => run.steps.judge(run, entry))
@@ -625,8 +631,10 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 
   // On-merge: the first checked change in line, re-read so this run's own
   // checked records count. The line is cut at its first stuck row: a checked
-  // change behind a stuck one never merges past it.
-  const reread = ordered((await read()).changes, "checked", "stuck")
+  // change behind a stuck one never merges past it. A round scoped to one
+  // change selects it before the cut, so a stuck change ahead of it is not in
+  // the line this round cuts.
+  const reread = ordered((await read()).changes, options.only, "checked", "stuck")
   const blocked = reread.findIndex((entry) => entry.reading.state === "stuck")
   const line = (blocked === -1 ? reread : reread.slice(0, blocked)).filter((entry) => !staleChecked(run, entry))
   const checked = line[0]
@@ -668,14 +676,20 @@ function staleChecked(run: Run, entry: QueueEntry): boolean {
   return tip.kind === "checked" && trailer(tip, "Config") !== run.options.configBlob
 }
 
-/** The entries in the named states, in line order. */
-function ordered(entries: QueueRead, ...states: readonly ("queued" | "checked" | "stuck")[]): readonly QueueEntry[] {
+/** The entries in the named states, in line order: only the change `only` names, when it names one. */
+function ordered(
+  entries: QueueRead,
+  only: Change | undefined,
+  ...states: readonly ("queued" | "checked" | "stuck")[]
+): readonly QueueEntry[] {
   const byHead = new Map(entries.map((entry) => [entry.change.head, entry]))
   return inLine(entries.map((entry) => entry.change))
     .map((change) => byHead.get(change.head))
     .filter(
       (entry): entry is QueueEntry =>
-        entry !== undefined && (states as readonly string[]).includes(entry.reading.state),
+        entry !== undefined &&
+        (states as readonly string[]).includes(entry.reading.state) &&
+        (only === undefined || (entry.change.branch === only.branch && entry.change.head === only.head)),
     )
 }
 
@@ -2508,9 +2522,9 @@ function stuckWrite(
   }>,
 ): EndedWrite {
   const subject = cause.subject.replace(/\s+/gu, " ").trim()
-  // Every stuck record names ALL THREE ways out of the line, in words that
-  // cannot be read as "re-push the same content" (@i/10-yrd/24492 box 2; the
-  // third, resume, since the andon made a stuck stop the line).
+  // Every stuck record names ALL FOUR ways out of the line, in words that
+  // cannot be read as "re-push the same content" (@i/10-yrd/24492 box 2; resume
+  // since the andon made a stuck stop the line; yrd merge for a queued fix).
   const next = `${cause.next}; ${stuckCures(branch)}`
   const incident = {
     code: cause.code,

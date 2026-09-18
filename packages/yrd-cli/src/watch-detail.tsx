@@ -5,7 +5,7 @@
  *   ╭──────────────────────────────── RUN main#000406 ─╮   the status box IS the run:
  *   │ ✓ merged                                          │   identity on the border, no
  *   │   Merged as b234234abcde at 14:15:31.             │   title row above it (23);
- *   │   Age 34:23 · Runtime 3:45 · Wait time 0:10       │   one derivation, `clocks()`;
+ *   │   took 34:23 · runtime 3:45                       │   the table cell's duration;
  *   │ ✓ typecheck  1:02                                 │   one step line per check,
  *   │ × test       0:04 — the submitter — it failed …   │   hanging glyphs (29a), the
  *   │ − lint       not run                              │   remedy on the failed one (39)
@@ -37,9 +37,8 @@
  */
 
 import { hyperlink } from "@silvery/ansi"
-import { Box, MarkdownView, Pulse, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
+import { Box, MarkdownView, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
 import type { ChangeRecord, CheckView, JournalRun, Row } from "@yrd/queue-core"
-import { clocks } from "@yrd/queue-core"
 import { diffSummary, historyEntries, metadataGroups, metadataKeyWidth, type ChangeCommits } from "./watch-change.ts"
 import { useMinute, useNow } from "./watch-clock.ts"
 import {
@@ -111,7 +110,6 @@ export const CHANGES_TAB = "changes"
 export function WatchDetail({
   detail,
   joinedRun = false,
-  live = true,
   selected,
   onSelect,
   diffOpen = false,
@@ -121,8 +119,6 @@ export function WatchDetail({
   detail: ChangeDetail | undefined
   /** True when the row is one run's view of the change, not the change's current state. */
   joinedRun?: boolean
-  /** False in a test or a single frame: nothing pulses. */
-  live?: boolean
   /** The open tab: `CHANGES_TAB` or a check's index as a string. */
   selected?: string
   onSelect?: (value: string) => void
@@ -142,7 +138,7 @@ export function WatchDetail({
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
       {/* The status box at the VERY top, no identity row above it (items 1, 23). */}
-      <RunStatusBox run={detail.run} live={live} joinedRun={joinedRun} />
+      <RunStatusBox run={detail.run} joinedRun={joinedRun} />
       {/* The change list under it (items 2, 24): one row per change in the run. */}
       <ChangeList members={[row]} />
       <Box height={1} flexShrink={0} />
@@ -200,37 +196,19 @@ export function WatchDetail({
  * explanation, timing, then one step line per step. It reads a `WatchRun` and
  * nothing else, so a run of another kind renders through it untouched (37m).
  */
-export function RunStatusBox({
-  run,
-  live = true,
-  joinedRun = false,
-}: {
-  run: WatchRun
-  live?: boolean
-  joinedRun?: boolean
-}) {
+export function RunStatusBox({ run, joinedRun = false }: { run: WatchRun; joinedRun?: boolean }) {
   const { row } = run
   const color = stateColor(row)
   const headline = headlineOf(row, joinedRun)
-  const working = row.live !== undefined
   const explanation = explanationLine(row)
   return (
     <TitledBox {...(runTitle(run) === undefined ? {} : { titleRight: runTitle(run) })} borderColor={color}>
       <MarkerRow
         marker={
-          working && live ? (
-            // Foreground-vs-BACKGROUND, never foreground-vs-foreground: two
-            // foreground tokens read too close in lightness to actually
-            // flicker (watch-boxes.tsx's HealthMarker carries the full
-            // rationale). intervalMs restores the pre-port 900ms rate.
-            <Pulse synchronized colors={[color, "$bg-surface-default"]} intervalMs={900} bold flexShrink={0}>
-              {stateGlyph(row)}
-            </Pulse>
-          ) : (
-            <Text color={color} bold flexShrink={0}>
-              {stateGlyph(row)}
-            </Text>
-          )
+          // Holds still: the one pulse on screen is the held row's, in the list (24196 P1).
+          <Text color={color} bold flexShrink={0}>
+            {stateGlyph(row)}
+          </Text>
         }
       >
         <Text color={color} bold wrap="wrap" minWidth={0}>
@@ -249,7 +227,6 @@ export function RunStatusBox({
         <StepLine
           key={`${String(index)}:${step.name}`}
           step={step}
-          live={live}
           {...(step.state === "running" && row.live?.check === step.name ? { since: row.live.since } : {})}
         />
       ))}
@@ -260,7 +237,7 @@ export function RunStatusBox({
 /** The clocks rows, the one part of the status box that moves every second: its own leaf on the second clock. */
 function TimingRows({ row }: { row: Row }) {
   const now = useNow()
-  const timing = timingRows(row, clocks(row, now))
+  const timing = timingRows(row, now)
   return (
     <>
       {timing.map((line) => (
@@ -279,7 +256,7 @@ function RunningFor({ since }: { since: Date }) {
 }
 
 /** One step: hanging glyph, name, duration, and the remedy on a failed one (item 39). Kind-agnostic. */
-function StepLine({ step, live, since }: { step: WatchStep; live: boolean; since?: Date }) {
+function StepLine({ step, since }: { step: WatchStep; since?: Date }) {
   const color = CHECK_COLOR[step.state]
   const active = step.state === "running"
   const failed = step.state === "failed" || step.state === "stuck"
@@ -287,16 +264,9 @@ function StepLine({ step, live, since }: { step: WatchStep; live: boolean; since
   return (
     <MarkerRow
       marker={
-        active && live ? (
-          // Same fix as RunStatusBox's own marker above: foreground-vs-background.
-          <Pulse synchronized colors={[color, "$bg-surface-default"]} intervalMs={900} flexShrink={0}>
-            {CHECK_GLYPH[step.state]}
-          </Pulse>
-        ) : (
-          <Text color={color} flexShrink={0}>
-            {CHECK_GLYPH[step.state]}
-          </Text>
-        )
+        <Text color={color} flexShrink={0}>
+          {CHECK_GLYPH[step.state]}
+        </Text>
       }
     >
       <Text wrap="wrap" minWidth={0}>

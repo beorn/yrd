@@ -18,14 +18,18 @@ import {
   checksOf,
   clocks,
   gitIn,
+  incidentTrailers,
   journalKey,
+  list,
   nextOwner,
+  readChange,
   readJournals,
   runStartedAt,
   subjects,
   watchRows,
 } from "../src/index.ts"
-import type { CheckSpec, Git, Row } from "../src/index.ts"
+import type { ChangeRecord, CheckSpec, Git, Row } from "../src/index.ts"
+import type { QueueEntry } from "../src/remote.ts"
 // `openLog` is the writer, and index.ts lists only what a consumer outside the
 // package imports. A test that writes a journal is inside it.
 import { openLog } from "../src/log.ts"
@@ -313,6 +317,7 @@ describe("a run's journal, read back", () => {
     expect(
       watchRows([{ ...change, state: "merged" }], {
         journals: readJournals(dir, { now: at }),
+        perRun: true,
       })[0]?.row.endedAt,
     ).toBeUndefined()
 
@@ -330,7 +335,7 @@ describe("a run's journal, read back", () => {
       { ...diagnostic, at: first.toISOString(), run: log.id },
       { ...diagnostic, at: at.toISOString(), run: log.id },
     ])
-    const row = watchRows([{ ...change, state: "merged" }], { journals })[0]?.row
+    const row = watchRows([{ ...change, state: "merged" }], { journals, perRun: true })[0]?.row
     expect(row).toMatchObject({ state: "merged", result: "pass", endedAt: ended, diagnostics: run?.diagnostics })
   })
 
@@ -412,14 +417,14 @@ describe("a run's journal, read back", () => {
     }
     const { dir, run: oldId } = journalDir([check], start)
     const current: Row = { branch: check.branch, head: check.head, state: "failed" }
-    const newestUnended = watchRows([current], { journals: readJournals(dir, { now: later }) })[0]!
+    const newestUnended = watchRows([current], { journals: readJournals(dir, { now: later }), perRun: true })[0]!
     expect(newestUnended.row.live?.run).toBe(oldId)
     expect(clocks(newestUnended.row, later).runtimeMs).toBe(60 * 60 * 1000)
     const log = openLog(dir, () => later)
     log.write({ ...check, log: "/w/new/test.log", start: later.toISOString() })
     log.write({ ...check, kind: "result", result: "fail", exit: "1" })
     log.write({ branch: check.branch, head: check.head, kind: "change", decision: "failed", reason: "test" })
-    const rows = watchRows([current], { journals: readJournals(dir, { now: later }) })
+    const rows = watchRows([current], { journals: readJournals(dir, { now: later }), perRun: true })
     expect(rows.map(({ row }) => row.run)).toEqual([log.id, oldId])
     const old = rows[1]!
     expect(old.row.live).toBeUndefined()
@@ -471,72 +476,252 @@ describe("the clocks", () => {
   const since = new Date("2026-09-03T19:00:00.000Z")
   const started = new Date("2026-09-03T19:30:00.000Z")
   const now = new Date("2026-09-03T20:00:00.000Z")
+  // @i/10-yrd/24196 (review finding 3): an attempt's runtime is how long its checks ran, from its first check's
+  // start to its decision, or to now while a check holds the row. A change waiting in line holds no check, so
+  // nothing about it is running: a runtime that kept counting there read like a check that never ended.
+  it("counts an attempt's runtime to now only while a check holds the row, never while a change waits in line", () => {
+    const waits: Row = { branch: "task/one", head: "abc", since, startedAt: started, state: "checked" }
+    const held: Row = { ...waits, live: { check: "test", phase: "merge", run: "q-1", since: started } }
 
-  it("reads age, wait and runtime from one place, so no two views can disagree", () => {
-    const row: Row = {
-      branch: "task/one",
-      endedAt: new Date("2026-09-03T19:45:00.000Z"),
-      head: "abc",
-      since,
-      startedAt: started,
-      state: "merged",
-    }
-
-    // Age freezes at the same ending record runtime already freezes at
-    // (19:45 − 19:00 = 45m), not at `now` (20:00): a merged row does not keep
-    // aging while the reader leaves the pane open.
-    expect(clocks(row, now)).toEqual({ ageMs: 45 * 60 * 1000, runtimeMs: 15 * 60 * 1000, waitMs: 30 * 60 * 1000 })
+    expect({
+      checked: clocks(waits, now).runtimeMs,
+      decided: clocks({ ...waits, endedAt: new Date("2026-09-03T19:45:00.000Z") }, now).runtimeMs,
+      held: clocks(held, now).runtimeMs,
+      queued: clocks({ ...waits, state: "queued" }, now).runtimeMs,
+    }).toEqual({ checked: undefined, decided: 15 * 60 * 1000, held: 30 * 60 * 1000, queued: undefined })
   })
 
-  it("keeps a decided row's age fixed at its ending record however much later it is read", () => {
-    const row: Row = {
-      branch: "task/one",
-      endedAt: new Date("2026-09-03T19:45:00.000Z"),
-      head: "abc",
-      since,
-      state: "merged",
-    }
-
-    const soon = clocks(row, now).ageMs
-    const muchLater = clocks(row, new Date("2026-09-10T20:00:00.000Z")).ageMs
-    expect(soon).toBe(45 * 60 * 1000)
-    expect(muchLater).toBe(soon)
-  })
-
-  it("keeps counting an undecided row's age as `now` advances", () => {
-    const row: Row = { branch: "task/one", head: "abc", since, state: "queued" }
-
-    const soon = clocks(row, now).ageMs
-    const later = clocks(row, new Date("2026-09-03T21:00:00.000Z")).ageMs
-    expect(soon).toBe(60 * 60 * 1000)
-    expect(later).toBe(2 * 60 * 60 * 1000)
-  })
-
-  it.each(["queued", "checked"] as const)("keeps counting the runtime of a %s change", (state) => {
-    const row: Row = { branch: "task/one", head: "abc", since, startedAt: started, state }
-
-    for (const state of ["queued", "checked"] as const) {
-      expect(clocks({ ...row, state }, now).runtimeMs, state).toBe(30 * 60 * 1000)
-    }
-    // Git can prove a change merged or its branch disappeared without an
-    // ending record. Missing evidence must not turn a stopped clock live.
-    for (const state of ["merged", "failed", "stuck", "direct"] as const) {
-      expect(clocks({ ...row, state }, now), state).toEqual({ ageMs: 60 * 60 * 1000, waitMs: 30 * 60 * 1000 })
-    }
-  })
-
+  // Git can prove a change merged or its branch disappeared without an ending
+  // record. Missing evidence must not turn a stopped clock live.
   it.each(["merged", "failed", "stuck", "direct"] as const)(
     "leaves runtime unknown for a %s change with no recorded ending time",
     (state) => {
       const row: Row = { branch: "task/one", head: "abc", since, startedAt: started, state }
-      expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000, waitMs: 30 * 60 * 1000 })
+      expect(clocks(row, now).runtimeMs).toBeUndefined()
     },
   )
 
-  it("leaves wait and runtime ABSENT when nothing recorded that checking began, rather than answering zero", () => {
-    const row: Row = { branch: "task/one", head: "abc", since, state: "queued" }
+  it("leaves runtime ABSENT when nothing recorded that checking began, rather than answering zero", () => {
+    const row: Row = {
+      branch: "task/one",
+      head: "abc",
+      live: { check: "test", phase: "merge", run: "q-1", since: started },
+      since,
+      state: "queued",
+    }
 
-    expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000 })
+    expect(clocks(row, now).runtimeMs).toBeUndefined()
+  })
+
+  // 24196 (A2-set-v2 items 4 and 5, superseding decisions 5 and 6's basis): a row shows ONE clock, the
+  // instant its place in the table is ordered by, and one duration whose word names its basis. They are
+  // named fields derived here once, never a renderer's relabel of another clock: `clockAt` is the submit instant
+  // while the change is in line, held and stuck rows included, and its ending record's instant once it
+  // ended (never the notice sent after it); `waitingMs` is now less the submit for every change in line,
+  // absent while its check runs and once it ended; `checkingMs` is how long the check running now has run;
+  // `tookMs` is an ended change's submit to its end; `stuckMs` is how long a stuck change has been stuck,
+  // from its OWN stuck record (A2-set-v4: the stop record a round writes after it is the top line's
+  // "line stopped since T", and a second stuck change under an older stop has no stop record of its own).
+  // The fields are read through a cast only until they exist, so this file compiles red-first.
+  it("names the one clock a row is ordered by, and its durations: waiting since submit for every change in line, this check's run time, stuck since its own stuck record, took from submit to end", () => {
+    const opened = new Date("2026-09-03T19:48:00.000Z")
+    const stuckAt = new Date("2026-09-03T19:50:00.000Z")
+    const withdrawnAt = new Date("2026-09-03T19:40:00.000Z")
+    const passed = new Date("2026-09-03T19:57:00.000Z")
+    const noticed = new Date("2026-09-03T19:59:00.000Z")
+    const checkStarted = new Date("2026-09-03T19:56:30.000Z")
+    const queued: Row = { at: opened, branch: "task/queued", head: "abc", since: opened, state: "queued" }
+    const checked: Row = {
+      at: passed,
+      branch: "task/checked",
+      head: "abd",
+      since,
+      startedAt: started,
+      state: "checked",
+    }
+    const stuck: Row = { at: stuckAt, branch: "task/stuck", endedAt: stuckAt, head: "abe", since, state: "stuck" }
+    const running: Row = { ...checked, live: { check: "test", phase: "merge", run: "q-1", since: checkStarted } }
+    // The tip is the notice sent after the merge: the ending is the merged record's instant, not the notice's.
+    const merged: Row = { ...checked, at: noticed, endedAt: passed, state: "merged" }
+    const withdrawn: Row = {
+      at: withdrawnAt,
+      branch: "task/withdrawn",
+      endedAt: withdrawnAt,
+      head: "abf",
+      since,
+      state: "withdrawn",
+    }
+    const read = (row: Row) => {
+      const measured = clocks(row, now) as Readonly<Record<string, unknown>>
+      return {
+        checkingMs: measured["checkingMs"],
+        clockAt: measured["clockAt"],
+        stuckMs: measured["stuckMs"],
+        tookMs: measured["tookMs"],
+        waitingMs: measured["waitingMs"],
+      }
+    }
+    const minutes = (count: number): number => count * 60 * 1000
+    const none = { checkingMs: undefined, stuckMs: undefined, tookMs: undefined, waitingMs: undefined }
+
+    expect({
+      checked: read(checked),
+      merged: read(merged),
+      queued: read(queued),
+      running: read(running),
+      stuck: read(stuck),
+      withdrawn: read(withdrawn),
+    }).toEqual({
+      checked: { ...none, clockAt: since, waitingMs: minutes(60) },
+      merged: { ...none, clockAt: passed, tookMs: minutes(57) },
+      queued: { ...none, clockAt: opened, waitingMs: minutes(12) },
+      running: { ...none, checkingMs: minutes(3) + 30_000, clockAt: since },
+      stuck: { ...none, clockAt: since, stuckMs: minutes(10), waitingMs: minutes(60) },
+      withdrawn: { ...none, clockAt: withdrawnAt, tookMs: minutes(40) },
+    })
+  })
+})
+
+/**
+ * @failure  The operator, 2026-09-16 21:34 PDT: "also the ordering looks weird - look at the time stamps".
+ *           Ended rows were ordered by their tip's instant, and the tip of a merged change is the notice
+ *           sent after it, so a merge rose to the top whenever its notice went out again; the change the
+ *           runner holds sat wherever its place in line put it; and a branch pushed without a submit was
+ *           nowhere (@i/10-yrd/24196, decision 4; the operator's v3 words).
+ * @level    l1 (the table read from records built in memory)
+ * @consumer the operator reading `yrd watch` and `yrd list`, top to bottom
+ */
+describe("the table's one order (24196)", () => {
+  const now = new Date("2026-09-03T20:00:00.000Z")
+  const ago = (minutes: number): Date => new Date(now.getTime() - minutes * 60 * 1000)
+  let shas = 0
+  const sha = (): string => (shas += 1).toString(16).padStart(40, "0")
+
+  /** One change's records, oldest first, each carrying its name and when it was opened, as every record does. */
+  function change(
+    branch: string,
+    opened: Date,
+    steps: readonly Readonly<{
+      kind: ChangeRecord["kind"]
+      at: Date
+      trailers?: readonly (readonly [string, string])[]
+    }>[],
+    over: Partial<Pick<QueueEntry["change"], "headOnTarget" | "branchHead">> = {},
+  ): QueueEntry {
+    const head = sha()
+    const record = (kind: ChangeRecord["kind"], at: Date, trailers: readonly (readonly [string, string])[] = []) => ({
+      at,
+      kind,
+      sha: sha(),
+      subject: kind,
+      trailers: [
+        ["Record", kind],
+        ["Change", `${branch}@${head}`],
+        ["Opened", opened.toISOString()],
+        ...trailers,
+      ] as const,
+    })
+    const records = [record("opened", opened), ...steps.map((step) => record(step.kind, step.at, step.trailers))] as [
+      ChangeRecord,
+      ...ChangeRecord[],
+    ]
+    const changeRecords = { branch, branchHead: head, head, headOnTarget: false, records, ...over }
+    return { change: changeRecords, reading: readChange(changeRecords) }
+  }
+
+  it("puts the change the runner holds first, then the line by its places, stuck where it stands, then the ended rows newest ending first, then the drafts newest first", () => {
+    const pending = change("task/a-pending", ago(60), [{ at: ago(3), kind: "checked" }])
+    const held = change("task/b-held", ago(50), [])
+    const incident = incidentTrailers({
+      code: "yrd-check-unresolved",
+      evidence: "/w/logs/q-1.jsonl",
+      next: "repair and resume",
+      owner: "the queue's operator",
+      subject: "the check could not be resolved",
+      via: "affected-tests",
+    })
+    const stuck = change("task/c-stuck", ago(40), [{ at: ago(6), kind: "stuck", trailers: incident }])
+    const submitted = change("task/d-submitted", ago(30), [])
+    const merged = change(
+      "task/e-merged",
+      ago(90),
+      [
+        { at: ago(80), kind: "checked" },
+        { at: ago(10), kind: "merged" },
+        // The notice, a minute ago: the change ended nine minutes before it.
+        {
+          at: ago(1),
+          kind: "sent",
+          trailers: [
+            ["State", "merged"],
+            ["Delivery", "sent"],
+            ["To", "@dev/2"],
+          ],
+        },
+      ],
+      { headOnTarget: true },
+    )
+    const failed = change("task/f-failed", ago(70), [{ at: ago(5), kind: "failed", trailers: [["Reason", "test"]] }])
+    const withdrawn = change("task/g-withdrawn", ago(100), [{ at: ago(20), kind: "withdrawn" }])
+    const run = "q-20260903T195500000Z-0000b0b0"
+    const check = { name: "affected-tests", phase: "submit", startedAt: ago(4) }
+    const journals = {
+      dir: "/w/logs",
+      malformed: [],
+      runs: new Map([
+        [
+          journalKey(held.change.branch, held.change.head),
+          [
+            {
+              at: ago(4),
+              branch: held.change.branch,
+              checks: [check],
+              head: held.change.head,
+              id: run,
+              running: check,
+              startedAt: ago(5),
+            },
+          ],
+        ],
+      ]),
+    }
+    const directMerges = [
+      {
+        at: ago(15),
+        commit: sha(),
+        gitlinks: [],
+        parents: [],
+        subject: "a hotfix",
+        target: "main",
+        why: "a direct push",
+      },
+    ]
+    // The drafts as the one derivation reads them (drafts.ts): the branch, its head, and its head commit's
+    // author and instant.
+    const drafts = [
+      { author: "ada", branch: "task/h-draft-older", committedAt: ago(120), head: sha(), movedSinceSubmit: false },
+      { author: "grace", branch: "task/i-draft-newer", committedAt: ago(30), head: sha(), movedSinceSubmit: false },
+    ]
+
+    const rows = list([withdrawn, submitted, merged, held, failed, stuck, pending], {
+      directMerges,
+      drafts,
+      journals,
+      now,
+    } as Parameters<typeof list>[1])
+
+    expect(rows.map((row) => row.branch)).toEqual([
+      "task/b-held",
+      "task/a-pending",
+      "task/c-stuck",
+      "task/d-submitted",
+      "task/f-failed",
+      "task/e-merged",
+      "main",
+      "task/g-withdrawn",
+      "task/i-draft-newer",
+      "task/h-draft-older",
+    ])
   })
 })
 
@@ -567,6 +752,7 @@ describe("the declared checks, joined to what ran", () => {
     ])
     const current: Row = { branch: "task/one", head: "abc", state: "failed" }
     const projected = watchRows([current], {
+      perRun: true,
       journals: {
         dir: "/logs",
         malformed: [],

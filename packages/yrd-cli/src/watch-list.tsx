@@ -2,27 +2,53 @@
  * The watch's LIST view — the table, its header, the top line and the filter
  * pills (watch-redesign items 3, 28, 30–33, 38):
  *
- *   YRD QUEUES   1 /hh ⎇ main                              ← the top line: title + queue pills, nothing else (30, 32b, 33)
- *   TIME      STATUS      RUN           CHANGES                        BY        AGE   RUNTIME
- *   17:04:06  ○ queued    —             task/foo  fix the parser        @ci      0:37
- *   17:02:11  ◉ queued    main#170206   task/bar  add a check (typecheck) @chief  3:12  1:02
- *   16:55:40  ✓ merged    main#165540   task/baz  drop a flag           @dev/2  14:20  4:01
+ *   YRD QUEUES   1 /hh ⎇ main                         ← the top line: title + queue pills, nothing else (30, 32b, 33)
+ *   TIME      STATUS      CHANGES                                        BY
+ *   ── drafts (7d): pushed to the remote, not submitted · TIME = pushed ─────
+ *   16:40:12  ◇ draft     task/qux  0123456789ab                       ada
+ *   ── 2 waiting, newest first; the bottom row goes next · TIME = submitted ─
+ *   17:04:06  ○ submitted task/foo  fix the parser                     @ci       waiting 0:37
+ *   17:02:11  ◉ checking  task/bar  add a check (typecheck)            @chief   checking 1:02
+ *             ▶ alive: beat 0:20 ago · this round since 17:02:09 (this machine only)
+ *   ── done, newest first · TIME = ended ────────────────────────────
+ *   16:55:40  ✓ merged    task/baz  drop a flag                        @dev/2     took 14:20
  *                                                     open  running  done  failed  all   ← status pills, right-aligned (9/32)
  *
- * Every cell reads the core's `Row` through `WatchRow`; nothing here derives
- * a state. The RUN cell names the run and carries NO glyph (operator
- * 2026-08-25, superseding item 38's glyph clause: the STATUS cell already
- * says it); a pre-run row shows a muted em-dash; a batch member sharing the
- * previous row's run shows a muted `·`. The CHANGES cell is the change's id
- * then its subject, never the branch alone (28; `@cto` 2026-09-05: PR numbers
- * are retired and the branch is the readable half of `<branch>@<sha>`).
+ * Every row has ONE clock, the instant its place in its band is ordered by,
+ * and one duration cell whose word names its basis (@i/10-yrd/24196; queue-core
+ * `clocks`). The STATUS word is the one word table's (watch-words.ts), and the
+ * RUNNER's row reads its word from the same table in the same column — which
+ * is the whole reason the runner stopped being a box.
+ *
+ * The RUN column is retired with it: a run id in local-time digits that
+ * existed off the queue's own machine only for merged changes, on a page whose
+ * rows are changes. The current round is on the runner's row; run ids stay in
+ * `--json` and in the change's detail.
+ *
+ * Every cell reads the core's `Row` through `WatchRow`; nothing here derives a
+ * state. The CHANGES cell is the change's id then its subject, never the
+ * branch alone (28; `@cto` 2026-09-05: PR numbers are retired and the branch
+ * is the readable half of `<branch>@<sha>`).
+ *
+ * The BAND ORDER is not here: it is in watch-frame.tsx, spelled once, so the
+ * pane and the page cannot drift apart again.
  */
 
 import React, { memo } from "react"
 import { Box, Pulse, Text, TogglePill, TogglePillGroup } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
-import { clock, friendlyPath, mediaDuration, runShortName, stateColor, stateGlyph } from "./watch-format.ts"
+import {
+  RUNNER_GLYPH,
+  STATE_WORDS,
+  clock,
+  durationText,
+  friendlyPath,
+  stateColor,
+  stateGlyph,
+  stateWord,
+} from "./watch-format.ts"
+import type { RunnerLine } from "./watch-runner.ts"
 
 /** The status filter buckets, in the order the pills show them (items 9, 32). */
 export const BUCKETS = ["open", "running", "done", "failed"] as const
@@ -41,6 +67,7 @@ export function bucketOf(row: Pick<Row, "state" | "live">): StatusBucket {
     case "queued":
     case "checked":
     case "stuck":
+    case "draft":
       return "open"
   }
 }
@@ -62,59 +89,60 @@ export function pillLabel(queue: WatchQueue, digit: number): string {
 export type ListLayout = Readonly<{
   timeWidth: number
   statusWidth: number
-  runWidth: number
   byWidth: number
-  ageWidth: number
   durationWidth: number
 }>
-
-/** The RUN cell's three shapes (item 38). */
-export type RunCell =
-  | Readonly<{ kind: "none" }>
-  | Readonly<{ kind: "continuation" }>
-  | Readonly<{ kind: "run"; text: string }>
-
-/** What the RUN cell says for a row, given the row above it. */
-export function runCell(item: WatchRow, label: string, previous: WatchRow | undefined): RunCell {
-  const run = item.run?.id ?? item.row.run
-  if (run === undefined) return { kind: "none" }
-  const previousRun = previous?.run?.id ?? previous?.row.run
-  // A batch member sharing the previous row's run is a continuation (M10 will
-  // make this common; today a run holds one change, so it never fires).
-  if (previous !== undefined && previousRun === run && previous.row.head !== item.row.head) {
-    return { kind: "continuation" }
-  }
-  return { kind: "run", text: runShortName(label, run) }
-}
 
 /** The CHANGES cell's parenthesized suffix: the running check, else a failure's code — status, never identity. */
 export function changesSuffix(row: Row): Readonly<{ text: string; color: string }> | undefined {
   if (row.live !== undefined) return { color: "$fg-info", text: row.live.check }
   if (row.state === "failed" && row.reason !== undefined) return { color: "$fg-error", text: `err=${row.reason}` }
-  if (row.state === "stuck" && row.reason !== undefined) return { color: "$fg-warning", text: `stuck=${row.reason}` }
-  if (row.state === "withdrawn" && row.reason !== undefined)
-    return { color: "$fg-muted", text: `withdrawn=${row.reason}` }
+  if (row.state === "stuck" && row.reason !== undefined) {
+    return { color: "$fg-warning", text: `${STATE_WORDS.stuck.word}=${row.reason}` }
+  }
+  if (row.state === "withdrawn" && row.reason !== undefined) {
+    return { color: "$fg-muted", text: `${STATE_WORDS.cancelled.word}=${row.reason}` }
+  }
   return undefined
 }
 
-/** The widths every row and the header share, so they cannot drift (the retired `timelineCellLayout`). */
-export function listLayout(rows: readonly WatchRow[], label: string, columns: number, now: Date): ListLayout {
-  const cells = rows.map((item, index) => runCell(item, label, rows[index - 1]))
-  const measured = rows.map((item) => clocks(item.row, now))
+/**
+ * The widths every row and the header share, so they cannot drift (the retired
+ * `timelineCellLayout`). `runner` is the runner's own word, submitter and
+ * duration, which sit in the same three columns as every change's and so are
+ * measured with them: the runner is a row now, not a box with its own
+ * geometry.
+ */
+export function listLayout(
+  rows: readonly WatchRow[],
+  columns: number,
+  now: Date,
+  runner?: Pick<RunnerLine, "state" | "duration" | "by">,
+): ListLayout {
+  const runnerWord = runner === undefined ? "" : STATE_WORDS[runner.state].word
   return {
-    timeWidth: 8,
-    statusWidth: Math.max(6, ...rows.map((item) => item.row.state.length + 2)),
-    runWidth: Math.max(3, ...cells.map((cell) => (cell.kind === "run" ? cell.text.length : 1))),
-    byWidth: columns < 100 ? 0 : Math.max(2, ...rows.map((item) => (item.row.submitter ?? "-").length)),
-    ageWidth: Math.max(
-      3,
-      ...measured.map((clock) => (clock.ageMs === undefined ? 0 : mediaDuration(clock.ageMs).length)),
-    ),
+    // The one clock to the second from 100 columns, to the minute below.
+    timeWidth: columns < 100 ? 5 : 8,
+    statusWidth: Math.max(6, runnerWord.length + 2, ...rows.map((item) => stateWord(item.row).length + 2)),
+    byWidth:
+      columns < 100
+        ? 0
+        : Math.max(
+            2,
+            (runner?.by ?? "-").length,
+            ...rows.map((item) => (item.row.submitter ?? item.row.author ?? "-").length),
+          ),
     durationWidth: Math.max(
-      "RUNTIME".length,
-      ...measured.map((clock) => (clock.runtimeMs === undefined ? 0 : mediaDuration(clock.runtimeMs).length)),
+      4,
+      (runner?.duration ?? "").length,
+      ...rows.map((item) => durationText(item.row, now).length),
     ),
   }
+}
+
+/** A row's one clock (queue-core `clocks`): the instant its place in the table is ordered by, which no `now` moves. */
+export function clockOf(row: Row): Date | undefined {
+  return clocks(row, new Date(0)).clockAt
 }
 
 /** The local calendar day a row's instant falls on, for the separators between days. */
@@ -124,11 +152,12 @@ export function dayOf(at: Date | undefined): string | undefined {
   return `${String(at.getFullYear())}-${two(at.getMonth() + 1)}-${two(at.getDate())}`
 }
 
-/** A date separator appears strictly BETWEEN two adjacent rows whose local calendar day differs. */
+/** A date separator appears strictly BETWEEN two adjacent rows whose one clock falls on different local days. */
 export function separatorBefore(rows: readonly WatchRow[], index: number): string | undefined {
   if (index === 0) return undefined
-  const day = dayOf(rows[index]?.row.at)
-  const previous = dayOf(rows[index - 1]?.row.at)
+  const at = (item: WatchRow | undefined): Date | undefined => (item === undefined ? undefined : clockOf(item.row))
+  const day = dayOf(at(rows[index]))
+  const previous = dayOf(at(rows[index - 1]))
   return day !== undefined && previous !== undefined && day !== previous ? day : undefined
 }
 
@@ -181,7 +210,14 @@ export function TopLine({
   )
 }
 
-/** The column header: the same layout every row uses. */
+/** Which drafts a reading lists: those committed in the last seven days, or every one. */
+export type DraftWindow = "7d" | "all"
+
+/**
+ * The column header: the same layout every row uses. It no longer names the
+ * order or the draft window — each band's own rule says both, for the rows
+ * under it, which is the only scope either was ever true of.
+ */
 export function ListHeader({ layout }: { layout: ListLayout }) {
   const label = (text: string): React.ReactNode => (
     <Text bold wrap="truncate">
@@ -191,11 +227,9 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
   return (
     <Cells layout={layout}>
       {{
-        age: label("AGE"),
         by: label("BY"),
         changes: label("CHANGES"),
-        duration: label("RUNTIME"),
-        run: label("RUN"),
+        duration: label(""),
         status: label("STATUS"),
         time: label("TIME"),
       }}
@@ -204,35 +238,16 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
 }
 
 /**
- * The two cells that show a relative time, each its own leaf on the
- * one-second clock, memoized on the row facts it is measured from: the tick
- * re-renders these and nothing else in the row.
+ * The duration cell, its own leaf on the one-second clock, memoized on the
+ * row: the tick re-renders this and nothing else in the row. An ended row's
+ * duration stops at its ending, so it reads the same on every tick.
  */
-const AgeCell = memo(function AgeCell({
-  since,
-  endedAt,
-  color,
-}: {
-  since: Date | undefined
-  /** Freezes the age at (endedAt − since) instead of letting it keep counting to `now` (a decided row). */
-  endedAt: Date | undefined
-  color: string | undefined
-}) {
+const DurationCell = memo(function DurationCell({ row, color }: { row: Row; color: string | undefined }) {
   const now = useNow()
-  const measured = clocks({ endedAt, since } as Row, now)
+  const text = durationText(row, now)
   return (
     <Text color={color ?? "$fg-muted"} wrap="truncate">
-      {measured.ageMs === undefined ? "" : mediaDuration(measured.ageMs)}
-    </Text>
-  )
-})
-
-const RuntimeCell = memo(function RuntimeCell({ row, color }: { row: Row; color: string | undefined }) {
-  const now = useNow()
-  const measured = clocks(row, now)
-  return (
-    <Text color={color ?? "$fg-muted"} wrap="truncate">
-      {measured.runtimeMs === undefined ? " " : mediaDuration(measured.runtimeMs)}
+      {text === "" ? " " : text}
     </Text>
   )
 })
@@ -245,11 +260,7 @@ function sameRow(left: ListRowProps, right: ListRowProps): boolean {
     left.cursor === right.cursor &&
     left.hovered === right.hovered &&
     left.live === right.live &&
-    left.label === right.label &&
     left.item.run?.id === right.item.run?.id &&
-    left.previous?.run?.id === right.previous?.run?.id &&
-    left.previous?.row.run === right.previous?.row.run &&
-    left.previous?.row.head === right.previous?.row.head &&
     a.branch === b.branch &&
     a.head === b.head &&
     a.state === b.state &&
@@ -258,19 +269,21 @@ function sameRow(left: ListRowProps, right: ListRowProps): boolean {
     a.reason === b.reason &&
     a.diagnostics === b.diagnostics &&
     a.submitter === b.submitter &&
+    a.author === b.author &&
+    a.movedSinceSubmit === b.movedSinceSubmit &&
     a.live?.check === b.live?.check &&
+    a.live?.since.getTime() === b.live?.since.getTime() &&
     a.at?.getTime() === b.at?.getTime() &&
     a.since?.getTime() === b.since?.getTime() &&
     a.startedAt?.getTime() === b.startedAt?.getTime() &&
     a.endedAt?.getTime() === b.endedAt?.getTime() &&
+    a.endingAt?.getTime() === b.endingAt?.getTime() &&
     Object.entries(left.layout).every(([key, value]) => right.layout[key as keyof ListLayout] === value)
   )
 }
 
 type ListRowProps = Readonly<{
   item: WatchRow
-  previous: WatchRow | undefined
-  label: string
   layout: ListLayout
   cursor: boolean
   /** The pointer is over this row: a tint under it, and nothing else — the cursor and the detail stay where they are. */
@@ -280,28 +293,24 @@ type ListRowProps = Readonly<{
 }>
 
 /**
- * One row of the table. Reads no clock itself: its two time cells do.
+ * One row of the table. Reads no clock itself: its duration cell does.
  *
  * Colour: the STATUS cell — glyph and word — wears the state's colour (the
  * retired pane's `timelineStatusColor`), a live check overlays the working
  * colour; the identity and time cells stay default or muted so the one
- * coloured word is what the eye lands on. The cursor row forces the selected
- * pair on every cell; a hovered row gets the hover surface only, which is the
- * affordance the pointer had before (item P: hover never moves the selection).
+ * coloured word is what the eye lands on. The change a check holds right now
+ * is the exception: its whole row reads in the working colour, and its marker
+ * is the one thing on screen that pulses (@i/10-yrd/24196). The cursor row
+ * forces the selected pair on every cell; a hovered row gets the hover surface
+ * only, which is the affordance the pointer had before (item P: hover never
+ * moves the selection).
  */
-export const ListRow = memo(function ListRow({
-  item,
-  previous,
-  label,
-  layout,
-  cursor,
-  hovered = false,
-  live = true,
-}: ListRowProps) {
+export const ListRow = memo(function ListRow({ item, layout, cursor, hovered = false, live = true }: ListRowProps) {
   const { row } = item
   const forced = cursor ? "$fg-on-selected" : undefined
+  const held = row.live === undefined ? undefined : "$fg-info"
   const color = stateColor(row)
-  const cell = runCell(item, label, previous)
+  const clockAt = clockOf(row)
   const suffix = changesSuffix(row)
   return (
     <Box
@@ -311,10 +320,9 @@ export const ListRow = memo(function ListRow({
     >
       <Cells layout={layout}>
         {{
-          age: <AgeCell since={row.since} endedAt={row.endedAt} color={forced} />,
           by: (
-            <Text color={forced ?? "$fg-muted"} wrap="truncate">
-              {row.submitter ?? "-"}
+            <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
+              {row.submitter ?? row.author ?? "-"}
             </Text>
           ),
           changes: (
@@ -324,13 +332,20 @@ export const ListRow = memo(function ListRow({
                   ⚠{" "}
                 </Text>
               )}
-              <Text color={forced} flexShrink={0}>
+              <Text color={forced ?? held} flexShrink={0}>
                 {row.branch}
               </Text>
               <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
-                <Text color={forced} wrap="truncate" minWidth={0}>
+                <Text color={forced ?? held} wrap="truncate" minWidth={0}>
                   {row.subject ??
-                    (row.state === "direct" ? (row.reason ?? "") : `${row.head.slice(0, 12)} (subject not fetched)`)}
+                    (row.state === "direct"
+                      ? (row.reason ?? "")
+                      : row.state === "draft"
+                        ? // A draft has no record to carry a subject; one whose head is not here has no date either.
+                          row.at === undefined
+                          ? "not yet read"
+                          : row.head.slice(0, 12)
+                        : `${row.head.slice(0, 12)} (subject not fetched)`)}
                 </Text>
                 {suffix === undefined ? null : (
                   <Text color={forced ?? suffix.color} flexShrink={0} wrap="truncate">
@@ -341,28 +356,15 @@ export const ListRow = memo(function ListRow({
               </Box>
             </Box>
           ),
-          duration: <RuntimeCell row={row} color={forced} />,
-          run:
-            cell.kind === "none" ? (
-              <Text color={forced ?? "$fg-muted"} wrap="truncate">
-                —
-              </Text>
-            ) : cell.kind === "continuation" ? (
-              <Text color={forced ?? "$fg-muted"} wrap="truncate">
-                ·
-              </Text>
-            ) : (
-              <Text color={forced} wrap="truncate">
-                {cell.text}
-              </Text>
-            ),
+          duration: <DurationCell row={row} color={forced ?? held} />,
           status: (
             <Box flexDirection="row" minWidth={0}>
-              {/* The cursor row is exempted (item 13's archaeology): `forced`
-                  is the selected pair and must read as a plain, steady color,
-                  never overridden by a pulse the cell can't also apply. Off
-                  the cursor, a live row's glyph pulses like the RUNNER box's
-                  own marker — same foreground-vs-background shape, same
+              {/* The held row's glyph is the one pulse on screen, cursor or
+                  not (24196 P1): the held row sorts first, so the cursor
+                  starts on it, and item 13's cursor exemption hid the only
+                  live marker. On the cursor it pulses in the selection's own
+                  pair, so the row still reads as selected; off it, against
+                  the surface — foreground-vs-background either way, at the
                   900ms rate. `live` (never rendering `<Pulse>` at all when
                   false) is what keeps a one-shot print safe: silvery's
                   `usePulse` calls `useScopeEffect` UNCONDITIONALLY, so even an
@@ -372,8 +374,13 @@ export const ListRow = memo(function ListRow({
                   it (measured 2026-09-09: `yrd queue list` crashed on any row
                   with a check running; swapping to `active=` still crashed,
                   one hook deeper). */}
-              {live && row.live !== undefined && forced === undefined ? (
-                <Pulse synchronized colors={[color, "$bg-surface-default"]} intervalMs={900} flexShrink={0}>
+              {live && row.live !== undefined ? (
+                <Pulse
+                  synchronized
+                  colors={forced === undefined ? [color, "$bg-surface-default"] : [forced, "$bg-selected"]}
+                  intervalMs={900}
+                  flexShrink={0}
+                >
                   {stateGlyph(row)}
                 </Pulse>
               ) : (
@@ -383,13 +390,13 @@ export const ListRow = memo(function ListRow({
               )}
               <Text color={forced ?? color} wrap="truncate">
                 {" "}
-                {row.state}
+                {stateWord(row)}
               </Text>
             </Box>
           ),
           time: (
-            <Text color={forced ?? "$fg-muted"} wrap="truncate">
-              {row.at === undefined ? "-" : clock(row.at, { seconds: true })}
+            <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
+              {clockAt === undefined ? "-" : clock(clockAt, { seconds: layout.timeWidth >= 8 })}
             </Text>
           ),
         }}
@@ -398,7 +405,74 @@ export const ListRow = memo(function ListRow({
   )
 }, sameRow)
 
-/** The seven cells in their one geometry, consumed by header and rows alike. */
+/**
+ * The runner's own row, drawn in the table's columns when no change is under a
+ * check to be it: TIME is the round's start, STATUS the runner's word from THE
+ * ONE WORD TABLE, CHANGES what it holds or why it holds nothing, BY the held
+ * change's submitter, and the last cell the word and how long.
+ *
+ * When the runner DOES hold a change, that change's own row is this row
+ * (watch-frame.tsx `bandOf`): it already says checking, the branch, the
+ * subject, the submitter and `checking 16m` in these same five cells, and
+ * drawing a second line for it is the duplication the band replaced.
+ */
+export function RunnerRow({ line, layout }: { line: RunnerLine; layout: ListLayout }) {
+  const { color, word } = STATE_WORDS[line.state]
+  return (
+    <Box minWidth={0} width="100%">
+      <Cells layout={layout}>
+        {{
+          by: (
+            <Text color="$fg-muted" wrap="truncate">
+              {line.by ?? "—"}
+            </Text>
+          ),
+          changes: (
+            <Box flexDirection="row" minWidth={0} overflow="hidden">
+              <Text bold color={color} flexShrink={0}>
+                {STATE_WORDS.runner.word}
+              </Text>
+              <Box paddingLeft={1} minWidth={0} overflow="hidden">
+                {/* ITEM 27: the affected text takes the state's OWN colour, and
+                    muting never dims an error. Reading the colour off the same
+                    entry the word came from is what makes that automatic: an
+                    idle runner's text is muted because `idle` is muted, and a
+                    stopped one's is loud because `stopped` is. Item 14's muted
+                    rail is the detail line below, which is metadata. */}
+                <Text color={color} wrap="truncate" minWidth={0}>
+                  {line.holds}
+                </Text>
+              </Box>
+            </Box>
+          ),
+          duration: (
+            <Text color={color} wrap="truncate">
+              {line.duration ?? " "}
+            </Text>
+          ),
+          status: (
+            <Box flexDirection="row" minWidth={0}>
+              <Text color={color} flexShrink={0}>
+                {RUNNER_GLYPH}
+              </Text>
+              <Text color={color} wrap="truncate">
+                {" "}
+                {word}
+              </Text>
+            </Box>
+          ),
+          time: (
+            <Text color="$fg-muted" wrap="truncate">
+              {line.at === undefined ? "—" : clock(line.at, { seconds: layout.timeWidth >= 8 })}
+            </Text>
+          ),
+        }}
+      </Cells>
+    </Box>
+  )
+}
+
+/** The five cells in their one geometry, consumed by header, rows and the runner alike. */
 function Cells({
   layout,
   children,
@@ -407,10 +481,8 @@ function Cells({
   children: Readonly<{
     time: React.ReactNode
     status: React.ReactNode
-    run: React.ReactNode
     changes: React.ReactNode
     by: React.ReactNode
-    age: React.ReactNode
     duration: React.ReactNode
   }>
 }) {
@@ -422,9 +494,6 @@ function Cells({
       <Box width={layout.statusWidth} flexShrink={0} flexDirection="row">
         {children.status}
       </Box>
-      <Box width={layout.runWidth} flexShrink={0}>
-        {children.run}
-      </Box>
       <Box flexGrow={1} flexBasis={0} minWidth={12}>
         {children.changes}
       </Box>
@@ -433,9 +502,6 @@ function Cells({
           {children.by}
         </Box>
       )}
-      <Box width={layout.ageWidth} flexShrink={0} justifyContent="flex-end">
-        {children.age}
-      </Box>
       <Box width={layout.durationWidth} flexShrink={0} justifyContent="flex-end">
         {children.duration}
       </Box>
