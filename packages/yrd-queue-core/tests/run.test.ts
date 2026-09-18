@@ -52,7 +52,10 @@ import { resolveGitSelection } from "../src/git.ts"
 
 const roots: string[] = []
 // The real queue child needs GitSuper even when the worker's PATH is sealed.
-const gitSuperBin = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin")
+const gitSuperBin = resolve(import.meta.dirname, "../../../../git-super/bin")
+if (!existsSync(gitSuperBin)) {
+  throw new Error(`git-super bin directory not found at ${gitSuperBin}`)
+}
 const CHANGES = queueRefPrefix("main")
 const PAUSE_REF = pauseRef("main")
 

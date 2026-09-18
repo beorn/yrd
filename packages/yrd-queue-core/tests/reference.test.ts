@@ -34,7 +34,10 @@ const author = ["-c", "user.email=reference@yrd.test", "-c", "user.name=yrd"] as
  * test asserting that the compose refuses would then be asserting something
  * about the machine it ran on.
  */
-const gitSuperBin = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin")
+const gitSuperBin = resolve(import.meta.dirname, "../../../../git-super/bin")
+if (!existsSync(gitSuperBin)) {
+  throw new Error(`git-super bin directory not found at ${gitSuperBin}`)
+}
 const superEnv = { ...process.env, PATH: `${gitSuperBin}:${process.env.PATH ?? ""}` }
 
 /** A Git that composes through the pinned build, and hands the same PATH to whatever it starts. */

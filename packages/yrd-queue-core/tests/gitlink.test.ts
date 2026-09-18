@@ -22,7 +22,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { Process } from "@yrd/process"
@@ -42,6 +42,12 @@ import {
   watchRows,
 } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
+
+const gitSuperBin = resolve(import.meta.dirname, "../../../../git-super/bin")
+if (!existsSync(gitSuperBin)) {
+  throw new Error(`git-super bin directory not found at ${gitSuperBin}`)
+}
+process.env.PATH = `${gitSuperBin}:${process.env.PATH ?? ""}`
 
 const roots: string[] = []
 
@@ -133,7 +139,7 @@ async function world(): Promise<World> {
       return {
         checks: check === undefined ? [] : [{ name: "submodule-check", on: check.on, run: check.run }],
         configBlob: "test-config",
-        env: process.env,
+        env: { ...process.env, PATH: `${gitSuperBin}:${process.env.PATH ?? ""}` },
         repo: work,
         target: { branch: "main", remote: "origin" },
         targetSha: await remoteTip(git, "refs/heads/main"),
@@ -358,6 +364,13 @@ async function addNestedSubmodule(
 }
 
 describe("settling gitlinks", () => {
+  it("resolves the candidate workspace's git-super bin relative to this test file, not /hh/dev", () => {
+    expect(gitSuperBin).toBe(resolve(import.meta.dirname, "../../../../git-super/bin"))
+    expect(existsSync(gitSuperBin)).toBe(true)
+    expect(gitSuperBin).toContain("/vendor/git-super/bin")
+    expect(gitSuperBin).not.toContain("/hh/dev/")
+  })
+
   // 24463: the same defect D1 used to catch at merge is refused at submit, with
   // the merge-and-pin cure, before a queue cycle.
   it("yrd submit refuses a gitlink that diverged from refs/heads/main", async () => {
