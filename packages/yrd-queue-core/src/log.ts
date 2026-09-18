@@ -134,6 +134,12 @@ export const LOG_KINDS = [
   // proof of the walk is a hand run. Readers match kinds by equality and none
   // refuses an unrecognised one, so adding this cannot break an existing reader.
   "descent",
+  // A verdict this run computed and then threw away, because the change ended
+  // under it while the check was running (24979). The row exists so the discard
+  // is never silent (24924 row 2): without it, a round that judged a change and
+  // recorded nothing about it reads exactly like a round that skipped it, and
+  // the only other account of the work was the crash this replaced.
+  "discarded",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]

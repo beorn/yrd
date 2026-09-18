@@ -92,6 +92,39 @@ const CARRIED = ["Opened", "Submitter", "Issue"] as const
 export const RECORD_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
 
 /**
+ * A `checked` or `withdrawn` write that arrived on a chain which had already
+ * ended (@i/10-yrd/24635, @i/10-yrd/24492). The refusal is correct in every
+ * case; the TYPE exists because its two causes want opposite handling and the
+ * message cannot tell them apart:
+ *
+ * - the queue lost track of an ended chain and tried to decide it anyway — a
+ *   defect, and the crash that follows is the right outcome;
+ * - the chain ended WHILE this run was judging it, which a withdraw is entitled
+ *   to do at any moment (@i/10-yrd/24979). Nobody is at fault, the ending has
+ *   already taken the change out of the line, and the round should discard its
+ *   verdict and go on.
+ *
+ * The caller decides which it is from where it caught this, not from the text.
+ */
+export class DecisionAfterEnding extends Error {
+  readonly endedAt: string
+  readonly endedKind: string
+  /** The write that was refused: a decision (`checked`) or a second ending (`withdrawn`). */
+  readonly refused: "checked" | "withdrawn"
+
+  constructor(
+    message: string,
+    about: Readonly<{ endedAt: string; endedKind: string; refused: "checked" | "withdrawn" }>,
+  ) {
+    super(message)
+    this.name = "DecisionAfterEnding"
+    this.endedAt = about.endedAt
+    this.endedKind = about.endedKind
+    this.refused = about.refused
+  }
+}
+
+/**
  * The commit one record IS, written onto `parent` — the record the caller read this
  * change at, or undefined for a change's first record, which gets the genesis and
  * the head instead. No ref moves: the object is the record, and whoever pushes it
@@ -123,11 +156,21 @@ export async function recordCommit(git: Git, write: WriteRecord, parent: string 
   // it would hide the ending from every tip reader (@i/10-yrd/24635, @cto
   // 2026-09-16). A retry's opened record re-opens a chain, a sent record only
   // repeats its ending, and a stuck chain is still open, so all of those pass.
+  //
+  // ADMISSION IS NOT THE ONLY WAY IN (@i/10-yrd/24979). The sentence above
+  // reasons from admission, and that reasoning is why this refusal was
+  // classified as a defect: if a chain can only arrive here open, a refusal
+  // means the queue lost track of it. But a withdraw may land AFTER admission,
+  // while the check is running, and then a correct round reaches this line
+  // through no fault of anybody's. The refusal is still right; what changes is
+  // that its caller must be able to tell this race from a defect, which a bare
+  // Error cannot say. The type carries the ending so `guarded` can name it.
   if ((write.kind === "checked" || write.kind === "withdrawn") && parent !== undefined) {
     const ended = endingRecord(await readRecords(git, parent))
     if (ended !== undefined) {
-      throw new Error(
+      throw new DecisionAfterEnding(
         `${write.kind} record refused for ${changeName(write.change)}: the chain already ended ${endedKind(ended)} at ${ended.sha.slice(0, 12)}; ${write.kind === "checked" ? "a decision cannot follow an ending (@i/10-yrd/24635)" : "a withdrawal cannot follow an ending (@i/10-yrd/24492)"}`,
+        { endedAt: ended.sha, endedKind: endedKind(ended), refused: write.kind },
       )
     }
   }

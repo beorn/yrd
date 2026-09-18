@@ -63,6 +63,7 @@ export { recordProgramStart, recordProgramResult } from "./program-root.ts"
 import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import {
   DIRECT_MERGE,
+  DecisionAfterEnding,
   commitTrailers,
   endedKind,
   recordCommit,
@@ -242,7 +243,16 @@ export type Run = Readonly<{
   stop: (stopped: Stopped) => void
 }>
 
-type Ended = "checked" | "failed" | "stuck" | "merged"
+/**
+ * How one step left one change. `discarded` is the only one that is not an
+ * account of the CHANGE at all: the change ended under the step (a withdraw
+ * while its check ran, @i/10-yrd/24979) and the step's verdict was thrown away.
+ * It exists so the round can tell that apart from a crash without either
+ * writing a record over somebody else's ending or stopping the line. Both round
+ * loops branch on `stuck`, `failed` and `merged` and let anything else fall
+ * through to the next change, so a discard continues the round by construction.
+ */
+type Ended = "checked" | "failed" | "stuck" | "merged" | "discarded"
 
 /** Which side of a change a step is on: the head it was submitted at, or its merge with the target. */
 type CandidatePhase = "submit" | "merge"
@@ -782,6 +792,27 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
     return await step()
   } catch (error) {
     if (error instanceof QueueAuthorityUnreadable || error instanceof RetryOnce) throw error
+    // THE ENDING WINS (@i/10-yrd/24979). A withdraw may land at any moment,
+    // including while this step was judging the change it took out of the line.
+    // The record layer then refuses this run's verdict, correctly — the chain
+    // has ended and a decision cannot follow an ending (24635). That refusal is
+    // the expected outcome of a race the queue can name, not a crash: the
+    // ending has ALREADY taken the change out of the line, so there is nothing
+    // to stop the line FOR, and the stuck this used to write outlived the stop
+    // it claimed (`yrd queue resume`: "the stop lifted when that change left
+    // the line"). Discard the verdict, say so, and let the round go on.
+    if (error instanceof DecisionAfterEnding) {
+      run.log.write({
+        branch: entry.change.branch,
+        endedAt: error.endedAt,
+        head: entry.change.head,
+        kind: "discarded",
+        // Why the verdict went away, in the reader's terms: not "the write
+        // failed" but "somebody ended this while we were judging it".
+        why: `the chain ended ${error.endedKind} at ${error.endedAt.slice(0, 12)} while this run was judging it; the verdict was discarded`,
+      })
+      return "discarded"
+    }
     // A candidate's setup that did not pass is the one crash whose owner the
     // queue can read rather than assume: `attributedSetupFailure` runs the same
     // setup on the settled base and bills whoever the ground names.
