@@ -92,10 +92,43 @@ const CARRIED = ["Opened", "Submitter", "Issue"] as const
 export const RECORD_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
 
 /**
- * A `checked` or `withdrawn` write that arrived on a chain which had already
- * ended (@i/10-yrd/24635, @i/10-yrd/24492). The refusal is correct in every
- * case; the TYPE exists because its two causes want opposite handling and the
- * message cannot tell them apart:
+ * THE ONLY RECORDS THAT MAY FOLLOW AN ENDING (@i/10-yrd/24980).
+ *
+ * A set, not a list of exceptions, because the rule is about what a record DOES
+ * and not about which kinds anyone has thought of. `opened` re-opens: a
+ * re-submit starts a new chain. `sent` reports: it repeats the ending it
+ * delivers, and every sent record follows an ending by construction, since
+ * notify fires on merged, failed and stuck. Refusing it would mean no submitter
+ * is ever told what happened to their change.
+ *
+ * Every other kind decides (`checked`) or ends (`merged`, `failed`,
+ * `withdrawn`) or claims a place in the line (`stuck`) — and a chain that has
+ * ended has no place in a line and nothing left to decide.
+ *
+ * Adding a kind to RECORD_KINDS therefore refuses it after an ending by
+ * default, which is the safe direction: a kind nobody classified cannot quietly
+ * overwrite somebody's ending.
+ */
+const ALLOWED_AFTER_ENDING: ReadonlySet<RecordKind> = new Set<RecordKind>(["opened", "sent"])
+
+/**
+ * Why a particular late write is refused, where a bead already named the rule.
+ * Everything else reads the general one: the principle is the same and only its
+ * citation differs.
+ */
+const LATE_WRITE_RULE: Partial<Record<RecordKind, string>> = {
+  checked: "a decision cannot follow an ending (@i/10-yrd/24635)",
+  stuck: "a stuck cannot follow an ending — it holds a place in a line this change has already left (@i/10-yrd/24979)",
+  withdrawn: "a withdrawal cannot follow an ending (@i/10-yrd/24492)",
+}
+
+const DECIDES_OR_ENDS = "a record that decides or ends cannot follow an ending (@i/10-yrd/24980)"
+
+/**
+ * A write that decides or ends, arriving on a chain which had already ended
+ * (@i/10-yrd/24980, generalising 24635 and 24492). The refusal is correct in
+ * every case; the TYPE exists because its two causes want opposite handling and
+ * the message cannot tell them apart:
  *
  * - the queue lost track of an ended chain and tried to decide it anyway — a
  *   defect, and the crash that follows is the right outcome;
@@ -109,12 +142,12 @@ export const RECORD_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
 export class DecisionAfterEnding extends Error {
   readonly endedAt: string
   readonly endedKind: string
-  /** The write that was refused: a decision (`checked`) or a second ending (`withdrawn`). */
-  readonly refused: "checked" | "withdrawn"
+  /** The kind that was refused: whatever it was, it decides or ends. */
+  readonly refused: RecordKind
 
   constructor(
     message: string,
-    about: Readonly<{ endedAt: string; endedKind: string; refused: "checked" | "withdrawn" }>,
+    about: Readonly<{ endedAt: string; endedKind: string; refused: RecordKind }>,
   ) {
     super(message)
     this.name = "DecisionAfterEnding"
@@ -165,11 +198,20 @@ export async function recordCommit(git: Git, write: WriteRecord, parent: string 
   // through no fault of anybody's. The refusal is still right; what changes is
   // that its caller must be able to tell this race from a defect, which a bare
   // Error cannot say. The type carries the ending so `guarded` can name it.
-  if ((write.kind === "checked" || write.kind === "withdrawn") && parent !== undefined) {
+  //
+  // AND THE RULE IS A SET, NOT TWO NAMED KINDS (@i/10-yrd/24980). Refusing only
+  // `checked` and `withdrawn` let a late `stuck` through, which is how the live
+  // specimen got its state: the round crashed on the refusal a withdraw had
+  // just caused, and the crash appended its stuck record ON TOP of the ending.
+  // The chain then answered two ways — `queue show` read the ending and said
+  // cancelled, `queue list` read the tip and said stuck. Asking instead what a
+  // record DOES makes that gap unreachable, and makes a kind nobody has
+  // classified yet refuse by default rather than pass by default.
+  if (!ALLOWED_AFTER_ENDING.has(write.kind) && parent !== undefined) {
     const ended = endingRecord(await readRecords(git, parent))
     if (ended !== undefined) {
       throw new DecisionAfterEnding(
-        `${write.kind} record refused for ${changeName(write.change)}: the chain already ended ${endedKind(ended)} at ${ended.sha.slice(0, 12)}; ${write.kind === "checked" ? "a decision cannot follow an ending (@i/10-yrd/24635)" : "a withdrawal cannot follow an ending (@i/10-yrd/24492)"}`,
+        `${write.kind} record refused for ${changeName(write.change)}: the chain already ended ${endedKind(ended)} at ${ended.sha.slice(0, 12)}; ${LATE_WRITE_RULE[write.kind] ?? DECIDES_OR_ENDS}`,
         { endedAt: ended.sha, endedKind: endedKind(ended), refused: write.kind },
       )
     }

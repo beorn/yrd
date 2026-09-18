@@ -782,10 +782,52 @@ async function direct(): Promise<void> {}
 async function observed(): Promise<void> {}
 
 /**
+ * One row saying this run threw a verdict away because the change ended under
+ * it (@i/10-yrd/24979). The discard is never silent (@i/10-yrd/24924 row 2):
+ * without this row, a round that judged a change and recorded nothing about it
+ * reads exactly like a round that never reached it.
+ */
+function sayDiscarded(run: Run, entry: QueueEntry, error: DecisionAfterEnding): Ended {
+  run.log.write({
+    branch: entry.change.branch,
+    endedAt: error.endedAt,
+    head: entry.change.head,
+    kind: "discarded",
+    refused: error.refused,
+    // Why the verdict went away, in the reader's terms: not "the write failed"
+    // but "somebody ended this while we were judging it".
+    why: `the chain ended ${error.endedKind} at ${error.endedAt.slice(0, 12)} while this run was judging it; the ${error.refused} was discarded`,
+  })
+  return "discarded"
+}
+
+/**
+ * A stuck ending — unless the chain ended while this run was judging it, in
+ * which case the ENDING WINS and the stuck is discarded instead.
+ *
+ * A stuck is not an ending: it holds a place in the line. Writing one onto a
+ * chain that has already ended would leave the change saying two things at
+ * once, and that is not hypothetical — before @i/10-yrd/24979 it was the live
+ * state of task/24523-rows-5-7, which `queue show` called cancelled and `queue
+ * list` called stuck at the same moment. The record layer refuses that write
+ * now; this turns its refusal into an outcome rather than a second crash on top
+ * of the first.
+ */
+async function stuckOrDiscarded(run: Run, entry: QueueEntry, ended: EndedWrite): Promise<Ended> {
+  try {
+    return await run.steps.end(run, entry, "stuck", ended)
+  } catch (error) {
+    if (!(error instanceof DecisionAfterEnding)) throw error
+    return sayDiscarded(run, entry, error)
+  }
+}
+
+/**
  * There is exactly one exit site (§ The queue run): a crash while judging a
  * change ends that change stuck, the queue's, with the crash as its cause, and
  * the run exits 2 like any other stuck. A crash inside that ending itself has
- * nowhere left to go and reaches the caller, which exits 2 too.
+ * nowhere left to go and reaches the caller, which exits 2 too — unless the
+ * chain ended under this run, which `stuckOrDiscarded` answers instead.
  */
 async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>): Promise<Ended> {
   try {
@@ -801,18 +843,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
     // to stop the line FOR, and the stuck this used to write outlived the stop
     // it claimed (`yrd queue resume`: "the stop lifted when that change left
     // the line"). Discard the verdict, say so, and let the round go on.
-    if (error instanceof DecisionAfterEnding) {
-      run.log.write({
-        branch: entry.change.branch,
-        endedAt: error.endedAt,
-        head: entry.change.head,
-        kind: "discarded",
-        // Why the verdict went away, in the reader's terms: not "the write
-        // failed" but "somebody ended this while we were judging it".
-        why: `the chain ended ${error.endedKind} at ${error.endedAt.slice(0, 12)} while this run was judging it; the verdict was discarded`,
-      })
-      return "discarded"
-    }
+    if (error instanceof DecisionAfterEnding) return sayDiscarded(run, entry, error)
     // A candidate's setup that did not pass is the one crash whose owner the
     // queue can read rather than assume: `attributedSetupFailure` runs the same
     // setup on the settled base and bills whoever the ground names.
@@ -885,10 +916,9 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
     // to repair and an operator reading a crash ending would go looking at the
     // change instead.
     if (error instanceof ReferenceUnpopulated) {
-      return run.steps.end(
+      return stuckOrDiscarded(
         run,
         entry,
-        "stuck",
         stuckWrite(run, entry.change.branch, {
           code: "yrd-reference-unpopulated",
           // The `ls-remote` that separates a missing pin from a remote that
@@ -904,10 +934,9 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
         }),
       )
     }
-    return run.steps.end(
+    return stuckOrDiscarded(
       run,
       entry,
-      "stuck",
       stuckWrite(run, entry.change.branch, {
         code: "yrd-queue-crash",
         next: "repair the queue fault, then run yrd queue run",

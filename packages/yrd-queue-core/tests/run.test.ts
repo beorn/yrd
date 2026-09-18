@@ -989,11 +989,22 @@ describe("a queue run", () => {
               ? (await rival(["rev-parse", `${intended}^^`])).trim()
               : relation === "equal"
                 ? intended
-                : await appendRecord(rival, "main", {
+                : // A rival's record on a chain the merge has already ended can
+                  // only be a `sent` one: a stuck cannot follow an ending
+                  // (@i/10-yrd/24979), and this fixture used to write one
+                  // because nothing refused it. The subject here is the RACE,
+                  // not the kind — what it needs is a competing record that
+                  // moves the tip, and a second queue delivering the same
+                  // ending is the one a real remote could hold.
+                  await appendRecord(rival, "main", {
                     change: { branch: "task/one", head },
-                    kind: "stuck",
+                    kind: "sent",
                     subject: "another queue got there first",
-                    trailers: [["Reason", "crash"]],
+                    trailers: [
+                      ["State", "merged"],
+                      ["To", "@dev/2"],
+                      ["Delivery", "sent"],
+                    ],
                   })
           // Only the disposable fixture's remote rewinds, under its exact
           // previous value, to exercise an external writer moving backwards.
@@ -1294,11 +1305,18 @@ describe("a queue run", () => {
         if (record === undefined || record === "") throw new Error("sent push names no record")
         attempted.push(record)
         await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
+        // A `sent` record, not a stuck: the merge has ended this chain and a
+        // stuck cannot follow an ending (@i/10-yrd/24979). The race is the
+        // subject; the rival only has to move the tip.
         const competingRecord = await appendRecord(rival, "main", {
           change: { branch: "task/one", head },
-          kind: "stuck",
+          kind: "sent",
           subject: `rival sent append ${String(competing.length + 1)}`,
-          trailers: [["Reason", "crash"]],
+          trailers: [
+            ["State", "merged"],
+            ["To", "@dev/2"],
+            ["Delivery", "sent"],
+          ],
         })
         await rival(["push", "--quiet", "origin", `${competingRecord}:${ref}`])
         competing.push(competingRecord)

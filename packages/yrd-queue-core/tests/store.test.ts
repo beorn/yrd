@@ -685,6 +685,30 @@ describe("the ending governs the reading, never the literal tip (@i/10-yrd/24635
     ).toBe("checked")
   })
 
+  // @i/10-yrd/24979 row 3. The rule refused a late `checked` and a late
+  // `withdrawn` and let a late `stuck` through, which is how the live specimen
+  // got its state: @dev/9 withdrew task/24523-rows-5-7, the round crashed on
+  // the refusal that withdraw caused, and the crash appended a stuck record ON
+  // TOP of the ending. The chain then said two different things depending on
+  // who asked — `yrd queue show` read the ending and called it cancelled, while
+  // `yrd queue list` read the tip and called it stuck. A change whose state
+  // depends on which command asked is worse than a stale word, and the gap that
+  // allowed it is this one missing kind.
+  it("refuses a stuck record on a chain that has ended, so no two readers disagree about its state", async () => {
+    const { git, head } = await repository()
+    const change = { branch: "task/one", head }
+    await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    await appendRecord(git, "main", {
+      change,
+      kind: "withdrawn",
+      subject: "task/one withdrawn",
+      trailers: [["By", "@chief"]],
+    })
+    await expect(
+      appendRecord(git, "main", { change, kind: "stuck", subject: "the queue crashed judging task/one" }),
+    ).rejects.toThrow(/already ended withdrawn at [0-9a-f]{12}/u)
+  })
+
   it("refuses a checked record on a chain that has ended, loudly; delivery still lands", async () => {
     const { git, head, target } = await repository()
     const change = { branch: "task/one", head }
