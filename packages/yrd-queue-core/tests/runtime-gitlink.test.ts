@@ -122,13 +122,13 @@ describe("where this runtime's own gitlink lives", () => {
 
   // Every `off` carries a reason code AND prose. The code is for a fact in the
   // health document; the prose is for the person the page wakes.
-  test.each([
-    [runtimeGitlinkPath("/home/x/yrd", undefined)],
-    [runtimeGitlinkPath("/elsewhere/yrd", "/hh/dev")],
-  ])("an off decision is legible, not a bare undefined", (off) => {
-    expect(off.kind).toBe("off")
-    expect("reason" in off && off.reason).toMatch(/^[a-z-]+$/u)
-    expect("why" in off && String(off.why).length).toBeGreaterThan(40)
-    expect("why" in off && off.why).toContain("the relaunch exit is off")
-  })
+  test.each([[runtimeGitlinkPath("/home/x/yrd", undefined)], [runtimeGitlinkPath("/elsewhere/yrd", "/hh/dev")]])(
+    "an off decision is legible, not a bare undefined",
+    (off) => {
+      expect(off.kind).toBe("off")
+      expect("reason" in off && off.reason).toMatch(/^[a-z-]+$/u)
+      expect("why" in off && String(off.why).length).toBeGreaterThan(40)
+      expect("why" in off && off.why).toContain("the relaunch exit is off")
+    },
+  )
 })
