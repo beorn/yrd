@@ -1462,6 +1462,7 @@ describe("a queue run", () => {
   })
 
   it("a malformed YRD-CHECK-RESULT on timeout is stuck, not rescued (24623)", async () => {
+    using err = vi.spyOn(console, "error").mockImplementation(() => undefined)
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
     const check = join(w.workdir, "malformed-then-hang.sh")
@@ -1480,9 +1481,14 @@ describe("a queue run", () => {
     expect(String(logRecords(outcome).find((record) => record.kind === "message")?.text)).toMatch(
       /log named no usable YRD-CHECK-RESULT/u,
     )
+    expect(err).toHaveBeenCalledWith(
+      "YRD-CHECK-RESULT is unreadable; not treating it as a verdict:",
+      expect.stringContaining("JSON Parse error"),
+    )
   })
 
   it("a YRD-CHECK-RESULT naming exit 3 on timeout is stuck, not rescued as a fail (@cto 7645ec3a)", async () => {
+    using err = vi.spyOn(console, "error").mockImplementation(() => undefined)
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
     const check = join(w.workdir, "cannot-judge-then-hang.sh")
@@ -1496,6 +1502,9 @@ describe("a queue run", () => {
     })
 
     expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/one"] })
+    expect(err).toHaveBeenCalledWith(
+      "YRD-CHECK-RESULT named neither pass nor fail (exit 0 or 1); not treating it as a verdict",
+    )
   })
 
   it.each([
