@@ -3424,9 +3424,27 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     // The round did not stop: task/two was judged and merged behind it.
     expect(outcome).toMatchObject({ exitCode: 0, stuck: [] })
     expect(outcome.merged).toEqual(["task/two"])
-    // Nothing paged, and no operator had to run `yrd queue resume` to be told
-    // the stop was already lifted.
-    expect(await refAt(w.git, PAUSE_REF)).toBeUndefined()
+    // THE SPECIMEN JOURNAL, STEP BY STEP (@i/10-yrd/24979 row 4). Run
+    // q-20260918T073412029Z-de18ba52 recorded exactly this chain, and each link
+    // is asserted absent here:
+    //   change  decision=stuck  "the queue crashed judging task/24523-rows-5-7:
+    //           checked record refused ... the chain already ended withdrawn at
+    //           9dbc55bf47bf"  code=yrd-queue-crash
+    //   message says=stuck      "yrd broken: the queue crashed judging ..."
+    //   pause   cause=stuck     state=paused
+    // The refusal is unchanged and still correct; what breaks the chain is that
+    // it is no longer read as a crash. No stuck decision, so no page, so no
+    // pause — and the operator is never sent to `yrd queue resume` to be told
+    // the stop had lifted before it was written.
+    // The ref is not empty — the merge that followed carries it forward with a
+    // `resumed` record of its own. What must not exist is a STANDING stop.
+    expect((await readPause(w.git, "origin", "main"))?.kind ?? "none").not.toBe("paused")
+    const rows = logRecords(outcome)
+    expect(rows.filter((row) => row.kind === "pause")).toEqual([])
+    expect(rows.filter((row) => row.kind === "message" && row.says === "stuck")).toEqual([])
+    expect(rows.filter((row) => row.kind === "change" && row.decision === "stuck")).toEqual([])
+    // And the discard is not silent: one row says the chain ended under it.
+    expect(rows.filter((row) => row.kind === "discarded")).toHaveLength(1)
     // The ending stands alone: a discarded verdict writes no record, so the
     // withdrawn tip is what every reader sees.
     await fetchChanges(w)
