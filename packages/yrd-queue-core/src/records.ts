@@ -120,6 +120,21 @@ export const RECORD_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
 const ALLOWED_AFTER_ENDING: ReadonlySet<RecordKind> = new Set<RecordKind>(["merged", "opened", "sent"])
 
 /**
+ * ONE RULE, ONE PLACE — and `withdraw.ts` is not a second one, before anybody
+ * counts two.
+ *
+ * `withdrawOne` (withdraw.ts:117) refuses an already-ended change up front so an
+ * operator gets a sentence instead of a throw from down here. That is a
+ * PRE-CHECK at the command; enforcement is this file. They cannot drift apart,
+ * because the pre-check calls the same `endingRecord` (records.ts:620, over
+ * ENDING_KINDS at records.ts:604) that the refusal below reads — it keeps no
+ * list of ending words of its own.
+ *
+ * Two implementations would mean two places that can DISAGREE about what
+ * "ended" is. Two call sites of one predicate cannot.
+ */
+
+/**
  * Why a particular late write is refused, where a bead already named the rule.
  * Everything else reads the general one: the principle is the same and only its
  * citation differs.
