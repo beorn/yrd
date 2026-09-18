@@ -1432,6 +1432,19 @@ async function candidateFailure(
     // rebase, exactly as an ordinary conflict is, so this is a failed change
     // and the files that overlapped travel with it.
     await worktree.remove()
+    const isUnfetchable = detail.message.includes("could not be fetched")
+    if (isUnfetchable) {
+      return run.steps.end(run, entry, "failed", {
+        remedy:
+          "resubmit from the checkout that holds the commit: yrd submit publishes a moved gitlink's commit to its " +
+          "submodule remote (refs/git-super/pins), and a pin ahead of the submodule's main lands by the queue moving that main",
+        subject: (detail.subject ?? detail.message).replace(/\s+/gu, " ").trim(),
+        trailers: [
+          ["Reason", "gitlink-not-on-remote"],
+          ["Detail", detail.message.replace(/\s+/gu, " ").trim()],
+        ],
+      })
+    }
     return run.steps.end(run, entry, "failed", {
       // THE CURE IS A MERGE, NOT A REBASE, and saying "rebase" sends the author
       // to a different operation than the one this queue performs. The queue

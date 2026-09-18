@@ -1649,4 +1649,107 @@ describe("a diverged component the merge composes", () => {
     expect(trailer(stuck!, "Owner")).toBe("the queue operator")
     expect(trailer(stuck!, "Subject")).toContain("shallow")
   })
+
+  it("fails the change with named refusal when the diverged component commit could not be fetched (25011)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const head = await submitGitlink(w, "task/unfetchable", pins.changeSide)
+    await using real = createProcess({ cwd: w.work })
+
+    const outcome = await queueRun({
+      ...(await w.options()),
+      process: refusingMerge(
+        {
+          code: "gitlink-compose-refused",
+          message: "gitlink submodule: diverged; component commit 22d0178b3a could not be fetched",
+          next: "push the component commit to refs/git-super/pins and submit again",
+          phase: "compose-gitlinks",
+          subject: "the diverged submodule could not be merged",
+        },
+        real,
+      ),
+    })
+
+    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/unfetchable"], merged: [], stuck: [] })
+    const records = await readRecords(
+      w.git,
+      await remoteTip(w.git, changeRef("main", { branch: "task/unfetchable", head })),
+    )
+    const failed = records.find((record) => record.kind === "failed")
+    expect(failed).toBeDefined()
+    expect(trailer(failed!, "Reason")).toBe("gitlink-not-on-remote")
+    expect(trailer(failed!, "Detail")).toContain("could not be fetched")
+  })
+
+  it("fetches an absent component commit and composes it when the queue clone lacks it (25011)", async () => {
+    const w = await world()
+
+    const submoduleWork = join(w.work, "..", "submodule-work")
+    const submodule = gitIn(submoduleWork)
+
+    // mainSide: on main-side branch
+    await submodule(["checkout", "--quiet", "-b", "main-side", "main"])
+    writeFileSync(join(submoduleWork, "main-side.txt"), "main side\n")
+    await submodule(["add", "main-side.txt"])
+    await submodule(["commit", "--quiet", "-m", "main side"])
+    const mainSide = (await submodule(["rev-parse", "HEAD"])).trim()
+    await submodule(["push", "--quiet", "origin", "main-side"])
+
+    // changeSide: pushed only as a pin ref, never as a branch on refs/heads/*
+    await submodule(["checkout", "--quiet", "-b", "change-side", "main"])
+    writeFileSync(join(submoduleWork, "change-side.txt"), "change side\n")
+    await submodule(["add", "change-side.txt"])
+    await submodule(["commit", "--quiet", "-m", "change side"])
+    const changeSide = (await submodule(["rev-parse", "HEAD"])).trim()
+    await submodule(["push", "--quiet", "origin", `${changeSide}:refs/git-super/pins/${changeSide}`])
+
+    // 1. Submit task/absent-side from authorWork while root main is still at base
+    const authorRoot = mkdtempSync(join(tmpdir(), "yrd-core-author-"))
+    roots.push(authorRoot)
+    const seed = gitIn(authorRoot)
+    const authorWork = join(authorRoot, "work")
+    await seed(["clone", "--quiet", join(w.work, "..", "remote.git"), authorWork])
+    const authorGit = gitIn(authorWork)
+    await authorGit(["config", "user.email", "dev2@yrd.test"])
+    await authorGit(["config", "user.name", "dev2"])
+    await authorGit(["remote", "set-url", "origin", "https://git-super.test/owned/root.git"])
+    await authorGit(["submodule", "update", "--init", "--quiet"])
+    const authorSub = gitIn(join(authorWork, "submodule"))
+    await authorSub(["remote", "set-url", "origin", "https://git-super.test/owned/submodule.git"])
+    await authorSub([
+      "fetch",
+      "--quiet",
+      "origin",
+      `+refs/git-super/pins/${changeSide}:refs/git-super/pins/${changeSide}`,
+    ])
+    await authorSub(["checkout", "--quiet", changeSide])
+    await authorGit(["checkout", "--quiet", "-b", "task/absent-side", "main"])
+    await authorGit(["add", "submodule"])
+    await authorGit(["commit", "--quiet", "-m", `task/absent-side: move submodule to ${changeSide}`])
+    await submit(authorGit, "origin", {
+      branch: "task/absent-side",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+
+    // 2. Move root main around the queue to mainSide
+    await gitlinkAroundQueue(w, mainSide)
+
+    // 3. Assert that the queue clone w.work/submodule does NOT hold changeSide
+    const queueSub = gitIn(join(w.work, "submodule"))
+    await expect(queueSub(["cat-file", "-e", `${changeSide}^{commit}`])).rejects.toThrow()
+
+    // 4. Run the queue. It must compose the diverged gitlink by fetching changeSide from submodule.git!
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/absent-side"], stuck: [] })
+    const target = await remoteTip(w.git, "refs/heads/main")
+    const composed = await gitlinkAt(w, target)
+    expect(composed).not.toBe(changeSide)
+    expect(composed).not.toBe(mainSide)
+    const bareSub = gitIn(join(w.work, "..", "submodule.git"))
+    expect((await bareSub(["show", "-s", "--format=%P", composed])).trim()).toBe(`${mainSide} ${changeSide}`)
+    expect(await queueSub(["cat-file", "-e", `${changeSide}^{commit}`])).toBe("")
+    expect(await queueSub(["cat-file", "-e", `${composed}^{commit}`])).toBe("")
+  })
 })
