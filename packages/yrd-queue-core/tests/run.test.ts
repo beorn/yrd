@@ -3437,6 +3437,53 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
   })
 
+  // @i/10-yrd/24980 row 3. The rule now refuses a late STUCK too, which puts a
+  // refusal on the queue's own crash path: `guarded` catches a fault, tries to
+  // end the change stuck, and that write meets the ending a rival left. The
+  // round must still come out the same way — one discarded row, no pause, and
+  // the line running — because a crash on a change that has already left the
+  // line is nobody's andon.
+  it("discards its own stuck ending when a rival ended the chain under a crashing round", async () => {
+    const w = await world()
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    await submitCommit(w, "task/two", "two.txt")
+
+    let crashed = false
+    const git: Git = async (args, input) => {
+      // A fault of the round's own while task/one's check is running, with the
+      // withdraw landing first: the stuck the crash wants to write is exactly
+      // the record the ending rule now refuses.
+      if (!crashed && existsSync(w.startedLog) && args[0] === "commit-tree") {
+        crashed = true
+        await withdraw(w.git, "origin", {
+          branch: "task/one",
+          by: "@chief",
+          target: { branch: "main", remote: "origin" },
+        })
+        throw new Error("injected: the round crashed while task/one was being withdrawn")
+      }
+      return w.git(args, input)
+    }
+
+    const outcome = await queueRun({ ...(await w.options({ exit: 0, on: ["submit"], sleep: 1 })), git })
+
+    expect(crashed, "the fault must actually have fired, or this arm proves nothing").toBe(true)
+    // NOT "no record on the pause ref": the merge that followed carries the ref
+    // forward with a `resumed` record of its own, which is ordinary. What must
+    // not exist is a STANDING stop — the line never stopped for this crash.
+    expect((await readPause(w.git, "origin", "main"))?.kind ?? "none").not.toBe("paused")
+    expect(outcome.stopped).toBeUndefined()
+    // The round went on: the change behind the crashing one merged.
+    expect(outcome.merged).toEqual(["task/two"])
+    await fetchChanges(w)
+    const records = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/one", head: headOne })))!,
+    )
+    // The ending is the last word: no stuck was appended over it.
+    expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
+  })
+
   // The same race one phase later (24979 acceptance row 2). This one is worth
   // its own arm rather than a parameter, because the two phases fail
   // DIFFERENTLY if they fail: a discarded judgement loses a verdict, while a
