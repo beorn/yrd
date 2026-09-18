@@ -371,7 +371,7 @@ describe("settling gitlinks", () => {
     expect(existsSync(join(gitSuperBin, "git-super"))).toBe(true)
     const w = await world()
     const options = await w.options()
-    expect(options.env.PATH.split(":")[0]).toBe(gitSuperBin)
+    expect(options.env?.PATH?.split(":")[0]).toBe(gitSuperBin)
   })
 
   // 24463: the same defect D1 used to catch at merge is refused at submit, with
