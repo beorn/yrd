@@ -112,7 +112,10 @@ export class DecisionAfterEnding extends Error {
   /** The write that was refused: a decision (`checked`) or a second ending (`withdrawn`). */
   readonly refused: "checked" | "withdrawn"
 
-  constructor(message: string, about: Readonly<{ endedAt: string; endedKind: string; refused: "checked" | "withdrawn" }>) {
+  constructor(
+    message: string,
+    about: Readonly<{ endedAt: string; endedKind: string; refused: "checked" | "withdrawn" }>,
+  ) {
     super(message)
     this.name = "DecisionAfterEnding"
     this.endedAt = about.endedAt
