@@ -31,7 +31,16 @@ import { journalKey, type Journals, type JournalRun, type LogRecord } from "./lo
 import { incidentFrom, incidentLine, type Incident } from "./incident.ts"
 import type { Git } from "./records.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
-import { inLine, nextOwner, tellingOf, tipOf, type ChangeState, type NextOwner, type Telling } from "./state.ts"
+import {
+  holdsPlaceInLine,
+  inLine,
+  nextOwner,
+  tellingOf,
+  tipOf,
+  type ChangeState,
+  type NextOwner,
+  type Telling,
+} from "./state.ts"
 
 export type Row = Readonly<{
   /** The change's branch; for a `direct` row, the target that commit moved. */
@@ -492,7 +501,27 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
     state === "stuck" || (state === "queued" && trailer(tip, "Code") !== undefined) ? incidentFrom(tip) : undefined
   const subject = options.subjects?.get(entry.change.head)
   const run = latest?.id ?? mergedByRun(trailer(tip, "Merged-By"))
-  const live = running?.running
+  // 24972: the journal's `running` marker is an OVERLAY, and a change that has
+  // ended cannot be under a check whatever a run journal still says. One run
+  // whose `running` was never closed — a killed runner, a crash, or simply an
+  // operator's `queue withdraw` — used to pin the change as in-flight forever,
+  // with an age nothing bounded: `checking 85h32m` on changes `queue show`
+  // called merged at the same instant, and during a stop the list named the
+  // wrong change as the line's occupant while it was checking another one.
+  //
+  // The gate is the place in line, not a second list of state words. A change
+  // that still holds its place can legitimately be running: `stuck` is NOT an
+  // ending (records.ts ENDING_KINDS), it keeps its place and the next run takes
+  // it again, and since no record kind means "checking", this marker is the
+  // only signal that re-check has. Suppressing it for `stuck` would render a
+  // genuinely running re-check as idle — which is why the gate asks whether the
+  // change is still in line rather than naming merged/failed/withdrawn again.
+  //
+  // Read off `state` rather than `endedKind(tip)`: `readChange` takes the
+  // chain's ending record over a stray later tip (24635) and reads an
+  // ancestry-first merge with no record at all — the garage case — as merged,
+  // and a tip-only test leaves both of those still rendering as checking.
+  const live = holdsPlaceInLine(state) ? running?.running : undefined
   const telling = tellingOf(tip)
   const refused = telling?.notTold.flatMap((name) => (name.refused === undefined ? [] : [name.refused])) ?? []
   const undelivered = telling?.notTold.flatMap((name) => (name.refused === undefined ? [name.undelivered] : [])) ?? []
