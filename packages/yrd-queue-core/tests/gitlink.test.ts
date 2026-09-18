@@ -364,11 +364,14 @@ async function addNestedSubmodule(
 }
 
 describe("settling gitlinks", () => {
-  it("resolves the candidate workspace's git-super bin relative to this test file, not /hh/dev", () => {
+  it("resolves the candidate workspace's git-super bin relative to this test file", async () => {
     expect(gitSuperBin).toBe(resolve(import.meta.dirname, "../../../../git-super/bin"))
     expect(existsSync(gitSuperBin)).toBe(true)
     expect(gitSuperBin).toContain("/vendor/git-super/bin")
-    expect(gitSuperBin).not.toContain("/hh/dev/")
+    expect(existsSync(join(gitSuperBin, "git-super"))).toBe(true)
+    const w = await world()
+    const options = await w.options()
+    expect(options.env.PATH.split(":")[0]).toBe(gitSuperBin)
   })
 
   // 24463: the same defect D1 used to catch at merge is refused at submit, with
