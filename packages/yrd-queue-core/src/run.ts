@@ -1732,10 +1732,14 @@ type Publication = Readonly<{ kind: "published"; record: string }> | Readonly<{ 
  *    ref. Root main and the merged record then go through the ordinary atomic
  *    push, so a ring's fence still rides it.
  *
- * A refusal at either write keeps the change in its place, never stuck: the
- * next run composes again against whatever the submodule main is by then (a
- * published child reads as an Equal pin; a main a person moved is fetched and
- * classified afresh), and the log says exactly which repositories moved.
+ * THE TWO REFUSALS ARE NOT THE SAME REFUSAL, and until 24951 they shared one
+ * outcome. A refused LANDING RECORD (1) means the change ref moved under this
+ * run: nothing was written anywhere, the change keeps its place, and the next
+ * run composes again against whatever the submodule main is by then. A refused
+ * PUBLICATION (2) happens after that record is already on the remote naming a
+ * merge, and it can leave some component mains moved and others not — so it
+ * stops the line naming the push, rather than leaving a half-published state
+ * for the next run to compose against silently (@cto 2026-09-18).
  */
 async function publishChildren(
   run: Run,
@@ -1818,21 +1822,35 @@ async function publishChildren(
     }
     return { kind: "published", record: landingRecord }
   }
-  // Nothing to raise: the remotes answered. What moved, if anything, is named,
-  // and the change keeps its place for the next run's fresh composition.
+  // The remotes answered and a component main this merge was about to move did
+  // NOT move. What that leaves behind is the reason this is a stop and not a
+  // wait: the landing record is already on the change ref naming a merge whose
+  // children were not published, and some children may have moved while others
+  // did not. Leaving the change "checked" here was the old behaviour; it is
+  // loud in the journal but silent in the QUEUE, and the next run composes
+  // against a half-published state nobody was told about. A composed pin makes
+  // that worse, because the commit exists only as a retained ref until this
+  // push lands it (24951, @cto 2026-09-18).
   const detail = published.detail
-  run.log.write({
-    branch,
-    decision: "checked",
-    head,
-    kind: "change",
-    reason: "publication-refused",
-    saw:
-      `git-super push exit ${String(execution.exitCode)} state=${published.state} partial=${String(published.partial)}` +
-      (detail === undefined ? "" : ` ${detail.code} (${detail.phase}): ${detail.message}`) +
-      (moved.length === 0 ? "; nothing moved" : `; moved: ${moved.join(", ")}`),
-  })
-  return { kind: "kept", ended: "checked" }
+  const saw =
+    `git-super push exit ${String(execution.exitCode)} state=${published.state} partial=${String(published.partial)}` +
+    (detail === undefined ? "" : ` ${detail.code} (${detail.phase}): ${detail.message}`) +
+    (moved.length === 0 ? "; nothing moved" : `; moved: ${moved.join(", ")}`)
+  run.log.write({ branch, decision: "stuck", head, kind: "change", reason: "publication-refused", saw })
+  return {
+    ended: await run.steps.end(run, entry, "stuck", {
+      ...stuckWrite(run, branch, {
+        code: "yrd-publication-refused",
+        detail: saw,
+        next: `publish the named component mains, or repair what refused the push, then run yrd queue run`,
+        subject: `${branch}: git super push --recurse-submodules=only did not advance every component main for merge ${mergeCommit.slice(0, 12)}`,
+        via: `git super push --recurse-submodules=only ${target.remote} ${mergeCommit}:refs/heads/${target.branch} at ${cwd}`,
+        worktree: cwd,
+      }),
+      ...(detail === undefined ? {} : { diagnosis: detail }),
+    }),
+    kind: "kept",
+  }
 }
 
 type GitSuperPushResult = Readonly<{
