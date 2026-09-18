@@ -559,3 +559,181 @@ describe("a packed Check: trailer", () => {
     })
   })
 })
+
+/**
+ * 24972: one run journal whose `running` was never closed pinned a change as
+ * in-flight forever, because `live` was read off the journal with no reference
+ * to the state. `queue list` said `checking 85h32m` about changes `queue show`
+ * called merged at the same instant, and during a stop it named the wrong
+ * change as the current occupant while the line was checking another one.
+ *
+ * The suppression set is the three kinds that END a chain — merged, failed,
+ * withdrawn (records.ts ENDING_KINDS) — and deliberately NOT `stuck`. A stuck
+ * chain keeps its place in line (state.ts `holdsPlaceInLine`) and the next run
+ * takes it again, and there is no `checking` record kind, so the journal's
+ * `running` marker is the ONLY in-flight signal a re-check has. Suppressing it
+ * for stuck would render a genuinely running re-check as idle. The table's own
+ * `stuckMs` already guards on `row.live === undefined`, so a stuck row holding
+ * a live overlay is a combination this table expects rather than one it treats
+ * as impossible.
+ */
+describe("a terminal change is never rendered as checking (24972)", () => {
+  async function withUnclosedRun(
+    w: World,
+    branch: string,
+    head: string,
+  ): Promise<{
+    journals: Parameters<typeof list>[1] extends infer O ? (O extends { journals?: infer J } ? J : never) : never
+  }> {
+    const startedAt = new Date(Date.now() - 5 * 60 * 60 * 1000)
+    const running = { name: "affected-tests", phase: "merge", startedAt }
+    return {
+      journals: {
+        dir: "/journal-fixture",
+        malformed: [],
+        runs: new Map([
+          [journalKey(branch, head), [{ at: startedAt, branch, checks: [], head, id: "q-stale", running, startedAt }]],
+        ]),
+      },
+    }
+  }
+
+  it.each([
+    ["merged", [["Merge", "0".repeat(40)]]],
+    ["failed", [["Reason", "verify"]]],
+    ["withdrawn", [["Reason", "replaced"]]],
+  ] as const)(
+    "suppresses the live overlay for a %s change holding an unclosed running marker",
+    async (kind, trailers) => {
+      const w = await world("{}\n")
+      const head = await submitCommit(w, "task/one", "one.txt")
+      await appendRecord(w.git, "main", {
+        change: { branch: "task/one", head },
+        kind,
+        subject: `task/one ${kind}`,
+        trailers: trailers as unknown as readonly (readonly [string, string])[],
+      })
+      const ref = changeRef("main", { branch: "task/one", head })
+      await w.git(["push", "--quiet", "--force", "origin", `${ref}:${ref}`])
+      const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
+      const { journals } = await withUnclosedRun(w, "task/one", head)
+
+      const row = list(entries, { journals })[0]
+      expect(row?.state).toBe(kind)
+      // The defect: `live` was set from the journal whatever the state said, and
+      // the age it carried was unbounded.
+      expect(row?.live).toBeUndefined()
+    },
+  )
+
+  it("still renders a genuinely in-flight change as checking, with its real age", async () => {
+    const w = await world("{}\n")
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
+    const { journals } = await withUnclosedRun(w, "task/one", head)
+
+    const row = list(entries, { journals })[0]
+    expect(row?.state).toBe("queued")
+    // The control that stops the fix from simply deleting the overlay.
+    expect(row?.live?.check).toBe("affected-tests")
+    expect(row?.live?.phase).toBe("merge")
+  })
+
+  it("keeps the overlay on a STUCK change, which still holds its place and is taken again", async () => {
+    const w = await world("{}\n")
+    const head = await submitCommit(w, "task/one", "one.txt")
+    await appendRecord(w.git, "main", {
+      change: { branch: "task/one", head },
+      kind: "stuck",
+      subject: "task/one stuck",
+      trailers: [
+        ["Code", "gitlink-off-main"],
+        ["Subject", "task/one moves km off its own main"],
+        ["Via", "yrd queue run"],
+        ["Evidence", "/journal-fixture/q-stale/merge/gitlink.log"],
+        ["Next", "re-pin km onto its own main and resubmit"],
+        ["Owner", "the submitter"],
+      ],
+    })
+    const ref = changeRef("main", { branch: "task/one", head })
+    await w.git(["push", "--quiet", "--force", "origin", `${ref}:${ref}`])
+    const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
+    const { journals } = await withUnclosedRun(w, "task/one", head)
+
+    const row = list(entries, { journals })[0]
+    expect(row?.state).toBe("stuck")
+    // stuck is NOT an ending: the next run takes it again, and the journal's
+    // marker is that re-check's only signal.
+    expect(row?.live?.check).toBe("affected-tests")
+  })
+})
+
+/**
+ * The 20:29 PDT specimen: `queue list` rendered TWO changes as `checking` at
+ * once while exactly one round was alive, and the header — which names the
+ * change under check — could not choose between them and printed its branch
+ * field blank at the one moment a reader needed it, during a 2h13m stop.
+ *
+ * Asserted through `list` rather than by handing `lineOf` a row with `live`
+ * already set: a fixture that supplies the field under test proves the
+ * renderer and nothing about the reader that fills it.
+ */
+describe("only one change can hold the line at a time (24972)", () => {
+  it("leaves exactly one live row when a merged neighbour still carries a stale marker", async () => {
+    const w = await world("{}\n")
+    const stale = await submitCommit(w, "task/stale", "stale.txt")
+    const real = await submitCommit(w, "task/real", "real.txt")
+    await appendRecord(w.git, "main", {
+      change: { branch: "task/stale", head: stale },
+      kind: "merged",
+      subject: "task/stale merged",
+      trailers: [["Merge", "0".repeat(40)]],
+    })
+    const ref = changeRef("main", { branch: "task/stale", head: stale })
+    await w.git(["push", "--quiet", "--force", "origin", `${ref}:${ref}`])
+    const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
+
+    const older = new Date(Date.now() - 38 * 60 * 1000)
+    const newer = new Date(Date.now() - 28 * 60 * 1000)
+    const journals = {
+      dir: "/journal-fixture",
+      malformed: [],
+      runs: new Map([
+        [
+          journalKey("task/stale", stale),
+          [
+            {
+              at: older,
+              branch: "task/stale",
+              checks: [],
+              head: stale,
+              id: "q-old",
+              running: { name: "affected-tests", phase: "merge", startedAt: older },
+              startedAt: older,
+            },
+          ],
+        ],
+        [
+          journalKey("task/real", real),
+          [
+            {
+              at: newer,
+              branch: "task/real",
+              checks: [],
+              head: real,
+              id: "q-live",
+              running: { name: "affected-tests", phase: "merge", startedAt: newer },
+              startedAt: newer,
+            },
+          ],
+        ],
+      ]),
+    }
+
+    const rows = list(entries, { journals })
+    const live = rows.filter((row) => row.live !== undefined)
+    expect(live.map((row) => row.branch)).toEqual(["task/real"])
+    // Both changes are still ROWS; the fix suppresses an overlay, never a row.
+    expect(rows).toHaveLength(2)
+  })
+})
