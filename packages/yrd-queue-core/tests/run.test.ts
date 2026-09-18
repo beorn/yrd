@@ -989,23 +989,39 @@ describe("a queue run", () => {
               ? (await rival(["rev-parse", `${intended}^^`])).trim()
               : relation === "equal"
                 ? intended
-                : // A rival's record on a chain the merge has already ended can
-                  // only be a `sent` one: a stuck cannot follow an ending
-                  // (@i/10-yrd/24979), and this fixture used to write one
-                  // because nothing refused it. The subject here is the RACE,
-                  // not the kind — what it needs is a competing record that
-                  // moves the tip, and a second queue delivering the same
-                  // ending is the one a real remote could hold.
-                  await appendRecord(rival, "main", {
-                    change: { branch: "task/one", head },
-                    kind: "sent",
-                    subject: "another queue got there first",
-                    trailers: [
-                      ["State", "merged"],
-                      ["To", "@dev/2"],
-                      ["Delivery", "sent"],
-                    ],
-                  })
+                : // THE RIVAL'S KIND FOLLOWS THE PHASE (@i/10-yrd/24980). The
+                  // subject here is the RACE, not the kind: all the fixture
+                  // needs is a competing record that moves the tip. But it has
+                  // to be a record a real second writer could actually have
+                  // written at this moment. Racing the CHECKED record, the
+                  // chain is still open and a stuck is legal. Racing the SENT
+                  // record, the merge has already ended the chain, and only a
+                  // record that does not decide may follow an ending — so the
+                  // rival is a second queue delivering the same ending. This
+                  // fixture wrote a stuck in both phases because nothing
+                  // refused it; a blanket substitution the other way breaks the
+                  // checked race, which is why this reads the phase.
+                  await appendRecord(
+                    rival,
+                    "main",
+                    kind === "checked"
+                      ? {
+                          change: { branch: "task/one", head },
+                          kind: "stuck",
+                          subject: "another queue got there first",
+                          trailers: [["Reason", "crash"]],
+                        }
+                      : {
+                          change: { branch: "task/one", head },
+                          kind: "sent",
+                          subject: "another queue got there first",
+                          trailers: [
+                            ["State", "merged"],
+                            ["To", "@dev/2"],
+                            ["Delivery", "sent"],
+                          ],
+                        },
+                  )
           // Only the disposable fixture's remote rewinds, under its exact
           // previous value, to exercise an external writer moving backwards.
           await rival([
@@ -1028,6 +1044,10 @@ describe("a queue run", () => {
       expect(outcome.merged).toEqual(["task/one"])
       await fetchChanges(w)
       const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+      // The rival's own record reads `stuck` while the chain is still open (the
+      // checked phase) and `sent` once the merge has ended it (@i/10-yrd/24980
+      // — a record that decides or ends may not follow an ending). Everything
+      // else in these sequences is this run's, and is unchanged.
       expect(records.map((record) => record.kind)).toEqual(
         kind === "checked"
           ? ["opened", "stuck", "checked", "merged", "sent"]
@@ -1036,10 +1056,10 @@ describe("a queue run", () => {
             : relation === "ahead"
               ? ["opened", "checked", "sent"]
               : relation === "behind"
-                ? ["opened", "checked", "merged", "sent", "stuck", "sent"]
+                ? ["opened", "checked", "merged", "sent", "sent", "sent"]
                 : refusals === 2
-                  ? ["opened", "checked", "merged", "stuck", "stuck"]
-                  : ["opened", "checked", "merged", "stuck", "sent"],
+                  ? ["opened", "checked", "merged", "sent", "sent"]
+                  : ["opened", "checked", "merged", "sent", "sent"],
       )
       expect(records.map((record) => record.sha)).toContain(concurrent)
       expect(intended).toMatch(/^[0-9a-f]{40}$/u)
@@ -1340,7 +1360,10 @@ describe("a queue run", () => {
     const records = await readRecords(w.git, (await refAt(w.git, ref))!)
     const merged = records.find((record) => record.kind === "merged")
     if (merged === undefined) throw new Error("missing merged record")
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "stuck", "stuck"])
+    // The two rival records are `sent` ones: the merge has ended this chain, so
+    // a record that decides could not follow it (@i/10-yrd/24980). The race is
+    // unchanged — two competing appends, both taking the tip.
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
     expect(records.slice(-2).map((record) => record.sha)).toEqual(competing)
     const rows = logRecords(outcome).filter((record) => record.kind === "message")
     expect(rows.map(({ delivered, id, to }) => ({ delivered, id, to }))).toEqual([

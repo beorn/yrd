@@ -24,7 +24,7 @@ import {
   trailer,
 } from "../src/index.ts"
 import type { ChangeRecord, Git } from "../src/index.ts"
-import { cleanupRootChanges, readRootChanges } from "../src/records.ts"
+import { cleanupRootChanges, readRootChanges, RECORD_KINDS } from "../src/records.ts"
 
 /**
  * The records of a change that certainly has some. `ChangeRecords.records` is a
@@ -683,6 +683,51 @@ describe("the ending governs the reading, never the literal tip (@i/10-yrd/24635
         headOnTarget: false,
       }).state,
     ).toBe("checked")
+  })
+
+  // @i/10-yrd/24980 row 1. The rule is a SET, and this is the arm that keeps it
+  // one: every kind is classified here, and the coverage assertion below fails
+  // if a kind is ever added to RECORD_KINDS without somebody deciding whether it
+  // may follow an ending. A list of exceptions rots silently; this cannot.
+  const AFTER_AN_ENDING = [
+    // Re-opens, reports, observes — ground truth and delivery both outrank a
+    // record, so these three land.
+    ["opened", "lands"],
+    ["sent", "lands"],
+    ["merged", "lands"],
+    // Decide, or claim a place in a line the change has already left.
+    ["checked", "refused"],
+    ["failed", "refused"],
+    ["stuck", "refused"],
+    ["withdrawn", "refused"],
+  ] as const
+
+  it("classifies every record kind for what may follow an ending, and covers the whole vocabulary", async () => {
+    expect(AFTER_AN_ENDING.map(([kind]) => kind).sort()).toEqual([...RECORD_KINDS].sort())
+
+    for (const [kind, outcome] of AFTER_AN_ENDING) {
+      const { git, head, target } = await repository()
+      const change = { branch: "task/one", head }
+      await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+      await appendRecord(git, "main", {
+        change,
+        kind: "merged",
+        subject: "task/one merged",
+        trailers: [
+          ["Merge", target],
+          ["Merged-By", mergedBy("main", "q-1")],
+        ],
+      })
+
+      const wrote = await appendRecord(git, "main", { change, kind, subject: `a late ${kind}` }).then(
+        () => "lands",
+        (error: unknown) => {
+          expect(String(error), `${kind}: the refusal must name the ending`).toMatch(/already ended merged/u)
+          return "refused"
+        },
+      )
+      expect(wrote, `a late ${kind} record after an ending`).toBe(outcome)
+    }
   })
 
   // @i/10-yrd/24979 row 3. The rule refused a late `checked` and a late

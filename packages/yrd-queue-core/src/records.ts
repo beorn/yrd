@@ -94,22 +94,30 @@ export const RECORD_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
 /**
  * THE ONLY RECORDS THAT MAY FOLLOW AN ENDING (@i/10-yrd/24980).
  *
- * A set, not a list of exceptions, because the rule is about what a record DOES
- * and not about which kinds anyone has thought of. `opened` re-opens: a
- * re-submit starts a new chain. `sent` reports: it repeats the ending it
- * delivers, and every sent record follows an ending by construction, since
- * notify fires on merged, failed and stuck. Refusing it would mean no submitter
- * is ever told what happened to their change.
+ * A RECORD THAT DECIDES CANNOT FOLLOW AN ENDING; a record that re-opens,
+ * reports, or observes ground truth can. That is the whole rule, and the reason
+ * this is a set rather than a list of exceptions: what matters is what a record
+ * DOES, not which kinds anyone has thought of so far.
  *
- * Every other kind decides (`checked`) or ends (`merged`, `failed`,
- * `withdrawn`) or claims a place in the line (`stuck`) — and a chain that has
- * ended has no place in a line and nothing left to decide.
+ * - `opened` RE-OPENS: a re-submit starts a new chain.
+ * - `sent` REPORTS: it repeats the ending it delivers. Every sent record
+ *   follows an ending by construction, since notify fires on merged, failed and
+ *   stuck, so refusing it would mean no submitter is ever told what happened.
+ * - `merged` OBSERVES: a commit on the target is ground truth, and ground truth
+ *   outranks any record. `catchUp` writes exactly this when a change that ended
+ *   failed is later merged around the queue; refusing it would leave the tip
+ *   saying failed while the commit sits on main. `readChange` is ancestry-first
+ *   for the same reason.
+ *
+ * `checked`, `failed` and `withdrawn` decide, and `stuck` claims a place in a
+ * line — and a chain that has ended has no place in a line and nothing left to
+ * decide.
  *
  * Adding a kind to RECORD_KINDS therefore refuses it after an ending by
- * default, which is the safe direction: a kind nobody classified cannot quietly
- * overwrite somebody's ending.
+ * default, which is the safe direction: a kind nobody has classified cannot
+ * quietly overwrite somebody's ending.
  */
-const ALLOWED_AFTER_ENDING: ReadonlySet<RecordKind> = new Set<RecordKind>(["opened", "sent"])
+const ALLOWED_AFTER_ENDING: ReadonlySet<RecordKind> = new Set<RecordKind>(["merged", "opened", "sent"])
 
 /**
  * Why a particular late write is refused, where a bead already named the rule.
@@ -145,10 +153,7 @@ export class DecisionAfterEnding extends Error {
   /** The kind that was refused: whatever it was, it decides or ends. */
   readonly refused: RecordKind
 
-  constructor(
-    message: string,
-    about: Readonly<{ endedAt: string; endedKind: string; refused: RecordKind }>,
-  ) {
+  constructor(message: string, about: Readonly<{ endedAt: string; endedKind: string; refused: RecordKind }>) {
     super(message)
     this.name = "DecisionAfterEnding"
     this.endedAt = about.endedAt
