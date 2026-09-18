@@ -80,6 +80,8 @@ type World = Readonly<{
   /** The command every notify entry in these cases runs: it appends the record to `notifyLog`. */
   notifier: string
   checkLog: string
+  /** Exists once the check has begun, before its sleep: the signal to act while a check is running. */
+  startedLog: string
   /** The target's `setup:`, exiting as the case says; it records its own cwd in `checkLog`, beside the check's. */
   setupCommand(exit: number): string
   options(
@@ -110,6 +112,9 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
   const workdir = join(root, "queue")
   const notifyLog = join(root, "notify.log")
   const checkLog = join(root, "check.log")
+  // Written by the check BEFORE it sleeps, so a case that has to act while a
+  // check is running waits on the check's own word instead of a fixed delay.
+  const startedLog = join(root, "check-started.log")
   const seed = gitIn(root)
   await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
   await seed(["clone", "--quiet", remote, work])
@@ -137,6 +142,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     fakeCheck,
     [
       "#!/bin/sh",
+      `echo "started" >> "${startedLog}"`,
       'sleep "${FAKE_SLEEP:-0}"',
       `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
       'if [ -f one.txt ] || [ "${FAKE_EVERYWHERE:-0}" = 1 ]; then exit "${FAKE_EXIT:-0}"; fi',
@@ -199,10 +205,20 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
       workdir,
     }),
     remote,
+    startedLog,
     target,
     work,
     workdir,
   }
+}
+
+/** Wait for the check to say it has begun, so a mid-check case never rests on a fixed delay. */
+async function checkRunning(w: World): Promise<void> {
+  for (let waited = 0; waited < 10_000; waited += 25) {
+    if (existsSync(w.startedLog)) return
+    await new Promise((done) => setTimeout(done, 25))
+  }
+  throw new Error(`the check never started: ${w.startedLog} was never written`)
 }
 
 async function submitCommit(w: World, branch: string, file: string): Promise<string> {
@@ -3341,6 +3357,43 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     await expect(withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: TARGET })).rejects.toThrow(
       /already ended merged/u,
     )
+  })
+
+  // @i/10-yrd/24979. The specimen, 2026-09-18 00:34 PDT: `@dev/9` withdrew
+  // task/24523-rows-5-7 on `@chief`'s ruling while round
+  // q-20260918T073412029Z-de18ba52 was mid-judge on it. The check finished, the
+  // `checked` write met 24635's ending rule, and the runner read that refusal
+  // as a crash — pause cause=stuck, a page, and the line stopped, although the
+  // ending had ALREADY lifted the stop, which is what `yrd queue resume` then
+  // said. 24635's refusal is right; treating it as an unhandled error is the
+  // defect. The ending wins, the verdict is discarded with a reason, the round
+  // goes on.
+  it("discards the verdict when a withdraw lands mid-check, and judges the rest of the round", async () => {
+    const w = await world()
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    await submitCommit(w, "task/two", "two.txt")
+
+    // The check is held open so the withdraw lands while the round is judging
+    // task/one; `checkRunning` waits on the check's own word, not a delay.
+    const running = queueRun(await w.options({ exit: 0, on: ["submit"], sleep: 2 }))
+    await checkRunning(w)
+    await withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: TARGET })
+    const outcome = await running
+
+    // The round did not stop: task/two was judged and merged behind it.
+    expect(outcome).toMatchObject({ exitCode: 0, stuck: [] })
+    expect(outcome.merged).toEqual(["task/two"])
+    // Nothing paged, and no operator had to run `yrd queue resume` to be told
+    // the stop was already lifted.
+    expect(await refAt(w.git, PAUSE_REF)).toBeUndefined()
+    // The ending stands alone: a discarded verdict writes no record, so the
+    // withdrawn tip is what every reader sees.
+    await fetchChanges(w)
+    const records = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/one", head: headOne })))!,
+    )
+    expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
   })
 
   it("reports a merged change as merged, never withdrawn, once its branch has moved on", async () => {
