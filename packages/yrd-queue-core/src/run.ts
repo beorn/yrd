@@ -1402,9 +1402,13 @@ async function candidateFailure(
     // and the files that overlapped travel with it.
     await worktree.remove()
     return run.steps.end(run, entry, "failed", {
+      // THE CURE IS A MERGE, NOT A REBASE, and saying "rebase" sends the author
+      // to a different operation than the one this queue performs. The queue
+      // composes a diverged component BY MERGE; when it cannot, the author does
+      // the same thing by hand.
       remedy:
-        detail.next ??
-        `rebase the submodule commit onto its own main, then submit ${entry.change.branch} to ${run.options.target.branch} again`,
+        `merge the component's main into the component task branch, re-stage the gitlink on a merge of ` +
+        `${run.options.target.branch}, push both, then submit ${entry.change.branch} again`,
       subject: (detail.subject ?? detail.message).replace(/\s+/gu, " ").trim(),
       trailers: [
         ["Reason", "conflict"],
