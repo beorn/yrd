@@ -3396,6 +3396,35 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
   })
 
+  // The same race one phase later (24979 acceptance row 2). This one is worth
+  // its own arm rather than a parameter, because the two phases fail
+  // DIFFERENTLY if they fail: a discarded judgement loses a verdict, while a
+  // merge that does not notice the ending LANDS A WITHDRAWN CHANGE on the
+  // target — the ending undone by the run it raced.
+  it("lets the ending win when a withdraw lands during the merge, and never lands the withdrawn change", async () => {
+    const w = await world()
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+
+    // No `on`, so the one check runs at merge (ruling A1): the change is
+    // already judged, and the withdraw lands before the merge commits.
+    const running = queueRun(await w.options({ exit: 0, sleep: 2 }))
+    await checkRunning(w)
+    await withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: TARGET })
+    const outcome = await running
+
+    expect(outcome).toMatchObject({ exitCode: 0, merged: [], stuck: [] })
+    expect(await refAt(w.git, PAUSE_REF)).toBeUndefined()
+    // The target never took it: the withdraw is an escape, and an escape the
+    // queue can overrun is not an escape (ADR-0015).
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    const records = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/one", head: headOne })))!,
+    )
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "withdrawn"])
+  })
+
   it("reports a merged change as merged, never withdrawn, once its branch has moved on", async () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
