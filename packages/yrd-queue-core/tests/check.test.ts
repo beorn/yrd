@@ -18,6 +18,7 @@ import { join } from "node:path"
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import type { Process, ProcessRequest, ProcessResult } from "@yrd/process"
 import { checkLogPath, runCheck } from "../src/index.ts"
+import { DEFAULT_CHECK_BOUND_MS } from "../src/check.ts"
 import type { CheckedTree } from "../src/index.ts"
 
 // A mutable facade permits narrow faults at existing filesystem calls only.
@@ -588,5 +589,44 @@ describe("check exit codes", () => {
       result: "stuck",
       why: "exit 99 is not a verdict",
     })
+  })
+})
+
+/**
+ * @failure A check cannot end on its own terms, because nothing tells it the
+ *          bound it will be killed at. It is SIGKILLed mid-leg, names nothing,
+ *          and the round reads "ran past its bound; log named no usable
+ *          YRD-CHECK-RESULT" — the whole account of a 30-minute run (24012;
+ *          specimen q-20260917T231744500Z-a6f3c0e1, which stopped the line
+ *          behind eleven unrelated changes).
+ * @level l1 (an injected Process boundary reads the runner request before a child can run).
+ * @consumer Every check. affected-tests needs it to reserve time for a residual
+ *           verdict; the bound is the queue's own number and no check should
+ *           re-declare it.
+ */
+describe("the bound the queue will enforce", () => {
+  it("names that bound in the check's environment, declared or default", async () => {
+    const seen: ProcessRequest[] = []
+    const process: Process = {
+      run: (received) => {
+        seen.push(received)
+        return Promise.resolve({ durationMs: 1, exitCode: 0, signal: null, stderr: "", stdout: "", timedOut: false })
+      },
+      close: () => Promise.resolve(),
+      [Symbol.asyncDispose]: () => Promise.resolve(),
+    }
+
+    await expect(
+      runCheck({ ...place("declared-bound"), process, spec: { name: "declared", run: "unused", timeoutMs: 90_000 } }),
+    ).resolves.toMatchObject({ result: "pass" })
+    await expect(
+      runCheck({ ...place("default-bound"), process, spec: { name: "default", run: "unused" } }),
+    ).resolves.toMatchObject({ result: "pass" })
+
+    // The declared bound, and — when a check declares none — the same default
+    // the runner will actually enforce. A check told nothing cannot tell the
+    // difference between "no bound" and "a bound I was not given".
+    expect(seen[0]?.env?.YRD_CHECK_TIMEOUT_MS).toBe("90000")
+    expect(seen[1]?.env?.YRD_CHECK_TIMEOUT_MS).toBe(String(DEFAULT_CHECK_BOUND_MS))
   })
 })

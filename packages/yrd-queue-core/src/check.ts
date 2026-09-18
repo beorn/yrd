@@ -656,15 +656,22 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   // Last, so they cannot be inherited over: what the check is judging is the
   // queue's own statement about the tree it just prepared, and a check told a
   // stale base by the environment would select the wrong work and say nothing.
+  const timeoutMs = run.spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
   env.YRD_REPO = run.cwd
   env.YRD_CANDIDATE_SHA = run.tree.candidate
   env.YRD_BASE_SHA = run.tree.base
+  // The bound this run will be killed at. A check that does not know it cannot
+  // reserve time to say what it could not finish: it is killed mid-leg and the
+  // round's whole account of it becomes "ran past its bound; log named no
+  // usable YRD-CHECK-RESULT" (24012). The number is the queue's, for the same
+  // reason the trio above is — a check that re-declared its own bound would
+  // drift from the one actually enforced and reserve against a fiction.
+  env.YRD_CHECK_TIMEOUT_MS = String(timeoutMs)
   // A check may pass through or request every other declared value, but this
   // name belongs to the queue. Remove either caller source in both modes, and
   // set it only after its declaration and absolute queue argument agreed.
   delete env.YRD_PROGRAM_ROOT
   if (programRoot !== undefined) env.YRD_PROGRAM_ROOT = programRoot
-  const timeoutMs = run.spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
   // Create-only, always, and open before the child exists. Every caller writes
   // under a directory of its own — the queue run's is keyed by change, run and
   // phase, `yrd check`'s by the instant it was invoked — so a path that already
