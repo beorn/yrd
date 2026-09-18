@@ -994,6 +994,22 @@ type SuperMergeDetail = Readonly<{
   next?: string
 }>
 
+/**
+ * How git-super composed a `merged` gitlink: the base both sides descend from,
+ * the two parents, and how many paths each side changed.
+ *
+ * The journal carries it because a `merged` pin is the one settlement whose
+ * commit exists in no submitter's tree — the merge authored it — so the
+ * evidence that admitted it has to be readable afterwards from the record
+ * alone.
+ */
+type SettledComposition = Readonly<{
+  base: string
+  parent: string
+  pin: string
+  files: Readonly<{ parent: number; pin: number }>
+}>
+
 type SettledGitlink = Readonly<{
   path: string
   from: string
@@ -1009,7 +1025,16 @@ type SettledGitlink = Readonly<{
    * moves independently of the pin km records -- so refusing it would refuse
    * every km change whose maddoc pin had not caught up.
    */
-  state: "raised" | "kept-ahead" | "kept-behind" | "as-written" | "left-off-main" | "not-run"
+  /**
+   * `merged` is a pin the MERGE composed (24951): the change's pin and the
+   * component main the root records had diverged, they changed disjoint files,
+   * and git-super created the two-parent commit carrying both. It publishes
+   * exactly as `kept-ahead` does, because the component main tip is that
+   * commit's first parent, so advancing main to it is a fast-forward.
+   */
+  state: "raised" | "kept-ahead" | "kept-behind" | "as-written" | "left-off-main" | "merged" | "not-run"
+  /** Present on a `merged` row and on no other. */
+  composition?: SettledComposition
 }>
 
 /**
@@ -1086,15 +1111,30 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
   if (mergeCommit === undefined) throw new Error(`git-super merge of ${head} lost its commit after composition`)
   const rootChanges = await readRootChanges(run.git, mergeCommit)
   for (const settled of result.gitlinks.filter((row) => row.state !== "not-run")) {
+    const composition = settled.composition
     run.log.write({
       branch: entry.change.branch,
-      from: settled.from,
+      // A COMPOSED ROW READS FROM ITS PARENTS, not from the recorded pin. Every
+      // other settle row answers "where did this pin stand against its main",
+      // so `from` is the pin; a composition has no single pin to report, and
+      // the two facts a reader needs are which heads it joined and what came
+      // out. `merged` names the commit this merge authored, and `files` is the
+      // disjointness that admitted it, flattened because a record field is a
+      // scalar or a string list.
+      ...(composition === undefined
+        ? { from: settled.from, to: settled.to }
+        : {
+            base: composition.base,
+            files: [`main ${String(composition.files.parent)}`, `change ${String(composition.files.pin)}`],
+            from: composition.parent,
+            merged: settled.from,
+            to: composition.pin,
+          }),
       head,
       kind: "settle",
       path: settled.path,
       phase,
       state: settled.state,
-      to: settled.to,
     })
   }
   // AFTER the settle rows, so the journal reads parent-then-descent in the order
@@ -1209,11 +1249,17 @@ export function readSuperMergeResult(value: unknown): SuperMergeResult {
       typeof entry.path !== "string" ||
       typeof entry.from !== "string" ||
       typeof entry.to !== "string" ||
-      !new Set(["raised", "kept-ahead", "kept-behind", "as-written", "left-off-main", "not-run"]).has(
+      !new Set(["raised", "kept-ahead", "kept-behind", "as-written", "left-off-main", "merged", "not-run"]).has(
         String(entry.state),
       )
     ) {
       throw new Error(`git-super merge gitlink ${String(index)} is incomplete`)
+    }
+    // A `merged` row without its composition is a producer defect, not an older
+    // git-super: the word and the evidence were added together, and the journal
+    // this row feeds is the whole reason the word exists.
+    if (entry.state === "merged") {
+      return { ...entry, composition: readSuperMergeComposition(entry.composition, index) } as SettledGitlink
     }
     return entry as SettledGitlink
   })
@@ -1231,6 +1277,31 @@ export function readSuperMergeResult(value: unknown): SuperMergeResult {
     ...(detail === undefined ? {} : { detail }),
     gitlinks,
     ...(descents === undefined ? {} : { descents }),
+  }
+}
+
+function readSuperMergeComposition(value: unknown, index: number): SettledComposition {
+  if (typeof value !== "object" || value === null) {
+    throw new Error(`git-super merge gitlink ${String(index)} is merged without a composition`)
+  }
+  const found = value as Record<string, unknown>
+  const files = found.files as Record<string, unknown> | undefined
+  if (
+    typeof found.base !== "string" ||
+    typeof found.parent !== "string" ||
+    typeof found.pin !== "string" ||
+    typeof files !== "object" ||
+    files === null ||
+    typeof files.parent !== "number" ||
+    typeof files.pin !== "number"
+  ) {
+    throw new Error(`git-super merge gitlink ${String(index)} has an incomplete composition`)
+  }
+  return {
+    base: found.base,
+    files: { parent: files.parent, pin: files.pin },
+    parent: found.parent,
+    pin: found.pin,
   }
 }
 
@@ -1313,6 +1384,42 @@ async function candidateFailure(
         ["Reason", "conflict"],
         ["Detail", detail.message],
       ],
+    })
+  }
+  if (detail.code === "gitlink-compose-refused") {
+    // The change's pin and the component main the root records DIVERGED, and
+    // the merge could not settle them: the two sides changed the same file, or
+    // Git itself could not merge them. Either way the remedy is the author's
+    // rebase, exactly as an ordinary conflict is, so this is a failed change
+    // and the files that overlapped travel with it.
+    await worktree.remove()
+    return run.steps.end(run, entry, "failed", {
+      remedy:
+        detail.next ??
+        `rebase the submodule commit onto its own main, then submit ${entry.change.branch} to ${run.options.target.branch} again`,
+      subject: (detail.subject ?? detail.message).replace(/\s+/gu, " ").trim(),
+      trailers: [
+        ["Reason", "conflict"],
+        ["Detail", detail.message.replace(/\s+/gu, " ").trim()],
+      ],
+    })
+  }
+  if (detail.code === "gitlink-compose-unavailable") {
+    // The merge could not JUDGE the diverged component -- a shallow store, an
+    // object no remote supplied, two histories with no base. Nothing about the
+    // submitted change is known to be wrong, so it keeps its place and the run
+    // stops naming the command, rather than billing a queue-environment fault
+    // to the author (@cto 7645ec3a).
+    return run.steps.end(run, entry, "stuck", {
+      ...stuckWrite(run, entry.change.branch, {
+        code: "yrd-gitlink-compose-unavailable",
+        detail: detail.message,
+        next: detail.next ?? "repair the named condition in the queue's checkout, then run yrd queue run",
+        subject: detail.subject ?? detail.message,
+        via: `git super merge (${detail.code}, ${detail.phase}) at ${worktree.path}`,
+        worktree: worktree.path,
+      }),
+      diagnosis: detail,
     })
   }
   if (detail.code === "gitlink-off-main") {

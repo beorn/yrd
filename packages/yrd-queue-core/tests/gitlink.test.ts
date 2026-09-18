@@ -1406,9 +1406,11 @@ describe("a diverged component the merge composes", () => {
     const composed = await gitlinkAt(w, target)
     expect(composed).not.toBe(pins.changeSide)
     expect(composed).not.toBe(pins.mainSide)
+    // (b) retained at the component remote before the root merge recorded it.
+    expect(await submoduleRemoteRef(w, `refs/git-super/pins/${composed}`)).toBe(composed)
     // (a) the component main tip is the FIRST parent and the carrier's pin the second.
-    const parents = (await w.git(["ls-remote", "https://git-super.test/owned/submodule.git", "refs/heads/main"])).trim()
-    expect(parents).toContain(composed)
+    const bare = gitIn(join(w.work, "..", "submodule.git"))
+    expect((await bare(["show", "-s", "--format=%P", composed])).trim()).toBe(`${pins.mainSide} ${pins.changeSide}`)
     // (c) the composed commit reached the component's main through the landing.
     expect(await submoduleMain(w)).toBe(composed)
     const message = await w.git(["show", "-s", "--format=%B", target])
@@ -1448,10 +1450,9 @@ describe("a diverged component the merge composes", () => {
     expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/walled"], stuck: [] })
     const target = await remoteTip(w.git, "refs/heads/main")
     const composed = await gitlinkAt(w, target)
-    const submoduleWork = join(w.work, "..", "submodule-work")
-    const parents = (await gitIn(submoduleWork)(["show", "-s", "--format=%P", composed])).trim()
-    expect(parents).toBe(`${pins.mainSide} ${pins.changeSide}`)
-    const composedMessage = await gitIn(submoduleWork)(["show", "-s", "--format=%B", composed])
+    const bare = gitIn(join(w.work, "..", "submodule.git"))
+    expect((await bare(["show", "-s", "--format=%P", composed])).trim()).toBe(`${pins.mainSide} ${pins.changeSide}`)
+    const composedMessage = await bare(["show", "-s", "--format=%B", composed])
     expect(composedMessage).toContain(`Change: task/walled@${head}`)
     expect(composedMessage).toContain("Merged-By:")
   })
@@ -1523,7 +1524,7 @@ describe("a diverged component the merge composes", () => {
       process: refusingMerge(
         {
           code: "gitlink-compose-unavailable",
-          message: "the diverged submodule at \"submodule\" could not be merged: the submodule store is shallow",
+          message: 'the diverged submodule at "submodule" could not be merged: the submodule store is shallow',
           phase: "compose-gitlinks",
           subject: "the submodule store is shallow",
         },
@@ -1541,6 +1542,6 @@ describe("a diverged component the merge composes", () => {
     expect(trailer(stuck!, "Code")).toBe("yrd-gitlink-compose-unavailable")
     expect(trailer(stuck!, "Via")).toContain("git super merge")
     expect(trailer(stuck!, "Owner")).toBe("the queue operator")
-    expect(trailer(stuck!, "Detail")).toContain("shallow")
+    expect(trailer(stuck!, "Subject")).toContain("shallow")
   })
 })

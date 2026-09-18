@@ -2082,6 +2082,12 @@ export function summarize(kind: string, rest: Readonly<Record<string, unknown>>)
           return `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} left off submodule main ${String(rest.to).slice(0, 12)}`
         case "kept-behind":
           return `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} kept behind submodule main ${String(rest.to).slice(0, 12)}`
+        // A COMPOSED pin has two sources and no single "from": the merge joined
+        // the component main with the change's pin. Rendering it through the
+        // arrow form below would read as an ordinary raise and lose the one
+        // fact that matters, which is that this commit is the merge's own.
+        case "merged":
+          return `${where}: ${String(rest.path)} merged submodule main ${String(rest.from).slice(0, 12)} with ${String(rest.to).slice(0, 12)} as ${String(rest.merged).slice(0, 12)}`
         default:
           return `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} -> ${String(rest.to).slice(0, 12)} (submodule main)`
       }
