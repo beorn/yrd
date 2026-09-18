@@ -1166,7 +1166,15 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     mergeCommit,
     ...(rootChanges === undefined ? {} : { rootChanges }),
     worktree,
-    publishing: result.gitlinks.filter((row) => row.state === "kept-ahead"),
+    // A COMPOSED PIN PUBLISHES EXACTLY AS AN AHEAD ONE DOES, and by the same
+    // proof: the component main tip is the composition's FIRST parent, so
+    // advancing main to it is a plain fast-forward, leased on the value
+    // git-super compared against and frozen into the merge. What is new is only
+    // that the queue authored the commit (D1, @cto 2026-09-18) -- nothing here
+    // pushes it, and no second push path exists: `publishChildren` moves the
+    // component main after the root merge has passed every check, as it always
+    // has.
+    publishing: result.gitlinks.filter((row) => row.state === "kept-ahead" || row.state === "merged"),
   }
 }
 
