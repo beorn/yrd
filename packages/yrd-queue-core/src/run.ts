@@ -1025,6 +1025,22 @@ type SuperMergeDetail = Readonly<{
   next?: string
 }>
 
+/**
+ * How git-super composed a `merged` gitlink: the base both sides descend from,
+ * the two parents, and how many paths each side changed.
+ *
+ * The journal carries it because a `merged` pin is the one settlement whose
+ * commit exists in no submitter's tree — the merge authored it — so the
+ * evidence that admitted it has to be readable afterwards from the record
+ * alone.
+ */
+type SettledComposition = Readonly<{
+  base: string
+  parent: string
+  pin: string
+  files: Readonly<{ parent: number; pin: number }>
+}>
+
 type SettledGitlink = Readonly<{
   path: string
   from: string
@@ -1040,7 +1056,16 @@ type SettledGitlink = Readonly<{
    * moves independently of the pin km records -- so refusing it would refuse
    * every km change whose maddoc pin had not caught up.
    */
-  state: "raised" | "kept-ahead" | "kept-behind" | "as-written" | "left-off-main" | "not-run"
+  /**
+   * `merged` is a pin the MERGE composed (24951): the change's pin and the
+   * component main the root records had diverged, they changed disjoint files,
+   * and git-super created the two-parent commit carrying both. It publishes
+   * exactly as `kept-ahead` does, because the component main tip is that
+   * commit's first parent, so advancing main to it is a fast-forward.
+   */
+  state: "raised" | "kept-ahead" | "kept-behind" | "as-written" | "left-off-main" | "merged" | "not-run"
+  /** Present on a `merged` row and on no other. */
+  composition?: SettledComposition
 }>
 
 /**
@@ -1117,15 +1142,30 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
   if (mergeCommit === undefined) throw new Error(`git-super merge of ${head} lost its commit after composition`)
   const rootChanges = await readRootChanges(run.git, mergeCommit)
   for (const settled of result.gitlinks.filter((row) => row.state !== "not-run")) {
+    const composition = settled.composition
     run.log.write({
       branch: entry.change.branch,
-      from: settled.from,
+      // A COMPOSED ROW READS FROM ITS PARENTS, not from the recorded pin. Every
+      // other settle row answers "where did this pin stand against its main",
+      // so `from` is the pin; a composition has no single pin to report, and
+      // the two facts a reader needs are which heads it joined and what came
+      // out. `merged` names the commit this merge authored, and `files` is the
+      // disjointness that admitted it, flattened because a record field is a
+      // scalar or a string list.
+      ...(composition === undefined
+        ? { from: settled.from, to: settled.to }
+        : {
+            base: composition.base,
+            files: [`main ${String(composition.files.parent)}`, `change ${String(composition.files.pin)}`],
+            from: composition.parent,
+            merged: settled.from,
+            to: composition.pin,
+          }),
       head,
       kind: "settle",
       path: settled.path,
       phase,
       state: settled.state,
-      to: settled.to,
     })
   }
   // AFTER the settle rows, so the journal reads parent-then-descent in the order
@@ -1157,7 +1197,15 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     mergeCommit,
     ...(rootChanges === undefined ? {} : { rootChanges }),
     worktree,
-    publishing: result.gitlinks.filter((row) => row.state === "kept-ahead"),
+    // A COMPOSED PIN PUBLISHES EXACTLY AS AN AHEAD ONE DOES, and by the same
+    // proof: the component main tip is the composition's FIRST parent, so
+    // advancing main to it is a plain fast-forward, leased on the value
+    // git-super compared against and frozen into the merge. What is new is only
+    // that the queue authored the commit (D1, @cto 2026-09-18) -- nothing here
+    // pushes it, and no second push path exists: `publishChildren` moves the
+    // component main after the root merge has passed every check, as it always
+    // has.
+    publishing: result.gitlinks.filter((row) => row.state === "kept-ahead" || row.state === "merged"),
   }
 }
 
@@ -1240,11 +1288,17 @@ export function readSuperMergeResult(value: unknown): SuperMergeResult {
       typeof entry.path !== "string" ||
       typeof entry.from !== "string" ||
       typeof entry.to !== "string" ||
-      !new Set(["raised", "kept-ahead", "kept-behind", "as-written", "left-off-main", "not-run"]).has(
+      !new Set(["raised", "kept-ahead", "kept-behind", "as-written", "left-off-main", "merged", "not-run"]).has(
         String(entry.state),
       )
     ) {
       throw new Error(`git-super merge gitlink ${String(index)} is incomplete`)
+    }
+    // A `merged` row without its composition is a producer defect, not an older
+    // git-super: the word and the evidence were added together, and the journal
+    // this row feeds is the whole reason the word exists.
+    if (entry.state === "merged") {
+      return { ...entry, composition: readSuperMergeComposition(entry.composition, index) } as SettledGitlink
     }
     return entry as SettledGitlink
   })
@@ -1262,6 +1316,31 @@ export function readSuperMergeResult(value: unknown): SuperMergeResult {
     ...(detail === undefined ? {} : { detail }),
     gitlinks,
     ...(descents === undefined ? {} : { descents }),
+  }
+}
+
+function readSuperMergeComposition(value: unknown, index: number): SettledComposition {
+  if (typeof value !== "object" || value === null) {
+    throw new Error(`git-super merge gitlink ${String(index)} is merged without a composition`)
+  }
+  const found = value as Record<string, unknown>
+  const files = found.files as Record<string, unknown> | undefined
+  if (
+    typeof found.base !== "string" ||
+    typeof found.parent !== "string" ||
+    typeof found.pin !== "string" ||
+    typeof files !== "object" ||
+    files === null ||
+    typeof files.parent !== "number" ||
+    typeof files.pin !== "number"
+  ) {
+    throw new Error(`git-super merge gitlink ${String(index)} has an incomplete composition`)
+  }
+  return {
+    base: found.base,
+    files: { parent: files.parent, pin: files.pin },
+    parent: found.parent,
+    pin: found.pin,
   }
 }
 
@@ -1344,6 +1423,46 @@ async function candidateFailure(
         ["Reason", "conflict"],
         ["Detail", detail.message],
       ],
+    })
+  }
+  if (detail.code === "gitlink-compose-refused") {
+    // The change's pin and the component main the root records DIVERGED, and
+    // the merge could not settle them: the two sides changed the same file, or
+    // Git itself could not merge them. Either way the remedy is the author's
+    // rebase, exactly as an ordinary conflict is, so this is a failed change
+    // and the files that overlapped travel with it.
+    await worktree.remove()
+    return run.steps.end(run, entry, "failed", {
+      // THE CURE IS A MERGE, NOT A REBASE, and saying "rebase" sends the author
+      // to a different operation than the one this queue performs. The queue
+      // composes a diverged component BY MERGE; when it cannot, the author does
+      // the same thing by hand.
+      remedy:
+        `merge the component's main into the component task branch, re-stage the gitlink on a merge of ` +
+        `${run.options.target.branch}, push both, then submit ${entry.change.branch} again`,
+      subject: (detail.subject ?? detail.message).replace(/\s+/gu, " ").trim(),
+      trailers: [
+        ["Reason", "conflict"],
+        ["Detail", detail.message.replace(/\s+/gu, " ").trim()],
+      ],
+    })
+  }
+  if (detail.code === "gitlink-compose-unavailable") {
+    // The merge could not JUDGE the diverged component -- a shallow store, an
+    // object no remote supplied, two histories with no base. Nothing about the
+    // submitted change is known to be wrong, so it keeps its place and the run
+    // stops naming the command, rather than billing a queue-environment fault
+    // to the author (@cto 7645ec3a).
+    return run.steps.end(run, entry, "stuck", {
+      ...stuckWrite(run, entry.change.branch, {
+        code: "yrd-gitlink-compose-unavailable",
+        detail: detail.message,
+        next: detail.next ?? "repair the named condition in the queue's checkout, then run yrd queue run",
+        subject: detail.subject ?? detail.message,
+        via: `git super merge (${detail.code}, ${detail.phase}) at ${worktree.path}`,
+        worktree: worktree.path,
+      }),
+      diagnosis: detail,
     })
   }
   if (detail.code === "gitlink-off-main") {
@@ -1648,10 +1767,14 @@ type Publication = Readonly<{ kind: "published"; record: string }> | Readonly<{ 
  *    ref. Root main and the merged record then go through the ordinary atomic
  *    push, so a ring's fence still rides it.
  *
- * A refusal at either write keeps the change in its place, never stuck: the
- * next run composes again against whatever the submodule main is by then (a
- * published child reads as an Equal pin; a main a person moved is fetched and
- * classified afresh), and the log says exactly which repositories moved.
+ * THE TWO REFUSALS ARE NOT THE SAME REFUSAL, and until 24951 they shared one
+ * outcome. A refused LANDING RECORD (1) means the change ref moved under this
+ * run: nothing was written anywhere, the change keeps its place, and the next
+ * run composes again against whatever the submodule main is by then. A refused
+ * PUBLICATION (2) happens after that record is already on the remote naming a
+ * merge, and it can leave some component mains moved and others not — so it
+ * stops the line naming the push, rather than leaving a half-published state
+ * for the next run to compose against silently (@cto 2026-09-18).
  */
 async function publishChildren(
   run: Run,
@@ -1734,21 +1857,35 @@ async function publishChildren(
     }
     return { kind: "published", record: landingRecord }
   }
-  // Nothing to raise: the remotes answered. What moved, if anything, is named,
-  // and the change keeps its place for the next run's fresh composition.
+  // The remotes answered and a component main this merge was about to move did
+  // NOT move. What that leaves behind is the reason this is a stop and not a
+  // wait: the landing record is already on the change ref naming a merge whose
+  // children were not published, and some children may have moved while others
+  // did not. Leaving the change "checked" here was the old behaviour; it is
+  // loud in the journal but silent in the QUEUE, and the next run composes
+  // against a half-published state nobody was told about. A composed pin makes
+  // that worse, because the commit exists only as a retained ref until this
+  // push lands it (24951, @cto 2026-09-18).
   const detail = published.detail
-  run.log.write({
-    branch,
-    decision: "checked",
-    head,
-    kind: "change",
-    reason: "publication-refused",
-    saw:
-      `git-super push exit ${String(execution.exitCode)} state=${published.state} partial=${String(published.partial)}` +
-      (detail === undefined ? "" : ` ${detail.code} (${detail.phase}): ${detail.message}`) +
-      (moved.length === 0 ? "; nothing moved" : `; moved: ${moved.join(", ")}`),
-  })
-  return { kind: "kept", ended: "checked" }
+  const saw =
+    `git-super push exit ${String(execution.exitCode)} state=${published.state} partial=${String(published.partial)}` +
+    (detail === undefined ? "" : ` ${detail.code} (${detail.phase}): ${detail.message}`) +
+    (moved.length === 0 ? "; nothing moved" : `; moved: ${moved.join(", ")}`)
+  run.log.write({ branch, decision: "stuck", head, kind: "change", reason: "publication-refused", saw })
+  return {
+    ended: await run.steps.end(run, entry, "stuck", {
+      ...stuckWrite(run, branch, {
+        code: "yrd-publication-refused",
+        detail: saw,
+        next: `publish the named component mains, or repair what refused the push, then run yrd queue run`,
+        subject: `${branch}: git super push --recurse-submodules=only did not advance every component main for merge ${mergeCommit.slice(0, 12)}`,
+        via: `git super push --recurse-submodules=only ${target.remote} ${mergeCommit}:refs/heads/${target.branch} at ${cwd}`,
+        worktree: cwd,
+      }),
+      ...(detail === undefined ? {} : { diagnosis: detail }),
+    }),
+    kind: "kept",
+  }
 }
 
 type GitSuperPushResult = Readonly<{

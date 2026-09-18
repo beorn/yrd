@@ -22,7 +22,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { Process } from "@yrd/process"
@@ -42,6 +42,12 @@ import {
   watchRows,
 } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
+
+const gitSuperBin = resolve(import.meta.dirname, "../../../../git-super/bin")
+if (!existsSync(gitSuperBin)) {
+  throw new Error(`git-super bin directory not found at ${gitSuperBin}`)
+}
+process.env.PATH = `${gitSuperBin}:${process.env.PATH ?? ""}`
 
 const roots: string[] = []
 
@@ -133,7 +139,7 @@ async function world(): Promise<World> {
       return {
         checks: check === undefined ? [] : [{ name: "submodule-check", on: check.on, run: check.run }],
         configBlob: "test-config",
-        env: process.env,
+        env: { ...process.env, PATH: `${gitSuperBin}:${process.env.PATH ?? ""}` },
         repo: work,
         target: { branch: "main", remote: "origin" },
         targetSha: await remoteTip(git, "refs/heads/main"),
@@ -358,6 +364,16 @@ async function addNestedSubmodule(
 }
 
 describe("settling gitlinks", () => {
+  it("resolves the candidate workspace's git-super bin relative to this test file", async () => {
+    expect(gitSuperBin).toBe(resolve(import.meta.dirname, "../../../../git-super/bin"))
+    expect(existsSync(gitSuperBin)).toBe(true)
+    expect(gitSuperBin).toContain("/vendor/git-super/bin")
+    expect(existsSync(join(gitSuperBin, "git-super"))).toBe(true)
+    const w = await world()
+    const options = await w.options()
+    expect(options.env?.PATH?.split(":")[0]).toBe(gitSuperBin)
+  })
+
   // 24463: the same defect D1 used to catch at merge is refused at submit, with
   // the merge-and-pin cure, before a queue cycle.
   it("yrd submit refuses a gitlink that diverged from refs/heads/main", async () => {
@@ -1346,5 +1362,291 @@ describe("settling gitlinks", () => {
         to: nested.leafMain,
       }),
     )
+  })
+})
+
+/**
+ * A component whose main moved under a change in flight (24951).
+ *
+ * The carrier pinned the component at a head that contained its main when it
+ * was submitted; by its merge turn another landing had moved that main, so the
+ * two sides diverged and the root merge refused the carrier outright. Where the
+ * two sides changed different files the queue now merges the component itself,
+ * and the carrier keeps its place.
+ */
+describe("a diverged component the merge composes", () => {
+  /**
+   * Three commits off the component's main tip, each touching a file the other
+   * two do not: what the landing moves main with, and two carriers in flight.
+   */
+  async function divergentSubmoduleCommits(
+    w: World,
+  ): Promise<Readonly<{ mainSide: string; changeSide: string; secondSide: string }>> {
+    const submoduleWork = join(w.work, "..", "submodule-work")
+    const submodule = gitIn(submoduleWork)
+    const sideCommit = async (branch: string, file: string, says: string): Promise<string> => {
+      await submodule(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(submoduleWork, file), `${says}\n`)
+      await submodule(["add", file])
+      await submodule(["commit", "--quiet", "-m", `a file only ${branch} changes`])
+      return (await submodule(["rev-parse", "HEAD"])).trim()
+    }
+    const mainSide = await sideCommit("main-side", "main-side.txt", "the landing that moved main")
+    const changeSide = await sideCommit("change-side", "change-side.txt", "the carrier in flight")
+    const secondSide = await sideCommit("second-side", "second-side.txt", "the carrier behind it")
+    await submodule(["checkout", "--quiet", "main"])
+    await submodule(["push", "--quiet", "origin", "main-side", "change-side", "second-side"])
+    return { changeSide, mainSide, secondSide }
+  }
+
+  /** The settle rows this run journaled. */
+  function settleRows(log: string): Record<string, unknown>[] {
+    return readFileSync(log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.kind === "settle")
+  }
+
+  it("lands the second of two changes moving the same gitlink, without a re-cut", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const first = await submitGitlink(w, "task/first-side", pins.mainSide)
+    const second = await submitGitlink(w, "task/second-side", pins.changeSide)
+
+    // One merge per run (D4): the first lands and moves the submodule's main.
+    const landing = await queueRun(await w.options())
+    expect(landing).toMatchObject({ exitCode: 0, failed: [], merged: ["task/first-side"], stuck: [] })
+    expect(await submoduleMain(w)).toBe(pins.mainSide)
+
+    // The second's pin and that main have now diverged; nothing re-cut it.
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/second-side"], stuck: [] })
+    const target = await remoteTip(w.git, "refs/heads/main")
+    const composed = await gitlinkAt(w, target)
+    expect(composed).not.toBe(pins.changeSide)
+    expect(composed).not.toBe(pins.mainSide)
+    // (b) retained at the component remote before the root merge recorded it.
+    expect(await submoduleRemoteRef(w, `refs/git-super/pins/${composed}`)).toBe(composed)
+    // (a) the component main tip is the FIRST parent and the carrier's pin the second.
+    const bare = gitIn(join(w.work, "..", "submodule.git"))
+    expect((await bare(["show", "-s", "--format=%P", composed])).trim()).toBe(`${pins.mainSide} ${pins.changeSide}`)
+    // (c) the composed commit reached the component's main through the landing.
+    expect(await submoduleMain(w)).toBe(composed)
+    const message = await w.git(["show", "-s", "--format=%B", target])
+    expect(message).toContain(`Settled: submodule@${composed} merged submodule-main@${pins.mainSide}`)
+    expect(settleRows(outcome.log)).toMatchObject([
+      {
+        base: w.main,
+        files: [`main 1`, `change 1`],
+        from: pins.mainSide,
+        merged: composed,
+        path: "submodule",
+        state: "merged",
+        to: pins.changeSide,
+      },
+    ])
+    const merged = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/second-side", head: second })))
+    ).find((record) => record.kind === "merged")
+    expect(merged).toBeDefined()
+    expect(trailer(merged!, "Published")).toBe(`submodule ${pins.mainSide} -> ${composed}`)
+    expect(first).not.toBe(second)
+  })
+
+  /**
+   * SPECIMEN 11 (24977 row 5): two carriers of a WALLED seat, which nothing can
+   * re-pin. The component's main moved AROUND the queue rather than through it,
+   * so no re-pin-on-signal rule reaches this carrier at all.
+   */
+  it("composes a carrier whose component main moved around the queue, then composes the one behind it", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    // Both carriers are cut and submitted while the component main is still at
+    // f-base, which is the only order a submit admits: a pin that does not
+    // contain the component's main is refused at submit, never at merge.
+    const head = await submitGitlink(w, "task/walled", pins.changeSide)
+    await submitGitlink(w, "task/walled-behind", pins.secondSide)
+    // The component pin on root main moves AROUND the queue: no landing, no
+    // signal, nothing that could re-pin a walled seat's carrier.
+    await gitlinkAroundQueue(w, pins.mainSide)
+    const bare = gitIn(join(w.work, "..", "submodule.git"))
+
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/walled"], stuck: [] })
+    const target = await remoteTip(w.git, "refs/heads/main")
+    const composed = await gitlinkAt(w, target)
+    expect((await bare(["show", "-s", "--format=%P", composed])).trim()).toBe(`${pins.mainSide} ${pins.changeSide}`)
+    const composedMessage = await bare(["show", "-s", "--format=%B", composed])
+    expect(composedMessage).toContain(`Change: task/walled@${head}`)
+    expect(composedMessage).toContain("Merged-By:")
+    // A candidate is composed once where it is JUDGED and once where it MERGES,
+    // and every carrier in the run is judged — so the journal carries a row per
+    // carrier per phase, each naming the composition that phase built.
+    const walled = settleRows(outcome.log).filter((row) => row.branch === "task/walled")
+    expect(walled.map((row) => row.phase)).toEqual(["submit", "merge"])
+    expect(walled.at(-1)).toMatchObject({
+      base: w.main,
+      files: ["main 1", "change 1"],
+      from: pins.mainSide,
+      merged: composed,
+      path: "submodule",
+      state: "merged",
+      to: pins.changeSide,
+    })
+    // Component main was fast-forwarded to the composition AFTER the root merge.
+    expect(await submoduleMain(w)).toBe(composed)
+
+    // The carrier behind it now diverges from a main the QUEUE authored, and
+    // composes against it on the next turn.
+    const second = await queueRun(await w.options())
+
+    expect(second).toMatchObject({ exitCode: 0, failed: [], merged: ["task/walled-behind"], stuck: [] })
+    const secondTarget = await remoteTip(w.git, "refs/heads/main")
+    const secondComposed = await gitlinkAt(w, secondTarget)
+    expect((await bare(["show", "-s", "--format=%P", secondComposed])).trim()).toBe(`${composed} ${pins.secondSide}`)
+    expect(await submoduleMain(w)).toBe(secondComposed)
+  })
+
+  /**
+   * A PUBLICATION that is refused stops the line (design § 9 item 4). It runs
+   * after the landing record is already on the change ref naming this merge, so
+   * some component mains may have moved and others not; leaving the change
+   * "checked" would send the next run to compose against a half-published state
+   * nobody was told about.
+   */
+  it("sticks the run when a component main moved between compose and publish", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const head = await submitGitlink(w, "task/raced-publish", pins.changeSide)
+    await gitlinkAroundQueue(w, pins.mainSide)
+    const rootBefore = await remoteTip(w.git, "refs/heads/main")
+    await using real = createProcess({ cwd: w.work })
+    let raced = 0
+    const racing: Process = {
+      ...real,
+      async run(request) {
+        const publishing =
+          request.argv.includes("super") &&
+          request.argv.includes("push") &&
+          request.argv.includes("--recurse-submodules=only")
+        if (publishing && raced++ === 0) {
+          // Between compose and publish, somebody else moves component main.
+          const submoduleWork = join(w.work, "..", "submodule-work")
+          const submodule = gitIn(submoduleWork)
+          await submodule(["checkout", "--quiet", "main"])
+          writeFileSync(join(submoduleWork, "unrelated.txt"), "moved under the queue\n")
+          await submodule(["add", "unrelated.txt"])
+          await submodule(["commit", "--quiet", "-m", "an unrelated commit on component main"])
+          await submodule(["push", "--quiet", "origin", "main"])
+        }
+        return real.run(request)
+      },
+    }
+
+    const outcome = await queueRun({ ...(await w.options()), process: racing })
+
+    expect(raced).toBeGreaterThan(0)
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/raced-publish"] })
+    const stuck = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/raced-publish", head })))
+    ).find((record) => record.kind === "stuck")
+    expect(stuck).toBeDefined()
+    expect(trailer(stuck!, "Code")).toBe("yrd-publication-refused")
+    expect(trailer(stuck!, "Via")).toContain("git super push --recurse-submodules=only")
+    // Root main did not move on this publish, and the racing commit still owns
+    // component main: nothing half-landed behind the stop.
+    expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+    expect(await submoduleMain(w)).not.toBe(await gitlinkAt(w, rootBefore))
+  })
+
+  /**
+   * The two new refusals, classified.
+   *
+   * git-super's own suite proves it EMITS these codes for a real overlap and a
+   * real unjudgeable store; what this proves is the half that lives here — that
+   * `candidateFailure` names both, because everything it does not name ends the
+   * round stuck for the whole fleet.
+   */
+  function refusingMerge(detail: Readonly<Record<string, string>>, real: Process): Process {
+    const refusal = JSON.stringify({
+      detail,
+      gitlinks: [],
+      partial: false,
+      repositories: [],
+      state: "failed",
+    })
+    return {
+      ...real,
+      async run(request) {
+        if (!request.argv.includes("super") || !request.argv.includes("merge")) return real.run(request)
+        return { durationMs: 1, exitCode: 1, signal: null, stderr: "", stdout: refusal, timedOut: false }
+      },
+    }
+  }
+
+  it("fails the change when the diverged component's two sides overlap, naming the files", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const head = await submitGitlink(w, "task/overlapping", pins.changeSide)
+    await using real = createProcess({ cwd: w.work })
+
+    const outcome = await queueRun({
+      ...(await w.options()),
+      process: refusingMerge(
+        {
+          code: "gitlink-compose-refused",
+          message: "gitlink submodule: diverged; files overlap: lib.txt",
+          next: "rebase the submodule commit onto its own main and submit again",
+          phase: "preflight-merge",
+          subject: "the diverged submodule could not be merged",
+        },
+        real,
+      ),
+    })
+
+    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/overlapping"], merged: [], stuck: [] })
+    const records = await readRecords(
+      w.git,
+      await remoteTip(w.git, changeRef("main", { branch: "task/overlapping", head })),
+    )
+    const failed = records.find((record) => record.kind === "failed")
+    expect(failed).toBeDefined()
+    expect(trailer(failed!, "Reason")).toBe("conflict")
+    expect(trailer(failed!, "Detail")).toContain("files overlap: lib.txt")
+  })
+
+  it("sticks the run, never the change, when the diverged component cannot be judged", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const head = await submitGitlink(w, "task/unjudgeable", pins.changeSide)
+    await using real = createProcess({ cwd: w.work })
+
+    const outcome = await queueRun({
+      ...(await w.options()),
+      process: refusingMerge(
+        {
+          code: "gitlink-compose-unavailable",
+          message: 'the diverged submodule at "submodule" could not be merged: the submodule store is shallow',
+          phase: "compose-gitlinks",
+          subject: "the submodule store is shallow",
+        },
+        real,
+      ),
+    })
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/unjudgeable"] })
+    const records = await readRecords(
+      w.git,
+      await remoteTip(w.git, changeRef("main", { branch: "task/unjudgeable", head })),
+    )
+    const stuck = records.find((record) => record.kind === "stuck")
+    expect(stuck).toBeDefined()
+    expect(trailer(stuck!, "Code")).toBe("yrd-gitlink-compose-unavailable")
+    expect(trailer(stuck!, "Via")).toContain("git super merge")
+    expect(trailer(stuck!, "Owner")).toBe("the queue operator")
+    expect(trailer(stuck!, "Subject")).toContain("shallow")
   })
 })
