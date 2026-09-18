@@ -752,6 +752,20 @@ describe("the ending governs the reading, never the literal tip (@i/10-yrd/24635
     await expect(
       appendRecord(git, "main", { change, kind: "stuck", subject: "the queue crashed judging task/one" }),
     ).rejects.toThrow(/already ended withdrawn at [0-9a-f]{12}/u)
+
+    // And the point of refusing it: the chain has ONE readable state. The
+    // disagreement this cures was a reader that walked to the ending and a
+    // reader that took the tip answering differently about the same head at the
+    // same moment — `queue show` said cancelled, `queue list` said stuck. With
+    // the late write refused, the tip IS the ending and there is nothing left
+    // for two readers to disagree about.
+    const tip = (await refAt(git, changeRef("main", change)))!
+    const records = written(await readRecords(git, tip))
+    expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
+    expect(readChange({ branch: "task/one", branchHead: head, records, head, headOnTarget: false }).state).toBe(
+      "withdrawn",
+    )
+    expect(records.at(-1)?.kind).toBe("withdrawn")
   })
 
   it("refuses a checked record on a chain that has ended, loudly; delivery still lands", async () => {
