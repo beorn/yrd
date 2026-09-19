@@ -10,8 +10,8 @@
  * is read again from one remote advertisement every time it is asked for.
  * One object-only fetch brings the declared target, captured pause, change tips and
  * relevant branch heads without moving a local ref or writing `FETCH_HEAD`.
- * One no-walk log reads the tip records, then ancestry is asked once per
- * distinct submitted head. A detail view expands only its selected entries
+ * One no-walk log reads the tip records, then one batched ancestry walk
+ * covers the distinct submitted heads. A detail view expands only its selected entries
  * through `readHistories` to recover phase-specific check evidence, and the
  * queue run expands exactly the entries whose tip could hide an ending
  * (`readObscuredEndings`, @i/10-yrd/24635). A remote with thousands of
@@ -29,7 +29,7 @@ import {
   type ChangeRecord,
   type Git,
 } from "./records.ts"
-import { GitExit, isAncestor } from "./git.ts"
+import { GitExit, offTheTarget } from "./git.ts"
 import { lineStop, parsePause, readPause, type PauseRecord } from "./pause.ts"
 import { changeName, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
 import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"
@@ -162,7 +162,8 @@ export async function readQueue(
   }
 
   const tips = await tipRecords(git, changeRefs)
-  const headOnTarget = new Map<string, boolean>()
+  const uniqueHeads = [...new Set(changeRefs.map(({ change }) => change.head))]
+  const offTarget = await offTheTarget(git, uniqueHeads, targetSha)
   const capturedPause = pauseSha === undefined ? undefined : await parsePause(git, pauseSha, `${remote} ${pause}`)
 
   const entries: QueueEntry[] = []
@@ -187,11 +188,7 @@ export async function readQueue(
         checked.push({ mergeOid: merge, recordRef: ref, recordOid: tip.sha })
       }
     }
-    let isHeadOnTarget = headOnTarget.get(submitted.head)
-    if (isHeadOnTarget === undefined) {
-      isHeadOnTarget = await isAncestor(git, submitted.head, targetSha)
-      headOnTarget.set(submitted.head, isHeadOnTarget)
-    }
+    const isHeadOnTarget = !offTarget.has(submitted.head)
     const change: ChangeRecords = {
       ...(branchHead === undefined ? {} : { branchHead }),
       branch: submitted.branch,

@@ -670,6 +670,22 @@ export async function isAncestor(git: Git, sha: string, of: string): Promise<boo
 }
 
 /**
+ * The heads among these the target does not contain, from ONE `rev-list` of
+ * them not reachable from it. Empty heads: no git. Exit 1 is not an answer
+ * here (ordinary off-target is an empty listing, exit 0); missing or corrupt
+ * objects rethrow, same as {@link isAncestor} on 128.
+ */
+export async function offTheTarget(
+  git: Git,
+  heads: readonly string[],
+  targetSha: string,
+): Promise<ReadonlySet<string>> {
+  if (heads.length === 0) return new Set()
+  const listed = new Set((await git(["rev-list", "--stdin", `^${targetSha}`], `${heads.join("\n")}\n`)).split("\n"))
+  return new Set(heads.filter((head) => listed.has(head)))
+}
+
+/**
  * One git configuration value as this repository resolves it — every scope git
  * honours, in git's own order — or undefined when nothing sets it. Git spells
  * "no such key" as exit 1, the third of the three answers this file reads.

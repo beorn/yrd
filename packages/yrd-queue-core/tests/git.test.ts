@@ -578,3 +578,78 @@ ${body}
   )
   return path
 }
+
+describe("offTheTarget", () => {
+  async function ancestryRepo(): Promise<{
+    git: Awaited<ReturnType<typeof gitIn>>
+    root: string
+    target: string
+    onTarget: string
+    offTarget: string
+  }> {
+    const root = temporaryRoot("off-the-target")
+    const git = gitIn(root)
+    await git(["init", "-q", "-b", "main"])
+    await git(["config", "user.email", "t@t"])
+    await git(["config", "user.name", "t"])
+    writeFileSync(join(root, "f"), "0\n")
+    await git(["add", "f"])
+    await git(["commit", "-q", "-m", "base"])
+    const onTarget = (await git(["rev-parse", "HEAD"])).trim()
+    writeFileSync(join(root, "f"), "1\n")
+    await git(["add", "f"])
+    await git(["commit", "-q", "-m", "target"])
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "-q", "-b", "side", onTarget])
+    writeFileSync(join(root, "f"), "side\n")
+    await git(["add", "f"])
+    await git(["commit", "-q", "-m", "off"])
+    const offTarget = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "-q", "main"])
+    return { git, root, target, onTarget, offTarget }
+  }
+
+  it("returns only candidate heads not on the target, from one rev-list", async () => {
+    const { git, target, onTarget, offTarget } = await ancestryRepo()
+    let revList = 0
+    let mergeBase = 0
+    const counting = async (args: readonly string[], input?: string) => {
+      if (args.includes("rev-list")) revList++
+      if (args.includes("merge-base")) mergeBase++
+      return git(args, input)
+    }
+    const heads = [onTarget, offTarget, target, onTarget]
+    const off = await gitRunner.offTheTarget(counting, heads, target)
+    expect([...off].sort()).toEqual([offTarget])
+    expect(revList).toBe(1)
+    expect(mergeBase).toBe(0)
+  })
+
+  it("issues no git when heads is empty", async () => {
+    const { git, target } = await ancestryRepo()
+    let calls = 0
+    const counting = async (args: readonly string[], input?: string) => {
+      calls++
+      return git(args, input)
+    }
+    const off = await gitRunner.offTheTarget(counting, [], target)
+    expect(off.size).toBe(0)
+    expect(calls).toBe(0)
+  })
+
+  it("ordinary off-target is false for isAncestor and present in offTheTarget", async () => {
+    const { git, target, onTarget, offTarget } = await ancestryRepo()
+    expect(await gitRunner.isAncestor(git, onTarget, target)).toBe(true)
+    expect(await gitRunner.isAncestor(git, offTarget, target)).toBe(false)
+    const off = await gitRunner.offTheTarget(git, [onTarget, offTarget], target)
+    expect(off.has(offTarget)).toBe(true)
+    expect(off.has(onTarget)).toBe(false)
+  })
+
+  it("a missing object is a loud failure, not a silent false", async () => {
+    const { git, target, onTarget } = await ancestryRepo()
+    const missing = "a".repeat(40)
+    await expect(gitRunner.isAncestor(git, missing, target)).rejects.toThrow()
+    await expect(gitRunner.offTheTarget(git, [onTarget, missing], target)).rejects.toThrow()
+  })
+})

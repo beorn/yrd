@@ -29,6 +29,7 @@
  * undated.
  */
 
+import { offTheTarget } from "./git.ts"
 import type { Git } from "./records.ts"
 import type { QueueEntry } from "./remote.ts"
 
@@ -124,11 +125,4 @@ async function commitFacts(
     throw new Error(`git log gave no committer date for present commit(s) ${unanswered.join(", ")}`)
   }
   return facts
-}
-
-/** The heads among these the target does not contain, from ONE `rev-list` of them not reachable from it. */
-async function offTheTarget(git: Git, heads: readonly string[], targetSha: string): Promise<ReadonlySet<string>> {
-  if (heads.length === 0) return new Set()
-  const listed = new Set((await git(["rev-list", "--stdin", `^${targetSha}`], `${heads.join("\n")}\n`)).split("\n"))
-  return new Set(heads.filter((head) => listed.has(head)))
 }
