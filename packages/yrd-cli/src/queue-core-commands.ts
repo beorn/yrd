@@ -759,19 +759,27 @@ export async function coreQueueCommand(
     }
     case "run": {
       if (request.tier === "long") {
-        let lastExitCode: YrdCliExitCode = 0
+        let worstExitCode: YrdCliExitCode = 0
         while (request.stopAtMs === undefined || Date.now() < request.stopAtMs) {
           const ran = await lockedRound({ tier: request.tier, stopAtMs: request.stopAtMs })
           if (typeof ran === "number") return ran
-          lastExitCode = ran.outcome.exitCode
-          if (lastExitCode !== 0) return lastExitCode
-          if (ran.outcome.merged.length === 0) break
+          const exitCode = ran.outcome.exitCode
+          if (exitCode > worstExitCode) worstExitCode = exitCode
+          if (exitCode === 2) return 2
+          if (ran.outcome.merged.length === 0 && ran.outcome.failed.length === 0) break
         }
         if (request.stopAtMs !== undefined && Date.now() >= request.stopAtMs) {
           io.stderr("yrd: stop time reached; leaving remaining changes deferred\n")
         }
-        return lastExitCode
+        return worstExitCode
       }
+      // One round, exactly `up`'s own (0 pass, 1 fail, 2 stuck): `outcome.exitCode`
+      // already carries that ladder, so forwarding it verbatim is the whole of
+      // the contract — a round a stuck change stopped, doing no other work,
+      // ends 2 here (run.ts's on-submit and on-merge steps set `exitCode: 2`
+      // the moment anything comes back stuck, never 0). A run that could not
+      // even judge answers 2 from the locked round, that same stuck, already
+      // said by `stuck()` above (@i/10-yrd/24141 AC1).
       const ran = await lockedRound()
       return typeof ran === "number" ? ran : ran.outcome.exitCode
     }

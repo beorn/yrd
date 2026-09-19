@@ -825,6 +825,9 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
       return { ...base, exit: 1, result: "fail" }
     case 2:
       return { ...base, exit: result.exitCode, result: "stuck", why: "the check said it could not judge" }
+    // 3 is the affected tests' cannot-judge. It is stuck like 2, never a fail
+    // billed to the submitter: a check that did not judge the change has no
+    // verdict about it, and a stuck change stops the line (@cto 7645ec3a).
     case 3: {
       const marker = checkResultFromLog(log)
       if (marker?.result === "deferred") {

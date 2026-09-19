@@ -3526,3 +3526,92 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
     expect(await carries(rounds[1]?.base ?? "", second), said()).toBe(true)
   }, 60_000)
 })
+
+describe("yrd queue run --tier long", () => {
+  it("continues after exit 1 so younger deferred changes judge and merge when older fails", async () => {
+    const w = await world()
+    const checkScript = join(w.workdir, "tier-check.sh")
+    writeFileSync(
+      checkScript,
+      [
+        "#!/bin/sh",
+        'if [ "$YRD_CHECK_TIER" != "long" ]; then',
+        '  echo \'YRD-CHECK-RESULT {"result":"deferred","reason":"too wide","projectedMs":3600000,"boundMs":1800000}\'',
+        "  exit 3",
+        "fi",
+        'if [ -f fail-in-long.txt ]; then',
+        "  exit 1",
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(checkScript, 0o755)
+
+    await redeclare(
+      w,
+      [
+        "checks:",
+        "  - tier-check:",
+        `      run: ${checkScript}`,
+        "      timeoutMs: 1800000",
+        "      long:",
+        "        timeoutMs: 5400000",
+        "",
+      ].join("\n"),
+    )
+
+    await w.git(["checkout", "--quiet", "-b", "task/older", "main"])
+    writeFileSync(join(w.work, "fail-in-long.txt"), "fail\n")
+    await w.git(["add", "fail-in-long.txt"])
+    await w.git(["commit", "--quiet", "-m", "older change"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/older",
+      submitter: "@dev/1",
+      target: { branch: "main", remote: "origin" },
+    })
+
+    await w.git(["checkout", "--quiet", "-b", "task/younger", "main"])
+    writeFileSync(join(w.work, "pass-in-long.txt"), "pass\n")
+    await w.git(["add", "pass-in-long.txt"])
+    await w.git(["commit", "--quiet", "-m", "younger change"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/younger",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+
+    const normalRun = capture(w.work)
+    expect(await coreQueueCommand(w.work, normalRun.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
+
+    const listed = capture(w.work)
+    expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes.filter(
+      (r) => r.branch !== "main",
+    )
+    expect(rows.map((r) => [r.branch, r.state])).toEqual([
+      ["task/older", "deferred"],
+      ["task/younger", "deferred"],
+    ])
+
+    const longRun = capture(w.work)
+    const exitCode = await coreQueueCommand(
+      w.work,
+      longRun.io,
+      { command: "run", tier: "long" },
+      { json: true, workdir: w.workdir },
+    )
+    expect(exitCode).toBe(1)
+
+    const listedAfter = capture(w.work)
+    expect(await coreQueueCommand(w.work, listedAfter.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const rowsAfter = (records(listedAfter)[0] as { changes: readonly Record<string, unknown>[] }).changes
+    const olderRow = rowsAfter.find((r) => r.branch === "task/older")
+    const youngerRow = rowsAfter.find((r) => r.branch === "task/younger")
+    expect(olderRow?.state).toBe("failed")
+    expect(youngerRow?.state).toBe("merged")
+  })
+})
+
