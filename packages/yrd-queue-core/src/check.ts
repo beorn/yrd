@@ -426,14 +426,10 @@ export type CheckVerdict = Readonly<{
 }>
 
 /**
- * The last computed pass/fail/deferred a check named on its log, or nothing when it
- * never did. A malformed line is not a verdict: timeout then stays stuck,
- * which is the existing bound path — and the failure is loud, so a stuck
- * round is distinguishable from a rescued one (24623).
- *
+ * Parse the structured CheckVerdict from the last YRD-CHECK-RESULT marker.
  * Condition 6: An unknown result marker is refused loudly.
  */
-export function readCheckResult(text: string): CheckVerdict | undefined {
+export function readCheckVerdict(text: string): CheckVerdict | undefined {
   const marked = text.split("\n").filter((line) => line.startsWith(`${CHECK_RESULT_MARKER} `))
   const line = marked.at(-1)
   if (line === undefined) return undefined
@@ -478,9 +474,17 @@ export function readCheckResult(text: string): CheckVerdict | undefined {
   return undefined
 }
 
+/**
+ * The last computed pass/fail/deferred string a check named on its log, or nothing when it
+ * never did.
+ */
+export function readCheckResult(text: string): "pass" | "fail" | "deferred" | undefined {
+  return readCheckVerdict(text)?.result
+}
+
 function checkResultFromLog(log: string): CheckVerdict | undefined {
   try {
-    return readCheckResult(readFileSync(log, "utf8"))
+    return readCheckVerdict(readFileSync(log, "utf8"))
   } catch (error) {
     if (error instanceof Error && error.message.startsWith(`${CHECK_RESULT_MARKER}: unknown result`)) {
       throw error
@@ -829,7 +833,6 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
     default:
       return { ...base, exit: result.exitCode, result: "stuck", why: `exit ${result.exitCode} is not a verdict` }
   }
-
 }
 
 /**

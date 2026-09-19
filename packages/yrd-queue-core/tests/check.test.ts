@@ -19,6 +19,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import type { Process, ProcessRequest, ProcessResult } from "@yrd/process"
 import { checkLogPath, runCheck } from "../src/index.ts"
 import type { CheckedTree } from "../src/index.ts"
+import { readCheckResult, readCheckVerdict } from "../src/check.ts"
 
 // A mutable facade permits narrow faults at existing filesystem calls only.
 vi.mock("node:fs", async (original) => ({ ...(await original<typeof import("node:fs")>()) }))
@@ -655,3 +656,37 @@ describe("check exit codes", () => {
   })
 })
 
+describe("readCheckResult and readCheckVerdict", () => {
+  it("readCheckResult returns string literals pass, fail, deferred, or undefined", () => {
+    expect(readCheckResult('YRD-CHECK-RESULT {"result":"pass","exit":0}')).toBe("pass")
+    expect(readCheckResult('YRD-CHECK-RESULT {"result":"fail","exit":1}')).toBe("fail")
+    expect(
+      readCheckResult(
+        'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":3480000,"boundMs":1800000}',
+      ),
+    ).toBe("deferred")
+    expect(readCheckResult("some log with no marker")).toBeUndefined()
+    expect(readCheckResult('YRD-CHECK-RESULT {"exit":0}')).toBe("pass")
+    expect(readCheckResult('YRD-CHECK-RESULT {"exit":1}')).toBe("fail")
+  })
+
+  it("readCheckVerdict returns full structured CheckVerdict", () => {
+    expect(
+      readCheckVerdict(
+        'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":3480000,"boundMs":1800000}',
+      ),
+    ).toEqual({
+      result: "deferred",
+      exit: undefined,
+      reason: "projection-exceeded",
+      projectedMs: 3480000,
+      boundMs: 1800000,
+    })
+  })
+
+  it("throws on unknown result marker", () => {
+    expect(() => readCheckVerdict('YRD-CHECK-RESULT {"result":"unknown-verdict"}')).toThrow(
+      'YRD-CHECK-RESULT: unknown result "unknown-verdict"',
+    )
+  })
+})
