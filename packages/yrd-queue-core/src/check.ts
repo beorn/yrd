@@ -55,6 +55,10 @@ export type CheckSpec = Readonly<{
   run: string
   /** The bound; the plan's default is thirty minutes. */
   timeoutMs?: number
+  /** Long-tier configuration overrides. */
+  long?: Readonly<{
+    timeoutMs: number
+  }>
   /** Environment names passed through from the queue's own environment. */
   environmentPassthrough?: readonly string[]
   /** The phases the check runs in; absent means merge (ruling A1). */
@@ -123,6 +127,8 @@ export type RunCheck = Readonly<{
   tmpdir: string
   process?: Process
   env?: NodeJS.ProcessEnv
+  /** Which check tier is running: normal (default) or long. */
+  tier?: "normal" | "long"
   /**
    * What the check itself asked for in this run, read off its own earlier log
    * (narrowing.ts). It joins the environment after the declaration's
@@ -711,9 +717,12 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   // set it only after its declaration and absolute queue argument agreed.
   delete env.YRD_PROGRAM_ROOT
   if (programRoot !== undefined) env.YRD_PROGRAM_ROOT = programRoot
-  const timeoutMs = run.spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
+  const timeoutMs =
+    (run.tier === "long" ? run.spec.long?.timeoutMs : undefined) ?? run.spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
   delete env.YRD_CHECK_TIMEOUT_MS
   env.YRD_CHECK_TIMEOUT_MS = String(timeoutMs)
+  delete env.YRD_CHECK_TIER
+  env.YRD_CHECK_TIER = run.tier ?? "normal"
   // Create-only, always, and open before the child exists. Every caller writes
   // under a directory of its own — the queue run's is keyed by change, run and
   // phase, `yrd check`'s by the instant it was invoked — so a path that already

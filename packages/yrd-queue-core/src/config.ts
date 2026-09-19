@@ -87,7 +87,7 @@ const TARGET_GRAMMAR = "must be <remote>#<branch>, e.g. origin#main"
 const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]"
 
 /** The endings the queue can notify about; it has no others to run a command on. */
-export const ENDINGS = ["merged", "failed", "stuck", "merged-direct", "observed"] as const
+export const ENDINGS = ["merged", "failed", "stuck", "merged-direct", "observed", "deferred"] as const
 const DEFAULT_ENDINGS = ["merged", "failed", "stuck", "merged-direct"] as const
 
 export type Ending = (typeof ENDINGS)[number]
@@ -255,7 +255,7 @@ function readChecks(value: unknown): readonly CheckSpec[] {
     value,
     "checks",
     ["submit", "merge"],
-    ["timeoutMs", "environmentPassthrough", "scripts", "programRoot"],
+    ["timeoutMs", "environmentPassthrough", "scripts", "programRoot", "long"],
   ).map((entry, index) => {
     const { body, name } = entry
     const where = `.yrd.yml checks[${index}] ${name}`
@@ -281,8 +281,19 @@ function readChecks(value: unknown): readonly CheckSpec[] {
     if (programRoot !== undefined && programRoot !== true) {
       throw new Error(`${where}: programRoot: must be true when present`)
     }
+    const long = body.long
+    if (long !== undefined) {
+      if (!isRecord(long)) {
+        throw new Error(`${where}: long: must be a mapping of long-tier options`)
+      }
+      onlyKeys(long, ["timeoutMs"], `${where} long`)
+      if (typeof long.timeoutMs !== "number" || long.timeoutMs <= 0) {
+        throw new Error(`${where} long: timeoutMs: must be a positive number`)
+      }
+    }
     return {
       environmentPassthrough: passthrough as readonly string[] | undefined,
+      ...(long === undefined ? {} : { long: { timeoutMs: long.timeoutMs as number } }),
       name,
       on: entry.on as readonly ("submit" | "merge")[] | undefined,
       ...(programRoot === true ? { programRoot: true as const } : {}),

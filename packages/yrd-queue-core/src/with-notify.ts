@@ -165,7 +165,7 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
   // it would put `sent State: failed` on top of a merged change and tell its
   // submitter to fix what has already merged (ruling A2).
   if (entry.change.headOnTarget && endedKind(tip) !== "merged") return
-  const unsent = tip.kind === "failed" || tip.kind === "stuck" || tip.kind === "merged"
+  const unsent = tip.kind === "failed" || tip.kind === "stuck" || tip.kind === "merged" || tip.kind === "deferred"
   if (tip.kind !== "sent" && !unsent) return
   // A retired change sends nothing (ruling B3).
   const reason = trailer(tip, "Reason")
@@ -175,7 +175,12 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
     throw new Error(`${entry.change.branch}: sent record ${tip.sha.slice(0, 12)} names no ended record to send again`)
   }
   const written = tip.kind === "sent" ? await readRecord(run.git, endedSha) : tip
-  if (written.kind !== "failed" && written.kind !== "stuck" && written.kind !== "merged") {
+  if (
+    written.kind !== "failed" &&
+    written.kind !== "stuck" &&
+    written.kind !== "merged" &&
+    written.kind !== "deferred"
+  ) {
     throw new Error(`${entry.change.branch}: ${endedSha.slice(0, 12)} is a ${written.kind} record, not an ended one`)
   }
   await run.steps.ended(run, entry, written.kind, written.sha, tip.sha)
@@ -183,8 +188,16 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
 
 /** The one message an ended change sends, in the plan's three shapes (§ Commands). */
 function messageFor(
-  kind: "merged" | "failed" | "stuck",
-  about: Readonly<{ branch: string; head: string; subject: string; merge?: string; remedy?: string }>,
+  kind: "merged" | "failed" | "stuck" | "deferred",
+  about: Readonly<{
+    branch: string
+    head: string
+    subject: string
+    merge?: string
+    remedy?: string
+    projectedMs?: number
+    boundMs?: number
+  }>,
 ): string {
   switch (kind) {
     case "merged":
@@ -193,6 +206,15 @@ function messageFor(
       return `send it back: ${about.subject}; ${about.remedy ?? ""}`.trim()
     case "stuck":
       return `yrd broken: ${about.subject}; the queue stays down until a person fixes it`
+    case "deferred": {
+      const projMin = about.projectedMs !== undefined ? Math.round(about.projectedMs / 60_000) : undefined
+      const boundMin = about.boundMs !== undefined ? Math.round(about.boundMs / 60_000) : undefined
+      const timing =
+        projMin !== undefined && boundMin !== undefined
+          ? `projected ${projMin}m > ${boundMin}m`
+          : "projection exceeded bound"
+      return `waits for long check: ${short(about.branch, about.head)} (${timing})`
+    }
   }
 }
 
@@ -204,7 +226,7 @@ function messageFor(
 async function told(
   run: Run,
   entry: QueueEntry,
-  kind: "merged" | "failed" | "stuck",
+  kind: "merged" | "failed" | "stuck" | "deferred",
   endedRecord: string,
   initialAppendTip: string,
 ): Promise<void> {
@@ -257,6 +279,8 @@ async function told(
     merge: trailer(written, "Merge") ?? "",
     remedy: trailer(written, "Remedy"),
     subject: written.subject,
+    projectedMs: trailer(written, "ProjectedMs") !== undefined ? Number(trailer(written, "ProjectedMs")) : undefined,
+    boundMs: trailer(written, "BoundMs") !== undefined ? Number(trailer(written, "BoundMs")) : undefined,
   })
   // The queue addresses nobody. It says what happened and runs the entries that
   // want this ending; who hears about it is their own business. The submitter
@@ -279,6 +303,13 @@ async function told(
       ...(kind === "merged" ? { merge: trailer(written, "Merge") ?? "" } : { log, reason: reasonFor(kind, written) }),
       ...(kind === "failed" ? { failures: await failuresOf(run, entry, endedRecord) } : {}),
       ...(kind === "failed" ? await priorFailureReason(run, entry, endedRecord) : {}),
+      ...(kind === "deferred"
+        ? {
+            projectedMs:
+              trailer(written, "ProjectedMs") !== undefined ? Number(trailer(written, "ProjectedMs")) : undefined,
+            boundMs: trailer(written, "BoundMs") !== undefined ? Number(trailer(written, "BoundMs")) : undefined,
+          }
+        : {}),
     },
     owed,
   )
@@ -373,11 +404,15 @@ export type NotifyRecord =
        * notifier then says what it always said.
        */
       priorReason?: string
+      projectedMs?: number
+      boundMs?: number
     }>
 
-/** Why a change ended, as its record says it: the check for a fail, the sentence for a stuck. */
-function reasonFor(kind: "failed" | "stuck", ended: ChangeRecord): string {
-  return kind === "failed" ? (trailer(ended, "Reason") ?? "check") : ended.subject
+/** Why a change ended, as its record says it: the check for a fail, the sentence for a stuck, the projection reason for deferred. */
+function reasonFor(kind: "failed" | "stuck" | "deferred", ended: ChangeRecord): string {
+  return kind === "failed" || kind === "deferred"
+    ? (trailer(ended, "Reason") ?? (kind === "failed" ? "check" : "projection-exceeded"))
+    : ended.subject
 }
 
 /** The ending a direct merge is; the other three are how a change itself ended. */
@@ -658,5 +693,7 @@ const RESULT_TRAILERS = new Set([
   "Base",
   "Gitlink",
   "Merged-By",
+  "ProjectedMs",
+  "BoundMs",
   ...INCIDENT_TRAILERS,
 ])

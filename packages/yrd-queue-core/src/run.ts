@@ -106,7 +106,7 @@ import {
 } from "./remote.ts"
 import { GitlinkNotOnRemote, ReferenceUnpopulated } from "./reference.ts"
 import { setupStuckCode, setupStuckNext, transportFaultIn } from "./setup-transport.ts"
-import { inLine, tipOf } from "./state.ts"
+import { inLine, openedAt, tipOf } from "./state.ts"
 import {
   checkedTree,
   claimWorktrees,
@@ -158,6 +158,10 @@ export type QueueRunOptions = Readonly<{
   git?: Git
   process?: Process
   env?: NodeJS.ProcessEnv
+  /** Which check tier to run: normal (default) or long. */
+  tier?: "normal" | "long"
+  /** Stop starting new checks after this epoch timestamp in ms (Condition 5). */
+  stopAtMs?: number
 }> &
   RingOptions
 
@@ -335,7 +339,7 @@ export type Steps = Readonly<{
   ended: (
     run: Run,
     entry: QueueEntry,
-    kind: "merged" | "failed" | "stuck",
+    kind: "merged" | "failed" | "stuck" | "deferred",
     endedRecord: string,
     appendTip: string,
   ) => Promise<void>
@@ -600,7 +604,8 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // below writes a change record or tells somebody about one, so a stopped round
   // leaves every change exactly as it found it while still surfacing direct merges.
   stopped = await run.steps.open(run)
-  if (stopped !== undefined) return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred }, stopped)
+  if (stopped !== undefined)
+    return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred }, stopped)
 
   // Bookkeeping at the edges of the records first, so every reader below reads
   // records and never reconciles. A bookkeeping pass can itself end an entry
@@ -616,6 +621,76 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
         await run.steps.stopLine(run, entry),
       )
     }
+  }
+
+  if (options.tier === "long") {
+    // In the long tier: process deferred changes, oldest first (Condition 5).
+    const deferredEntries = entries
+      .filter(
+        (entry) =>
+          entry.reading.state === "deferred" &&
+          (options.only === undefined ||
+            (entry.change.branch === options.only.branch && entry.change.head === options.only.head)),
+      )
+      .sort((left, right) => openedAt(left.change) - openedAt(right.change))
+
+    if (deferredEntries.length === 0) {
+      return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+    }
+
+    if (options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+      log.write({
+        kind: "observation",
+        why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting new checks and leaving remaining changes deferred`,
+      })
+      return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+    }
+
+    const entry = deferredEntries[0]
+    if (entry === undefined) {
+      return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+    }
+    const outcome = await judged(run, entry, () => run.steps.judge(run, entry))
+    if (outcome === "stuck") {
+      stuck.push(entry.change.branch)
+      return finish(
+        run,
+        2,
+        { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred },
+        await run.steps.stopLine(run, entry),
+      )
+    }
+    if (outcome === "failed") {
+      failed.push(entry.change.branch)
+      return finish(run, 1, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+    }
+    if (outcome === "checked") {
+      const queueAfterJudge = (await read()).changes
+      const checkedEntry = queueAfterJudge.find(
+        (e) => e.change.branch === entry.change.branch && e.change.head === entry.change.head,
+      )
+      if (checkedEntry !== undefined) {
+        const mergeOutcome = await judged(run, checkedEntry, () => run.steps.merge(run, checkedEntry))
+        if (mergeOutcome === "stuck") {
+          stuck.push(entry.change.branch)
+          return finish(
+            run,
+            2,
+            { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred },
+            await run.steps.stopLine(run, checkedEntry),
+          )
+        }
+        if (mergeOutcome === "failed") {
+          failed.push(entry.change.branch)
+          return finish(run, 1, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+        }
+        if (mergeOutcome === "merged") {
+          merged.push(entry.change.branch)
+          return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+        }
+      }
+    }
+    return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
   }
 
   // On-submit: every queued change, oldest first, in a fresh worktree of its
@@ -1004,7 +1079,7 @@ async function writeDeferredRecord(
     trailers.push(["BoundMs", String(deferredOne.boundMs)])
   }
   trailers.push(...checkTrailers(results))
-  await writeRecord(
+  const deferredSha = await writeRecord(
     run,
     {
       change,
@@ -1014,6 +1089,9 @@ async function writeDeferredRecord(
     },
     tipOf(entry.change).sha,
   )
+  if (deferredSha !== undefined) {
+    await run.steps.ended(run, entry, "deferred", deferredSha, deferredSha)
+  }
   return "deferred"
 }
 
@@ -1054,6 +1132,21 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     const deferredOne = results.find((result) => result.result === "deferred")
     if (deferredOne !== undefined) {
+      if (run.options.tier === "long") {
+        return await run.steps.end(
+          run,
+          entry,
+          "stuck",
+          stuckWrite(run, entry.change.branch, {
+            code: "yrd-check-unresolved",
+            next: `inspect ${deferredOne.name} duration or reduce change scope`,
+            subject:
+              `the long tier check could not complete for ${branch}: ${deferredOne.name} projection exceeded bound`.trim(),
+            trailers: checkTrailers(results),
+            via: `${deferredOne.name} during submit`,
+          }),
+        )
+      }
       return await writeDeferredRecord(run, entry, "submit", deferredOne, results)
     }
     const failing = results.filter((result) => result.result === "fail")
@@ -2117,6 +2210,21 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     const deferredOne = results.find((result) => result.result === "deferred")
     if (deferredOne !== undefined) {
+      if (run.options.tier === "long") {
+        return await run.steps.end(
+          run,
+          entry,
+          "stuck",
+          stuckWrite(run, entry.change.branch, {
+            code: "yrd-check-unresolved",
+            next: `inspect ${deferredOne.name} duration or reduce change scope`,
+            subject:
+              `the long tier check could not complete for ${branch} at merge: ${deferredOne.name} projection exceeded bound`.trim(),
+            trailers: checkTrailers(results),
+            via: `${deferredOne.name} during merge`,
+          }),
+        )
+      }
       return await writeDeferredRecord(run, entry, "merge", deferredOne, results)
     }
     const failing = results.filter((result) => result.result === "fail")
@@ -2608,6 +2716,7 @@ async function check(
         plumbing: run.plumbing,
         setup: run.options.setup,
         extraEnv,
+        tier: run.options.tier,
       })
     } catch (error) {
       if (!(error instanceof ProgramSubjectSetupFailed) || phase === "base") throw error
@@ -2652,6 +2761,7 @@ async function runDeclaredCheck(
     tmpdir: run.tmpdir,
     spec,
     tree,
+    tier: run.options.tier,
     ...(extraEnv === undefined ? {} : { extraEnv }),
   })
   recordProgramResult(run, { ...about, end: new Date().toISOString(), start }, result)

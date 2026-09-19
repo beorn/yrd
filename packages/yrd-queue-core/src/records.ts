@@ -544,9 +544,7 @@ export function tipRecord(record: ChangeRecord | undefined, sha: string, where: 
     changeOf(record, where)
     return record
   }
-  throw new Error(
-    `${where} at ${sha.slice(0, 12)} carries no valid Record: ${RECORD_KINDS.join("|")} trailer`,
-  )
+  throw new Error(`${where} at ${sha.slice(0, 12)} carries no valid Record: ${RECORD_KINDS.join("|")} trailer`)
 }
 
 /** Every value of a trailer, in order. */
@@ -558,7 +556,9 @@ export function trailers(record: ChangeRecord, name: string): readonly string[] 
 export function endedKind(tip: ChangeRecord): RecordKind {
   if (tip.kind !== "sent") return tip.kind
   const state = trailer(tip, "State")
-  return state === "merged" || state === "failed" || state === "stuck" || state === "withdrawn" ? state : "sent"
+  return state === "merged" || state === "failed" || state === "stuck" || state === "withdrawn" || state === "deferred"
+    ? state
+    : "sent"
 }
 
 /**

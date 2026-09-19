@@ -31,6 +31,7 @@ export type ProgramRootCheck = Readonly<{
   log: QueueRunLog
   setup?: string
   extraEnv?: Readonly<Record<string, string>>
+  tier?: "normal" | "long"
 }> &
   Pick<PrepareWorktree, "env" | "process" | "selection" | "gitOptions" | "populateReference" | "plumbing">
 
@@ -346,6 +347,7 @@ export async function programRootCheck(run: ProgramRootCheck): Promise<CheckResu
       tree,
       extraEnv: run.extraEnv,
       programRoot: program.path,
+      tier: run.tier,
     })
     recordProgramResult(run, { ...about, end: new Date().toISOString(), start }, result)
     return result

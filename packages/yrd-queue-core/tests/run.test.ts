@@ -29,6 +29,7 @@ import {
   changeRef,
   checkLogPath,
   gitIn,
+  holdsPlaceInLine,
   list,
   mergedByRun,
   pauseRef,
@@ -47,7 +48,15 @@ import {
   withdraw,
   writePause,
 } from "../src/index.ts"
-import type { ChangeRecord, CheckedTree, Git, PauseRecord, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
+import type {
+  ChangeRecord,
+  CheckedTree,
+  CheckSpec,
+  Git,
+  PauseRecord,
+  QueueRunOptions,
+  QueueRunOutcome,
+} from "../src/index.ts"
 import { resolveGitSelection } from "../src/git.ts"
 
 const roots: string[] = []
@@ -1601,14 +1610,19 @@ describe("a queue run", () => {
     await fetchChanges(w)
     const refOne = changeRef("main", { branch: "task/one", head: headOne })
     const recordsOne = await readRecords(w.git, (await refAt(w.git, refOne))!)
+    const deferredRec = recordsOne.find((r) => r.kind === "deferred")!
+    expect(deferredRec).toBeDefined()
+    expect(trailer(deferredRec, "Reason")).toBe("projection-exceeded")
+    expect(trailer(deferredRec, "Phase")).toBe("merge")
+    expect(trailer(deferredRec, "ProjectedMs")).toBe("3480000")
+    expect(trailer(deferredRec, "BoundMs")).toBe("1800000")
+    expect(trailer(deferredRec, "Projected")).toBeUndefined()
+    expect(trailer(deferredRec, "Bound")).toBeUndefined()
     const lastOne = recordsOne.at(-1)!
-    expect(lastOne.kind).toBe("deferred")
-    expect(trailer(lastOne, "Reason")).toBe("projection-exceeded")
-    expect(trailer(lastOne, "Phase")).toBe("merge")
+    expect(lastOne.kind).toBe("sent")
+    expect(trailer(lastOne, "State")).toBe("deferred")
     expect(trailer(lastOne, "ProjectedMs")).toBe("3480000")
     expect(trailer(lastOne, "BoundMs")).toBe("1800000")
-    expect(trailer(lastOne, "Projected")).toBeUndefined()
-    expect(trailer(lastOne, "Bound")).toBeUndefined()
   })
 
   it("a check that defers on submit writes Phase: submit trailer and defers before checked state", async () => {
@@ -1641,14 +1655,255 @@ describe("a queue run", () => {
     await fetchChanges(w)
     const ref = changeRef("main", { branch: "task/wide", head })
     const records = await readRecords(w.git, (await refAt(w.git, ref))!)
-    expect(records.map((r) => r.kind)).toEqual(["opened", "deferred"])
-    const last = records.at(-1)!
+    expect(records.map((r) => r.kind)).toEqual(["opened", "deferred", "sent"])
+    const last = records.find((r) => r.kind === "deferred")!
     expect(trailer(last, "Phase")).toBe("submit")
     expect(trailer(last, "Reason")).toBe("projection-exceeded")
     expect(trailer(last, "ProjectedMs")).toBe("3600000")
     expect(trailer(last, "BoundMs")).toBe("1800000")
     expect(trailer(last, "Projected")).toBeUndefined()
     expect(trailer(last, "Bound")).toBeUndefined()
+    const sent = records.at(-1)!
+    expect(sent.kind).toBe("sent")
+    expect(trailer(sent, "State")).toBe("deferred")
+  })
+
+  it("a deferred result notifies the submitter with projected and bound minutes and writes sent record", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/deferred-notify", "file.txt")
+    const check = join(w.workdir, "deferred-notify-check.sh")
+    writeFileSync(
+      check,
+      [
+        "#!/bin/sh",
+        `echo 'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":3480000,"boundMs":1800000}'`,
+        "exit 3",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(check, 0o755)
+    const base = await w.options({ timeoutMs: 1800000 })
+    const outcome = await queueRun({
+      ...base,
+      checks: [{ ...base.checks[0]!, on: ["submit"] as const, run: check, timeoutMs: 1800000 }],
+      notify: [{ name: "recorder", on: ["deferred"], run: w.notifier }],
+    })
+    expect(outcome.deferred).toEqual(["task/deferred-notify"])
+    const msgs = messages(w)
+    expect(msgs.length).toBe(1)
+    expect(msgs[0]).toMatchObject({
+      change: `task/deferred-notify@${head}`,
+      record: "deferred",
+      reason: "projection-exceeded",
+      projectedMs: 3480000,
+      boundMs: 1800000,
+    })
+    await fetchChanges(w)
+    const ref = changeRef("main", { branch: "task/deferred-notify", head })
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(records.map((r) => r.kind)).toEqual(["opened", "deferred", "sent"])
+    const sent = records.at(-1)!
+    expect(trailer(sent, "To")).toBe("recorder")
+    expect(trailer(sent, "Delivery")).toBe("sent")
+    expect(trailer(sent, "State")).toBe("deferred")
+    expect(trailer(sent, "ProjectedMs")).toBe("3480000")
+    expect(trailer(sent, "BoundMs")).toBe("1800000")
+  })
+
+  it("the long round takes the oldest deferred change, uses the long bound from configuration, merges on pass, records failed on fail", async () => {
+    const w = await world()
+    await submitCommit(w, "task/defer-one", "one.txt")
+    await submitCommit(w, "task/defer-two", "two.txt")
+
+    const deferCheck = join(w.workdir, "defer-check.sh")
+    writeFileSync(
+      deferCheck,
+      [
+        "#!/bin/sh",
+        'if [ "$YRD_CHECK_TIER" = "long" ]; then',
+        '  if git log -1 --format=%s "$YRD_CANDIDATE_SHA" | grep -q "task/defer-one"; then',
+        "    exit 0",
+        "  else",
+        "    exit 1",
+        "  fi",
+        "else",
+        `  echo 'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":3480000,"boundMs":1800000}'`,
+        "  exit 3",
+        "fi",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(deferCheck, 0o755)
+
+    const base = await w.options({ timeoutMs: 1800000 })
+    const checkSpec: CheckSpec = {
+      ...base.checks[0]!,
+      on: ["submit", "merge"] as const,
+      run: deferCheck,
+      timeoutMs: 1800000,
+      long: { timeoutMs: 5400000 },
+    }
+
+    // Normal round defers both changes
+    const normalOutcome = await queueRun({
+      ...base,
+      checks: [checkSpec],
+    })
+    expect(normalOutcome.deferred).toEqual(["task/defer-one", "task/defer-two"])
+
+    // Long round 1 runs oldest deferred change (task/defer-one), passes and merges it
+    const longOutcome = await queueRun({
+      ...base,
+      checks: [checkSpec],
+      tier: "long",
+    })
+    expect(longOutcome.exitCode).toBe(0)
+    expect(longOutcome.merged).toEqual(["task/defer-one"])
+
+    // Long round 2 runs remaining deferred change (task/defer-two), fails and records failed
+    const longOutcomeTwo = await queueRun({
+      ...base,
+      checks: [checkSpec],
+      tier: "long",
+    })
+    expect(longOutcomeTwo.exitCode).toBe(1)
+    expect(longOutcomeTwo.failed).toEqual(["task/defer-two"])
+  })
+
+  it("a projection past the long bound is stuck and stops the line", async () => {
+    const w = await world()
+    await submitCommit(w, "task/too-long", "toolong.txt")
+
+    const deferCheck = join(w.workdir, "long-defer-check.sh")
+    writeFileSync(
+      deferCheck,
+      [
+        "#!/bin/sh",
+        `echo 'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":7200000,"boundMs":5400000}'`,
+        "exit 3",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(deferCheck, 0o755)
+
+    const base = await w.options({ timeoutMs: 1800000 })
+    const checkSpec: CheckSpec = {
+      ...base.checks[0]!,
+      on: ["submit", "merge"] as const,
+      run: deferCheck,
+      timeoutMs: 1800000,
+      long: { timeoutMs: 5400000 },
+    }
+
+    // Normal round defers task/too-long
+    await queueRun({ ...base, checks: [checkSpec] })
+
+    // Long round on task/too-long exceeds bound -> ends stuck and stops the line
+    const longOutcome = await queueRun({
+      ...base,
+      checks: [checkSpec],
+      tier: "long",
+    })
+    expect(longOutcome.exitCode).toBe(2)
+    expect(longOutcome.stuck).toEqual(["task/too-long"])
+  })
+
+  it("a deferred change holds no place in line; a new head returns it to normal", async () => {
+    const w = await world()
+    await submitCommit(w, "task/defer-retry", "one.txt")
+
+    const deferCheck = join(w.workdir, "retry-defer-check.sh")
+    writeFileSync(
+      deferCheck,
+      [
+        "#!/bin/sh",
+        "if [ -f retry.txt ]; then",
+        "  exit 0",
+        "else",
+        `  echo 'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":3480000,"boundMs":1800000}'`,
+        "  exit 3",
+        "fi",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(deferCheck, 0o755)
+
+    const base = await w.options({ timeoutMs: 1800000 })
+    const checkSpec: CheckSpec = {
+      ...base.checks[0]!,
+      on: ["submit", "merge"] as const,
+      run: deferCheck,
+      timeoutMs: 1800000,
+    }
+
+    // Normal round defers task/defer-retry
+    const normalOutcome = await queueRun({ ...base, checks: [checkSpec] })
+    expect(normalOutcome.deferred).toEqual(["task/defer-retry"])
+
+    // Verify it holds no place in line
+    await fetchChanges(w)
+    const read = await readQueue(w.git, "origin", "main", await remoteTarget({ git: w.git }))
+    const entry = read.changes.find((e) => e.change.branch === "task/defer-retry")!
+    expect(entry.reading.state).toBe("deferred")
+    expect(holdsPlaceInLine(entry.reading.state)).toBe(false)
+
+    // A new head is pushed to the branch and submitted
+    await w.git(["checkout", "--quiet", "task/defer-retry"])
+    writeFileSync(join(w.work, "retry.txt"), "retry\n")
+    await w.git(["add", "retry.txt"])
+    await w.git(["commit", "--quiet", "-m", "task/defer-retry: retry"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/defer-retry",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    // Now normal round checks the new head and it merges
+    const retryOutcome = await queueRun({ ...base, checks: [checkSpec] })
+    expect(retryOutcome.exitCode).toBe(0)
+    expect(retryOutcome.merged).toEqual(["task/defer-retry"])
+  })
+
+  it("stop starting new checks after stopAtMs, leaving remaining changes deferred", async () => {
+    const w = await world()
+    await submitCommit(w, "task/defer-timeout", "timeout.txt")
+
+    const deferCheck = join(w.workdir, "stop-defer-check.sh")
+    writeFileSync(
+      deferCheck,
+      [
+        "#!/bin/sh",
+        `echo 'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":3480000,"boundMs":1800000}'`,
+        "exit 3",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(deferCheck, 0o755)
+
+    const base = await w.options({ timeoutMs: 1800000 })
+    const checkSpec: CheckSpec = {
+      ...base.checks[0]!,
+      on: ["submit", "merge"] as const,
+      run: deferCheck,
+      timeoutMs: 1800000,
+      long: { timeoutMs: 5400000 },
+    }
+
+    // Defer task/defer-timeout
+    await queueRun({ ...base, checks: [checkSpec] })
+
+    // Long round with stopAtMs in the past: stops starting new checks immediately
+    const longOutcome = await queueRun({
+      ...base,
+      checks: [checkSpec],
+      tier: "long",
+      stopAtMs: Date.now() - 1000,
+    })
+    expect(longOutcome.exitCode).toBe(0)
+    expect(longOutcome.merged).toEqual([])
+    expect(longOutcome.failed).toEqual([])
+    expect(longOutcome.stuck).toEqual([])
   })
 
   it("two checked changes, the first fails at merge, the second is not judged in that round", async () => {
@@ -1659,15 +1914,7 @@ describe("a queue run", () => {
     const check = join(w.workdir, "merge-fail-check.sh")
     writeFileSync(
       check,
-      [
-        "#!/bin/sh",
-        'if [ -f "one.txt" ]; then',
-        "  exit 1",
-        "else",
-        "  exit 0",
-        "fi",
-        "",
-      ].join("\n"),
+      ["#!/bin/sh", 'if [ -f "one.txt" ]; then', "  exit 1", "else", "  exit 0", "fi", ""].join("\n"),
     )
     chmodSync(check, 0o755)
     const base = await w.options({ timeoutMs: 1800000 })

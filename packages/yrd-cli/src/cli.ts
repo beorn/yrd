@@ -318,6 +318,43 @@ function buildProgram(
         ),
       )
     })
+  function parseDuration(value: string): number | undefined {
+    const match = /^(\d+(?:\.\d+)?)\s*(h|m|s|ms)?$/i.exec(value.trim())
+    if (!match) return undefined
+    const amount = Number(match[1])
+    if (Number.isNaN(amount) || amount <= 0) return undefined
+    const unit = (match[2] ?? "s").toLowerCase()
+    switch (unit) {
+      case "h":
+        return Math.round(amount * 3600 * 1000)
+      case "m":
+        return Math.round(amount * 60 * 1000)
+      case "s":
+        return Math.round(amount * 1000)
+      case "ms":
+        return Math.round(amount)
+      default:
+        return undefined
+    }
+  }
+
+  function parseStopAt(value: string): number | undefined {
+    const parsed = Date.parse(value)
+    if (!Number.isNaN(parsed)) return parsed
+    const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(value.trim())
+    if (!match) return undefined
+    const hours = Number(match[1])
+    const minutes = Number(match[2])
+    const seconds = Number(match[3] ?? 0)
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59) return undefined
+    const target = new Date()
+    target.setHours(hours, minutes, seconds, 0)
+    if (target.getTime() <= Date.now()) {
+      target.setDate(target.getDate() + 1)
+    }
+    return target.getTime()
+  }
+
   queue
     .command("run")
     .description(
@@ -326,13 +363,55 @@ function buildProgram(
     )
     .option("--json", "emit stable JSON")
     .option("--queue <value>", QUEUE_HELP)
+    .option("--tier <value>", "which check tier to run: normal (default) or long")
+    .option("--stop-at <value>", "stop starting new checks after ISO timestamp or HH:MM time")
+    .option("--stop-after <value>", "stop starting new checks after duration, e.g. 2h, 30m, 90s")
     .action(async (options) => {
-      const { json, queue } = options as { json?: boolean; queue?: string }
+      const {
+        json,
+        queue,
+        tier: tierOpt,
+        stopAt: stopAtOpt,
+        stopAfter: stopAfterOpt,
+      } = options as {
+        json?: boolean
+        queue?: string
+        tier?: string
+        stopAt?: string
+        stopAfter?: string
+      }
+      let tier: "normal" | "long" | undefined
+      if (tierOpt !== undefined) {
+        if (tierOpt !== "normal" && tierOpt !== "long") {
+          io.stderr(`yrd: --tier must be normal or long (got ${tierOpt})\n`)
+          setExit(1)
+          return
+        }
+        tier = tierOpt
+      }
+      let stopAtMs: number | undefined
+      if (stopAfterOpt !== undefined) {
+        const ms = parseDuration(stopAfterOpt)
+        if (ms === undefined) {
+          io.stderr(`yrd: --stop-after must be a valid duration like 2h, 30m, 90s (got ${stopAfterOpt})\n`)
+          setExit(1)
+          return
+        }
+        stopAtMs = Date.now() + ms
+      } else if (stopAtOpt !== undefined) {
+        const parsed = parseStopAt(stopAtOpt)
+        if (parsed === undefined) {
+          io.stderr(`yrd: --stop-at must be a valid ISO timestamp or HH:MM time (got ${stopAtOpt})\n`)
+          setExit(1)
+          return
+        }
+        stopAtMs = parsed
+      }
       const location = await resolveQueueLocation(cwd(), queue, env)
       const taken = await coreQueueCommand(
         location.repo,
         io,
-        { command: "run" },
+        { command: "run", ...(tier === undefined ? {} : { tier }), ...(stopAtMs === undefined ? {} : { stopAtMs }) },
         {
           json,
           env,

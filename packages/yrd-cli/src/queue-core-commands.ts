@@ -210,7 +210,7 @@ export type CoreQueueCommand =
   | Readonly<{ command: "pause"; by: string; reason: string }>
   | Readonly<{ command: "resume"; by: string; reason?: string }>
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string }>
-  | Readonly<{ command: "run" }>
+  | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
   | Readonly<{
       command: "merge"
       branch: string
@@ -428,13 +428,20 @@ export async function coreQueueCommand(
    * cannot be read — is stuck, has no change to stop the line on, and has
    * already said so.
    */
-  const oneRound = async (declared: CapturedDeclaration, only?: Change): Promise<QueueRunOutcome | undefined> => {
+  const oneRound = async (
+    declared: CapturedDeclaration,
+    only?: Change,
+    tier?: "normal" | "long",
+    stopAtMs?: number,
+  ): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
       outcome = await queueRun({
         ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
         foreground: request.command === "run" || request.command === "merge",
         ...(only === undefined ? {} : { only }),
+        ...(tier === undefined ? {} : { tier }),
+        ...(stopAtMs === undefined ? {} : { stopAtMs }),
       })
     } catch (error) {
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
@@ -512,6 +519,8 @@ export async function coreQueueCommand(
     round: Readonly<{
       before?: (declared: CapturedDeclaration) => Promise<YrdCliExitCode | undefined>
       only?: Change
+      tier?: "normal" | "long"
+      stopAtMs?: number
       stallMs?: number
       stop?: AbortSignal
       waiting?: Readonly<{
@@ -583,7 +592,7 @@ export async function coreQueueCommand(
       if (declared === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
       const before = await round.before?.(declared)
       if (before !== undefined) return before
-      const outcome = await oneRound(declared, round.only)
+      const outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs)
       return outcome === undefined ? 2 : { declared, outcome }
     } finally {
       lock.release()
@@ -749,13 +758,20 @@ export async function coreQueueCommand(
       return 0
     }
     case "run": {
-      // One round, exactly `up`'s own (0 pass, 1 fail, 2 stuck): `outcome.exitCode`
-      // already carries that ladder, so forwarding it verbatim is the whole of
-      // the contract — a round a stuck change stopped, doing no other work,
-      // ends 2 here (run.ts's on-submit and on-merge steps set `exitCode: 2`
-      // the moment anything comes back stuck, never 0). A run that could not
-      // even judge answers 2 from the locked round, that same stuck, already
-      // said by `stuck()` above (@i/10-yrd/24141 AC1).
+      if (request.tier === "long") {
+        let lastExitCode: YrdCliExitCode = 0
+        while (request.stopAtMs === undefined || Date.now() < request.stopAtMs) {
+          const ran = await lockedRound({ tier: request.tier, stopAtMs: request.stopAtMs })
+          if (typeof ran === "number") return ran
+          lastExitCode = ran.outcome.exitCode
+          if (lastExitCode !== 0) return lastExitCode
+          if (ran.outcome.merged.length === 0) break
+        }
+        if (request.stopAtMs !== undefined && Date.now() >= request.stopAtMs) {
+          io.stderr("yrd: stop time reached; leaving remaining changes deferred\n")
+        }
+        return lastExitCode
+      }
       const ran = await lockedRound()
       return typeof ran === "number" ? ran : ran.outcome.exitCode
     }

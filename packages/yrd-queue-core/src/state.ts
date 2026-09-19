@@ -177,6 +177,7 @@ export function readChange(change: ChangeRecords): ChangeReading {
       if (state === "failed") return { state: "failed", reason: reasonOf(last) }
       if (state === "stuck") return { state: "stuck", reason: incidentFrom(last).code }
       if (state === "withdrawn") return { state: "withdrawn", reason: reasonOf(last) }
+      if (state === "deferred") return { state: "deferred", reason: reasonOf(last) }
       throw new Error(`sent record ${last.sha.slice(0, 12)} names no ended state (State: ${state ?? "absent"})`)
     }
   }
