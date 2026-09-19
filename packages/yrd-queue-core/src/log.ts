@@ -347,7 +347,7 @@ export type JournalCheck = Readonly<{
   /** How long it took, from the end row. */
   ms?: number
   /** The separate result row's measured verdict and exit, not the change's current state. */
-  result?: "pass" | "fail" | "stuck"
+  result?: "pass" | "fail" | "stuck" | "deferred"
   exit?: string
   /**
    * On a `base` phase row, which of the two base runs this was: `full` is the
@@ -665,7 +665,12 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
         )
         continue
       }
-      if (record.result !== "pass" && record.result !== "fail" && record.result !== "stuck") {
+      if (
+        record.result !== "pass" &&
+        record.result !== "fail" &&
+        record.result !== "stuck" &&
+        record.result !== "deferred"
+      ) {
         ;(change.malformed ??= []).push(`run journal ${id} has an invalid check result: ${String(record.result)}`)
         continue
       }

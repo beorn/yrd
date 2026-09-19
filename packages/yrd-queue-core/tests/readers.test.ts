@@ -289,6 +289,40 @@ describe("a run's journal, read back", () => {
     expect(b?.malformed).toBeUndefined()
   })
 
+  it("reads a deferred check result cleanly without marking the journal malformed (25029)", () => {
+    const { dir } = journalDir([
+      { base: "aaa", checks: ["affected-tests"], kind: "run", queue: "q", target: "main" },
+      {
+        branch: "task/wide",
+        head: "abc123",
+        kind: "check",
+        log: "/w/checks/affected-tests.log",
+        name: "affected-tests",
+        phase: "merge",
+        start: "2026-09-19T10:20:00.000Z",
+      },
+      {
+        branch: "task/wide",
+        exit: "3",
+        head: "abc123",
+        kind: "result",
+        name: "affected-tests",
+        phase: "merge",
+        result: "deferred",
+      },
+    ])
+
+    const journals = readJournals(dir)
+    expect(journals.malformed).toEqual([])
+    const check = journals.runs.get(journalKey("task/wide", "abc123"))?.[0]?.checks[0]
+    expect(check).toMatchObject({
+      name: "affected-tests",
+      phase: "merge",
+      result: "deferred",
+      exit: "3",
+    })
+  })
+
   // 24202: CI's parse-only regressions above do not prove retention, attempted
   // vs recorded decisions, or the completion clock. Exercise the whole lifecycle.
   it.each([
