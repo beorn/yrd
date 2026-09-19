@@ -748,8 +748,6 @@ describe("only one change can hold the line at a time (24972)", () => {
         ["Reason", "projection-exceeded"],
         ["ProjectedMs", "3480000"],
         ["BoundMs", "1800000"],
-        ["Projected", "58m"],
-        ["Bound", "30m"],
       ],
     })
     const ref = changeRef("main", { branch: "task/wide", head })
@@ -763,8 +761,6 @@ describe("only one change can hold the line at a time (24972)", () => {
       state: "deferred",
       projectedMs: 3480000,
       boundMs: 1800000,
-      projected: "58m",
-      bound: "30m",
     })
   })
 })

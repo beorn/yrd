@@ -100,8 +100,10 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
     }
     case "deferred": {
       const reason = trailer(record, "Reason")
-      const projected = trailer(record, "Projected")
-      const bound = trailer(record, "Bound")
+      const projectedMs = trailer(record, "ProjectedMs")
+      const boundMs = trailer(record, "BoundMs")
+      const projected = projectedMs !== undefined ? `${Math.round(Number(projectedMs) / 60000)}m` : undefined
+      const bound = boundMs !== undefined ? `${Math.round(Number(boundMs) / 60000)}m` : undefined
       const timing = projected && bound ? ` (${projected} > ${bound})` : ""
       return {
         at: record.at,

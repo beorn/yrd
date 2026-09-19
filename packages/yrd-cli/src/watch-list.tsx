@@ -105,8 +105,8 @@ export function changesSuffix(row: Row): Readonly<{ text: string; color: string 
     return { color: "$fg-muted", text: `${STATE_WORDS.cancelled.word}=${row.reason}` }
   }
   if (row.state === "deferred") {
-    const projected = row.projected ?? (row.projectedMs !== undefined ? `${Math.round(row.projectedMs / 60000)}m` : undefined)
-    const bound = row.bound ?? (row.boundMs !== undefined ? `${Math.round(row.boundMs / 60000)}m` : undefined)
+    const projected = row.projectedMs !== undefined ? `${Math.round(row.projectedMs / 60000)}m` : undefined
+    const bound = row.boundMs !== undefined ? `${Math.round(row.boundMs / 60000)}m` : undefined
     const timing = projected && bound ? `projected ${projected} > ${bound}, ` : ""
     return {
       color: "$fg-accent",

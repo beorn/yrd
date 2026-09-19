@@ -1604,10 +1604,86 @@ describe("a queue run", () => {
     const lastOne = recordsOne.at(-1)!
     expect(lastOne.kind).toBe("deferred")
     expect(trailer(lastOne, "Reason")).toBe("projection-exceeded")
+    expect(trailer(lastOne, "Phase")).toBe("merge")
     expect(trailer(lastOne, "ProjectedMs")).toBe("3480000")
     expect(trailer(lastOne, "BoundMs")).toBe("1800000")
-    expect(trailer(lastOne, "Projected")).toBe("58m")
-    expect(trailer(lastOne, "Bound")).toBe("30m")
+    expect(trailer(lastOne, "Projected")).toBeUndefined()
+    expect(trailer(lastOne, "Bound")).toBeUndefined()
+  })
+
+  it("a check that defers on submit writes Phase: submit trailer and defers before checked state", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/wide", "wide.txt")
+
+    const check = join(w.workdir, "deferred-submit-check.sh")
+    writeFileSync(
+      check,
+      [
+        "#!/bin/sh",
+        `echo 'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":3600000,"boundMs":1800000}'`,
+        "exit 3",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(check, 0o755)
+    const base = await w.options({ timeoutMs: 1800000 })
+
+    const outcome = await queueRun({
+      ...base,
+      checks: [{ ...base.checks[0]!, on: ["submit"] as const, run: check, timeoutMs: 1800000 }],
+    })
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.stuck).toEqual([])
+    expect(outcome.deferred).toEqual(["task/wide"])
+    expect(outcome.merged).toEqual([])
+
+    await fetchChanges(w)
+    const ref = changeRef("main", { branch: "task/wide", head })
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(records.map((r) => r.kind)).toEqual(["opened", "deferred"])
+    const last = records.at(-1)!
+    expect(trailer(last, "Phase")).toBe("submit")
+    expect(trailer(last, "Reason")).toBe("projection-exceeded")
+    expect(trailer(last, "ProjectedMs")).toBe("3600000")
+    expect(trailer(last, "BoundMs")).toBe("1800000")
+    expect(trailer(last, "Projected")).toBeUndefined()
+    expect(trailer(last, "Bound")).toBeUndefined()
+  })
+
+  it("two checked changes, the first fails at merge, the second is not judged in that round", async () => {
+    const w = await world()
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    const headTwo = await submitCommit(w, "task/two", "two.txt")
+
+    const check = join(w.workdir, "merge-fail-check.sh")
+    writeFileSync(
+      check,
+      [
+        "#!/bin/sh",
+        'if [ -f "one.txt" ]; then',
+        "  exit 1",
+        "else",
+        "  exit 0",
+        "fi",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(check, 0o755)
+    const base = await w.options({ timeoutMs: 1800000 })
+    const outcome = await queueRun({
+      ...base,
+      checks: [{ ...base.checks[0]!, on: ["merge"] as const, run: check, timeoutMs: 1800000 }],
+    })
+
+    expect(outcome.failed).toEqual(["task/one"])
+    expect(outcome.merged).toEqual([])
+    expect(outcome.deferred).toEqual([])
+
+    await fetchChanges(w)
+    const refTwo = changeRef("main", { branch: "task/two", head: headTwo })
+    const recordsTwo = await readRecords(w.git, (await refAt(w.git, refTwo))!)
+    expect(recordsTwo.map((r) => r.kind)).toEqual(["opened", "checked"])
   })
 
   it("a check declaring a scripts: path the target does not carry is loud: the change ends stuck and names it (D5)", async () => {

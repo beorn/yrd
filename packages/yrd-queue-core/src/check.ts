@@ -826,20 +826,8 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
       }
       return { ...base, exit: result.exitCode, result: "stuck", why: "the check said it could not judge" }
     }
-    default: {
-      const marker = checkResultFromLog(log)
-      if (marker?.result === "deferred") {
-        return {
-          ...base,
-          exit: result.exitCode,
-          result: "deferred",
-          why: marker.reason,
-          projectedMs: marker.projectedMs,
-          boundMs: marker.boundMs,
-        }
-      }
+    default:
       return { ...base, exit: result.exitCode, result: "stuck", why: `exit ${result.exitCode} is not a verdict` }
-    }
   }
 
 }

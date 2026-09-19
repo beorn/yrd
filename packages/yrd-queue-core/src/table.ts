@@ -133,10 +133,6 @@ export type Row = Readonly<{
   projectedMs?: number
   /** Check bound in ms for a deferred change. */
   boundMs?: number
-  /** Formatted projected duration string (e.g. 58m). */
-  projected?: string
-  /** Formatted bound string (e.g. 30m). */
-  bound?: string
 }>
 
 /** One line of the watch's list: a change, or a change as ONE run saw it. */
@@ -598,8 +594,6 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
       ? {}
       : { projectedMs: Number(trailer(tip, "ProjectedMs")) }),
     ...(trailer(tip, "BoundMs") === undefined ? {} : { boundMs: Number(trailer(tip, "BoundMs")) }),
-    ...(trailer(tip, "Projected") === undefined ? {} : { projected: trailer(tip, "Projected") }),
-    ...(trailer(tip, "Bound") === undefined ? {} : { bound: trailer(tip, "Bound") }),
   }
 }
 

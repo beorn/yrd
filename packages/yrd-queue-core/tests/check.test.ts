@@ -636,5 +636,22 @@ describe("check exit codes", () => {
       boundMs: 1800000,
     })
   })
+
+  it("treats exit 134 with a deferred result marker as stuck", async () => {
+    const where = place("deferred-crash")
+    const result = await runCheck({
+      ...where,
+      spec: {
+        name: "crashed-check",
+        run: `echo 'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":3480000,"boundMs":1800000}' && exit 134`,
+        timeoutMs: 1800000,
+      },
+    })
+    expect(result).toMatchObject({
+      exit: 134,
+      result: "stuck",
+      why: "exit 134 is not a verdict",
+    })
+  })
 })
 
