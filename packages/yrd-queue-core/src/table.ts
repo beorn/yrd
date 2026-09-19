@@ -129,6 +129,14 @@ export type Row = Readonly<{
   undelivered?: string
   /** Who acts next and why, derived once beside `readChange` (state.ts). Absent for a merged change: nobody. */
   next?: NextOwner
+  /** Projected duration in ms for a deferred change. */
+  projectedMs?: number
+  /** Check bound in ms for a deferred change. */
+  boundMs?: number
+  /** Formatted projected duration string (e.g. 58m). */
+  projected?: string
+  /** Formatted bound string (e.g. 30m). */
+  bound?: string
 }>
 
 /** One line of the watch's list: a change, or a change as ONE run saw it. */
@@ -586,6 +594,12 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
     ...(refused.length === 0 ? {} : { refused: refused.join("; ") }),
     ...(undelivered.length === 0 ? {} : { undelivered: undelivered.join("; ") }),
     ...(next === undefined ? {} : { next }),
+    ...(trailer(tip, "ProjectedMs") === undefined
+      ? {}
+      : { projectedMs: Number(trailer(tip, "ProjectedMs")) }),
+    ...(trailer(tip, "BoundMs") === undefined ? {} : { boundMs: Number(trailer(tip, "BoundMs")) }),
+    ...(trailer(tip, "Projected") === undefined ? {} : { projected: trailer(tip, "Projected") }),
+    ...(trailer(tip, "Bound") === undefined ? {} : { bound: trailer(tip, "Bound") }),
   }
 }
 

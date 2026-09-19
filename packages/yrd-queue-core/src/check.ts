@@ -88,14 +88,16 @@ const BASE_ENV = ["PATH", "HOME", "SHELL", "LANG", "USER", "LOGNAME"] as const
 
 export type CheckResult = Readonly<{
   name: string
-  result: "pass" | "fail" | "stuck"
+  result: "pass" | "fail" | "stuck" | "deferred"
   /** The exit code, or the word for what ended it when there was none. */
   exit: number | "timeout" | "signal" | "missing" | "unsettled"
   durationMs: number
   /** Where stdout and stderr went, one file per attempt. */
   log: string
-  /** Why, when the result is stuck. */
+  /** Why, when the result is stuck or deferred. */
   why?: string
+  projectedMs?: number
+  boundMs?: number
 }>
 
 /**
@@ -227,7 +229,7 @@ export function readCheckTrailer(packed: string): Readonly<{ name: string; exit?
  * change's state — `readChange` is the only place that happens.
  */
 export type CheckRun = Readonly<{
-  result: "pass" | "fail" | "stuck"
+  result: "pass" | "fail" | "stuck" | "deferred"
   /** The exit as the trailer spells it: a number, or `timeout`, `signal`, `missing`, `unsettled`. */
   exit?: string
   /** How long it took. */
@@ -250,7 +252,7 @@ export type CheckView = Readonly<{
   spec?: CheckSpec
   /** What the record says this check did; absent also covers a journal with no measured result. */
   result?: CheckRun
-  state: "passed" | "failed" | "stuck" | "running" | "not-run" | "unmeasured"
+  state: "passed" | "failed" | "stuck" | "running" | "not-run" | "unmeasured" | "deferred"
   /** The real log path: the result's when it ran, the journal's while it runs. */
   log?: string
 }>
@@ -338,7 +340,9 @@ export function checksOf(
             ? "passed"
             : result === "fail"
               ? "failed"
-              : "stuck",
+              : result === "deferred"
+                ? "deferred"
+                : "stuck",
       ...(spec === undefined ? {} : { spec }),
       ...(found.result.log === undefined ? {} : { log: found.result.log }),
     }
@@ -413,7 +417,23 @@ export function checksOf(
  * which is the existing bound path — and the failure is loud, so a stuck
  * round is distinguishable from a rescued one (24623).
  */
-export function readCheckResult(text: string): "pass" | "fail" | undefined {
+export type CheckVerdict = Readonly<{
+  result: "pass" | "fail" | "deferred"
+  exit?: number
+  reason?: string
+  projectedMs?: number
+  boundMs?: number
+}>
+
+/**
+ * The last computed pass/fail/deferred a check named on its log, or nothing when it
+ * never did. A malformed line is not a verdict: timeout then stays stuck,
+ * which is the existing bound path — and the failure is loud, so a stuck
+ * round is distinguishable from a rescued one (24623).
+ *
+ * Condition 6: An unknown result marker is refused loudly.
+ */
+export function readCheckResult(text: string): CheckVerdict | undefined {
   const marked = text.split("\n").filter((line) => line.startsWith(`${CHECK_RESULT_MARKER} `))
   const line = marked.at(-1)
   if (line === undefined) return undefined
@@ -423,12 +443,32 @@ export function readCheckResult(text: string): "pass" | "fail" | undefined {
       console.error(`${CHECK_RESULT_MARKER} payload is not an object; not treating it as a verdict`)
       return undefined
     }
-    const body = parsed as { result?: unknown; exit?: unknown }
-    if (body.result === "pass" || body.result === "fail") return body.result
-    if (body.exit === 0 || body.exit === "0") return "pass"
-    if (body.exit === 1 || body.exit === "1") return "fail"
+    const body = parsed as {
+      result?: unknown
+      exit?: unknown
+      reason?: unknown
+      projectedMs?: unknown
+      boundMs?: unknown
+    }
+    if (body.result !== undefined) {
+      if (body.result === "pass" || body.result === "fail" || body.result === "deferred") {
+        return {
+          result: body.result,
+          exit: typeof body.exit === "number" ? body.exit : undefined,
+          reason: typeof body.reason === "string" ? body.reason : undefined,
+          projectedMs: typeof body.projectedMs === "number" ? body.projectedMs : undefined,
+          boundMs: typeof body.boundMs === "number" ? body.boundMs : undefined,
+        }
+      }
+      throw new Error(`${CHECK_RESULT_MARKER}: unknown result "${String(body.result)}"`)
+    }
+    if (body.exit === 0 || body.exit === "0") return { result: "pass", exit: 0 }
+    if (body.exit === 1 || body.exit === "1") return { result: "fail", exit: 1 }
     console.error(`${CHECK_RESULT_MARKER} named neither pass nor fail (exit 0 or 1); not treating it as a verdict`)
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith(`${CHECK_RESULT_MARKER}: unknown result`)) {
+      throw error
+    }
     console.error(
       `${CHECK_RESULT_MARKER} is unreadable; not treating it as a verdict:`,
       error instanceof Error ? error.message : String(error),
@@ -438,10 +478,13 @@ export function readCheckResult(text: string): "pass" | "fail" | undefined {
   return undefined
 }
 
-function checkResultFromLog(log: string): "pass" | "fail" | undefined {
+function checkResultFromLog(log: string): CheckVerdict | undefined {
   try {
     return readCheckResult(readFileSync(log, "utf8"))
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith(`${CHECK_RESULT_MARKER}: unknown result`)) {
+      throw error
+    }
     console.error(
       `${CHECK_RESULT_MARKER}: check log ${log} could not be read; not treating it as a verdict:`,
       error instanceof Error ? error.message : String(error),
@@ -665,6 +708,8 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   delete env.YRD_PROGRAM_ROOT
   if (programRoot !== undefined) env.YRD_PROGRAM_ROOT = programRoot
   const timeoutMs = run.spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
+  delete env.YRD_CHECK_TIMEOUT_MS
+  env.YRD_CHECK_TIMEOUT_MS = String(timeoutMs)
   // Create-only, always, and open before the child exists. Every caller writes
   // under a directory of its own — the queue run's is keyed by change, run and
   // phase, `yrd check`'s by the instant it was invoked — so a path that already
@@ -717,7 +762,19 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
     // the verdict away as yrd-check-unresolved. A check that named nothing
     // stays stuck, which is the existing "past its bound" path.
     const rescued = checkResultFromLog(log)
-    if (rescued !== undefined) return { ...base, exit: rescued === "pass" ? 0 : 1, result: rescued }
+    if (rescued !== undefined) {
+      if (rescued.result === "deferred") {
+        return {
+          ...base,
+          exit: rescued.exit ?? "timeout",
+          result: "deferred",
+          why: rescued.reason,
+          projectedMs: rescued.projectedMs,
+          boundMs: rescued.boundMs,
+        }
+      }
+      return { ...base, exit: rescued.result === "pass" ? 0 : 1, result: rescued.result }
+    }
     const progress = checkProgressFromLog(log)
     const named = progress === undefined ? "" : `; last progress ${progress}`
     return {
@@ -754,14 +811,37 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
     case 1:
       return { ...base, exit: 1, result: "fail" }
     case 2:
-    // 3 is the affected tests' cannot-judge. It is stuck like 2, never a fail
-    // billed to the submitter: a check that did not judge the change has no
-    // verdict about it, and a stuck change stops the line (@cto 7645ec3a).
-    case 3:
       return { ...base, exit: result.exitCode, result: "stuck", why: "the check said it could not judge" }
-    default:
+    case 3: {
+      const marker = checkResultFromLog(log)
+      if (marker?.result === "deferred") {
+        return {
+          ...base,
+          exit: result.exitCode,
+          result: "deferred",
+          why: marker.reason,
+          projectedMs: marker.projectedMs,
+          boundMs: marker.boundMs,
+        }
+      }
+      return { ...base, exit: result.exitCode, result: "stuck", why: "the check said it could not judge" }
+    }
+    default: {
+      const marker = checkResultFromLog(log)
+      if (marker?.result === "deferred") {
+        return {
+          ...base,
+          exit: result.exitCode,
+          result: "deferred",
+          why: marker.reason,
+          projectedMs: marker.projectedMs,
+          boundMs: marker.boundMs,
+        }
+      }
       return { ...base, exit: result.exitCode, result: "stuck", why: `exit ${result.exitCode} is not a verdict` }
+    }
   }
+
 }
 
 /**

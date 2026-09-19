@@ -17,8 +17,17 @@ import { TERMINAL_DECISIONS } from "../src/log.ts"
 import { RECORD_KINDS } from "../src/records.ts"
 
 describe("the record and decision vocabularies are pinned (a new word freezes every older running reader)", () => {
-  test("the Record: kinds are exactly these seven", () => {
-    expect([...RECORD_KINDS]).toEqual(["opened", "checked", "merged", "failed", "stuck", "withdrawn", "sent"])
+  test("the Record: kinds are exactly these eight", () => {
+    expect([...RECORD_KINDS]).toEqual([
+      "opened",
+      "checked",
+      "merged",
+      "failed",
+      "stuck",
+      "withdrawn",
+      "sent",
+      "deferred",
+    ])
   })
 
   test("the journal's change decisions are exactly these five", () => {

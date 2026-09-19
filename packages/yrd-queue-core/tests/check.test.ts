@@ -589,4 +589,52 @@ describe("check exit codes", () => {
       why: "exit 99 is not a verdict",
     })
   })
+
+  it("an unknown result marker is refused loudly (condition 6)", async () => {
+    // Condition 6: an unknown result marker must refuse loudly, never treat it as pass or lose the change.
+    const where = place("unknown-marker")
+    await expect(
+      runCheck({
+        ...where,
+        spec: {
+          name: "unknown-result",
+          run: `echo 'YRD-CHECK-RESULT {"result":"mystery-verdict"}' && exit 3`,
+        },
+      }),
+    ).rejects.toThrow(/unknown result.*mystery-verdict/iu)
+  })
+
+  it("exports YRD_CHECK_TIMEOUT_MS to the check execution environment", async () => {
+    const where = place("timeout-env")
+    const result = await runCheck({
+      ...where,
+      spec: {
+        name: "test-timeout-env",
+        run: `echo "BOUND=$YRD_CHECK_TIMEOUT_MS" && exit 0`,
+        timeoutMs: 42000,
+      },
+    })
+    expect(result).toMatchObject({ exit: 0, result: "pass" })
+    expect(readFileSync(result.log, "utf8")).toContain("BOUND=42000")
+  })
+
+  it("treats exit 3 with a deferred result marker as deferred", async () => {
+    const where = place("deferred-marker")
+    const result = await runCheck({
+      ...where,
+      spec: {
+        name: "affected-tests",
+        run: `echo 'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":3480000,"boundMs":1800000}' && exit 3`,
+        timeoutMs: 1800000,
+      },
+    })
+    expect(result).toMatchObject({
+      exit: 3,
+      result: "deferred",
+      why: "projection-exceeded",
+      projectedMs: 3480000,
+      boundMs: 1800000,
+    })
+  })
 })
+

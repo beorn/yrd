@@ -39,6 +39,7 @@ export const LEGEND_STATES = [
   "pending",
   "merging",
   "merged",
+  "deferred",
   "stuck",
   "failed",
   "cancelled",
@@ -141,6 +142,12 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
     means: "on the queue branch; ended",
     next: "nothing; a revert is a new change",
     word: "merged",
+  },
+  deferred: {
+    color: "$fg-accent",
+    means: "checks exceeded the normal bound; waits for the long check",
+    next: "runs in the long tier",
+    word: "deferred",
   },
   stuck: {
     color: "$fg-warning",

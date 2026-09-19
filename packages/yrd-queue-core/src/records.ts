@@ -41,8 +41,21 @@
 import { refAt } from "./git.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
 
+/** The one word for a deferred record and state, kept behind one constant (CTO ruling 25029). */
+export const DEFERRED_WORD = "deferred" as const
+export const RECORD_KIND_DEFERRED = DEFERRED_WORD
+
 /** The kinds a record can be. The vocabulary is closed. */
-export const RECORD_KINDS = ["opened", "checked", "merged", "failed", "stuck", "withdrawn", "sent"] as const
+export const RECORD_KINDS = [
+  "opened",
+  "checked",
+  "merged",
+  "failed",
+  "stuck",
+  "withdrawn",
+  "sent",
+  RECORD_KIND_DEFERRED,
+] as const
 
 export type RecordKind = (typeof RECORD_KINDS)[number]
 
@@ -532,7 +545,7 @@ export function tipRecord(record: ChangeRecord | undefined, sha: string, where: 
     return record
   }
   throw new Error(
-    `${where} at ${sha.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|withdrawn|sent trailer`,
+    `${where} at ${sha.slice(0, 12)} carries no valid Record: ${RECORD_KINDS.join("|")} trailer`,
   )
 }
 

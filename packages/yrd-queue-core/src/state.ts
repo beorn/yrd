@@ -49,12 +49,22 @@ import {
   standsEnded,
   trailer,
   trailers,
+  DEFERRED_WORD,
   type ChangeRecord,
   type NotTold,
 } from "./records.ts"
 import { incidentFrom } from "./incident.ts"
 
-export const CHANGE_STATES = ["queued", "checked", "stuck", "merged", "failed", "withdrawn"] as const
+export const CHANGE_STATE_DEFERRED = DEFERRED_WORD
+export const CHANGE_STATES = [
+  "queued",
+  "checked",
+  "stuck",
+  "merged",
+  "failed",
+  "withdrawn",
+  CHANGE_STATE_DEFERRED,
+] as const
 
 export type ChangeState = (typeof CHANGE_STATES)[number]
 
@@ -157,6 +167,8 @@ export function readChange(change: ChangeRecords): ChangeReading {
       return { state: "checked" }
     case "opened":
       return { state: "queued" }
+    case "deferred":
+      return { state: "deferred", reason: reasonOf(last) }
     case "sent": {
       // A sent record repeats the ended state it followed (`State:`, ruling A2)
       // and carries that record's result, so the tip alone answers.
@@ -247,6 +259,8 @@ export function nextOwner(
   switch (reading.state) {
     case "merged":
       return undefined
+    case "deferred":
+      return { because: "it is waiting for the long check", owner: "the queue" }
     case "queued":
       return { because: "it starts when the queue reaches it", owner: "the queue" }
     case "checked":

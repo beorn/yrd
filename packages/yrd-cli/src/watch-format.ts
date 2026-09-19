@@ -92,6 +92,7 @@ export function diagnosticLines(
 /** The one glyph per state — the retired watch's, kept because the operator already reads them. */
 export const STATE_GLYPH: Readonly<Record<Row["state"], string>> = {
   checked: "◉",
+  deferred: "☾",
   direct: "→",
   draft: "◇",
   failed: "×",
@@ -119,6 +120,7 @@ export function stateGlyph(row: Pick<Row, "state" | "live">): string {
 
 /** The one glyph per check state, so the tab strip, the step lines and the one-shot print cannot disagree about a check. */
 export const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
+  deferred: "☾",
   failed: "×",
   "not-run": "−",
   passed: "✓",
@@ -129,6 +131,7 @@ export const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
 
 /** The one color per check state. */
 export const CHECK_COLOR: Readonly<Record<CheckView["state"], string>> = {
+  deferred: "$fg-accent",
   failed: "$fg-error",
   "not-run": "$fg-muted",
   passed: "$fg-success",

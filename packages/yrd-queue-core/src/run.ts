@@ -176,6 +176,7 @@ export type QueueRunOutcome = Readonly<{
   merged: readonly string[]
   failed: readonly string[]
   stuck: readonly string[]
+  deferred?: readonly string[]
   /** The commits on the target's first-parent line that the queue did not put there, reported this run (E5). */
   directMerges: readonly string[]
   /**
@@ -252,7 +253,7 @@ export type Run = Readonly<{
  * loops branch on `stuck`, `failed` and `merged` and let anything else fall
  * through to the next change, so a discard continues the round by construction.
  */
-type Ended = "checked" | "failed" | "stuck" | "merged" | "discarded"
+type Ended = "checked" | "failed" | "stuck" | "merged" | "discarded" | "deferred"
 
 /** Which side of a change a step is on: the head it was submitted at, or its merge with the target. */
 type CandidatePhase = "submit" | "merge"
@@ -545,6 +546,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const merged: string[] = []
   const failed: string[] = []
   const stuck: string[] = []
+  const deferred: string[] = []
 
   const entries = changes
 
@@ -561,6 +563,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       failed,
       merged,
       stuck,
+      deferred,
     })
   }
   for (const notice of observation.notices) {
@@ -597,7 +600,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // below writes a change record or tells somebody about one, so a stopped round
   // leaves every change exactly as it found it while still surfacing direct merges.
   stopped = await run.steps.open(run)
-  if (stopped !== undefined) return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck }, stopped)
+  if (stopped !== undefined) return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred }, stopped)
 
   // Bookkeeping at the edges of the records first, so every reader below reads
   // records and never reconciles. A bookkeeping pass can itself end an entry
@@ -609,7 +612,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       return finish(
         run,
         2,
-        { checkedWaiting: 0, directMerges, failed, merged, stuck },
+        { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred },
         await run.steps.stopLine(run, entry),
       )
     }
@@ -632,11 +635,12 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       return finish(
         run,
         2,
-        { checkedWaiting: 0, directMerges, failed, merged, stuck },
+        { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred },
         await run.steps.stopLine(run, entry),
       )
     }
     if (outcome === "failed") failed.push(entry.change.branch)
+    else if (outcome === "deferred") deferred.push(entry.change.branch)
   }
 
   // On-merge: the first checked change in line, re-read so this run's own
@@ -647,28 +651,37 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const reread = ordered((await read()).changes, options.only, "checked", "stuck")
   const blocked = reread.findIndex((entry) => entry.reading.state === "stuck")
   const line = (blocked === -1 ? reread : reread.slice(0, blocked)).filter((entry) => !staleChecked(run, entry))
-  const checked = line[0]
-  if (checked !== undefined) {
+  let mergedIndex = -1
+  for (const [i, checked] of line.entries()) {
     const outcome = await judged(run, checked, () => run.steps.merge(run, checked))
     if (outcome === "stuck") {
       stuck.push(checked.change.branch)
       return finish(
         run,
         2,
-        { checkedWaiting: 0, directMerges, failed, merged, stuck },
+        { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred },
         await run.steps.stopLine(run, checked),
       )
     }
-    if (outcome === "failed") failed.push(checked.change.branch)
-    else if (outcome === "merged") merged.push(checked.change.branch)
+    if (outcome === "failed") {
+      failed.push(checked.change.branch)
+    } else if (outcome === "deferred") {
+      deferred.push(checked.change.branch)
+    } else if (outcome === "merged") {
+      merged.push(checked.change.branch)
+      mergedIndex = i
+      break
+    }
   }
+
+  const checkedWaiting = mergedIndex !== -1 ? Math.max(0, line.length - 1 - mergedIndex) : 0
 
   return finish(
     run,
     stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0,
     // Everything this run left checked behind the one it acted on. Read from
     // the line it already re-read, so saying it costs no second look.
-    { checkedWaiting: Math.max(0, line.length - 1), directMerges, failed, merged, stuck },
+    { checkedWaiting, directMerges, failed, merged, stuck, deferred },
     stopped,
   )
 }
@@ -996,6 +1009,34 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
           via: `${stuckOne.name} during submit`,
         }),
       )
+    }
+    const deferredOne = results.find((result) => result.result === "deferred")
+    if (deferredOne !== undefined) {
+      const trailers: (readonly [string, string])[] = [
+        ["Reason", deferredOne.why ?? "projection-exceeded"],
+        ["Config", run.options.configBlob],
+        ["Base", run.targetSha],
+      ]
+      if (deferredOne.projectedMs !== undefined) {
+        trailers.push(["ProjectedMs", String(deferredOne.projectedMs)])
+        trailers.push(["Projected", `${Math.round(deferredOne.projectedMs / 60000)}m`])
+      }
+      if (deferredOne.boundMs !== undefined) {
+        trailers.push(["BoundMs", String(deferredOne.boundMs)])
+        trailers.push(["Bound", `${Math.round(deferredOne.boundMs / 60000)}m`])
+      }
+      trailers.push(...checkTrailers(results))
+      await writeRecord(
+        run,
+        {
+          change,
+          kind: "deferred",
+          subject: `${branch} deferred: ${deferredOne.name} projection exceeded normal bound`,
+          trailers,
+        },
+        tipOf(entry.change).sha,
+      )
+      return "deferred"
     }
     const failing = results.filter((result) => result.result === "fail")
     if (failing.length > 0) {
@@ -2056,6 +2097,34 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
         }),
       )
     }
+    const deferredOne = results.find((result) => result.result === "deferred")
+    if (deferredOne !== undefined) {
+      const trailers: (readonly [string, string])[] = [
+        ["Reason", deferredOne.why ?? "projection-exceeded"],
+        ["Config", run.options.configBlob],
+        ["Base", run.targetSha],
+      ]
+      if (deferredOne.projectedMs !== undefined) {
+        trailers.push(["ProjectedMs", String(deferredOne.projectedMs)])
+        trailers.push(["Projected", `${Math.round(deferredOne.projectedMs / 60000)}m`])
+      }
+      if (deferredOne.boundMs !== undefined) {
+        trailers.push(["BoundMs", String(deferredOne.boundMs)])
+        trailers.push(["Bound", `${Math.round(deferredOne.boundMs / 60000)}m`])
+      }
+      trailers.push(...checkTrailers(results))
+      await writeRecord(
+        run,
+        {
+          change,
+          kind: "deferred",
+          subject: `${branch} deferred: ${deferredOne.name} projection exceeded normal bound`,
+          trailers,
+        },
+        tipOf(entry.change).sha,
+      )
+      return "deferred"
+    }
     const failing = results.filter((result) => result.result === "fail")
     if (failing.length > 0) {
       retained = worktree.path
@@ -2853,6 +2922,7 @@ function finish(
     merged: string[]
     failed: string[]
     stuck: string[]
+    deferred?: string[]
     directMerges: readonly string[]
     checkedWaiting: number
   }>,

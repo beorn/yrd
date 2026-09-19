@@ -244,6 +244,7 @@ describe("the notice", () => {
     // Every state a row can have, each its own value: a state the core adds fails to compile here until listed.
     const states = Object.values({
       checked: "checked",
+      deferred: "deferred",
       direct: "direct",
       draft: "draft",
       failed: "failed",

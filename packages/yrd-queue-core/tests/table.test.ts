@@ -736,4 +736,36 @@ describe("only one change can hold the line at a time (24972)", () => {
     // Both changes are still ROWS; the fix suppresses an overlay, never a row.
     expect(rows).toHaveLength(2)
   })
+
+  it("yrd list shows the state, the projected minutes and the bound", async () => {
+    const w = await world("{}\n")
+    const head = await submitCommit(w, "task/wide", "wide.txt")
+    await appendRecord(w.git, "main", {
+      change: { branch: "task/wide", head },
+      kind: "deferred" as any,
+      subject: "task/wide deferred",
+      trailers: [
+        ["Reason", "projection-exceeded"],
+        ["ProjectedMs", "3480000"],
+        ["BoundMs", "1800000"],
+        ["Projected", "58m"],
+        ["Bound", "30m"],
+      ],
+    })
+    const ref = changeRef("main", { branch: "task/wide", head })
+    await w.git(["push", "--quiet", "--force", "origin", `${ref}:${ref}`])
+    const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
+    const rows = list(entries)
+    const wideRow = rows.find((r) => r.branch === "task/wide")
+    expect(wideRow).toBeDefined()
+    expect(wideRow).toMatchObject({
+      branch: "task/wide",
+      state: "deferred",
+      projectedMs: 3480000,
+      boundMs: 1800000,
+      projected: "58m",
+      bound: "30m",
+    })
+  })
 })
+

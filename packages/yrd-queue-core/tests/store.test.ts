@@ -377,7 +377,7 @@ describe("a change's records are its commits", () => {
     ).trim()
     await git(["update-ref", ref, malformed])
     await expect(readRecords(git, malformed)).rejects.toThrow(
-      `at ${malformed.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|withdrawn|sent trailer`,
+      `at ${malformed.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|withdrawn|sent|deferred trailer`,
     )
   })
 

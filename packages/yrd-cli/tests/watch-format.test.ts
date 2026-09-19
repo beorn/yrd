@@ -110,11 +110,13 @@ describe("the one glyph table", () => {
   it("overlays the working glyph on any state while a check runs, and keeps the state's glyph otherwise", () => {
     expect(stateGlyph({ state: "queued" })).toBe("○")
     expect(stateGlyph({ state: "failed" })).toBe("×")
+    expect(stateGlyph({ state: "deferred" as any })).toBe("☾")
     expect(
       stateGlyph({ live: { check: "typecheck", phase: "submit", run: "q-x", since: new Date() }, state: "queued" }),
     ).toBe("◉")
   })
 })
+
 
 describe("friendlyPath (items 30a, 33)", () => {
   it("prints a repository under $HOME with ~, the way a shell prompt would", () => {

@@ -17,7 +17,7 @@ import { act } from "react"
 import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
 import type { Row, WatchRow } from "@yrd/queue-core"
-import { ListRow, type ListLayout } from "../src/watch-list.tsx"
+import { ListRow, changesSuffix, type ListLayout } from "../src/watch-list.tsx"
 import { NowContext, NowProvider } from "../src/watch-clock.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
@@ -139,3 +139,21 @@ describe("the duration freezes once a row is decided (the operator's 2026-09-09 
     expect(second).not.toContain("45:00")
   }, 10_000)
 })
+
+describe("changesSuffix for deferred row", () => {
+  it("shows the projected duration and bound with waits for the long check", () => {
+    const row: Row = {
+      branch: "task/wide",
+      head: "a".repeat(40),
+      state: "deferred" as any,
+      projectedMs: 58 * 60 * 1000,
+      boundMs: 30 * 60 * 1000,
+    }
+    const suffix = changesSuffix(row)
+    expect(suffix).toEqual({
+      color: "$fg-accent",
+      text: "projected 58m > 30m, waits for the long check",
+    })
+  })
+})
+

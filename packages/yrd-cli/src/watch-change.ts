@@ -98,6 +98,17 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
         ...(note === undefined ? {} : { detail: note }),
       }
     }
+    case "deferred": {
+      const reason = trailer(record, "Reason")
+      const projected = trailer(record, "Projected")
+      const bound = trailer(record, "Bound")
+      const timing = projected && bound ? ` (${projected} > ${bound})` : ""
+      return {
+        at: record.at,
+        text: reason === undefined ? `${STATE_WORDS.deferred.word}${timing}` : `${STATE_WORDS.deferred.word} ${reason}${timing}`,
+        detail: "waits for the long check",
+      }
+    }
     case "sent": {
       // A message that went where it should is not news (item 31's echo rule).
       const delivery = trailer(record, "Delivery")

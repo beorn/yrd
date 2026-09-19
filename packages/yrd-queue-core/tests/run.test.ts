@@ -1566,6 +1566,50 @@ describe("a queue run", () => {
     },
   )
 
+  it("a deferred result writes the record, does not stop the line, and the next change in line is judged in the same round", async () => {
+    const w = await world()
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    const headTwo = await submitCommit(w, "task/two", "two.txt")
+
+    const check = join(w.workdir, "deferred-check.sh")
+    writeFileSync(
+      check,
+      [
+        "#!/bin/sh",
+        'if git log -1 --format=%s "$YRD_CANDIDATE_SHA" | grep -q "task/one"; then',
+        `  echo 'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":3480000,"boundMs":1800000}'`,
+        "  exit 3",
+        "else",
+        "  exit 0",
+        "fi",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(check, 0o755)
+    const base = await w.options({ timeoutMs: 1800000 })
+
+    const outcome = await queueRun({
+      ...base,
+      checks: [{ ...base.checks[0]!, run: check, timeoutMs: 1800000 }],
+    })
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.stuck).toEqual([])
+    expect(outcome.deferred).toEqual(["task/one"])
+    expect(outcome.merged).toEqual(["task/two"])
+
+    await fetchChanges(w)
+    const refOne = changeRef("main", { branch: "task/one", head: headOne })
+    const recordsOne = await readRecords(w.git, (await refAt(w.git, refOne))!)
+    const lastOne = recordsOne.at(-1)!
+    expect(lastOne.kind).toBe("deferred")
+    expect(trailer(lastOne, "Reason")).toBe("projection-exceeded")
+    expect(trailer(lastOne, "ProjectedMs")).toBe("3480000")
+    expect(trailer(lastOne, "BoundMs")).toBe("1800000")
+    expect(trailer(lastOne, "Projected")).toBe("58m")
+    expect(trailer(lastOne, "Bound")).toBe("30m")
+  })
+
   it("a check declaring a scripts: path the target does not carry is loud: the change ends stuck and names it (D5)", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
