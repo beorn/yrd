@@ -1138,7 +1138,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     "failed",
     "cancelled",
   ] as const
-  const KEYS = [...STATES, "direct", "waiting", "took", "runner"] as const
+  const KEYS = [...STATES, "direct", "waiting", "took", "runner", "verifying"] as const
   type Entry = { word: string; color: string; means?: string; next?: string }
   type WordTable = Record<(typeof KEYS)[number], Entry>
 
