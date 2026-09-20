@@ -29,7 +29,7 @@
  */
 
 import React, { memo } from "react"
-import { Box, Pulse, Text, TogglePill, TogglePillGroup } from "silvery"
+import { Box, Pulse, Text } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import {
@@ -131,11 +131,7 @@ export function listLayout(
     agentWidth:
       columns < 100
         ? 0
-        : Math.max(
-            5,
-            (runner?.by ?? "—").length,
-            ...rows.map((item) => (item.row.submitter ?? "—").length),
-          ),
+        : Math.max(5, (runner?.by ?? "—").length, ...rows.map((item) => (item.row.submitter ?? "—").length)),
     queueRunWidth: Math.max(
       11,
       queueRunText(queue.digit, queue.label, undefined).length,
@@ -168,8 +164,8 @@ export function separatorBefore(rows: readonly WatchRow[], index: number): strin
 
 /**
  * The top line (ia.md): `yrd watch`, then one pill per queue right-aligned —
- * `digit path ⎇ branch`. Inverse backgrounds come from TogglePill's own
- * surface (active vs dimmer unselected). There is no queue All control;
+ * `digit path ⎇ branch`. Active pills use `$bg-inverse` / `$fg-on-inverse`;
+ * idle pills are muted with no fill. There is no queue All control;
  * number keys still toggle queues. Status All is the `a` key, not a pill.
  */
 export function TopLine({
@@ -196,9 +192,9 @@ export function TopLine({
       <Text bold flexShrink={0}>
         yrd watch
       </Text>
-      <TogglePillGroup flexShrink={1} minWidth={0} overflow="hidden" justifyContent="flex-end">
+      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" justifyContent="flex-end" gap={1}>
         {queues.map((queue, index) => (
-          <TogglePill
+          <InversePill
             key={`${queue.path}@${queue.branch}`}
             label={pillLabel(queue, index + 1)}
             boldFirstLetter
@@ -208,7 +204,36 @@ export function TopLine({
             }}
           />
         ))}
-      </TogglePillGroup>
+      </Box>
+    </Box>
+  )
+}
+
+/** Active filter/queue pills: inverse fill so on/off is not foreground-only. */
+function InversePill({
+  label,
+  active,
+  onToggle,
+  boldFirstLetter = false,
+}: {
+  label: string
+  active: boolean
+  onToggle: () => void
+  boldFirstLetter?: boolean
+}) {
+  const color = active ? "$fg-on-inverse" : "$fg-muted"
+  return (
+    <Box flexShrink={0} backgroundColor={active ? "$bg-inverse" : undefined} onClick={onToggle}>
+      {boldFirstLetter && label.length > 0 ? (
+        <>
+          <Text color={color} bold>
+            {label.slice(0, 1)}
+          </Text>
+          <Text color={color}>{label.slice(1)}</Text>
+        </>
+      ) : (
+        <Text color={color}>{label}</Text>
+      )}
     </Box>
   )
 }
@@ -533,20 +558,18 @@ export function StatusPills({
   onSelectOnly: (bucket: StatusBucket) => void
 }) {
   return (
-    <Box height={1} flexDirection="row" justifyContent="flex-end" minWidth={0} overflow="hidden">
-      <TogglePillGroup>
-        {BUCKETS.map((bucket) => (
-          <TogglePill
-            key={bucket}
-            label={bucket}
-            boldFirstLetter
-            active={buckets.has(bucket)}
-            onToggle={() => {
-              onSelectOnly(bucket)
-            }}
-          />
-        ))}
-      </TogglePillGroup>
+    <Box height={1} flexDirection="row" justifyContent="flex-end" minWidth={0} overflow="hidden" gap={1}>
+      {BUCKETS.map((bucket) => (
+        <InversePill
+          key={bucket}
+          label={bucket}
+          boldFirstLetter
+          active={buckets.has(bucket)}
+          onToggle={() => {
+            onSelectOnly(bucket)
+          }}
+        />
+      ))}
     </Box>
   )
 }

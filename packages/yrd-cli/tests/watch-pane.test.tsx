@@ -247,6 +247,45 @@ describe("the top line (items 30, 32d, 33)", () => {
   })
 })
 
+describe("ia.md first viewport and inverse pills (24196)", () => {
+  it("keeps boxed RUNNER in a 24-row overflow frame after first-paint scroll", async () => {
+    const rows: WatchRow[] = [
+      ...Array.from({ length: 18 }, (_, i) => ({
+        row: row({ branch: `task/w${String(i)}`, head: String(i).padStart(40, "0"), position: i + 1, state: "queued" }),
+      })),
+      ...Array.from({ length: 18 }, (_, i) => ({
+        row: row({
+          branch: `task/d${String(i)}`,
+          endedAt: NOW,
+          head: String(i + 50).padStart(40, "0"),
+          merge: "9".repeat(40),
+          state: "merged",
+        }),
+      })),
+    ]
+    const app = render(<WatchPane snapshot={snapshot({ rows })} live={false} />, { cols: 160, rows: 24 })
+    await settle(app)
+    expect(
+      app.lines.some((line) => line.includes("RUNNER")),
+      app.lines.join("\n"),
+    ).toBe(true)
+    app.unmount()
+  })
+
+  it("paints the active status pill with an inverse background after o", async () => {
+    const app = render(<WatchPane snapshot={snapshot()} live={false} />, { cols: 160, rows: 24 })
+    await settle(app)
+    app.press("o")
+    await settle(app)
+    const y = app.lines.findIndex((line) => /\bopen\b/u.test(line) && line.includes("failed"))
+    const x = (app.lines[y] ?? "").indexOf("open")
+    expect(y, app.lines.join("\n")).toBeGreaterThanOrEqual(0)
+    expect(x).toBeGreaterThanOrEqual(0)
+    expect(app.cell(x, y).bg, JSON.stringify(app.cell(x, y))).not.toBeNull()
+    app.unmount()
+  })
+})
+
 describe("the table (items 3, 28, 38)", () => {
   it("has the operator's columns: TASK AGENT QUEUE / RUN STATE AGE / RUN, and rows that read across them", async () => {
     const text = await paint(<WatchPane snapshot={snapshot()} live={false} />)

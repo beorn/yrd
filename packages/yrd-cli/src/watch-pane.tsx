@@ -459,16 +459,16 @@ export function WatchPane({
       // The other window, read now rather than at the next round, outside any redraw.
       const asked: DraftWindow = draftWindow.current === "7d" ? "all" : "7d"
       draftWindow.current = asked
-      void load({ draftWindow: asked }).then(
-        (next) => {
+      void (async () => {
+        try {
+          const next = await load({ draftWindow: asked })
           if (asked !== draftWindow.current) return
           setShown(next)
           setReadFailure(undefined)
-        },
-        (error: unknown) => {
+        } catch (error: unknown) {
           setReadFailure({ at: new Date(), message: firstLine(error) })
-        },
-      )
+        }
+      })()
     }
     if (character !== undefined && /^[1-9]$/u.test(character)) {
       const queue = shown.queues[Number(character) - 1]
@@ -747,6 +747,7 @@ function Table({
           items={[...rows]}
           getKey={watchRowKey}
           cursorKey={cursor}
+          scrollTo={cursor}
           nav
           active={active}
           virtualization="index"
