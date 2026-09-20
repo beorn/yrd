@@ -69,7 +69,7 @@ import {
 } from "silvery"
 import type { GitObservation, Row, StopFact } from "@yrd/queue-core"
 import { NowProvider, useMinute } from "./watch-clock.ts"
-import { STATE_WORDS, clock, firstLine, legendLines, runShortName, stateGlyph } from "./watch-format.ts"
+import { RUNNER_GLYPH, STATE_WORDS, clock, firstLine, legendLines, runShortName, stateGlyph } from "./watch-format.ts"
 import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
 import {
   BUCKETS,
@@ -92,6 +92,7 @@ import {
   LoudPause,
   QueueLine,
   RunnerDetail,
+  queueLine,
   bandHeight,
   bandPlan,
   bandedRows,
@@ -149,7 +150,6 @@ export type WatchTier = "right" | "below" | "full"
 /** Where the detail goes at this terminal size, or `full` when there is no room for a split. */
 // The STATS box needs rows the list would otherwise have: below 30 rows the
 // list keeps them all, below 44 the box drops its TIME rows (item 21).
-const STATS_MIN_ROWS = 30
 const STATS_TIME_MIN_ROWS = 44
 // Below this many rows the status pills give way first, so the table keeps a
 // row under the title, the queue line, the header, a band rule, the runner's
@@ -182,7 +182,7 @@ const HELP = [
   "Home         follow the newest rows again      ←/→      move between the tabs",
   "v            fold the diff open or shut        1-9      toggle a queue",
   "o r d f      show one status; O R D F toggle   a        show everything",
-  "w            drafts of the last 7 days, or every draft",
+  "s            expand or fold STATS              w        drafts of 7d, or every draft",
   "The watch writes nothing. Stop a change by moving its ref or pausing the queue.",
 ]
 
@@ -233,6 +233,8 @@ export function WatchPane({
   const [held, setHeld] = useState<readonly HeldDetail[]>([])
   const [diffOpen, setDiffOpen] = useState(false)
   const [diffs, setDiffs] = useState<ReadonlyMap<string, DiffText>>(new Map())
+  const [statsOpen, setStatsOpen] = useState(false)
+  const centeredRunner = useRef(false)
   const listRef = useRef<ListViewHandle | null>(null)
   /** The drafts the reader asked for, read by every round: a round begun before `w` must not undo it. */
   const draftWindow = useRef<DraftWindow>(snapshot.drafts?.window ?? "7d")
@@ -295,6 +297,19 @@ export function WatchPane({
   const keyed = cursorKey === undefined ? -1 : visible.findIndex((item) => watchRowKey(item) === cursorKey)
   const at = keyed >= 0 ? keyed : Math.min(cursor, Math.max(0, visible.length - 1))
   const vanished = cursorKey !== undefined && keyed < 0 && visible.length > 0 ? cursorRow : undefined
+  useEffect(() => {
+    if (centeredRunner.current || visible.length === 0) return
+    const heldAt = visible.findIndex((item) => item.row.live !== undefined)
+    const doneAt = visible.findIndex((item) => {
+      const bucket = bucketOf(item.row)
+      return bucket === "done" || bucket === "failed"
+    })
+    const i = heldAt >= 0 ? heldAt : doneAt
+    if (i < 0) return
+    centeredRunner.current = true
+    setCursor(i)
+    setCursorRow(visible[i])
+  }, [visible])
   useEffect(() => {
     if (keyed >= 0 && keyed !== cursor) setCursor(keyed)
   }, [keyed, cursor])
@@ -435,6 +450,7 @@ export function WatchPane({
     if (character === "D") toggleBucket("done")
     if (character === "F") toggleBucket("failed")
     if (character === "a") showAll()
+    if (character === "s") setStatsOpen((was) => !was)
     if (character === "w" && load !== undefined) {
       // The other window, read now rather than at the next round, outside any redraw.
       const asked: DraftWindow = draftWindow.current === "7d" ? "all" : "7d"
@@ -498,13 +514,18 @@ export function WatchPane({
       paddingX={1}
       pills={terminalRows < PILLS_MIN_ROWS ? null : <StatusPills buckets={buckets} onSelectOnly={selectOnly} />}
       stats={
-        shown.decisions === undefined || terminalRows < STATS_MIN_ROWS ? null : (
-          <StatsBox
-            decisions={shown.decisions}
-            columns={listColumns - 2}
-            timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
-          />
-        )
+        <Box flexShrink={0} minWidth={0}>
+          <Text wrap="truncate">
+            {RUNNER_GLYPH} STATS {queueLine(shown, shown.at, Math.max(20, listColumns - 10))}
+          </Text>
+          {statsOpen && shown.decisions !== undefined ? (
+            <StatsBox
+              decisions={shown.decisions}
+              columns={listColumns - 2}
+              timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
+            />
+          ) : null}
+        </Box>
       }
     >
       <Table
