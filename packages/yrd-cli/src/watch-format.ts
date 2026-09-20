@@ -259,6 +259,25 @@ export function durationText(row: Row, now: Date): string {
 }
 
 /**
+ * AGE / RUN for the table (ia.md 2026-09-19). RUN is that attempt's
+ * `clocks.runtimeMs` and freezes when the attempt ends. AGE is unknown
+ * (`—`) unless a beginning other than the tip `Opened:` trailer exists:
+ * that trailer is not proven total lifetime across retries.
+ */
+export function ageRunText(row: Row, now: Date): string {
+  const measured = clocks(row, now)
+  const runtime = measured.runtimeMs ?? measured.checkingMs
+  const run = runtime === undefined ? "—" : mediaDuration(runtime)
+  return `— / ${run}`
+}
+
+/** Queue digit beside the run: `1 · main#2342`, or `1 · —` with no attempt. */
+export function queueRunText(digit: number, label: string, runId: string | undefined): string {
+  if (runId === undefined) return `${String(digit)} · —`
+  return `${String(digit)} · ${runShortName(label, runId)}`
+}
+
+/**
  * The timing line the detail and a one-row page print for a change
  * (@i/10-yrd/24196): its one duration, word and basis exactly as its table
  * cell says it, then the attempt's runtime under its own name, which counts

@@ -51,7 +51,8 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
   const runner = runnerOf(snapshot, snapshot.at)
   const holding = holdsChange(runner.state)
   const rows = bandedRows(snapshot.rows, holding)
-  const layout = listLayout(rows, columns, snapshot.at, runner)
+  const queue = { digit: 1, label: queues[0]?.label ?? snapshot.queue }
+  const layout = listLayout(rows, columns, snapshot.at, runner, queue)
   const plan = bandPlan(rows, columns - 2, snapshot.drafts?.window ?? "7d", holding)
   return (
     <NowProvider readAt={snapshot.at} live={false}>
@@ -60,7 +61,7 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
         <LoudPause snapshot={snapshot} />
         {/* The queue's own name, as a stranger spells it — the line a logged round's `updated` stamp sits under. */}
         <Text wrap="truncate">{snapshot.queue}</Text>
-        <TopLine queues={queues} visible={undefined} onToggle={() => undefined} allOn />
+        <TopLine queues={queues} visible={undefined} onToggle={() => undefined} />
         <QueueLine snapshot={snapshot} columns={columns} />
         {snapshot.journalAbsent === undefined ? null : (
           <Text color="$fg-muted" wrap="truncate">
@@ -86,9 +87,16 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
                     {separator}
                   </Text>
                 )}
-                <ListRow item={item} layout={layout} cursor={false} live={false} />
+                <ListRow
+                  item={item}
+                  layout={layout}
+                  cursor={false}
+                  live={false}
+                  queueDigit={queue.digit}
+                  queueLabel={queue.label}
+                />
                 {/* The runner's second line hangs under the row that IS the runner. */}
-                {plan.holding === index ? <RunnerDetail snapshot={snapshot} layout={layout} named /> : null}
+                {plan.holding === index ? <RunnerDetail snapshot={snapshot} named /> : null}
               </Box>
             )
           })}
@@ -101,7 +109,7 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
           ))}
           {options.scope === undefined ? (
             // A draft is a row and no change: the queue line counts the drafts.
-            <Text color="$fg-muted">{`${String(rows.filter((item) => item.row.state !== "draft").length)} change(s) · one row each`}</Text>
+            <Text color="$fg-muted">{`${String(rows.filter((item) => item.row.state !== "draft").length)} change(s) · ${String(rows.filter((item) => item.row.state === "draft").length)} draft(s) · one row each`}</Text>
           ) : null}
         </ListStack>
       </Box>

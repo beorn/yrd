@@ -312,7 +312,7 @@ export function BandBreakRows({
       {brk.runner ? (
         <>
           <RunnerRow line={runnerOf(snapshot, now)} layout={layout} />
-          <RunnerDetail snapshot={snapshot} layout={layout} />
+          <RunnerDetail snapshot={snapshot} />
         </>
       ) : null}
       {brk.rules.map((rule) => (
@@ -334,20 +334,12 @@ export function BandBreakRows({
  * row is the runner's row and nothing else on it says so. Under the runner's
  * own row the word is already in the cell above, and saying it twice is noise.
  */
-export function RunnerDetail({
-  snapshot,
-  layout,
-  named = false,
-}: {
-  snapshot: WatchSnapshot
-  layout: ListLayout
-  named?: boolean
-}) {
+export function RunnerDetail({ snapshot, named = false }: { snapshot: WatchSnapshot; named?: boolean }) {
   const now = useNow()
   const line = runnerOf(snapshot, now)
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-      <Box width={layout.timeWidth + layout.statusWidth + 1} flexShrink={0} />
+      <Box width={2} flexShrink={0} />
       <Box flexGrow={1} flexBasis={0} minWidth={0} overflow="hidden" flexDirection="row">
         <Text color={STATE_WORDS[line.state].color} flexShrink={0}>
           {RUNNER_GLYPH}

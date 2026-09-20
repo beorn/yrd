@@ -115,8 +115,8 @@ describe("the printed page's frame", () => {
   it("puts RUNNER in the table, under the header, as a row and not a box", async () => {
     const text = await paint(snapshot({ pause, runner }))
     const lines = text.split("\n").filter((line) => line.trim() !== "")
-    const title = lines.findIndex((line) => line.includes("YRD QUEUES"))
-    const header = lines.findIndex((line) => line.includes("CHANGES"))
+    const title = lines.findIndex((line) => line.includes("yrd watch"))
+    const header = lines.findIndex((line) => line.includes("TASK"))
     const runnerRow = lines.findIndex((line) => line.includes("RUNNER"))
     expect(title).toBeGreaterThanOrEqual(0)
     expect(header).toBeGreaterThan(title)
@@ -143,7 +143,7 @@ describe("the printed page's frame", () => {
     const text = await paint(snapshot({ runner }))
     const lines = text.split("\n").filter((line) => line.trim() !== "")
     const name = lines.findIndex((line) => line.trim() === "example.test/repo#main")
-    const header = lines.findIndex((line) => line.includes("CHANGES"))
+    const header = lines.findIndex((line) => line.includes("TASK"))
     expect(name).toBeGreaterThanOrEqual(0)
     expect(name).toBeLessThan(header)
   })
@@ -273,7 +273,7 @@ function flowJournals(): Journals {
  */
 function table(text: string): readonly string[] {
   const lines = text.split("\n").filter((line) => line.trim() !== "")
-  return lines.slice(lines.findIndex((line) => line.includes("CHANGES")))
+  return lines.slice(lines.findIndex((line) => line.includes("TASK")))
 }
 
 function flowSnapshot(over: Partial<WatchSnapshot> = {}): WatchSnapshot {
@@ -341,6 +341,6 @@ describe("the flow page: four bands, one row per change", () => {
     expect(runner).toContain("?")
     expect(text).not.toContain("╭─ RUNNER")
     // The RUN column is gone from every row.
-    expect(lines.find((line) => line.includes("CHANGES"))).not.toContain("RUN")
+    expect(lines.find((line) => line.includes("TASK"))).toContain("QUEUE / RUN")
   })
 })
