@@ -133,8 +133,8 @@ export function listLayout(
         ? 0
         : Math.max(
             5,
-            (runner?.by ?? "-").length,
-            ...rows.map((item) => (item.row.submitter ?? item.row.author ?? "-").length),
+            (runner?.by ?? "—").length,
+            ...rows.map((item) => (item.row.submitter ?? "—").length),
           ),
     queueRunWidth: Math.max(
       11,
@@ -346,7 +346,7 @@ export const ListRow = memo(function ListRow({
         {{
           agent: (
             <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
-              {row.submitter ?? row.author ?? "-"}
+              {row.submitter ?? "—"}
             </Text>
           ),
           task: (

@@ -27,6 +27,7 @@ import { useNow } from "./watch-clock.ts"
 import { RUNNER_GLYPH, STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.ts"
 import type { RunnerState } from "./watch-words.ts"
 import { RunnerRow, clockOf, type ListLayout } from "./watch-list.tsx"
+import { TitledBox } from "./watch-primitives.tsx"
 import { runnerLine } from "./watch-runner.ts"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import type { WatchRow } from "./watch-rows.ts"
@@ -310,10 +311,10 @@ export function BandBreakRows({
   return (
     <Box flexDirection="column" flexShrink={0} minWidth={0}>
       {brk.runner ? (
-        <>
+        <TitledBox title={STATE_WORDS.runner.word} flushTop>
           <RunnerRow line={runnerOf(snapshot, now)} layout={layout} />
           <RunnerDetail snapshot={snapshot} />
-        </>
+        </TitledBox>
       ) : null}
       {brk.rules.map((rule) => (
         <Text key={rule} color="$fg-muted" wrap="truncate">
@@ -394,9 +395,9 @@ export function ListStack({
           ))}
         </Box>
       )}
-      {children}
-      {pills}
       {stats}
+      {pills}
+      {children}
     </Box>
   )
 }

@@ -163,7 +163,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     // The runner is a ROW between what waits and what is done, always there:
     // off the queue's own machine it says its status is not published rather
     // than guessing, and nothing invents one to avoid printing `?`.
-    const runnerRow = lines.find((line) => line.includes("RUNNER"))
+    const runnerRow = lines.find((line) => line.includes("RUNNER") && line.includes("?"))
     expect(runnerRow, plain.report).toBeDefined()
     expect(runnerRow, plain.report).toContain("?")
     expect(lines.indexOf(runnerRow!), plain.report).toBeGreaterThan(header)
