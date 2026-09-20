@@ -112,17 +112,17 @@ describe("the printed page's frame", () => {
     latest: { alive: false, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
   }
 
-  it("puts RUNNER in the table, under the header, as a row and not a box", async () => {
+  it("puts RUNNER in the table, under the header, in a box", async () => {
     const text = await paint(snapshot({ pause, runner }))
     const lines = text.split("\n").filter((line) => line.trim() !== "")
-    const title = lines.findIndex((line) => line.includes("YRD QUEUES"))
-    const header = lines.findIndex((line) => line.includes("CHANGES"))
+    const title = lines.findIndex((line) => line.includes("yrd watch"))
+    const header = lines.findIndex((line) => line.includes("TASK"))
     const runnerRow = lines.findIndex((line) => line.includes("RUNNER"))
     expect(title).toBeGreaterThanOrEqual(0)
     expect(header).toBeGreaterThan(title)
     // The band is IN the table now, between what waits and what is done.
     expect(runnerRow).toBeGreaterThan(header)
-    expect(text).not.toContain("\u256d\u2500 RUNNER")
+    expect(text).toContain("\u256d\u2500 RUNNER")
     expect(text.match(new RegExp(pause, "gu"))).toHaveLength(1)
     // The pause is the loudest state on the page and it leads it; the runner's
     // row says the WORD paused and what lifts the stop, never the same sentence.
@@ -143,7 +143,7 @@ describe("the printed page's frame", () => {
     const text = await paint(snapshot({ runner }))
     const lines = text.split("\n").filter((line) => line.trim() !== "")
     const name = lines.findIndex((line) => line.trim() === "example.test/repo#main")
-    const header = lines.findIndex((line) => line.includes("CHANGES"))
+    const header = lines.findIndex((line) => line.includes("TASK"))
     expect(name).toBeGreaterThanOrEqual(0)
     expect(name).toBeLessThan(header)
   })
@@ -273,7 +273,7 @@ function flowJournals(): Journals {
  */
 function table(text: string): readonly string[] {
   const lines = text.split("\n").filter((line) => line.trim() !== "")
-  return lines.slice(lines.findIndex((line) => line.includes("CHANGES")))
+  return lines.slice(lines.findIndex((line) => line.includes("TASK")))
 }
 
 function flowSnapshot(over: Partial<WatchSnapshot> = {}): WatchSnapshot {
@@ -334,13 +334,12 @@ describe("the flow page: four bands, one row per change", () => {
   it("draws the runner in the table's own columns and says `?` where no status is published", async () => {
     const text = await paint(flowSnapshot({ runner: undefined }))
     const lines = table(text)
-    const runner = lines.find((line) => line.includes("RUNNER"))
+    const runner = lines.find((line) => line.includes("RUNNER") && line.includes("?"))
 
     expect(runner, text).toBeDefined()
-    // S1 does not invent a status source: the runner publishes nothing until S2.
     expect(runner).toContain("?")
-    expect(text).not.toContain("╭─ RUNNER")
+    expect(text).toContain("╭─ RUNNER")
     // The RUN column is gone from every row.
-    expect(lines.find((line) => line.includes("CHANGES"))).not.toContain("RUN")
+    expect(lines.find((line) => line.includes("TASK"))).toContain("QUEUE / RUN")
   })
 })

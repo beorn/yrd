@@ -40,6 +40,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
   writeSync,
 } from "node:fs"
@@ -443,6 +444,30 @@ export function readRunLog(dir: string, run: string): readonly LogRecord[] {
   return records
 }
 
+const journalFileCache = new Map<string, { mtimeMs: number; size: number; runs: JournalRun[] }>()
+
+function journalPath(dir: string, id: string): string {
+  return join(dir, `${id}.jsonl`)
+}
+
+function pruneJournalCache(dir: string, windowed: readonly string[]): void {
+  const live = new Set(windowed.map((id) => journalPath(dir, id)))
+  const prefix = dir.endsWith("/") ? dir : `${dir}/`
+  for (const key of journalFileCache.keys()) {
+    if (key.startsWith(prefix) && !live.has(key)) journalFileCache.delete(key)
+  }
+}
+
+function cachedRunsIn(dir: string, id: string, startedAt: Date): readonly JournalRun[] {
+  const path = journalPath(dir, id)
+  const st = statSync(path)
+  const hit = journalFileCache.get(path)
+  if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.runs
+  const runs = [...runsIn(readRunLog(dir, id), id, startedAt)]
+  journalFileCache.set(path, { mtimeMs: st.mtimeMs, size: st.size, runs })
+  return runs
+}
+
 /**
  * Every record across every run journal in the directory that matches,
  * oldest run first — unwindowed, unlike {@link readJournals}: a caller asking
@@ -504,18 +529,20 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     return startedAt !== undefined && now.getTime() - startedAt.getTime() <= sinceMs
   })
   if (windowed.length === 0) {
+    pruneJournalCache(dir, [])
     const held =
       ours.length === 0
         ? "it holds no run journal"
         : `its ${String(ours.length)} run journal(s) are all older than the window`
     return { absent: `no run journal was read: ${dir} — ${held}`, dir, malformed: [], runs: new Map() }
   }
+  pruneJournalCache(dir, windowed)
   const runs = new Map<string, JournalRun[]>()
   const malformed: { run: string; key: string; message: string }[] = []
   for (const id of [...windowed].sort()) {
     const startedAt = runStartedAt(id)
     if (startedAt === undefined) continue
-    for (const run of runsIn(readRunLog(dir, id), id, startedAt)) {
+    for (const run of cachedRunsIn(dir, id, startedAt)) {
       const key = journalKey(run.branch, run.head)
       for (const message of run.malformed ?? []) malformed.push({ key, message, run: run.id })
       const held = runs.get(key)

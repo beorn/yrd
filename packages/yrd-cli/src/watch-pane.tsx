@@ -69,7 +69,7 @@ import {
 } from "silvery"
 import type { GitObservation, Row, StopFact } from "@yrd/queue-core"
 import { NowProvider, useMinute } from "./watch-clock.ts"
-import { STATE_WORDS, clock, firstLine, legendLines, runShortName, stateGlyph } from "./watch-format.ts"
+import { RUNNER_GLYPH, STATE_WORDS, clock, firstLine, legendLines, runShortName, stateGlyph } from "./watch-format.ts"
 import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
 import {
   BUCKETS,
@@ -92,6 +92,7 @@ import {
   LoudPause,
   QueueLine,
   RunnerDetail,
+  queueLine,
   bandHeight,
   bandPlan,
   bandedRows,
@@ -149,7 +150,6 @@ export type WatchTier = "right" | "below" | "full"
 /** Where the detail goes at this terminal size, or `full` when there is no room for a split. */
 // The STATS box needs rows the list would otherwise have: below 30 rows the
 // list keeps them all, below 44 the box drops its TIME rows (item 21).
-const STATS_MIN_ROWS = 30
 const STATS_TIME_MIN_ROWS = 44
 // Below this many rows the status pills give way first, so the table keeps a
 // row under the title, the queue line, the header, a band rule, the runner's
@@ -182,7 +182,7 @@ const HELP = [
   "Home         follow the newest rows again      ←/→      move between the tabs",
   "v            fold the diff open or shut        1-9      toggle a queue",
   "o r d f      show one status; O R D F toggle   a        show everything",
-  "w            drafts of the last 7 days, or every draft",
+  "s            expand or fold STATS              w        drafts of 7d, or every draft",
   "The watch writes nothing. Stop a change by moving its ref or pausing the queue.",
 ]
 
@@ -233,6 +233,8 @@ export function WatchPane({
   const [held, setHeld] = useState<readonly HeldDetail[]>([])
   const [diffOpen, setDiffOpen] = useState(false)
   const [diffs, setDiffs] = useState<ReadonlyMap<string, DiffText>>(new Map())
+  const [statsOpen, setStatsOpen] = useState(false)
+  const centeredRunner = useRef(false)
   const listRef = useRef<ListViewHandle | null>(null)
   /** The drafts the reader asked for, read by every round: a round begun before `w` must not undo it. */
   const draftWindow = useRef<DraftWindow>(snapshot.drafts?.window ?? "7d")
@@ -288,13 +290,26 @@ export function WatchPane({
     ),
     holdsChange(runnerOf(shown, shown.at).state),
   )
-  const allOn = buckets.size === BUCKETS.length && visibleQueues === undefined
+
   // Where the cursor's row is NOW; when it left the table, the cursor stays
   // where it was (its neighbour) and the row that left is named below.
   const cursorKey = cursorRow === undefined ? undefined : watchRowKey(cursorRow)
   const keyed = cursorKey === undefined ? -1 : visible.findIndex((item) => watchRowKey(item) === cursorKey)
   const at = keyed >= 0 ? keyed : Math.min(cursor, Math.max(0, visible.length - 1))
   const vanished = cursorKey !== undefined && keyed < 0 && visible.length > 0 ? cursorRow : undefined
+  useEffect(() => {
+    if (centeredRunner.current || visible.length === 0) return
+    const heldAt = visible.findIndex((item) => item.row.live !== undefined)
+    const doneAt = visible.findIndex((item) => {
+      const bucket = bucketOf(item.row)
+      return bucket === "done" || bucket === "failed"
+    })
+    const i = heldAt >= 0 ? heldAt : doneAt
+    if (i < 0) return
+    centeredRunner.current = true
+    setCursor(i)
+    setCursorRow(visible[i])
+  }, [visible])
   useEffect(() => {
     if (keyed >= 0 && keyed !== cursor) setCursor(keyed)
   }, [keyed, cursor])
@@ -435,6 +450,7 @@ export function WatchPane({
     if (character === "D") toggleBucket("done")
     if (character === "F") toggleBucket("failed")
     if (character === "a") showAll()
+    if (character === "s") setStatsOpen((was) => !was)
     if (character === "w" && load !== undefined) {
       // The other window, read now rather than at the next round, outside any redraw.
       const asked: DraftWindow = draftWindow.current === "7d" ? "all" : "7d"
@@ -496,19 +512,20 @@ export function WatchPane({
     <ListStack
       snapshot={shown}
       paddingX={1}
-      pills={
-        terminalRows < PILLS_MIN_ROWS ? null : (
-          <StatusPills buckets={buckets} allOn={allOn} onSelectOnly={selectOnly} onAll={showAll} />
-        )
-      }
+      pills={terminalRows < PILLS_MIN_ROWS ? null : <StatusPills buckets={buckets} onSelectOnly={selectOnly} />}
       stats={
-        shown.decisions === undefined || terminalRows < STATS_MIN_ROWS ? null : (
-          <StatsBox
-            decisions={shown.decisions}
-            columns={listColumns - 2}
-            timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
-          />
-        )
+        <Box flexShrink={0} minWidth={0}>
+          <Text wrap="truncate">
+            {RUNNER_GLYPH} STATS {queueLine(shown, shown.at, Math.max(20, listColumns - 10))}
+          </Text>
+          {statsOpen && shown.decisions !== undefined ? (
+            <StatsBox
+              decisions={shown.decisions}
+              columns={listColumns - 2}
+              timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
+            />
+          ) : null}
+        </Box>
       }
     >
       <Table
@@ -554,13 +571,7 @@ export function WatchPane({
             so the queue's loudest state is said up here (watch-frame.tsx). */}
         <LoudPause snapshot={shown} />
         {/* The top line is ONLY the title and the queue pills (items 30, 32b, 33). */}
-        <TopLine
-          queues={shown.queues}
-          visible={visibleQueues}
-          onToggle={toggleQueue}
-          allOn={allOn}
-          {...(live ? { onShowAll: showAll } : {})}
-        />
+        <TopLine queues={shown.queues} visible={visibleQueues} onToggle={toggleQueue} />
         <QueueLine snapshot={shown} columns={columns} />
         {/* Where the journal was looked for, when there was none. A watch that
             showed no running check because it had no journal to read must say
@@ -597,7 +608,8 @@ export function WatchPane({
           <Text color="$fg-muted" wrap="truncate">
             {cursorRow === undefined ? "" : "Home follows the newest again · "}
             {/* A draft is a row and no change: the queue line counts the drafts. */}
-            {String(changesIn(visible))} of {String(changesIn(shown.rows))} change(s) · ? for help · q leaves
+            {String(changesIn(visible))} of {String(changesIn(shown.rows))} change(s) · {String(draftsIn(visible))} of{" "}
+            {String(draftsIn(shown.rows))} draft(s) · ? for help · q leaves
           </Text>
         </Box>
         {helpOpen ? (
@@ -628,6 +640,11 @@ export function WatchPane({
 /** How many of these rows are changes: every row but a draft's. */
 function changesIn(rows: readonly WatchRow[]): number {
   return rows.filter((item) => item.row.state !== "draft").length
+}
+
+/** How many of these rows are drafts: the other population the footer must name. */
+function draftsIn(rows: readonly WatchRow[]): number {
+  return rows.filter((item) => item.row.state === "draft").length
 }
 
 /** One read that failed: when, and the first line of why. */
@@ -709,7 +726,8 @@ function Table({
   const minute = useMinute()
   const { columns } = useWindowSize()
   const runner = runnerOf(snapshot, minute)
-  const layout = listLayout(rows, columns, minute, runner)
+  const queue = { digit: 1, label: snapshot.queues[0]?.label ?? snapshot.queue }
+  const layout = listLayout(rows, columns, minute, runner, queue)
   const plan: BandPlan = bandPlan(rows, columns - 4, snapshot.drafts?.window ?? "7d", holdsChange(runner.state))
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
@@ -743,7 +761,15 @@ function Table({
             const separator = separatorBefore(rows, index)
             const brk = plan.before.get(index)
             const row = (
-              <ListRow item={item} layout={layout} cursor={index === cursor} hovered={meta.isHovered} live={live} />
+              <ListRow
+                item={item}
+                layout={layout}
+                cursor={index === cursor}
+                hovered={meta.isHovered}
+                live={live}
+                queueDigit={queue.digit}
+                queueLabel={queue.label}
+              />
             )
             if (separator === undefined && brk === undefined && plan.holding !== index) return row
             return (
@@ -756,7 +782,7 @@ function Table({
                 )}
                 {row}
                 {/* The runner's second line hangs under the row that IS the runner. */}
-                {plan.holding === index ? <RunnerDetail snapshot={snapshot} layout={layout} named /> : null}
+                {plan.holding === index ? <RunnerDetail snapshot={snapshot} named /> : null}
               </Box>
             )
           }}

@@ -27,6 +27,7 @@ import { useNow } from "./watch-clock.ts"
 import { RUNNER_GLYPH, STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.ts"
 import type { RunnerState } from "./watch-words.ts"
 import { RunnerRow, clockOf, type ListLayout } from "./watch-list.tsx"
+import { TitledBox } from "./watch-primitives.tsx"
 import { runnerLine } from "./watch-runner.ts"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import type { WatchRow } from "./watch-rows.ts"
@@ -310,10 +311,10 @@ export function BandBreakRows({
   return (
     <Box flexDirection="column" flexShrink={0} minWidth={0}>
       {brk.runner ? (
-        <>
+        <TitledBox title={STATE_WORDS.runner.word} flushTop>
           <RunnerRow line={runnerOf(snapshot, now)} layout={layout} />
-          <RunnerDetail snapshot={snapshot} layout={layout} />
-        </>
+          <RunnerDetail snapshot={snapshot} />
+        </TitledBox>
       ) : null}
       {brk.rules.map((rule) => (
         <Text key={rule} color="$fg-muted" wrap="truncate">
@@ -334,20 +335,12 @@ export function BandBreakRows({
  * row is the runner's row and nothing else on it says so. Under the runner's
  * own row the word is already in the cell above, and saying it twice is noise.
  */
-export function RunnerDetail({
-  snapshot,
-  layout,
-  named = false,
-}: {
-  snapshot: WatchSnapshot
-  layout: ListLayout
-  named?: boolean
-}) {
+export function RunnerDetail({ snapshot, named = false }: { snapshot: WatchSnapshot; named?: boolean }) {
   const now = useNow()
   const line = runnerOf(snapshot, now)
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-      <Box width={layout.timeWidth + layout.statusWidth + 1} flexShrink={0} />
+      <Box width={2} flexShrink={0} />
       <Box flexGrow={1} flexBasis={0} minWidth={0} overflow="hidden" flexDirection="row">
         <Text color={STATE_WORDS[line.state].color} flexShrink={0}>
           {RUNNER_GLYPH}
@@ -402,9 +395,9 @@ export function ListStack({
           ))}
         </Box>
       )}
-      {children}
-      {pills}
       {stats}
+      {pills}
+      {children}
     </Box>
   )
 }
