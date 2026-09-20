@@ -85,6 +85,29 @@ async function branchWithCommit(w: World, branch: string, file: string): Promise
   return head
 }
 
+it("a queue reading with N changes asks ancestry once", async () => {
+  const w = await world()
+  for (const n of [1, 2, 3]) {
+    await branchWithCommit(w, `task/n${n}`, `n${n}.txt`)
+    await submit(w.git, "origin", {
+      branch: `task/n${n}`,
+      submitter: "@dev/2",
+      target: { remote: "origin", branch: "main" },
+    })
+  }
+  let revListStdin = 0
+  let mergeBaseIsAncestor = 0
+  const git: Git = async (args, input) => {
+    if (args[0] === "rev-list" && args.includes("--stdin")) revListStdin++
+    if (args[0] === "merge-base" && args.includes("--is-ancestor")) mergeBaseIsAncestor++
+    return w.git(args, input)
+  }
+  const reading = await readQueue(git, "origin", "main", w.target)
+  expect(reading.changes).toHaveLength(3)
+  expect(revListStdin).toBe(1)
+  expect(mergeBaseIsAncestor).toBe(0)
+})
+
 async function remoteRefs(w: World): Promise<readonly string[]> {
   return (await w.git(["ls-remote", "--refs", "origin"]))
     .split("\n")
