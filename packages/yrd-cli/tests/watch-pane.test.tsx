@@ -11,6 +11,7 @@
  * @consumer the operator reading `yrd watch`
  */
 
+import { mkdirSync, writeFileSync } from "node:fs"
 import type React from "react"
 import { act } from "react"
 import { describe, expect, it, vi } from "vitest"
@@ -272,6 +273,80 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     app.unmount()
   })
 
+  it("at 160x48 puts status pills on the right and boxed RUNNER in the frame", async () => {
+    const rows: WatchRow[] = [
+      ...Array.from({ length: 8 }, (_, i) => ({
+        row: row({ branch: `task/w${String(i)}`, head: String(i).padStart(40, "0"), position: i + 1, state: "queued" }),
+      })),
+      {
+        row: row({
+          branch: "task/x",
+          live: { check: "affected-tests", phase: "merge", run: RUN_ID, since: NOW },
+          state: "queued",
+        }),
+      },
+      ...Array.from({ length: 8 }, (_, i) => ({
+        row: row({
+          branch: `task/d${String(i)}`,
+          endedAt: NOW,
+          head: String(i + 50).padStart(40, "0"),
+          merge: "9".repeat(40),
+          state: "merged",
+        }),
+      })),
+    ]
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({
+          rows,
+          runner: {
+            journalDir: "/w/logs",
+            service: BEATING,
+            latest: { alive: true, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
+          },
+        })}
+        live={false}
+      />,
+      { cols: 160, rows: 48 },
+    )
+    await settle(app)
+    const dump = (name: string) => {
+      const dir = "/hh/var/@dev2/replay-160x48"
+      if (process.env.DUMP_160 !== "1") return
+      mkdirSync(dir, { recursive: true })
+      const numbered = app.lines
+        .map((line, i) => `${String(i).padStart(2, "0")}|${line}|len=${String(line.length)}`)
+        .join("\n")
+      writeFileSync(`${dir}/${name}.txt`, `${numbered}\n`)
+    }
+    dump("before")
+    const pillsY = app.lines.findIndex(
+      (line) => line.includes("open") && line.includes("failed") && line.includes("running"),
+    )
+    const pills = app.lines[pillsY] ?? ""
+    const openX = pills.indexOf("open")
+    expect(pillsY, app.lines.join("\n")).toBeGreaterThanOrEqual(0)
+    expect(openX, pills).toBeGreaterThan(100)
+    expect(pills.trimEnd().endsWith("failed")).toBe(true)
+    expect(
+      app.lines.some((line) => line.includes("RUNNER")),
+      app.lines.join("\n"),
+    ).toBe(true)
+    expect(
+      app.lines.some((line) => line.includes("ready")),
+      app.lines.join("\n"),
+    ).toBe(true)
+    app.press("o")
+    await settle(app)
+    dump("o")
+    const openCell = app.cell(openX, pillsY)
+    expect(openCell.bg, JSON.stringify(openCell)).not.toBeNull()
+    app.press("a")
+    await settle(app)
+    dump("a")
+    app.unmount()
+  })
+
   it("paints the active status pill with an inverse background after o", async () => {
     const app = render(<WatchPane snapshot={snapshot()} live={false} />, { cols: 160, rows: 24 })
     await settle(app)
@@ -282,6 +357,82 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     expect(y, app.lines.join("\n")).toBeGreaterThanOrEqual(0)
     expect(x).toBeGreaterThanOrEqual(0)
     expect(app.cell(x, y).bg, JSON.stringify(app.cell(x, y))).not.toBeNull()
+    app.unmount()
+  })
+
+  it("after o then a, completed frames keep a clean RUNNER box and bring the held change back", async () => {
+    const held = "task/held-waiting"
+    const rows: WatchRow[] = [
+      ...Array.from({ length: 30 }, (_, i) => ({
+        row: row({
+          at: NOW,
+          author: "someone",
+          branch: `task/draft${String(i)}`,
+          head: String(i + 200).padStart(40, "0"),
+          state: "draft",
+        }),
+      })),
+      {
+        row: row({
+          branch: held,
+          live: { check: "affected-tests", phase: "merge", run: RUN_ID, since: NOW },
+          position: 1,
+          state: "queued",
+        }),
+      },
+      ...Array.from({ length: 20 }, (_, i) => ({
+        row: row({
+          branch: `task/done${String(i)}`,
+          endedAt: NOW,
+          head: String(i + 300).padStart(40, "0"),
+          merge: "9".repeat(40),
+          state: "merged",
+        }),
+      })),
+    ]
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({
+          drafts: { unread: 0, window: "7d" },
+          rows,
+          runner: {
+            journalDir: "/w/logs",
+            service: BEATING,
+            latest: { alive: true, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
+          },
+        })}
+        live={false}
+      />,
+      { cols: 160, rows: 48 },
+    )
+    await settle(app)
+    app.press("o")
+    await settle(app)
+    const afterO = app.lines.join("\n")
+    expect(afterO, afterO).not.toMatch(/aRUNNER/)
+    expect(
+      app.lines.some((line) => line.includes("RUNNER")),
+      afterO,
+    ).toBe(true)
+    const runnerTitle = app.lines.find((line) => line.includes("RUNNER"))
+    expect(runnerTitle, afterO).toBeDefined()
+    expect(runnerTitle, afterO).not.toMatch(/RUNNER\w/)
+    expect(afterO, afterO).toMatch(/TIME = pushed/)
+    const pillsY = app.lines.findIndex((line) => /\bopen\b/u.test(line) && line.includes("failed"))
+    const openX = (app.lines[pillsY] ?? "").indexOf("open")
+    expect(app.cell(openX, pillsY).bg, JSON.stringify(app.cell(openX, pillsY))).not.toBeNull()
+    app.press("a")
+    await settle(app)
+    const afterA = app.lines.join("\n")
+    expect(afterA, afterA).not.toMatch(/aRUNNER/)
+    expect(
+      app.lines.some((line) => line.includes("RUNNER")),
+      afterA,
+    ).toBe(true)
+    expect(
+      app.lines.some((line) => line.includes(held) && line.includes("checking")),
+      afterA,
+    ).toBe(true)
     app.unmount()
   })
 })

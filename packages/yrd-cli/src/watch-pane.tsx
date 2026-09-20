@@ -391,6 +391,9 @@ export function WatchPane({
   const selectOnly = (bucket: StatusBucket): void => {
     setBuckets(new Set([bucket]))
     toTop()
+    // A new exclusive filter is a new first viewport: the one-shot runner
+    // center must run again, or `o` then `a` keeps the drafts scroll.
+    centeredRunner.current = false
   }
   const toggleBucket = (bucket: StatusBucket): void => {
     setBuckets((was) => {
@@ -400,10 +403,13 @@ export function WatchPane({
       return next
     })
     toTop()
+    centeredRunner.current = false
   }
   const showAll = (): void => {
     setBuckets(new Set(BUCKETS))
     setVisibleQueues(undefined)
+    toTop()
+    centeredRunner.current = false
   }
   const toggleQueue = (queueLabel: string): void => {
     setVisibleQueues((was) => {
@@ -514,6 +520,7 @@ export function WatchPane({
   const listColumns = opened && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) - DIVIDER_SIZE : columns
   const list = (
     <ListStack
+      key={[...buckets].toSorted().join(",")}
       snapshot={shown}
       paddingX={1}
       pills={terminalRows < PILLS_MIN_ROWS ? null : <StatusPills buckets={buckets} onSelectOnly={selectOnly} />}
