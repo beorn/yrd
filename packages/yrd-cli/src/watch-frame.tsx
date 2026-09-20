@@ -81,11 +81,14 @@ export function lineOf(rows: readonly WatchRow[]): Readonly<{ held: Row | undefi
  */
 export function queueLine(snapshot: WatchSnapshot, now: Date, width: number): string {
   const { held, waiting } = lineOf(snapshot.unfiltered)
-  const breakdown = (["pending", "submitted", "stuck"] as const)
-    .map((word) => [word, waiting.filter((row) => displayState(row) === word).length] as const)
-    .filter(([, count]) => count > 0)
-    .map(([word, count]) => `${String(count)} ${STATE_WORDS[word].word}`)
-    .join(", ")
+  const breakdownCounts = new Map<string, number>()
+  for (const key of ["pending", "submitted", "stuck"] as const) {
+    const n = waiting.filter((row) => displayState(row) === key).length
+    if (n === 0) continue
+    const label = STATE_WORDS[key].word
+    breakdownCounts.set(label, (breakdownCounts.get(label) ?? 0) + n)
+  }
+  const breakdown = [...breakdownCounts.entries()].map(([word, count]) => `${String(count)} ${word}`).join(", ")
   const stop = snapshot.stopped ?? undefined
   const merged = snapshot.unfiltered
     .flatMap(({ row }) => {
@@ -204,7 +207,7 @@ export function bandRule(band: Band, count: number, width: number, draftWindow =
     band === "drafts"
       ? `${STATE_WORDS.draft.word}s (${draftWindow}): ${STATE_WORDS.draft.means ?? ""} · TIME = pushed`
       : band === "waiting"
-        ? `${String(count)} ${STATE_WORDS.waiting.word}, newest first; the bottom row goes next · TIME = submitted`
+        ? `${String(count)} ${STATE_WORDS.waiting.word}, newest first; the bottom row goes next · TIME = opened`
         : "done, newest first · TIME = ended"
   const rule = `── ${said} `
   return rule.padEnd(Math.max(rule.length, width), "─")

@@ -125,13 +125,13 @@ describe("HISTORY and METADATA (watch-change)", () => {
         ["To", "@chief"],
       ]),
     ])
-    // Each record in the word for the state it put the change in (24196): the record checked reads pending.
+    // Each record in the word for the state it put the change in (24196): the record checked reads ready.
     expect(entries.map((entry) => entry.text)).toEqual([
       "message to @chief failed",
       "failed test",
       "resubmitted by @chief",
-      "pending at 3c285a41af46",
-      "submitted by @chief",
+      "ready at 3c285a41af46",
+      "ready by @chief",
     ])
   })
 
@@ -219,7 +219,7 @@ describe("a check running now", () => {
       position: 1,
       state: "checked",
     })
-    expect(headlineOf(live, true)).toBe("pending #1, checking affected-tests")
-    expect(headlineOf(live)).toBe("pending #1, checking affected-tests")
+    expect(headlineOf(live, true)).toBe("ready #1, checking affected-tests")
+    expect(headlineOf(live)).toBe("ready #1, checking affected-tests")
   })
 })

@@ -7,8 +7,8 @@
  * table.
  *
  * The queue core's internal names are not words anyone reads: a change the
- * core calls `queued` reads ready (S4; `submitted` is retired on the page),
- * `checked` reads pending, `withdrawn` reads cancelled, and a change under a
+ * core calls `queued` or `checked` reads ready (S4; `submitted` and `pending`
+ * are retired on the page), `withdrawn` reads cancelled, and a change under a
  * check RIGHT NOW reads checking. `--json`, `CHANGE_STATES` and the record
  * kinds keep the core's names; the full vocabulary cut is 24908.
  *
@@ -47,16 +47,16 @@ export const LEGEND_STATES = [
 
 /**
  * THE RUNNER'S EIGHT STATES, in legend order (@cto, relayed by @chief). Four of
- * them — `verifying`, `checking`, `merging`, `stuck` — are a change's words
- * too, and deliberately so: the flow page draws the runner as a row in the same
- * STATUS column as every change, so the column reads one vocabulary and no word
- * is minted twice for one fact. When the runner is checking, the change it
- * holds is checking; that overlap IS the design.
+ * them — `fitting` (key `verifying`), `checking`, `merging`, `stuck` — are a
+ * change's words too, and deliberately so: the flow page draws the runner as a
+ * row in the same STATUS column as every change, so the column reads one
+ * vocabulary and no word is minted twice for one fact. When the runner is
+ * checking, the change it holds is checking; that overlap IS the design.
  *
  * `processing` retires here. It named the checking phase and the merging phase
  * with one word, and a phase earns a word when it takes time and can fail:
  * running the project's own checks and writing the target are two such phases,
- * and `verifying` (git machinery) is a third.
+ * and `fitting` (composing the tree that will be judged) is a third.
  */
 export const RUNNER_STATES = [
   "idle",
@@ -115,21 +115,21 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
   draft: { color: "$fg-muted", means: "pushed to the remote, not submitted", next: "yrd submit", word: "draft" },
   submitted: {
     color: "$fg-warning",
-    means: "in the queue, waiting for its first check",
-    next: "the runner checks it",
+    means: "in the queue, waiting its turn",
+    next: "the runner takes it",
     word: "ready",
   },
   checking: {
     color: "$fg-info",
     means: "the runner is testing it now",
-    next: "pending, stuck or failed",
+    next: "ready, stuck or failed",
     word: "checking",
   },
   pending: {
     color: "$fg-warning",
-    means: "checks passed; waiting in line to merge",
-    next: "it merges when the line reaches it",
-    word: "pending",
+    means: "in the queue, waiting its turn",
+    next: "the runner takes it",
+    word: "ready",
   },
   merging: {
     color: "$fg-info",
@@ -171,9 +171,9 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
   // The runner's own, drawn on its row in the same column.
   verifying: {
     color: "$fg-info",
-    means: "the runner is settling the change's git state, before any check runs",
+    means: "the runner is composing the tree that will be judged, where the change meets the target as it is now",
     next: "provisioning, or stuck",
-    word: "verifying",
+    word: "fitting",
   },
   provisioning: {
     color: "$fg-info",
@@ -261,8 +261,16 @@ export function legendLines(width: number = Number.POSITIVE_INFINITY): readonly 
   // with the changes: `merging` is in the change legend and on no row either,
   // and a legend that quietly dropped it from this line would promise it.
   const waiting = [...RUNNER_STATES, ...RUNNER_SIGNALS].filter((key) => !said.has(key))
+  // One on-screen word once: `queued` and `checked` both paint ready (S4).
+  const seen = new Set<string>()
+  const legendKeys = LEGEND_STATES.filter((key) => {
+    const word = STATE_WORDS[key].word
+    if (seen.has(word)) return false
+    seen.add(word)
+    return true
+  })
   return [
-    ...LEGEND_STATES.flatMap(entry),
+    ...legendKeys.flatMap(entry),
     "",
     "not a change",
     ...entry("direct"),
