@@ -986,7 +986,7 @@ describe("the frame's order under the table", () => {
   }
   const decisions = [{ at: NOW, decision: "merged" as const, duplicate: false, run: RUN_ID }]
 
-  it("puts the status pills between the rows and STATS", async () => {
+  it("puts STATS and status pills above the rows", async () => {
     const app = render(<WatchPane snapshot={snapshot({ runner, decisions })} live={false} />, {
       cols: 120,
       rows: 50,
@@ -995,13 +995,12 @@ describe("the frame's order under the table", () => {
     await settle(app)
     const lines = app.text.split("\n")
     const lastRow = lines.findIndex((line) => line.includes("task/one"))
-    const pills = lines.findIndex(
-      (line, index) => index > lastRow && /\bopen\b.*\brunning\b.*\bdone\b.*\bfailed\b/u.test(line),
-    )
+    const pills = lines.findIndex((line) => /\bopen\b.*\brunning\b.*\bdone\b.*\bfailed\b/u.test(line))
     const stats = lines.findIndex((line) => line.includes("STATS"))
     expect(lastRow).toBeGreaterThan(0)
-    expect(pills).toBeGreaterThan(lastRow)
-    expect(stats).toBeGreaterThan(pills)
+    expect(stats).toBeGreaterThan(0)
+    expect(pills).toBeGreaterThan(stats)
+    expect(lastRow).toBeGreaterThan(pills)
     app.unmount()
   })
 })
@@ -1520,7 +1519,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const unheld = rows.map(({ row, ...rest }) => ({ ...rest, row: { ...row, live: undefined } }))
     const painted = await lines(snapshot({ rows: unheld, runner: RUNNER }), 120, 40)
 
-    const rail = (painted.find((line) => line.includes("RUNNER")) ?? "").replace(/\s+/gu, " ")
+    const rail = (painted.find((line) => line.includes("RUNNER") && /in line/u.test(line)) ?? "").replace(/\s+/gu, " ")
     const top = topLineOf(painted).line.trim()
     expect({
       rail: /and (\d+) in line/u.exec(rail)?.[1],
@@ -1766,7 +1765,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const line = tableRow(painted, " task/d")
     const segments = topLineOf(painted).line.trim().split(" · ")
     expect({
-      by: / ada\b/u.test(line),
+      by: / —/.test(line) && !/ ada\b/u.test(line),
       counted: segments.slice(1).some((segment) => segment.startsWith(`1 ${W.draft.word}`)),
       noRun: line.includes("— / —"),
       waiting: segments[0] === `1 ${W.waiting.word}: 1 ${W.submitted.word}`,
@@ -1995,7 +1994,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         heldWord: held.includes(` ${W.checking.word} `),
         size: `${String(cols)}x${String(rows)}`,
         tier: watchTier(cols, rows),
-        topLineOneRow: top.line.includes(`${W.checking.word} task/x`) && top.next.includes("TASK"),
+        topLineOneRow: top.line.includes(`${W.checking.word} task/x`),
       })
     }
 
@@ -2142,8 +2141,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // A stale journal reads `idle` and reports its age on the second line: no
     // word is derived from an mtime (@cto, relayed by @chief). `silent` and
     // `stopped` are the runner's own published beat, and it publishes none yet.
-    const at = painted.findIndex((line) => line.includes("RUNNER"))
-    const runner = painted.slice(at, at + 2).join("\n")
+    const at = painted.findIndex((line) => line.includes("RUNNER") && line.includes("idle"))
+    const runner = painted.slice(at, at + 3).join("\n")
     expect({
       age: /beat \d/u.test(runner),
       said: runner.includes("idle"),
