@@ -40,6 +40,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
   writeSync,
 } from "node:fs"
@@ -443,6 +444,18 @@ export function readRunLog(dir: string, run: string): readonly LogRecord[] {
   return records
 }
 
+const journalFileCache = new Map<string, { mtimeMs: number; size: number; runs: JournalRun[] }>()
+
+function cachedRunsIn(dir: string, id: string, startedAt: Date): readonly JournalRun[] {
+  const path = join(dir, `${id}.jsonl`)
+  const st = statSync(path)
+  const hit = journalFileCache.get(path)
+  if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.runs
+  const runs = [...runsIn(readRunLog(dir, id), id, startedAt)]
+  journalFileCache.set(path, { mtimeMs: st.mtimeMs, size: st.size, runs })
+  return runs
+}
+
 /**
  * Every record across every run journal in the directory that matches,
  * oldest run first — unwindowed, unlike {@link readJournals}: a caller asking
@@ -515,7 +528,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
   for (const id of [...windowed].sort()) {
     const startedAt = runStartedAt(id)
     if (startedAt === undefined) continue
-    for (const run of runsIn(readRunLog(dir, id), id, startedAt)) {
+    for (const run of cachedRunsIn(dir, id, startedAt)) {
       const key = journalKey(run.branch, run.head)
       for (const message of run.malformed ?? []) malformed.push({ key, message, run: run.id })
       const held = runs.get(key)
