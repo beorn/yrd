@@ -10,7 +10,7 @@
  * about what is there.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -116,6 +116,19 @@ describe("a run's journal, read back", () => {
       "unmeasured",
       "running",
     ])
+  })
+
+  it("rereads a journal when the file's mtime or size changes", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const { dir, run } = journalDir([{ branch: "task/one", head: "abc123", kind: "change" }], at)
+    expect(readJournals(dir, { now: at }).runs.get(journalKey("task/one", "abc123"))).toHaveLength(1)
+    appendFileSync(
+      join(dir, `${run}.jsonl`),
+      `${JSON.stringify({ at: at.toISOString(), branch: "task/two", head: "def456", kind: "change", run })}\n`,
+    )
+    const journals = readJournals(dir, { now: at })
+    expect(journals.runs.get(journalKey("task/one", "abc123"))).toHaveLength(1)
+    expect(journals.runs.get(journalKey("task/two", "def456"))).toHaveLength(1)
   })
 
   it("says nothing is running once the run reached a decision, whatever start row it left open", () => {
