@@ -162,6 +162,8 @@ export type QueueRunOptions = Readonly<{
   tier?: "normal" | "long"
   /** Stop starting new checks after this epoch timestamp in ms (Condition 5). */
   stopAtMs?: number
+  /** Injected clock for testing stop windows; defaults to Date.now. */
+  now?: () => number
 }> &
   RingOptions
 
@@ -426,6 +428,14 @@ function gitInvocationOptions(options: QueueRunOptions, log: QueueRunLog): GitIn
   }
 }
 
+function nowMs(options: QueueRunOptions): number {
+  return options.now !== undefined ? options.now() : Date.now()
+}
+
+function isStopWindowClosed(options: QueueRunOptions): boolean {
+  return options.stopAtMs !== undefined && nowMs(options) >= options.stopAtMs
+}
+
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   await using resources = new AsyncDisposableStack()
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
@@ -638,10 +648,10 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
     }
 
-    if (options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+    if (isStopWindowClosed(options)) {
       log.write({
         kind: "observation",
-        why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting new checks and leaving remaining changes deferred`,
+        why: `stop time reached (${new Date(options.stopAtMs!).toISOString()}); stopping starting new checks and leaving remaining changes deferred`,
       })
       return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
     }
@@ -664,12 +674,31 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       failed.push(entry.change.branch)
       return finish(run, 1, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
     }
+    if (outcome === "deferred") {
+      deferred.push(entry.change.branch)
+      return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+    }
     if (outcome === "checked") {
       const queueAfterJudge = (await read()).changes
       const checkedEntry = queueAfterJudge.find(
         (e) => e.change.branch === entry.change.branch && e.change.head === entry.change.head,
       )
       if (checkedEntry !== undefined) {
+        if (isStopWindowClosed(options)) {
+          log.write({
+            kind: "observation",
+            why: `stop time reached (${new Date(options.stopAtMs!).toISOString()}); stopping starting merge checks and leaving change deferred`,
+          })
+          await writeDeferredRecord(
+            run,
+            checkedEntry,
+            "merge",
+            { name: "stop-time", result: "deferred", why: "stop-time", exit: 0, durationMs: 0, log: "" },
+            [],
+          )
+          deferred.push(checkedEntry.change.branch)
+          return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+        }
         const mergeOutcome = await judged(run, checkedEntry, () => run.steps.merge(run, checkedEntry))
         if (mergeOutcome === "stuck") {
           stuck.push(entry.change.branch)
@@ -704,6 +733,13 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   for (const entry of ordered(entries, options.only, "queued", "stuck", "checked").filter(
     (entry) => entry.reading.state !== "checked" || staleChecked(run, entry),
   )) {
+    if (isStopWindowClosed(options)) {
+      log.write({
+        kind: "observation",
+        why: `stop time reached (${new Date(options.stopAtMs!).toISOString()}); stopping starting new checks`,
+      })
+      break
+    }
     const outcome = await judged(run, entry, () => run.steps.judge(run, entry))
     if (outcome === "stuck") {
       stuck.push(entry.change.branch)
@@ -728,6 +764,13 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const line = (blocked === -1 ? reread : reread.slice(0, blocked)).filter((entry) => !staleChecked(run, entry))
   let stoppedIndex = -1
   for (const [i, checked] of line.entries()) {
+    if (isStopWindowClosed(options)) {
+      log.write({
+        kind: "observation",
+        why: `stop time reached (${new Date(options.stopAtMs!).toISOString()}); stopping starting new checks`,
+      })
+      break
+    }
     const outcome = await judged(run, checked, () => run.steps.merge(run, checked))
     if (outcome === "stuck") {
       stuck.push(checked.change.branch)
@@ -1079,12 +1122,16 @@ async function writeDeferredRecord(
     trailers.push(["BoundMs", String(deferredOne.boundMs)])
   }
   trailers.push(...checkTrailers(results))
+  const subject =
+    deferredOne.why === "stop-time"
+      ? `${branch} deferred: stop time reached before ${phase === "merge" ? "on-merge checks" : "on-submit checks"} completed`
+      : `${branch} deferred: ${deferredOne.name} projection exceeded normal bound`
   const deferredSha = await writeRecord(
     run,
     {
       change,
       kind: "deferred",
-      subject: `${branch} deferred: ${deferredOne.name} projection exceeded normal bound`,
+      subject,
       trailers,
     },
     tipOf(entry.change).sha,
@@ -1132,7 +1179,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     const deferredOne = results.find((result) => result.result === "deferred")
     if (deferredOne !== undefined) {
-      if (run.options.tier === "long") {
+      if (run.options.tier === "long" && deferredOne.why !== "stop-time") {
         return await run.steps.end(
           run,
           entry,
@@ -1152,6 +1199,16 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     const failing = results.filter((result) => result.result === "fail")
     if (failing.length > 0) {
       return await attributedFailure(run, entry, results, failing, "submit", composed.rootChanges?.changes ?? [])
+    }
+    const declaredForSubmit = run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes("submit"))
+    if (results.length < declaredForSubmit.length) {
+      return await writeDeferredRecord(
+        run,
+        entry,
+        "submit",
+        { name: "stop-time", result: "deferred", why: "stop-time", exit: 0, durationMs: 0, log: "" },
+        results,
+      )
     }
     await writeRecord(
       run,
@@ -2210,7 +2267,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     const deferredOne = results.find((result) => result.result === "deferred")
     if (deferredOne !== undefined) {
-      if (run.options.tier === "long") {
+      if (run.options.tier === "long" && deferredOne.why !== "stop-time") {
         return await run.steps.end(
           run,
           entry,
@@ -2231,6 +2288,16 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     if (failing.length > 0) {
       retained = worktree.path
       return await attributedFailure(run, entry, results, failing, "merge", rootChanges?.changes ?? [])
+    }
+    const declaredForMerge = run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes("merge"))
+    if (results.length < declaredForMerge.length) {
+      return await writeDeferredRecord(
+        run,
+        entry,
+        "merge",
+        { name: "stop-time", result: "deferred", why: "stop-time", exit: 0, durationMs: 0, log: "" },
+        results,
+      )
     }
     // Pass. The merge is ours to make only while the target is still where this
     // change was checked against and the branch still at the head; otherwise the
@@ -2678,6 +2745,13 @@ async function runPhase(
 ): Promise<readonly CheckResult[]> {
   const results: CheckResult[] = []
   for (const spec of run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes(declaredPhase))) {
+    if (isStopWindowClosed(run.options)) {
+      run.log.write({
+        kind: "observation",
+        why: `stop time reached (${new Date(run.options.stopAtMs!).toISOString()}); stopping starting new checks for ${entry.change.branch}`,
+      })
+      break
+    }
     results.push(await check(run, entry, spec, cwd, tree, phase, narrowed.get(spec.name)))
     if (results.at(-1)?.result !== "pass") break
   }

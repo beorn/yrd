@@ -1906,6 +1906,170 @@ describe("a queue run", () => {
     expect(longOutcome.stuck).toEqual([])
   })
 
+  it("stop starting merge checks when stopAtMs passes during submit checking in long tier", async () => {
+    const w = await world()
+    await submitCommit(w, "task/defer-mid-flight", "mid.txt")
+
+    const submitRanFlag = join(w.workdir, "submit-ran.flag")
+    const phaseLog = join(w.workdir, "phases-executed.log")
+    const checkScript = join(w.workdir, "timed-check.sh")
+    writeFileSync(
+      checkScript,
+      [
+        "#!/bin/sh",
+        `echo "$YRD_CHECK_TIER" >> "${phaseLog}"`,
+        'if [ "$YRD_CHECK_TIER" = "normal" ]; then',
+        `  echo 'YRD-CHECK-RESULT {"result":"deferred","reason":"projection-exceeded","projectedMs":3480000,"boundMs":1800000}'`,
+        "  exit 3",
+        "fi",
+        `touch "${submitRanFlag}"`,
+        `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(checkScript, 0o755)
+
+    const base = await w.options({ timeoutMs: 1800000 })
+    const checkSpec: CheckSpec = {
+      ...base.checks[0]!,
+      on: ["submit", "merge"] as const,
+      run: checkScript,
+      timeoutMs: 1800000,
+      long: { timeoutMs: 5400000 },
+    }
+
+    // 1. Normal round defers task/defer-mid-flight
+    const normalOutcome = await queueRun({ ...base, checks: [checkSpec] })
+    expect(normalOutcome.deferred).toEqual(["task/defer-mid-flight"])
+
+    // 2. Long round with controlled clock:
+    // Clock starts at t0 = 1000, deadline is t = 2000.
+    // When judge runs submit check, it creates submitRanFlag so now() returns 3000 >= deadline.
+    const deadline = 2000
+    const longOutcome = await queueRun({
+      ...base,
+      checks: [checkSpec],
+      tier: "long",
+      stopAtMs: deadline,
+      now: () => (existsSync(submitRanFlag) ? 3000 : 1000),
+    })
+
+    // Assertions for R16:
+    // - Merge checking was NOT started
+    expect(longOutcome.exitCode).toBe(0)
+    expect(longOutcome.merged).toEqual([])
+    expect(longOutcome.deferred).toEqual(["task/defer-mid-flight"])
+
+    // Check tiers executed: normal ran once (submit), long ran once (submit), merge NEVER ran
+    const phases = readFileSync(phaseLog, "utf8").trim().split("\n")
+    expect(phases).toEqual(["normal", "long"])
+
+    // Inspect change records:
+    await fetchChanges(w)
+    const queueState = await readQueue(w.git, "origin", "main", await remoteTarget({ git: w.git }))
+    const changeEntry = queueState.changes.find((e) => e.change.branch === "task/defer-mid-flight")!
+    expect(changeEntry.reading.state).toBe("deferred")
+
+    const ref = changeRef("main", changeEntry.change)
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    const deferredRec = records.filter((r) => r.kind === "deferred").at(-1)!
+    expect(deferredRec).toBeDefined()
+    expect(deferredRec.subject).toContain("stop time reached before on-merge checks completed")
+    expect(deferredRec.subject).not.toContain("projection exceeded normal bound")
+    expect(trailer(deferredRec, "Reason")).toBe("stop-time")
+    expect(trailer(deferredRec, "Phase")).toBe("merge")
+
+    // 3. Resumption: subsequent long round with open stop window completes and merges
+    rmSync(submitRanFlag, { force: true })
+    const resumedOutcome = await queueRun({
+      ...base,
+      checks: [checkSpec],
+      tier: "long",
+      stopAtMs: 10000,
+      now: () => 4000,
+    })
+    expect(resumedOutcome.exitCode).toBe(0)
+    expect(resumedOutcome.merged).toEqual(["task/defer-mid-flight"])
+
+    const finalPhases = readFileSync(phaseLog, "utf8").trim().split("\n")
+    expect(finalPhases).toEqual(["normal", "long", "long", "long"])
+  })
+
+  it("stops starting subsequent checks when stopAtMs passes during multi-check phase", async () => {
+    const w = await world()
+    await submitCommit(w, "task/multi-check-timeout", "multi.txt")
+
+    const flagFile = join(w.workdir, "check-a-ran.flag")
+    const logA = join(w.workdir, "checkA.log")
+    const logB = join(w.workdir, "checkB.log")
+
+    const scriptA = join(w.workdir, "check-a.sh")
+    writeFileSync(
+      scriptA,
+      [
+        "#!/bin/sh",
+        `echo ranA >> "${logA}"`,
+        `touch "${flagFile}"`,
+        `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(scriptA, 0o755)
+
+    const scriptB = join(w.workdir, "check-b.sh")
+    writeFileSync(
+      scriptB,
+      ["#!/bin/sh", `echo ranB >> "${logB}"`, `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`, "exit 0", ""].join(
+        "\n",
+      ),
+    )
+    chmodSync(scriptB, 0o755)
+
+    const base = await w.options({ timeoutMs: 1800000 })
+    const checkA: CheckSpec = {
+      ...base.checks[0]!,
+      name: "checkA",
+      on: ["submit"] as const,
+      run: scriptA,
+    }
+    const checkB: CheckSpec = {
+      ...base.checks[0]!,
+      name: "checkB",
+      on: ["submit"] as const,
+      run: scriptB,
+    }
+
+    const deadline = 2000
+    const outcome = await queueRun({
+      ...base,
+      checks: [checkA, checkB],
+      stopAtMs: deadline,
+      now: () => (existsSync(flagFile) ? 3000 : 1000),
+    })
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.deferred).toEqual(["task/multi-check-timeout"])
+    expect(existsSync(logA)).toBe(true)
+    expect(existsSync(logB)).toBe(false)
+
+    await fetchChanges(w)
+    const queueState = await readQueue(w.git, "origin", "main", await remoteTarget({ git: w.git }))
+    const changeEntry = queueState.changes.find((e) => e.change.branch === "task/multi-check-timeout")!
+    expect(changeEntry.reading.state).toBe("deferred")
+
+    const ref = changeRef("main", changeEntry.change)
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    const deferredRec = records.find((r) => r.kind === "deferred")!
+    expect(deferredRec).toBeDefined()
+    expect(trailer(deferredRec, "Reason")).toBe("stop-time")
+    // checkA passed and is recorded; unstarted checkB is NOT recorded
+    const checkTrailers = deferredRec.trailers.filter(([k]) => k === "Check").map(([, v]) => v)
+    expect(checkTrailers.some((v) => v.startsWith("checkA"))).toBe(true)
+    expect(checkTrailers.some((v) => v.startsWith("checkB"))).toBe(false)
+  })
+
   it("two checked changes, the first fails at merge, the second is not judged in that round", async () => {
     const w = await world()
     const headOne = await submitCommit(w, "task/one", "one.txt")
