@@ -10,7 +10,7 @@
  * about what is there.
  */
 
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -129,6 +129,26 @@ describe("a run's journal, read back", () => {
     const journals = readJournals(dir, { now: at })
     expect(journals.runs.get(journalKey("task/one", "abc123"))).toHaveLength(1)
     expect(journals.runs.get(journalKey("task/two", "def456"))).toHaveLength(1)
+  })
+
+  it("invalidates the journal cache when mtime changes at the same size", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const { dir, run } = journalDir([{ branch: "task/one", head: "abc123", kind: "change" }], at)
+    const path = join(dir, `${run}.jsonl`)
+    expect(readJournals(dir, { now: at }).runs.get(journalKey("task/one", "abc123"))).toHaveLength(1)
+    const later = new Date(at.getTime() + 5_000)
+    utimesSync(path, later, later)
+    expect(readJournals(dir, { now: at }).runs.get(journalKey("task/one", "abc123"))).toHaveLength(1)
+  })
+
+  it("drops cached journals that leave the directory", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const { dir, run } = journalDir([{ branch: "task/one", head: "abc123", kind: "change" }], at)
+    expect(readJournals(dir, { now: at }).runs.size).toBe(1)
+    rmSync(join(dir, `${run}.jsonl`))
+    expect(readJournals(dir, { now: at }).absent).toMatch(
+      /holds no run journal|older than the window|no such directory/,
+    )
   })
 
   it("says nothing is running once the run reached a decision, whatever start row it left open", () => {

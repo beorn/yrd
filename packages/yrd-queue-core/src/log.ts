@@ -446,8 +446,20 @@ export function readRunLog(dir: string, run: string): readonly LogRecord[] {
 
 const journalFileCache = new Map<string, { mtimeMs: number; size: number; runs: JournalRun[] }>()
 
+function journalPath(dir: string, id: string): string {
+  return join(dir, `${id}.jsonl`)
+}
+
+function pruneJournalCache(dir: string, windowed: readonly string[]): void {
+  const live = new Set(windowed.map((id) => journalPath(dir, id)))
+  const prefix = dir.endsWith("/") ? dir : `${dir}/`
+  for (const key of journalFileCache.keys()) {
+    if (key.startsWith(prefix) && !live.has(key)) journalFileCache.delete(key)
+  }
+}
+
 function cachedRunsIn(dir: string, id: string, startedAt: Date): readonly JournalRun[] {
-  const path = join(dir, `${id}.jsonl`)
+  const path = journalPath(dir, id)
   const st = statSync(path)
   const hit = journalFileCache.get(path)
   if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.runs
@@ -517,12 +529,14 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     return startedAt !== undefined && now.getTime() - startedAt.getTime() <= sinceMs
   })
   if (windowed.length === 0) {
+    pruneJournalCache(dir, [])
     const held =
       ours.length === 0
         ? "it holds no run journal"
         : `its ${String(ours.length)} run journal(s) are all older than the window`
     return { absent: `no run journal was read: ${dir} — ${held}`, dir, malformed: [], runs: new Map() }
   }
+  pruneJournalCache(dir, windowed)
   const runs = new Map<string, JournalRun[]>()
   const malformed: { run: string; key: string; message: string }[] = []
   for (const id of [...windowed].sort()) {
