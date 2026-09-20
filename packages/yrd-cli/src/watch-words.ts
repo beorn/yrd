@@ -7,10 +7,10 @@
  * table.
  *
  * The queue core's internal names are not words anyone reads: a change the
- * core calls `queued` reads submitted, `checked` reads pending, `withdrawn`
- * reads cancelled, and a change under a check RIGHT NOW reads checking.
- * `--json`, `CHANGE_STATES` and the record kinds keep the core's names; the
- * rename is its own change.
+ * core calls `queued` reads ready (S4; `submitted` is retired on the page),
+ * `checked` reads pending, `withdrawn` reads cancelled, and a change under a
+ * check RIGHT NOW reads checking. `--json`, `CHANGE_STATES` and the record
+ * kinds keep the core's names; the full vocabulary cut is 24908.
  *
  * The COLOUR is here for the same reason the word is: the flow page draws the
  * runner as a row in the table's own STATUS column, and a second colour table
@@ -114,10 +114,10 @@ export type RunnerState = (typeof RUNNER_STATES)[number] | (typeof RUNNER_SIGNAL
 export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took" | "runner", WordEntry> = {
   draft: { color: "$fg-muted", means: "pushed to the remote, not submitted", next: "yrd submit", word: "draft" },
   submitted: {
-    color: "$fg-accent",
+    color: "$fg-warning",
     means: "in the queue, waiting for its first check",
     next: "the runner checks it",
-    word: "submitted",
+    word: "ready",
   },
   checking: {
     color: "$fg-info",

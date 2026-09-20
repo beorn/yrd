@@ -25,7 +25,7 @@ export {
 /**
  * The word a row's state reads as (watch-words.ts): a check running on it now
  * reads checking whatever its records say; otherwise the core's state, in the
- * operator's word.
+ * operator's word (`queued` paints ready).
  */
 export function displayState(row: Pick<Row, "state" | "live">): DisplayState {
   if (row.live !== undefined) return "checking"

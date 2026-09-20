@@ -155,7 +155,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(lines.slice(2, header).join("\n")).toContain("no run journal was read")
     const row = lines.find((line) => line.includes("task/one") && !line.includes("RUNNER"))
     expect(row, plain.report).toBeDefined()
-    expect(row).toContain("○ submitted")
+    expect(row).toContain("○ ready")
     expect(row).toContain("task/one")
     expect(row).toContain("does its work")
     expect(row).toContain("@dev/10")
@@ -183,8 +183,8 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(trimmed(stripAnsi(colored.stdout))).toEqual(trimmed(plain.stdout))
     const row = colored.stdout.split("\n").find((line) => stripAnsi(line).includes("task/one"))
     expect(row, colored.report).toBeDefined()
-    // The STATUS cell — glyph and word — is painted: an SGR sequence opens before `submitted`.
-    expect(row).toMatch(/\[[0-9;]*m[^]*○ submitted/u)
+    // The STATUS cell — glyph and word — is painted: an SGR sequence opens before `ready`.
+    expect(row).toMatch(/\[[0-9;]*m[^]*○ ready/u)
   })
 
   it("lays the page out to the terminal's width, and to 120 columns for a pipe", async () => {

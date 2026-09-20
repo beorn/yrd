@@ -41,8 +41,8 @@ describe("the status box's own lines", () => {
 
   it("names the reason a failed or stuck change carries, and the position of one in line", () => {
     expect(headlineOf(row({ reason: "test", state: "failed" }))).toBe("failed test")
-    // The state in the one word table's word (24196): the core's queued reads submitted.
-    expect(headlineOf(row({ position: 2, state: "queued" }))).toBe("submitted #2")
+    // The state in the one word table's word (24196): the core's queued reads ready.
+    expect(headlineOf(row({ position: 2, state: "queued" }))).toBe("ready #2")
   })
 
   it("says how a change merged, whether or not a record names the merge", () => {

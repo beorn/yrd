@@ -269,11 +269,40 @@ describe("the table (items 3, 28, 38)", () => {
   it("names the queue digit and a dash when the row has no attempt (ia.md drafts/waiting)", async () => {
     const text = await paint(<WatchPane snapshot={snapshot({ rows: [{ row: row() }] })} live={false} />)
 
-    const line = text
-      .split("\n")
-      .find((candidate) => candidate.includes("○ submitted") || candidate.includes("task/one"))
-    expect(line).toContain("○ submitted")
+    const line = text.split("\n").find((candidate) => candidate.includes("○ ready") || candidate.includes("task/one"))
+    expect(line).toContain("○ ready")
     expect(line).toContain("1 · —")
+  })
+
+  it("queued paints ready in the warning colour, matching pending, not failed (S4)", async () => {
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({
+          rows: [
+            { row: row({ branch: "task/queued", state: "queued" }) },
+            { row: row({ branch: "task/checked", head: "1".repeat(40), state: "checked" }) },
+            { row: row({ branch: "task/failed", reason: "test", state: "failed" }) },
+          ],
+        })}
+        live={false}
+      />,
+      { cols: 140, rows: 30 },
+    )
+    await settle(app)
+    const painted = app.lines
+    const at = (needle: string) => {
+      const y = painted.findIndex((line) => line.includes(needle) && !line.includes("RUNNER"))
+      const x = (painted[y] ?? "").indexOf(needle)
+      return { fg: y < 0 || x < 0 ? undefined : app.cell(x, y).fg, line: painted[y] ?? "" }
+    }
+    const ready = at("ready")
+    const pending = at("pending")
+    const failed = at("failed")
+    expect(ready.line, painted.join("\n")).toContain("○ ready")
+    expect(pending.line, painted.join("\n")).toContain("pending")
+    expect(ready.fg, JSON.stringify({ ready: ready.fg, pending: pending.fg, failed: failed.fg })).toEqual(pending.fg)
+    expect(ready.fg).not.toEqual(failed.fg)
+    app.unmount()
   })
 
   it("filters by status bucket with o r d f, and a shows everything again (items 9, 32)", async () => {
@@ -1340,6 +1369,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // The colour joined the table in S1 — one word, one colour, one entry, so a
     // column that draws both cannot take them from two places — and is asserted
     // by the colour arms in watch-boxes.test.tsx rather than spelled here.
+    // S4/24908: queued paints ready in the warning token (yellow), not accent (blue).
+    expect(W.submitted).toMatchObject({ word: "ready", color: "$fg-warning" })
     const said = ({ color: _color, ...entry }: Entry) => entry
     expect({
       ...Object.fromEntries(STATES.map((key) => [key, said(W[key])])),
@@ -1371,7 +1402,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       submitted: {
         means: "in the queue, waiting for its first check",
         next: "the runner checks it",
-        word: "submitted",
+        word: "ready",
       },
       took: "took",
       waiting: "waiting",

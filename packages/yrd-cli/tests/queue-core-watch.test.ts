@@ -941,7 +941,7 @@ describe("the timing a one-row page prints under its row (24196)", () => {
     ).toBe(0)
 
     const lines = page.stdout().split("\n")
-    const row = lines.find((line) => line.includes("task/good") && line.includes("○ submitted")) ?? ""
+    const row = lines.find((line) => line.includes("task/good") && line.includes("○ ready")) ?? ""
     expect(row, page.stdout()).toContain("task/good")
     // AGE / RUN is unknown with no attempt (ia.md). The one-row timing line
     // under `next:` is still the cell's duration word, never Age or Wait time.
@@ -996,7 +996,7 @@ describe("the queue line under a selector (24196)", () => {
       },
       page.stdout(),
     ).toEqual({
-      queueLine: "2 waiting: 2 submitted · 1 draft (7d)",
+      queueLine: "2 waiting: 2 ready · 1 draft (7d)",
       rail: "nothing under a check, and 2 in line",
       scope: true,
     })
