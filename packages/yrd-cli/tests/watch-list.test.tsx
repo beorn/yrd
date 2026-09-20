@@ -22,7 +22,7 @@ import { NowContext, NowProvider } from "../src/watch-clock.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
-const LAYOUT: ListLayout = { byWidth: 0, durationWidth: 7, statusWidth: 12, timeWidth: 8 }
+const LAYOUT: ListLayout = { agentWidth: 0, ageRunWidth: 11, statusWidth: 12, queueRunWidth: 14 }
 
 const RUNNING_ROW: Row = {
   branch: "task/checking-something",
@@ -78,17 +78,15 @@ describe("ListRow STATUS cell pulse, live (item 13 archaeology)", () => {
   }, 10_000)
 })
 
-// The duration cell, read across a real tick of the watch's own clock
-// (`NowProvider`, not a still `NowContext.Provider` value): a decided row's
-// duration must read the same before and after, while an open row's keeps
-// counting — the operator's 2026-09-09 report that AGE "just goes forever"
-// past a merge. AGE is gone (24196): an ended row's one duration is `took`,
-// submitted to ended, and it stops there the way AGE had to.
+// AGE / RUN across a real tick: RUN freezes at endedAt − startedAt; AGE stays
+// unknown (tip Opened is not total lifetime). An open row without an attempt
+// shows dashes and must not count Opened as AGE.
 const DECIDED_ROW: Row = {
   branch: "task/merged-thing",
   endedAt: new Date(NOW.getTime() - 15 * 60 * 1000),
   head: "cafef00d".padEnd(40, "0"),
   since: new Date(NOW.getTime() - 45 * 60 * 1000),
+  startedAt: new Date(NOW.getTime() - 30 * 60 * 1000),
   state: "merged",
 }
 
@@ -99,9 +97,7 @@ const OPEN_ROW: Row = {
   state: "queued",
 }
 
-// LAYOUT's durationWidth (7) is sized for the pulse tests above, which never
-// read this cell; "took 30:00" and "waiting 45:00" would not fit in it.
-const AGE_LAYOUT: ListLayout = { ...LAYOUT, durationWidth: 13 }
+const AGE_LAYOUT: ListLayout = { ...LAYOUT, ageRunWidth: 13 }
 
 async function paintAge(row: Row) {
   const app = render(
@@ -125,18 +121,21 @@ async function paintAge(row: Row) {
   return { first, second }
 }
 
-describe("the duration freezes once a row is decided (the operator's 2026-09-09 report)", () => {
-  it("keeps a merged row's duration at its ending record, not at `now`, across a real tick", async () => {
+describe("AGE / RUN (ia.md): RUN freezes; AGE is not tip Opened", () => {
+  it("keeps a merged row's RUN at endedAt − startedAt across a real tick, and does not print Opened as AGE", async () => {
     const { first, second } = await paintAge(DECIDED_ROW)
-    // endedAt (15m ago) − since (45m ago) = 30m, fixed — never 45m (now − since).
-    expect(first).toContain("took 30:00")
-    expect(second).toContain("took 30:00")
+    expect(first).toContain("— / 15:00")
+    expect(second).toContain("— / 15:00")
+    expect(first).not.toContain("45:00")
+    expect(first).not.toContain("took")
   }, 10_000)
 
-  it("keeps counting an open row's wait past the same tick (existing behavior preserved)", async () => {
+  it("does not count an open row's tip Opened as AGE", async () => {
     const { first, second } = await paintAge(OPEN_ROW)
-    expect(first).toContain("waiting 45:00")
-    expect(second).not.toContain("45:00")
+    expect(first).toContain("— / —")
+    expect(second).toContain("— / —")
+    expect(first).not.toContain("waiting")
+    expect(first).not.toContain("45:00")
   }, 10_000)
 })
 
@@ -156,4 +155,3 @@ describe("changesSuffix for deferred row", () => {
     })
   })
 })
-

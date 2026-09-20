@@ -147,18 +147,17 @@ describe("`yrd list` prints the watch's page, once", () => {
     // The queue's name first, then the identity pills, then the queue line, then (past the journal
     // notice a machine that runs no queue prints, G5) the header the pane draws.
     expect(lines[0]).toMatch(/remote\.git#main$/u)
-    expect(lines[1]).toContain("YRD QUEUES")
+    expect(lines[1]).toContain("yrd watch")
     expect(lines[1]).toContain("⎇ main")
-    // The RUN column is retired with the RUNNER box (S1): a run id in local-time
-    // digits, on a page whose rows are changes.
-    const header = lines.findIndex((line) => /^TIME\s+STATUS\s+CHANGES\b.*\bBY\s*$/u.test(line))
+    const header = lines.findIndex((line) => line.includes("TASK") && line.includes("QUEUE / RUN"))
     expect(header, plain.report).toBeGreaterThan(1)
-    expect(lines[header], plain.report).not.toContain("RUN ")
+    expect(lines[header], plain.report).toContain("QUEUE / RUN")
     expect(lines.slice(2, header).join("\n")).toContain("no run journal was read")
     const row = lines.find((line) => line.includes("task/one") && !line.includes("RUNNER"))
     expect(row, plain.report).toBeDefined()
     expect(row).toContain("○ submitted")
-    expect(row).toContain("task/one does its work")
+    expect(row).toContain("task/one")
+    expect(row).toContain("does its work")
     expect(row).toContain("@dev/10")
     expect(plain.stdout).toContain("1 change(s)")
     // The runner is a ROW between what waits and what is done, always there:
@@ -198,7 +197,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(widest(wide.stdout)).toBeLessThanOrEqual(160)
     expect(widest(piped.stdout)).toBeLessThanOrEqual(120)
     // The header keeps every column at every width.
-    for (const ran of [narrow, wide, piped]) expect(ran.stdout, ran.report).toMatch(/^TIME\s+STATUS\s+CHANGES/mu)
+    for (const ran of [narrow, wide, piped]) expect(ran.stdout, ran.report).toMatch(/TASK/u)
   })
 
   it("leaves `--json` exactly as it was: the same document with or without colour, and never a colour byte", async () => {

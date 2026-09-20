@@ -989,7 +989,7 @@ describe("the queue line under a selector (24196)", () => {
     const lines = page.stdout().split("\n")
     expect(
       {
-        queueLine: lines[lines.findIndex((line) => line.includes("YRD QUEUES")) + 1]?.trim(),
+        queueLine: lines[lines.findIndex((line) => line.includes("yrd watch")) + 1]?.trim(),
         // The runner's ROW carries the count now, and it counts the QUEUE and
         // not the view: the selector shows one change, the row says two.
         rail: /nothing under a check, and \d+ in line/u.exec(page.stdout())?.[0],
