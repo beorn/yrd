@@ -7,10 +7,10 @@
  * table.
  *
  * The queue core's internal names are not words anyone reads: a change the
- * core calls `queued` or `checked` reads ready (S4; `submitted` and `pending`
- * are retired on the page), `withdrawn` reads cancelled, and a change under a
- * check RIGHT NOW reads checking. `--json`, `CHANGE_STATES` and the record
- * kinds keep the core's names; the full vocabulary cut is 24908.
+ * core calls `queued` reads submitted and `checked` reads pending (operator
+ * v3 nine; both `$fg-warning`). `withdrawn` reads cancelled, and a change
+ * under a check RIGHT NOW reads checking. `--json`, `CHANGE_STATES` and the
+ * record kinds keep the core's names; the full vocabulary cut is 24908.
  *
  * The COLOUR is here for the same reason the word is: the flow page draws the
  * runner as a row in the table's own STATUS column, and a second colour table
@@ -115,21 +115,21 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
   draft: { color: "$fg-muted", means: "pushed to the remote, not submitted", next: "yrd submit", word: "draft" },
   submitted: {
     color: "$fg-warning",
-    means: "in the queue, waiting its turn",
-    next: "the runner takes it",
-    word: "ready",
+    means: "in the queue, waiting for its first check",
+    next: "the runner checks it",
+    word: "submitted",
   },
   checking: {
     color: "$fg-info",
     means: "the runner is testing it now",
-    next: "ready, stuck or failed",
+    next: "pending, stuck or failed",
     word: "checking",
   },
   pending: {
     color: "$fg-warning",
-    means: "in the queue, waiting its turn",
-    next: "the runner takes it",
-    word: "ready",
+    means: "checks passed; waiting in line to merge",
+    next: "it merges when the line reaches it",
+    word: "pending",
   },
   merging: {
     color: "$fg-info",
@@ -261,7 +261,7 @@ export function legendLines(width: number = Number.POSITIVE_INFINITY): readonly 
   // with the changes: `merging` is in the change legend and on no row either,
   // and a legend that quietly dropped it from this line would promise it.
   const waiting = [...RUNNER_STATES, ...RUNNER_SIGNALS].filter((key) => !said.has(key))
-  // One on-screen word once: `queued` and `checked` both paint ready (S4).
+  // One on-screen word once: submitted and pending are distinct (operator v3).
   const seen = new Set<string>()
   const legendKeys = LEGEND_STATES.filter((key) => {
     const word = STATE_WORDS[key].word

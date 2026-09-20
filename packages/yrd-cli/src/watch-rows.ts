@@ -45,7 +45,7 @@ export function matchesTerm(row: WatchRow, term: string): boolean {
   // a branch called `task/merged-…` while every genuinely merged change was
   // excluded (a-state-name-filters-to-zero-rows-and-exit-zero). The word the
   // table SHOWS for that state is in it too (@i/10-yrd/24196): a reader who
-  // sees `ready` on the screen and types it means the same rows as `checked`.
+  // sees `pending` on the screen and types it means the same rows as `checked`.
   return [
     row.row.branch,
     row.row.subject,

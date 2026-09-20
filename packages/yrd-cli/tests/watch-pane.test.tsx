@@ -333,7 +333,7 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
       app.lines.join("\n"),
     ).toBe(true)
     expect(
-      app.lines.some((line) => line.includes("ready")),
+      app.lines.some((line) => line.includes("submitted")),
       app.lines.join("\n"),
     ).toBe(true)
     app.press("o")
@@ -459,12 +459,14 @@ describe("the table (items 3, 28, 38)", () => {
   it("names the queue digit and a dash when the row has no attempt (ia.md drafts/waiting)", async () => {
     const text = await paint(<WatchPane snapshot={snapshot({ rows: [{ row: row() }] })} live={false} />)
 
-    const line = text.split("\n").find((candidate) => candidate.includes("○ ready") || candidate.includes("task/one"))
-    expect(line).toContain("○ ready")
+    const line = text
+      .split("\n")
+      .find((candidate) => candidate.includes("○ submitted") || candidate.includes("task/one"))
+    expect(line).toContain("○ submitted")
     expect(line).toContain("1 · —")
   })
 
-  it("queued paints ready in the warning colour, matching pending, not failed (S4)", async () => {
+  it("queued paints submitted and checked paints pending, same warning colour, not failed", async () => {
     const app = render(
       <WatchPane
         snapshot={snapshot({
@@ -488,8 +490,8 @@ describe("the table (items 3, 28, 38)", () => {
     const queued = at("task/queued")
     const checked = at("task/checked")
     const failed = at("task/failed")
-    expect(queued.line, painted.join("\n")).toContain("○ ready")
-    expect(checked.line, painted.join("\n")).toContain("ready")
+    expect(queued.line, painted.join("\n")).toContain("○ submitted")
+    expect(checked.line, painted.join("\n")).toContain("pending")
     expect(queued.fg, JSON.stringify({ queued: queued.fg, checked: checked.fg, failed: failed.fg })).toEqual(checked.fg)
     expect(queued.fg).not.toEqual(failed.fg)
     app.unmount()
@@ -659,9 +661,9 @@ describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () =
     // Header on the box, then the bold title and the body.
     expect(text).toContain("task/one@abcdef012345")
     expect(text).toContain("The parser dropped the last token.")
-    // HISTORY newest first, human verbs only where a human acted. S4: opened paints ready.
+    // HISTORY newest first, human verbs only where a human acted. Opened paints submitted.
     const failedAt = text.indexOf("failed test — fix the test and resubmit")
-    const openedAt = text.indexOf("ready by @chief")
+    const openedAt = text.indexOf("submitted by @chief")
     expect(failedAt).toBeGreaterThan(-1)
     expect(openedAt).toBeGreaterThan(failedAt)
     // METADATA: keys uppercase in one column, the three groups.
@@ -1559,9 +1561,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // The colour joined the table in S1 — one word, one colour, one entry, so a
     // column that draws both cannot take them from two places — and is asserted
     // by the colour arms in watch-boxes.test.tsx rather than spelled here.
-    // S4: queued and checked paint ready in warning yellow; verifying paints fitting.
-    expect(W.submitted).toMatchObject({ word: "ready", color: "$fg-warning" })
-    expect(W.pending).toMatchObject({ word: "ready", color: "$fg-warning" })
+    // Operator v3: queued paints submitted, checked paints pending, both warning yellow; verifying paints fitting.
+    expect(W.submitted).toMatchObject({ word: "submitted", color: "$fg-warning" })
+    expect(W.pending).toMatchObject({ word: "pending", color: "$fg-warning" })
     expect(W.verifying).toMatchObject({ word: "fitting", color: "$fg-info" })
     const said = ({ color: _color, ...entry }: Entry) => entry
     expect({
@@ -1575,16 +1577,16 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         next: "nothing",
         word: "cancelled",
       },
-      checking: { means: "the runner is testing it now", next: "ready, stuck or failed", word: "checking" },
+      checking: { means: "the runner is testing it now", next: "pending, stuck or failed", word: "checking" },
       direct: "direct",
       draft: { means: "pushed to the remote, not submitted", next: "yrd submit", word: "draft" },
       failed: { means: "a check failed; ended", next: "a new head is a new change", word: "failed" },
       merged: { means: "on the queue branch; ended", next: "nothing; a revert is a new change", word: "merged" },
       merging: { means: "the runner is writing main for it now", next: "merged or failed", word: "merging" },
       pending: {
-        means: "in the queue, waiting its turn",
-        next: "the runner takes it",
-        word: "ready",
+        means: "checks passed; waiting in line to merge",
+        next: "it merges when the line reaches it",
+        word: "pending",
       },
       stuck: {
         means: "the queue could not judge it and stopped the line (ADR-0015)",
@@ -1592,9 +1594,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         word: "stuck",
       },
       submitted: {
-        means: "in the queue, waiting its turn",
-        next: "the runner takes it",
-        word: "ready",
+        means: "in the queue, waiting for its first check",
+        next: "the runner checks it",
+        word: "submitted",
       },
       took: "took",
       waiting: "waiting",
@@ -1645,7 +1647,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // columns narrower than the terminal): drafts, breakdown, the last merge's branch, the last merge,
     // times, branch names.
     const waiting = `5 ${W.waiting.word}`
-    const breakdown = `: 4 ${W.submitted.word}, 1 ${W.stuck.word}`
+    const breakdown = `: 2 ${W.pending.word}, 2 ${W.submitted.word}, 1 ${W.stuck.word}`
     const check = (times: boolean) => ` · ${W.checking.word} task/x${times ? " for 3:21" : ""}`
     const stop = (times: boolean) => ` · line stopped at task/s${times ? ` since ${clock(stuckAt)}` : ""}`
     const merge = (branch: boolean) => ` · last merge ${clock(mergedAt)}${branch ? " (task/y)" : ""}`
@@ -1663,7 +1665,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       quiet: await at(160, SILENT),
     }).toEqual({
       160: waiting + breakdown + check(true) + stop(true) + merge(true) + drafts,
-      144: waiting + breakdown + check(true) + stop(true) + merge(true) + drafts,
+      144: waiting + breakdown + check(true) + stop(true) + merge(true),
       120: waiting + check(true) + stop(true) + merge(true),
       100: waiting + check(true) + stop(true) + merge(false),
       90: waiting + check(true) + stop(true),
@@ -1706,7 +1708,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const waiting = `5 ${W.waiting.word}`
 
     expect({ 70: await at(70), 50: await at(50), 40: await at(40) }).toEqual({
-      70: `${waiting}: 5 ${W.submitted.word} · paused since ${clock(since)} by @chief`,
+      70: `${waiting}: 2 ${W.pending.word}, 3 ${W.submitted.word} · paused since ${clock(since)} by @chief`,
       50: `${waiting} · paused since ${clock(since)} by @chief`,
       40: `${waiting} · paused by @chief`,
     })

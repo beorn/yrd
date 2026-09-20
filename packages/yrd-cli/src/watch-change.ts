@@ -5,10 +5,10 @@
  * of state — a history row says what a record says, in the ruled words.
  *
  * HISTORY: one line per record, newest first, a human verb only where a
- * human acted (`ready by @chief`); machine rows read as what the queue
- * did (`ready at 3c285a41`, `merged as b234234a`), each record in the one
+ * human acted (`submitted by @chief`); machine rows read as what the queue
+ * did (`pending at 3c285a41`, `merged as b234234a`), each record in the one
  * word table's word for the state it put the change in (watch-words.ts: the
- * record `checked` reads ready, `withdrawn` reads cancelled). The `sent` echo renders
+ * record `checked` reads pending, `withdrawn` reads cancelled). The `sent` echo renders
  * only when delivery FAILED, the way item 31 keeps the `check requested` echo
  * only when it failed or drifted: a message that went where it should is not
  * news. No status is fused onto a history row; the current state lives in the

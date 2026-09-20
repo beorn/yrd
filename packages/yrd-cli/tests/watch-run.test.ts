@@ -41,8 +41,8 @@ describe("the status box's own lines", () => {
 
   it("names the reason a failed or stuck change carries, and the position of one in line", () => {
     expect(headlineOf(row({ reason: "test", state: "failed" }))).toBe("failed test")
-    // The state in the one word table's word (24196): the core's queued reads ready.
-    expect(headlineOf(row({ position: 2, state: "queued" }))).toBe("ready #2")
+    // The state in the one word table's word (24196): the core's queued reads submitted.
+    expect(headlineOf(row({ position: 2, state: "queued" }))).toBe("submitted #2")
   })
 
   it("says how a change merged, whether or not a record names the merge", () => {
@@ -125,13 +125,13 @@ describe("HISTORY and METADATA (watch-change)", () => {
         ["To", "@chief"],
       ]),
     ])
-    // Each record in the word for the state it put the change in (24196): the record checked reads ready.
+    // Each record in the word for the state it put the change in (24196): the record checked reads pending.
     expect(entries.map((entry) => entry.text)).toEqual([
       "message to @chief failed",
       "failed test",
       "resubmitted by @chief",
-      "ready at 3c285a41af46",
-      "ready by @chief",
+      "pending at 3c285a41af46",
+      "submitted by @chief",
     ])
   })
 
@@ -219,7 +219,7 @@ describe("a check running now", () => {
       position: 1,
       state: "checked",
     })
-    expect(headlineOf(live, true)).toBe("ready #1, checking affected-tests")
-    expect(headlineOf(live)).toBe("ready #1, checking affected-tests")
+    expect(headlineOf(live, true)).toBe("pending #1, checking affected-tests")
+    expect(headlineOf(live)).toBe("pending #1, checking affected-tests")
   })
 })
