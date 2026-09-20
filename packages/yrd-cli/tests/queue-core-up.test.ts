@@ -524,7 +524,10 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     // thing an operator most needs to see behind "I am not on that machine".
     // The row says the WORD and the cure; the record's own sentence is the loud
     // line above and is said exactly once.
-    const runnerRow = page.find((line) => line.includes("RUNNER"))
+    // Boxed RUNNER puts `╭─ RUNNER` on its own title line; the status row
+    // inside still names the WORD and the cure (24196).
+    const runnerRow = page.find((line) => line.includes("RUNNER") && line.includes("paused"))
+    expect(runnerRow, listed.stdout()).toBeDefined()
     expect(runnerRow, listed.stdout()).toContain("paused")
     expect(runnerRow, listed.stdout()).toContain("resume: yrd queue resume")
     expect(runnerRow, listed.stdout()).not.toContain("refs/yrd/main/runner")
@@ -1251,15 +1254,16 @@ describe("yrd queue list, the table", () => {
 
     const asText = capture(w.work)
     expect(await coreQueueCommand(w.work, asText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    // On the page: its own row — the direct glyph and word in STATUS, the
-    // target as its branch and the commit's own subject as its CHANGES text;
+    // On the page: its own row — the direct glyph and word in STATUS, TASK
+    // leading with the commit's subject then the target branch (ia.md);
     // the sentence is the JSON's `reason`, above.
     const directLine = asText
       .stdout()
       .split("\n")
       .find((line) => line.includes("→ direct"))
     expect(directLine, asText.stdout()).toBeDefined()
-    expect(directLine).toContain("main direct.txt")
+    expect(directLine).toContain("direct.txt around the queue")
+    expect(directLine).toMatch(/\bmain\b/u)
   })
 })
 
@@ -3464,6 +3468,8 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
     const stop = new AbortController()
     const service = capture(w.work)
     const merge = capture(w.work)
+    // Assigned after `up` is listening; prefer-const cannot see that write.
+    // eslint-disable-next-line prefer-const -- reassigned at merge spawn
     let merging: Promise<YrdCliExitCode> | undefined
     const rounds: QueueRunOutcome[] = []
     let merged: YrdCliExitCode | undefined
@@ -3539,7 +3545,7 @@ describe("yrd queue run --tier long", () => {
         '  echo \'YRD-CHECK-RESULT {"result":"deferred","reason":"too wide","projectedMs":3600000,"boundMs":1800000}\'',
         "  exit 3",
         "fi",
-        'if [ -f fail-in-long.txt ]; then',
+        "if [ -f fail-in-long.txt ]; then",
         "  exit 1",
         "fi",
         "exit 0",
@@ -3606,7 +3612,9 @@ describe("yrd queue run --tier long", () => {
     expect(exitCode).toBe(1)
 
     const listedAfter = capture(w.work)
-    expect(await coreQueueCommand(w.work, listedAfter.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(
+      await coreQueueCommand(w.work, listedAfter.io, { command: "list" }, { json: true, workdir: w.workdir }),
+    ).toBe(0)
     const rowsAfter = (records(listedAfter)[0] as { changes: readonly Record<string, unknown>[] }).changes
     const olderRow = rowsAfter.find((r) => r.branch === "task/older")
     const youngerRow = rowsAfter.find((r) => r.branch === "task/younger")
@@ -3614,4 +3622,3 @@ describe("yrd queue run --tier long", () => {
     expect(youngerRow?.state).toBe("merged")
   })
 })
-

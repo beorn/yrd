@@ -728,20 +728,17 @@ describe("what a watch says it looked at", () => {
     // in the change's own detail below. The runner's row carries a clock like
     // any row now, and while the line is stopped it names the change it
     // stopped at, so it is told apart by its own word and not by its shape.
-    const historyLines = plain
-      .stdout()
-      .split("\n")
-      .filter((line) => /^\d\d:\d\d:\d\d /u.test(line) && line.includes("task/history"))
-    const changeLines = historyLines.filter((line) => !line.includes("RUNNER"))
+    const pageLines = plain.stdout().split("\n")
+    const changeLines = pageLines.filter((line) => line.includes(`stuck=${String(original.reason)}`))
     expect(changeLines, plain.stdout()).toHaveLength(1)
-    expect(changeLines[0], plain.stdout()).toContain(`stuck=${String(original.reason)}`)
+    expect(changeLines[0], plain.stdout()).toContain("task/history")
     expect(
-      historyLines.some((line) => line.includes("RUNNER") && line.includes("stopped")),
+      pageLines.some((line) => line.includes("RUNNER") && line.includes("stopped")),
       plain.stdout(),
     ).toBe(true)
-    // The RUN column is retired with the box: a run id in local-time digits on
-    // a page whose rows are changes said nothing a reader could act on.
-    expect(plain.stdout(), plain.stdout()).not.toContain(runShortName("main", secondId))
+    // QUEUE / RUN names the latest attempt as `1 · main#…` (ia.md); historical
+    // run ids stay in `--json` and in the change's own detail, not as extra rows.
+    expect(changeLines[0], plain.stdout()).toContain(runShortName("main", secondId))
 
     rendered.snapshot = undefined
     const interactive = capture(w.work)
@@ -944,13 +941,15 @@ describe("the timing a one-row page prints under its row (24196)", () => {
     ).toBe(0)
 
     const lines = page.stdout().split("\n")
-    const row = lines.find((line) => /^\d\d:\d\d:\d\d /u.test(line) && line.includes("task/good")) ?? ""
-    const cell = /\S+ \d+:\d\d$/u.exec(row.trimEnd())?.[0] ?? ""
+    const row = lines.find((line) => line.includes("task/good") && line.includes("○ submitted")) ?? ""
+    expect(row, page.stdout()).toContain("task/good")
+    // AGE / RUN is unknown with no attempt (ia.md). The one-row timing line
+    // under `next:` is still the cell's duration word, never Age or Wait time.
+    expect(row.trimEnd(), page.stdout()).toMatch(/— \/ —\s*$/u)
     const notice = lines.findIndex((line) => line.includes("next: "))
-    expect({ cell, trailer: lines[notice + 1]?.trim() }, page.stdout()).toEqual({
-      cell: expect.stringMatching(/^waiting \d/u),
-      trailer: cell,
-    })
+    expect(lines[notice + 1]?.trim(), page.stdout()).toMatch(/^waiting \d/u)
+    expect(page.stdout()).not.toContain("Age")
+    expect(page.stdout()).not.toContain("Wait time")
   })
 })
 

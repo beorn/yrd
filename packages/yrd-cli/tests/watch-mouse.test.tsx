@@ -49,11 +49,12 @@ const SNAPSHOT: WatchSnapshot = {
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
- * The table row a branch is drawn on, or a failure naming the screen. Read by the branch AND its subject:
- * the queue line above the table names a branch too, as the last merge (24196).
+ * The table row a branch is drawn on, or a failure naming the screen. TASK leads
+ * with the subject, then the branch (ia.md); the queue line above also names a
+ * branch as the last merge, so both tokens together are the discriminator (24196).
  */
 function rowOf(lines: readonly string[], branch: string): number {
-  const index = lines.findIndex((line) => line.includes(`${branch} work on ${branch}`))
+  const index = lines.findIndex((line) => line.includes(`work on ${branch} ${branch}`))
   expect(index, lines.join("\n")).toBeGreaterThanOrEqual(0)
   return index
 }
