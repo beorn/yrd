@@ -311,6 +311,10 @@ export function WatchPane({
     setCursorRow(visible[i])
   }, [visible])
   useEffect(() => {
+    if (!centeredRunner.current) return
+    listRef.current?.scrollToItem(at)
+  }, [at])
+  useEffect(() => {
     if (keyed >= 0 && keyed !== cursor) setCursor(keyed)
   }, [keyed, cursor])
   const selected = visible[at]
@@ -514,7 +518,7 @@ export function WatchPane({
       paddingX={1}
       pills={terminalRows < PILLS_MIN_ROWS ? null : <StatusPills buckets={buckets} onSelectOnly={selectOnly} />}
       stats={
-        <Box flexShrink={0} minWidth={0}>
+        <Box flexDirection="column" flexShrink={0} minWidth={0}>
           <Text wrap="truncate">
             {RUNNER_GLYPH} STATS {queueLine(shown, shown.at, Math.max(20, listColumns - 10))}
           </Text>

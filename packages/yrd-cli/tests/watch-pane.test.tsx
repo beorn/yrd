@@ -1819,6 +1819,41 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(drawn).toEqual({ loud: true, shown: true })
   })
 
+  it("stacks compact STATS above the expanded box, not beside it, at 80 and 160 columns", async () => {
+    const snap = snapshot({
+      decisions: DECISIONS,
+      drafts: { unread: 0, window: "7d" },
+      rows: EVERY_STATE,
+      runner: RUNNER,
+      stopped: STOP,
+    } as Partial<WatchSnapshot>)
+    const seen = []
+    for (const [cols, rows] of [
+      [160, 40],
+      [80, 31],
+    ] as const) {
+      const app = render(<WatchPane snapshot={snap} live={false} />, { cols, rows })
+      await settle(app)
+      app.press("s")
+      await settle(app)
+      const painted = app.text.split("\n")
+      const compact = painted.findIndex((line) => line.includes("▸ STATS") || /^\s*▸ STATS/u.test(line))
+      const box = painted.findIndex((line) => line.includes("╭─ STATS"))
+      seen.push({
+        size: `${String(cols)}x${String(rows)}`,
+        compact,
+        box,
+        stacked: compact >= 0 && box > compact,
+        beside: painted.some((line) => line.includes("▸ STATS") && line.includes("╭─ STATS")),
+      })
+      app.unmount()
+    }
+    expect(seen).toEqual([
+      { size: "160x40", compact: expect.any(Number), box: expect.any(Number), stacked: true, beside: false },
+      { size: "80x31", compact: expect.any(Number), box: expect.any(Number), stacked: true, beside: false },
+    ])
+  })
+
   it("? opens the help as an overlay centred over the pane, which keeps its footer, with the legend unclipped at 160x48 and 100x31: every state's word, what it means and what happens next, and direct apart as not a change", async () => {
     const W = await words()
     const full = snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER })
