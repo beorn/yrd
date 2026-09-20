@@ -469,11 +469,11 @@ describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () =
     // Header on the box, then the bold title and the body.
     expect(text).toContain("task/one@abcdef012345")
     expect(text).toContain("The parser dropped the last token.")
-    // HISTORY newest first, human verbs only where a human acted.
+    // HISTORY newest first, human verbs only where a human acted. S4: opened paints ready.
     const failedAt = text.indexOf("failed test — fix the test and resubmit")
-    const submittedAt = text.indexOf("submitted by @chief")
+    const openedAt = text.indexOf("ready by @chief")
     expect(failedAt).toBeGreaterThan(-1)
-    expect(submittedAt).toBeGreaterThan(failedAt)
+    expect(openedAt).toBeGreaterThan(failedAt)
     // METADATA: keys uppercase in one column, the three groups.
     expect(text).toMatch(/BY\s+@chief/u)
     expect(text).toMatch(/CREATED\s+\d\d:\d\d:\d\d · 1h00m ago/u)
