@@ -1071,6 +1071,8 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
       { cols: 200, rows: 40 },
     )
     await app.waitForLayoutStable()
+    app.press("Home")
+    await app.waitForLayoutStable()
     app.press("ArrowDown")
     await app.waitForLayoutStable()
     app.press("Enter")
@@ -1108,6 +1110,8 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
       { cols: 200, rows: 40 },
     )
     await app.waitForLayoutStable()
+    app.press("Home")
+    await app.waitForLayoutStable()
     app.press("ArrowDown")
     await app.waitForLayoutStable()
     app.press("Enter")
@@ -1142,6 +1146,8 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
       />,
       { cols: 200, rows: 40 },
     )
+    await app.waitForLayoutStable()
+    app.press("Home")
     await app.waitForLayoutStable()
     expect(current(app)).not.toContain("Home follows the newest again")
     await waitFor(() => {
@@ -1850,6 +1856,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       rows: 50,
     })
     await settle(app)
+    app.press("Home")
+    await settle(app)
     const shown: string[] = []
     for (const key of ["Enter", "j", "j", "v"]) {
       app.press(key)
@@ -2433,7 +2441,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.unmount()
   })
 
-  it("idle queue is selectable in queued-only data: row zero is selected by default and arrow down navigates to the idle runner (watch-review-1244)", async () => {
+  it("idle queue is selectable in queued-only data: idle runner is selected by default (watch-review-1345)", async () => {
     const q1 = row({ branch: "task/q1", head: "1".repeat(40), state: "queued", position: 1 })
     const q2 = row({ branch: "task/q2", head: "2".repeat(40), state: "queued", position: 2 })
     const app = render(
@@ -2446,16 +2454,43 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(app)
     expect(current(app)).not.toContain("Home follows the newest again")
-    // Navigate from q1 (row 0) to q2 (row 1) to runner (index 2)
-    app.press("ArrowDown")
-    await settle(app)
-    app.press("ArrowDown")
-    await settle(app)
+    // Idle runner is selected by default on mount in queued-only data
     app.press("Enter")
     await waitFor(() => {
       expect(current(app)).toContain("▸ RUNNER idle")
       expect(current(app)).toContain("Queue: example.test/repo#main")
     })
+    // ArrowUp navigates up to q1 (position 1 is right above runner)
+    app.press("ArrowUp")
+    await settle(app)
+    app.press("Enter")
+    await waitFor(() => {
+      expect(current(app)).toContain("· task/q1@111111111111")
+    })
+    app.unmount()
+  })
+
+  it("keyboard navigation moves cursor without snapping selected row to viewport lead (watch-review-1345)", async () => {
+    const rows = Array.from({ length: 20 }, (_, i) =>
+      row({ branch: `task/row-${i}`, head: `${i}`.repeat(40), state: "queued", position: i + 1 }),
+    )
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: rows.map((r) => ({ row: r })), runner: RUNNER })}
+        open={opener()}
+        live={false}
+      />,
+      { cols: 160, rows: 25 },
+    )
+    await settle(app)
+    // Initially runner is selected (index 20) and centered
+    expect(current(app)).not.toContain("Home follows the newest again")
+    // Moving cursor within visible range does not alter viewport lead
+    app.press("ArrowUp")
+    await settle(app)
+    app.press("ArrowDown")
+    await settle(app)
+    expect(current(app)).toContain("RUNNER")
     app.unmount()
   })
 })

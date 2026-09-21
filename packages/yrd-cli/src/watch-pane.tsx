@@ -367,9 +367,7 @@ export function WatchPane({
     let i = -1
     if (heldAt >= 0) {
       i = heldAt
-    } else if (hasDone && runnerAt >= 0) {
-      i = runnerAt
-    } else if (visible.length === 0 && runnerAt >= 0) {
+    } else if (runnerAt >= 0) {
       i = runnerAt
     } else if (visibleItems.length > 0) {
       i = 0
@@ -389,9 +387,8 @@ export function WatchPane({
   }, [visibleItems])
 
   useEffect(() => {
-    if (keyed >= 0) {
-      if (keyed !== cursor) setCursor(keyed)
-      listRef.current?.scrollToItem(keyed)
+    if (keyed >= 0 && keyed !== cursor) {
+      setCursor(keyed)
     }
   }, [keyed, cursor])
   const label = shown.queues[0]?.label ?? shown.queue
