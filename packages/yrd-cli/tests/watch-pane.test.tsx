@@ -2414,4 +2414,48 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       supervisor: /\bhab\b/u.test(runner),
     }).toEqual({ age: true, said: true, silent: false, supervisor: false })
   })
+
+  it("idle queue is selectable and selected by default in an empty queue, and opening it shows runner detail (watch-review-1244)", async () => {
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: [], runner: RUNNER })}
+        open={opener()}
+        live={false}
+      />,
+      { cols: 160, rows: 40 },
+    )
+    await settle(app)
+    app.press("Enter")
+    await waitFor(() => {
+      expect(current(app)).toContain("▸ RUNNER idle")
+      expect(current(app)).toContain("Queue: example.test/repo#main")
+    })
+    app.unmount()
+  })
+
+  it("idle queue is selectable in queued-only data: row zero is selected by default and arrow down navigates to the idle runner (watch-review-1244)", async () => {
+    const q1 = row({ branch: "task/q1", head: "1".repeat(40), state: "queued", position: 1 })
+    const q2 = row({ branch: "task/q2", head: "2".repeat(40), state: "queued", position: 2 })
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: [{ row: q1 }, { row: q2 }], runner: RUNNER })}
+        open={opener()}
+        live={false}
+      />,
+      { cols: 160, rows: 40 },
+    )
+    await settle(app)
+    expect(current(app)).not.toContain("Home follows the newest again")
+    // Navigate from q1 (row 0) to q2 (row 1) to runner (index 2)
+    app.press("ArrowDown")
+    await settle(app)
+    app.press("ArrowDown")
+    await settle(app)
+    app.press("Enter")
+    await waitFor(() => {
+      expect(current(app)).toContain("▸ RUNNER idle")
+      expect(current(app)).toContain("Queue: example.test/repo#main")
+    })
+    app.unmount()
+  })
 })

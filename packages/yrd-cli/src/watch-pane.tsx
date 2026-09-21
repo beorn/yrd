@@ -58,7 +58,9 @@ import {
   ListView,
   ModalDialog,
   ModalOverlay,
+  SplitPane,
   Text,
+  clampSplitPaneRatio,
   resolveSplitPaneLayout,
   useInput,
   useScopeEffect,
@@ -173,7 +175,7 @@ const LIST_NATURAL_WIDTH = 140
 const DETAIL_NATURAL_WIDTH = 72
 const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
-const DIVIDER_SIZE = 1
+const DIVIDER_SIZE = 0
 const DEFAULT_SPLIT_RATIO = 0.65
 /** Below this many terminal rows the STATS box would push the table off the screen, so it yields (the retired pane's own rule). */
 /** The TIME rows under the counts cost five more; below this height the list keeps them. */
@@ -197,7 +199,7 @@ export function watchTier(columns: number, rows: number): WatchTier {
     availableHeight: rows,
     primary: { width: LIST_NATURAL_WIDTH, height: LIST_NATURAL_HEIGHT },
     secondary: { width: DETAIL_NATURAL_WIDTH, height: DETAIL_NATURAL_HEIGHT },
-    dividerSize: DIVIDER_SIZE,
+    dividerSize: 1,
     preferredDirection: "row",
   })
   return layout === "row" ? "right" : layout === "column" ? "below" : "full"
@@ -359,6 +361,7 @@ export function WatchPane({
     if (centeredRunner.current || visibleItems.length === 0) return
     const heldAt = visibleItems.findIndex((item) => item.kind === "row" && item.item.row.live !== undefined)
     const runnerAt = visibleItems.findIndex((item) => item.kind === "runner")
+
     const hasDone = visibleItems.some((item) => item.kind === "row" && bandOf(item.item.row, false) === "done")
 
     let i = -1
@@ -366,6 +369,10 @@ export function WatchPane({
       i = heldAt
     } else if (hasDone && runnerAt >= 0) {
       i = runnerAt
+    } else if (visible.length === 0 && runnerAt >= 0) {
+      i = runnerAt
+    } else if (visibleItems.length > 0) {
+      i = 0
     }
 
     if (i < 0) {
@@ -376,8 +383,8 @@ export function WatchPane({
     centeredRunner.current = true
     setCursor(i)
     const targetItem = visibleItems[i]
-    setCursorItemKey(targetItem?.key)
-    setCursorRow(targetItem?.kind === "row" ? targetItem.item : undefined)
+    setCursorItemKey(targetItem?.kind === "row" && i === 0 ? undefined : targetItem?.key)
+    setCursorRow(targetItem?.kind === "row" && i === 0 ? undefined : targetItem?.kind === "row" ? targetItem.item : undefined)
     listRef.current?.scrollToItem(i)
   }, [visibleItems])
 
@@ -629,8 +636,8 @@ export function WatchPane({
         onCursor={(index) => {
           setCursor(index)
           const item = visibleItems[index]
-          setCursorItemKey(item?.key)
-          setCursorRow(item?.kind === "row" ? item.item : undefined)
+          setCursorItemKey(item?.kind === "row" && index === 0 ? undefined : item?.key)
+          setCursorRow(item?.kind === "row" && index === 0 ? undefined : item?.kind === "row" ? item.item : undefined)
         }}
       />
     </ListStack>
@@ -643,35 +650,16 @@ export function WatchPane({
         list
       )
     ) : (
-      <Box
-        flexDirection={tier === "right" ? "row" : "column"}
-        flexGrow={1}
-        minHeight={0}
-        minWidth={0}
-        overflow="hidden"
-      >
-        <Box
-          flexDirection="column"
-          minHeight={0}
-          minWidth={0}
-          overflow="hidden"
-          {...(tier === "right"
-            ? { width: Math.floor(columns * DEFAULT_SPLIT_RATIO), height: "100%" }
-            : { height: Math.floor(terminalRows * 0.6), width: "100%" })}
-        >
-          {list}
-        </Box>
-        <Box
-          flexDirection="column"
-          flexGrow={1}
-          minHeight={0}
-          minWidth={0}
-          overflow="hidden"
-          {...(tier === "right" ? { height: "100%" } : { width: "100%" })}
-        >
-          {detailPane}
-        </Box>
-      </Box>
+      <SplitPane
+        direction={tier === "right" ? "row" : "column"}
+        ratio={clampSplitPaneRatio(tier === "right" ? DEFAULT_SPLIT_RATIO : 0.6, {
+          containerSize: tier === "right" ? columns : terminalRows,
+          dividerSize: DIVIDER_SIZE,
+        })}
+        dividerSize={DIVIDER_SIZE}
+        primary={list}
+        secondary={detailPane}
+      />
     )
 
   return (
@@ -876,13 +864,14 @@ function Table({
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       <Box height={1} flexShrink={0} />
       <ListHeader layout={layout} />
-      {rows.length === 0 ? (
+      {items.length === 0 ? (
         <>
           <BandBreakRows brk={plan.before.get(0) ?? plan.after} snapshot={snapshot} layout={layout} includeRunner={true} />
           <Text color="$fg-muted">{empty}</Text>
         </>
       ) : (
-        <ListView
+        <>
+          <ListView
           ref={listRef}
           items={[...items]}
           getKey={(item) => item.key}
@@ -955,9 +944,11 @@ function Table({
             )
           }}
         />
-      )}
-      {/* Nothing is done yet, so the runner's row follows the last one. */}
-      <BandBreakRows brk={rows.length === 0 ? undefined : plan.after} snapshot={snapshot} layout={layout} includeRunner={false} />
+        {rows.length === 0 ? <Text color="$fg-muted">{empty}</Text> : null}
+      </>
+    )}
+    {/* Nothing is done yet, so the runner's row follows the last one. */}
+    <BandBreakRows brk={rows.length === 0 ? undefined : plan.after} snapshot={snapshot} layout={layout} includeRunner={false} />
     </Box>
   )
 }

@@ -158,7 +158,7 @@ export function listLayout(
           queueRunText(queue.digit, queue.label, undefined).length,
           ...rows.map((item) => queueRunText(queue.digit, queue.label, runIdOf(item)).length),
         ),
-    ageRunWidth: Math.max(7, (runner?.duration ?? "").length, ...rows.map((item) => ageRunText(item.row, now).length)),
+    ageRunWidth: Math.max(9, (runner?.duration ?? "").length, ...rows.map((item) => ageRunText(item.row, now).length)),
     isSeparateColumns: separate,
     isFullQueue: fullQueue,
   }
@@ -595,7 +595,7 @@ function Cells({
   }>
 }) {
   return (
-    <Box height={1} width="100%" flexDirection="row" gap={1} minWidth={0} overflow="hidden">
+    <Box height={1} width="100%" flexDirection="row" gap={1} minWidth={0} overflow="hidden" paddingRight={1}>
       <Box flexGrow={1} flexBasis={0} minWidth={12}>
         {children.task}
       </Box>

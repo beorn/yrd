@@ -51,7 +51,7 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
   const runner = runnerOf(snapshot, snapshot.at)
   const holding = holdsChange(runner.state)
   const rows = bandedRows(snapshot.rows, holding)
-  const queue = { digit: 1, label: queues[0]?.label ?? snapshot.queue }
+  const queue = { digit: 1, label: snapshot.queue }
   const layout = listLayout(rows, columns, snapshot.at, runner, queue, {
     singleQueue: false,
     separateColumns: true,
