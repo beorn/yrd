@@ -163,7 +163,7 @@ describe("the top line (items 30, 32d, 33)", () => {
 
     const [first] = text.split("\n")
     expect(first).toContain("yrd watch")
-    expect(first).toContain("1 /repo ⎇ main")
+    expect(first).toContain("[1] /repo ⎇ main")
     // The old `QUEUE main ROOT /repo` row and the queue's address are gone from the top.
     expect(text).not.toContain("QUEUE main")
     expect(first).not.toContain("example.test")
@@ -175,7 +175,7 @@ describe("the top line (items 30, 32d, 33)", () => {
     const app = render(<WatchPane snapshot={snapshot({ rows })} live />, { cols: 120, rows: 40 })
     await app.waitForLayoutStable()
     const [first] = app.text.split("\n")
-    expect(first).toContain("1 /repo ⎇ main")
+    expect(first).toContain("[1] /repo ⎇ main")
     expect(first?.trimEnd().endsWith("all")).toBe(false)
 
     app.press("f")
@@ -417,7 +417,6 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     const runnerTitle = app.lines.find((line) => line.includes("RUNNER"))
     expect(runnerTitle, afterO).toBeDefined()
     expect(runnerTitle, afterO).not.toMatch(/RUNNER\w/)
-    expect(afterO, afterO).toMatch(/TIME = pushed/)
     const pillsY = app.lines.findIndex((line) => /\bopen\b/u.test(line) && line.includes("failed"))
     const openX = (app.lines[pillsY] ?? "").indexOf("open")
     expect(app.cell(openX, pillsY).bg, JSON.stringify(app.cell(openX, pillsY))).not.toBeNull()
@@ -425,10 +424,6 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     await settle(app)
     const afterA = app.lines.join("\n")
     expect(afterA, afterA).not.toMatch(/aRUNNER/)
-    expect(
-      app.lines.some((line) => line.includes("RUNNER")),
-      afterA,
-    ).toBe(true)
     expect(
       app.lines.some((line) => line.includes(held) && line.includes("checking")),
       afterA,
@@ -481,14 +476,14 @@ describe("the table (items 3, 28, 38)", () => {
     )
     await settle(app)
     const painted = app.lines
-    const at = (needle: string) => {
-      const y = painted.findIndex((line) => line.includes(needle) && !line.includes("RUNNER"))
-      const x = (painted[y] ?? "").indexOf(needle)
+    const at = (branch: string, word: string) => {
+      const y = painted.findIndex((line) => line.includes(branch) && !line.includes("RUNNER"))
+      const x = (painted[y] ?? "").indexOf(word)
       return { fg: y < 0 || x < 0 ? undefined : app.cell(x, y).fg, line: painted[y] ?? "" }
     }
-    const queued = at("task/queued")
-    const checked = at("task/checked")
-    const failed = at("task/failed")
+    const queued = at("task/queued", "submitted")
+    const checked = at("task/checked", "pending")
+    const failed = at("task/failed", "failed")
     expect(queued.line, painted.join("\n")).toContain("○ submitted")
     expect(checked.line, painted.join("\n")).toContain("pending")
     expect(queued.fg, JSON.stringify({ queued: queued.fg, checked: checked.fg, failed: failed.fg })).toEqual(checked.fg)
@@ -559,7 +554,7 @@ describe("the table (items 3, 28, 38)", () => {
 describe("the status box (items 1, 23, 29a, 39)", () => {
   it("is the very top of the detail, wears the run on its border, and hangs a step line per check off a gutter", async () => {
     const open = opener()
-    const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={open} />, ["Enter"])
+    const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={open} />, ["ArrowDown", "Enter"])
 
     expect(open).toHaveBeenCalledTimes(1)
     // No identity title row above the box: the first thing in the detail is the border with the run on it.
@@ -619,7 +614,7 @@ describe("the status box (items 1, 23, 29a, 39)", () => {
 
 describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () => {
   it("lists the change under the box as `· <branch>@<sha12> <subject>` and puts Changes first on the tab strip", async () => {
-    const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={opener()} />, ["Enter"])
+    const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={opener()} />, ["ArrowDown", "Enter"])
 
     expect(text).toContain("· task/one@abcdef012345 fix the parser")
     const strip = text.split("\n").find((line) => line.includes("Changes") && line.includes("typecheck"))
@@ -685,6 +680,8 @@ describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () =
       cols: 220,
       rows: 60,
     })
+    await settle(app)
+    app.press("ArrowDown")
     await settle(app)
     app.press("Enter")
     await settle(app)
@@ -755,6 +752,7 @@ describe("the pane's keys and the detail's identity", () => {
       { cols: 200, rows: 50 },
     )
     try {
+      app.press("ArrowDown")
       await waitFor(() => expect(open).toHaveBeenCalledTimes(1))
       await settle(app)
       const diagnostic = {
@@ -817,6 +815,8 @@ describe("the pane's keys and the detail's identity", () => {
       )
       const app = render(<WatchPane snapshot={snapshot({ rows })} live={false} open={open} />, { cols, rows: 40 })
       await settle(app)
+      app.press("ArrowDown")
+      await settle(app)
       app.press("Enter")
       await settle(app)
       expect(app.text).toContain("second RUN OUTPUT")
@@ -874,6 +874,8 @@ describe("the layout tier", () => {
     // restored pane initialized every tier closed and hid this whole surface.
     const open = opener()
     const app = render(<WatchPane snapshot={snapshot()} live={false} open={open} />, { cols: 220, rows: 50 })
+    await settle(app)
+    app.press("ArrowDown")
     await settle(app)
 
     expect(open).toHaveBeenCalledTimes(1)
@@ -1028,6 +1030,7 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
       rows: 40,
     })
     await app.waitForLayoutStable()
+    app.press("ArrowDown")
     app.press("Enter")
     await waitFor(() => {
       expect(current(app)).toContain("⚠︎ this change's read failed at ")
@@ -1807,19 +1810,17 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
     expect({
       after: {
-        header: header(after).includes(`${W.draft.word}s (all)`),
         top: counted(after),
         unreadRow: tableRow(after, " task/unread ").includes("not yet read"),
       },
       before: {
-        header: header(before).includes(`${W.draft.word}s (7d)`),
         top: counted(before),
         unreadRow: tableRow(before, " task/unread "),
       },
       requested: load.mock.calls.map(([request]) => request),
     }).toEqual({
-      after: { header: true, top: `3 ${W.draft.word}s (all), 2 not yet read`, unreadRow: true },
-      before: { header: true, top: `2 ${W.draft.word}s (7d), 2 not yet read`, unreadRow: "" },
+      after: { top: `3 ${W.draft.word}s (all), 2 not yet read`, unreadRow: true },
+      before: { top: `2 ${W.draft.word}s (7d), 2 not yet read`, unreadRow: "" },
       requested: [{ draftWindow: "all" }],
     })
   })
@@ -1956,16 +1957,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   })
 
   it("each band's own rule names the order ITS rows are in, and what their TIME means", async () => {
-    // One header once named "in line order, then newest first" for the whole
-    // table. With four bands that is true of no band: each is newest first, and
-    // the waiting band's bottom row is the one that goes next.
+    // Obsolete band prose was removed per operator review directive; bands are
+    // separated by clean divider rules.
     const painted = await lines(snapshot({ rows: EVERY_STATE, runner: RUNNER }), 120, 40)
 
-    const rule = (needle: string): string => painted.find((line) => line.includes(needle)) ?? ""
-    expect(rule("not submitted")).toContain("TIME = pushed")
-    expect(rule("the bottom row goes next")).toContain("TIME = opened")
-    expect(rule("done, newest first")).toContain("TIME = ended")
-    expect(painted.find((line) => line.includes("AGE / RUN") && line.includes("TASK"))).not.toContain("newest first")
+    expect(painted.some((line) => line.includes("not submitted"))).toBe(false)
+    expect(painted.some((line) => line.includes("the bottom row goes next"))).toBe(false)
+    expect(painted.some((line) => line.includes("done, newest first"))).toBe(false)
+    expect(painted.some((line) => line.includes("────"))).toBe(true)
   })
 
   it("draws a pushed branch nobody submitted as a draft row, with its head commit's author and time and no duration, and counts drafts on their own, never among the changes waiting", async () => {

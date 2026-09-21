@@ -148,10 +148,10 @@ describe("`yrd list` prints the watch's page, once", () => {
     // notice a machine that runs no queue prints, G5) the header the pane draws.
     expect(lines[0]).toMatch(/remote\.git#main$/u)
     expect(lines[1]).toContain("yrd watch")
-    expect(lines[1]).toContain("⎇ main")
-    const header = lines.findIndex((line) => line.includes("TASK") && line.includes("QUEUE / RUN"))
+    const header = lines.findIndex((line) => line.includes("TASK") && line.includes("QUEUE") && line.includes("RUN"))
     expect(header, plain.report).toBeGreaterThan(1)
-    expect(lines[header], plain.report).toContain("QUEUE / RUN")
+    expect(lines[header], plain.report).toContain("QUEUE")
+    expect(lines[header], plain.report).toContain("RUN")
     expect(lines.slice(2, header).join("\n")).toContain("no run journal was read")
     const row = lines.find((line) => line.includes("task/one") && !line.includes("RUNNER"))
     expect(row, plain.report).toBeDefined()

@@ -92,6 +92,7 @@ export type ListLayout = Readonly<{
   statusWidth: number
   ageRunWidth: number
   isSeparateColumns?: boolean
+  isFullQueue?: boolean
 }>
 
 /** The CHANGES cell's parenthesized suffix: the running check, else a failure's code — status, never identity. */
@@ -129,19 +130,21 @@ export function listLayout(
   now: Date,
   runner?: Pick<RunnerLine, "state" | "duration" | "by">,
   queue: Readonly<{ digit: number; label: string }> = { digit: 1, label: "main" },
-  options?: { singleQueue?: boolean; separateColumns?: boolean },
+  options?: { singleQueue?: boolean; separateColumns?: boolean; fullQueueRefs?: boolean },
 ): ListLayout {
   const runnerWord = runner === undefined ? "" : STATE_WORDS[runner.state].word
   const runIdOf = (item: WatchRow): string | undefined => item.run?.id ?? item.row.run
   const separate = options?.separateColumns ?? false
   const single = options?.singleQueue ?? true
+  const fullQueue = options?.fullQueueRefs ?? false
+  const qWidth = separate ? (fullQueue ? Math.max(16, queue.label.length) : single ? 0 : 3) : 0
   return {
     statusWidth: Math.max(6, runnerWord.length + 2, ...rows.map((item) => stateWord(item.row).length + 2)),
     agentWidth:
       columns < 100
         ? 0
         : Math.max(5, (runner?.by ?? "—").length, ...rows.map((item) => (item.row.submitter ?? "—").length)),
-    qWidth: separate ? (single ? 0 : 3) : 0,
+    qWidth,
     runWidth: separate
       ? Math.max(
           3,
@@ -157,6 +160,7 @@ export function listLayout(
         ),
     ageRunWidth: Math.max(7, (runner?.duration ?? "").length, ...rows.map((item) => ageRunText(item.row, now).length)),
     isSeparateColumns: separate,
+    isFullQueue: fullQueue,
   }
 }
 
@@ -223,7 +227,7 @@ export function TopLine({
         {queues.map((queue, index) => (
           <InversePill
             key={`${queue.path}@${queue.branch}`}
-            label={pillLabel(queue, index + 1)}
+            label={pillLabel(queue, index + 1, true)}
             boldFirstLetter
             active={visible === undefined || visible.has(queue.label)}
             onToggle={() => {
@@ -291,7 +295,7 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
       {{
         agent: label("AGENT"),
         task: label("TASK"),
-        q: (layout.qWidth ?? 0) === 0 ? null : label("Q"),
+        q: (layout.qWidth ?? 0) === 0 ? null : label(layout.isFullQueue ? "QUEUE" : "Q"),
         run: label("RUN"),
         queueRun: label("QUEUE / RUN"),
         status: label("STATE"),
@@ -435,7 +439,7 @@ export const ListRow = memo(function ListRow({
           q:
             (layout.qWidth ?? 0) === 0 ? null : (
               <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
-                {String(queueDigit)}
+                {layout.isFullQueue ? queueLabel : String(queueDigit)}
               </Text>
             ),
           run: (
@@ -507,10 +511,14 @@ export function RunnerRow({
   line,
   layout,
   cursor = false,
+  queueDigit = 1,
+  queueLabel = "main",
 }: {
   line: RunnerLine
   layout: ListLayout
   cursor?: boolean
+  queueDigit?: number
+  queueLabel?: string
 }) {
   const { color, word } = STATE_WORDS[line.state]
   const forced = cursor ? "$fg-on-selected" : undefined
@@ -541,11 +549,11 @@ export function RunnerRow({
               </Box>
             </Box>
           ),
-          q: (layout.qWidth ?? 0) === 0 ? null : <Text color={forced ?? "$fg-muted"}>1</Text>,
+          q: (layout.qWidth ?? 0) === 0 ? null : <Text color={forced ?? "$fg-muted"}>{layout.isFullQueue ? queueLabel : String(queueDigit)}</Text>,
           run: <Text color={forced ?? "$fg-muted"}>—</Text>,
           queueRun: (
             <Text color={forced ?? "$fg-muted"} wrap="truncate">
-              1 · —
+              {queueRunText(queueDigit, queueLabel, undefined)}
             </Text>
           ),
           ageRun: (

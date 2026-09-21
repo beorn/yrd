@@ -177,7 +177,7 @@ export type Band = (typeof BANDS)[number]
 export function bandOf(row: Pick<Row, "state" | "position" | "live">, holding = true): Band {
   if (row.live !== undefined && holding) return "runner"
   if (row.state === "draft") return "drafts"
-  if (row.position !== undefined) return "waiting"
+  if (row.position !== undefined || row.state === "queued" || row.state === "checked" || row.state === "stuck") return "waiting"
   return "done"
 }
 
@@ -201,16 +201,9 @@ export function bandedRows(rows: readonly WatchRow[], holding = true): readonly 
   return [...of("drafts"), ...waiting, ...of("runner"), ...of("done")]
 }
 
-/** A band's rule: the legend that opens it, drawn to the table's width. */
-export function bandRule(band: Band, count: number, width: number, draftWindow = "7d"): string {
-  const said =
-    band === "drafts"
-      ? `${STATE_WORDS.draft.word}s (${draftWindow}): ${STATE_WORDS.draft.means ?? ""} · TIME = pushed`
-      : band === "waiting"
-        ? `${String(count)} ${STATE_WORDS.waiting.word}, newest first; the bottom row goes next · TIME = opened`
-        : "done, newest first · TIME = ended"
-  const rule = `── ${said} `
-  return rule.padEnd(Math.max(rule.length, width), "─")
+/** A band's rule: the divider that opens it, drawn to the table's width without prose. */
+export function bandRule(_band: Band, _count: number, width: number, _draftWindow = "7d"): string {
+  return "─".repeat(Math.max(1, width))
 }
 
 /** What is drawn at one point in the table that is not a change's row. */
@@ -304,10 +297,12 @@ export function BandBreakRows({
   brk,
   snapshot,
   layout,
+  includeRunner = true,
 }: {
   brk: BandBreak | undefined
   snapshot: WatchSnapshot
   layout: ListLayout
+  includeRunner?: boolean
 }) {
   const now = useNow()
   if (brk === undefined) return null
@@ -315,7 +310,7 @@ export function BandBreakRows({
   const color = STATE_WORDS[runner.state].color
   return (
     <Box flexDirection="column" flexShrink={0} minWidth={0}>
-      {brk.runner ? (
+      {brk.runner && includeRunner ? (
         <Box flexDirection="column" marginTop={1} marginBottom={1}>
           <TitledBox title={STATE_WORDS.runner.word} flushTop borderColor={color}>
             <RunnerRow line={runner} layout={layout} />
@@ -323,8 +318,8 @@ export function BandBreakRows({
           </TitledBox>
         </Box>
       ) : null}
-      {brk.rules.map((rule) => (
-        <Text key={rule} color="$fg-muted" wrap="truncate">
+      {brk.rules.map((rule, idx) => (
+        <Text key={`${rule}-${idx}`} color="$fg-muted" wrap="truncate">
           {rule}
         </Text>
       ))}
