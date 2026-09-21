@@ -311,13 +311,17 @@ export function BandBreakRows({
 }) {
   const now = useNow()
   if (brk === undefined) return null
+  const runner = runnerOf(snapshot, now)
+  const color = STATE_WORDS[runner.state].color
   return (
     <Box flexDirection="column" flexShrink={0} minWidth={0}>
       {brk.runner ? (
-        <TitledBox title={STATE_WORDS.runner.word} flushTop>
-          <RunnerRow line={runnerOf(snapshot, now)} layout={layout} />
-          <RunnerDetail snapshot={snapshot} />
-        </TitledBox>
+        <Box flexDirection="column" marginTop={1} marginBottom={1}>
+          <TitledBox title={STATE_WORDS.runner.word} flushTop borderColor={color}>
+            <RunnerRow line={runner} layout={layout} />
+            <RunnerDetail snapshot={snapshot} />
+          </TitledBox>
+        </Box>
       ) : null}
       {brk.rules.map((rule) => (
         <Text key={rule} color="$fg-muted" wrap="truncate">

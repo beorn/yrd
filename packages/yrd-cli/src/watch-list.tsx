@@ -34,10 +34,12 @@ import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import {
   RUNNER_GLYPH,
+  RUNNING_GLYPH,
   STATE_WORDS,
   ageRunText,
   friendlyPath,
   queueRunText,
+  runIdentifier,
   stateColor,
   stateGlyph,
   stateWord,
@@ -76,16 +78,20 @@ export type WatchQueue = Readonly<{
   branch: string
 }>
 
-/** The pill's text (items 32d, 36): `1 /hh ⎇ main` — digit, shortest friendly path, the branch glyph, the branch. */
-export function pillLabel(queue: WatchQueue, digit: number): string {
-  return `${String(digit)} ${friendlyPath(queue.path)} ⎇ ${queue.branch}`
+/** The pill's text (items 32d, 36, 24196): bracket shortcuts `[1] /hh ⎇ main` or plain `1 /hh ⎇ main`. */
+export function pillLabel(queue: WatchQueue, digit: number, brackets = false): string {
+  const prefix = brackets ? `[${String(digit)}]` : String(digit)
+  return `${prefix} ${friendlyPath(queue.path)} ⎇ ${queue.branch}`
 }
 
 export type ListLayout = Readonly<{
   agentWidth: number
+  qWidth?: number
+  runWidth?: number
   queueRunWidth: number
   statusWidth: number
   ageRunWidth: number
+  isSeparateColumns?: boolean
 }>
 
 /** The CHANGES cell's parenthesized suffix: the running check, else a failure's code — status, never identity. */
@@ -123,21 +129,34 @@ export function listLayout(
   now: Date,
   runner?: Pick<RunnerLine, "state" | "duration" | "by">,
   queue: Readonly<{ digit: number; label: string }> = { digit: 1, label: "main" },
+  options?: { singleQueue?: boolean; separateColumns?: boolean },
 ): ListLayout {
   const runnerWord = runner === undefined ? "" : STATE_WORDS[runner.state].word
   const runIdOf = (item: WatchRow): string | undefined => item.run?.id ?? item.row.run
+  const separate = options?.separateColumns ?? false
+  const single = options?.singleQueue ?? true
   return {
     statusWidth: Math.max(6, runnerWord.length + 2, ...rows.map((item) => stateWord(item.row).length + 2)),
     agentWidth:
       columns < 100
         ? 0
         : Math.max(5, (runner?.by ?? "—").length, ...rows.map((item) => (item.row.submitter ?? "—").length)),
-    queueRunWidth: Math.max(
-      11,
-      queueRunText(queue.digit, queue.label, undefined).length,
-      ...rows.map((item) => queueRunText(queue.digit, queue.label, runIdOf(item)).length),
-    ),
+    qWidth: separate ? (single ? 0 : 3) : 0,
+    runWidth: separate
+      ? Math.max(
+          3,
+          ...rows.map((item) => runIdentifier(runIdOf(item)).length),
+        )
+      : 0,
+    queueRunWidth: separate
+      ? 0
+      : Math.max(
+          11,
+          queueRunText(queue.digit, queue.label, undefined).length,
+          ...rows.map((item) => queueRunText(queue.digit, queue.label, runIdOf(item)).length),
+        ),
     ageRunWidth: Math.max(7, (runner?.duration ?? "").length, ...rows.map((item) => ageRunText(item.row, now).length)),
+    isSeparateColumns: separate,
   }
 }
 
@@ -162,21 +181,28 @@ export function separatorBefore(rows: readonly WatchRow[], index: number): strin
   return day !== undefined && previous !== undefined && day !== previous ? day : undefined
 }
 
+export type LineStatus = Readonly<{
+  marker: string
+  word: string
+  color: string
+}>
+
 /**
- * The top line (ia.md): `yrd watch`, then one pill per queue right-aligned —
- * `digit path ⎇ branch`. Active pills use `$bg-inverse` / `$fg-on-inverse`;
- * idle pills are muted with no fill. There is no queue All control;
- * number keys still toggle queues. Status All is the `a` key, not a pill.
+ * The top line (ia.md, 24196): `yrd watch` and queue filter pills on the left,
+ * status marker + bold YRD + actual RUNNING/STOPPED/STUCK on the right.
+ * Active pills use `$bg-inverse` / `$fg-on-inverse`; idle pills are muted with no fill.
  */
 export function TopLine({
   queues,
   visible,
   onToggle,
+  status,
 }: {
   queues: readonly WatchQueue[]
   /** The labels of the queues shown; `undefined` means every one. */
   visible: ReadonlySet<string> | undefined
   onToggle: (label: string) => void
+  status?: LineStatus
 }) {
   return (
     <Box
@@ -187,12 +213,13 @@ export function TopLine({
       minWidth={0}
       overflow="hidden"
       paddingLeft={1}
+      paddingRight={1}
       justifyContent="space-between"
     >
-      <Text bold flexShrink={0}>
-        yrd watch
-      </Text>
-      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" justifyContent="flex-end" gap={1}>
+      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" gap={1}>
+        <Text bold flexShrink={0}>
+          yrd watch
+        </Text>
         {queues.map((queue, index) => (
           <InversePill
             key={`${queue.path}@${queue.branch}`}
@@ -204,6 +231,13 @@ export function TopLine({
             }}
           />
         ))}
+      </Box>
+      <Box flexDirection="row" flexShrink={0} gap={1}>
+        <Text color={status?.color ?? "$fg-info"}>{status?.marker ?? RUNNING_GLYPH}</Text>
+        <Text bold>YRD</Text>
+        <Text bold color={status?.color ?? "$fg-info"}>
+          {status?.word ?? "RUNNING"}
+        </Text>
       </Box>
     </Box>
   )
@@ -257,9 +291,11 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
       {{
         agent: label("AGENT"),
         task: label("TASK"),
-        ageRun: label("AGE / RUN"),
-        status: label("STATE"),
+        q: (layout.qWidth ?? 0) === 0 ? null : label("Q"),
+        run: label("RUN"),
         queueRun: label("QUEUE / RUN"),
+        status: label("STATE"),
+        ageRun: label("AGE / RUN"),
       }}
     </Cells>
   )
@@ -396,6 +432,17 @@ export const ListRow = memo(function ListRow({
               )}
             </Box>
           ),
+          q:
+            (layout.qWidth ?? 0) === 0 ? null : (
+              <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
+                {String(queueDigit)}
+              </Text>
+            ),
+          run: (
+            <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
+              {runIdentifier(item.run?.id ?? row.run)}
+            </Text>
+          ),
           queueRun: (
             <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
               {queueRunText(queueDigit, queueLabel, item.run?.id ?? row.run)}
@@ -456,20 +503,29 @@ export const ListRow = memo(function ListRow({
  * subject, the submitter and `checking 16m` in these same five cells, and
  * drawing a second line for it is the duplication the band replaced.
  */
-export function RunnerRow({ line, layout }: { line: RunnerLine; layout: ListLayout }) {
+export function RunnerRow({
+  line,
+  layout,
+  cursor = false,
+}: {
+  line: RunnerLine
+  layout: ListLayout
+  cursor?: boolean
+}) {
   const { color, word } = STATE_WORDS[line.state]
+  const forced = cursor ? "$fg-on-selected" : undefined
   return (
-    <Box minWidth={0} width="100%">
+    <Box minWidth={0} width="100%" backgroundColor={cursor ? "$bg-selected" : undefined}>
       <Cells layout={layout}>
         {{
           agent: (
-            <Text color="$fg-muted" wrap="truncate">
+            <Text color={forced ?? "$fg-muted"} wrap="truncate">
               {line.by ?? "—"}
             </Text>
           ),
           task: (
             <Box flexDirection="row" minWidth={0} overflow="hidden">
-              <Text bold color={color} flexShrink={0}>
+              <Text bold color={forced ?? color} flexShrink={0}>
                 {STATE_WORDS.runner.word}
               </Text>
               <Box paddingLeft={1} minWidth={0} overflow="hidden">
@@ -479,28 +535,30 @@ export function RunnerRow({ line, layout }: { line: RunnerLine; layout: ListLayo
                     idle runner's text is muted because `idle` is muted, and a
                     stopped one's is loud because `stopped` is. Item 14's muted
                     rail is the detail line below, which is metadata. */}
-                <Text color={color} wrap="truncate" minWidth={0}>
+                <Text color={forced ?? color} wrap="truncate" minWidth={0}>
                   {line.holds}
                 </Text>
               </Box>
             </Box>
           ),
+          q: (layout.qWidth ?? 0) === 0 ? null : <Text color={forced ?? "$fg-muted"}>1</Text>,
+          run: <Text color={forced ?? "$fg-muted"}>—</Text>,
           queueRun: (
-            <Text color="$fg-muted" wrap="truncate">
+            <Text color={forced ?? "$fg-muted"} wrap="truncate">
               1 · —
             </Text>
           ),
           ageRun: (
-            <Text color={color} wrap="truncate">
+            <Text color={forced ?? color} wrap="truncate">
               {line.duration ?? " "}
             </Text>
           ),
           status: (
             <Box flexDirection="row" minWidth={0}>
-              <Text color={color} flexShrink={0}>
+              <Text color={forced ?? color} flexShrink={0}>
                 {RUNNER_GLYPH}
               </Text>
-              <Text color={color} wrap="truncate">
+              <Text color={forced ?? color} wrap="truncate">
                 {" "}
                 {word}
               </Text>
@@ -521,7 +579,9 @@ function Cells({
   children: Readonly<{
     task: React.ReactNode
     agent: React.ReactNode
-    queueRun: React.ReactNode
+    q?: React.ReactNode
+    run?: React.ReactNode
+    queueRun?: React.ReactNode
     status: React.ReactNode
     ageRun: React.ReactNode
   }>
@@ -536,9 +596,22 @@ function Cells({
           {children.agent}
         </Box>
       )}
-      <Box width={layout.queueRunWidth} flexShrink={0}>
-        {children.queueRun}
-      </Box>
+      {layout.isSeparateColumns ? (
+        <>
+          {(layout.qWidth ?? 0) === 0 ? null : (
+            <Box width={layout.qWidth ?? 0} flexShrink={0}>
+              {children.q}
+            </Box>
+          )}
+          <Box width={layout.runWidth ?? 0} flexShrink={0}>
+            {children.run}
+          </Box>
+        </>
+      ) : (
+        <Box width={layout.queueRunWidth} flexShrink={0}>
+          {children.queueRun}
+        </Box>
+      )}
       <Box width={layout.statusWidth} flexShrink={0} flexDirection="row">
         {children.status}
       </Box>

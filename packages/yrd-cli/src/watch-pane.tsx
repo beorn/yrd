@@ -68,24 +68,27 @@ import {
   type ListViewHandle,
 } from "silvery"
 import type { GitObservation, Row, StopFact } from "@yrd/queue-core"
-import { NowProvider, useMinute } from "./watch-clock.ts"
-import { RUNNER_GLYPH, STATE_WORDS, clock, firstLine, legendLines, runShortName, stateGlyph } from "./watch-format.ts"
+import { NowProvider, useMinute, useNow } from "./watch-clock.ts"
+import { RUNNER_GLYPH, RUNNING_GLYPH, STATE_WORDS, clock, firstLine, legendLines, runShortName, stateGlyph } from "./watch-format.ts"
 import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
 import {
   BUCKETS,
   ListHeader,
   ListRow,
+  RunnerRow,
   StatusPills,
   TopLine,
   bucketOf,
   listLayout,
   separatorBefore,
   type DraftWindow,
+  type LineStatus,
   type StatusBucket,
   type WatchQueue,
 } from "./watch-list.tsx"
 import { watchRowKey, type WatchRow } from "./watch-rows.ts"
 import { StatsBox } from "./watch-boxes.tsx"
+import { TitledBox } from "./watch-primitives.tsx"
 import {
   BandBreakRows,
   ListStack,
@@ -282,13 +285,15 @@ export function WatchPane({
   // filters over the one table (items 9, 32); `all` is every one of both. The
   // bands are applied HERE, before the cursor and the detail read an index, so
   // every one of them addresses the sequence the reader is looking at.
+  const runner = runnerOf(shown, shown.at)
+  const holding = holdsChange(runner.state)
   const visible = bandedRows(
     shown.rows.filter(
       (item) =>
         buckets.has(bucketOf(item.row)) &&
         (visibleQueues === undefined || shown.queues.length === 0 || visibleQueues.has(shown.queues[0]?.label ?? "")),
     ),
-    holdsChange(runnerOf(shown, shown.at).state),
+    holding,
   )
 
   // Where the cursor's row is NOW; when it left the table, the cursor stays
@@ -305,15 +310,15 @@ export function WatchPane({
       return bucket === "done" || bucket === "failed"
     })
     const i = heldAt >= 0 ? heldAt : doneAt
-    if (i < 0) return
+    if (i <= 0) {
+      centeredRunner.current = true
+      return
+    }
     centeredRunner.current = true
     setCursor(i)
     setCursorRow(visible[i])
+    listRef.current?.scrollToItem(i)
   }, [visible])
-  useEffect(() => {
-    if (!centeredRunner.current) return
-    listRef.current?.scrollToItem(at)
-  }, [at])
   useEffect(() => {
     if (keyed >= 0 && keyed !== cursor) setCursor(keyed)
   }, [keyed, cursor])
@@ -387,28 +392,37 @@ export function WatchPane({
   const toTop = (): void => {
     setCursor(0)
     setCursorRow(undefined)
+    listRef.current?.scrollToItem(0)
   }
   const selectOnly = (bucket: StatusBucket): void => {
     setBuckets(new Set([bucket]))
-    toTop()
-    // A new exclusive filter is a new first viewport: the one-shot runner
-    // center must run again, or `o` then `a` keeps the drafts scroll.
+    if (cursorRow === undefined || bucketOf(cursorRow.row) !== bucket) {
+      toTop()
+    }
     centeredRunner.current = false
   }
   const toggleBucket = (bucket: StatusBucket): void => {
+    let willKeep = false
     setBuckets((was) => {
       const next = new Set(was)
       if (next.has(bucket)) next.delete(bucket)
       else next.add(bucket)
+      if (cursorRow !== undefined && next.has(bucketOf(cursorRow.row))) {
+        willKeep = true
+      }
       return next
     })
-    toTop()
+    if (cursorRow === undefined || !willKeep) {
+      toTop()
+    }
     centeredRunner.current = false
   }
   const showAll = (): void => {
     setBuckets(new Set(BUCKETS))
     setVisibleQueues(undefined)
-    toTop()
+    if (cursorRow === undefined) {
+      toTop()
+    }
     centeredRunner.current = false
   }
   const toggleQueue = (queueLabel: string): void => {
@@ -419,7 +433,7 @@ export function WatchPane({
       else next.add(queueLabel)
       return next.size === every.size ? undefined : next
     })
-    toTop()
+    if (cursorRow === undefined) setCursor(0)
   }
 
   useInput((input, key) => {
@@ -527,7 +541,7 @@ export function WatchPane({
       stats={
         <Box flexDirection="column" flexShrink={0} minWidth={0}>
           <Text wrap="truncate">
-            {RUNNER_GLYPH} STATS {queueLine(shown, shown.at, Math.max(20, listColumns - 10))}
+            ▸ STATS{shown.decisions === undefined ? "" : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
           </Text>
           {statsOpen && shown.decisions !== undefined ? (
             <StatsBox
@@ -582,7 +596,12 @@ export function WatchPane({
             so the queue's loudest state is said up here (watch-frame.tsx). */}
         <LoudPause snapshot={shown} />
         {/* The top line is ONLY the title and the queue pills (items 30, 32b, 33). */}
-        <TopLine queues={shown.queues} visible={visibleQueues} onToggle={toggleQueue} />
+        <TopLine
+          queues={shown.queues}
+          visible={visibleQueues}
+          onToggle={toggleQueue}
+          status={queueLineStatus(shown, shown.at)}
+        />
         <QueueLine snapshot={shown} columns={columns} />
         {/* Where the journal was looked for, when there was none. A watch that
             showed no running check because it had no journal to read must say
@@ -656,6 +675,27 @@ function changesIn(rows: readonly WatchRow[]): number {
 /** How many of these rows are drafts: the other population the footer must name. */
 function draftsIn(rows: readonly WatchRow[]): number {
   return rows.filter((item) => item.row.state === "draft").length
+}
+
+/** Derive status marker, word, and color for the top line (RUNNING / STOPPED / STUCK). */
+export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
+  const runner = runnerOf(snapshot, now)
+  if (snapshot.stopped !== undefined && snapshot.stopped !== null) {
+    if (snapshot.stopped.change === null) {
+      return { marker: "■", word: "STOPPED", color: "$fg-error" }
+    }
+    return { marker: "◌", word: "STUCK", color: "$fg-warning" }
+  }
+  if (runner.state === "stopped" || runner.state === "silent") {
+    return { marker: "■", word: "STOPPED", color: "$fg-error" }
+  }
+  if (runner.state === "stuck") {
+    return { marker: "◌", word: "STUCK", color: "$fg-warning" }
+  }
+  if (runner.state === "paused") {
+    return { marker: "■", word: "STOPPED", color: "$fg-warning" }
+  }
+  return { marker: RUNNING_GLYPH, word: "RUNNING", color: "$fg-info" }
 }
 
 /** One read that failed: when, and the first line of why. */
@@ -738,10 +778,15 @@ function Table({
   const { columns } = useWindowSize()
   const runner = runnerOf(snapshot, minute)
   const queue = { digit: 1, label: snapshot.queues[0]?.label ?? snapshot.queue }
-  const layout = listLayout(rows, columns, minute, runner, queue)
+  const isSingleQueue = snapshot.queues.length <= 1
+  const layout = listLayout(rows, columns, minute, runner, queue, {
+    singleQueue: isSingleQueue,
+    separateColumns: true,
+  })
   const plan: BandPlan = bandPlan(rows, columns - 4, snapshot.drafts?.window ?? "7d", holdsChange(runner.state))
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+      <Box height={1} flexShrink={0} />
       <ListHeader layout={layout} />
       {rows.length === 0 ? (
         <>

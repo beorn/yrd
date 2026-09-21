@@ -259,16 +259,23 @@ export function durationText(row: Row, now: Date): string {
 }
 
 /**
- * AGE / RUN for the table (ia.md 2026-09-19). RUN is that attempt's
- * `clocks.runtimeMs` and freezes when the attempt ends. AGE is unknown
- * (`—`) unless a beginning other than the tip `Opened:` trailer exists:
- * that trailer is not proven total lifetime across retries.
+ * AGE / RUN for the table (ia.md 2026-09-19, 24196). RUN is that attempt's
+ * `clocks.runtimeMs` (or active `checkingMs`) and freezes when the attempt ends.
+ * AGE is unknown (`—`) because tip Opened is not submission lifetime across retries.
  */
 export function ageRunText(row: Row, now: Date): string {
   const measured = clocks(row, now)
   const runtime = measured.runtimeMs ?? measured.checkingMs
   const run = runtime === undefined ? "—" : mediaDuration(runtime)
   return `— / ${run}`
+}
+
+/** Bare numeric attempt / timestamp identifier without label prefix: `085315` or `—`. */
+export function runIdentifier(id: string | undefined): string {
+  if (id === undefined) return "—"
+  const startedAt = runStartedAt(id)
+  if (startedAt === undefined) return id
+  return clock(startedAt, { seconds: true }).replace(/:/gu, "")
 }
 
 /** Queue digit beside the run: `1 · main#2342`, or `1 · —` with no attempt. */
