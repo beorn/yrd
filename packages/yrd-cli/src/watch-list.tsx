@@ -137,20 +137,26 @@ export function listLayout(
   const separate = options?.separateColumns ?? false
   const single = options?.singleQueue ?? true
   const fullQueue = options?.fullQueueRefs ?? false
-  const qWidth = separate ? (fullQueue ? Math.max(16, queue.label.length) : single ? 0 : 3) : 0
+  const statusWidth = Math.max(6, runnerWord.length + 2, ...rows.map((item) => stateWord(item.row).length + 2))
+  const agentWidth =
+    columns < 100
+      ? 0
+      : Math.max(5, (runner?.by ?? "—").length, ...rows.map((item) => (item.row.submitter ?? "—").length))
+  const runWidth = separate
+    ? Math.max(
+        3,
+        ...rows.map((item) => runIdentifier(runIdOf(item)).length),
+      )
+    : 0
+  const ageRunWidth = Math.max(9, (runner?.duration ?? "").length, ...rows.map((item) => ageRunText(item.row, now).length))
+  const fixedExceptQ = statusWidth + agentWidth + (separate ? runWidth : 0) + ageRunWidth + 8
+  const maxAvailableForQ = Math.max(16, columns - fixedExceptQ - 36)
+  const qWidth = separate ? (fullQueue ? Math.max(16, Math.min(queue.label.length, maxAvailableForQ)) : single ? 0 : 3) : 0
   return {
-    statusWidth: Math.max(6, runnerWord.length + 2, ...rows.map((item) => stateWord(item.row).length + 2)),
-    agentWidth:
-      columns < 100
-        ? 0
-        : Math.max(5, (runner?.by ?? "—").length, ...rows.map((item) => (item.row.submitter ?? "—").length)),
+    statusWidth,
+    agentWidth,
     qWidth,
-    runWidth: separate
-      ? Math.max(
-          3,
-          ...rows.map((item) => runIdentifier(runIdOf(item)).length),
-        )
-      : 0,
+    runWidth,
     queueRunWidth: separate
       ? 0
       : Math.max(
@@ -158,7 +164,7 @@ export function listLayout(
           queueRunText(queue.digit, queue.label, undefined).length,
           ...rows.map((item) => queueRunText(queue.digit, queue.label, runIdOf(item)).length),
         ),
-    ageRunWidth: Math.max(9, (runner?.duration ?? "").length, ...rows.map((item) => ageRunText(item.row, now).length)),
+    ageRunWidth,
     isSeparateColumns: separate,
     isFullQueue: fullQueue,
   }
@@ -319,6 +325,13 @@ const AgeRunCell = memo(function AgeRunCell({ row, color }: { row: Row; color: s
   )
 })
 
+function diagnosticsEqual(a: Row["diagnostics"], b: Row["diagnostics"]): boolean {
+  if (a === b) return true
+  if (a === undefined || b === undefined) return a === b
+  if (a.length !== b.length) return false
+  return a.every((diag, i) => diag.reason === b[i]?.reason && diag.text === b[i]?.text && diag.at === b[i]?.at)
+}
+
 /** Whether two rows would paint the same, so a round that changed nothing about a row repaints nothing. */
 function sameRow(left: ListRowProps, right: ListRowProps): boolean {
   const a = left.item.row
@@ -336,7 +349,7 @@ function sameRow(left: ListRowProps, right: ListRowProps): boolean {
     a.run === b.run &&
     a.subject === b.subject &&
     a.reason === b.reason &&
-    a.diagnostics === b.diagnostics &&
+    diagnosticsEqual(a.diagnostics, b.diagnostics) &&
     a.submitter === b.submitter &&
     a.author === b.author &&
     a.movedSinceSubmit === b.movedSinceSubmit &&
@@ -416,13 +429,8 @@ export const ListRow = memo(function ListRow({
           ),
           task: (
             <Box flexDirection="row" minWidth={0} overflow="hidden">
-              {(row.diagnostics?.length ?? 0) === 0 ? null : (
-                <Text color={forced ?? "$fg-warning"} flexShrink={0}>
-                  ⚠{" "}
-                </Text>
-              )}
               <Text color={forced ?? held} wrap="truncate" minWidth={0}>
-                {title}
+                {`${(row.diagnostics?.length ?? 0) > 0 ? "\u26A0\uFE0E " : ""}${title}`}
               </Text>
               <Text color={forced ?? held ?? "$fg-muted"} flexShrink={0}>
                 {" "}
