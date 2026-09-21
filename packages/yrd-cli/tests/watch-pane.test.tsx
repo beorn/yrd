@@ -438,7 +438,14 @@ describe("the table (items 3, 28, 38)", () => {
 
     const header = text.split("\n").find((line) => line.includes("TASK"))
     expect(header).toBeDefined()
-    for (const column of ["TASK", "AGENT", header?.includes("QUEUE / RUN") ? "QUEUE / RUN" : "RUN", "STATE", "AGE / RUN"]) expect(header).toContain(column)
+    for (const column of [
+      "TASK",
+      "AGENT",
+      header?.includes("QUEUE / RUN") ? "QUEUE / RUN" : "RUN",
+      "STATE",
+      "AGE / RUN",
+    ])
+      expect(header).toContain(column)
     expect(header!.trimEnd().endsWith("AGE / RUN")).toBe(true)
     const line = text
       .split("\n")
@@ -2424,14 +2431,10 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   })
 
   it("idle queue is selectable and selected by default in an empty queue, and opening it shows runner detail (watch-review-1244)", async () => {
-    const app = render(
-      <WatchPane
-        snapshot={snapshot({ rows: [], runner: RUNNER })}
-        open={opener()}
-        live={false}
-      />,
-      { cols: 160, rows: 40 },
-    )
+    const app = render(<WatchPane snapshot={snapshot({ rows: [], runner: RUNNER })} open={opener()} live={false} />, {
+      cols: 160,
+      rows: 40,
+    })
     await settle(app)
     app.press("Enter")
     await waitFor(() => {
@@ -2515,29 +2518,32 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const lines = text.split("\n")
 
     // Terminal is 25 rows tall (0..24). In the 18-row ListView viewport (lines 6..23):
-    // Runner box begins at line 13 and ends at line 16 (4 rows tall).
+    // Runner item has height 5 (1 row marginTop + 4 rows TitledBox).
+    // Center alignment places the middle row (offset 2) at viewport center, placing
+    // runner box at lines 14..17 with the item's marginTop at line 13.
     const runnerStart = lines.findIndex((l) => l.includes("╭─ RUNNER"))
     const runnerEnd = lines.findIndex((l) => l.includes("╰─"))
-    expect(runnerStart).toBe(13)
-    expect(runnerEnd).toBe(16)
+    expect(runnerStart).toBe(14)
+    expect(runnerEnd).toBe(17)
 
-    // Above runner: exactly 7 rows in viewport (lines 6..12), with task/queued-0..5 visible
-    // and older queued items (task/queued-6..19) scrolled off-screen above the viewport.
-    expect(lines[6]).toContain("task/queued-5")
-    expect(lines[11]).toContain("task/queued-0")
+    // Above runner item: exactly 7 rows of queued items in viewport (lines 6..12: task/queued-6..0).
+    expect(lines[6]).toContain("task/queued-6")
+    expect(lines[12]).toContain("task/queued-0")
     expect(text).not.toContain("task/queued-19")
-    expect(text).not.toContain("task/queued-6")
+    expect(text).not.toContain("task/queued-7")
 
-    // Below runner: exactly 7 rows in viewport (lines 17..23), with task/done-0..4 visible
-    // and later merged items (task/done-5..19) scrolled off-screen below the viewport.
-    expect(lines[19]).toContain("task/done-0")
-    expect(lines[23]).toContain("task/done-4")
-    expect(text).not.toContain("task/done-5")
+    // Below runner box: exactly 6 rows in viewport (lines 18..23), with break row (line 18),
+    // separator (line 19), and task/done-0..3 (lines 20..23).
+    expect(lines[20]).toContain("task/done-0")
+    expect(lines[23]).toContain("task/done-3")
+    expect(text).not.toContain("task/done-4")
     expect(text).not.toContain("task/done-19")
 
-    // Proves exact vertical centering: 7 rows visible above runner, 7 rows visible below runner.
-    expect(runnerStart - 6).toBe(7)
-    expect(23 - runnerEnd).toBe(7)
+    // Proves vertical centering of the 5-row runner item in the 18-row viewport:
+    // 7 rows above the runner item (lines 6..12), 6 rows below the runner box (lines 18..23),
+    // placing the spare row above per the Silvery centering rule.
+    expect(runnerStart - 1 - 6).toBe(7)
+    expect(23 - runnerEnd).toBe(6)
 
     app.unmount()
   })
