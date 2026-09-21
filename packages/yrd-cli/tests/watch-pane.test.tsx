@@ -2483,7 +2483,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       { cols: 160, rows: 25 },
     )
     await settle(app)
-    // Initially runner is selected (index 20) and centered
+    // Initially runner is selected (index 20)
+    expect(current(app)).toContain("RUNNER")
     expect(current(app)).not.toContain("Home follows the newest again")
     // Moving cursor within visible range does not alter viewport lead
     app.press("ArrowUp")
@@ -2491,6 +2492,53 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.press("ArrowDown")
     await settle(app)
     expect(current(app)).toContain("RUNNER")
+    app.unmount()
+  })
+
+  it("vertically centers the idle runner in a long queue with rows above and below (watch-correction-review-1419)", async () => {
+    const queued = Array.from({ length: 20 }, (_, i) =>
+      row({ branch: `task/queued-${i}`, head: `${i}`.repeat(40), state: "queued", position: i + 1 }),
+    )
+    const merged = Array.from({ length: 20 }, (_, i) =>
+      row({ branch: `task/done-${i}`, head: `d${i}`.padEnd(40, "0"), state: "merged" }),
+    )
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: [...queued, ...merged].map((r) => ({ row: r })), runner: RUNNER })}
+        open={opener()}
+        live={false}
+      />,
+      { cols: 160, rows: 25 },
+    )
+    await settle(app)
+    const text = current(app)
+    const lines = text.split("\n")
+
+    // Terminal is 25 rows tall (0..24). In the 18-row ListView viewport (lines 6..23):
+    // Runner box begins at line 13 and ends at line 16 (4 rows tall).
+    const runnerStart = lines.findIndex((l) => l.includes("╭─ RUNNER"))
+    const runnerEnd = lines.findIndex((l) => l.includes("╰─"))
+    expect(runnerStart).toBe(13)
+    expect(runnerEnd).toBe(16)
+
+    // Above runner: exactly 7 rows in viewport (lines 6..12), with task/queued-0..5 visible
+    // and older queued items (task/queued-6..19) scrolled off-screen above the viewport.
+    expect(lines[6]).toContain("task/queued-5")
+    expect(lines[11]).toContain("task/queued-0")
+    expect(text).not.toContain("task/queued-19")
+    expect(text).not.toContain("task/queued-6")
+
+    // Below runner: exactly 7 rows in viewport (lines 17..23), with task/done-0..4 visible
+    // and later merged items (task/done-5..19) scrolled off-screen below the viewport.
+    expect(lines[19]).toContain("task/done-0")
+    expect(lines[23]).toContain("task/done-4")
+    expect(text).not.toContain("task/done-5")
+    expect(text).not.toContain("task/done-19")
+
+    // Proves exact vertical centering: 7 rows visible above runner, 7 rows visible below runner.
+    expect(runnerStart - 6).toBe(7)
+    expect(23 - runnerEnd).toBe(7)
+
     app.unmount()
   })
 })
