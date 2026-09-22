@@ -38,12 +38,14 @@ export {
   EVENT_TRAILERS,
   changeInput,
   changesRef,
+  createEventQueue,
   decide,
   evolve,
   initial,
   listChanges,
   queueFormat,
   queueRef,
+  readEventQueue,
   readStatus,
 } from "./events.ts"
 export type {
@@ -52,6 +54,7 @@ export type {
   ChangeEventType,
   ChangeStatus,
   EventChange,
+  EventQueue,
   EventStore,
 } from "./events.ts"
 export {
