@@ -4,7 +4,7 @@
  *
  * The command surface is
  * `yrd queue submit|withdraw|run|up|pause|resume|list|stats|show|health`,
- * `yrd merge`, `yrd check`, `yrd env open|list|close`, with `yrd submit` and
+ * `yrd drop`, `yrd merge`, `yrd check`, `yrd env open|list|close`, with `yrd submit` and
  * `yrd list` as the aliases of the two used most, `yrd watch` as
  * `queue list --watch`, and `yrd bay` as `env`'s until flag day's word is
  * retired. Every
@@ -182,7 +182,7 @@ function buildProgram(
       .option("--notify <seat>", "name who withdrew the change")
       .option("--queue <value>", QUEUE_HELP)
       .option("--reason <text>", "why the change leaves the line, written on the record")
-  const queueWithdraw = async (branch: string, options: PauseOptions): Promise<void> => {
+  const queueEnd = async (branch: string, options: PauseOptions, command: "withdraw" | "drop"): Promise<void> => {
     const location = await resolveQueueLocation(cwd(), options.queue, env)
     setExit(
       await coreQueueCommand(
@@ -191,7 +191,7 @@ function buildProgram(
         {
           branch,
           by: resolveSubmitter(options.notify, env),
-          command: "withdraw",
+          command,
           ...(options.reason === undefined ? {} : { reason: options.reason }),
         },
         {
@@ -297,7 +297,7 @@ function buildProgram(
     })
   withdrawOptions(queue.command("withdraw <branch>").description(WITHDRAW_DESCRIPTION))
     .addHelpSection("On withdraw:", WITHDRAW_HELP)
-    .action(async (branch, options) => queueWithdraw(branch as string, options as PauseOptions))
+    .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "withdraw"))
   queue
     .command("resume")
     .description(
@@ -725,7 +725,16 @@ function buildProgram(
     program.command("withdraw <branch>").description(`${WITHDRAW_DESCRIPTION} (the same as ${name} queue withdraw)`),
   )
     .addHelpSection("On withdraw:", WITHDRAW_HELP)
-    .action(async (branch, options) => queueWithdraw(branch as string, options as PauseOptions))
+    .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "withdraw"))
+
+  program
+    .command("drop <branch>")
+    .description("end an event change and delete its branch in one leased publish")
+    .option("--json", "emit stable JSON")
+    .option("--notify <seat>", "name who dropped the change")
+    .option("--queue <value>", QUEUE_HELP)
+    .option("--reason <text>", "operator note kept in the ending event")
+    .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
 
   program
     .command("check <name...>")
