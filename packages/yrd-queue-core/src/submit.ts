@@ -23,12 +23,14 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { listRefs, openEvents } from "gitomic/events"
 import { targetName, type Target } from "./config.ts"
 import { ABSENT, appendRecord, type Git } from "./records.ts"
 import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
 import { readStop, remoteUrl } from "./remote.ts"
+import { changeInput, changesRef, decide, eventPause, evolve, initial, queueFormat, readEventQueue } from "./events.ts"
 import { verifyCandidate, type Verification } from "./verifying.ts"
 
 export type SubmitRequest = Readonly<{
@@ -52,9 +54,9 @@ export type Submitted = Readonly<{
   head: string
   /** The target commit observed during preflight; the queue checks again at merge. */
   targetHead: string
-  /** The opened record's sha. */
+  /** The opened event or legacy record's sha. */
   opened: string
-  /** True when the change already existed at this head, so this was a retry. */
+  /** True when this branch already had an open change at this head, so this was a retry. */
   retry: boolean
   /** Gitlinks this change moved whose commits submit published to their submodule remotes (24454). */
   published: readonly PublishedGitlink[]
@@ -211,7 +213,12 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
   // The line's stop, read to be ECHOED: a stopped line accepts the change and
   // the run is where the stop is enforced. It is read before the refusals
   // below so a stale or rebased branch is told about the stop too.
-  const { stop } = await readStop(git, remote, request.target.branch, targetHead)
+  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
+  const store = { repo: root, remote }
+  const stop =
+    (await queueFormat(request.target.branch, store)) === "event"
+      ? eventPause(await readEventQueue(request.target.branch, store))
+      : (await readStop(git, remote, request.target.branch, targetHead)).stop
   const bound = freshnessLine(targetHead)
   if (await isAncestor(git, head, targetHead)) {
     throw new Error(
@@ -225,7 +232,6 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
     )
   }
   const issue = await issueOf(git, request.branch, head, targetHead, request.issue)
-  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
   const scratch = mkdtempSync(join(tmpdir(), "yrd-submit-verifying-"))
   const hooksPath = join(scratch, "hooks-disabled")
   mkdirSync(hooksPath)
@@ -262,6 +268,65 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
 }
 
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
+  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
+  if ((await queueFormat(request.target.branch, { repo: root, remote })) === "event") {
+    return submitEvent(git, remote, request, root)
+  }
+  return submitLegacy(git, remote, request)
+}
+
+async function submitEvent(git: Git, remote: string, request: SubmitRequest, root: string): Promise<Submitted> {
+  const inspected = await inspectSubmit(git, remote, request)
+  const head = inspected.head
+  const published = await publishMovedGitlinks(git, root, inspected.targetHead, head)
+  const store = { repo: root, remote }
+  const queue = await readEventQueue(request.target.branch, store)
+  const ref = changesRef(request.target.branch, request.branch)
+  const branchRef = `refs/heads/${request.branch}`
+  const branchAt = (await listRefs(branchRef, store)).get(branchRef) ?? null
+  const input = changeInput("opened", {
+    queueTip: queue.tip,
+    at: new Date(),
+    commit: head,
+    ...(inspected.issue === undefined ? {} : { issue: inspected.issue.issue }),
+    title: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
+  })
+  const chain = await openEvents({ ...store, ref, writer: request.submitter })
+  let retry = false
+  // The opened event keeps `head`; publishing the branch beside it is for the
+  // branch ref's meaning, not for object reachability. Gitomic moves both in
+  // one atomic publish and refuses a branch lease that went stale.
+  const result = await chain.transact(
+    (events) => {
+      const current = events.reduce(evolve, initial)
+      retry =
+        current.commit === head &&
+        (current.status === "queued" ||
+          current.status === "verifying" ||
+          current.status === "checking" ||
+          current.status === "merging" ||
+          current.status === "stuck")
+      return decide(events, input)
+    },
+    `submit ${request.branch}`,
+    { also: [{ ref: branchRef, expect: branchAt, oid: head }] },
+  )
+  const opened = result.events.findLast((event) => event.type === "opened")?.id
+  if (opened === undefined) throw new Error(`${ref} in ${root}: submit published no opened event`)
+  return {
+    branch: request.branch,
+    head,
+    targetHead: inspected.targetHead,
+    opened,
+    retry,
+    published,
+    verifying: inspected.verifying,
+    ...(inspected.issue === undefined ? {} : { issue: inspected.issue }),
+    ...(inspected.stop === undefined ? {} : { stop: inspected.stop }),
+  }
+}
+
+async function submitLegacy(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   const inspected = await inspectSubmit(git, remote, request)
   const { targetHead } = inspected
   const head = inspected.head

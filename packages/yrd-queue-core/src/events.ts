@@ -4,6 +4,7 @@ import type { Event, EventInput } from "gitomic/events"
 import type { GitomicBackend } from "gitomic"
 
 import { queueRefPrefix } from "./refs.ts"
+import type { PauseRecord } from "./pause.ts"
 
 export const CHANGE_STATUSES = [
   "draft",
@@ -49,6 +50,11 @@ export type EventChange = Readonly<{
   status: ChangeStatus
   /** The submitted commit of the current or last change. */
   commit?: string
+  issue?: string
+  since?: Date
+  at?: Date
+  endedAt?: Date
+  tip?: string
   /** This chain's latest ending, including the event that recorded it. */
   ending?: { kind: ChangeEnding; id: string }
   reason?: string
@@ -131,7 +137,7 @@ function prop(event: EventShape, key: string): string | undefined {
   return found[0]?.[1]
 }
 
-function requireCause(event: EventShape): void {
+function requireCause(event: EventShape): Date {
   const queue = prop(event, EVENT_TRAILERS.queue)
   if (queue === undefined || !COMMIT_OID.test(queue)) {
     throw new Error(`event ${event.id} (${event.type}) needs Queue: naming the queue chain tip`)
@@ -140,6 +146,7 @@ function requireCause(event: EventShape): void {
   if (time === undefined || Number.isNaN(Date.parse(time)) || new Date(time).toISOString() !== time) {
     throw new Error(`event ${event.id} (${event.type}) needs Time: as an ISO instant`)
   }
+  return new Date(time)
 }
 
 function keptCommit(event: EventShape): string {
@@ -157,14 +164,24 @@ function endingRefusal(state: EventChange, event: EventShape): never {
 
 /** Pure fold. Unknown kinds and malformed transitions fail at the selected event chain. */
 export function evolve(state: EventChange, event: EventShape): EventChange {
-  requireCause(event)
+  const at = requireCause(event)
   if (event.props.some(([key]) => key === "Status")) {
     throw new Error(`event ${event.id} stores Status:; status must be a fold`)
   }
+  const next = { ...state, at, tip: event.id }
   switch (event.type) {
     case "opened": {
       if (isOpen(state.status)) throw new Error(`event ${event.id} opens a second change before the first ends`)
-      return { ...state, status: "queued", commit: keptCommit(event), ending: undefined, reason: undefined }
+      return {
+        ...next,
+        status: "queued",
+        commit: keptCommit(event),
+        issue: prop(event, EVENT_TRAILERS.issue),
+        since: at,
+        endedAt: undefined,
+        ending: undefined,
+        reason: undefined,
+      }
     }
     case "verifying":
     case "checking":
@@ -184,7 +201,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         throw new Error(`event ${event.id} verifying needs queued or verifying, found ${state.status}`)
       }
       if (event.type === "verifying") keptCommit(event)
-      return { ...state, status: event.type, reason: prop(event, "Reason") }
+      return { ...next, status: event.type, reason: prop(event, "Reason") }
     }
     case "failed":
     case "cancelled": {
@@ -196,22 +213,28 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         }
         if (reason === "dropped" || reason === "deleted") keptCommit(event)
       }
-      return { ...state, status: event.type, ending: { kind: event.type, id: event.id }, reason }
+      return { ...next, status: event.type, ending: { kind: event.type, id: event.id }, endedAt: at, reason }
     }
     case "merged":
       // A merge observed on main is ground truth even after a recorded ending.
       if (state.commit === undefined) throw new Error(`event ${event.id} merged needs an opened change`)
-      return { ...state, status: "merged", ending: { kind: "merged", id: event.id }, reason: prop(event, "Reason") }
+      return {
+        ...next,
+        status: "merged",
+        ending: { kind: "merged", id: event.id },
+        endedAt: at,
+        reason: prop(event, "Reason"),
+      }
     case "ignored": {
       const reason = prop(event, "Reason")
       if (reason === undefined || reason.length === 0) throw new Error(`event ${event.id} ignored needs Reason:`)
-      return { ...state, ignored: true }
+      return { ...next, ignored: true }
     }
     case "unignored":
-      return { ...state, ignored: false }
+      return { ...next, ignored: false }
     case "sent":
     case "observed":
-      return state
+      return next
     default:
       throw new Error(`unknown Yrd change event ${event.type} at ${event.id}`)
   }
@@ -247,6 +270,19 @@ export type EventQueue = Readonly<{
   tip: string
   pause?: Readonly<{ id: string; at: Date; reason: string; by: string }>
 }>
+
+/** The queue stop in the existing command response shape. */
+export function eventPause(queue: EventQueue): PauseRecord | undefined {
+  if (queue.pause === undefined) return undefined
+  return {
+    kind: "paused",
+    sha: queue.pause.id,
+    at: queue.pause.at,
+    reason: queue.pause.reason,
+    by: queue.pause.by,
+    cause: "operator",
+  }
+}
 
 /** The first event declares a queue and keeps the commit carrying .yrd.yml. */
 export async function createEventQueue(queue: string, commit: string, store: EventStore, at: Date): Promise<string> {
@@ -392,13 +428,10 @@ export async function readStatus(queue: string, branch: string, store: EventStor
   return project(await chain.events({ limit: 1024 }), ref, store.repo)
 }
 
-/** Branch projections for a local event queue, with one shared history walk. */
+/** Branch projections for an event queue, with one batched remote fetch and history walk. */
 export async function listChanges(queue: string, store: EventStore): Promise<ReadonlyMap<string, EventChange>> {
   if ((await queueFormat(queue, store)) !== "event") {
     throw new Error(`queue ${queue} in ${store.repo} has no event queue chain`)
-  }
-  if (store.remote !== undefined) {
-    throw new TypeError("remote event listing requires gitomic 3a.1 batch fetch")
   }
   await readEventQueue(queue, store)
   const prefix = `${queueRefPrefix(queue)}/changes/`

@@ -29,6 +29,7 @@ import {
   claimWorktrees,
   directMergeLine,
   pauseLine,
+  eventPause,
   queueFormat,
   readEventQueue,
   writeQueueEvent,
@@ -653,17 +654,7 @@ export async function coreQueueCommand(
         const eventStore = { repo, remote: config.target.remote }
         if ((await queueFormat(config.target.branch, eventStore)) === "event") {
           const now = await readEventQueue(config.target.branch, eventStore)
-          const standing: PauseRecord | undefined =
-            now.pause === undefined
-              ? undefined
-              : {
-                  kind: "paused",
-                  sha: now.pause.id,
-                  at: now.pause.at,
-                  reason: now.pause.reason,
-                  by: now.pause.by,
-                  cause: "operator",
-                }
+          const standing = eventPause(now)
           if (request.command === "pause" && standing !== undefined) {
             throw new QueuePaused(standing, config.target.remote, config.target.branch)
           }
