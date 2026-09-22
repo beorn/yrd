@@ -24,7 +24,7 @@ import {
   trailer,
 } from "../src/index.ts"
 import type { ChangeRecord, Git } from "../src/index.ts"
-import { cleanupRootChanges, readRootChanges } from "../src/records.ts"
+import { cleanupRootChanges, readRootChanges } from "../src/legacy-records.ts"
 
 /**
  * The records of a change that certainly has some. `ChangeRecords.records` is a

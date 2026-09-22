@@ -2198,7 +2198,7 @@ function runOptions(
  * `Check` and silently drop the rest, which is the failure this repo bans; a
  * `string | string[]` union would push a type test onto every reader for a
  * difference the record model does not make. So every name gets a list, and the
- * two JSON reads are the twins of the two accessors in records.ts:
+ * two JSON reads are the twins of the two accessors in legacy-records.ts:
  * `trailers.By[0]` is `trailer(record, "By")` and `trailers.Check` is
  * `trailers(record, "Check")`. Names come in the order the record first carries
  * them, values in record order. Always present, empty when there are none: a

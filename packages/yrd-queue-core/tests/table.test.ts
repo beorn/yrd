@@ -26,7 +26,7 @@ import {
   watchRows,
 } from "../src/index.ts"
 import type { Git, Row } from "../src/index.ts"
-import { recordMessage } from "../src/records.ts"
+import { recordMessage } from "../src/legacy-records.ts"
 
 const roots: string[] = []
 const MAIN = { branch: "main", remote: "origin" } as const
@@ -568,7 +568,7 @@ describe("a packed Check: trailer", () => {
  * change as the current occupant while the line was checking another one.
  *
  * The suppression set is the three kinds that END a chain — merged, failed,
- * withdrawn (records.ts ENDING_KINDS) — and deliberately NOT `stuck`. A stuck
+ * withdrawn (legacy-records.ts ENDING_KINDS) — and deliberately NOT `stuck`. A stuck
  * chain keeps its place in line (state.ts `holdsPlaceInLine`) and the next run
  * takes it again, and there is no `checking` record kind, so the journal's
  * `running` marker is the ONLY in-flight signal a re-check has. Suppressing it
@@ -764,4 +764,3 @@ describe("only one change can hold the line at a time (24972)", () => {
     })
   })
 })
-

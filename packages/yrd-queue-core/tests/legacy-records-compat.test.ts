@@ -58,6 +58,7 @@ it("keeps the exact legacy record and pause object ids under a fixed clock", asy
         ["Issue", "#25040"],
       ],
     })
+    const [, genesis, retainedHead] = (await git(["rev-list", "--parents", "-n", "1", opened])).trim().split(/\s+/u)
     const checked = await appendRecord(git, "main", {
       change,
       kind: "checked",
@@ -78,13 +79,24 @@ it("keeps the exact legacy record and pause object ids under a fixed clock", asy
       reason: "fixed-clock resume",
     })
 
-    expect({ candidate, checked, head, opened, paused: paused.sha, resumed: resumed.sha }).toEqual({
+    expect({
+      candidate,
+      checked,
+      genesis,
+      head,
+      opened,
+      paused: paused.sha,
+      resumed: resumed.sha,
+      retainedHead,
+    }).toEqual({
       candidate: "917c4fed28a939a7e4c16cacf070306641541fa8",
       checked: "6b38dab6b4709170bfd27fb0d33ef8044aa0c868",
+      genesis: "538f8f98bbb84332337777f997139c8464b80cd9",
       head: "591a78a8d7634696ba4aac046eb98e2e05bcc476",
       opened: "e9a72abd40b3942a356132f821fbcda698b1e14b",
       paused: "e8d10831f1a28d485ea6070b6b6dc94129fb19a6",
       resumed: "c7d6d84fa8acc1247864966ebad8d30e6a144838",
+      retainedHead: "591a78a8d7634696ba4aac046eb98e2e05bcc476",
     })
   } finally {
     vi.useRealTimers()

@@ -27,9 +27,8 @@ import {
   tipRecord,
   trailer,
   type ChangeRecord,
-  type Git,
-} from "./records.ts"
-import { GitExit, offTheTarget } from "./git.ts"
+} from "./legacy-records.ts"
+import { GitExit, offTheTarget, type Git } from "./git.ts"
 import { lineStop, parsePause, readPause, type PauseRecord } from "./pause.ts"
 import { changeName, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
 import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"

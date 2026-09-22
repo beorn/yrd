@@ -3764,7 +3764,7 @@ describe("a queue run", () => {
     expect(await trailerOn(w, merge, "Issue")).toBe("@i/10-yrd/1")
     expect(await trailerOn(w, merge, "Submitter")).toBe("@dev/2")
     await fetchChanges(w)
-    // The records and the genesis, on the ref's first-parent line (records.ts).
+    // The records and the genesis, on the ref's first-parent line (legacy-records.ts).
     expect(
       (await w.git(["log", "--first-parent", "--format=%s", `${CHANGES}/${named}`])).trim().split("\n"),
     ).toHaveLength(5)
@@ -5249,7 +5249,7 @@ describe("a gitlink the component's remote does not hold", () => {
  * @failure A delivery failure carrying a line break is refused at record-write time and
  *          takes the whole run down, replacing the record that says what happened with none.
  *
- * One trailer is one line (`recordMessage` in records.ts). Two producers feed
+ * One trailer is one line (`recordMessage` in legacy-records.ts). Two producers feed
  * `Delivery-Error` and only one was safe: a notifier that EXITS non-zero has
  * its output collapsed where it is read, while a notifier that could not RUN
  * carries the thrown message verbatim — and a spawn or timeout message is
