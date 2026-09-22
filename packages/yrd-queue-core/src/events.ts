@@ -17,7 +17,7 @@ export const CHANGE_STATUSES = [
   "cancelled",
 ] as const
 export type ChangeStatus = (typeof CHANGE_STATUSES)[number]
-export type Ending = "merged" | "failed" | "cancelled"
+export type ChangeEnding = "merged" | "failed" | "cancelled"
 export type CancellationReason = "resubmitted" | "dropped" | "deleted"
 
 export type EventChange = Readonly<{
@@ -25,7 +25,7 @@ export type EventChange = Readonly<{
   /** The submitted commit of the current or last change. */
   commit?: string
   /** This chain's latest ending, including the event that recorded it. */
-  ending?: { kind: Ending; id: string }
+  ending?: { kind: ChangeEnding; id: string }
   reason?: string
   ignored: boolean
 }>
@@ -54,8 +54,9 @@ function assertBranch(branch: string): void {
     branch.endsWith(".") ||
     /[\x00-\x20\x7f~^:?*[\\]/u.test(branch) ||
     branch.split("/").some((part) => part.length === 0 || part.startsWith(".") || part.endsWith(".lock"))
-  )
-    {throw new TypeError(`invalid branch for an event ref: ${JSON.stringify(branch)}`)}
+  ) {
+    throw new TypeError(`invalid branch for an event ref: ${JSON.stringify(branch)}`)
+  }
 }
 
 type EventShape = Pick<Event, "id" | "type" | "props" | "links">
@@ -93,7 +94,10 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     case "checking":
     case "merging":
     case "stuck": {
-      if (!isOpen(state.status) || state.status === "stuck") return endingRefusal(state, event)
+      if (state.status === "stuck") {
+        throw new Error(`event ${event.id} (${event.type}) cannot advance a stuck change; merge or cancel it`)
+      }
+      if (!isOpen(state.status)) return endingRefusal(state, event)
       if (event.type === "verifying") keptCommit(event)
       return { ...state, status: event.type, reason: prop(event, "Reason") }
     }
@@ -162,9 +166,7 @@ export async function readStatus(queue: string, branch: string, store: EventStor
   const ref = changesRef(queue, branch)
   const chain = await openEvents({ ...store, ref })
   if ((await chain.head()) === null) throw new Error(`missing event chain ${ref} in ${store.repo}`)
-  const events = await chain.events({ limit: 1024 })
-  assertWholeChain(events, ref, store.repo)
-  return events.reduce(evolve, initial)
+  return project(await chain.events({ limit: 1024 }), ref, store.repo)
 }
 
 /** Branch projections for a local event queue, with one shared history walk. */
@@ -179,15 +181,15 @@ export async function listChanges(queue: string, store: EventStore): Promise<Rea
   const chains = await chainsUnder(prefix, { ...store, limit: 1024 })
   const changes = new Map<string, EventChange>()
   for (const [ref, events] of chains) {
-    assertWholeChain(events, ref, store.repo)
-    changes.set(ref.slice(prefix.length), events.reduce(evolve, initial))
+    changes.set(ref.slice(prefix.length), project(events, ref, store.repo))
   }
   return changes
 }
 
-function assertWholeChain(events: readonly Event[], ref: string, repo: string): void {
+function project(events: readonly Event[], ref: string, repo: string): EventChange {
   if (events.length === 0) throw new Error(`empty event chain ${ref} in ${repo}`)
   if (events[0]?.parent !== null) {
     throw new Error(`event chain ${ref} in ${repo} exceeds 1024 events; refusing a partial status`)
   }
+  return events.reduce(evolve, initial)
 }
