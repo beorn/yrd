@@ -174,6 +174,26 @@ describe("ADR-0016 event fold", () => {
     ).toThrow(/Time/)
   })
 
+  it("re-verifies an interrupted checking or merging change with its new kept candidate", () => {
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const first = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
+    expect(first.candidate).toBe(B)
+    const checking = evolve(first, event("checking", "c".repeat(40)))
+    const second = evolve(checking, event("verifying", "d".repeat(40), [["Commit", A]], [A]))
+    expect(second).toMatchObject({ status: "verifying", candidate: A, commit: A })
+    const merging = evolve(checking, event("merging", "e".repeat(40)))
+    const third = evolve(merging, event("verifying", "f".repeat(40), [["Commit", B]], [B]))
+    expect(third).toMatchObject({ status: "verifying", candidate: B, commit: A })
+  })
+
+  it("recognizes an observed merge of a verified candidate after a failed ending", () => {
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const verified = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
+    const failed = evolve(verified, event("failed", "c".repeat(40)))
+    const merged = evolve(failed, event("merged", "d".repeat(40), [["Commit", B]], [B]))
+    expect(merged).toMatchObject({ status: "merged", commit: A, candidate: B })
+  })
+
   it("cancels the prior open change before a second opened event", () => {
     const current = [event("opened", A, [["Commit", A]], [A])]
     const next = decide(current, input("opened", [["Commit", B]], [B]))
@@ -279,10 +299,11 @@ describe("ADR-0016 event fold", () => {
         [B],
       ),
     )
-    expect(dropped).toMatchObject({ status: "cancelled", commit: B, reason: "dropped" })
+    expect(dropped).toMatchObject({ status: "cancelled", commit: A, reason: "dropped" })
     expect(dropped.issue).toBeUndefined()
     expect(dropped.submitter).toBeUndefined()
     expect(dropped.since).toBeUndefined()
+    expect(evolve(dropped, event("merged", "d".repeat(40), [["Commit", A]], [A])).status).toBe("merged")
   })
 })
 
@@ -428,12 +449,19 @@ describe("the queue-format boundary", () => {
     const merged = {
       type: "merged" as const,
       at: new Date("2026-09-22T14:05:00.000Z"),
-      commit: head,
+      commit: composed,
       also: [{ ref: "refs/heads/lab", expect: A, oid: composed }],
     }
     await expect(appendChangeEvent(location, "lab", "task/42", merging, merged)).rejects.toThrow()
     expect((await readStatus(location, "lab", "task/42")).status).toBe("merging")
     expect(await target.head()).toBe(targetCommit)
+    await expect(
+      appendChangeEvent(location, "lab", "task/42", merging, {
+        ...merged,
+        commit: head,
+        also: [{ ref: "refs/heads/lab", expect: targetCommit, oid: composed }],
+      }),
+    ).rejects.toThrow(/candidate/)
     await appendChangeEvent(location, "lab", "task/42", merging, {
       ...merged,
       also: [{ ref: "refs/heads/lab", expect: targetCommit, oid: composed }],

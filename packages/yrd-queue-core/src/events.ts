@@ -49,8 +49,10 @@ export type ChangeEventType = (typeof CHANGE_EVENT_TYPES)[number]
 
 export type EventChange = Readonly<{
   status: ChangeStatus
-  /** The submitted commit of the current or last change. */
+  /** The submitted commit, or the last head when a branch was dropped before any submit. */
   commit?: string
+  /** The last verified composition, kept by its verifying event. */
+  candidate?: string
   issue?: string
   submitter?: string
   since?: Date
@@ -185,6 +187,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         ...next,
         status: "queued",
         commit: keptCommit(event),
+        candidate: undefined,
         issue: prop(event, EVENT_TRAILERS.issue),
         submitter,
         since: at,
@@ -207,11 +210,19 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       if (event.type === "merging" && state.status !== "checking") {
         throw new Error(`event ${event.id} merging needs checking, found ${state.status}`)
       }
-      if (event.type === "verifying" && state.status !== "queued" && state.status !== "verifying") {
-        throw new Error(`event ${event.id} verifying needs queued or verifying, found ${state.status}`)
+      if (
+        event.type === "verifying" &&
+        state.status !== "queued" &&
+        state.status !== "verifying" &&
+        state.status !== "checking" &&
+        state.status !== "merging"
+      ) {
+        throw new Error(
+          `event ${event.id} verifying needs queued, verifying, checking or merging, found ${state.status}`,
+        )
       }
-      if (event.type === "verifying") keptCommit(event)
-      return { ...next, status: event.type, reason: prop(event, "Reason") }
+      const candidate = event.type === "verifying" ? keptCommit(event) : state.candidate
+      return { ...next, status: event.type, candidate, reason: prop(event, "Reason") }
     }
     case "failed":
     case "cancelled": {
@@ -222,7 +233,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         return {
           ...next,
           status: "cancelled",
-          commit: keptCommit(event),
+          commit: state.commit ?? keptCommit(event),
           issue: undefined,
           submitter: undefined,
           since: undefined,
@@ -238,13 +249,28 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         }
         if (reason === "dropped" || reason === "deleted") keptCommit(event)
       }
-      return { ...next, status: event.type, ending: { kind: event.type, id: event.id }, endedAt: at, reason }
+      return {
+        ...next,
+        status: event.type,
+        ending: { kind: event.type, id: event.id },
+        endedAt: at,
+        reason,
+      }
     }
     case "merged":
       // A merge observed on main is ground truth even after a recorded ending.
       if (state.commit === undefined) throw new Error(`event ${event.id} merged needs an opened change`)
-      if (keptCommit(event) !== state.commit) {
-        throw new Error(`event ${event.id} merged must keep the submitted Commit: ${state.commit}`)
+      if (state.status === "merging" && state.candidate === undefined) {
+        throw new Error(`event ${event.id} merged needs the verified candidate`)
+      }
+      const kept = keptCommit(event)
+      if (
+        (state.status === "merging" && kept !== state.candidate) ||
+        (state.status !== "merging" && kept !== state.commit && kept !== state.candidate)
+      ) {
+        throw new Error(
+          `event ${event.id} merged must keep ${state.status === "merging" ? `candidate ${state.candidate}` : `submitted commit ${state.commit}${state.candidate === undefined ? "" : ` or candidate ${state.candidate}`}`}`,
+        )
       }
       return {
         ...next,
