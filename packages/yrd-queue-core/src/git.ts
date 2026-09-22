@@ -19,6 +19,8 @@ import { randomUUID } from "node:crypto"
 import { accessSync, constants, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
+import { danglingRefs } from "git-super/objects"
+import type { GitProcess } from "git-super/process"
 import type { Git } from "./records.ts"
 import type { QueueObservation } from "./remote.ts"
 
@@ -651,11 +653,63 @@ export async function readRemoteCommit(git: Git, remote: string, ref: string): P
   try {
     await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", remote, sha])
   } catch (cause) {
-    throw new Error(`${remote} advertised ${ref} at ${sha}, but fetching that commit failed: ${String(cause)}`, {
-      cause,
-    })
+    const named = await nameDanglingRefs(git, remote, cause)
+    throw new Error(
+      `${remote} advertised ${ref} at ${sha}, but fetching that commit failed: ${named ?? String(cause)}`,
+      { cause },
+    )
   }
   return sha
+}
+
+/** git's own words when a local ref names an object this store no longer has. */
+const MISSING_REF_OBJECT = /\bbad object refs\/|did not send all necessary objects/u
+
+/**
+ * A fetch that failed on a missing object fails every time, and git's text names
+ * the first ref it tripped on, which need not be the dangling one (hh 25050,
+ * 25051). Name every ref whose object is gone, with its local object, the
+ * remote's value and the verified-delete cure. Undefined when the failure is
+ * not that one; a scan that cannot run is said so, never read as none found.
+ */
+async function nameDanglingRefs(git: Git, remote: string, cause: unknown): Promise<string | undefined> {
+  if (!(cause instanceof GitExit) || !MISSING_REF_OBJECT.test(cause.detail)) return undefined
+  // danglingRefs speaks git-super's process port; this one runs through yrd's own runner.
+  const port: GitProcess = {
+    run: async (request) => {
+      try {
+        return { code: 0, stdout: await git(request.args, request.stdin), stderr: "" }
+      } catch (error) {
+        if (error instanceof GitExit) return { code: error.exitCode, stdout: "", stderr: error.detail }
+        throw error
+      }
+    },
+  }
+  let dangling: readonly Readonly<{ ref: string; oid: string }>[]
+  try {
+    dangling = await danglingRefs(port, cause.cwd)
+  } catch (error) {
+    return `${cause.detail}; the local refs could not be scanned for the missing object: ${String(error)}`
+  }
+  if (dangling.length === 0) return undefined
+  const lines: string[] = []
+  for (const { ref, oid } of dangling) {
+    let there: string
+    try {
+      there =
+        (await git(["ls-remote", remote, ref]))
+          .split("\n")
+          .map((row) => row.split("\t"))
+          .find(([, name]) => name === ref)?.[0] ?? "absent"
+    } catch (error) {
+      there = `unread (${error instanceof GitExit ? error.detail : String(error)})`
+    }
+    lines.push(`${ref} local=${oid} origin=${there} object missing locally`)
+  }
+  return (
+    `a local ref names an object this store no longer has, so every fetch fails: ${lines.join("; ")}. ` +
+    `Cure: ${dangling.map(({ ref, oid }) => `git update-ref -d ${ref} ${oid}`).join("; ")}, then fetch again`
+  )
 }
 
 /** Whether `sha` is an ancestor of `of`. */
