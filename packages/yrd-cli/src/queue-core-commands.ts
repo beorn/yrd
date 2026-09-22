@@ -2623,10 +2623,21 @@ function lockWaitFact(wait: RoundLockWait): Readonly<Record<string, unknown>> {
  * withdrawn change stands on the failed rung: it did not land, and the next
  * move is its submitter's (@i/10-yrd/24492).
  */
-function endingCode(states: readonly Row["state"][]): YrdCliExitCode | undefined {
-  if (states.some((state) => state === "queued" || state === "checked")) return undefined
+export function endingCode(states: readonly Row["state"][]): YrdCliExitCode | undefined {
+  if (
+    states.some(
+      (state) =>
+        state === "queued" ||
+        state === "verifying" ||
+        state === "checking" ||
+        state === "merging" ||
+        state === "checked",
+    )
+  ) {
+    return undefined
+  }
   if (states.some((state) => state === "stuck")) return 2
-  if (states.some((state) => state === "failed" || state === "withdrawn")) return 1
+  if (states.some((state) => state === "failed" || state === "withdrawn" || state === "cancelled")) return 1
   return 0
 }
 
