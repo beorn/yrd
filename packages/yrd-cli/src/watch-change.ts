@@ -102,9 +102,19 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
       const reason = trailer(record, "Reason")
       const projectedMs = trailer(record, "ProjectedMs")
       const boundMs = trailer(record, "BoundMs")
-      const projected = projectedMs !== undefined ? `${Math.round(Number(projectedMs) / 60000)}m` : undefined
-      const bound = boundMs !== undefined ? `${Math.round(Number(boundMs) / 60000)}m` : undefined
-      const timing = projected && bound ? ` (${projected} > ${bound})` : ""
+      const projNum = projectedMs !== undefined ? Number(projectedMs) : undefined
+      const boundNum = boundMs !== undefined ? Number(boundMs) : undefined
+      const projected = projNum !== undefined && !Number.isNaN(projNum) ? `${Math.round(projNum / 60000)}m` : undefined
+      const bound = boundNum !== undefined && !Number.isNaN(boundNum) ? `${Math.round(boundNum / 60000)}m` : undefined
+      const rel =
+        projNum !== undefined && boundNum !== undefined && !Number.isNaN(projNum) && !Number.isNaN(boundNum)
+          ? projNum > boundNum
+            ? ">"
+            : projNum < boundNum
+              ? "<"
+              : "="
+          : ">"
+      const timing = projected && bound ? ` (${projected} ${rel} ${bound})` : ""
       return {
         at: record.at,
         text:
