@@ -55,91 +55,60 @@ import {
 afterEach(removeTemporaryRoots)
 
 describe("the submit path", { timeout: 120_000 }, () => {
-  // The core refusal alone misses writes in CLI config discovery and the
-  // resumed pause lookup. Both submit spellings must preserve the full trace.
+  // The core stale-compose test does not prove that both public submit aliases
+  // accept a moved target while leaving the author's branch and FETCH_HEAD alone.
   it.each([
     { label: "submit", argv: ["submit"] },
     { label: "queue submit", argv: ["queue", "submit"] },
-  ])("$label and its dry run refuse a stale base without changing any local or remote ref", async ({ argv }) => {
+  ])("$label previews and submits a stale but composable branch without rewriting it", async ({ argv }) => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
     const branch = "24099-stale"
     const head = await commitOnBranch(repo, branch)
-    const beforeBase = await targetTip(repo)
     const peer = await secondWorkingRepo(origin, "other", "other@example.invalid")
     await git(peer, "checkout", "-q", "main")
     await git(peer, "commit", "--allow-empty", "-qm", "target moved")
     await git(peer, "push", "-q", "origin", "main")
     const target = await refSha(origin, "refs/heads/main")
-    const paused = await runYrd(peer, "queue", "pause", "--reason", "preflight fixture")
-    expect(paused.exitCode, paused.report).toBe(0)
-    const resumed = await runYrd(peer, "queue", "resume", "--reason", "ready")
-    expect(resumed.exitCode, resumed.report).toBe(0)
     const fetchHead = join(repo, ".git", "FETCH_HEAD")
     await writeFile(fetchHead, "the caller's previous fetch\n")
     const beforeLocal = await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
     const beforeRemote = await git(origin, "for-each-ref", "--format=%(refname) %(objectname)")
 
-    for (const flags of [["--dry-run"], []]) {
-      const result = await runYrd(repo, ...argv, branch, ...flags)
-      expect(result.exitCode, result.report).not.toBe(0)
-      expect(result.report).toContain(beforeBase)
-      expect(result.report).toContain(target)
-      expect(result.report).toContain("--rebase")
-      expect(result.report).toContain("the queue revalidates at merge")
-      expect(result.stdout, result.report).toBe("")
-      expect(await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(beforeLocal)
-      expect(await git(origin, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(beforeRemote)
-      expect(await readFile(fetchHead, "utf8")).toBe("the caller's previous fetch\n")
-      expect(await refSha(repo, `refs/heads/${branch}`)).toBe(head)
-    }
+    const preview = await runYrd(repo, ...argv, branch, "--dry-run", "--json")
+    expect(preview.exitCode, preview.report).toBe(0)
+    expect(JSON.parse(preview.stdout)).toMatchObject({
+      dryRun: true,
+      targetHead: target,
+      verifying: { state: "verified", head, targetHead: target },
+    })
+    expect(await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(beforeLocal)
+    expect(await git(origin, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(beforeRemote)
+    expect(await readFile(fetchHead, "utf8")).toBe("the caller's previous fetch\n")
+
+    const opened = await runYrd(repo, ...argv, branch, "--json")
+    expect(opened.exitCode, opened.report).toBe(0)
+    expect(JSON.parse(opened.stdout)).toMatchObject({ branch, head, targetHead: target })
+    expect(await refSha(repo, `refs/heads/${branch}`)).toBe(head)
+    expect(await refSha(origin, `refs/heads/${branch}`)).toBe(head)
+    expect(await refExists(origin, changeRef("main", { branch, head }))).toBe(true)
+    expect(await readFile(fetchHead, "utf8")).toBe("the caller's previous fetch\n")
   })
 
-  // The public opt-in must reach both aliases. Core tests cannot catch an
-  // unforwarded CLI flag or a preview that promises an invented change OID.
+  // A removed public flag must be rejected by both aliases before any write.
   it.each([
     { label: "submit", argv: ["submit"] },
     { label: "queue submit", argv: ["queue", "submit"] },
-  ])("$label previews an explicit rebase and opens only its resulting head", async ({ argv }) => {
+  ])("$label rejects the retired --rebase flag without changing refs", async ({ argv }) => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
-    const branch = "24099-rebase"
-    const head = await commitOnBranch(repo, branch)
-    const peer = await secondWorkingRepo(origin, "other", "other@example.invalid")
-    await git(peer, "checkout", "-q", "main")
-    await git(peer, "commit", "--allow-empty", "-qm", "target moved")
-    await git(peer, "push", "-q", "origin", "main")
-    const target = await refSha(origin, "refs/heads/main")
-    await git(repo, "checkout", "-q", branch)
+    const branch = "24099-retired-rebase"
+    await commitOnBranch(repo, branch)
     const beforeLocal = await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
     const beforeRemote = await refs(origin)
-    const dry = await runYrd(repo, ...argv, branch, "--rebase", "--dry-run", "--json")
-    expect(dry.exitCode, dry.report).toBe(0)
-    expect(JSON.parse(dry.stdout)).toMatchObject({
-      branch,
-      headBeforeRebase: head,
-      targetHead: target,
-      rebaseRequired: true,
-      dryRun: true,
-    })
-    expect(JSON.parse(dry.stdout)).not.toHaveProperty("change")
+    const refused = await runYrd(repo, ...argv, branch, "--rebase", "--dry-run", "--json")
+    expect(refused.exitCode, refused.report).not.toBe(0)
+    expect(refused.report).toContain("unknown option '--rebase'")
     expect(await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(beforeLocal)
     expect(await refs(origin)).toEqual(beforeRemote)
-    await writeFile(join(repo, "untracked.txt"), "keep this work")
-    for (const flags of [["--dry-run"], []]) {
-      const refused = await runYrd(repo, ...argv, branch, "--rebase", ...flags)
-      expect(refused.exitCode, refused.report).not.toBe(0)
-      expect(refused.report).toContain("clean worktree")
-    }
-    await git(repo, "add", "untracked.txt")
-    await git(repo, "commit", "-qm", "preserve untracked work")
-    const opened = await runYrd(repo, ...argv, branch, "--rebase", "--json")
-    expect(opened.exitCode, opened.report).toBe(0)
-    const actual = await refSha(repo, `refs/heads/${branch}`)
-    if (actual === undefined) throw new Error(`submitted branch ${branch} is missing from ${repo}`)
-    expect(actual).not.toBe(head)
-    expect(JSON.parse(opened.stdout)).toMatchObject({ head: actual, targetHead: target })
-    expect(await refSha(origin, `refs/heads/${branch}`)).toBe(actual)
-    expect(await refExists(origin, changeRef("main", { branch, head: actual }))).toBe(true)
-    expect(await refExists(origin, changeRef("main", { branch, head }))).toBe(false)
   })
 
   // today: red — `queue submit` exits 0 but pushes `<branch>:refs/yrd/submit/

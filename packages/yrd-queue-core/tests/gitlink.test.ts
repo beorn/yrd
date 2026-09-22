@@ -23,7 +23,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, beforeEach, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { Process } from "@yrd/process"
 import {
@@ -48,7 +48,11 @@ const gitSuperBin = resolve(import.meta.dirname, "../../../../git-super/bin")
 if (!existsSync(gitSuperBin)) {
   throw new Error(`git-super bin directory not found at ${gitSuperBin}`)
 }
-process.env.PATH = `${gitSuperBin}:${process.env.PATH ?? ""}`
+// The root Vitest project seals PATH in its setup beforeEach. Reassert this
+// test's checked-out GitSuper after that hook so both test runners use it.
+beforeEach(() => {
+  process.env.PATH = `${gitSuperBin}:${process.env.PATH ?? ""}`
+})
 
 const roots: string[] = []
 
