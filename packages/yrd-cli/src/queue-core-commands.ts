@@ -19,6 +19,7 @@ import { dirname, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
+import { listRefs } from "gitomic/events"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import {
@@ -30,7 +31,10 @@ import {
   directMergeLine,
   pauseLine,
   eventPause,
+  eventRows,
+  listChanges,
   queueFormat,
+  queueRefPrefix,
   readEventQueue,
   writeQueueEvent,
   prepareWorktree,
@@ -1331,7 +1335,7 @@ export async function coreQueueCommand(
           /** Every decision the rows carry, one per run per change and unfiltered, for the STATS box. */
           decisions: readonly RunDecision[]
           /** The queue read the rows came from, so a detail opened later reads the same tip. */
-          entries: QueueEntries
+          entries: QueueEntries | undefined
           journals: Journals
           /** The stop that stands, as the reading derived it. */
           stopped: StopFact | null
@@ -1341,13 +1345,21 @@ export async function coreQueueCommand(
       > => {
         // The ending instants a notice hides and the drafts are what a person
         // reads; `--json` reads neither, so its document is the one it was.
-        const { queue, journals, all, drafts, observation } = await readListing(
-          git,
-          declared.config,
-          workdir,
-          declared.oid,
-          options.json === true ? {} : { shown: { draftWindow } },
-        )
+        const format = await queueFormat(config.target.branch, { repo, remote: config.target.remote })
+        const reading =
+          format === "event"
+            ? await readEventListing(git, declared.config, repo, workdir, declared.oid)
+            : {
+                format: "legacy" as const,
+                ...(await readListing(
+                  git,
+                  declared.config,
+                  workdir,
+                  declared.oid,
+                  options.json === true ? {} : { shown: { draftWindow } },
+                )),
+              }
+        const { journals, all, drafts, observation } = reading
         if (options.json !== true) narrateMalformed(io, journals, said)
         // TWO LENSES OVER ONE READING, and which is which is the whole of S1.
         //
@@ -1366,18 +1378,22 @@ export async function coreQueueCommand(
         const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
-        const pause = queue.stop
+        const pause = reading.format === "event" ? reading.pause : reading.queue.stop
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table. Zero
         // rows also names the fields the term was checked against, so a state
         // name that found nothing is told it WAS considered, not skipped —
         // the same message on `--json` as on the page (AC1,
         // a-state-name-filters-to-zero-rows-and-exit-zero).
-        const scope =
+        const filteredScope =
           request.terms === undefined || request.terms.length === 0
             ? undefined
             : `${String(changes.length)} of ${String(all.filter((row) => row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
               (changes.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
+        const scope =
+          reading.format === "event"
+            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/; draft branches and direct target commits are outside this reading.${filteredScope === undefined ? "" : ` ${filteredScope}`}`
+            : filteredScope
         return {
           observation,
           data: {
@@ -1390,7 +1406,7 @@ export async function coreQueueCommand(
             stopped: stopFact(pause),
             ...(scope === undefined ? {} : { scope }),
           },
-          entries: queue.changes,
+          entries: reading.format === "event" ? undefined : reading.queue.changes,
           journals,
           queue: queueName(config.target, await remoteUrl(git, config.target.remote)),
           // Pre-M8 a repository has exactly one queue: the target's branch, on
@@ -1546,7 +1562,7 @@ export async function coreQueueCommand(
         let ending: YrdCliExitCode | undefined
         // The queue read the LAST round made: a detail opened between rounds
         // reads the same tips the table shows, never a fresher or staler one.
-        let entries: QueueEntries = first.entries
+        let entries: QueueEntries | undefined = first.entries
         let journals = first.journals
         let seen: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }> = first
         const app = await run(
@@ -1568,7 +1584,12 @@ export async function coreQueueCommand(
               return snapshotOf(next)
             },
             loadDiff: (item) => readDiff(git, config, item),
-            open: (item) => openDetail(git, config, entries, item, config.target.branch, journalFor(item, journals)),
+            open: (item) => {
+              if (entries === undefined) {
+                throw new Error(`event history detail for ${item.row.branch} is unavailable in this build`)
+              }
+              return openDetail(git, config, entries, item, config.target.branch, journalFor(item, journals))
+            },
             onEnding:
               request.terms === undefined || request.terms.length === 0
                 ? undefined
@@ -2760,19 +2781,64 @@ function checkLines(check: CheckView): readonly string[] {
   ]
 }
 
+/** Read an event queue through Gitomic and project only its branch chains. */
+async function readEventListing(
+  git: GitRunner,
+  config: QueueConfig,
+  repo: string,
+  workdir: string,
+  targetOid: string,
+): Promise<
+  Readonly<{
+    format: "event"
+    all: readonly Row[]
+    journals: Journals
+    drafts: undefined
+    pause: PauseRecord | undefined
+    observation: GitObservation
+  }>
+> {
+  const store = { repo, remote: config.target.remote }
+  const queue = await readEventQueue(config.target.branch, store)
+  const changes = await listChanges(config.target.branch, store)
+  const projected = eventRows(changes)
+  const titles = await subjects(
+    git,
+    projected.map((row) => row.head),
+  )
+  const all = projected.map((row) => ({
+    ...row,
+    ...(titles.get(row.head) === undefined ? {} : { subject: titles.get(row.head) }),
+  }))
+  const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
+  const [queueRefs, branchRefs] = await Promise.all([listRefs(queuePrefix, store), listRefs("refs/heads/", store)])
+  const observation = await git.observe({
+    version: 1,
+    root: {
+      remote: await remoteUrl(git, config.target.remote),
+      targetRef: `refs/heads/${config.target.branch}`,
+      targetOid,
+    },
+    checked: [],
+    fence: {
+      prefixes: ["refs/heads/", queuePrefix],
+      refs: [...queueRefs, ...branchRefs].map(([ref, oid]) => ({ ref, oid })),
+    },
+  })
+  return {
+    format: "event",
+    all,
+    journals: readJournals(join(workdir, "logs")),
+    drafts: undefined,
+    pause: eventPause(queue),
+    observation,
+  }
+}
+
 /**
- * One reading of the queue as the list, the watch and the stats consume it:
- * the change refs at the remote, the run journal on THIS machine, the direct
- * commits on the target (E5) and the head subjects, in one batched read. A
- * machine that runs no queue has no journal, and `journals.absent` is the
- * sentence that says so rather than a row that reads as if nothing were
- * running. Nothing here derives a state: `list()` does, once, for everyone.
- *
- * `shown` asks for what only a person reads (@i/10-yrd/24196): the instants of
- * the endings a notice hides, which the table times and orders ended rows by,
- * and the drafts of one window (queue-core drafts.ts), both in batched reads
- * made here and never in a redraw. `--json` and `yrd queue stats` ask for
- * neither.
+ * One legacy queue reading for list, watch and stats: change refs, the local
+ * run journal, direct target commits and head subjects. `shown` adds ending
+ * instants and draft branches for the human table.
  */
 export async function readListing(
   git: GitRunner,
