@@ -599,19 +599,39 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   return { queue, branch, event: written, head }
 }
 
-/** Branch projections for an event queue, with one batched remote fetch and history walk. */
-export async function listChanges(store: QueueLocation, queue: string): Promise<ReadonlyMap<string, EventChange>> {
+type ChangeHistory = Readonly<{ state: EventChange; events: readonly Event[] }>
+
+/** Branch histories and projections from one batched remote fetch. */
+export async function listChangeHistories(
+  store: QueueLocation,
+  queue: string,
+): Promise<ReadonlyMap<string, ChangeHistory>> {
   if ((await queueFormat(store, queue)) !== "event") {
     throw new Error(`queue ${queue} in ${store.repo} has no event queue chain`)
   }
   await readEventQueue(store, queue)
   const prefix = `${queueRefPrefix(queue)}/changes/`
   const chains = await chainsUnder(prefix, { ...store, limit: 1024 })
-  const changes = new Map<string, EventChange>()
+  const changes = new Map<string, ChangeHistory>()
   for (const [ref, events] of chains) {
-    changes.set(ref.slice(prefix.length), project(events, ref, store.repo))
+    changes.set(ref.slice(prefix.length), { state: project(events, ref, store.repo), events })
   }
   return changes
+}
+
+/** Branch projections for an event queue. */
+export async function listChanges(store: QueueLocation, queue: string): Promise<ReadonlyMap<string, EventChange>> {
+  const histories = await listChangeHistories(store, queue)
+  return new Map([...histories].map(([branch, history]) => [branch, history.state]))
+}
+
+/** Every merged ending in the selected histories, including an older ending after a branch reopened. */
+export function mergedHistoryCommits(histories: ReadonlyMap<string, ChangeHistory>): ReadonlySet<Oid> {
+  const commits = new Set<Oid>()
+  for (const { events } of histories.values()) {
+    for (const event of events) if (event.type === "merged") commits.add(keptCommit(event))
+  }
+  return commits
 }
 
 function project(events: readonly Event[], ref: string, repo: string): EventChange {
