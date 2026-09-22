@@ -243,14 +243,18 @@ describe("the notice", () => {
   it("reads every state's word from the one word table, so it cannot drift from the table; direct apart", () => {
     // Every state a row can have, each its own value: a state the core adds fails to compile here until listed.
     const states = Object.values({
+      cancelled: "cancelled",
       checked: "checked",
+      checking: "checking",
       deferred: "deferred",
       direct: "direct",
       draft: "draft",
       failed: "failed",
       merged: "merged",
+      merging: "merging",
       queued: "queued",
       stuck: "stuck",
+      verifying: "verifying",
       withdrawn: "withdrawn",
     } as const satisfies { readonly [S in Row["state"]]: S })
     // The table answers with a word no second map could hold, so a notice reading a map of its own cannot match.
