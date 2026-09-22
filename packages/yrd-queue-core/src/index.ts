@@ -47,6 +47,7 @@ export {
   queueRef,
   readEventQueue,
   readStatus,
+  writeQueueEvent,
 } from "./events.ts"
 export type {
   CancellationReason,
@@ -56,7 +57,9 @@ export type {
   EventChange,
   EventQueue,
   EventStore,
+  WriteQueueEvent,
 } from "./events.ts"
+export { eventRows } from "./event-table.ts"
 export {
   appendRecord,
   DIRECT_MERGE,

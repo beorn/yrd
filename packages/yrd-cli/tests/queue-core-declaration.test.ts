@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { changeRef, gitIn, readQueue, writePause } from "@yrd/queue-core"
+import { changeRef, createEventQueue, gitIn, readEventQueue, readQueue, writePause } from "@yrd/queue-core"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -50,6 +50,31 @@ async function world(config?: string): Promise<string> {
 }
 
 describe("a queue is the selected origin branch carrying config", () => {
+  it("pause and resume an event queue on its queue chain without a legacy pause ref", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const store = { repo, remote: "origin" }
+    await createEventQueue("main", head, store, new Date("2026-09-22T14:00:00.000Z"))
+    const paused = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "repair", "--json"],
+        paused.io,
+      ),
+      paused.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(paused.stdout())).toMatchObject({ kind: "paused", reason: "repair" })
+    expect((await readEventQueue("main", store)).pause?.reason).toBe("repair")
+    const resumed = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main", "--json"], resumed.io),
+      resumed.stderr(),
+    ).toBe(0)
+    expect((await readEventQueue("main", store)).pause).toBeUndefined()
+    expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause"])).toBe("")
+  })
+
   it.each(["open", "close"])("refuses the retired garage %s command without changing local refs", async (verb) => {
     const repo = await world("{}\n")
     const git = gitIn(repo)

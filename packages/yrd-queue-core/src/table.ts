@@ -42,7 +42,7 @@ import {
   type Telling,
 } from "./state.ts"
 
-export type Row = Readonly<{
+export type Row<Status extends string = ChangeState | "direct" | "draft"> = Readonly<{
   /** The change's branch; for a `direct` row, the target that commit moved. */
   branch: string
   /** The change's head; for a `direct` row, that commit itself. */
@@ -51,7 +51,7 @@ export type Row = Readonly<{
    * A change's state; `direct` for a commit on the target the queue did not put there (E5); `draft` for a
    * head at the remote nobody submitted (drafts.ts), which has no record and is no change.
    */
-  state: ChangeState | "direct" | "draft"
+  state: Status
   /** 1-based place in line for queued, checked and stuck rows; absent otherwise. */
   position?: number
   /** The result of the run named by `run`: pass, fail or stuck, with its deciding check. */
@@ -590,9 +590,7 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
     ...(refused.length === 0 ? {} : { refused: refused.join("; ") }),
     ...(undelivered.length === 0 ? {} : { undelivered: undelivered.join("; ") }),
     ...(next === undefined ? {} : { next }),
-    ...(trailer(tip, "ProjectedMs") === undefined
-      ? {}
-      : { projectedMs: Number(trailer(tip, "ProjectedMs")) }),
+    ...(trailer(tip, "ProjectedMs") === undefined ? {} : { projectedMs: Number(trailer(tip, "ProjectedMs")) }),
     ...(trailer(tip, "BoundMs") === undefined ? {} : { boundMs: Number(trailer(tip, "BoundMs")) }),
   }
 }
