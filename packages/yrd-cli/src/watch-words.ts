@@ -106,7 +106,7 @@ export const RUNNER_SIGNALS = ["silent", "stopped", "unpublished"] as const
 export const RUNNER_STATES_SAID = ["idle", "checking", "stopped", "stuck", "paused", "unpublished"] as const
 
 /** A word a change's row can show: one of the nine, or `direct`, which is no change. */
-export type DisplayState = (typeof LEGEND_STATES)[number] | "direct" | "queued" | "verifying"
+export type DisplayState = (typeof LEGEND_STATES)[number] | "direct" | "queued" | "verifying" | "event-verifying"
 
 /** A word the runner's row can show: one of the eight, a signal, or the unpublished `?`. */
 export type RunnerState = (typeof RUNNER_STATES)[number] | (typeof RUNNER_SIGNALS)[number]
@@ -174,6 +174,12 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
     color: "$fg-info",
     means: "the runner is composing the tree that will be judged, where the change meets the target as it is now",
     next: "provisioning, or stuck",
+    word: "fitting",
+  },
+  "event-verifying": {
+    color: "$fg-info",
+    means: "the event queue is composing the candidate it will judge",
+    next: "checking or stuck",
     word: "verifying",
   },
   provisioning: {

@@ -37,6 +37,7 @@ import {
   queueRef,
   queueRefPrefix,
   changesRef,
+  readChangeEvents,
   readEventQueue,
   writeQueueEvent,
   prepareWorktree,
@@ -1340,6 +1341,7 @@ export async function coreQueueCommand(
           decisions: readonly RunDecision[]
           /** The queue read the rows came from, so a detail opened later reads the same tip. */
           entries: QueueEntries | undefined
+          eventChanges: ReadonlyMap<string, EventChange> | undefined
           journals: Journals
           /** The stop that stands, as the reading derived it. */
           stopped: StopFact | null
@@ -1411,6 +1413,7 @@ export async function coreQueueCommand(
             ...(scope === undefined ? {} : { scope }),
           },
           entries: reading.format === "event" ? undefined : reading.queue.changes,
+          eventChanges: reading.format === "event" ? reading.changes : undefined,
           journals,
           queue: queueName(config.target, await remoteUrl(git, config.target.remote)),
           // Pre-M8 a repository has exactly one queue: the target's branch, on
@@ -1567,6 +1570,7 @@ export async function coreQueueCommand(
         // The queue read the LAST round made: a detail opened between rounds
         // reads the same tips the table shows, never a fresher or staler one.
         let entries: QueueEntries | undefined = first.entries
+        let eventChanges = first.eventChanges
         let journals = first.journals
         let seen: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }> = first
         const app = await run(
@@ -1584,13 +1588,24 @@ export async function coreQueueCommand(
                 io.stderr(`${next.observation.message}\n`)
               }
               entries = next.entries
+              eventChanges = next.eventChanges
               journals = next.journals
               return snapshotOf(next)
             },
             loadDiff: (item) => readDiff(git, config, item),
             open: (item) => {
               if (entries === undefined) {
-                throw new Error(`event history detail for ${item.row.branch} is unavailable in this build`)
+                const selected = eventChanges?.get(item.row.branch)
+                if (selected === undefined) throw new Error(`event change ${item.row.branch} left the selected listing`)
+                return openEventDetail(
+                  git,
+                  config,
+                  item,
+                  config.target.branch,
+                  repo,
+                  selected,
+                  journalFor(item, journals),
+                )
               }
               return openDetail(git, config, entries, item, config.target.branch, journalFor(item, journals))
             },
@@ -1853,6 +1868,52 @@ export async function coreQueueCommand(
       return 0
     }
     case "show": {
+      if ((await queueFormat(config.target.branch, { repo, remote: config.target.remote })) === "event") {
+        const reading = await readEventListing(git, config, repo, workdir, captured.oid)
+        const name = queueName(config.target, await remoteUrl(git, config.target.remote))
+        const row = reading.all.find((candidate) => candidate.branch === request.branch)
+        const selected = reading.changes.get(request.branch)
+        if ((row === undefined) !== (selected === undefined)) {
+          throw new Error(`event listing for ${request.branch} disagrees with its change fold`)
+        }
+        if (selected !== undefined && selected.tip === undefined) {
+          throw new Error(`event change ${request.branch} has no selected tip`)
+        }
+        const events =
+          selected === undefined
+            ? []
+            : await readChangeEvents(config.target.branch, request.branch, selected.tip as string, {
+                repo,
+                remote: config.target.remote,
+              })
+        const scope =
+          `Read ${changesRef(config.target.branch, request.branch)} at ${config.target.remote}; ` +
+          "draft branches and direct target commits are outside this reading; check results are not projected from events yet."
+        emit(
+          io,
+          options.json,
+          {
+            queue: name,
+            changes: row === undefined ? [] : [{ ...row, queue: config.target.branch, events }],
+            journal: journalFact(reading.journals),
+            observation: reading.observation,
+            scope,
+          },
+          row === undefined
+            ? `no change for ${request.branch} on ${name}. ${scope}`
+            : [
+                rowLine({ row }),
+                `  queue: ${config.target.branch}`,
+                ...events.map((event) => {
+                  const at = event.props.find(([key]) => key === "Time")?.[1]
+                  if (at === undefined) throw new Error(`event ${event.id} has no Time:`)
+                  const reason = event.props.find(([key]) => key === "Reason")?.[1]
+                  return `  ${at} ${event.type}${event.writer === null ? "" : ` by ${event.writer}`}${reason === undefined ? "" : ` — ${reason}`}`
+                }),
+              ].join("\n"),
+        )
+        return 0
+      }
       const queue = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
       const journals = readJournals(join(workdir, "logs"))
       if (options.json !== true) narrateMalformed(io, journals, new Set())
@@ -2311,6 +2372,37 @@ function missedSelector(terms: readonly string[], queue: string, matched: number
 /** One reading of the queue as the pane consumes it. */
 /** The entries one queue read yields: the type `readQueue` returns, named here rather than widened in the core. */
 type QueueEntries = Awaited<ReturnType<typeof readQueue>>["changes"]
+
+/** Open exactly the event tip shown in the table, including every event in its history. */
+export async function openEventDetail(
+  git: Git,
+  config: QueueConfig,
+  item: WatchRow,
+  label: string,
+  repo: string,
+  selected: EventChange,
+  journal?: JournalRun,
+): Promise<ChangeDetail> {
+  const { row } = item
+  if (
+    row.format !== "event" ||
+    selected.commit !== row.head ||
+    selected.status !== row.state ||
+    selected.tip === undefined
+  ) {
+    throw new Error(`event detail for ${row.branch} disagrees with the selected table row`)
+  }
+  const events = await readChangeEvents(label, row.branch, selected.tip, { repo, remote: config.target.remote })
+  return {
+    row,
+    run: runOf(row, label, [], item.run?.id ?? row.run),
+    checks: [],
+    events,
+    ...(journal === undefined ? {} : { journal }),
+    ...(await headFacts(git, config, row)),
+    note: "Check results are not projected from event history in this detail.",
+  }
+}
 
 /**
  * One change's detail, read for the row under the cursor and for nothing else
@@ -2799,6 +2891,7 @@ async function readEventListing(
     journals: Journals
     drafts: undefined
     pause: PauseRecord | undefined
+    changes: ReadonlyMap<string, EventChange>
     observation: GitObservation
   }>
 > {
@@ -2836,6 +2929,7 @@ async function readEventListing(
     journals: readJournals(join(workdir, "logs")),
     drafts: undefined,
     pause: eventPause(queue),
+    changes,
     observation,
   }
 }
