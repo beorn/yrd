@@ -67,7 +67,7 @@
     },
   },
   "overrides": {
-    "git-super": "github:beorn/git-super#8345832bbdb917522bd87262c4db207d993d09ba",
+    "git-super": "github:beorn/git-super#ec68517c1ecfcd9571d7193355af1dab5df78283",
     "loggily": "^0.11.0",
   },
   "packages": {
@@ -273,7 +273,7 @@
 
     "gifenc": ["gifenc@1.0.3", "", {}, "sha512-xdr6AdrfGBcfzncONUOlXMBuc5wJDtOueE3c5rdG0oNgtINLD+f2iFZltrBRZYzACRbKr+mSVU/x98zv2u3jmw=="],
 
-    "git-super": ["git-super@github:beorn/git-super#8345832", { "dependencies": { "@bearly/flock": "0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "loggily": "^0.10.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-8345832", "sha512-LnOw8tiTukRbscI2wc7DOCduSzclWoekRidSz+WHBcSA++sPb+jWW0iiAuTamE2OYCn2P6FhuBzC237tCw1vHQ=="],
+    "git-super": ["git-super@github:beorn/git-super#ec68517", { "dependencies": { "@bearly/flock": "0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "loggily": "^0.10.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-ec68517", "sha512-O8awTVVEd/P+VkTtUAQt4fs9ru425YOkZ1i8dijcQi+ZgEhuLV0UGZxzYpRM9LUkHISBmt6j8LFSHgdyLuEKpQ=="],
 
     "is-fullwidth-code-point": ["is-fullwidth-code-point@5.1.0", "", { "dependencies": { "get-east-asian-width": "^1.3.1" } }, "sha512-5XHYaSyiqADb4RnZ1Bdad6cPp8Toise4TzEjcOYDHZkTCbKgiUl7WTUCpNWHuxmDt91wnsZBc9xinNzopv3JMQ=="],
 
