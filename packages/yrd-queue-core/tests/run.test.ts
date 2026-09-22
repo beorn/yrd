@@ -3955,7 +3955,9 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
       (await refAt(w.git, changeRef("main", { branch: "task/one", head: headOne })))!,
     )
     expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
-  })
+    // Two checks each sleep FAKE_SLEEP=2s, so 4s of vitest's default 5s is fixed sleep and a loaded
+    // host times out before the round ends; the budget is the check sleep plus the git work.
+  }, 15_000)
 
   // The same race one phase later (24979 acceptance row 2). This one is worth
   // its own arm rather than a parameter, because the two phases fail

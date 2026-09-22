@@ -3597,7 +3597,9 @@ describe("yrd queue run --tier long", () => {
     const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes.filter(
       (r) => r.branch !== "main",
     )
-    expect(rows.map((r) => [r.branch, r.state])).toEqual([
+    // Both deferred; not their order. Ended rows sort newest first by the record commit's
+    // whole-second time, so two records written ~150 ms apart tie or split by the clock.
+    expect(rows.map((r) => [r.branch, r.state]).sort()).toEqual([
       ["task/older", "deferred"],
       ["task/younger", "deferred"],
     ])
