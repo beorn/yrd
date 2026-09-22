@@ -493,6 +493,50 @@ export async function appendChangeEvent(
   return written
 }
 
+/** End one open change and delete its branch in the same leased publish. */
+export async function dropEventChange(
+  queue: string,
+  branch: string,
+  request: Readonly<{ by: string; reason?: string }>,
+  store: EventStore,
+): Promise<Readonly<{ event: string; head: string }>> {
+  const state = await readStatus(queue, branch, store)
+  if (!isOpen(state.status)) {
+    throw new Error(`${changesRef(queue, branch)} already ended ${state.status} at ${state.tip}; nothing to drop`)
+  }
+  if (state.tip === undefined) throw new Error(`${changesRef(queue, branch)} has no selected event tip`)
+  const branchRef = `refs/heads/${branch}`
+  const head = (await listRefs(branchRef, store)).get(branchRef)
+  if (head === undefined) {
+    throw new Error(
+      `${branchRef} in ${store.repo}${store.remote === undefined ? "" : ` at ${store.remote}`} is absent; cannot drop`,
+    )
+  }
+  const written = await appendChangeEvent(
+    queue,
+    branch,
+    state.tip,
+    {
+      type: "cancelled",
+      at: new Date(),
+      commit: head,
+      reason: "dropped",
+      title: `dropped ${branch}`,
+      ...(request.reason === undefined ? {} : { content: request.reason }),
+      writer: request.by,
+      // The event keeps H, so this branch delete only removes its name, not its commit.
+      also: [{ ref: branchRef, expect: head, oid: null }],
+    },
+    store,
+  )
+  const events = await readChangeEvents(queue, branch, written, store)
+  const ending = events.at(-1)
+  if (ending?.id !== written || ending.type !== "cancelled" || keptCommit(ending) !== head) {
+    throw new Error(`${changesRef(queue, branch)} in ${store.repo}: dropped event did not keep ${head}`)
+  }
+  return { event: written, head }
+}
+
 /** Branch projections for an event queue, with one batched remote fetch and history walk. */
 export async function listChanges(queue: string, store: EventStore): Promise<ReadonlyMap<string, EventChange>> {
   if ((await queueFormat(queue, store)) !== "event") {
