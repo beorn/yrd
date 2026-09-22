@@ -507,23 +507,61 @@ export async function readChangeEvents(
 }
 
 /** Write one run decision against the row it judged; a rival tip discards that judgement. */
+type ChangeWrite = Readonly<{
+  type: Exclude<ChangeEventType, "opened">
+  at: Date
+  commit?: string
+  issue?: string
+  reason?: string
+  title?: string
+  content?: string
+  writer?: string
+  /** A target or branch ref moved in the same CAS publish as this event. */
+  also?: readonly AlsoRef[]
+}>
+
 export async function appendChangeEvent(
   store: QueueLocation,
   queue: string,
   branch: string,
   selectedTip: string,
-  write: Readonly<{
-    type: Exclude<ChangeEventType, "opened">
-    at: Date
-    commit?: string
-    issue?: string
-    reason?: string
-    title?: string
-    content?: string
-    writer?: string
-    /** A target or branch ref moved in the same CAS publish as this event. */
-    also?: readonly AlsoRef[]
-  }>,
+  write: ChangeWrite,
+): Promise<string> {
+  if (write.writer === QUEUE_RUN_WRITER) {
+    throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
+  }
+  return appendDecision(store, queue, branch, selectedTip, write)
+}
+
+/** The sole event append that attributes a merge to this queue run; both refs are leased. */
+export async function appendPublishedMerge(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+  selectedTip: string,
+  request: Readonly<{ at: Date; commit: Oid; targetExpect: Oid; queueTip: Oid }>,
+): Promise<string> {
+  if (request.commit === request.targetExpect) {
+    throw new TypeError(`published merge needs the target to move from ${request.targetExpect}`)
+  }
+  return appendDecision(store, queue, branch, selectedTip, {
+    type: "merged",
+    at: request.at,
+    commit: request.commit,
+    writer: QUEUE_RUN_WRITER,
+    also: [
+      { ref: `refs/heads/${queue}`, expect: request.targetExpect, oid: request.commit },
+      { ref: queueRef(queue), expect: request.queueTip, oid: request.queueTip },
+    ],
+  })
+}
+
+async function appendDecision(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+  selectedTip: string,
+  write: ChangeWrite,
 ): Promise<string> {
   const queueTip = (await readEventQueue(store, queue)).tip
   const history = await readChangeEvents(store, queue, branch, selectedTip)

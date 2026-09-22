@@ -4,10 +4,9 @@ import { join } from "node:path"
 
 import {
   appendChangeEvent,
+  appendPublishedMerge,
   listChangeHistories,
   mergedHistoryCommits,
-  QUEUE_RUN_WRITER,
-  queueRef,
   readEventQueue,
   readStatus,
 } from "./events.ts"
@@ -217,15 +216,11 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
       tip = await appendChangeEvent(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })
       tip = await appendChangeEvent(store, queue, branch, tip, { type: "checking", at: new Date() })
       tip = await appendChangeEvent(store, queue, branch, tip, { type: "merging", at: new Date() })
-      await appendChangeEvent(store, queue, branch, tip, {
-        type: "merged",
+      await appendPublishedMerge(store, queue, branch, tip, {
         at: new Date(),
         commit: candidate,
-        writer: QUEUE_RUN_WRITER,
-        also: [
-          { ref: targetRef, expect: target, oid: candidate },
-          { ref: queueRef(queue), expect: queueState.tip, oid: queueState.tip },
-        ],
+        targetExpect: target,
+        queueTip: queueState.tip,
       })
       log.write({ kind: "merge", branch, head, commit: candidate })
       log.write({ kind: "change", branch, head, decision: "merged" })

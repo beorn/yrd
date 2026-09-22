@@ -40,6 +40,7 @@ import {
   pauseRef,
   queueRefPrefix,
   queueRun,
+  readEventQueue,
   readStatus,
   readRecords,
   refAt,
@@ -66,7 +67,7 @@ import type {
 } from "../src/index.ts"
 import { resolveGitSelection } from "../src/git.ts"
 import * as verifying from "../src/verifying.ts"
-import { appendChangeEvent } from "../src/events.ts"
+import { appendChangeEvent, appendPublishedMerge } from "../src/events.ts"
 
 const roots: string[] = []
 // The real queue child needs GitSuper even when the worker's PATH is sealed.
@@ -544,6 +545,22 @@ it("reports an observed direct merge even when its change has a merged event", a
   await w.git(["push", "--quiet", "origin", "main"])
   const change = await readStatus(store, "main", "task/observed-direct")
   if (change.tip === undefined) throw new Error("submitted event has no tip")
+  await expect(
+    appendChangeEvent(store, "main", "task/observed-direct", change.tip, {
+      type: "merged",
+      at: new Date(),
+      commit: head,
+      writer: "yrd-run",
+    }),
+  ).rejects.toThrow(/writer.*reserved/)
+  await expect(
+    appendPublishedMerge(store, "main", "task/observed-direct", change.tip, {
+      at: new Date(),
+      commit: head,
+      targetExpect: head,
+      queueTip: (await readEventQueue(store, "main")).tip,
+    }),
+  ).rejects.toThrow(/target.*move/)
   await appendChangeEvent(store, "main", "task/observed-direct", change.tip, {
     type: "merged",
     at: new Date(),
