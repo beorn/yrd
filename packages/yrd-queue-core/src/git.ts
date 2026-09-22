@@ -704,7 +704,7 @@ async function nameDanglingRefs(git: Git, remote: string, cause: unknown): Promi
     } catch (error) {
       there = `unread (${error instanceof GitExit ? error.detail : String(error)})`
     }
-    lines.push(`${ref} local=${oid} origin=${there} object missing locally`)
+    lines.push(`${ref} local=${oid} ${remote}=${there} object missing locally`)
   }
   return (
     `a local ref names an object this store no longer has, so every fetch fails: ${lines.join("; ")}. ` +

@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process"
 import { appendFileSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import { gitIn } from "../src/git.ts"
 import * as gitRunner from "../src/git.ts"
@@ -291,7 +291,17 @@ describe("the git runner", () => {
         onInvocation: log.writeGitInvocation,
       },
     )
-    await expect(git(["status"])).rejects.toThrow("capture is incomplete")
+    // The truncation is the point of this test, so it owns the two warnings the
+    // process layer logs for it (stdout and stderr) instead of leaking them.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      await expect(git(["status"])).rejects.toThrow("capture is incomplete")
+      const warned = warn.mock.calls.map((call) => call.map(String).join(" "))
+      expect(warned).toHaveLength(2)
+      for (const line of warned) expect(line).toContain("produced more output than Yrd captures")
+    } finally {
+      warn.mockRestore()
+    }
     const artifacts = git.lastInvocation?.artifacts
     expect(artifacts?.complete).toBe(true)
     if (artifacts === undefined) throw new Error("Missing raw artifact paths")
