@@ -29,6 +29,7 @@ import { directMergeLine, type DirectMerge } from "./direct.ts"
 import type { Draft } from "./drafts.ts"
 import { journalKey, type Journals, type JournalRun, type LogRecord } from "./log.ts"
 import { incidentFrom, incidentLine, type Incident } from "./incident.ts"
+import type { ChangeStatus } from "./events.ts"
 import type { Git } from "./records.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
 import {
@@ -42,7 +43,7 @@ import {
   type Telling,
 } from "./state.ts"
 
-export type Row<Status extends string = ChangeState | "direct" | "draft"> = Readonly<{
+export type Row<Status extends string = ChangeState | ChangeStatus | "direct" | "draft"> = Readonly<{
   /** Event rows keep their fold's status word; legacy rows use the historical display vocabulary. */
   format?: "event"
   /** The change's branch; for a `direct` row, the target that commit moved. */
