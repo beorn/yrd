@@ -531,6 +531,32 @@ it("accounts for its earlier merged event when scanning a later round", async ()
   expect((await readStatus(store, "main", "task/second")).status).toBe("merged")
 })
 
+/** @failure An observer's merged event hid a submitted commit pushed around the queue.
+ * @level l3 @consumer queue operator
+ */
+it("reports an observed direct merge even when its change has a merged event", async () => {
+  const w = await world()
+  const store = { repo: w.work, remote: "origin" }
+  await createEventQueue(store, "main", w.target, new Date())
+  const head = await submitCommit(w, "task/observed-direct", "one.txt")
+  await w.git(["checkout", "--quiet", "main"])
+  await w.git(["merge", "--ff-only", "task/observed-direct"])
+  await w.git(["push", "--quiet", "origin", "main"])
+  const change = await readStatus(store, "main", "task/observed-direct")
+  if (change.tip === undefined) throw new Error("submitted event has no tip")
+  await appendChangeEvent(store, "main", "task/observed-direct", change.tip, {
+    type: "merged",
+    at: new Date(),
+    commit: head,
+  })
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, directMerges: [head], merged: [] })
+  expect(logRecords(outcome).filter((row) => row.kind === "merged-direct")).toMatchObject([{ commit: head }])
+  expect(await remoteTarget(w)).toBe(head)
+})
+
 /** One commit on the target, pushed around the queue: the thing only the queue may do. */
 async function pushAroundQueue(w: World, file: string): Promise<string> {
   await w.git(["checkout", "--quiet", "main"])
