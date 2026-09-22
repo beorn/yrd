@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest"
 import type { Event } from "gitomic/events"
 import { evolve, initial } from "../src/events.ts"
 import { eventRows } from "../src/event-table.ts"
+import { clocks } from "../src/table.ts"
 
 const QUEUE = "a".repeat(40)
 const HEAD = "b".repeat(40)
@@ -85,5 +86,23 @@ describe("event changes use the shared table row", () => {
     expect(() => eventRows(new Map([["task/no-time", { status: "queued", commit: HEAD, ignored: false }]]))).toThrow(
       /task\/no-time.*Time/,
     )
+  })
+
+  it("uses opening time for working states and ending time for cancellation", () => {
+    const since = new Date("2026-09-22T14:00:00.000Z")
+    const at = new Date("2026-09-22T14:03:00.000Z")
+    const endedAt = new Date("2026-09-22T14:04:00.000Z")
+    const now = new Date("2026-09-22T14:10:00.000Z")
+    for (const state of ["verifying", "checking", "merging"] as const) {
+      const clock = clocks({ branch: "task/phase", head: HEAD, state, format: "event", since, at }, now)
+      expect(clock.clockAt).toEqual(since)
+      expect(clock.waitingMs).toBeUndefined()
+    }
+    expect(
+      clocks({ branch: "task/drop", head: HEAD, state: "cancelled", format: "event", since, at, endedAt }, now),
+    ).toMatchObject({
+      clockAt: endedAt,
+      tookMs: 240_000,
+    })
   })
 })

@@ -401,12 +401,14 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
       : Math.max(0, until.getTime() - row.startedAt.getTime())
   const since = (at: Date | undefined): number | undefined =>
     at === undefined ? undefined : Math.max(0, now.getTime() - at.getTime())
-  const inLineState = row.state === "queued" || row.state === "checked" || row.state === "stuck"
-  const ended = row.state === "merged" || row.state === "failed" || row.state === "withdrawn"
+  const waitingState = row.state === "queued" || row.state === "checked" || row.state === "stuck"
+  const inLineState = waitingState || row.state === "verifying" || row.state === "checking" || row.state === "merging"
+  const ended =
+    row.state === "merged" || row.state === "failed" || row.state === "withdrawn" || row.state === "cancelled"
   const endedWhen = row.endingAt ?? row.endedAt
   const clockAt = inLineState ? (row.since ?? row.at) : ended ? (endedWhen ?? row.at) : row.at
   const checkingMs = since(row.live?.since)
-  const waitingMs = inLineState && row.live === undefined ? since(row.since) : undefined
+  const waitingMs = waitingState && row.live === undefined ? since(row.since) : undefined
   const stuckMs = row.state === "stuck" && row.live === undefined ? since(endedWhen) : undefined
   const tookMs =
     ended && row.since !== undefined && endedWhen !== undefined

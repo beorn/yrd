@@ -34,7 +34,9 @@ import {
   eventRows,
   listChanges,
   queueFormat,
+  queueRef,
   queueRefPrefix,
+  changesRef,
   readEventQueue,
   writeQueueEvent,
   prepareWorktree,
@@ -107,6 +109,8 @@ import {
   type RuntimeGitlinkOff,
   type ChangeRecord,
   type Change,
+  type EventChange,
+  type EventQueue,
   type DraftReading,
   type Row,
   type StopFact,
@@ -2812,6 +2816,7 @@ async function readEventListing(
   }))
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
   const [queueRefs, branchRefs] = await Promise.all([listRefs(queuePrefix, store), listRefs("refs/heads/", store)])
+  assertEventListingFence(config.target.branch, queue, changes, queueRefs)
   const observation = await git.observe({
     version: 1,
     root: {
@@ -2832,6 +2837,31 @@ async function readEventListing(
     drafts: undefined,
     pause: eventPause(queue),
     observation,
+  }
+}
+
+/** A history read and its final observation must name the same event tips. */
+export function assertEventListingFence(
+  name: string,
+  queue: EventQueue,
+  changes: ReadonlyMap<string, EventChange>,
+  advertised: ReadonlyMap<string, string>,
+): void {
+  const expected = new Map<string, string>([[queueRef(name), queue.tip]])
+  for (const [branch, change] of changes) {
+    if (change.tip === undefined) throw new Error(`event change ${branch} has no selected chain tip`)
+    expected.set(changesRef(name, branch), change.tip)
+  }
+  const changePrefix = `${queueRefPrefix(name)}/changes/`
+  for (const [ref, tip] of expected) {
+    if (advertised.get(ref) !== tip) {
+      throw new Error(`${ref} moved during event list: read ${tip}, observed ${advertised.get(ref) ?? "absent"}`)
+    }
+  }
+  for (const [ref, tip] of advertised) {
+    if (ref.startsWith(changePrefix) && !expected.has(ref)) {
+      throw new Error(`${ref} appeared during event list at ${tip}; read the queue again`)
+    }
   }
 }
 
