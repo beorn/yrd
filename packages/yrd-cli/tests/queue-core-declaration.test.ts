@@ -14,6 +14,7 @@ import {
   changeRef,
   changesRef,
   createEventQueue,
+  eventRows,
   gitIn,
   listChanges,
   queueRef,
@@ -21,10 +22,12 @@ import {
   readEventQueue,
   readQueue,
   writePause,
+  watchRows,
 } from "@yrd/queue-core"
 import { openEvents } from "gitomic/events"
-import { assertEventListingFence, coreQueueCommand, readListing } from "../src/queue-core-commands.ts"
+import { assertEventListingFence, coreQueueCommand, openEventDetail, readListing } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { eventHistoryEntries } from "../src/watch-change.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -114,6 +117,34 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await coreQueueCommand(repo, table.io, { command: "list", terms: ["queued"] }, { queue: "main" })).toBe(0)
     expect(table.stdout()).toContain("task/event")
     expect(table.stdout()).toContain("queued")
+    // Existing list checks cannot catch show falling back to the legacy ref
+    // reader and silently claiming this event-only branch has no history.
+    const shown = capture(repo)
+    expect(
+      await coreQueueCommand(repo, shown.io, { command: "show", branch: "task/event" }, { json: true, queue: "main" }),
+    ).toBe(0)
+    expect(JSON.parse(shown.stdout())).toMatchObject({
+      changes: [{ branch: "task/event", head: commit, state: "queued", format: "event", events: [{ type: "opened" }] }],
+    })
+    const human = capture(repo)
+    expect(await coreQueueCommand(repo, human.io, { command: "show", branch: "task/event" }, { queue: "main" })).toBe(0)
+    expect(human.stdout()).toContain("task/event")
+    expect(human.stdout()).toContain("opened by yrd")
+    const selected = (await listChanges("main", store)).get("task/event")
+    if (selected === undefined) throw new Error("fixture event change is missing")
+    const row = watchRows(eventRows(new Map([["task/event", selected]])))[0]
+    if (row === undefined) throw new Error("fixture event row is missing")
+    const detail = await openEventDetail(git, declaration, row, "main", repo, selected)
+    expect(detail.events?.map((event) => event.type)).toEqual(["opened"])
+    expect(eventHistoryEntries(detail.events ?? []).map((entry) => entry.text)).toEqual(["opened by yrd"])
+    expect(detail.records).toBeUndefined()
+    await chain.append(
+      [changeInput("verifying", { queueTip: created, at: new Date("2026-09-22T14:02:00.000Z"), commit })],
+      { expect: selected.tip as string },
+    )
+    await expect(openEventDetail(git, declaration, row, "main", repo, selected)).rejects.toThrow(
+      /moved after the selected reading/,
+    )
   })
 
   it("submits an unpublished branch and its opened event atomically", async () => {
