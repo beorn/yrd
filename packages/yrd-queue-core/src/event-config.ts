@@ -1,4 +1,8 @@
-/** The event runner slice admitted by #25040; richer evidence is designed in #25065. */
+/**
+ * The event runner slice admitted by #25040; richer evidence is designed in
+ * #25065. Creation and CLI entry points audit the complete declaration shape;
+ * a library queueRun call receives only the feature refusals below.
+ */
 import type { CheckSpec } from "./check.ts"
 import type { Notifier, QueueConfig } from "./config.ts"
 
@@ -33,8 +37,8 @@ function assertPlainFeatures(config: EventQueueRunConfig, action: EventQueueConf
     if (check.programRoot === true) unsupported(action, "a programRoot check", ` (${check.name})`)
     if ((check.scripts?.length ?? 0) > 0) unsupported(action, "a scripts check", ` (${check.name})`)
     if (check.long !== undefined) unsupported(action, "a deferred-capable check", ` (${check.name} has long:)`)
-    for (const key of Object.keys(check)) {
-      if (!CHECK_KEYS.has(key)) unsupported(action, `check key ${key}:`, ` (${check.name})`)
+    for (const [key, value] of Object.entries(check)) {
+      if (value !== undefined && !CHECK_KEYS.has(key)) unsupported(action, `check key ${key}:`, ` (${check.name})`)
     }
   }
 }
@@ -42,8 +46,8 @@ function assertPlainFeatures(config: EventQueueRunConfig, action: EventQueueConf
 /** Refuse every declaration feature or future key the event runner does not execute. */
 export function assertPlainEventQueueConfig(config: QueueConfig, action: EventQueueConfigAction): void {
   assertPlainFeatures(config, action)
-  for (const key of Object.keys(config)) {
-    if (!QUEUE_KEYS.has(key)) unsupported(action, `queue key ${key}:`)
+  for (const [key, value] of Object.entries(config)) {
+    if (value !== undefined && !QUEUE_KEYS.has(key)) unsupported(action, `queue key ${key}:`)
   }
 }
 

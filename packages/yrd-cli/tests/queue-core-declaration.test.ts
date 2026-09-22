@@ -49,6 +49,12 @@ it("refuses future event queue and check keys by name", () => {
     /queue key futureQueueFeature:.*#25040.*25065/u,
   )
   expect(() =>
+    assertPlainEventQueueConfig({ ...plain, futureQueueFeature: undefined } as QueueConfig, "run"),
+  ).not.toThrow()
+  expect(() => assertPlainEventQueueConfig({ ...plain, futureQueueFeature: null } as QueueConfig, "run")).toThrow(
+    /queue key futureQueueFeature:/u,
+  )
+  expect(() =>
     assertPlainEventQueueConfig(
       {
         ...plain,
@@ -57,6 +63,24 @@ it("refuses future event queue and check keys by name", () => {
       "run",
     ),
   ).toThrow(/check key futureCheckFeature:.*#25040.*25065/u)
+  expect(() =>
+    assertPlainEventQueueConfig(
+      {
+        ...plain,
+        checks: [{ ...plain.checks[0]!, futureCheckFeature: undefined } as unknown as (typeof plain.checks)[number]],
+      },
+      "run",
+    ),
+  ).not.toThrow()
+  expect(() =>
+    assertPlainEventQueueConfig(
+      {
+        ...plain,
+        checks: [{ ...plain.checks[0]!, futureCheckFeature: "" } as unknown as (typeof plain.checks)[number]],
+      },
+      "run",
+    ),
+  ).toThrow(/check key futureCheckFeature:/u)
 })
 
 function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout(): string }> {
@@ -97,6 +121,38 @@ async function createQueue(repo: string, queue: string, commit: string, at: Date
 }
 
 describe("a queue is the selected origin branch carrying config", () => {
+  it("creates and runs an event queue from a parsed plain-check declaration", async () => {
+    // Literal QueueConfig fixtures omit absent optional keys. A real
+    // declaration materializes some of them as undefined, and those must not
+    // be mistaken for configured features or unknown future keys.
+    const repo = await world('checks:\n  - lab-gate: {run: "true"}\n')
+    const git = gitIn(repo)
+    const store = { repo, remote: "origin" }
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+    await git(["checkout", "--quiet", "-b", "task/plain-check"])
+    writeFileSync(join(repo, "plain-check.txt"), "plain check\n")
+    await git(["add", "plain-check.txt"])
+    await git(["commit", "--quiet", "-m", "plain check change"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+
+    const submitted = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], submitted.io),
+      submitted.stderr(),
+    ).toBe(0)
+    const run = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], run.io), run.stderr()).toBe(
+      0,
+    )
+    expect((await listChanges(store, "main")).get("task/plain-check")).toMatchObject({
+      commit: head,
+      status: "merged",
+    })
+    const published = (await git(["ls-remote", "--heads", "origin", "main"])).split("\t")[0]
+    expect(await git(["show", `${published}:plain-check.txt`])).toBe("plain check\n")
+  }, 15_000)
+
   it.each([
     ["setup:", 'setup: "true"\n'],
     ["teardown:", 'teardown: "true"\n'],
