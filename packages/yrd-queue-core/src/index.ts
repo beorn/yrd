@@ -33,7 +33,10 @@ export {
 } from "./refs.ts"
 export type { Change } from "./refs.ts"
 export {
+  CHANGE_EVENT_TYPES,
   CHANGE_STATUSES,
+  EVENT_TRAILERS,
+  changeInput,
   changesRef,
   decide,
   evolve,
@@ -43,7 +46,14 @@ export {
   queueRef,
   readStatus,
 } from "./events.ts"
-export type { CancellationReason, ChangeEnding, ChangeStatus, EventChange, EventStore } from "./events.ts"
+export type {
+  CancellationReason,
+  ChangeEnding,
+  ChangeEventType,
+  ChangeStatus,
+  EventChange,
+  EventStore,
+} from "./events.ts"
 export {
   appendRecord,
   DIRECT_MERGE,
