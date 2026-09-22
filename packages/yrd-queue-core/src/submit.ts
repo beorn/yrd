@@ -28,7 +28,7 @@ import { ABSENT, appendRecord, type Git } from "./records.ts"
 import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
-import { readStop } from "./remote.ts"
+import { readStop, remoteUrl } from "./remote.ts"
 import { verifyCandidate, type Verification } from "./verifying.ts"
 
 export type SubmitRequest = Readonly<{
@@ -119,7 +119,8 @@ export async function publishMovedGitlinks(
     const path = prefix === "" ? row.path : `${prefix}/${row.path}`
     const checkout = join(root, row.path)
     const child = gitIn(checkout)
-    const remote = (await child(["remote", "get-url", "origin"])).trim()
+    // The DECLARED submodule url is what the record names; the transport rewrite is the host's.
+    const remote = await remoteUrl(child, "origin")
     // Where the pin is: this checkout, else the remote under some ref (a branch
     // somebody pushed by hand; the queue fetches by sha, so ask the same way),
     // else nowhere, which is a refusal before anything is pushed.
