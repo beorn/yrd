@@ -309,6 +309,37 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(state.candidate).toBe(await remoteTarget(w))
   expect(state.candidate).not.toBe(head)
   expect(await w.git(["rev-parse", `${state.candidate}^1`])).toMatch(new RegExp(w.target))
+  expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
+})
+
+/** @failure A deleted event branch stayed queued forever and blocked every change behind it.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("ends a deleted event branch with its last commit kept, then continues the line", async () => {
+  const w = await world()
+  const store = { repo: w.work, remote: "origin" }
+  await createWorldEventQueue(w)
+  const deleted = await submitCommit(w, "task/deleted-event", "deleted.txt")
+  await submitCommit(w, "task/after-deleted", "after.txt")
+  const standing = await readStatus(store, "main", "task/deleted-event")
+  if (standing.tip === undefined) throw new Error("submitted event has no tip")
+  await appendChangeEvent(store, "main", "task/deleted-event", standing.tip, {
+    type: "stuck",
+    at: new Date(),
+    reason: "branch owner must act",
+  })
+  await w.git(["push", "--quiet", "origin", ":refs/heads/task/deleted-event"])
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/after-deleted"], stuck: [] })
+  const state = await readStatus(store, "main", "task/deleted-event")
+  expect(state).toMatchObject({ status: "cancelled", commit: deleted, reason: "deleted" })
+  const ending = (await (await openEvents({ ...store, ref: changesRef("main", "task/deleted-event") })).events()).find(
+    (event) => event.id === state.ending?.id,
+  )
+  expect(ending).toMatchObject({ type: "cancelled", links: [deleted] })
+  expect(await w.git(["ls-remote", "--refs", "origin", "refs/heads/task/deleted-event"])).toBe("")
 })
 
 /** @failure A run treated an already-stuck event change as absent and advanced the line.

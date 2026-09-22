@@ -154,7 +154,50 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
       reason: change.reason,
     })
   }
-  const standing = open.find((change) => change.status === "stuck")
+  const endDeletedChange = async (selected: (typeof open)[number]): Promise<void> => {
+    const { branch, commit: head } = selected
+    let tip = selected.tip
+    try {
+      tip = await appendChangeEvent(store, queue, branch, tip, {
+        type: "cancelled",
+        at: new Date(),
+        commit: head,
+        reason: "deleted",
+        title: `deleted ${branch}`,
+      })
+      const ended = await readStatus(store, queue, branch)
+      if (ended.status !== "cancelled" || ended.reason !== "deleted" || ended.commit !== head || ended.tip !== tip) {
+        throw new Error(
+          `event queue ${url}#${queue}: deleted branch ${branch} wrote ${tip} but read back ${ended.status} at ${ended.tip ?? "no tip"}`,
+        )
+      }
+      log.write({ kind: "change", branch, head, decision: "cancelled", reason: "branch deleted" })
+    } catch (error) {
+      let current
+      try {
+        current = await readStatus(store, queue, branch)
+      } catch (readError) {
+        throw new AggregateError(
+          [error, readError],
+          `event queue ${url}#${queue}: ${branch} deletion decision failed and its current chain could not be read`,
+        )
+      }
+      if (current.tip === tip) throw error
+      log.write({
+        kind: "discarded",
+        branch,
+        head,
+        reason: `change advanced to ${current.status} at ${current.tip ?? "no tip"} while this round ended its deleted branch: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    }
+  }
+  const branchHeads = await listRefs("refs/heads/", store)
+  const remaining: typeof open = []
+  for (const selectedChange of open) {
+    if (branchHeads.has(`refs/heads/${selectedChange.branch}`)) remaining.push(selectedChange)
+    else await endDeletedChange(selectedChange)
+  }
+  const standing = remaining.find((change) => change.status === "stuck")
   if (standing !== undefined) {
     if (!(await queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)))) {
       log.write({
@@ -174,13 +217,19 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
       reason: "queue resumed",
     })
   }
-  const line = standing === undefined ? open : [standing, ...open.filter((change) => change.branch !== standing.branch)]
+  const line =
+    standing === undefined ? remaining : [standing, ...remaining.filter((change) => change.branch !== standing.branch)]
   const failed: string[] = []
   for (const selectedChange of line) {
     const { branch, commit: head } = selectedChange
     let tip = selectedChange.tip
     if (options.stopAtMs !== undefined && (options.now?.() ?? Date.now()) >= options.stopAtMs) {
       return result(0, [], [], [], [branch])
+    }
+    const branchRef = `refs/heads/${branch}`
+    if (!(await listRefs(branchRef, store)).has(branchRef)) {
+      await endDeletedChange({ ...selectedChange, tip })
+      continue
     }
     // This first runner slice cannot publish component mains beside the root
     // target. Refuse either side's gitlinks before composing a candidate.
