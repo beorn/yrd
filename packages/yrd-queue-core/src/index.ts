@@ -1,11 +1,10 @@
 /**
  * The queue's core: one store, which is the git repository.
  *
- * A branch is its ref at the queue's remote; a change is the ref
- * `refs/yrd/changes/<branch>@<sha>`, whose commits are its records; a merge is
- * one `--no-ff` merge commit on the target, naming its change. Nothing else is
- * written and nothing is remembered: every state a reader sees is derived from
- * those refs and the target's ancestry at the moment they ask.
+ * A branch is its ref at the queue's remote. Event queues have one queue chain
+ * and one change chain per branch under `refs/yrd/<queue>/`; their status is a
+ * fold over those events. Unmigrated queues retain their legacy `Record:`
+ * format until #25041 converts it. The queue-format selector chooses one.
  *
  * This package is the replacement core of the [plan](../../../../pm/@i/10-yrd/plan.md)
  * § Milestones M4. It reuses the git wrapper, submodule materialization, the
@@ -33,6 +32,18 @@ export {
   refOfChange,
 } from "./refs.ts"
 export type { Change } from "./refs.ts"
+export {
+  CHANGE_STATUSES,
+  changesRef,
+  decide,
+  evolve,
+  initial,
+  listChanges,
+  queueFormat,
+  queueRef,
+  readStatus,
+} from "./events.ts"
+export type { CancellationReason, ChangeEnding, ChangeStatus, EventChange, EventStore } from "./events.ts"
 export {
   appendRecord,
   DIRECT_MERGE,

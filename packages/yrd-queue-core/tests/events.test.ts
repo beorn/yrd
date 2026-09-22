@@ -90,6 +90,25 @@ describe("ADR-0016 event fold", () => {
       decide([event("opened", A, [["Commit", A]], [A])], { type: "verifying", props: [["Commit", B]] }),
     ).toThrow(/keep/)
   })
+
+  it("a stuck change refuses another phase while drop remains an escape", () => {
+    const opened = event("opened", A, [["Commit", A]], [A])
+    const stuck = event("stuck", B, [["Reason", "needs-operator"]])
+    const current = [opened, stuck]
+    expect(current.reduce(evolve, initial).status).toBe("stuck")
+    expect(() => decide(current, { type: "checking" })).toThrow(/stuck.*merge or cancel/)
+    const [dropped] = decide(current, {
+      type: "cancelled",
+      props: [
+        ["Reason", "dropped"],
+        ["Commit", A],
+      ],
+      keeps: [A],
+    })
+    expect(
+      evolve(current.reduce(evolve, initial), event(dropped!.type, "c".repeat(40), dropped?.props ?? [], [A])).status,
+    ).toBe("cancelled")
+  })
 })
 
 describe("the queue-format boundary", () => {
