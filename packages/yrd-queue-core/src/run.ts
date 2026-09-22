@@ -48,7 +48,7 @@
 
 import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
-import { createProcess, type Process } from "@yrd/process"
+import { type Process } from "@yrd/process"
 import {
   programRootCheck,
   ProgramSubjectSetupFailed,
@@ -80,7 +80,6 @@ import {
 import { queueName, readConfig, type Target } from "./config.ts"
 import {
   GitExit,
-  gitEnvironment,
   gitIn,
   isAncestor,
   type GitObservation,
@@ -91,6 +90,14 @@ import {
 } from "./git.ts"
 import { incidentTrailers, type Incident } from "./incident.ts"
 import { stuckCures, type PauseRecord } from "./pause.ts"
+import {
+  gitSuperExecution,
+  readSuperMergeDetail,
+  verifyCandidate,
+  type SuperMergeDetail,
+  type SettledGitlink,
+} from "./verifying.ts"
+export { readSuperMergeResult } from "./verifying.ts"
 import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { narrowingOf } from "./narrowing.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
@@ -432,7 +439,7 @@ function nowMs(options: QueueRunOptions): number {
   return options.now !== undefined ? options.now() : Date.now()
 }
 
-function isStopWindowClosed(options: QueueRunOptions): boolean {
+function isStopWindowClosed(options: QueueRunOptions): options is QueueRunOptions & { stopAtMs: number } {
   return options.stopAtMs !== undefined && nowMs(options) >= options.stopAtMs
 }
 
@@ -614,8 +621,9 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // below writes a change record or tells somebody about one, so a stopped round
   // leaves every change exactly as it found it while still surfacing direct merges.
   stopped = await run.steps.open(run)
-  if (stopped !== undefined)
+  if (stopped !== undefined) {
     return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred }, stopped)
+  }
 
   // Bookkeeping at the edges of the records first, so every reader below reads
   // records and never reconciles. A bookkeeping pass can itself end an entry
@@ -651,7 +659,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     if (isStopWindowClosed(options)) {
       log.write({
         kind: "observation",
-        why: `stop time reached (${new Date(options.stopAtMs!).toISOString()}); stopping starting new checks and leaving remaining changes deferred`,
+        why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting new checks and leaving remaining changes deferred`,
       })
       return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
     }
@@ -687,7 +695,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
         if (isStopWindowClosed(options)) {
           log.write({
             kind: "observation",
-            why: `stop time reached (${new Date(options.stopAtMs!).toISOString()}); stopping starting merge checks and leaving change deferred`,
+            why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting merge checks and leaving change deferred`,
           })
           await writeDeferredRecord(
             run,
@@ -736,7 +744,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     if (isStopWindowClosed(options)) {
       log.write({
         kind: "observation",
-        why: `stop time reached (${new Date(options.stopAtMs!).toISOString()}); stopping starting new checks`,
+        why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting new checks`,
       })
       break
     }
@@ -767,7 +775,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     if (isStopWindowClosed(options)) {
       log.write({
         kind: "observation",
-        why: `stop time reached (${new Date(options.stopAtMs!).toISOString()}); stopping starting new checks`,
+        why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting new checks`,
       })
       break
     }
@@ -1226,88 +1234,6 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
   }
 }
 
-type SuperMergeDetail = Readonly<{
-  code: string
-  phase: string
-  message: string
-  subject?: string
-  next?: string
-}>
-
-/**
- * How git-super composed a `merged` gitlink: the base both sides descend from,
- * the two parents, and how many paths each side changed.
- *
- * The journal carries it because a `merged` pin is the one settlement whose
- * commit exists in no submitter's tree — the merge authored it — so the
- * evidence that admitted it has to be readable afterwards from the record
- * alone.
- */
-type SettledComposition = Readonly<{
-  base: string
-  parent: string
-  pin: string
-  files: Readonly<{ parent: number; pin: number }>
-}>
-
-type SettledGitlink = Readonly<{
-  path: string
-  from: string
-  to: string
-  /**
-   * `kept-behind` is a NESTED pin the planner classified and deliberately left
-   * alone: behind its own main, recorded inside its parent component's commit,
-   * which a root merge does not rewrite (24454 row 4). It is neither a
-   * publication nor a refusal, so it is logged like any other settle row and
-   * never reaches `publishing`.
-   *
-   * It is the NORMAL state for km/apps/maddoc, not a rare one -- maddoc main
-   * moves independently of the pin km records -- so refusing it would refuse
-   * every km change whose maddoc pin had not caught up.
-   */
-  /**
-   * `merged` is a pin the MERGE composed (24951): the change's pin and the
-   * component main the root records had diverged, they changed disjoint files,
-   * and git-super created the two-parent commit carrying both. It publishes
-   * exactly as `kept-ahead` does, because the component main tip is that
-   * commit's first parent, so advancing main to it is a fast-forward.
-   */
-  state: "raised" | "kept-ahead" | "kept-behind" | "as-written" | "left-off-main" | "merged" | "not-run"
-  /** Present on a `merged` row and on no other. */
-  composition?: SettledComposition
-}>
-
-/**
- * One nested child seen while git-super descended into an Ahead parent.
- *
- * An EQUAL child emits no settle row -- it is recorded as it stands, neither
- * published nor refused -- and Equal is the NORMAL state for a nested pin. So
- * without this, the commonest nested outcome is indistinguishable in the journal
- * from a walk that never ran (24454 row 2).
- */
-type SuperMergeDescentChild = Readonly<{
-  path: string
-  target: string
-  state: "equal" | "kept-ahead" | "kept-behind" | "as-written" | "left-off-main"
-}>
-
-/** git-super's descent into one Ahead parent, and everything it classified there. */
-type SuperMergeDescent = Readonly<{
-  parent: string
-  parentTarget: string
-  children: readonly SuperMergeDescentChild[]
-}>
-
-type SuperMergeResult = Readonly<{
-  state: "updated" | "unchanged" | "failed" | "unknown"
-  partial: boolean
-  commit?: string
-  detail?: SuperMergeDetail
-  gitlinks: readonly SettledGitlink[]
-  /** Absent when no parent was Ahead. Optional so an older git-super still parses. */
-  descents?: readonly SuperMergeDescent[]
-}>
-
 type ComposedCandidate =
   | Readonly<{
       kind: "ready"
@@ -1322,12 +1248,17 @@ type ComposedCandidate =
 /** Compose and settle the exact tree a phase will judge, then materialize that final commit before setup or checks run. */
 async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePhase): Promise<ComposedCandidate> {
   const { head } = entry.change
-  const composing = await freshWorktree(
-    run.git,
-    run.options.repo,
-    run.targetSha,
-    join(run.worktrees, "compose", phase, head.slice(0, 12)),
-    {
+  const composed = await verifyCandidate({
+    git: run.git,
+    repo: run.options.repo,
+    targetHead: run.targetSha,
+    head,
+    path: join(run.worktrees, "compose", phase, head.slice(0, 12)),
+    message: mergeMessage(run, entry),
+    env: run.options.env,
+    process: run.options.process,
+    hooksPath: run.hooksPath,
+    worktree: {
       env: run.options.env,
       gitOptions: gitInvocationOptions(run.options, run.log),
       plumbing: run.plumbing,
@@ -1335,22 +1266,14 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
       process: run.options.process,
       selection: run.options.selection,
     },
-  )
-  const result = await superMerge(run, composing.path, head, mergeMessage(run, entry))
-  if (result.state !== "updated" || result.partial) {
-    const detail = result.detail
-    if (detail === undefined) {
-      throw new Error(`git-super merge of ${head} returned ${result.state} without a failure detail`)
-    }
-    return { detail, kind: "failed", worktree: composing }
+  })
+  if (composed.state === "failed") {
+    return { detail: composed.verifying.detail, kind: "failed", worktree: composed.failedWorktree }
   }
-  if (result.commit === undefined) throw new Error(`git-super merge of ${head} reported updated without a commit`)
-  await composing.remove()
-
-  const mergeCommit = result.commit
-  if (mergeCommit === undefined) throw new Error(`git-super merge of ${head} lost its commit after composition`)
+  const { verifying } = composed
+  const mergeCommit = verifying.candidate
   const rootChanges = await readRootChanges(run.git, mergeCommit)
-  for (const settled of result.gitlinks.filter((row) => row.state !== "not-run")) {
+  for (const settled of verifying.gitlinks.filter((row) => row.state !== "not-run")) {
     const composition = settled.composition
     run.log.write({
       branch: entry.change.branch,
@@ -1381,7 +1304,7 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
   // the walk actually ran. `children` is a string list rather than objects
   // because LogRecord fields are scalars or string arrays -- a nested shape
   // cannot be written here, and flattening keeps every row greppable.
-  for (const descent of result.descents ?? []) {
+  for (const descent of verifying.descents ?? []) {
     run.log.write({
       branch: entry.change.branch,
       children: descent.children.map((child) => `${child.path} ${child.state} ${child.target}`),
@@ -1414,194 +1337,11 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     // pushes it, and no second push path exists: `publishChildren` moves the
     // component main after the root merge has passed every check, as it always
     // has.
-    publishing: result.gitlinks.filter((row) => row.state === "kept-ahead" || row.state === "merged"),
+    publishing: verifying.gitlinks.filter((row) => row.state === "kept-ahead" || row.state === "merged"),
   }
 }
 
-/** Run git-super as the ruled command boundary; malformed or truncated JSON is never treated as a verdict. */
-async function superMerge(run: Run, cwd: string, commit: string, message: string): Promise<SuperMergeResult> {
-  const execution = await gitSuperExecution(run, cwd, ["merge", commit, "-m", message])
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(execution.stdout)
-  } catch (error) {
-    throw new Error(
-      `git-super merge exited ${String(execution.exitCode)} without readable JSON: ${execution.stderr.trim() || execution.stdout.trim()}`,
-      { cause: error },
-    )
-  }
-  const result = readSuperMergeResult(parsed)
-  if (execution.exitCode === 0 && result.state === "updated" && !result.partial) return result
-  if ((execution.exitCode === 1 || execution.exitCode === 2) && result.detail !== undefined) return result
-  throw new Error(
-    `git-super merge exit/result disagreement: exit=${String(execution.exitCode)} state=${result.state} partial=${String(result.partial)}`,
-  )
-}
-
-async function gitSuperExecution(
-  run: Run,
-  cwd: string,
-  argv: readonly string[],
-): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
-  const owned = run.options.process === undefined
-  const process =
-    run.options.process ?? createProcess({ cwd, env: gitEnvironment(run.options.env ?? globalThis.process.env) })
-  try {
-    const execution = await process.run({
-      argv: ["git", "-c", `core.hooksPath=${run.hooksPath}`, "super", "--json", ...argv],
-      cwd,
-      env: gitEnvironment(run.options.env ?? globalThis.process.env),
-    })
-    if (
-      execution.timedOut ||
-      execution.stalled === true ||
-      execution.signal !== null ||
-      execution.sweepFailure !== undefined ||
-      execution.escapedDescendant === true
-    ) {
-      throw new Error(
-        `git-super ${argv[0] ?? "command"} did not settle normally: exit=${String(execution.exitCode)} signal=${execution.signal ?? "none"} timedOut=${String(execution.timedOut)} stalled=${String(execution.stalled === true)}${execution.sweepFailure === undefined ? "" : `; ${execution.sweepFailure}`}`,
-      )
-    }
-    if (execution.outputTruncation !== undefined) {
-      throw new Error(
-        `git-super ${argv[0] ?? "command"} output was truncated: ${JSON.stringify(execution.outputTruncation)}`,
-      )
-    }
-    return execution
-  } finally {
-    if (owned) await process.close()
-  }
-}
-
-/**
- * Parse git-super's merge JSON. Exported because it is a pure reader with no
- * coverage of its own until now, and the only other way to exercise it is a
- * full queue round -- which is what let the descents field reach production
- * unparsed. Same shape as the other readers this package exports.
- */
-export function readSuperMergeResult(value: unknown): SuperMergeResult {
-  if (typeof value !== "object" || value === null) throw new Error("git-super merge JSON is not an object")
-  const found = value as Record<string, unknown>
-  if (!new Set(["updated", "unchanged", "failed", "unknown"]).has(String(found.state))) {
-    throw new Error(`git-super merge JSON has invalid state ${String(found.state)}`)
-  }
-  if (typeof found.partial !== "boolean") throw new Error("git-super merge JSON has no boolean partial field")
-  if (!Array.isArray(found.gitlinks)) throw new Error("git-super merge JSON has no gitlinks array")
-  const gitlinks = found.gitlinks.map((row, index): SettledGitlink => {
-    if (typeof row !== "object" || row === null) {
-      throw new Error(`git-super merge gitlink ${String(index)} is not an object`)
-    }
-    const entry = row as Record<string, unknown>
-    if (
-      typeof entry.path !== "string" ||
-      typeof entry.from !== "string" ||
-      typeof entry.to !== "string" ||
-      !new Set(["raised", "kept-ahead", "kept-behind", "as-written", "left-off-main", "merged", "not-run"]).has(
-        String(entry.state),
-      )
-    ) {
-      throw new Error(`git-super merge gitlink ${String(index)} is incomplete`)
-    }
-    // A `merged` row without its composition is a producer defect, not an older
-    // git-super: the word and the evidence were added together, and the journal
-    // this row feeds is the whole reason the word exists.
-    if (entry.state === "merged") {
-      return { ...entry, composition: readSuperMergeComposition(entry.composition, index) } as SettledGitlink
-    }
-    return entry as SettledGitlink
-  })
-  const detail = found.detail === undefined ? undefined : readSuperMergeDetail(found.detail)
-  // ABSENT MEANS NONE, MALFORMED MEANS THROW -- the same contract the gitlinks
-  // array gets. Absent is the normal case for a round with no Ahead parent and
-  // for any git-super older than the field, so it cannot be an error; but a
-  // present-and-wrong row is a producer defect and swallowing it would leave the
-  // journal quietly incomplete, which is the exact failure this row exists for.
-  const descents = found.descents === undefined ? undefined : readSuperMergeDescents(found.descents)
-  return {
-    state: found.state as SuperMergeResult["state"],
-    partial: found.partial,
-    ...(typeof found.commit === "string" ? { commit: found.commit } : {}),
-    ...(detail === undefined ? {} : { detail }),
-    gitlinks,
-    ...(descents === undefined ? {} : { descents }),
-  }
-}
-
-function readSuperMergeComposition(value: unknown, index: number): SettledComposition {
-  if (typeof value !== "object" || value === null) {
-    throw new Error(`git-super merge gitlink ${String(index)} is merged without a composition`)
-  }
-  const found = value as Record<string, unknown>
-  const files = found.files as Record<string, unknown> | undefined
-  if (
-    typeof found.base !== "string" ||
-    typeof found.parent !== "string" ||
-    typeof found.pin !== "string" ||
-    typeof files !== "object" ||
-    files === null ||
-    typeof files.parent !== "number" ||
-    typeof files.pin !== "number"
-  ) {
-    throw new Error(`git-super merge gitlink ${String(index)} has an incomplete composition`)
-  }
-  return {
-    base: found.base,
-    files: { parent: files.parent, pin: files.pin },
-    parent: found.parent,
-    pin: found.pin,
-  }
-}
-
-function readSuperMergeDescents(value: unknown): readonly SuperMergeDescent[] {
-  if (!Array.isArray(value)) throw new Error("git-super merge descents is not an array")
-  return value.map((row, index): SuperMergeDescent => {
-    if (typeof row !== "object" || row === null) {
-      throw new Error(`git-super merge descent ${String(index)} is not an object`)
-    }
-    const entry = row as Record<string, unknown>
-    if (typeof entry.parent !== "string" || typeof entry.parentTarget !== "string") {
-      throw new Error(`git-super merge descent ${String(index)} is incomplete`)
-    }
-    if (!Array.isArray(entry.children)) {
-      throw new Error(`git-super merge descent ${String(index)} has no children array`)
-    }
-    const children = entry.children.map((child, childIndex): SuperMergeDescentChild => {
-      if (typeof child !== "object" || child === null) {
-        throw new Error(`git-super merge descent ${String(index)} child ${String(childIndex)} is not an object`)
-      }
-      const found = child as Record<string, unknown>
-      if (
-        typeof found.path !== "string" ||
-        typeof found.target !== "string" ||
-        !new Set(["equal", "kept-ahead", "kept-behind", "as-written", "left-off-main"]).has(String(found.state))
-      ) {
-        throw new Error(`git-super merge descent ${String(index)} child ${String(childIndex)} is incomplete`)
-      }
-      return found as SuperMergeDescentChild
-    })
-    // An EMPTY children array is meaningful, not a degenerate row: it says the
-    // walk descended into this parent and found no nested gitlink. Dropping it
-    // would erase the difference between that and never descending at all.
-    return { parent: entry.parent, parentTarget: entry.parentTarget, children }
-  })
-}
-
-function readSuperMergeDetail(value: unknown): SuperMergeDetail {
-  if (typeof value !== "object" || value === null) throw new Error("git-super merge detail is not an object")
-  const detail = value as Record<string, unknown>
-  if (typeof detail.code !== "string" || typeof detail.phase !== "string" || typeof detail.message !== "string") {
-    throw new Error("git-super merge detail has no code, phase, or message")
-  }
-  return {
-    code: detail.code,
-    phase: detail.phase,
-    message: detail.message,
-    ...(typeof detail.subject === "string" ? { subject: detail.subject } : {}),
-    ...(typeof detail.next === "string" ? { next: detail.next } : {}),
-  }
-}
-
+/** The queue's merge commit retains its change and actor in Git history. */
 function mergeMessage(run: Run, entry: QueueEntry): string {
   const { branch, head } = entry.change
   const tip = tipOf(entry.change)
@@ -2053,12 +1793,11 @@ async function publishChildren(
     })
     return { kind: "kept", ended: "checked" }
   }
-  const execution = await gitSuperExecution(run, cwd, [
-    "push",
-    "--recurse-submodules=only",
-    target.remote,
-    `${mergeCommit}:refs/heads/${target.branch}`,
-  ])
+  const execution = await gitSuperExecution(
+    { process: run.options.process, env: run.options.env, hooksPath: run.hooksPath },
+    cwd,
+    ["push", "--recurse-submodules=only", target.remote, `${mergeCommit}:refs/heads/${target.branch}`],
+  )
   let published: GitSuperPushResult
   try {
     published = readGitSuperPushResult(JSON.parse(execution.stdout))
@@ -2748,7 +2487,7 @@ async function runPhase(
     if (isStopWindowClosed(run.options)) {
       run.log.write({
         kind: "observation",
-        why: `stop time reached (${new Date(run.options.stopAtMs!).toISOString()}); stopping starting new checks for ${entry.change.branch}`,
+        why: `stop time reached (${new Date(run.options.stopAtMs).toISOString()}); stopping starting new checks for ${entry.change.branch}`,
       })
       break
     }

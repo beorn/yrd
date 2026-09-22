@@ -205,7 +205,6 @@ export type CoreQueueCommand =
       submitter: string
       issue?: string
       dryRun?: boolean
-      rebase?: boolean
     }>
   | Readonly<{ command: "pause"; by: string; reason: string }>
   | Readonly<{ command: "resume"; by: string; reason?: string }>
@@ -216,7 +215,6 @@ export type CoreQueueCommand =
       branch: string
       submitter: string
       issue?: string
-      rebase?: boolean
       /**
        * The author's checkout, which a change that is not open is submitted
        * from; absent when the command runs outside a clone, which can merge
@@ -711,22 +709,20 @@ export async function coreQueueCommand(
         submitter: request.submitter,
         target: config.target,
         ...(request.issue === undefined ? {} : { issue: request.issue }),
-        ...(request.rebase === true ? { rebase: true } : {}),
       }
       // A stopped line ACCEPTS the submit (the andon, operator 2026-09-16): the
       // stop is echoed — who, why, and what lifts it — and never refused on.
       if (request.dryRun === true) {
         const inspected = await inspectSubmit(git, config.target.remote, submission)
-        const { head, targetHead, rebaseRequired } = inspected
+        const { head, targetHead, verifying } = inspected
         const issue = inspected.issue
         emit(
           io,
           options.json,
           {
-            ...(rebaseRequired
-              ? { branch, headBeforeRebase: head, rebaseRequired }
-              : { change: changeName({ branch, head }) }),
+            change: changeName({ branch, head }),
             dryRun: true,
+            verifying,
             submitter: request.submitter,
             target: targetName(config.target),
             targetHead,
@@ -734,9 +730,7 @@ export async function coreQueueCommand(
             stopped: stopFact(inspected.stop),
             ...issueOutput(io, branch, issue),
           },
-          (rebaseRequired
-            ? `would rebase ${branch} at ${head} onto ${targetHead}, then open its new head (unknown until rebase)`
-            : `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}`) +
+          `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}` +
             `${issue === undefined ? "" : ` (issue ${issue.issue})`}; nothing was pushed; ${freshnessLine(targetHead)}`,
         )
         echoStop(inspected.stop)
@@ -833,7 +827,6 @@ export async function coreQueueCommand(
           submitter: request.submitter,
           target: { branch: config.target.branch, remote },
           ...(request.issue === undefined ? {} : { issue: request.issue }),
-          ...(request.rebase === true ? { rebase: true } : {}),
         })
         // The stop the submit was accepted under is not echoed here: this
         // command does not wait for it to lift, and the stop that still stands

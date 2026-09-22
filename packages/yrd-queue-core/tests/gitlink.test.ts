@@ -210,9 +210,7 @@ async function submitMissingGitlink(w: World, branch: string, missing: string): 
   await w.git(["read-tree", "main"])
   await expect(
     submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } }),
-  ).rejects.toThrow(
-    new RegExp(`submodule at ${missing} is a gitlink this change moved to a commit neither .* holds`, "u"),
-  )
+  ).rejects.toThrow(new RegExp(`submodule.*${missing}`, "u"))
   // Nothing was opened by the refused submit; the change below is opened by hand.
   expect((await w.git(["ls-remote", "--refs", "origin", `refs/heads/${branch}`])).trim()).toBe("")
   const change = { branch, head }
@@ -374,15 +372,11 @@ describe("settling gitlinks", () => {
     expect(options.env?.PATH?.split(":")[0]).toBe(gitSuperBin)
   })
 
-  // 24463: the same defect D1 used to catch at merge is refused at submit, with
-  // the merge-and-pin cure, before a queue cycle.
+  // The shared verifier applies git-super's pin verdict before opening a change.
   it("yrd submit refuses a gitlink that diverged from refs/heads/main", async () => {
     const w = await world()
     await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(
-      new RegExp(
-        `submodule pin ${w.offMain} has diverged from refs/heads/main at ${w.main}\\. Merge submodule's current main into task/off`,
-        "u",
-      ),
+      new RegExp(`gitlink-off-main.*${w.offMain}.*${w.main}`, "u"),
     )
   })
 
@@ -398,7 +392,7 @@ describe("settling gitlinks", () => {
   // merge-time failure remains for a change opened by hand.
   it("an off-main gitlink fails back to its submitter while the next change proceeds", async () => {
     const w = await world()
-    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/diverged from refs\/heads\/main/u)
+    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/gitlink-off-main/u)
     await submitFile(w, "task/next")
 
     const outcome = await queueRun(await w.options())
@@ -438,7 +432,7 @@ describe("settling gitlinks", () => {
   // is the submitter's, not a queue incident).
   it("an off-main pin never opens a change, so readers see no incident", async () => {
     const w = await world()
-    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/diverged from refs\/heads\/main/u)
+    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/gitlink-off-main/u)
     const head = await submitFile(w, "task/file")
 
     const outcome = await queueRun(await w.options())
@@ -1263,7 +1257,7 @@ describe("settling gitlinks", () => {
    * writer" -- so an unclassified one would have stopped the line for the fleet
    * instead of going back to the one person who can re-record the gitlink.
    */
-  it("fails the change on a nested pin LOWERED below the parent's own main, never stuck", async () => {
+  it("refuses a nested pin LOWERED below the parent's own main before opening a change", async () => {
     const w = await world()
     const nested = await addNestedSubmodule(w)
     // The submodule's main ADVANCES its nested pin, so the candidate below --
@@ -1296,27 +1290,18 @@ describe("settling gitlinks", () => {
     await w.git(["commit", "--quiet", "-m", "task/nested-lowered: carry the lowered nested pin"])
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", {
-      branch: "task/nested-lowered",
-      submitter: "@dev/2",
-      target: { branch: "main", remote: "origin" },
-    })
-
-    const outcome = await queueRun(await w.options())
-
-    // FAILED, NOT STUCK. exitCode 1 is an attributed candidate failure; 2 is the
-    // queue going down.
-    expect(outcome.exitCode, "a submitter's lowering must not stop the queue").toBe(1)
-    expect(outcome.merged).toEqual([])
-    const records = await readRecords(
-      w.git,
-      await remoteTip(w.git, changeRef("main", { branch: "task/nested-lowered", head })),
-    )
-    expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
-    const failed = records.find((record) => record.kind === "failed")
-    expect(trailer(failed!, "Reason")).toBe("nested-pin-lowered")
-    // And the record tells the author what to do, rather than naming a queue fault.
-    expect(failed?.subject ?? "").toContain("apps/leaf")
+    await expect(
+      submit(w.git, "origin", {
+        branch: "task/nested-lowered",
+        submitter: "@dev/2",
+        target: { branch: "main", remote: "origin" },
+      }),
+    ).rejects.toThrow(/nested-pin-lowered.*submodule\/apps\/leaf/u)
+    expect(
+      (
+        await w.git(["ls-remote", "--refs", "origin", changeRef("main", { branch: "task/nested-lowered", head })])
+      ).trim(),
+    ).toBe("")
   })
 
   /**

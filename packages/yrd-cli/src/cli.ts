@@ -46,14 +46,14 @@ type GlobalOptions = YrdObservabilityFlags
 
 type SubmitOptions = Readonly<{
   json?: boolean
+  submitter?: string
   notify?: string
   issue?: string
   dryRun?: boolean
-  rebase?: boolean
   queue?: string
 }>
 type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string }>
-type MergeOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; rebase?: boolean; queue?: string }>
+type MergeOptions = Readonly<{ json?: boolean; submitter?: string; notify?: string; issue?: string; queue?: string }>
 
 // Only queue actions load the runtime identity fence. Help and --version must
 // not perform its Git reads (version owns its own bounded source diagnostic).
@@ -71,6 +71,7 @@ const queueHealthCommand = async (workdir: string, io: YrdCliIO): Promise<YrdCli
 }
 
 const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
+const SUBMITTER_HELP = `the agent submitting this change, who hears its result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP =
   "the issue, checked against the branch's first Refs/Resolves binding; unbound legacy name fallback is reported"
 const DRY_RUN_HELP = "print the change this would open and push nothing"
@@ -81,14 +82,14 @@ const SUBMIT_HELP: [string, string][] = [
     "1. Inspect",
     "read this branch and fetch the configured target's advertised commit objects without pulling or integrating; refuse the target branch; a stopped line still accepts the change, and says who stopped it and what lifts it",
   ],
-  ["2. Validate", "require shared history and the captured target in this branch; refuse stale branches by default"],
+  ["2. Validate", "require shared history, then verify the submitted commit against the current target"],
   [
-    "3. Rebase if requested",
-    "--rebase updates a stale, clean, checked-out branch; it never auto-stashes or updates other branch refs; conflicts stop before a change opens",
+    "3. Compose",
+    "git-super merges the submitted commit onto the observed target and settles gitlinks; conflicts stop before a change opens",
   ],
   [
     "4. Publish",
-    "record the exact resulting commit after any rebase; atomically push that commit as the branch head and its opened record with leases against observed remote refs",
+    "keep the submitted commit unchanged; atomically push that commit as the branch head and its opened record with leases against observed remote refs",
   ],
   ["5. Return", "the change is queued; checks and the merge run later, and the queue revalidates at merge"],
 ]
@@ -125,6 +126,20 @@ export function resolveSubmitter(declared: string | undefined, env: NodeJS.Proce
   if (named !== undefined && named !== "") return named
   const launched = env[DEFAULT_SUBMITTER_ENV]?.trim()
   return launched === undefined || launched === "" ? "unknown" : launched
+}
+
+function submitterOption(
+  options: Pick<SubmitOptions, "submitter" | "notify">,
+  env: NodeJS.ProcessEnv,
+  io: YrdCliIO,
+): string {
+  if (options.notify !== undefined) {
+    io.stderr("yrd: `--notify` is now `--submitter`\n")
+    if (options.submitter !== undefined && options.submitter !== options.notify) {
+      throw new Error("--submitter and --notify name different submitters; use one value")
+    }
+  }
+  return resolveSubmitter(options.submitter ?? options.notify, env)
 }
 
 function buildProgram(
@@ -199,11 +214,10 @@ function buildProgram(
       io,
       {
         command: "submit",
-        submitter: resolveSubmitter(options.notify, env),
+        submitter: submitterOption(options, env, io),
         ...(branch === undefined ? {} : { branch }),
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.dryRun === true ? { dryRun: true } : {}),
-        ...(options.rebase === true ? { rebase: true } : {}),
       },
       {
         json: options.json,
@@ -224,15 +238,15 @@ function buildProgram(
     .command("submit [branch]")
     .description("push the branch and open its change; defaults to the branch checked out here")
     .option("--json", "emit stable JSON")
+    .option("--submitter <agent>", SUBMITTER_HELP)
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
     .option("--queue <value>", QUEUE_HELP)
-    .option("--rebase", "rebase this clean, checked-out branch onto the captured target before submitting")
     .addHelpSection("On submit:", SUBMIT_HELP)
     .addHelpSection(
       "Before submitting:",
-      "Commit your changes and update your own branch with Git. A separate git push or git super push is optional and does not queue a change. --dry-run previews admission; --dry-run --rebase describes the rewrite without making it.",
+      "Commit your changes on your own branch. A separate git push or git super push is optional and does not queue a change. --dry-run previews admission and pushes nothing.",
     )
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
   queue
@@ -639,15 +653,15 @@ function buildProgram(
     .command("submit [branch]")
     .description("push the branch and open its change")
     .option("--json", "emit stable JSON")
+    .option("--submitter <agent>", SUBMITTER_HELP)
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
     .option("--queue <value>", QUEUE_HELP)
-    .option("--rebase", "rebase this clean, checked-out branch onto the captured target before submitting")
     .addHelpSection("On submit:", SUBMIT_HELP)
     .addHelpSection(
       "Before submitting:",
-      "Commit your changes and update your own branch with Git. A separate git push or git super push is optional and does not queue a change. --dry-run previews admission; --dry-run --rebase describes the rewrite without making it.",
+      "Commit your changes on your own branch. A separate git push or git super push is optional and does not queue a change. --dry-run previews admission and pushes nothing.",
     )
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
 
@@ -665,9 +679,8 @@ function buildProgram(
         {
           branch,
           command: "merge",
-          submitter: resolveSubmitter(options.notify, env),
+          submitter: submitterOption(options, env, io),
           ...(options.issue === undefined ? {} : { issue: options.issue }),
-          ...(options.rebase === true ? { rebase: true } : {}),
           ...(author === undefined
             ? {}
             : {
@@ -697,10 +710,10 @@ function buildProgram(
         "line, then run its checks and its merge in this process",
     )
     .option("--json", "emit stable JSON")
+    .option("--submitter <agent>", SUBMITTER_HELP)
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--queue <value>", QUEUE_HELP)
-    .option("--rebase", "rebase this clean, checked-out branch onto the captured target before submitting")
     .addHelpSection("On merge:", MERGE_HELP)
     .action(async (branch, options) => queueMerge(branch as string, options as MergeOptions))
 

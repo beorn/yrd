@@ -58,6 +58,7 @@ import type {
   QueueRunOutcome,
 } from "../src/index.ts"
 import { resolveGitSelection } from "../src/git.ts"
+import * as verifying from "../src/verifying.ts"
 
 const roots: string[] = []
 // The real queue child needs GitSuper even when the worker's PATH is sealed.
@@ -248,6 +249,23 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
   })
   return head
 }
+
+/** @failure Submit and the queue drift to different composition paths.
+ * @level l2 @consumer the submitter and the queue runner
+ * Separate behaviour tests cannot prove both entry points invoke one verifier.
+ */
+it("submit and both queue phases call the same git-only verifier", async () => {
+  const w = await world()
+  using calls = vi.spyOn(verifying, "verifyCandidate")
+  const head = await submitCommit(w, "task/shared-verifier", "one.txt")
+  expect(calls).toHaveBeenCalledTimes(1)
+  expect(calls.mock.calls[0]?.[0]).toMatchObject({ head, targetHead: w.target })
+
+  const outcome = await queueRun(await w.options({ exit: 0 }))
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/shared-verifier"] })
+  expect(calls).toHaveBeenCalledTimes(3)
+  expect(calls.mock.calls.slice(1).map(([options]) => options.head)).toEqual([head, head])
+})
 
 async function remoteTarget(w: Pick<World, "git">): Promise<string> {
   const target = (await w.git(["ls-remote", "--refs", "origin", "refs/heads/main"])).trim().split(/\s+/u)[0]
@@ -4562,8 +4580,9 @@ describe("a gitlink the component's remote does not hold", () => {
 
   it("fails the change and bills its submitter when the remote answers and lacks the pin", async () => {
     const w = await world()
-    const { child, unpushed } = await withUnpushedGitlink(w)
     const head = await submitCommit(w, "task/one", "one.txt")
+    // The change was accepted before target main gained this unavailable pin.
+    const { child, unpushed } = await withUnpushedGitlink(w)
 
     const outcome = await queueRun(await w.options({ exit: 0 }))
 
@@ -4587,8 +4606,8 @@ describe("a gitlink the component's remote does not hold", () => {
 
   it("sticks the change on the queue when the remote cannot be reached either", async () => {
     const w = await world()
-    const { child } = await withUnpushedGitlink(w)
     const head = await submitCommit(w, "task/one", "one.txt")
+    const { child } = await withUnpushedGitlink(w)
     // Nothing answers, so nothing can be attributed, so nobody is billed.
     rmSync(child, { force: true, recursive: true })
 

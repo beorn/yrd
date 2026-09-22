@@ -165,10 +165,10 @@ describe("`yrd list` is `yrd queue list`", () => {
       const explanation = steps.replace(/\s+/gu, " ")
       for (const meaning of [
         "without pulling or integrating",
-        "stale branches by default",
-        "--rebase",
-        "never auto-stashes or updates other branch refs",
-        "exact resulting commit after any rebase",
+        "verify the submitted commit against the current target",
+        "git-super merges the submitted commit",
+        "settles gitlinks",
+        "keep the submitted commit unchanged",
         "atomically push",
         "leases",
         "queued; checks and the merge run later",
@@ -176,5 +176,26 @@ describe("`yrd list` is `yrd queue list`", () => {
         expect(explanation, submitted.report).toContain(meaning)
       }
     }
+  })
+
+  /** @failure The renamed flag changes the recorded actor or leaves an undocumented rebase path.
+   * @level l2 @consumer agents submitting a change
+   * The help assertions above cannot prove the flag reaches the command result.
+   */
+  it("accepts --submitter and reports the one-release --notify alias", async () => {
+    const work = await queueWithOneChange()
+    const canonical = await yrd(work, "submit", "task/one", "--dry-run", "--json", "--submitter", "@dev/7")
+    expect(canonical.exitCode, canonical.report).toBe(0)
+    expect(JSON.parse(canonical.stdout)).toMatchObject({ submitter: "@dev/7", verifying: { state: "ready" } })
+    expect(canonical.stdout).not.toContain("rebaseRequired")
+
+    const alias = await yrd(work, "submit", "task/one", "--dry-run", "--json", "--notify", "@dev/7")
+    expect(alias.exitCode, alias.report).toBe(0)
+    expect(alias.stderr).toContain("`--notify` is now `--submitter`")
+    expect(JSON.parse(alias.stdout)).toMatchObject({ submitter: "@dev/7", verifying: { state: "ready" } })
+
+    const help = await yrd(work, "submit", "--help")
+    expect(help.stdout).toContain("--submitter <agent>")
+    expect(help.stdout).not.toContain("--rebase")
   })
 })
