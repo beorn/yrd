@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest"
 import type { Event, EventInput } from "gitomic/events"
-import { openEvents } from "gitomic/events"
+import { listRefs, openEvents } from "gitomic/events"
 import { createMemBackend } from "gitomic/mem"
 import { open } from "gitomic"
 import {
@@ -14,6 +14,7 @@ import {
   changesRef,
   createEventQueue,
   decide,
+  dropEventChange,
   evolve,
   initial,
   listChanges,
@@ -180,6 +181,35 @@ describe("ADR-0016 event fold", () => {
 })
 
 describe("the queue-format boundary", () => {
+  it("drops a branch in the same publish as an ending that keeps its last commit", async () => {
+    const store = { repo: "yrd-event-drop", backend: createMemBackend() }
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await createEventQueue("lab", base, store, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/drop" })
+    const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+    await (
+      await openEvents({ ...store, ref: changesRef("lab", "task/drop") })
+    ).append([changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head })], {
+      expect: null,
+    })
+    const last = (await branch.transact(async (map) => map.set("work", "two"), "push after submit")).oid
+    const dropped = await dropEventChange("lab", "task/drop", { by: "@dev/2" }, store)
+    expect((await readStatus("lab", "task/drop", store)).reason).toBe("dropped")
+    expect((await readStatus("lab", "task/drop", store)).commit).toBe(head)
+    expect((await listRefs("refs/heads/task/drop", store)).has("refs/heads/task/drop")).toBe(false)
+    expect((await (await openEvents({ ...store, ref: changesRef("lab", "task/drop") })).events()).at(-1)).toMatchObject(
+      {
+        id: dropped.event,
+        type: "cancelled",
+        links: [last],
+      },
+    )
+    await expect(dropEventChange("lab", "task/drop", { by: "@dev/2" }, store)).rejects.toThrow(
+      /already ended cancelled/,
+    )
+  })
+
   it("writes a runner phase at the selected tip and keeps its candidate, then refuses a stale rival", async () => {
     const store = { repo: "yrd-event-run-writer", backend: createMemBackend() }
     const target = await open({ ...store, ref: "refs/heads/lab" })
