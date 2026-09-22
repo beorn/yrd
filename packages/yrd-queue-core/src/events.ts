@@ -1,7 +1,7 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
 import { chainsUnder, listRefs, openEvents } from "gitomic/events"
 import type { AlsoRef, Event, EventInput } from "gitomic/events"
-import type { GitomicBackend } from "gitomic"
+import type { GitomicBackend, Oid } from "gitomic"
 
 import { queueRefPrefix } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
@@ -323,6 +323,8 @@ export type Dropped = Readonly<{ queue: string; branch: string; head: string; ev
 
 export type EventQueue = Readonly<{
   created: string
+  /** Derived from the created event's kept commit. This is the queue's start, not legacy run.ts's resolved .yrd.yml declaration. */
+  declaration: Oid
   tip: string
   pause?: Readonly<{ id: string; at: Date; reason: string; by: string }>
 }>
@@ -417,11 +419,12 @@ function projectEventQueue(events: readonly Event[], ref: string, repo: string):
     throw new Error(`event queue chain ${ref} in ${repo} exceeds 1024 events; refusing a partial read`)
   }
   let previous: string | undefined
+  let declaration: string | undefined
   let pause: EventQueue["pause"]
   for (const [index, event] of events.entries()) {
     if (index === 0) {
       if (event.type !== "created") throw new Error(`${ref}: first event ${event.id} must be created`)
-      keptCommit(event)
+      declaration = keptCommit(event)
       if (prop(event, EVENT_TRAILERS.queue) !== undefined) {
         throw new Error(`${ref}: created event ${event.id} cannot name a preceding Queue:`)
       }
@@ -466,7 +469,8 @@ function projectEventQueue(events: readonly Event[], ref: string, repo: string):
     previous = event.id
   }
   if (previous === undefined) throw new Error(`missing event queue tip ${ref} in ${repo}`)
-  return { created: first.id, tip: previous, ...(pause === undefined ? {} : { pause }) }
+  if (declaration === undefined) throw new Error(`${ref}: missing declaration commit`)
+  return { created: first.id, declaration, tip: previous, ...(pause === undefined ? {} : { pause }) }
 }
 
 /** One advertisement selects the format. An event queue with no changes is empty. */
