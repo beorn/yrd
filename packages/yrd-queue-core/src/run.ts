@@ -82,6 +82,7 @@ import {
   GitExit,
   gitIn,
   isAncestor,
+  readRemoteCommit,
   type GitObservation,
   type ObservationNotice,
   mergeBase,
@@ -102,7 +103,7 @@ import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } fro
 import { narrowingOf } from "./narrowing.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
-import { queueFormat } from "./events.ts"
+import { queueRef } from "./events.ts"
 import { eventQueueRun } from "./event-run.ts"
 import { composed, type RingOptions } from "./rings.ts"
 import {
@@ -448,9 +449,6 @@ function isStopWindowClosed(options: QueueRunOptions): options is QueueRunOption
 }
 
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
-  if ((await queueFormat({ repo: options.repo, remote: options.target.remote }, options.target.branch)) === "event") {
-    return eventQueueRun(options)
-  }
   await using resources = new AsyncDisposableStack()
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
   // THE JOURNAL OPENS WITH ITS HEADER, before the first journaled Git call and
@@ -483,7 +481,8 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     pid: process.pid,
     target: options.target.branch,
   })
-  const selected = gitIn(options.repo, options.process, options.selection, gitInvocationOptions(options, log))
+  const gitOptions = gitInvocationOptions(options, log)
+  const selected = gitIn(options.repo, options.process, options.selection, gitOptions)
   const git = options.git ?? selected
   const hooksPath = join(options.workdir, "hooks-disabled")
   mkdirSync(hooksPath, { recursive: true })
@@ -492,6 +491,9 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     throw new Error(
       `queue-owned hooks path ${hooksPath} is not empty (${hooks.join(", ")}); remove the named entries, then run yrd queue run`,
     )
+  }
+  if ((await readRemoteCommit(git, options.target.remote, queueRef(options.target.branch))) !== undefined) {
+    return eventQueueRun(options, { git, gitOptions, hooksPath, log, selected })
   }
   const targetSha = options.targetSha
   // One captured-object refusal earns one retry across the whole round. Keep

@@ -1,5 +1,5 @@
 /** Run a change from the event projection, leasing its merge with the queue. */
-import { mkdirSync, readdirSync } from "node:fs"
+import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 
 import {
@@ -18,8 +18,9 @@ import { eventDirectMergeCommits } from "./direct.ts"
 import { listRefs } from "gitomic/events"
 import { checkLogPath, runCheck, type CheckResult } from "./check.ts"
 import { queueName } from "./config.ts"
-import { gitIn, offTheTarget } from "./git.ts"
-import { openLog } from "./log.ts"
+import { offTheTarget, type GitInvocationOptions, type GitRunner } from "./git.ts"
+import type { QueueRunLog } from "./log.ts"
+import type { Git } from "./records.ts"
 import { recordProgramResult, recordProgramStart } from "./program-root.ts"
 import { queueRefPrefix } from "./refs.ts"
 import { remoteUrl } from "./remote.ts"
@@ -27,34 +28,20 @@ import { verifyCandidate } from "./verifying.ts"
 import { prepareWorktree } from "./worktree.ts"
 import type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
 
-export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
+export async function eventQueueRun(
+  options: QueueRunOptions,
+  prepared: Readonly<{
+    git: Git
+    gitOptions: GitInvocationOptions
+    hooksPath: string
+    log: QueueRunLog
+    selected: GitRunner
+  }>,
+): Promise<QueueRunOutcome> {
   assertPlainEventQueueRun(options, options)
   const store = { repo: options.repo, remote: options.target.remote }
   const queue = options.target.branch
-  const log = openLog(join(options.workdir, "logs"), undefined, options.render)
-  log.write({
-    kind: "run",
-    base: options.targetSha,
-    checks: options.checks.map((check) => check.name),
-    config: options.configBlob,
-    gitlink: options.targetSha,
-    pid: process.pid,
-    target: queue,
-  })
-  const gitOptions = {
-    ...(options.env === undefined ? {} : { env: options.env }),
-    openOutput: log.openGitOutput,
-    onInvocation: log.writeGitInvocation,
-  }
-  const git = options.git ?? gitIn(options.repo, options.process, options.selection, gitOptions)
-  const hooksPath = join(options.workdir, "hooks-disabled")
-  mkdirSync(hooksPath, { recursive: true })
-  const hooks = readdirSync(hooksPath).sort()
-  if (hooks.length > 0) {
-    throw new Error(
-      `queue-owned hooks path ${hooksPath} is not empty (${hooks.join(", ")}); remove the named entries, then run yrd queue run`,
-    )
-  }
+  const { git, gitOptions, hooksPath, log, selected } = prepared
 
   const url = await remoteUrl(git, options.target.remote)
   log.write({ kind: "queue", queue: queueName(options.target, url) })
@@ -68,7 +55,6 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
       `event queue ${url}#${queue}: target moved from ${options.targetSha} to ${target}; start a new round`,
     )
   }
-  const selected = gitIn(options.repo, options.process, options.selection, gitOptions)
   const observation = await selected.observe({
     version: 1,
     root: { remote: url, targetRef, targetOid: target },
