@@ -103,6 +103,7 @@ import { narrowingOf } from "./narrowing.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
 import { queueFormat } from "./events.ts"
+import { eventQueueRun } from "./event-run.ts"
 import { composed, type RingOptions } from "./rings.ts"
 import {
   CapturedQueueObjectsUnavailable,
@@ -446,9 +447,7 @@ function isStopWindowClosed(options: QueueRunOptions): options is QueueRunOption
 
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   if ((await queueFormat({ repo: options.repo, remote: options.target.remote }, options.target.branch)) === "event") {
-    throw new Error(
-      `event queue ${options.target.remote}#${options.target.branch} cannot run until #25040's runner is delivered; no event change was judged`,
-    )
+    return eventQueueRun(options)
   }
   await using resources = new AsyncDisposableStack()
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
