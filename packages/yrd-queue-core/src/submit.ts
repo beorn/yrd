@@ -216,8 +216,8 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
   const store = { repo: root, remote }
   const stop =
-    (await queueFormat(request.target.branch, store)) === "event"
-      ? eventPause(await readEventQueue(request.target.branch, store))
+    (await queueFormat(store, request.target.branch)) === "event"
+      ? eventPause(await readEventQueue(store, request.target.branch))
       : (await readStop(git, remote, request.target.branch, targetHead)).stop
   const bound = freshnessLine(targetHead)
   if (await isAncestor(git, head, targetHead)) {
@@ -269,7 +269,7 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
 
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-  if ((await queueFormat(request.target.branch, { repo: root, remote })) === "event") {
+  if ((await queueFormat({ repo: root, remote }, request.target.branch)) === "event") {
     return submitEvent(git, remote, request, root)
   }
   return submitLegacy(git, remote, request)
@@ -280,7 +280,7 @@ async function submitEvent(git: Git, remote: string, request: SubmitRequest, roo
   const head = inspected.head
   const published = await publishMovedGitlinks(git, root, inspected.targetHead, head)
   const store = { repo: root, remote }
-  const queue = await readEventQueue(request.target.branch, store)
+  const queue = await readEventQueue(store, request.target.branch)
   const ref = changesRef(request.target.branch, request.branch)
   const branchRef = `refs/heads/${request.branch}`
   const branchAt = (await listRefs(branchRef, store)).get(branchRef) ?? null
@@ -288,6 +288,7 @@ async function submitEvent(git: Git, remote: string, request: SubmitRequest, roo
     queueTip: queue.tip,
     at: new Date(),
     commit: head,
+    by: request.submitter,
     ...(inspected.issue === undefined ? {} : { issue: inspected.issue.issue }),
     title: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
   })

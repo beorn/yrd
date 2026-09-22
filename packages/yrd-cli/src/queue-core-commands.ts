@@ -29,7 +29,7 @@ import {
   checksOf,
   claimWorktrees,
   directMergeLine,
-  dropEventChange,
+  drop,
   pauseLine,
   eventPause,
   eventRows,
@@ -662,16 +662,16 @@ export async function coreQueueCommand(
   switch (request.command) {
     case "drop": {
       const eventStore = { repo, remote: config.target.remote }
-      if ((await queueFormat(config.target.branch, eventStore)) !== "event") {
-        throw new Error(
-          `drop needs an event queue at ${config.target.remote}#${config.target.branch}; legacy changes use withdraw`,
-        )
-      }
-      const dropped = await dropEventChange(config.target.branch, request.branch, request, eventStore)
+      const dropped = await drop(eventStore, {
+        queue: config.target.branch,
+        branch: request.branch,
+        by: request.by,
+        ...(request.reason === undefined ? {} : { note: request.reason }),
+      })
       emit(
         io,
         options.json,
-        { branch: request.branch, ...dropped },
+        dropped,
         `dropped ${request.branch} at ${dropped.head.slice(0, 12)}; ending ${dropped.event.slice(0, 12)} kept its commit`,
       )
       return 0
@@ -680,8 +680,8 @@ export async function coreQueueCommand(
     case "resume": {
       try {
         const eventStore = { repo, remote: config.target.remote }
-        if ((await queueFormat(config.target.branch, eventStore)) === "event") {
-          const now = await readEventQueue(config.target.branch, eventStore)
+        if ((await queueFormat(eventStore, config.target.branch)) === "event") {
+          const now = await readEventQueue(eventStore, config.target.branch)
           const standing = eventPause(now)
           if (request.command === "pause" && standing !== undefined) {
             throw new QueuePaused(standing, config.target.remote, config.target.branch)
@@ -689,11 +689,12 @@ export async function coreQueueCommand(
           if (request.command === "resume" && standing === undefined) throw new QueueNotPaused()
           const at = new Date()
           const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
-          const id = await writeQueueEvent(
-            config.target.branch,
-            { type: request.command === "pause" ? "paused" : "resumed", reason, by: request.by, at },
-            eventStore,
-          )
+          const id = await writeQueueEvent(eventStore, config.target.branch, {
+            type: request.command === "pause" ? "paused" : "resumed",
+            reason,
+            by: request.by,
+            at,
+          })
           const written: PauseRecord = {
             kind: request.command === "pause" ? "paused" : "resumed",
             sha: id,
@@ -732,7 +733,7 @@ export async function coreQueueCommand(
       }
     }
     case "withdraw": {
-      if ((await queueFormat(config.target.branch, { repo, remote: config.target.remote })) === "event") {
+      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
         io.stderr(
           `yrd: ${config.target.remote}#${config.target.branch} is an event queue; use yrd drop ${request.branch}\n`,
         )
@@ -1376,7 +1377,7 @@ export async function coreQueueCommand(
       > => {
         // The ending instants a notice hides and the drafts are what a person
         // reads; `--json` reads neither, so its document is the one it was.
-        const format = await queueFormat(config.target.branch, { repo, remote: config.target.remote })
+        const format = await queueFormat({ repo, remote: config.target.remote }, config.target.branch)
         const reading =
           format === "event"
             ? await readEventListing(git, declared.config, repo, workdir, declared.oid)
@@ -1893,7 +1894,7 @@ export async function coreQueueCommand(
       return 0
     }
     case "show": {
-      if ((await queueFormat(config.target.branch, { repo, remote: config.target.remote })) === "event") {
+      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
         const reading = await readEventListing(git, config, repo, workdir, captured.oid)
         if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
           io.stderr(`${reading.observation.message}\n`)
@@ -1911,10 +1912,12 @@ export async function coreQueueCommand(
         const events =
           selected === undefined
             ? []
-            : await readChangeEvents(config.target.branch, request.branch, selected.tip as string, {
-                repo,
-                remote: config.target.remote,
-              })
+            : await readChangeEvents(
+                { repo, remote: config.target.remote },
+                config.target.branch,
+                request.branch,
+                selected.tip as string,
+              )
         const scope =
           `Read ${changesRef(config.target.branch, request.branch)} at ${config.target.remote}; ` +
           "draft branches and direct target commits are outside this reading; check results are not projected from events yet."
@@ -2421,7 +2424,7 @@ export async function openEventDetail(
   ) {
     throw new Error(`event detail for ${row.branch} disagrees with the selected table row`)
   }
-  const events = await readChangeEvents(label, row.branch, selected.tip, { repo, remote: config.target.remote })
+  const events = await readChangeEvents({ repo, remote: config.target.remote }, label, row.branch, selected.tip)
   return {
     row,
     run: runOf(row, label, [], item.run?.id ?? row.run),
@@ -2925,8 +2928,8 @@ async function readEventListing(
   }>
 > {
   const store = { repo, remote: config.target.remote }
-  const queue = await readEventQueue(config.target.branch, store)
-  const changes = await listChanges(config.target.branch, store)
+  const queue = await readEventQueue(store, config.target.branch)
+  const changes = await listChanges(store, config.target.branch)
   const projected = eventRows(changes)
   const titles = await subjects(
     git,

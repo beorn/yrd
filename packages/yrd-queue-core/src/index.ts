@@ -40,7 +40,7 @@ export {
   changesRef,
   createEventQueue,
   decide,
-  dropEventChange,
+  drop,
   eventPause,
   evolve,
   initial,
@@ -59,7 +59,9 @@ export type {
   ChangeStatus,
   EventChange,
   EventQueue,
-  EventStore,
+  QueueLocation,
+  DropRequest,
+  Dropped,
   WriteQueueEvent,
 } from "./events.ts"
 export { eventRows } from "./event-table.ts"

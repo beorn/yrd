@@ -22,6 +22,7 @@ export type ChangeEnding = "merged" | "failed" | "cancelled"
 export type CancellationReason = "resubmitted" | "dropped" | "deleted"
 
 export const EVENT_TRAILERS = {
+  by: "By",
   commit: "Commit",
   issue: "Issue",
   queue: "Queue",
@@ -51,6 +52,7 @@ export type EventChange = Readonly<{
   /** The submitted commit of the current or last change. */
   commit?: string
   issue?: string
+  submitter?: string
   since?: Date
   at?: Date
   endedAt?: Date
@@ -71,6 +73,7 @@ export function changeInput(
     at: Date
     commit?: string
     issue?: string
+    by?: string
     reason?: string
     title?: string
     content?: string
@@ -80,6 +83,9 @@ export function changeInput(
   if (Number.isNaN(details.at.getTime())) throw new TypeError("Time: needs a valid instant")
   if ((type === "opened" || type === "verifying") && details.commit === undefined) {
     throw new TypeError(`${type} needs Commit:`)
+  }
+  if (type === "opened" && (details.by === undefined || details.by.trim() === "")) {
+    throw new TypeError("opened needs By:")
   }
   if (details.commit !== undefined && !COMMIT_OID.test(details.commit)) {
     throw new TypeError(`Commit: must name a commit oid, got ${details.commit}`)
@@ -92,6 +98,7 @@ export function changeInput(
   ]
   if (details.commit !== undefined) props.push([EVENT_TRAILERS.commit, details.commit])
   if (details.issue !== undefined) props.push([EVENT_TRAILERS.issue, details.issue])
+  if (details.by !== undefined) props.push([EVENT_TRAILERS.by, details.by])
   if (details.reason !== undefined) props.push([EVENT_TRAILERS.reason, details.reason])
   return {
     type,
@@ -172,11 +179,14 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
   switch (event.type) {
     case "opened": {
       if (isOpen(state.status)) throw new Error(`event ${event.id} opens a second change before the first ends`)
+      const submitter = prop(event, EVENT_TRAILERS.by)
+      if (submitter === undefined || submitter.trim() === "") throw new Error(`event ${event.id} opened needs By:`)
       return {
         ...next,
         status: "queued",
         commit: keptCommit(event),
         issue: prop(event, EVENT_TRAILERS.issue),
+        submitter,
         since: at,
         endedAt: undefined,
         ending: undefined,
@@ -205,8 +215,23 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     }
     case "failed":
     case "cancelled": {
-      if (!isOpen(state.status)) return endingRefusal(state, event)
       const reason = prop(event, "Reason")
+      // Dropping a branch records the last head being deleted even when no
+      // change was open. This is also the first event for an unsubmitted branch.
+      if (!isOpen(state.status) && event.type === "cancelled" && reason === "dropped") {
+        return {
+          ...next,
+          status: "cancelled",
+          commit: keptCommit(event),
+          issue: undefined,
+          submitter: undefined,
+          since: undefined,
+          ending: { kind: "cancelled", id: event.id },
+          endedAt: at,
+          reason,
+        }
+      }
+      if (!isOpen(state.status)) return endingRefusal(state, event)
       if (event.type === "cancelled") {
         if (reason !== "resubmitted" && reason !== "dropped" && reason !== "deleted") {
           throw new Error(`event ${event.id} cancelled needs Reason: resubmitted, dropped or deleted`)
@@ -266,7 +291,9 @@ export function decide(events: readonly Event[], input: EventInput): readonly Ev
   return [input]
 }
 
-export type EventStore = Readonly<{ repo: string; backend?: GitomicBackend; remote?: string }>
+export type QueueLocation = Readonly<{ repo: string; remote: string; backend?: GitomicBackend }>
+export type DropRequest = Readonly<{ queue: string; branch: string; by: string; note?: string }>
+export type Dropped = Readonly<{ queue: string; branch: string; head: string; event: string }>
 
 export type EventQueue = Readonly<{
   created: string
@@ -288,7 +315,7 @@ export function eventPause(queue: EventQueue): PauseRecord | undefined {
 }
 
 /** The first event declares a queue and keeps the commit carrying .yrd.yml. */
-export async function createEventQueue(queue: string, commit: string, store: EventStore, at: Date): Promise<string> {
+export async function createEventQueue(store: QueueLocation, queue: string, commit: string, at: Date): Promise<string> {
   const ref = queueRef(queue)
   if (!COMMIT_OID.test(commit)) throw new TypeError(`Commit: must name a commit oid, got ${commit}`)
   if (Number.isNaN(at.getTime())) throw new TypeError("Time: needs a valid instant")
@@ -313,7 +340,7 @@ export async function createEventQueue(queue: string, commit: string, store: Eve
 }
 
 /** Read and validate the queue declaration and its current operator stop. */
-export async function readEventQueue(queue: string, store: EventStore): Promise<EventQueue> {
+export async function readEventQueue(store: QueueLocation, queue: string): Promise<EventQueue> {
   const ref = queueRef(queue)
   const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
   return projectEventQueue(events, ref, store.repo)
@@ -322,7 +349,7 @@ export async function readEventQueue(queue: string, store: EventStore): Promise<
 export type WriteQueueEvent = Readonly<{ type: "paused" | "resumed"; reason: string; by: string; at: Date }>
 
 /** Append a queue stop under Gitomic's CAS; retries fold the current chain again. */
-export async function writeQueueEvent(queue: string, write: WriteQueueEvent, store: EventStore): Promise<string> {
+export async function writeQueueEvent(store: QueueLocation, queue: string, write: WriteQueueEvent): Promise<string> {
   const ref = queueRef(queue)
   if (write.reason.trim() === "") throw new TypeError(`${write.type} needs Reason:`)
   if (Number.isNaN(write.at.getTime())) throw new TypeError("Time: needs a valid instant")
@@ -417,14 +444,14 @@ function projectEventQueue(events: readonly Event[], ref: string, repo: string):
 }
 
 /** One advertisement selects the format. An event queue with no changes is empty. */
-export async function queueFormat(queue: string, store: EventStore): Promise<"event" | "legacy"> {
+export async function queueFormat(store: QueueLocation, queue: string): Promise<"event" | "legacy"> {
   const refs = await listRefs(queueRefPrefix(queue), store)
   return refs.has(queueRef(queue)) ? "event" : "legacy"
 }
 
 /** Read one existing branch chain; a missing selected chain is a data error. */
-export async function readStatus(queue: string, branch: string, store: EventStore): Promise<EventChange> {
-  await readEventQueue(queue, store)
+export async function readStatus(store: QueueLocation, queue: string, branch: string): Promise<EventChange> {
+  await readEventQueue(store, queue)
   const ref = changesRef(queue, branch)
   const chain = await openEvents({ ...store, ref })
   if ((await chain.head()) === null) throw new Error(`missing event chain ${ref} in ${store.repo}`)
@@ -433,10 +460,10 @@ export async function readStatus(queue: string, branch: string, store: EventStor
 
 /** Read the history selected by a table row; refuse a changed tip instead of showing another snapshot. */
 export async function readChangeEvents(
+  store: QueueLocation,
   queue: string,
   branch: string,
   selectedTip: string,
-  store: EventStore,
 ): Promise<readonly Event[]> {
   const ref = changesRef(queue, branch)
   const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
@@ -449,6 +476,7 @@ export async function readChangeEvents(
 
 /** Write one run decision against the row it judged; a rival tip discards that judgement. */
 export async function appendChangeEvent(
+  store: QueueLocation,
   queue: string,
   branch: string,
   selectedTip: string,
@@ -464,10 +492,9 @@ export async function appendChangeEvent(
     /** A target or branch ref moved in the same CAS publish as this event. */
     also?: readonly AlsoRef[]
   }>,
-  store: EventStore,
 ): Promise<string> {
-  const queueTip = (await readEventQueue(queue, store)).tip
-  const history = await readChangeEvents(queue, branch, selectedTip, store)
+  const queueTip = (await readEventQueue(store, queue)).tip
+  const history = await readChangeEvents(store, queue, branch, selectedTip)
   const input = changeInput(write.type, {
     queueTip,
     at: write.at,
@@ -493,56 +520,61 @@ export async function appendChangeEvent(
   return written
 }
 
-/** End one open change and delete its branch in the same leased publish. */
-export async function dropEventChange(
-  queue: string,
-  branch: string,
-  request: Readonly<{ by: string; reason?: string }>,
-  store: EventStore,
-): Promise<Readonly<{ event: string; head: string }>> {
-  const state = await readStatus(queue, branch, store)
-  if (!isOpen(state.status)) {
-    throw new Error(`${changesRef(queue, branch)} already ended ${state.status} at ${state.tip}; nothing to drop`)
+/** End a branch and delete its name in the same leased publish. */
+export async function drop(store: QueueLocation, request: DropRequest): Promise<Dropped> {
+  const { queue, branch } = request
+  if ((await queueFormat(store, queue)) !== "event") {
+    throw new Error(`drop needs an event queue at ${store.remote}#${queue}; use yrd withdraw for legacy changes`)
   }
-  if (state.tip === undefined) throw new Error(`${changesRef(queue, branch)} has no selected event tip`)
+  const queueTip = (await readEventQueue(store, queue)).tip
+  const ref = changesRef(queue, branch)
+  const chain = await openEvents({ ...store, ref, writer: request.by })
+  const selectedTip = await chain.head()
+  const history = selectedTip === null ? [] : await chain.events({ limit: 1024 })
+  const state = selectedTip === null ? initial : project(history, ref, store.repo)
   const branchRef = `refs/heads/${branch}`
   const head = (await listRefs(branchRef, store)).get(branchRef)
   if (head === undefined) {
+    if (state.ending !== undefined && state.reason === "dropped") {
+      const ending = history.findLast((event) => event.id === state.ending?.id)
+      if (ending === undefined) throw new Error(`${ref} in ${store.repo}: missing dropped ending ${state.ending.id}`)
+      return { queue, branch, event: ending.id, head: keptCommit(ending) }
+    }
+    const disposition = isOpen(state.status)
+      ? `its open change must end cancelled (deleted) by the deleted-branch observer`
+      : state.ending === undefined
+        ? `there is no branch to drop`
+        : `its change already ended ${state.ending.kind} at ${state.ending.id}; there is no branch to drop`
     throw new Error(
-      `${branchRef} in ${store.repo}${store.remote === undefined ? "" : ` at ${store.remote}`} is absent; cannot drop`,
+      `${branchRef} in ${store.repo}${store.remote === undefined ? "" : ` at ${store.remote}`} is absent; ${disposition}`,
     )
   }
-  const written = await appendChangeEvent(
-    queue,
-    branch,
-    state.tip,
-    {
-      type: "cancelled",
-      at: new Date(),
-      commit: head,
-      reason: "dropped",
-      title: `dropped ${branch}`,
-      ...(request.reason === undefined ? {} : { content: request.reason }),
-      writer: request.by,
-      // The event keeps H, so this branch delete only removes its name, not its commit.
-      also: [{ ref: branchRef, expect: head, oid: null }],
-    },
-    store,
-  )
-  const events = await readChangeEvents(queue, branch, written, store)
-  const ending = events.at(-1)
-  if (ending?.id !== written || ending.type !== "cancelled" || keptCommit(ending) !== head) {
-    throw new Error(`${changesRef(queue, branch)} in ${store.repo}: dropped event did not keep ${head}`)
-  }
-  return { event: written, head }
+  const input = changeInput("cancelled", {
+    queueTip,
+    at: new Date(),
+    commit: head,
+    reason: "dropped",
+    by: request.by,
+    title: `dropped ${branch}`,
+    ...(request.note === undefined ? {} : { content: request.note }),
+  })
+  const planned = decide(history, input)
+  const result = await chain.append(planned, {
+    expect: selectedTip,
+    // The event keeps H, so this branch delete only removes its name.
+    also: [{ ref: branchRef, expect: head, oid: null }],
+  })
+  const written = result.events.findLast((event) => event.type === "cancelled")?.id
+  if (written === undefined) throw new Error(`${ref} in ${store.repo}: dropped event was not written`)
+  return { queue, branch, event: written, head }
 }
 
 /** Branch projections for an event queue, with one batched remote fetch and history walk. */
-export async function listChanges(queue: string, store: EventStore): Promise<ReadonlyMap<string, EventChange>> {
-  if ((await queueFormat(queue, store)) !== "event") {
+export async function listChanges(store: QueueLocation, queue: string): Promise<ReadonlyMap<string, EventChange>> {
+  if ((await queueFormat(store, queue)) !== "event") {
     throw new Error(`queue ${queue} in ${store.repo} has no event queue chain`)
   }
-  await readEventQueue(queue, store)
+  await readEventQueue(store, queue)
   const prefix = `${queueRefPrefix(queue)}/changes/`
   const chains = await chainsUnder(prefix, { ...store, limit: 1024 })
   const changes = new Map<string, EventChange>()

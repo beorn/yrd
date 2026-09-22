@@ -91,7 +91,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const git = gitIn(repo)
     const store = { repo, remote: "origin" }
     const targetOid = (await git(["rev-parse", "HEAD"])).trim()
-    const created = await createEventQueue("main", targetOid, store, new Date("2026-09-22T14:00:00.000Z"))
+    const created = await createEventQueue(store, "main", targetOid, new Date("2026-09-22T14:00:00.000Z"))
     const declaration = await readConfig(git, targetOid, { remote: "origin", branch: "main" })
     if (declaration === undefined) throw new Error("fixture target lost .yrd.yml")
     await expect(readListing(git, declaration, repo, targetOid)).rejects.toThrow(/event format/)
@@ -102,10 +102,10 @@ describe("a queue is the selected origin branch carrying config", () => {
     const commit = (await git(["rev-parse", "HEAD"])).trim()
     const chain = await openEvents({ ...store, ref: changesRef("main", "task/event"), writer: "yrd" })
     await chain.append(
-      [changeInput("opened", { queueTip: created, at: new Date("2026-09-22T14:01:00.000Z"), commit })],
+      [changeInput("opened", { queueTip: created, at: new Date("2026-09-22T14:01:00.000Z"), commit, by: "yrd" })],
       { expect: null },
     )
-    expect((await listChanges("main", store)).get("task/event")).toMatchObject({ status: "queued", commit })
+    expect((await listChanges(store, "main")).get("task/event")).toMatchObject({ status: "queued", commit })
     // A queue selected by its queue chain must display the fold's state. The
     // legacy ref reader finds zero changes here and would print an empty list.
     const listed = capture(repo)
@@ -130,7 +130,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await coreQueueCommand(repo, human.io, { command: "show", branch: "task/event" }, { queue: "main" })).toBe(0)
     expect(human.stdout()).toContain("task/event")
     expect(human.stdout()).toContain("opened by yrd")
-    const selected = (await listChanges("main", store)).get("task/event")
+    const selected = (await listChanges(store, "main")).get("task/event")
     if (selected === undefined) throw new Error("fixture event change is missing")
     const row = watchRows(eventRows(new Map([["task/event", selected]])))[0]
     if (row === undefined) throw new Error("fixture event row is missing")
@@ -152,9 +152,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     const git = gitIn(repo)
     const store = { repo, remote: "origin" }
     const created = await createEventQueue(
+      store,
       "main",
       (await git(["rev-parse", "HEAD"])).trim(),
-      store,
       new Date("2026-09-22T14:00:00.000Z"),
     )
     await git(["checkout", "--quiet", "-b", "task/event-submit"])
@@ -168,8 +168,8 @@ describe("a queue is the selected origin branch carrying config", () => {
       submitted.stderr(),
     ).toBe(0)
     expect(JSON.parse(submitted.stdout())).toMatchObject({ branch: "task/event-submit", head })
-    expect((await readEventQueue("main", store)).tip).toBe(created)
-    expect((await listChanges("main", store)).get("task/event-submit")).toMatchObject({
+    expect((await readEventQueue(store, "main")).tip).toBe(created)
+    expect((await listChanges(store, "main")).get("task/event-submit")).toMatchObject({
       status: "queued",
       commit: head,
     })
@@ -200,7 +200,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       dropped.stderr(),
     ).toBe(0)
     expect(JSON.parse(dropped.stdout())).toMatchObject({ branch: "task/event-submit", head })
-    expect((await listChanges("main", store)).get("task/event-submit")).toMatchObject({
+    expect((await listChanges(store, "main")).get("task/event-submit")).toMatchObject({
       status: "cancelled",
       reason: "dropped",
     })
@@ -209,8 +209,16 @@ describe("a queue is the selected origin branch carrying config", () => {
       (await (await openEvents({ ...store, ref: changesRef("main", "task/event-submit") })).events()).at(-1)?.links,
     ).toContain(head)
     const repeated = capture(repo)
-    expect(await runYrdProcess(["bun", "yrd", "drop", "task/event-submit", "--queue", "main"], repeated.io)).toBe(2)
-    expect(repeated.stderr()).toContain("already ended cancelled")
+    expect(await runYrdProcess(["bun", "yrd", "drop", "task/event-submit", "--queue", "main"], repeated.io)).toBe(0)
+    expect(repeated.stdout()).toContain(head.slice(0, 12))
+  })
+
+  it("directs drop on a legacy queue to the existing withdraw command", async () => {
+    const repo = await world("{}\n")
+    const refused = capture(repo)
+    const exit = await runYrdProcess(["bun", "yrd", "drop", "task/example", "--queue", "main"], refused.io)
+    expect(refused.stderr()).toContain("yrd withdraw")
+    expect(exit).toBe(2)
   })
 
   it("pause and resume an event queue on its queue chain without a legacy pause ref", async () => {
@@ -218,7 +226,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const git = gitIn(repo)
     const head = (await git(["rev-parse", "HEAD"])).trim()
     const store = { repo, remote: "origin" }
-    await createEventQueue("main", head, store, new Date("2026-09-22T14:00:00.000Z"))
+    await createEventQueue(store, "main", head, new Date("2026-09-22T14:00:00.000Z"))
     const paused = capture(repo)
     expect(
       await runYrdProcess(
@@ -228,13 +236,13 @@ describe("a queue is the selected origin branch carrying config", () => {
       paused.stderr(),
     ).toBe(0)
     expect(JSON.parse(paused.stdout())).toMatchObject({ kind: "paused", reason: "repair" })
-    expect((await readEventQueue("main", store)).pause?.reason).toBe("repair")
+    expect((await readEventQueue(store, "main")).pause?.reason).toBe("repair")
     const resumed = capture(repo)
     expect(
       await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main", "--json"], resumed.io),
       resumed.stderr(),
     ).toBe(0)
-    expect((await readEventQueue("main", store)).pause).toBeUndefined()
+    expect((await readEventQueue(store, "main")).pause).toBeUndefined()
     expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause"])).toBe("")
   })
 
