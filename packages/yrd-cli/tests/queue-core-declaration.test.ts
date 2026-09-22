@@ -9,7 +9,18 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { changeRef, createEventQueue, gitIn, readEventQueue, readQueue, writePause } from "@yrd/queue-core"
+import {
+  changeInput,
+  changeRef,
+  changesRef,
+  createEventQueue,
+  gitIn,
+  listChanges,
+  readEventQueue,
+  readQueue,
+  writePause,
+} from "@yrd/queue-core"
+import { openEvents } from "gitomic/events"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -50,6 +61,73 @@ async function world(config?: string): Promise<string> {
 }
 
 describe("a queue is the selected origin branch carrying config", () => {
+  it("reads event changes from the remote in one selected format", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = { repo, remote: "origin" }
+    const created = await createEventQueue(
+      "main",
+      (await git(["rev-parse", "HEAD"])).trim(),
+      store,
+      new Date("2026-09-22T14:00:00.000Z"),
+    )
+    await git(["checkout", "--quiet", "-b", "task/event"])
+    writeFileSync(join(repo, "work.txt"), "event work\n")
+    await git(["add", "work.txt"])
+    await git(["commit", "--quiet", "-m", "event work"])
+    const commit = (await git(["rev-parse", "HEAD"])).trim()
+    const chain = await openEvents({ ...store, ref: changesRef("main", "task/event"), writer: "yrd" })
+    await chain.append(
+      [changeInput("opened", { queueTip: created, at: new Date("2026-09-22T14:01:00.000Z"), commit })],
+      { expect: null },
+    )
+    expect((await listChanges("main", store)).get("task/event")).toMatchObject({ status: "queued", commit })
+  })
+
+  it("submits an unpublished branch and its opened event atomically", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = { repo, remote: "origin" }
+    const created = await createEventQueue(
+      "main",
+      (await git(["rev-parse", "HEAD"])).trim(),
+      store,
+      new Date("2026-09-22T14:00:00.000Z"),
+    )
+    await git(["checkout", "--quiet", "-b", "task/event-submit"])
+    writeFileSync(join(repo, "work.txt"), "event submit\n")
+    await git(["add", "work.txt"])
+    await git(["commit", "--quiet", "-m", "event submit"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const submitted = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], submitted.io),
+      submitted.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(submitted.stdout())).toMatchObject({ branch: "task/event-submit", head })
+    expect((await readEventQueue("main", store)).tip).toBe(created)
+    expect((await listChanges("main", store)).get("task/event-submit")).toMatchObject({
+      status: "queued",
+      commit: head,
+    })
+    expect(
+      (await (await openEvents({ ...store, ref: changesRef("main", "task/event-submit") })).events())[0]?.links,
+    ).toContain(head)
+    expect((await git(["ls-remote", "--refs", "origin", "refs/heads/task/event-submit"])).split("\t")[0]).toBe(head)
+    expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/task/event-submit@*"])).toBe("")
+    const retried = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], retried.io),
+      retried.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(retried.stdout())).toMatchObject({ branch: "task/event-submit", head, retry: true })
+    expect(
+      (await (await openEvents({ ...store, ref: changesRef("main", "task/event-submit") })).events()).map(
+        (event) => event.type,
+      ),
+    ).toEqual(["opened", "cancelled", "opened"])
+  })
+
   it("pause and resume an event queue on its queue chain without a legacy pause ref", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
