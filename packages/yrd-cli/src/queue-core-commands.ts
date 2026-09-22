@@ -29,6 +29,9 @@ import {
   claimWorktrees,
   directMergeLine,
   pauseLine,
+  queueFormat,
+  readEventQueue,
+  writeQueueEvent,
   prepareWorktree,
   checkedTree,
   programRootCheck,
@@ -647,6 +650,42 @@ export async function coreQueueCommand(
     case "pause":
     case "resume": {
       try {
+        const eventStore = { repo, remote: config.target.remote }
+        if ((await queueFormat(config.target.branch, eventStore)) === "event") {
+          const now = await readEventQueue(config.target.branch, eventStore)
+          const standing: PauseRecord | undefined =
+            now.pause === undefined
+              ? undefined
+              : {
+                  kind: "paused",
+                  sha: now.pause.id,
+                  at: now.pause.at,
+                  reason: now.pause.reason,
+                  by: now.pause.by,
+                  cause: "operator",
+                }
+          if (request.command === "pause" && standing !== undefined) {
+            throw new QueuePaused(standing, config.target.remote, config.target.branch)
+          }
+          if (request.command === "resume" && standing === undefined) throw new QueueNotPaused()
+          const at = new Date()
+          const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
+          const id = await writeQueueEvent(
+            config.target.branch,
+            { type: request.command === "pause" ? "paused" : "resumed", reason, by: request.by, at },
+            eventStore,
+          )
+          const written: PauseRecord = {
+            kind: request.command === "pause" ? "paused" : "resumed",
+            sha: id,
+            at,
+            reason,
+            by: request.by,
+            cause: "operator",
+          }
+          emit(io, options.json, written, pauseLine(written))
+          return 0
+        }
         // Whether a stop STANDS is the one derivation's answer, never the tip's
         // kind alone: a stuck stop whose change has left the line is over, so a
         // pause may follow it and there is nothing for a resume to end.
