@@ -33,9 +33,10 @@ export function displayState(row: DisplayRow): DisplayState {
   if (row.live !== undefined) return "checking"
   if (row.format === "event") {
     switch (row.state) {
+      case "verifying":
+        return "event-verifying"
       case "draft":
       case "queued":
-      case "verifying":
       case "checking":
       case "merging":
       case "merged":
