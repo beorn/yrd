@@ -147,7 +147,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
   })
 
-  it("submits an unpublished branch and its opened event atomically", async () => {
+  it("submits an unpublished branch, then drops its open change and branch atomically", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
     const store = { repo, remote: "origin" }
@@ -189,6 +189,28 @@ describe("a queue is the selected origin branch carrying config", () => {
         (event) => event.type,
       ),
     ).toEqual(["opened", "cancelled", "opened"])
+    const refusedWithdraw = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "withdraw", "task/event-submit", "--queue", "main"], refusedWithdraw.io),
+    ).toBe(1)
+    expect(refusedWithdraw.stderr()).toContain("use yrd drop")
+    const dropped = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "drop", "task/event-submit", "--queue", "main", "--json"], dropped.io),
+      dropped.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(dropped.stdout())).toMatchObject({ branch: "task/event-submit", head })
+    expect((await listChanges("main", store)).get("task/event-submit")).toMatchObject({
+      status: "cancelled",
+      reason: "dropped",
+    })
+    expect(await git(["ls-remote", "--refs", "origin", "refs/heads/task/event-submit"])).toBe("")
+    expect(
+      (await (await openEvents({ ...store, ref: changesRef("main", "task/event-submit") })).events()).at(-1)?.links,
+    ).toContain(head)
+    const repeated = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "drop", "task/event-submit", "--queue", "main"], repeated.io)).toBe(2)
+    expect(repeated.stderr()).toContain("already ended cancelled")
   })
 
   it("pause and resume an event queue on its queue chain without a legacy pause ref", async () => {

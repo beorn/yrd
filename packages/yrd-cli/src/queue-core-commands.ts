@@ -29,6 +29,7 @@ import {
   checksOf,
   claimWorktrees,
   directMergeLine,
+  dropEventChange,
   pauseLine,
   eventPause,
   eventRows,
@@ -222,6 +223,7 @@ export type CoreQueueCommand =
   | Readonly<{ command: "pause"; by: string; reason: string }>
   | Readonly<{ command: "resume"; by: string; reason?: string }>
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string }>
+  | Readonly<{ command: "drop"; branch: string; by: string; reason?: string }>
   | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
   | Readonly<{
       command: "merge"
@@ -327,6 +329,7 @@ export type CoreQueueCommand =
 /** What each command is called when it has to say it needs a queue. */
 const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   check: "check",
+  drop: "drop",
   pause: "queue pause",
   list: "queue list",
   merge: "merge",
@@ -657,6 +660,22 @@ export async function coreQueueCommand(
   }
 
   switch (request.command) {
+    case "drop": {
+      const eventStore = { repo, remote: config.target.remote }
+      if ((await queueFormat(config.target.branch, eventStore)) !== "event") {
+        throw new Error(
+          `drop needs an event queue at ${config.target.remote}#${config.target.branch}; legacy changes use withdraw`,
+        )
+      }
+      const dropped = await dropEventChange(config.target.branch, request.branch, request, eventStore)
+      emit(
+        io,
+        options.json,
+        { branch: request.branch, ...dropped },
+        `dropped ${request.branch} at ${dropped.head.slice(0, 12)}; ending ${dropped.event.slice(0, 12)} kept its commit`,
+      )
+      return 0
+    }
     case "pause":
     case "resume": {
       try {
@@ -713,6 +732,12 @@ export async function coreQueueCommand(
       }
     }
     case "withdraw": {
+      if ((await queueFormat(config.target.branch, { repo, remote: config.target.remote })) === "event") {
+        io.stderr(
+          `yrd: ${config.target.remote}#${config.target.branch} is an event queue; use yrd drop ${request.branch}\n`,
+        )
+        return 1
+      }
       try {
         const taken = await withdraw(git, config.target.remote, {
           branch: request.branch,

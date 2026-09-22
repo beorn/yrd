@@ -40,6 +40,7 @@ export {
   changesRef,
   createEventQueue,
   decide,
+  dropEventChange,
   eventPause,
   evolve,
   initial,
