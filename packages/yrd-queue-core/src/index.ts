@@ -46,6 +46,7 @@ export {
   listChanges,
   queueFormat,
   queueRef,
+  readChangeEvents,
   readEventQueue,
   readStatus,
   writeQueueEvent,

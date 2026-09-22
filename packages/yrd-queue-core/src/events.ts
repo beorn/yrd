@@ -428,6 +428,22 @@ export async function readStatus(queue: string, branch: string, store: EventStor
   return project(await chain.events({ limit: 1024 }), ref, store.repo)
 }
 
+/** Read the history selected by a table row; refuse a changed tip instead of showing another snapshot. */
+export async function readChangeEvents(
+  queue: string,
+  branch: string,
+  selectedTip: string,
+  store: EventStore,
+): Promise<readonly Event[]> {
+  const ref = changesRef(queue, branch)
+  const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
+  const state = project(events, ref, store.repo)
+  if (state.tip !== selectedTip) {
+    throw new Error(`${ref} moved after the selected reading: expected ${selectedTip}, read ${state.tip}`)
+  }
+  return events
+}
+
 /** Branch projections for an event queue, with one batched remote fetch and history walk. */
 export async function listChanges(queue: string, store: EventStore): Promise<ReadonlyMap<string, EventChange>> {
   if ((await queueFormat(queue, store)) !== "event") {

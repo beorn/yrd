@@ -39,7 +39,15 @@
 import { hyperlink } from "@silvery/ansi"
 import { Box, MarkdownView, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
 import type { ChangeRecord, CheckView, JournalRun, Row } from "@yrd/queue-core"
-import { diffSummary, historyEntries, metadataGroups, metadataKeyWidth, type ChangeCommits } from "./watch-change.ts"
+import type { Event } from "gitomic/events"
+import {
+  diffSummary,
+  eventHistoryEntries,
+  historyEntries,
+  metadataGroups,
+  metadataKeyWidth,
+  type ChangeCommits,
+} from "./watch-change.ts"
 import { useMinute, useNow } from "./watch-clock.ts"
 import {
   CHECK_COLOR,
@@ -81,6 +89,8 @@ export type ChangeDetail = Readonly<{
   checks: readonly CheckPanel[]
   /** The change's own records, for HISTORY; absent when the histories were not read. */
   records?: readonly ChangeRecord[]
+  /** The event chain selected by the table, for event-format HISTORY. */
+  events?: readonly Event[]
   /** The head commit's body, for the Changes tab. */
   body?: string
   /** What git said about the commits past the base. */
@@ -330,7 +340,12 @@ function ChangeBox({
   // History and metadata print `ago` to the minute; the seconds are noise here.
   const now = useMinute()
   const { row } = detail
-  const history = detail.records === undefined ? undefined : historyEntries(detail.records)
+  const history =
+    detail.events === undefined
+      ? detail.records === undefined
+        ? undefined
+        : historyEntries(detail.records)
+      : eventHistoryEntries(detail.events)
   const groups = metadataGroups(row, now, {
     ...(detail.commits === undefined ? {} : { commits: detail.commits }),
     ...(detail.run.id === undefined ? {} : { runId: detail.run.id }),
