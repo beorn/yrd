@@ -12,43 +12,40 @@ import {
   readStatus,
 } from "./events.ts"
 import { eventRows } from "./event-table.ts"
+import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
 import { listRefs } from "gitomic/events"
+import { checkLogPath, runCheck, type CheckResult } from "./check.ts"
 import { queueName } from "./config.ts"
 import { gitIn } from "./git.ts"
 import { openLog } from "./log.ts"
+import { recordProgramResult, recordProgramStart } from "./program-root.ts"
 import { queueRefPrefix } from "./refs.ts"
 import { remoteUrl } from "./remote.ts"
 import { verifyCandidate } from "./verifying.ts"
+import { prepareWorktree } from "./worktree.ts"
 import type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
 
 export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
-  // The first runner slice only admits queues that declare no executable work.
-  // A configured check or notifier must never disappear behind a successful merge.
-  if (options.checks.length > 0 || options.setup !== undefined || (options.notify?.length ?? 0) > 0) {
-    throw new Error(
-      `event queue ${options.target.remote}#${options.target.branch} has checks, setup or notifications; runner execution remains pending in #25040`,
-    )
-  }
+  assertPlainEventQueueRun(options, options)
   const store = { repo: options.repo, remote: options.target.remote }
   const queue = options.target.branch
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
   log.write({
     kind: "run",
     base: options.targetSha,
-    checks: [],
+    checks: options.checks.map((check) => check.name),
     config: options.configBlob,
     gitlink: options.targetSha,
     pid: process.pid,
     target: queue,
   })
-  const git =
-    options.git ??
-    gitIn(options.repo, options.process, options.selection, {
-      ...(options.env === undefined ? {} : { env: options.env }),
-      openOutput: log.openGitOutput,
-      onInvocation: log.writeGitInvocation,
-    })
+  const gitOptions = {
+    ...(options.env === undefined ? {} : { env: options.env }),
+    openOutput: log.openGitOutput,
+    onInvocation: log.writeGitInvocation,
+  }
+  const git = options.git ?? gitIn(options.repo, options.process, options.selection, gitOptions)
   const hooksPath = join(options.workdir, "hooks-disabled")
   mkdirSync(hooksPath, { recursive: true })
   const hooks = readdirSync(hooksPath).sort()
@@ -70,11 +67,7 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
       `event queue ${url}#${queue}: target moved from ${options.targetSha} to ${target}; start a new round`,
     )
   }
-  const selected = gitIn(options.repo, options.process, options.selection, {
-    ...(options.env === undefined ? {} : { env: options.env }),
-    openOutput: log.openGitOutput,
-    onInvocation: log.writeGitInvocation,
-  })
+  const selected = gitIn(options.repo, options.process, options.selection, gitOptions)
   const observation = await selected.observe({
     version: 1,
     root: { remote: url, targetRef, targetOid: target },
@@ -182,6 +175,7 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
     })
   }
   const line = standing === undefined ? open : [standing, ...open.filter((change) => change.branch !== standing.branch)]
+  const failed: string[] = []
   for (const selectedChange of line) {
     const { branch, commit: head } = selectedChange
     let tip = selectedChange.tip
@@ -221,21 +215,106 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
           reason: verified.verifying.detail.message,
         })
         log.write({ kind: "change", branch, head, decision: "failed" })
-        return result(1, [], [branch])
+        failed.push(branch)
+        continue
       }
       const candidate = verified.verifying.candidate
       tip = await appendChangeEvent(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })
-      tip = await appendChangeEvent(store, queue, branch, tip, { type: "checking", at: new Date() })
-      tip = await appendChangeEvent(store, queue, branch, tip, { type: "merging", at: new Date() })
+      const checks = options.checks.filter((check) => (check.on ?? ["merge"]).includes("merge"))
+      const logDir = join(options.workdir, "checks", `${branch}@${head}`, log.id, "attempt-1", "merge")
+      const checkLogs = checks.map((check) => checkLogPath(logDir, check.name))
+      tip = await appendChangeEvent(store, queue, branch, tip, {
+        type: "checking",
+        at: new Date(),
+        ...(checkLogs.length === 0 ? {} : { reason: `merge check logs: ${checkLogs.join(", ")}` }),
+      })
+      const results: CheckResult[] = []
+      if (checks.length > 0) {
+        const worktree = await prepareWorktree(
+          git,
+          options.repo,
+          candidate,
+          join(options.workdir, "worktrees", log.id, `${branch.replaceAll("/", "_")}-checking`),
+          {
+            targetSha: target,
+            populateReference: options.populateReference,
+            selection: options.selection,
+            gitOptions,
+            process: options.process,
+            env: options.env,
+          },
+        )
+        try {
+          const tmpdir = join(options.workdir, "tmp")
+          for (const check of checks) {
+            const start = new Date().toISOString()
+            const about = { branch, head, name: check.name, phase: "merge", start }
+            recordProgramStart({ log }, { ...about, log: checkLogPath(logDir, check.name) })
+            const checked = await runCheck({
+              cwd: worktree.path,
+              tree: worktree.tree,
+              logDir,
+              tmpdir,
+              spec: check,
+              process: options.process,
+              env: options.env,
+              tier: options.tier,
+            })
+            recordProgramResult({ log }, { ...about, end: new Date().toISOString() }, checked)
+            results.push(checked)
+            if (checked.result !== "pass") break
+          }
+        } finally {
+          await worktree.remove()
+        }
+      }
+      const stoppedCheck = results.find((check) => check.result !== "pass")
+      if (stoppedCheck?.result === "fail") {
+        await appendChangeEvent(store, queue, branch, tip, {
+          type: "failed",
+          at: new Date(),
+          reason: `${stoppedCheck.name} failed (exit ${String(stoppedCheck.exit)}; log ${stoppedCheck.log})`,
+        })
+        log.write({
+          kind: "change",
+          branch,
+          head,
+          decision: "failed",
+          reason: `${stoppedCheck.name} exited ${String(stoppedCheck.exit)}`,
+        })
+        failed.push(branch)
+        continue
+      }
+      if (stoppedCheck?.result === "stuck") {
+        await appendChangeEvent(store, queue, branch, tip, {
+          type: "stuck",
+          at: new Date(),
+          reason: `${stoppedCheck.name} could not judge (${stoppedCheck.why ?? `exit ${String(stoppedCheck.exit)}`}; log ${stoppedCheck.log})`,
+        })
+        log.write({ kind: "change", branch, head, decision: "stuck", reason: stoppedCheck.name })
+        return result(2, [], failed, [branch])
+      }
+      if (stoppedCheck?.result === "deferred") {
+        throw new Error(
+          `event queue ${url}#${queue}: check ${stoppedCheck.name} returned deferred (log ${stoppedCheck.log}); #25040 has no deferred event status and @i/10-yrd/25065-event-queues-run-every-check-kind-beyond-plain-merge-checks owns that representation before #25041`,
+        )
+      }
+      const checkReason = checkLogs.length === 0 ? undefined : `merge checks passed; logs: ${checkLogs.join(", ")}`
+      tip = await appendChangeEvent(store, queue, branch, tip, {
+        type: "merging",
+        at: new Date(),
+        ...(checkReason === undefined ? {} : { reason: checkReason }),
+      })
       await appendPublishedMerge(store, queue, branch, tip, {
         at: new Date(),
         commit: candidate,
         targetExpect: target,
         queueTip: queueState.tip,
+        ...(checkReason === undefined ? {} : { reason: checkReason }),
       })
       log.write({ kind: "merge", branch, head, commit: candidate })
       log.write({ kind: "change", branch, head, decision: "merged" })
-      return result(0, [branch], [], [], [], undefined, candidate)
+      return result(failed.length > 0 ? 1 : 0, [branch], failed, [], [], undefined, candidate)
     } catch (error) {
       let current
       try {
@@ -255,5 +334,5 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
       })
     }
   }
-  return result(0)
+  return result(failed.length > 0 ? 1 : 0, [], failed)
 }

@@ -5,6 +5,9 @@ import type { GitomicBackend, Oid } from "gitomic"
 
 import { queueRefPrefix } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
+import { assertPlainEventQueueConfig } from "./event-config.ts"
+import { gitIn, refAt } from "./git.ts"
+import type { QueueConfig } from "./config.ts"
 
 export const CHANGE_STATUSES = [
   "draft",
@@ -346,10 +349,38 @@ export function eventPause(queue: EventQueue): PauseRecord | undefined {
 }
 
 /** The first event declares a queue and keeps the commit carrying .yrd.yml. */
-export async function createEventQueue(store: QueueLocation, queue: string, commit: string, at: Date): Promise<string> {
+export async function createEventQueue(
+  store: QueueLocation,
+  queue: string,
+  commit: string,
+  config: QueueConfig,
+  at: Date,
+): Promise<string> {
   const ref = queueRef(queue)
   if (!COMMIT_OID.test(commit)) throw new TypeError(`Commit: must name a commit oid, got ${commit}`)
   if (Number.isNaN(at.getTime())) throw new TypeError("Time: needs a valid instant")
+  if (config === undefined) {
+    throw new Error(
+      `cannot create event queue ${queue} at ${commit}: the pinned commit has no declared QueueConfig; #25040 does not invent a default`,
+    )
+  }
+  if (config.target.remote !== store.remote || config.target.branch !== queue) {
+    throw new Error(
+      `cannot create event queue ${store.remote}#${queue}: QueueConfig targets ${config.target.remote}#${config.target.branch}`,
+    )
+  }
+  const blob = await refAt(gitIn(store.repo), `${commit}:.yrd.yml`, "blob")
+  if (blob === undefined) {
+    throw new Error(
+      `cannot create event queue ${queue} at ${commit}: the pinned commit has no .yrd.yml; #25040 does not invent a default`,
+    )
+  }
+  if (blob !== config.blob) {
+    throw new Error(
+      `cannot create event queue ${queue} at ${commit}: config blob ${config.blob} does not match ${commit}:.yrd.yml at ${blob}`,
+    )
+  }
+  assertPlainEventQueueConfig(config, "create")
   const result = await (
     await openEvents({ ...store, ref, writer: "yrd" })
   ).append(
@@ -560,7 +591,7 @@ export async function appendPublishedMerge(
   queue: string,
   branch: string,
   selectedTip: string,
-  request: Readonly<{ at: Date; commit: Oid; targetExpect: Oid; queueTip: Oid }>,
+  request: Readonly<{ at: Date; commit: Oid; targetExpect: Oid; queueTip: Oid; reason?: string }>,
 ): Promise<string> {
   if (request.commit === request.targetExpect) {
     throw new TypeError(`published merge needs the target to move from ${request.targetExpect}`)
@@ -569,6 +600,7 @@ export async function appendPublishedMerge(
     type: "merged",
     at: request.at,
     commit: request.commit,
+    ...(request.reason === undefined ? {} : { reason: request.reason }),
     writer: QUEUE_RUN_WRITER,
     also: [
       { ref: `refs/heads/${queue}`, expect: request.targetExpect, oid: request.commit },

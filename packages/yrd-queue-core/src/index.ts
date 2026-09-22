@@ -65,6 +65,8 @@ export type {
   WriteQueueEvent,
 } from "./events.ts"
 export { eventRows } from "./event-table.ts"
+export { assertPlainEventQueueConfig, assertPlainEventQueueRun } from "./event-config.ts"
+export type { EventQueueConfigAction } from "./event-config.ts"
 export {
   appendRecord,
   DIRECT_MERGE,

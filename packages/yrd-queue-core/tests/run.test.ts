@@ -41,6 +41,7 @@ import {
   queueRefPrefix,
   queueRun,
   readEventQueue,
+  readConfig,
   readStatus,
   readRecords,
   refAt,
@@ -234,6 +235,13 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
   }
 }
 
+/** Create the event queue from the exact declaration commit it pins. */
+async function createWorldEventQueue(w: World, commit = w.target, at = new Date()): Promise<string> {
+  const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error(`fixture target ${commit} lost .yrd.yml`)
+  return createEventQueue({ repo: w.work, remote: "origin" }, "main", commit, config, at)
+}
+
 /** Wait for the check to say it has begun, so a mid-check case never rests on a fixed delay. */
 async function checkRunning(w: World): Promise<void> {
   for (let waited = 0; waited < 10_000; waited += 25) {
@@ -289,7 +297,7 @@ async function remoteTarget(w: Pick<World, "git">): Promise<string> {
  */
 it("runs a check-free event change through one atomic merge", async () => {
   const w = await world()
-  await createEventQueue({ repo: w.work, remote: "origin" }, "main", w.target, new Date())
+  await createWorldEventQueue(w)
   const head = await submitCommit(w, "task/event-run", "one.txt")
   const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
 
@@ -309,7 +317,7 @@ it("runs a check-free event change through one atomic merge", async () => {
 it("stops an event queue at a stuck change", async () => {
   const w = await world()
   const store = { repo: w.work, remote: "origin" }
-  await createEventQueue(store, "main", w.target, new Date())
+  await createWorldEventQueue(w)
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
   await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "earlier repair", at: new Date() })
@@ -340,7 +348,7 @@ it("stops an event queue at a stuck change", async () => {
 it("retries a stuck event change after an operator resumes the queue", async () => {
   const w = await world()
   const store = { repo: w.work, remote: "origin" }
-  await createEventQueue(store, "main", w.target, new Date())
+  await createWorldEventQueue(w)
   await submitCommit(w, "task/stuck-first", "one.txt")
   await submitCommit(w, "task/behind", "two.txt")
   const first = await readStatus(store, "main", "task/stuck-first")
@@ -368,7 +376,7 @@ it("retries a stuck event change after an operator resumes the queue", async () 
 it("reverifies an unfinished event phase in a later round", async () => {
   const w = await world()
   const store = { repo: w.work, remote: "origin" }
-  await createEventQueue(store, "main", w.target, new Date())
+  await createWorldEventQueue(w)
   const head = await submitCommit(w, "task/reverify", "one.txt")
   const queued = await readStatus(store, "main", "task/reverify")
   if (queued.tip === undefined) throw new Error("submitted event has no tip")
@@ -384,18 +392,163 @@ it("reverifies an unfinished event phase in a later round", async () => {
   expect((await readStatus(store, "main", "task/reverify")).candidate).toBe(await remoteTarget(w))
 })
 
-/** @failure A partial event runner could report success while omitting declared checks or delivery.
- * @level l3 @consumer queue operator and submitter
+/** @failure A configured event runner could report success without running the target's merge check.
+ * @level l3 @consumer queue operator, submitter and check reader
  */
-it("refuses a configured event run until its checks and notifications are implemented", async () => {
+it("runs a configured event change's default merge check before merging", async () => {
   const w = await world()
   const store = { repo: w.work, remote: "origin" }
-  await createEventQueue(store, "main", w.target, new Date())
+  await createWorldEventQueue(w)
   await submitCommit(w, "task/configured-event", "one.txt")
 
-  await expect(queueRun(await w.options({ exit: 0 }))).rejects.toThrow(/has checks, setup or notifications/)
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/configured-event"], failed: [], stuck: [] })
+  expect(await remoteTarget(w)).not.toBe(w.target)
+  const checkLog = checkLogFor(outcome, "task/configured-event", "merge", "verify")
+  expect(await readStatus(store, "main", "task/configured-event")).toMatchObject({
+    status: "merged",
+    reason: expect.stringContaining(checkLog),
+  })
+  expect(existsSync(checkLog)).toBe(true)
+  expect(readFileSync(w.checkLog, "utf8")).toContain("check cwd=")
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ kind: "result", name: "verify", phase: "merge", result: "pass", exit: "0" }),
+    ]),
+  )
+})
+
+/** @failure An event queue could accept a declaration feature whose evidence it cannot preserve yet.
+ * @level l2 @consumer queue operator and declaration author
+ */
+it.each([
+  ["setup:", (w: World, base: QueueRunOptions) => ({ ...base, notify: [], setup: w.setupCommand(0) })],
+  ["teardown:", (_w: World, base: QueueRunOptions) => ({ ...base, notify: [], teardown: "true" })],
+  ["notify:", (_w: World, base: QueueRunOptions) => ({ ...base, checks: [] })],
+  [
+    "submit-phase",
+    (_w: World, base: QueueRunOptions) => ({
+      ...base,
+      notify: [],
+      checks: [{ ...base.checks[0]!, on: ["submit" as const] }],
+    }),
+  ],
+  [
+    "programRoot",
+    (_w: World, base: QueueRunOptions) => ({
+      ...base,
+      notify: [],
+      checks: [{ ...base.checks[0]!, programRoot: true as const }],
+    }),
+  ],
+  [
+    "scripts",
+    (_w: World, base: QueueRunOptions) => ({
+      ...base,
+      notify: [],
+      checks: [{ ...base.checks[0]!, scripts: ["checks/verify.sh"] }],
+    }),
+  ],
+  [
+    "deferred-capable",
+    (_w: World, base: QueueRunOptions) => ({
+      ...base,
+      notify: [],
+      checks: [{ ...base.checks[0]!, long: { timeoutMs: 60_000 } }],
+    }),
+  ],
+  ["long check tier", (_w: World, base: QueueRunOptions) => ({ ...base, notify: [], tier: "long" as const })],
+  [
+    "deferred-capable stop window",
+    (_w: World, base: QueueRunOptions) => ({ ...base, notify: [], stopAtMs: Date.now() + 60_000 }),
+  ],
+])("refuses event run feature %s until 25065", async (feature, configured) => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const options = configured(w, await w.options({ exit: 0 }))
+
+  await expect(queueRun(options)).rejects.toThrow(new RegExp(`${feature}.*#25040.*25065`))
+})
+
+it("refuses an undeclared deferred event result instead of leaving a successful outcome", async () => {
+  const w = await world()
+  const store = { repo: w.work, remote: "origin" }
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/deferred-event", "one.txt")
+  const base = await w.options({ exit: 0 })
+  const deferred = {
+    ...base,
+    notify: [],
+    checks: [
+      {
+        ...base.checks[0]!,
+        run: `echo 'YRD-CHECK-RESULT {"result":"deferred","reason":"projection exceeded","projectedMs":3600000,"boundMs":1800000}' && exit 3`,
+      },
+    ],
+  }
+
+  await expect(queueRun(deferred)).rejects.toThrow(/verify returned deferred .*#25040.*25065/u)
+  expect(await readStatus(store, "main", "task/deferred-event")).toMatchObject({
+    status: "checking",
+    reason: expect.stringMatching(/verify\.log/u),
+  })
+})
+
+/** @failure A failed configured event check could stop the event line or lose its failed ending.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("ends a failed configured event check and continues with the next change", async () => {
+  const w = await world()
+  const store = { repo: w.work, remote: "origin" }
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/a", "one.txt")
+  await submitCommit(w, "task/b", "two.txt")
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 1 })), notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/a"], merged: ["task/b"], stuck: [] })
+  expect(await remoteTarget(w)).not.toBe(w.target)
+  expect((await readStatus(store, "main", "task/a")).status).toBe("failed")
+  expect((await readStatus(store, "main", "task/b")).status).toBe("merged")
+})
+
+/** @failure A queue-owned configured event check failure could be billed as failed or let the next change pass.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("ends a queue-owned configured event check stuck and holds the next change", async () => {
+  const w = await world()
+  const store = { repo: w.work, remote: "origin" }
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/a", "one.txt")
+  await submitCommit(w, "task/b", "two.txt")
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 2 })), notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/a"] })
   expect(await remoteTarget(w)).toBe(w.target)
-  expect((await readStatus(store, "main", "task/configured-event")).status).toBe("queued")
+  expect((await readStatus(store, "main", "task/a")).status).toBe("stuck")
+  expect((await readStatus(store, "main", "task/b")).status).toBe("queued")
+})
+
+/** @failure A drop during a configured event check could leave a stale verdict to stop the line.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("discards a dropped event check once and continues with the next change", async () => {
+  const w = await world()
+  const store = { repo: w.work, remote: "origin" }
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/a", "one.txt")
+  await submitCommit(w, "task/b", "two.txt")
+
+  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25 })), notify: [] })
+  await checkRunning(w)
+  await drop(store, { queue: "main", branch: "task/a", by: "operator" })
+
+  const outcome = await running
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/b"], failed: [], stuck: [] })
+  expect((await readStatus(store, "main", "task/a")).status).toBe("cancelled")
+  expect(logRecords(outcome).filter((row) => row.kind === "discarded" && row.branch === "task/a")).toHaveLength(1)
 })
 
 /** @failure A pause published during composition was replaced by a fresh queue-tip read, so merge crossed the stop.
@@ -404,7 +557,7 @@ it("refuses a configured event run until its checks and notifications are implem
 it("leases the queue tip observed before an event merge", async () => {
   const w = await world()
   const store = { repo: w.work, remote: "origin" }
-  await createEventQueue(store, "main", w.target, new Date())
+  await createWorldEventQueue(w)
   await submitCommit(w, "task/paused-event", "one.txt")
   const verify = verifying.verifyCandidate
   let entered!: () => void
@@ -438,7 +591,7 @@ it("leases the queue tip observed before an event merge", async () => {
 it("discards a dropped event judgement and continues the round", async () => {
   const w = await world()
   const store = { repo: w.work, remote: "origin" }
-  await createEventQueue(store, "main", w.target, new Date())
+  await createWorldEventQueue(w)
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
   const verify = verifying.verifyCandidate
@@ -499,7 +652,7 @@ it("refuses a component-bearing event change until pin publication is implemente
   await w.git(["push", "--quiet", "origin", "main"])
   await w.git(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--", "child"])
   const target = await remoteTarget(w)
-  const queueTip = await createEventQueue(store, "main", target, new Date())
+  const queueTip = await createWorldEventQueue(w, target)
   await w.git(["checkout", "--quiet", "-b", "task/component", "main"])
   writeFileSync(join(w.work, "one.txt"), "one\n")
   await w.git(["add", "one.txt"])
@@ -527,7 +680,7 @@ it("refuses a component-bearing event change until pin publication is implemente
 it("reports a direct merge after the declaration and still merges the queued change", async () => {
   const w = await world()
   const store = { repo: w.work, remote: "origin" }
-  await createEventQueue(store, "main", w.target, new Date())
+  await createWorldEventQueue(w)
   const direct = await pushAroundQueue(w, "direct.txt")
   const secondDirect = await editDeclarationAroundQueue(w, "# edited around the queue\n{}\n")
   await submitCommit(w, "task/after-direct", "one.txt")
@@ -551,7 +704,7 @@ it("reports a direct merge after the declaration and still merges the queued cha
 it("accounts for its earlier merged event when scanning a later round", async () => {
   const w = await world()
   const store = { repo: w.work, remote: "origin" }
-  await createEventQueue(store, "main", w.target, new Date())
+  await createWorldEventQueue(w)
   await submitCommit(w, "task/first", "one.txt")
   const first = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
   expect(first.merged).toEqual(["task/first"])
@@ -573,7 +726,7 @@ it("accounts for its earlier merged event when scanning a later round", async ()
 it("reports an observed direct merge even when its change has a merged event", async () => {
   const w = await world()
   const store = { repo: w.work, remote: "origin" }
-  await createEventQueue(store, "main", w.target, new Date())
+  await createWorldEventQueue(w)
   const head = await submitCommit(w, "task/observed-direct", "one.txt")
   await w.git(["checkout", "--quiet", "main"])
   await w.git(["merge", "--ff-only", "task/observed-direct"])
