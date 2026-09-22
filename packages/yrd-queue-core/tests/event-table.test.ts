@@ -31,6 +31,7 @@ describe("event changes use the shared table row", () => {
         [
           ["Commit", HEAD],
           ["Issue", "25040"],
+          ["By", "@dev/2"],
         ],
         [HEAD],
       ),
@@ -63,6 +64,7 @@ describe("event changes use the shared table row", () => {
         state: "checking",
         format: "event",
         issue: "25040",
+        submitter: "@dev/2",
         since: new Date(TIME),
         at: new Date(TIME),
         position: 1,
@@ -74,6 +76,7 @@ describe("event changes use the shared table row", () => {
         format: "event",
         issue: "25040",
         reason: "dropped",
+        submitter: "@dev/2",
         since: new Date(TIME),
         at: new Date(TIME),
         endedAt: new Date(TIME),
