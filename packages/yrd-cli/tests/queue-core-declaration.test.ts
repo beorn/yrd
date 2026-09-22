@@ -29,6 +29,7 @@ import { assertEventListingFence, coreQueueCommand, openEventDetail, readListing
 import { runYrdProcess } from "../src/cli.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import type { QueueConfig } from "@yrd/queue-core"
 
 const roots: string[] = []
 afterAll(() => {
@@ -65,7 +66,75 @@ async function world(config?: string): Promise<string> {
   return repo
 }
 
+async function createQueue(repo: string, queue: string, commit: string, at: Date): Promise<string> {
+  const git = gitIn(repo)
+  const config = await readConfig(git, commit, { branch: queue, remote: "origin" })
+  if (config === undefined) throw new Error(`fixture target ${commit} lost .yrd.yml`)
+  return createEventQueue({ repo, remote: "origin" }, queue, commit, config, at)
+}
+
 describe("a queue is the selected origin branch carrying config", () => {
+  it.each([
+    ["setup:", 'setup: "true"\n'],
+    ["teardown:", 'teardown: "true"\n'],
+    ["notify:", 'notify:\n  - recorder: {on: [merged], run: "true"}\n'],
+    ["submit-phase", 'checks:\n  - verify: {run: "true", on: submit}\n'],
+    ["programRoot", 'checks:\n  - verify: {run: "true", programRoot: true}\n'],
+    ["scripts", 'checks:\n  - verify: {run: "true", scripts: [tools/check.ts]}\n'],
+    ["deferred-capable", 'checks:\n  - verify: {run: "true", long: {timeoutMs: 60000}}\n'],
+  ])("refuses event queue creation with %s before writing a queue ref", async (feature, declaration) => {
+    const repo = await world(declaration)
+    const git = gitIn(repo)
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture declaration is absent")
+    const before = await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])
+
+    await expect(
+      createEventQueue({ repo, remote: "origin" }, "main", target, config, new Date("2026-09-22T14:00:00.000Z")),
+    ).rejects.toThrow(new RegExp(`${feature}.*#25040.*25065`))
+
+    expect(await git(["ls-remote", "--refs", "origin", queueRef("main")])).toBe("")
+    expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])).toBe(before)
+  })
+
+  it("refuses event queue creation when config came from another blob", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture declaration is absent")
+
+    await expect(
+      createEventQueue(
+        { repo, remote: "origin" },
+        "main",
+        target,
+        { ...config, blob: "f".repeat(40) },
+        new Date("2026-09-22T14:00:00.000Z"),
+      ),
+    ).rejects.toThrow(/config blob .* does not match .*\.yrd\.yml/u)
+    expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])).toBe("")
+  })
+
+  it("refuses event queue creation without a declaration instead of inventing defaults", async () => {
+    const repo = await world()
+    const git = gitIn(repo)
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    expect(await readConfig(git, target, { branch: "main", remote: "origin" })).toBeUndefined()
+
+    await expect(
+      createEventQueue(
+        { repo, remote: "origin" },
+        "main",
+        target,
+        undefined as unknown as QueueConfig,
+        new Date("2026-09-22T14:00:00.000Z"),
+      ),
+    ).rejects.toThrow(/no declared QueueConfig.*#25040 does not invent a default/u)
+    expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])).toBe("")
+  })
+
   it("refuses a moved or newly added event ref between history and observation", () => {
     const before = "a".repeat(40)
     const changeTip = "b".repeat(40)
@@ -91,7 +160,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const git = gitIn(repo)
     const store = { repo, remote: "origin" }
     const targetOid = (await git(["rev-parse", "HEAD"])).trim()
-    const created = await createEventQueue(store, "main", targetOid, new Date("2026-09-22T14:00:00.000Z"))
+    const created = await createQueue(repo, "main", targetOid, new Date("2026-09-22T14:00:00.000Z"))
     const declaration = await readConfig(git, targetOid, { remote: "origin", branch: "main" })
     if (declaration === undefined) throw new Error("fixture target lost .yrd.yml")
     await expect(readListing(git, declaration, repo, targetOid)).rejects.toThrow(/event format/)
@@ -151,8 +220,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
     const store = { repo, remote: "origin" }
-    const created = await createEventQueue(
-      store,
+    const created = await createQueue(
+      repo,
       "main",
       (await git(["rev-parse", "HEAD"])).trim(),
       new Date("2026-09-22T14:00:00.000Z"),
@@ -213,6 +282,26 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(repeated.stdout()).toContain(head.slice(0, 12))
   })
 
+  it("refuses notify configuration when submitting to an event queue until 25065", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+    writeFileSync(join(repo, ".yrd.yml"), 'notify:\n  - recorder: {on: [merged], run: "true"}\n')
+    await git(["add", ".yrd.yml"])
+    await git(["commit", "--quiet", "-m", "configure event notification"])
+    await git(["push", "--quiet", "origin", "main"])
+    await git(["checkout", "--quiet", "-b", "task/event-notify"])
+    writeFileSync(join(repo, "work.txt"), "event notify\n")
+    await git(["add", "work.txt"])
+    await git(["commit", "--quiet", "-m", "event notify"])
+
+    const submitted = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main"], submitted.io)).toBe(2)
+    expect(submitted.stderr()).toMatch(/notify:.*#25040.*25065/u)
+    expect(await git(["ls-remote", "--refs", "origin", "refs/heads/task/event-notify"])).toBe("")
+  })
+
   it("directs drop on a legacy queue to the existing withdraw command", async () => {
     const repo = await world("{}\n")
     const refused = capture(repo)
@@ -226,7 +315,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const git = gitIn(repo)
     const head = (await git(["rev-parse", "HEAD"])).trim()
     const store = { repo, remote: "origin" }
-    await createEventQueue(store, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
     const paused = capture(repo)
     expect(
       await runYrdProcess(
