@@ -55,6 +55,7 @@ export function bucketOf(row: Pick<Row, "state" | "live">): StatusBucket {
     case "merged":
     case "direct":
     case "withdrawn":
+    case "cancelled":
       return "done"
     case "failed":
       return "failed"
@@ -64,6 +65,10 @@ export function bucketOf(row: Pick<Row, "state" | "live">): StatusBucket {
     case "draft":
     case "deferred":
       return "open"
+    case "verifying":
+    case "checking":
+    case "merging":
+      return "running"
   }
 }
 
