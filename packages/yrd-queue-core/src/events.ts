@@ -202,7 +202,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     case "checking":
     case "merging":
     case "stuck": {
-      if (state.status === "stuck") {
+      if (state.status === "stuck" && event.type !== "verifying") {
         throw new Error(`event ${event.id} (${event.type}) cannot advance a stuck change; merge or cancel it`)
       }
       if (!isOpen(state.status)) return endingRefusal(state, event)
@@ -217,10 +217,11 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         state.status !== "queued" &&
         state.status !== "verifying" &&
         state.status !== "checking" &&
-        state.status !== "merging"
+        state.status !== "merging" &&
+        state.status !== "stuck"
       ) {
         throw new Error(
-          `event ${event.id} verifying needs queued, verifying, checking or merging, found ${state.status}`,
+          `event ${event.id} verifying needs queued, verifying, checking, merging or stuck, found ${state.status}`,
         )
       }
       const candidate = event.type === "verifying" ? keptCommit(event) : state.candidate
@@ -374,6 +375,26 @@ export async function readEventQueue(store: QueueLocation, queue: string): Promi
   const ref = queueRef(queue)
   const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
   return projectEventQueue(events, ref, store.repo)
+}
+
+/** Whether the queue was explicitly resumed after this change's latest stuck event. */
+export async function queueResumedAfter(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+  history: ChangeHistory | undefined,
+): Promise<boolean> {
+  const stuck = history?.events.findLast((event) => event.type === "stuck")
+  if (stuck === undefined) {
+    throw new Error(`event queue ${store.remote}#${queue}: stuck change ${branch} has no stuck event`)
+  }
+  const ref = queueRef(queue)
+  const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
+  projectEventQueue(events, ref, store.repo)
+  const cause = prop(stuck, EVENT_TRAILERS.queue)
+  const index = events.findIndex((event) => event.id === cause)
+  if (index < 0) throw new Error(`${stuck.id} names Queue: ${cause ?? "missing"} outside ${ref}`)
+  return events.slice(index + 1).some((event) => event.type === "resumed")
 }
 
 export type WriteQueueEvent = Readonly<{ type: "paused" | "resumed"; reason: string; by: string; at: Date }>
@@ -579,11 +600,17 @@ async function appendDecision(
     throw new Error(`${changesRef(queue, branch)}: a run decision wrote ${planned.length} events`)
   }
   const ref = changesRef(queue, branch)
+  // A stuck event's Queue: must still be the queue tip when it is published.
+  // Otherwise a concurrent resume could appear after that tip but before stuck.
+  const also =
+    write.type === "stuck"
+      ? [{ ref: queueRef(queue), expect: queueTip, oid: queueTip }, ...(write.also ?? [])]
+      : write.also
   const result = await (
     await openEvents({ ...store, ref, writer: write.writer ?? "yrd" })
   ).append(planned, {
     expect: selectedTip,
-    ...(write.also === undefined ? {} : { also: write.also }),
+    ...(also === undefined ? {} : { also }),
   })
   const written = result.events.findLast((event) => event.type === write.type)?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: ${write.type} event was not written`)

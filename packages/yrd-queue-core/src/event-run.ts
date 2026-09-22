@@ -7,6 +7,7 @@ import {
   appendPublishedMerge,
   listChangeHistories,
   mergedHistoryCommits,
+  queueResumedAfter,
   readEventQueue,
   readStatus,
 } from "./events.ts"
@@ -162,16 +163,26 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
   }
   const standing = open.find((change) => change.status === "stuck")
   if (standing !== undefined) {
+    if (!(await queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)))) {
+      log.write({
+        kind: "change",
+        branch: standing.branch,
+        head: standing.commit,
+        decision: "stuck",
+        reason: standing.reason ?? "queue could not judge this change",
+      })
+      return result(2, [], [], [standing.branch])
+    }
     log.write({
       kind: "change",
       branch: standing.branch,
       head: standing.commit,
-      decision: "stuck",
-      reason: standing.reason ?? "queue could not judge this change",
+      decision: "retry",
+      reason: "queue resumed",
     })
-    return result(2, [], [], [standing.branch])
   }
-  for (const selectedChange of open) {
+  const line = standing === undefined ? open : [standing, ...open.filter((change) => change.branch !== standing.branch)]
+  for (const selectedChange of line) {
     const { branch, commit: head } = selectedChange
     let tip = selectedChange.tip
     if (options.stopAtMs !== undefined && (options.now?.() ?? Date.now()) >= options.stopAtMs) {
