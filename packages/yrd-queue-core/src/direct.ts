@@ -108,7 +108,13 @@ async function firstParentLine(git: Git, targetSha: string, boundary: string): P
   return line
 }
 
-/** Event queue E5: declaration is the exact first-parent boundary; merged events account for queue publications. */
+/**
+ * Event queue E5: declaration is the exact first-parent boundary; merged
+ * events account for queue publications and target merges the runner observed.
+ * A direct-only commit is deliberately returned again on every run until such
+ * an event stands above it, always under the commit sha as its identity. This
+ * keeps legacy `run.ts`'s `reportDirectMerges` at-least-once contract.
+ */
 export async function eventDirectMergeCommits(
   git: Git,
   target: string,
