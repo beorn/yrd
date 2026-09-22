@@ -277,10 +277,52 @@ export async function createEventQueue(queue: string, commit: string, store: Eve
 export async function readEventQueue(queue: string, store: EventStore): Promise<EventQueue> {
   const ref = queueRef(queue)
   const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
+  return projectEventQueue(events, ref, store.repo)
+}
+
+export type WriteQueueEvent = Readonly<{ type: "paused" | "resumed"; reason: string; by: string; at: Date }>
+
+/** Append a queue stop under Gitomic's CAS; retries fold the current chain again. */
+export async function writeQueueEvent(queue: string, write: WriteQueueEvent, store: EventStore): Promise<string> {
+  const ref = queueRef(queue)
+  if (write.reason.trim() === "") throw new TypeError(`${write.type} needs Reason:`)
+  if (Number.isNaN(write.at.getTime())) throw new TypeError("Time: needs a valid instant")
+  const chain = await openEvents({ ...store, ref, writer: write.by })
+  const result = await chain.transact((events) => {
+    const current = projectEventQueue(events, ref, store.repo)
+    const input: EventInput = {
+      type: write.type,
+      props: [
+        [EVENT_TRAILERS.queue, current.tip],
+        [EVENT_TRAILERS.time, write.at.toISOString()],
+        [EVENT_TRAILERS.reason, write.reason],
+      ],
+    }
+    const pending: Event = {
+      id: "pending",
+      parent: current.tip,
+      links: [],
+      type: input.type,
+      title: input.type,
+      content: "",
+      props: input.props ?? [],
+      writer: write.by,
+      instance: null,
+      seq: null,
+    }
+    projectEventQueue([...events, pending], ref, store.repo)
+    return [input]
+  }, `${write.type} ${queue}`)
+  const written = result.events[0]?.id
+  if (written === undefined) throw new Error(`${ref} in ${store.repo}: ${write.type} event was not written`)
+  return written
+}
+
+function projectEventQueue(events: readonly Event[], ref: string, repo: string): EventQueue {
   const first = events[0]
-  if (first === undefined) throw new Error(`missing event queue chain ${ref} in ${store.repo}`)
+  if (first === undefined) throw new Error(`missing event queue chain ${ref} in ${repo}`)
   if (first.parent !== null) {
-    throw new Error(`event queue chain ${ref} in ${store.repo} exceeds 1024 events; refusing a partial read`)
+    throw new Error(`event queue chain ${ref} in ${repo} exceeds 1024 events; refusing a partial read`)
   }
   let previous: string | undefined
   let pause: EventQueue["pause"]
@@ -331,7 +373,7 @@ export async function readEventQueue(queue: string, store: EventStore): Promise<
     }
     previous = event.id
   }
-  if (previous === undefined) throw new Error(`missing event queue tip ${ref} in ${store.repo}`)
+  if (previous === undefined) throw new Error(`missing event queue tip ${ref} in ${repo}`)
   return { created: first.id, tip: previous, ...(pause === undefined ? {} : { pause }) }
 }
 

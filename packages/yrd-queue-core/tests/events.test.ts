@@ -20,6 +20,7 @@ import {
   queueRef,
   readEventQueue,
   readStatus,
+  writeQueueEvent,
 } from "../src/events.ts"
 
 const A = "a".repeat(40)
@@ -183,37 +184,26 @@ describe("the queue-format boundary", () => {
     const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
     const created = await createEventQueue("lab", commit, store, new Date("2026-09-22T14:00:00.000Z"))
     expect((await readEventQueue("lab", store)).created).toBe(created)
-    const queue = await openEvents({ ...store, ref: queueRef("lab") })
-    await queue.append(
-      [
-        {
-          type: "paused",
-          props: [
-            ["Queue", created],
-            ["Time", "2026-09-22T14:01:00.000Z"],
-            ["Reason", "repair"],
-          ],
-        },
-      ],
-      { expect: created },
+    await writeQueueEvent(
+      "lab",
+      { type: "paused", reason: "repair", by: "operator", at: new Date("2026-09-22T14:01:00.000Z") },
+      store,
     )
     expect((await readEventQueue("lab", store)).pause?.reason).toBe("repair")
-    const paused = await queue.head()
-    if (paused === null) throw new Error("pause event was not written")
-    await queue.append(
-      [
-        {
-          type: "resumed",
-          props: [
-            ["Queue", paused],
-            ["Time", "2026-09-22T14:02:00.000Z"],
-            ["Reason", "repaired"],
-          ],
-        },
-      ],
-      { expect: paused },
+    expect((await readEventQueue("lab", store)).pause?.by).toBe("operator")
+    await writeQueueEvent(
+      "lab",
+      { type: "resumed", reason: "repaired", by: "operator", at: new Date("2026-09-22T14:02:00.000Z") },
+      store,
     )
     expect((await readEventQueue("lab", store)).pause).toBeUndefined()
+    await expect(
+      writeQueueEvent(
+        "lab",
+        { type: "resumed", reason: "again", by: "operator", at: new Date("2026-09-22T14:03:00.000Z") },
+        store,
+      ),
+    ).rejects.toThrow(/resumes a running queue/)
   })
 
   it("selects one event queue by its queue ref and reads an empty change set without legacy fallback", async () => {
