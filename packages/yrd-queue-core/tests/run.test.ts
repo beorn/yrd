@@ -993,9 +993,11 @@ describe("a queue run", () => {
     const rootUrl = "https://example.test/acme/product.git"
     const childUrl = "https://example.test/acme/child.git"
     const config = join(w.workdir, "gitconfig")
-    await w.git(["config", "--file", config, `url.${w.remote}.insteadOf`, rootUrl])
     await w.git(["config", "--file", config, `url.${child}.insteadOf`, childUrl])
     await w.git(["config", "--file", config, "protocol.file.allow", "always"])
+    // Queue-format detection uses Gitomic's own Git process before the runner
+    // passes its environment to GitSuper. Keep the root URL reachable there too.
+    await w.git(["config", `url.${w.remote}.insteadOf`, rootUrl])
     for (const [key, value] of [
       ["path", "packages/child"],
       ["url", childUrl],
