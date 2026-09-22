@@ -1870,6 +1870,10 @@ export async function coreQueueCommand(
     case "show": {
       if ((await queueFormat(config.target.branch, { repo, remote: config.target.remote })) === "event") {
         const reading = await readEventListing(git, config, repo, workdir, captured.oid)
+        if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
+          io.stderr(`${reading.observation.message}\n`)
+          return 2
+        }
         const name = queueName(config.target, await remoteUrl(git, config.target.remote))
         const row = reading.all.find((candidate) => candidate.branch === request.branch)
         const selected = reading.changes.get(request.branch)
