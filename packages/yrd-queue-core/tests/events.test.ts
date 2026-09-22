@@ -44,6 +44,7 @@ describe("ADR-0016 event fold", () => {
     expect(queued.status).toBe("queued")
     expect(evolve(queued, verifying).status).toBe("verifying")
     expect(evolve(evolve(queued, verifying), event("checking", "c".repeat(40))).status).toBe("checking")
+    expect(() => evolve(queued, event("checking", "c".repeat(40)))).toThrow(/checking.*verifying/)
     expect(evolve(evolve(queued, event("failed", B)), event("sent", "d".repeat(40))).status).toBe("failed")
     expect(() =>
       evolve(
@@ -59,6 +60,7 @@ describe("ADR-0016 event fold", () => {
         ),
       ),
     ).toThrow(/Status/)
+    expect(() => evolve(initial, event("merged", B))).toThrow(/opened/)
   })
 
   it("cancels the prior open change before a second opened event", () => {
