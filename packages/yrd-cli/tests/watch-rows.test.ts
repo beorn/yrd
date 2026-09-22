@@ -9,7 +9,7 @@
 
 import { describe, expect, it, vi } from "vitest"
 import type { Journals, Row } from "@yrd/queue-core"
-import { journalKey } from "@yrd/queue-core"
+import { CHANGE_STATUSES, journalKey } from "@yrd/queue-core"
 import * as format from "../src/watch-format.ts"
 import { noticeLine, watchNotice } from "../src/watch-notice.ts"
 import { filterRows, rowLine, watchRows, watchRowKey } from "../src/watch-rows.ts"
@@ -167,19 +167,8 @@ describe("the filter terms", () => {
   })
 
   it("selects every event status by the same word in JSON and in the table", () => {
-    const states = [
-      "draft",
-      "queued",
-      "verifying",
-      "checking",
-      "merging",
-      "merged",
-      "failed",
-      "stuck",
-      "cancelled",
-    ] as const
     const eventRows = watchRows(
-      states.map((state, index) =>
+      CHANGE_STATUSES.map((state, index) =>
         row({ branch: `work/${String(index)}`, format: "event", head: String(index).repeat(40), state }),
       ),
     )
