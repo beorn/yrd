@@ -16,12 +16,13 @@ import {
   createEventQueue,
   gitIn,
   listChanges,
+  queueRef,
   readEventQueue,
   readQueue,
   writePause,
 } from "@yrd/queue-core"
 import { openEvents } from "gitomic/events"
-import { coreQueueCommand } from "../src/queue-core-commands.ts"
+import { assertEventListingFence, coreQueueCommand } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
@@ -61,6 +62,26 @@ async function world(config?: string): Promise<string> {
 }
 
 describe("a queue is the selected origin branch carrying config", () => {
+  it("refuses a moved or newly added event ref between history and observation", () => {
+    const before = "a".repeat(40)
+    const changeTip = "b".repeat(40)
+    const moved = "c".repeat(40)
+    const queue = { created: before, tip: before }
+    const changes = new Map([
+      ["task/one", { status: "queued" as const, commit: before, tip: changeTip, ignored: false }],
+    ])
+    const advertised = new Map([
+      [queueRef("main"), before],
+      [changesRef("main", "task/one"), changeTip],
+    ])
+    expect(() => assertEventListingFence("main", queue, changes, advertised)).not.toThrow()
+    advertised.set(changesRef("main", "task/one"), moved)
+    expect(() => assertEventListingFence("main", queue, changes, advertised)).toThrow(/task\/one moved.*read.*observed/)
+    advertised.set(changesRef("main", "task/one"), changeTip)
+    advertised.set(changesRef("main", "task/two"), moved)
+    expect(() => assertEventListingFence("main", queue, changes, advertised)).toThrow(/task\/two appeared/)
+  })
+
   it("reads event changes from the remote in one selected format", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
