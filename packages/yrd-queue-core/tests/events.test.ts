@@ -11,12 +11,14 @@ import { open } from "gitomic"
 import {
   changeInput,
   changesRef,
+  createEventQueue,
   decide,
   evolve,
   initial,
   listChanges,
   queueFormat,
   queueRef,
+  readEventQueue,
   readStatus,
 } from "../src/events.ts"
 
@@ -29,7 +31,26 @@ function event(
   props: readonly (readonly [string, string])[] = [],
   links: string[] = [],
 ): Event {
-  return { id, parent: null, links, type, title: type, content: "", props, writer: "yrd", instance: null, seq: null }
+  return {
+    id,
+    parent: null,
+    links,
+    type,
+    title: type,
+    content: "",
+    props: [
+      ...(props.some(([key]) => key === "Queue") ? [] : [["Queue", A] as const]),
+      ...(props.some(([key]) => key === "Time") ? [] : [["Time", "2026-09-22T14:00:00.000Z"] as const]),
+      ...props,
+    ],
+    writer: "yrd",
+    instance: null,
+    seq: null,
+  }
+}
+
+function input(type: string, props: readonly (readonly [string, string])[] = [], keeps: string[] = []): EventInput {
+  return { type, props: [["Queue", A], ["Time", "2026-09-22T14:00:00.000Z"], ...props], keeps }
 }
 
 function landed(inputs: readonly EventInput[], firstId: string): Event[] {
@@ -91,11 +112,21 @@ describe("ADR-0016 event fold", () => {
       ),
     ).toThrow(/Status/)
     expect(() => evolve(initial, event("merged", B))).toThrow(/opened/)
+    expect(() => evolve(initial, { ...opened, props: [["Commit", A]] })).toThrow(/Queue/)
+    expect(() =>
+      evolve(initial, {
+        ...opened,
+        props: [
+          ["Queue", A],
+          ["Commit", A],
+        ],
+      }),
+    ).toThrow(/Time/)
   })
 
   it("cancels the prior open change before a second opened event", () => {
     const current = [event("opened", A, [["Commit", A]], [A])]
-    const next = decide(current, { type: "opened", props: [["Commit", B]], keeps: [B] })
+    const next = decide(current, input("opened", [["Commit", B]], [B]))
     expect(next.map((input) => input.type)).toEqual(["cancelled", "opened"])
     expect(next[0]?.props).toContainEqual(["Reason", "resubmitted"])
     const ended = landed(next, B).reduce(evolve, current.reduce(evolve, initial))
@@ -106,21 +137,19 @@ describe("ADR-0016 event fold", () => {
   it("refuses deciding events after an ending with its kind and sha, but allows reports, reopen and observed merge", () => {
     const current = [event("opened", A, [["Commit", A]], [A]), event("failed", B)]
     for (const kind of ["verifying", "checking", "merging", "stuck", "failed", "cancelled"]) {
-      expect(() => decide(current, { type: kind }), kind).toThrow(/failed.*bbbbbbbb/)
+      expect(() => decide(current, input(kind)), kind).toThrow(/failed.*bbbbbbbb/)
     }
-    expect(decide(current, { type: "sent" }).map((input) => input.type)).toEqual(["sent"])
-    expect(decide(current, { type: "merged" }).map((input) => input.type)).toEqual(["merged"])
-    expect(decide(current, { type: "opened", props: [["Commit", B]], keeps: [B] }).map((input) => input.type)).toEqual([
-      "opened",
-    ])
+    expect(decide(current, input("sent")).map((input) => input.type)).toEqual(["sent"])
+    expect(decide(current, input("merged")).map((input) => input.type)).toEqual(["merged"])
+    expect(decide(current, input("opened", [["Commit", B]], [B])).map((input) => input.type)).toEqual(["opened"])
   })
 
   it("requires an event to keep each commit it records", () => {
-    expect(() => decide([], { type: "opened", props: [["Commit", A]] })).toThrow(/keep/)
-    expect(() => decide([], { type: "opened", keeps: [A] })).toThrow(/Commit/)
-    expect(() =>
-      decide([event("opened", A, [["Commit", A]], [A])], { type: "verifying", props: [["Commit", B]] }),
-    ).toThrow(/keep/)
+    expect(() => decide([], input("opened", [["Commit", A]]))).toThrow(/keep/)
+    expect(() => decide([], input("opened", [], [A]))).toThrow(/Commit/)
+    expect(() => decide([event("opened", A, [["Commit", A]], [A])], input("verifying", [["Commit", B]]))).toThrow(
+      /keep/,
+    )
   })
 
   it("a stuck change refuses another phase while drop remains an escape", () => {
@@ -128,27 +157,71 @@ describe("ADR-0016 event fold", () => {
     const stuck = event("stuck", B, [["Reason", "needs-operator"]])
     const current = [opened, stuck]
     expect(current.reduce(evolve, initial).status).toBe("stuck")
-    expect(() => decide(current, { type: "checking" })).toThrow(/stuck.*merge or cancel/)
-    const [dropped] = decide(current, {
-      type: "cancelled",
-      props: [
-        ["Reason", "dropped"],
-        ["Commit", A],
-      ],
-      keeps: [A],
-    })
+    expect(() => decide(current, input("checking"))).toThrow(/stuck.*merge or cancel/)
+    const [dropped] = decide(
+      current,
+      input(
+        "cancelled",
+        [
+          ["Reason", "dropped"],
+          ["Commit", A],
+        ],
+        [A],
+      ),
+    )
+    if (dropped === undefined) throw new Error("drop decision produced no event")
     expect(
-      evolve(current.reduce(evolve, initial), event(dropped!.type, "c".repeat(40), dropped?.props ?? [], [A])).status,
+      evolve(current.reduce(evolve, initial), event(dropped.type, "c".repeat(40), dropped.props ?? [], [A])).status,
     ).toBe("cancelled")
   })
 })
 
 describe("the queue-format boundary", () => {
+  it("requires a declared queue chain and derives its pause from queue events", async () => {
+    const store = { repo: "yrd-event-queue", backend: createMemBackend() }
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const created = await createEventQueue("lab", commit, store, new Date("2026-09-22T14:00:00.000Z"))
+    expect((await readEventQueue("lab", store)).created).toBe(created)
+    const queue = await openEvents({ ...store, ref: queueRef("lab") })
+    await queue.append(
+      [
+        {
+          type: "paused",
+          props: [
+            ["Queue", created],
+            ["Time", "2026-09-22T14:01:00.000Z"],
+            ["Reason", "repair"],
+          ],
+        },
+      ],
+      { expect: created },
+    )
+    expect((await readEventQueue("lab", store)).pause?.reason).toBe("repair")
+    const paused = await queue.head()
+    if (paused === null) throw new Error("pause event was not written")
+    await queue.append(
+      [
+        {
+          type: "resumed",
+          props: [
+            ["Queue", paused],
+            ["Time", "2026-09-22T14:02:00.000Z"],
+            ["Reason", "repaired"],
+          ],
+        },
+      ],
+      { expect: paused },
+    )
+    expect((await readEventQueue("lab", store)).pause).toBeUndefined()
+  })
+
   it("selects one event queue by its queue ref and reads an empty change set without legacy fallback", async () => {
     const store = { repo: "yrd-event-selector", backend: createMemBackend() }
     expect(await queueFormat("lab", store)).toBe("legacy")
-    const queue = await openEvents({ ...store, ref: queueRef("lab") })
-    await queue.append([{ type: "created" }], { expect: null })
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await createEventQueue("lab", targetCommit, store, new Date("2026-09-22T14:00:00.000Z"))
     expect(await queueFormat("lab", store)).toBe("event")
     expect(await listChanges("lab", store)).toEqual(new Map())
     await expect(readStatus("lab", "missing", store)).rejects.toThrow(
@@ -159,13 +232,21 @@ describe("the queue-format boundary", () => {
     const branch = await openEvents({ ...store, ref })
     const work = await open({ ...store, ref: "refs/heads/task/42" })
     const commit = (await work.transact(async (map) => map.set("work.txt", "one"), "work")).oid
-    await branch.append([{ type: "opened", props: [["Commit", commit]], keeps: [commit] }], { expect: null })
+    await branch.append([input("opened", [["Commit", commit]], [commit])], { expect: null })
     expect((await listChanges("lab", store)).get("task/42")?.status).toBe("queued")
     expect((await readStatus("lab", "task/42", store)).status).toBe("queued")
     // Gitomic's reader defaults to 50; a status must fold the whole chain.
-    const reports = Array.from({ length: 51 }, () => ({ type: "sent" }))
+    const reports = Array.from({ length: 51 }, () => input("sent"))
     await branch.append(reports, { expect: await branch.head() })
     expect((await listChanges("lab", store)).get("task/42")?.status).toBe("queued")
     expect((await readStatus("lab", "task/42", store)).status).toBe("queued")
+  })
+
+  it("refuses a present but malformed queue chain instead of showing empty changes", async () => {
+    const store = { repo: "yrd-event-malformed", backend: createMemBackend() }
+    const queue = await openEvents({ ...store, ref: queueRef("lab") })
+    await queue.append([{ type: "created" }], { expect: null })
+    expect(await queueFormat("lab", store)).toBe("event")
+    await expect(listChanges("lab", store)).rejects.toThrow(/created.*Commit/)
   })
 })

@@ -27,6 +27,7 @@ export const EVENT_TRAILERS = {
   reason: "Reason",
   time: "Time",
 } as const
+const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 
 export const CHANGE_EVENT_TYPES = [
   "opened",
@@ -69,13 +70,12 @@ export function changeInput(
     content?: string
   }>,
 ): EventInput {
-  const oid = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
-  if (!oid.test(details.queueTip)) throw new TypeError(`Queue: must name a commit oid, got ${details.queueTip}`)
+  if (!COMMIT_OID.test(details.queueTip)) throw new TypeError(`Queue: must name a commit oid, got ${details.queueTip}`)
   if (Number.isNaN(details.at.getTime())) throw new TypeError("Time: needs a valid instant")
   if ((type === "opened" || type === "verifying") && details.commit === undefined) {
     throw new TypeError(`${type} needs Commit:`)
   }
-  if (details.commit !== undefined && !oid.test(details.commit)) {
+  if (details.commit !== undefined && !COMMIT_OID.test(details.commit)) {
     throw new TypeError(`Commit: must name a commit oid, got ${details.commit}`)
   }
   if (details.issue !== undefined && details.issue.trim() === "") throw new TypeError("Issue: cannot be empty")
@@ -131,6 +131,17 @@ function prop(event: EventShape, key: string): string | undefined {
   return found[0]?.[1]
 }
 
+function requireCause(event: EventShape): void {
+  const queue = prop(event, EVENT_TRAILERS.queue)
+  if (queue === undefined || !COMMIT_OID.test(queue)) {
+    throw new Error(`event ${event.id} (${event.type}) needs Queue: naming the queue chain tip`)
+  }
+  const time = prop(event, EVENT_TRAILERS.time)
+  if (time === undefined || Number.isNaN(Date.parse(time)) || new Date(time).toISOString() !== time) {
+    throw new Error(`event ${event.id} (${event.type}) needs Time: as an ISO instant`)
+  }
+}
+
 function keptCommit(event: EventShape): string {
   const commit = prop(event, "Commit")
   if (commit === undefined) throw new Error(`event ${event.id} (${event.type}) needs Commit:`)
@@ -146,6 +157,7 @@ function endingRefusal(state: EventChange, event: EventShape): never {
 
 /** Pure fold. Unknown kinds and malformed transitions fail at the selected event chain. */
 export function evolve(state: EventChange, event: EventShape): EventChange {
+  requireCause(event)
   if (event.props.some(([key]) => key === "Status")) {
     throw new Error(`event ${event.id} stores Status:; status must be a fold`)
   }
@@ -230,6 +242,99 @@ export function decide(events: readonly Event[], input: EventInput): readonly Ev
 
 export type EventStore = Readonly<{ repo: string; backend?: GitomicBackend; remote?: string }>
 
+export type EventQueue = Readonly<{
+  created: string
+  tip: string
+  pause?: Readonly<{ id: string; at: Date; reason: string; by: string }>
+}>
+
+/** The first event declares a queue and keeps the commit carrying .yrd.yml. */
+export async function createEventQueue(queue: string, commit: string, store: EventStore, at: Date): Promise<string> {
+  const ref = queueRef(queue)
+  if (!COMMIT_OID.test(commit)) throw new TypeError(`Commit: must name a commit oid, got ${commit}`)
+  if (Number.isNaN(at.getTime())) throw new TypeError("Time: needs a valid instant")
+  const result = await (
+    await openEvents({ ...store, ref, writer: "yrd" })
+  ).append(
+    [
+      {
+        type: "created",
+        props: [
+          [EVENT_TRAILERS.commit, commit],
+          [EVENT_TRAILERS.time, at.toISOString()],
+        ],
+        keeps: [commit],
+      },
+    ],
+    { expect: null },
+  )
+  const created = result.events[0]?.id
+  if (created === undefined) throw new Error(`${ref} in ${store.repo}: created event was not written`)
+  return created
+}
+
+/** Read and validate the queue declaration and its current operator stop. */
+export async function readEventQueue(queue: string, store: EventStore): Promise<EventQueue> {
+  const ref = queueRef(queue)
+  const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
+  const first = events[0]
+  if (first === undefined) throw new Error(`missing event queue chain ${ref} in ${store.repo}`)
+  if (first.parent !== null) {
+    throw new Error(`event queue chain ${ref} in ${store.repo} exceeds 1024 events; refusing a partial read`)
+  }
+  let previous: string | undefined
+  let pause: EventQueue["pause"]
+  for (const [index, event] of events.entries()) {
+    if (index === 0) {
+      if (event.type !== "created") throw new Error(`${ref}: first event ${event.id} must be created`)
+      keptCommit(event)
+      if (prop(event, EVENT_TRAILERS.queue) !== undefined) {
+        throw new Error(`${ref}: created event ${event.id} cannot name a preceding Queue:`)
+      }
+    } else {
+      if (prop(event, EVENT_TRAILERS.queue) !== previous) {
+        throw new Error(`${ref}: event ${event.id} (${event.type}) needs Queue: ${previous}`)
+      }
+    }
+    const time = prop(event, EVENT_TRAILERS.time)
+    if (time === undefined || Number.isNaN(Date.parse(time)) || new Date(time).toISOString() !== time) {
+      throw new Error(`${ref}: event ${event.id} (${event.type}) needs Time: as an ISO instant`)
+    }
+    if (event.props.some(([key]) => key === "Status")) throw new Error(`${ref}: event ${event.id} stores Status:`)
+    switch (event.type) {
+      case "created":
+        if (index !== 0) throw new Error(`${ref}: event ${event.id} declares a second queue`)
+        break
+      case "paused": {
+        if (pause !== undefined) throw new Error(`${ref}: event ${event.id} pauses an already paused queue`)
+        const reason = prop(event, EVENT_TRAILERS.reason)
+        if (reason === undefined || reason.length === 0) {
+          throw new Error(`${ref}: paused event ${event.id} needs Reason:`)
+        }
+        if (event.writer === null) throw new Error(`${ref}: paused event ${event.id} needs a writer`)
+        pause = { id: event.id, at: new Date(time), reason, by: event.writer }
+        break
+      }
+      case "resumed":
+        if (pause === undefined) throw new Error(`${ref}: event ${event.id} resumes a running queue`)
+        if (prop(event, EVENT_TRAILERS.reason) === undefined) {
+          throw new Error(`${ref}: resumed event ${event.id} needs Reason:`)
+        }
+        pause = undefined
+        break
+      case "configured":
+      case "started":
+      case "stopped":
+        break
+      default:
+        throw new Error(`${ref}: unknown queue event ${event.type} at ${event.id}`)
+    }
+    previous = event.id
+  }
+  if (previous === undefined) throw new Error(`missing event queue tip ${ref} in ${store.repo}`)
+  return { created: first.id, tip: previous, ...(pause === undefined ? {} : { pause }) }
+}
+
 /** One advertisement selects the format. An event queue with no changes is empty. */
 export async function queueFormat(queue: string, store: EventStore): Promise<"event" | "legacy"> {
   const refs = await listRefs(queueRefPrefix(queue), store)
@@ -238,6 +343,7 @@ export async function queueFormat(queue: string, store: EventStore): Promise<"ev
 
 /** Read one existing branch chain; a missing selected chain is a data error. */
 export async function readStatus(queue: string, branch: string, store: EventStore): Promise<EventChange> {
+  await readEventQueue(queue, store)
   const ref = changesRef(queue, branch)
   const chain = await openEvents({ ...store, ref })
   if ((await chain.head()) === null) throw new Error(`missing event chain ${ref} in ${store.repo}`)
@@ -252,6 +358,7 @@ export async function listChanges(queue: string, store: EventStore): Promise<Rea
   if (store.remote !== undefined) {
     throw new TypeError("remote event listing requires gitomic 3a.1 batch fetch")
   }
+  await readEventQueue(queue, store)
   const prefix = `${queueRefPrefix(queue)}/changes/`
   const chains = await chainsUnder(prefix, { ...store, limit: 1024 })
   const changes = new Map<string, EventChange>()
