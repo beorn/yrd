@@ -98,6 +98,15 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         throw new Error(`event ${event.id} (${event.type}) cannot advance a stuck change; merge or cancel it`)
       }
       if (!isOpen(state.status)) return endingRefusal(state, event)
+      if (event.type === "checking" && state.status !== "verifying") {
+        throw new Error(`event ${event.id} checking needs verifying, found ${state.status}`)
+      }
+      if (event.type === "merging" && state.status !== "checking") {
+        throw new Error(`event ${event.id} merging needs checking, found ${state.status}`)
+      }
+      if (event.type === "verifying" && state.status !== "queued" && state.status !== "verifying") {
+        throw new Error(`event ${event.id} verifying needs queued or verifying, found ${state.status}`)
+      }
       if (event.type === "verifying") keptCommit(event)
       return { ...state, status: event.type, reason: prop(event, "Reason") }
     }
@@ -115,6 +124,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     }
     case "merged":
       // A merge observed on main is ground truth even after a recorded ending.
+      if (state.commit === undefined) throw new Error(`event ${event.id} merged needs an opened change`)
       return { ...state, status: "merged", ending: { kind: "merged", id: event.id }, reason: prop(event, "Reason") }
     case "ignored": {
       const reason = prop(event, "Reason")
