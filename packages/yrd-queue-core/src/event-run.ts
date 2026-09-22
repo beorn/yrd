@@ -6,7 +6,6 @@ import {
   appendChangeEvent,
   appendPublishedMerge,
   listChangeHistories,
-  mergedHistoryCommits,
   queueResumedAfter,
   readEventQueue,
   readStatus,
@@ -99,13 +98,7 @@ export async function eventQueueRun(
   const queueState = await readEventQueue(store, queue)
   const histories = await listChangeHistories(store, queue)
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
-  const direct = await eventDirectMergeCommits(
-    git,
-    queue,
-    target,
-    queueState.declaration,
-    mergedHistoryCommits(histories),
-  )
+  const direct = await eventDirectMergeCommits(git, queue, target, queueState.declaration, histories)
   directMerges = direct.map((commit) => commit.commit)
   for (const commit of direct) {
     log.write({

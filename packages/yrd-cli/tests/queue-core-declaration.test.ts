@@ -301,6 +301,64 @@ describe("a queue is the selected origin branch carrying config", () => {
     }
   }, 15_000)
 
+  it("lists direct commits after the declaration until a merged event accounts for the line", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = { repo, remote: "origin" }
+    const declaration = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", declaration, new Date("2026-09-22T14:00:00.000Z"))
+
+    writeFileSync(join(repo, "direct.txt"), "around the queue\n")
+    await git(["add", "direct.txt"])
+    await git(["commit", "--quiet", "-m", "direct target commit"])
+    const direct = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", "main"])
+
+    const listed = capture(repo)
+    expect(
+      await coreQueueCommand(repo, listed.io, { command: "list", terms: ["direct"] }, { json: true, queue: "main" }),
+    ).toBe(0)
+    expect((JSON.parse(listed.stdout()) as { changes: readonly { head: string; state: string }[] }).changes).toEqual([
+      expect.objectContaining({ head: direct, state: "direct" }),
+    ])
+    expect(listed.stdout()).not.toContain(declaration)
+
+    const table = capture(repo)
+    expect(await coreQueueCommand(repo, table.io, { command: "list", terms: ["direct"] }, { queue: "main" })).toBe(0)
+    expect(table.stdout()).toContain(direct.slice(0, 12))
+    expect(table.stdout()).toMatch(/\bdirect\b/u)
+
+    writeFileSync(join(repo, "queued.txt"), "queue publication\n")
+    await git(["add", "queued.txt"])
+    await git(["commit", "--quiet", "-m", "queue publication"])
+    const published = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", "main"])
+    await (
+      await openEvents({ ...store, ref: changesRef("main", "task/accounted"), writer: "yrd" })
+    ).append(
+      [
+        changeInput("opened", {
+          queueTip,
+          at: new Date("2026-09-22T14:01:00.000Z"),
+          commit: published,
+          by: "yrd",
+        }),
+        changeInput("merged", {
+          queueTip,
+          at: new Date("2026-09-22T14:02:00.000Z"),
+          commit: published,
+        }),
+      ],
+      { expect: null },
+    )
+
+    const accounted = capture(repo)
+    expect(
+      await coreQueueCommand(repo, accounted.io, { command: "list", terms: ["direct"] }, { json: true, queue: "main" }),
+    ).toBe(0)
+    expect((JSON.parse(accounted.stdout()) as { changes: readonly unknown[] }).changes).toEqual([])
+  }, 15_000)
+
   it("submits an unpublished branch, then drops its open change and branch atomically", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)

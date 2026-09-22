@@ -44,6 +44,7 @@ import { gitlinkRows } from "./git.ts"
 import { changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
 import { tipOf } from "./state.ts"
+import { mergedHistoryCommits } from "./events.ts"
 
 export type DirectMerge = Readonly<{
   /** The branch it moved: the queue's target. */
@@ -120,8 +121,9 @@ export async function eventDirectMergeCommits(
   target: string,
   targetSha: string,
   declaration: string,
-  accounted: ReadonlySet<string>,
+  histories: Parameters<typeof mergedHistoryCommits>[0],
 ): Promise<readonly DirectMerge[]> {
+  const accounted = mergedHistoryCommits(histories)
   const line = await firstParentLine(git, targetSha, `${declaration}..${targetSha}`)
   if (targetSha !== declaration && line.at(-1)?.parents[0] !== declaration) {
     throw new Error(`${target} at ${targetSha}: queue declaration ${declaration} is not on its first-parent line`)

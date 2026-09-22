@@ -32,9 +32,10 @@ import {
   directMergeLine,
   drop,
   pauseLine,
+  eventDirectMergeCommits,
   eventPause,
   eventRows,
-  listChanges,
+  listChangeHistories,
   queueFormat,
   queueRef,
   queueRefPrefix,
@@ -1430,7 +1431,7 @@ export async function coreQueueCommand(
               (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
         const scope =
           reading.format === "event"
-            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and branch heads at ${config.target.remote}; direct target commits are outside this reading.${filteredScope === undefined ? "" : ` ${filteredScope}`}`
+            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.${filteredScope === undefined ? "" : ` ${filteredScope}`}`
             : filteredScope
         return {
           observation,
@@ -1627,6 +1628,9 @@ export async function coreQueueCommand(
             loadDiff: (item) => readDiff(git, config, item),
             open: (item) => {
               if (entries === undefined) {
+                if (item.row.state === "direct") {
+                  return openDetail(git, config, [], item, config.target.branch, journalFor(item, journals))
+                }
                 const selected = eventChanges?.get(item.row.branch)
                 if (selected === undefined) throw new Error(`event change ${item.row.branch} left the selected listing`)
                 return openEventDetail(
@@ -2936,7 +2940,9 @@ async function readEventListing(
 > {
   const store = { repo, remote: config.target.remote }
   const queue = await readEventQueue(store, config.target.branch)
-  const changes = await listChanges(store, config.target.branch)
+  const histories = await listChangeHistories(store, config.target.branch)
+  const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
+  const directMerges = await eventDirectMergeCommits(git, config.target.branch, targetOid, queue.declaration, histories)
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
   const [queueRefs, branchRefs] = await Promise.all([listRefs(queuePrefix, store), listRefs("refs/heads/", store)])
   assertEventListingFence(config.target.branch, queue, changes, queueRefs)
@@ -2951,7 +2957,11 @@ async function readEventListing(
     },
     { targetSha: targetOid },
   )
-  const projected = eventRows(changes, [...drafts.dated, ...drafts.undated])
+  const projected = [
+    ...eventRows(changes),
+    ...list([], { directMerges }),
+    ...eventRows(new Map(), [...drafts.dated, ...drafts.undated]),
+  ]
   const titles = await subjects(
     git,
     projected.map((row) => row.head),

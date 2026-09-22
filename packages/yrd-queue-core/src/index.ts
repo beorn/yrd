@@ -44,6 +44,7 @@ export {
   eventPause,
   evolve,
   initial,
+  listChangeHistories,
   listChanges,
   queueFormat,
   queueRef,
@@ -132,7 +133,7 @@ export type { Clocks, ListOptions, Row, WatchRow, WatchRowOptions } from "./tabl
 export { readHistories, readQueue, readStop, resolveRemote } from "./remote.ts"
 export { DRAFT_EXCLUDED_PREFIXES, DRAFT_WINDOW_MS, readDrafts } from "./drafts.ts"
 export type { Draft, DraftReading } from "./drafts.ts"
-export { directMergeCommits, directMergeLine } from "./direct.ts"
+export { directMergeCommits, directMergeLine, eventDirectMergeCommits } from "./direct.ts"
 export { refuseTarget, inspectSubmit, freshnessLine, submit, issueOf } from "./submit.ts"
 export type { IssueResolution } from "./submit.ts"
 export { withdraw, NothingToWithdraw } from "./withdraw.ts"
