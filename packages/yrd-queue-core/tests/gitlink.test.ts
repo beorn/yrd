@@ -31,6 +31,7 @@ import {
   changeRef,
   checksOf,
   gitIn,
+  inspectSubmit,
   journalKey,
   list,
   queueRun,
@@ -503,6 +504,48 @@ describe("settling gitlinks", () => {
     ).find((record) => record.kind === "merged")
     expect(merged).toBeDefined()
     expect(trailer(merged!, "Published")).toBe(`submodule ${w.main} -> ${pin}`)
+  })
+
+  /** @failure A linked author's private module store is absent from git-super's durable scratch borrow. */
+  it("previews an unpublished pin from a linked worktree without publishing it", async () => {
+    const w = await world()
+    const bay = join(w.work, "..", "linked-author")
+    await w.git([
+      "super",
+      "--json",
+      "worktree",
+      "add",
+      bay,
+      await remoteTip(w.git, "refs/heads/main"),
+      "--reference",
+      w.work,
+    ])
+    const author = gitIn(bay)
+    await author(["checkout", "--quiet", "-b", "task/linked-author"])
+    const child = gitIn(join(bay, "submodule"))
+    await child(["config", "user.email", "queue@yrd.test"])
+    await child(["config", "user.name", "yrd"])
+    writeFileSync(join(bay, "submodule", "lib.txt"), "private linked commit\n")
+    await child(["commit", "--quiet", "-am", "private linked commit"])
+    const pin = (await child(["rev-parse", "HEAD"])).trim()
+    await author(["add", "submodule"])
+    await author(["commit", "--quiet", "-m", "task/linked-author: move private pin"])
+    const rejectingHooks = join(w.work, "..", "rejecting-hooks")
+    mkdirSync(rejectingHooks)
+    writeFileSync(join(rejectingHooks, "pre-commit"), "#!/bin/sh\nexit 86\n")
+    chmodSync(join(rejectingHooks, "pre-commit"), 0o755)
+    await author(["config", "core.hooksPath", rejectingHooks])
+
+    const preview = await inspectSubmit(author, "origin", {
+      branch: "task/linked-author",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+    expect(preview.verifying).toMatchObject({
+      state: "verified",
+      gitlinks: [{ path: "submodule", state: "kept-ahead" }],
+    })
+    expect(await submoduleRemoteRef(w, `refs/git-super/pins/${pin}`)).toBeUndefined()
   })
 
   // The same submit, retried at the same head: the retention ref already

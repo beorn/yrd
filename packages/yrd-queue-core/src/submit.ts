@@ -20,7 +20,7 @@
  * the same derivation every other reader uses.
  */
 
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { targetName, type Target } from "./config.ts"
@@ -226,6 +226,8 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
   const issue = await issueOf(git, request.branch, head, targetHead, request.issue)
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
   const scratch = mkdtempSync(join(tmpdir(), "yrd-submit-verifying-"))
+  const hooksPath = join(scratch, "hooks-disabled")
+  mkdirSync(hooksPath)
   let verifying: Verification
   try {
     const composed = await verifyCandidate({
@@ -235,6 +237,7 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
       head,
       path: join(scratch, "candidate"),
       message: `verify ${request.branch} at ${head} against ${targetHead}`,
+      hooksPath,
     })
     verifying = composed.verifying
     if (composed.state === "failed") {
