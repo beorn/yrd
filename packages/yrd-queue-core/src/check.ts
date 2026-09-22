@@ -280,7 +280,7 @@ export function checksOf(
 ): readonly CheckView[] {
   void ending
   // An ending record's own `Check:` trailers are carried forward verbatim
-  // onto the `sent` record that follows it (records.ts), so one real
+  // onto the `sent` record that follows it (legacy-records.ts), so one real
   // occurrence's exact trailer text — name, exit, ms and its create-only,
   // therefore never-reused, log path together — can be folded in twice by
   // `show()`. Two trailers that are not byte-identical are never the same

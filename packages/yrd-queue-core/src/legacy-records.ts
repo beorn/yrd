@@ -38,7 +38,7 @@
  * on one change lose loudly instead of interleaving.
  */
 
-import { refAt } from "./git.ts"
+import { refAt, type Git } from "./git.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
 
 /** The one word for a deferred record and state, kept behind one constant (CTO ruling 25029). */
@@ -70,9 +70,6 @@ export type ChangeRecord = Readonly<{
   /** Trailers in order, repeats kept: a change can carry many `Check:` lines. */
   trailers: readonly (readonly [string, string])[]
 }>
-
-/** One git invocation, returning its stdout; `input` is its stdin. Throws on a non-zero exit. */
-export type Git = (args: readonly string[], input?: string) => Promise<string>
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 /** Git's expected-old value for a ref that must not exist yet. */

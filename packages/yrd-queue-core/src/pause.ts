@@ -22,16 +22,8 @@
  * can decide it differently.
  */
 
-import {
-  ABSENT,
-  RECORD_FORMAT,
-  commitTrailers,
-  endedKind,
-  standsEnded,
-  type ChangeRecord,
-  type Git,
-} from "./records.ts"
-import { readRemoteCommit } from "./git.ts"
+import { ABSENT, RECORD_FORMAT, commitTrailers, endedKind, standsEnded, type ChangeRecord } from "./legacy-records.ts"
+import { readRemoteCommit, type Git } from "./git.ts"
 
 import { changeName, parseChangeName, pauseRef, type Change } from "./refs.ts"
 import { holdsPlaceInLine, type ChangeState } from "./state.ts"

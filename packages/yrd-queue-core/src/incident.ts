@@ -8,7 +8,7 @@
  */
 
 import { isAbsolute } from "node:path"
-import { trailers, type ChangeRecord } from "./records.ts"
+import { trailers, type ChangeRecord } from "./legacy-records.ts"
 
 export const INCIDENT_TRAILERS = ["Code", "Subject", "Via", "Evidence", "Next", "Owner"] as const
 

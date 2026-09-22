@@ -74,14 +74,14 @@ import {
   readRootChanges,
   cleanupRootChanges,
   type RootChanges,
-  type Git,
   type WriteRecord,
-} from "./records.ts"
+} from "./legacy-records.ts"
 import { queueName, readConfig, type Target } from "./config.ts"
 import {
   GitExit,
   gitIn,
   isAncestor,
+  type Git,
   type GitObservation,
   type ObservationNotice,
   mergeBase,

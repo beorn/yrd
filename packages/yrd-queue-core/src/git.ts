@@ -21,8 +21,10 @@ import { isAbsolute } from "node:path"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { danglingRefs } from "git-super/objects"
 import type { GitProcess } from "git-super/process"
-import type { Git } from "./records.ts"
 import type { QueueObservation } from "./remote.ts"
+
+/** One git invocation, returning its stdout; `input` is its stdin. Throws on a non-zero exit. */
+export type Git = (args: readonly string[], input?: string) => Promise<string>
 
 export type GitSelection = Readonly<{
   executable: string

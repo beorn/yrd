@@ -34,7 +34,7 @@
  * from the stop itself.
  */
 
-import { mergedBy } from "./records.ts"
+import { mergedBy } from "./legacy-records.ts"
 import {
   pauseLine,
   QueuePaused,

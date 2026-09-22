@@ -1,7 +1,7 @@
 /**
  * The operator's own ending: `yrd queue withdraw <branch>` takes one change
  * out of the line by appending a `withdrawn` record to its chain — an ending
- * like merged or failed (records.ts ENDING_KINDS), so every reader drops the
+ * like merged or failed (legacy-records.ts ENDING_KINDS), so every reader drops the
  * change from its working sets while the history stays whole. The branch
  * itself is untouched: withdrawing is not deleting, and a later `yrd submit`
  * of the same branch re-opens the chain through the ordinary retry path — a
@@ -16,11 +16,11 @@
  * The write mirrors `submit` and `writeRecord`: read the remote fresh, write
  * the record object onto the tip that read saw, push under a lease for that
  * same tip. A racing queue run loses loudly; one retry re-reads the winner's
- * tip and re-checks the ending before appending again (records.ts).
+ * tip and re-checks the ending before appending again (legacy-records.ts).
  */
 
-import { refAt } from "./git.ts"
-import { endedKind, endingRecord, readRecords, recordCommit, type Git, type WriteRecord } from "./records.ts"
+import { refAt, type Git } from "./git.ts"
+import { endedKind, endingRecord, readRecords, recordCommit, type WriteRecord } from "./legacy-records.ts"
 import { parseChangeRef, queueRefPrefix, type Change } from "./refs.ts"
 
 export type WithdrawRequest = Readonly<{
