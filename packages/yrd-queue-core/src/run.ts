@@ -445,7 +445,7 @@ function isStopWindowClosed(options: QueueRunOptions): options is QueueRunOption
 }
 
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
-  if ((await queueFormat(options.target.branch, { repo: options.repo, remote: options.target.remote })) === "event") {
+  if ((await queueFormat({ repo: options.repo, remote: options.target.remote }, options.target.branch)) === "event") {
     throw new Error(
       `event queue ${options.target.remote}#${options.target.branch} cannot run until #25040's runner is delivered; no event change was judged`,
     )

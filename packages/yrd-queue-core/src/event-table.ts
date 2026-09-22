@@ -36,6 +36,7 @@ export function eventRows(changes: ReadonlyMap<string, EventChange>): readonly R
       format: "event",
       ...(positions.get(branch) === undefined ? {} : { position: positions.get(branch) }),
       ...(change.issue === undefined ? {} : { issue: change.issue }),
+      ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
       ...(change.since === undefined ? {} : { since: change.since }),
       ...(change.at === undefined ? {} : { at: change.at }),
       ...(change.endedAt === undefined ? {} : { endedAt: change.endedAt }),
