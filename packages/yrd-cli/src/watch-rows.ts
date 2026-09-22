@@ -53,7 +53,7 @@ export function matchesTerm(row: WatchRow, term: string): boolean {
     row.row.result,
     row.row.reason,
     row.row.state,
-    stateWord({ state: row.row.state }),
+    stateWord(row.row),
   ].some((field) => field?.toLocaleLowerCase().includes(wanted) === true)
 }
 
@@ -85,7 +85,7 @@ export function rowLine(row: WatchRow): string {
   // now — which is the run, whatever else is known.
   const run = row.run?.id ?? row.row.run ?? row.row.live?.run
   return [
-    `${position} ${stateWord({ state: row.row.state }).padEnd(9)} ${row.row.branch} ${row.row.head.slice(0, 12)} ${result}`,
+    `${position} ${stateWord(row.row).padEnd(9)} ${row.row.branch} ${row.row.head.slice(0, 12)} ${result}`,
     row.row.issue === undefined ? "" : ` ${row.row.issue}`,
     // A direct merge's whole line IS its reason, subject and all, so adding
     // the subject beside it printed it twice. Anything the result already

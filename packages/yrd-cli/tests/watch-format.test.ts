@@ -18,6 +18,7 @@ import {
   mediaDuration,
   runShortName,
   stateGlyph,
+  stateWord,
 } from "../src/watch-format.ts"
 
 describe("ref-write diagnostic lines", () => {
@@ -107,6 +108,14 @@ describe("ref-write diagnostic lines", () => {
 })
 
 describe("the one glyph table", () => {
+  it("shows event statuses literally while preserving legacy queue words", () => {
+    expect(stateWord({ state: "queued", format: "event" })).toBe("queued")
+    expect(stateWord({ state: "verifying", format: "event" })).toBe("verifying")
+    expect(stateWord({ state: "cancelled", format: "event" })).toBe("cancelled")
+    expect(stateWord({ state: "queued" })).toBe("submitted")
+    expect(stateGlyph({ state: "verifying", format: "event" })).toBe("◉")
+  })
+
   it("overlays the working glyph on any state while a check runs, and keeps the state's glyph otherwise", () => {
     expect(stateGlyph({ state: "queued" })).toBe("○")
     expect(stateGlyph({ state: "failed" })).toBe("×")
@@ -116,7 +125,6 @@ describe("the one glyph table", () => {
     ).toBe("◉")
   })
 })
-
 
 describe("friendlyPath (items 30a, 33)", () => {
   it("prints a repository under $HOME with ~, the way a shell prompt would", () => {

@@ -22,7 +22,18 @@ function event(
 
 describe("event changes use the shared table row", () => {
   it("projects one row per branch with the fold's current status, submitted head and ending reason", () => {
-    const opened = evolve(initial, event("opened", QUEUE, [["Commit", HEAD]], [HEAD]))
+    const opened = evolve(
+      initial,
+      event(
+        "opened",
+        QUEUE,
+        [
+          ["Commit", HEAD],
+          ["Issue", "25040"],
+        ],
+        [HEAD],
+      ),
+    )
     const verifying = evolve(opened, event("verifying", "c".repeat(40), [["Commit", HEAD]], [HEAD]))
     const checking = evolve(verifying, event("checking", "d".repeat(40)))
     const cancelled = evolve(
@@ -45,12 +56,34 @@ describe("event changes use the shared table row", () => {
     )
 
     expect(rows).toEqual([
-      { branch: "task/check", head: HEAD, state: "checking" },
-      { branch: "task/drop", head: HEAD, state: "cancelled", reason: "dropped" },
+      {
+        branch: "task/check",
+        head: HEAD,
+        state: "checking",
+        format: "event",
+        issue: "25040",
+        since: new Date(TIME),
+        at: new Date(TIME),
+        position: 1,
+      },
+      {
+        branch: "task/drop",
+        head: HEAD,
+        state: "cancelled",
+        format: "event",
+        issue: "25040",
+        reason: "dropped",
+        since: new Date(TIME),
+        at: new Date(TIME),
+        endedAt: new Date(TIME),
+      },
     ])
   })
 
   it("names a branch whose selected chain has no submitted commit", () => {
     expect(() => eventRows(new Map([["task/missing", initial]]))).toThrow(/task\/missing.*submitted commit/)
+    expect(() => eventRows(new Map([["task/no-time", { status: "queued", commit: HEAD, ignored: false }]]))).toThrow(
+      /task\/no-time.*Time/,
+    )
   })
 })
