@@ -7,14 +7,15 @@ import { describe, expect, it } from "vitest"
 import type { Event, EventInput } from "gitomic/events"
 import { listRefs, openEvents } from "gitomic/events"
 import { createMemBackend } from "gitomic/mem"
-import { open } from "gitomic"
+import { Conflict, open } from "gitomic"
+import type { GitomicBackend } from "gitomic"
 import {
   appendChangeEvent,
   changeInput,
   changesRef,
   createEventQueue,
   decide,
-  dropEventChange,
+  drop,
   evolve,
   initial,
   listChanges,
@@ -27,6 +28,40 @@ import {
 
 const A = "a".repeat(40)
 const B = "b".repeat(40)
+
+function remoteMemStore(repo: string) {
+  const backend = createMemBackend()
+  const localRefs = backend.listRefs
+  const localPublish = backend.publish
+  if (localRefs === undefined || localPublish === undefined) throw new Error("mem backend lacks event ref operations")
+  let beforePublish: (() => Promise<void>) | undefined
+  const proxy: GitomicBackend = {
+    ...backend,
+    listRefs: (name, prefix) => localRefs(name, prefix),
+    publish: async (name, updates) => {
+      const hook = beforePublish
+      beforePublish = undefined
+      if (hook !== undefined) await hook()
+      return localPublish(name, updates)
+    },
+    fetchRefs: async (name, refs) => {
+      if (typeof refs === "string") return localRefs(name, refs)
+      const found = new Map<string, string>()
+      for (const ref of refs) {
+        const oid = (await localRefs(name, ref)).get(ref)
+        if (oid === undefined) throw new Error(`missing fixture ref ${ref}`)
+        found.set(ref, oid)
+      }
+      return found
+    },
+  }
+  const store = { repo, backend: proxy }
+  return {
+    store,
+    location: { ...store, remote: "origin" },
+    beforeNextPublish: (hook: () => Promise<void>) => (beforePublish = hook),
+  }
+}
 
 function event(
   type: string,
@@ -44,6 +79,7 @@ function event(
     props: [
       ...(props.some(([key]) => key === "Queue") ? [] : [["Queue", A] as const]),
       ...(props.some(([key]) => key === "Time") ? [] : [["Time", "2026-09-22T14:00:00.000Z"] as const]),
+      ...(type === "opened" && !props.some(([key]) => key === "By") ? [["By", "@dev/2"] as const] : []),
       ...props,
     ],
     writer: "yrd",
@@ -53,7 +89,16 @@ function event(
 }
 
 function input(type: string, props: readonly (readonly [string, string])[] = [], keeps: string[] = []): EventInput {
-  return { type, props: [["Queue", A], ["Time", "2026-09-22T14:00:00.000Z"], ...props], keeps }
+  return {
+    type,
+    props: [
+      ["Queue", A],
+      ["Time", "2026-09-22T14:00:00.000Z"],
+      ...(type === "opened" ? [["By", "@dev/2"] as const] : []),
+      ...props,
+    ],
+    keeps,
+  }
 }
 
 function landed(inputs: readonly EventInput[], firstId: string): Event[] {
@@ -73,19 +118,21 @@ describe("ADR-0017 ref tree", () => {
 describe("ADR-0016 event fold", () => {
   it("constructs required Yrd trailers and kept commits for a write", () => {
     const at = new Date("2026-09-22T14:00:00.000Z")
-    const opened = changeInput("opened", { queueTip: A, at, commit: B, issue: "25040" })
+    const opened = changeInput("opened", { queueTip: A, at, commit: B, issue: "25040", by: "@dev/2" })
     expect(opened.props).toEqual([
       ["Queue", A],
       ["Time", at.toISOString()],
       ["Commit", B],
       ["Issue", "25040"],
+      ["By", "@dev/2"],
     ])
     expect(opened.keeps).toEqual([B])
     expect(changeInput("checking", { queueTip: A, at }).props).toEqual([
       ["Queue", A],
       ["Time", at.toISOString()],
     ])
-    expect(() => changeInput("opened", { queueTip: A, at })).toThrow(/Commit/)
+    expect(() => changeInput("opened", { queueTip: A, at, by: "@dev/2" })).toThrow(/Commit/)
+    expect(() => changeInput("opened", { queueTip: A, at, commit: B })).toThrow(/By/)
     const resubmit = decide([event("opened", A, [["Commit", A]], [A])], opened)
     expect(resubmit[0]?.props).toContainEqual(["Queue", A])
     expect(resubmit[0]?.props).toContainEqual(["Time", at.toISOString()])
@@ -178,25 +225,87 @@ describe("ADR-0016 event fold", () => {
       evolve(current.reduce(evolve, initial), event(dropped.type, "c".repeat(40), dropped.props ?? [], [A])).status,
     ).toBe("cancelled")
   })
+
+  it("records a dropped branch with no prior submit as a cancelled chain that keeps its last head", () => {
+    const dropped = event(
+      "cancelled",
+      B,
+      [
+        ["Reason", "dropped"],
+        ["Commit", A],
+      ],
+      [A],
+    )
+    const state = evolve(initial, dropped)
+    expect(state).toMatchObject({ status: "cancelled", commit: A, reason: "dropped", ending: { id: B } })
+    expect(() =>
+      evolve(
+        initial,
+        event(
+          "cancelled",
+          B,
+          [
+            ["Reason", "deleted"],
+            ["Commit", A],
+          ],
+          [A],
+        ),
+      ),
+    ).toThrow(/open change/)
+  })
+
+  it("does not carry an earlier submission's attribution onto a later branch drop", () => {
+    const ended = [
+      event(
+        "opened",
+        A,
+        [
+          ["Commit", A],
+          ["Issue", "25040"],
+        ],
+        [A],
+      ),
+      event("failed", B),
+    ].reduce(evolve, initial)
+    const dropped = evolve(
+      ended,
+      event(
+        "cancelled",
+        "c".repeat(40),
+        [
+          ["Reason", "dropped"],
+          ["Commit", B],
+        ],
+        [B],
+      ),
+    )
+    expect(dropped).toMatchObject({ status: "cancelled", commit: B, reason: "dropped" })
+    expect(dropped.issue).toBeUndefined()
+    expect(dropped.submitter).toBeUndefined()
+    expect(dropped.since).toBeUndefined()
+  })
 })
 
 describe("the queue-format boundary", () => {
   it("drops a branch in the same publish as an ending that keeps its last commit", async () => {
-    const store = { repo: "yrd-event-drop", backend: createMemBackend() }
+    const { store, location } = remoteMemStore("yrd-event-drop")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
-    const queueTip = await createEventQueue("lab", base, store, new Date("2026-09-22T14:00:00.000Z"))
+    const queueTip = await createEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
     const branch = await open({ ...store, ref: "refs/heads/task/drop" })
     const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
     await (
       await openEvents({ ...store, ref: changesRef("lab", "task/drop") })
-    ).append([changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head })], {
-      expect: null,
-    })
+    ).append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      {
+        expect: null,
+      },
+    )
     const last = (await branch.transact(async (map) => map.set("work", "two"), "push after submit")).oid
-    const dropped = await dropEventChange("lab", "task/drop", { by: "@dev/2" }, store)
-    expect((await readStatus("lab", "task/drop", store)).reason).toBe("dropped")
-    expect((await readStatus("lab", "task/drop", store)).commit).toBe(head)
+    const dropped = await drop(location, { queue: "lab", branch: "task/drop", by: "@dev/2" })
+    expect((await readStatus(location, "lab", "task/drop")).reason).toBe("dropped")
+    expect((await readStatus(location, "lab", "task/drop")).commit).toBe(head)
     expect((await listRefs("refs/heads/task/drop", store)).has("refs/heads/task/drop")).toBe(false)
     expect((await (await openEvents({ ...store, ref: changesRef("lab", "task/drop") })).events()).at(-1)).toMatchObject(
       {
@@ -205,16 +314,82 @@ describe("the queue-format boundary", () => {
         links: [last],
       },
     )
-    await expect(dropEventChange("lab", "task/drop", { by: "@dev/2" }, store)).rejects.toThrow(
-      /already ended cancelled/,
+    expect(await drop(location, { queue: "lab", branch: "task/drop", by: "@dev/2" })).toEqual(dropped)
+  })
+
+  it("drops a never-submitted branch by creating its chain, then reports the ending on retry", async () => {
+    const { store, location } = remoteMemStore("yrd-event-drop-draft")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    await createEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/draft" })
+    const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+    const dropped = await drop(location, { queue: "lab", branch: "task/draft", by: "@dev/2" })
+    expect(await readStatus(location, "lab", "task/draft")).toMatchObject({
+      status: "cancelled",
+      commit: head,
+      reason: "dropped",
+    })
+    expect((await listRefs("refs/heads/task/draft", store)).size).toBe(0)
+    const events = await (await openEvents({ ...store, ref: changesRef("lab", "task/draft") })).events()
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ id: dropped.event, type: "cancelled", links: [head] })
+    expect(await drop(location, { queue: "lab", branch: "task/draft", by: "@dev/2" })).toEqual(dropped)
+  })
+
+  it("leaves the chain and moved branch untouched when the delete lease loses", async () => {
+    const { store, location, beforeNextPublish } = remoteMemStore("yrd-event-drop-race")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    await createEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/race" })
+    await branch.transact(async (map) => map.set("work", "one"), "first head")
+    let rival = ""
+    beforeNextPublish(async () => {
+      rival = (await branch.transact(async (map) => map.set("work", "two"), "rival head")).oid
+    })
+    const refused = drop(location, { queue: "lab", branch: "task/race", by: "@dev/2" })
+    await expect(refused).rejects.toBeInstanceOf(Conflict)
+    await expect(refused).rejects.toThrow(new RegExp(`refs/heads/task/race.*${rival}`))
+    expect(await branch.head()).toBe(rival)
+    expect(await (await openEvents({ ...store, ref: changesRef("lab", "task/race") })).head()).toBeNull()
+  })
+
+  it("names the deleted-branch disposition when an open change lost its branch", async () => {
+    const { store, location } = remoteMemStore("yrd-event-drop-absent")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await createEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branchRef = "refs/heads/task/absent"
+    const branch = await open({ ...store, ref: branchRef })
+    const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+    const chain = await openEvents({ ...store, ref: changesRef("lab", "task/absent") })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      { expect: null },
     )
+    if (store.backend.publish === undefined) throw new Error("fixture backend cannot delete a ref")
+    await store.backend.publish(store.repo, [{ ref: branchRef, expect: head, oid: null }])
+    await expect(drop(location, { queue: "lab", branch: "task/absent", by: "@dev/2" })).rejects.toThrow(
+      /refs\/heads\/task\/absent.*cancelled \(deleted\).*deleted-branch observer/,
+    )
+    expect(await chain.head()).toBe(opened.head)
+    expect((await readStatus(location, "lab", "task/absent")).status).toBe("queued")
+    const failed = await chain.append(
+      [changeInput("failed", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), reason: "check failed" })],
+      { expect: opened.head },
+    )
+    await expect(drop(location, { queue: "lab", branch: "task/absent", by: "@dev/2" })).rejects.toThrow(
+      /refs\/heads\/task\/absent.*already ended failed.*no branch to drop/,
+    )
+    expect(await chain.head()).toBe(failed.head)
   })
 
   it("writes a runner phase at the selected tip and keeps its candidate, then refuses a stale rival", async () => {
-    const store = { repo: "yrd-event-run-writer", backend: createMemBackend() }
+    const { store, location } = remoteMemStore("yrd-event-run-writer")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
-    const queueTip = await createEventQueue("lab", targetCommit, store, new Date("2026-09-22T14:00:00.000Z"))
+    const queueTip = await createEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
     const branch = await open({ ...store, ref: "refs/heads/task/42" })
     const head = (await branch.transact(async (map) => map.set("work.txt", "one"), "work")).oid
     const candidate = await open({ ...store, ref: "refs/heads/candidate" })
@@ -222,118 +397,91 @@ describe("the queue-format boundary", () => {
     const ref = changesRef("lab", "task/42")
     const chain = await openEvents({ ...store, ref })
     const opened = await chain.append(
-      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head })],
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
       { expect: null },
     )
     const selectedTip = opened.head
     if (selectedTip === null) throw new Error("fixture opened event has no tip")
-    const verifying = await appendChangeEvent(
-      "lab",
-      "task/42",
-      selectedTip,
-      {
-        type: "verifying",
-        at: new Date("2026-09-22T14:02:00.000Z"),
-        commit: composed,
-      },
-      store,
-    )
-    expect((await readStatus("lab", "task/42", store)).status).toBe("verifying")
+    const verifying = await appendChangeEvent(location, "lab", "task/42", selectedTip, {
+      type: "verifying",
+      at: new Date("2026-09-22T14:02:00.000Z"),
+      commit: composed,
+    })
+    expect((await readStatus(location, "lab", "task/42")).status).toBe("verifying")
     expect((await chain.events()).at(-1)).toMatchObject({ id: verifying, type: "verifying", links: [composed] })
     await expect(
-      appendChangeEvent(
-        "lab",
-        "task/42",
-        selectedTip,
-        {
-          type: "checking",
-          at: new Date("2026-09-22T14:03:00.000Z"),
-        },
-        store,
-      ),
-    ).rejects.toThrow(/moved after the selected reading/)
-    const checking = await appendChangeEvent(
-      "lab",
-      "task/42",
-      verifying,
-      {
+      appendChangeEvent(location, "lab", "task/42", selectedTip, {
         type: "checking",
         at: new Date("2026-09-22T14:03:00.000Z"),
-      },
-      store,
-    )
+      }),
+    ).rejects.toThrow(/moved after the selected reading/)
+    const checking = await appendChangeEvent(location, "lab", "task/42", verifying, {
+      type: "checking",
+      at: new Date("2026-09-22T14:03:00.000Z"),
+    })
     expect(checking).toMatch(/^[0-9a-f]{40}$/u)
-    expect((await readStatus("lab", "task/42", store)).status).toBe("checking")
-    const merging = await appendChangeEvent(
-      "lab",
-      "task/42",
-      checking,
-      {
-        type: "merging",
-        at: new Date("2026-09-22T14:04:00.000Z"),
-      },
-      store,
-    )
+    expect((await readStatus(location, "lab", "task/42")).status).toBe("checking")
+    const merging = await appendChangeEvent(location, "lab", "task/42", checking, {
+      type: "merging",
+      at: new Date("2026-09-22T14:04:00.000Z"),
+    })
     const merged = {
       type: "merged" as const,
       at: new Date("2026-09-22T14:05:00.000Z"),
       commit: head,
       also: [{ ref: "refs/heads/lab", expect: A, oid: composed }],
     }
-    await expect(appendChangeEvent("lab", "task/42", merging, merged, store)).rejects.toThrow()
-    expect((await readStatus("lab", "task/42", store)).status).toBe("merging")
+    await expect(appendChangeEvent(location, "lab", "task/42", merging, merged)).rejects.toThrow()
+    expect((await readStatus(location, "lab", "task/42")).status).toBe("merging")
     expect(await target.head()).toBe(targetCommit)
-    await appendChangeEvent(
-      "lab",
-      "task/42",
-      merging,
-      {
-        ...merged,
-        also: [{ ref: "refs/heads/lab", expect: targetCommit, oid: composed }],
-      },
-      store,
-    )
-    expect((await readStatus("lab", "task/42", store)).status).toBe("merged")
+    await appendChangeEvent(location, "lab", "task/42", merging, {
+      ...merged,
+      also: [{ ref: "refs/heads/lab", expect: targetCommit, oid: composed }],
+    })
+    expect((await readStatus(location, "lab", "task/42")).status).toBe("merged")
     expect(await target.head()).toBe(composed)
   })
 
   it("requires a declared queue chain and derives its pause from queue events", async () => {
-    const store = { repo: "yrd-event-queue", backend: createMemBackend() }
+    const { store, location } = remoteMemStore("yrd-event-queue")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
-    const created = await createEventQueue("lab", commit, store, new Date("2026-09-22T14:00:00.000Z"))
-    expect((await readEventQueue("lab", store)).created).toBe(created)
-    await writeQueueEvent(
-      "lab",
-      { type: "paused", reason: "repair", by: "operator", at: new Date("2026-09-22T14:01:00.000Z") },
-      store,
-    )
-    expect((await readEventQueue("lab", store)).pause?.reason).toBe("repair")
-    expect((await readEventQueue("lab", store)).pause?.by).toBe("operator")
-    await writeQueueEvent(
-      "lab",
-      { type: "resumed", reason: "repaired", by: "operator", at: new Date("2026-09-22T14:02:00.000Z") },
-      store,
-    )
-    expect((await readEventQueue("lab", store)).pause).toBeUndefined()
+    const created = await createEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    expect((await readEventQueue(location, "lab")).created).toBe(created)
+    await writeQueueEvent(location, "lab", {
+      type: "paused",
+      reason: "repair",
+      by: "operator",
+      at: new Date("2026-09-22T14:01:00.000Z"),
+    })
+    expect((await readEventQueue(location, "lab")).pause?.reason).toBe("repair")
+    expect((await readEventQueue(location, "lab")).pause?.by).toBe("operator")
+    await writeQueueEvent(location, "lab", {
+      type: "resumed",
+      reason: "repaired",
+      by: "operator",
+      at: new Date("2026-09-22T14:02:00.000Z"),
+    })
+    expect((await readEventQueue(location, "lab")).pause).toBeUndefined()
     await expect(
-      writeQueueEvent(
-        "lab",
-        { type: "resumed", reason: "again", by: "operator", at: new Date("2026-09-22T14:03:00.000Z") },
-        store,
-      ),
+      writeQueueEvent(location, "lab", {
+        type: "resumed",
+        reason: "again",
+        by: "operator",
+        at: new Date("2026-09-22T14:03:00.000Z"),
+      }),
     ).rejects.toThrow(/resumes a running queue/)
   })
 
   it("selects one event queue by its queue ref and reads an empty change set without legacy fallback", async () => {
-    const store = { repo: "yrd-event-selector", backend: createMemBackend() }
-    expect(await queueFormat("lab", store)).toBe("legacy")
+    const { store, location } = remoteMemStore("yrd-event-selector")
+    expect(await queueFormat(location, "lab")).toBe("legacy")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
-    await createEventQueue("lab", targetCommit, store, new Date("2026-09-22T14:00:00.000Z"))
-    expect(await queueFormat("lab", store)).toBe("event")
-    expect(await listChanges("lab", store)).toEqual(new Map())
-    await expect(readStatus("lab", "missing", store)).rejects.toThrow(
+    await createEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
+    expect(await queueFormat(location, "lab")).toBe("event")
+    expect(await listChanges(location, "lab")).toEqual(new Map())
+    await expect(readStatus(location, "lab", "missing")).rejects.toThrow(
       /missing event chain.*refs\/yrd\/lab\/changes\/missing/,
     )
 
@@ -342,20 +490,20 @@ describe("the queue-format boundary", () => {
     const work = await open({ ...store, ref: "refs/heads/task/42" })
     const commit = (await work.transact(async (map) => map.set("work.txt", "one"), "work")).oid
     await branch.append([input("opened", [["Commit", commit]], [commit])], { expect: null })
-    expect((await listChanges("lab", store)).get("task/42")?.status).toBe("queued")
-    expect((await readStatus("lab", "task/42", store)).status).toBe("queued")
+    expect((await listChanges(location, "lab")).get("task/42")?.status).toBe("queued")
+    expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
     // Gitomic's reader defaults to 50; a status must fold the whole chain.
     const reports = Array.from({ length: 51 }, () => input("sent"))
     await branch.append(reports, { expect: await branch.head() })
-    expect((await listChanges("lab", store)).get("task/42")?.status).toBe("queued")
-    expect((await readStatus("lab", "task/42", store)).status).toBe("queued")
+    expect((await listChanges(location, "lab")).get("task/42")?.status).toBe("queued")
+    expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
   })
 
   it("refuses a present but malformed queue chain instead of showing empty changes", async () => {
-    const store = { repo: "yrd-event-malformed", backend: createMemBackend() }
+    const { store, location } = remoteMemStore("yrd-event-malformed")
     const queue = await openEvents({ ...store, ref: queueRef("lab") })
     await queue.append([{ type: "created" }], { expect: null })
-    expect(await queueFormat("lab", store)).toBe("event")
-    await expect(listChanges("lab", store)).rejects.toThrow(/created.*Commit/)
+    expect(await queueFormat(location, "lab")).toBe("event")
+    await expect(listChanges(location, "lab")).rejects.toThrow(/created.*Commit/)
   })
 })
