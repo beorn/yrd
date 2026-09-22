@@ -8,7 +8,17 @@ import type { Event, EventInput } from "gitomic/events"
 import { openEvents } from "gitomic/events"
 import { createMemBackend } from "gitomic/mem"
 import { open } from "gitomic"
-import { changesRef, decide, evolve, initial, listChanges, queueFormat, queueRef, readStatus } from "../src/events.ts"
+import {
+  changeInput,
+  changesRef,
+  decide,
+  evolve,
+  initial,
+  listChanges,
+  queueFormat,
+  queueRef,
+  readStatus,
+} from "../src/events.ts"
 
 const A = "a".repeat(40)
 const B = "b".repeat(40)
@@ -37,6 +47,26 @@ describe("ADR-0017 ref tree", () => {
 })
 
 describe("ADR-0016 event fold", () => {
+  it("constructs required Yrd trailers and kept commits for a write", () => {
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const opened = changeInput("opened", { queueTip: A, at, commit: B, issue: "25040" })
+    expect(opened.props).toEqual([
+      ["Queue", A],
+      ["Time", at.toISOString()],
+      ["Commit", B],
+      ["Issue", "25040"],
+    ])
+    expect(opened.keeps).toEqual([B])
+    expect(changeInput("checking", { queueTip: A, at }).props).toEqual([
+      ["Queue", A],
+      ["Time", at.toISOString()],
+    ])
+    expect(() => changeInput("opened", { queueTip: A, at })).toThrow(/Commit/)
+    const resubmit = decide([event("opened", A, [["Commit", A]], [A])], opened)
+    expect(resubmit[0]?.props).toContainEqual(["Queue", A])
+    expect(resubmit[0]?.props).toContainEqual(["Time", at.toISOString()])
+  })
+
   it("derives phases and endings without a Status trailer", () => {
     const opened = event("opened", A, [["Commit", A]], [A])
     const verifying = event("verifying", B, [["Commit", B]], [B])
