@@ -2,8 +2,16 @@
 import { mkdirSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 
-import { appendChangeEvent, listChanges, queueRef, readEventQueue, readStatus } from "./events.ts"
+import {
+  appendChangeEvent,
+  listChangeHistories,
+  mergedHistoryCommits,
+  queueRef,
+  readEventQueue,
+  readStatus,
+} from "./events.ts"
 import { eventRows } from "./event-table.ts"
+import { eventDirectMergeCommits } from "./direct.ts"
 import { listRefs } from "gitomic/events"
 import { queueName } from "./config.ts"
 import { gitIn } from "./git.ts"
@@ -78,6 +86,7 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
     message: observation.message,
     ...(observation.contract === "native" ? {} : { outcome: observation.outcome }),
   })
+  let directMerges: readonly string[] = []
   const result = (
     exitCode: 0 | 1 | 2,
     merged: string[] = [],
@@ -98,7 +107,7 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
     failed,
     stuck,
     deferred,
-    directMerges: [],
+    directMerges,
     checkedWaiting: 0,
     ...(stopped === undefined ? {} : { stopped }),
   })
@@ -107,20 +116,31 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
   }
 
   const queueState = await readEventQueue(store, queue)
-  if (target !== queueState.declaration) {
-    const commits = (await git(["rev-list", "--first-parent", `${queueState.declaration}..${target}`]))
-      .trim()
-      .split("\n")
-      .filter((commit) => commit !== "")
-    throw new Error(
-      `event queue ${url}#${queue}: lab-only refusal while direct merge accounting (E5, #25040) is pending; first-parent commits after ${queueState.declaration}: ${commits.join(", ") || "none (target diverged or moved)"}; refusing target ${target}`,
-    )
+  const histories = await listChangeHistories(store, queue)
+  const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
+  const direct = await eventDirectMergeCommits(
+    git,
+    queue,
+    target,
+    queueState.declaration,
+    mergedHistoryCommits(histories),
+  )
+  directMerges = direct.map((commit) => commit.commit)
+  for (const commit of direct) {
+    log.write({
+      kind: "merged-direct",
+      branch: queue,
+      commit: commit.commit,
+      gitlinks: commit.gitlinks,
+      parents: commit.parents,
+      subject: commit.subject,
+      why: commit.why,
+    })
   }
   if (queueState.pause !== undefined && options.foreground !== true) {
     log.write({ kind: "pause", reason: queueState.pause.reason, by: queueState.pause.by, sha: queueState.pause.id })
     return result(0, [], [], [], [], { ring: "pause", says: queueState.pause.reason, what: queueState.pause })
   }
-  const changes = await listChanges(store, queue)
   const open: { branch: string; status: string; since: Date; commit: string; tip: string; reason?: string }[] = []
   for (const row of eventRows(changes)) {
     if (row.position === undefined) continue

@@ -488,18 +488,47 @@ it("refuses a component-bearing event change until pin publication is implemente
 /** @failure An event round reported no direct merges after the target moved around the queue.
  * @level l3 @consumer queue operator
  */
-it("refuses an unaccounted target movement instead of reporting no direct merges", async () => {
+it("reports a direct merge after the declaration and still merges the queued change", async () => {
   const w = await world()
   const store = { repo: w.work, remote: "origin" }
   await createEventQueue(store, "main", w.target, new Date())
   const direct = await pushAroundQueue(w, "direct.txt")
+  const secondDirect = await editDeclarationAroundQueue(w, "# edited around the queue\n{}\n")
   await submitCommit(w, "task/after-direct", "one.txt")
 
-  await expect(queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })).rejects.toThrow(
-    /direct merge accounting.*#25040/,
-  )
-  expect(await remoteTarget(w)).toBe(direct)
-  expect((await readStatus(store, "main", "task/after-direct")).status).toBe("queued")
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, directMerges: [direct, secondDirect], merged: ["task/after-direct"] })
+  expect(logRecords(outcome).filter((row) => row.kind === "merged-direct")).toMatchObject([
+    { branch: "main", commit: direct },
+    { branch: "main", commit: secondDirect },
+  ])
+  expect((await readStatus(store, "main", "task/after-direct")).status).toBe("merged")
+  expect(await w.git(["rev-parse", `${await remoteTarget(w)}^1`])).toMatch(new RegExp(secondDirect))
+  const later = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(later.directMerges).toEqual([])
+})
+
+/** @failure A later event round mistook the queue's own merge for a direct merge.
+ * @level l3 @consumer queue operator
+ */
+it("accounts for its earlier merged event when scanning a later round", async () => {
+  const w = await world()
+  const store = { repo: w.work, remote: "origin" }
+  await createEventQueue(store, "main", w.target, new Date())
+  await submitCommit(w, "task/first", "one.txt")
+  const first = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(first.merged).toEqual(["task/first"])
+
+  await w.git(["checkout", "--quiet", "main"])
+  await w.git(["pull", "--ff-only", "origin", "main"])
+  const direct = await pushAroundQueue(w, "later-direct.txt")
+  await submitCommit(w, "task/second", "two.txt")
+  const second = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+  expect(second).toMatchObject({ exitCode: 0, directMerges: [direct], merged: ["task/second"] })
+  expect(logRecords(second).filter((row) => row.kind === "merged-direct")).toMatchObject([{ commit: direct }])
+  expect((await readStatus(store, "main", "task/second")).status).toBe("merged")
 })
 
 /** One commit on the target, pushed around the queue: the thing only the queue may do. */
