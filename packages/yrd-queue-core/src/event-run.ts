@@ -6,6 +6,7 @@ import {
   appendChangeEvent,
   listChangeHistories,
   mergedHistoryCommits,
+  QUEUE_RUN_WRITER,
   queueRef,
   readEventQueue,
   readStatus,
@@ -220,6 +221,7 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
         type: "merged",
         at: new Date(),
         commit: candidate,
+        writer: QUEUE_RUN_WRITER,
         also: [
           { ref: targetRef, expect: target, oid: candidate },
           { ref: queueRef(queue), expect: queueState.tip, oid: queueState.tip },
