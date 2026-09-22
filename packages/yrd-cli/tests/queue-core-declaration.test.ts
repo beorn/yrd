@@ -10,6 +10,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
+  CHANGE_STATUSES,
   changeInput,
   changeRef,
   changesRef,
@@ -214,7 +215,84 @@ describe("a queue is the selected origin branch carrying config", () => {
     await expect(openEventDetail(git, declaration, row, "main", repo, selected)).rejects.toThrow(
       /moved after the selected reading/,
     )
-  })
+  }, 15_000)
+
+  it("uses every event change status unchanged in JSON, the table, and status filters", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = { repo, remote: "origin" }
+    const commit = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const statuses = CHANGE_STATUSES.filter((status) => status !== "draft")
+
+    for (const [index, status] of statuses.entries()) {
+      const branch = `task/status-${String(index)}`
+      const at = (minute: number): Date => new Date(`2026-09-22T14:${String(minute).padStart(2, "0")}:00.000Z`)
+      const events = [changeInput("opened", { queueTip, at: at(index * 5 + 1), commit, by: "yrd" })]
+      if (status === "verifying" || status === "checking" || status === "merging") {
+        events.push(changeInput("verifying", { queueTip, at: at(index * 5 + 2), commit }))
+      }
+      if (status === "checking" || status === "merging") {
+        events.push(changeInput("checking", { queueTip, at: at(index * 5 + 3) }))
+      }
+      if (status === "merging") events.push(changeInput("merging", { queueTip, at: at(index * 5 + 4) }))
+      if (status === "merged") events.push(changeInput("merged", { queueTip, at: at(index * 5 + 2), commit }))
+      if (status === "failed") {
+        events.push(changeInput("failed", { queueTip, at: at(index * 5 + 2), reason: "check failed" }))
+      }
+      if (status === "stuck") {
+        events.push(changeInput("stuck", { queueTip, at: at(index * 5 + 2), reason: "operator" }))
+      }
+      if (status === "cancelled") {
+        events.push(changeInput("cancelled", { queueTip, at: at(index * 5 + 2), reason: "resubmitted" }))
+      }
+      await (
+        await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+      ).append(events, {
+        expect: null,
+      })
+    }
+
+    const json = capture(repo)
+    expect(await coreQueueCommand(repo, json.io, { command: "list" }, { json: true, queue: "main" })).toBe(0)
+    expect(
+      (JSON.parse(json.stdout()) as { changes: readonly { state: string }[] }).changes.map((row) => row.state).sort(),
+    ).toEqual([...statuses].sort())
+
+    const table = capture(repo)
+    expect(await coreQueueCommand(repo, table.io, { command: "list" }, { queue: "main" })).toBe(0)
+    for (const [index, status] of statuses.entries()) {
+      const branch = `task/status-${String(index)}`
+      expect(
+        table
+          .stdout()
+          .split("\n")
+          .find((line) => line.includes(`queue ${branch}`)),
+      ).toMatch(new RegExp(`\\b${status}\\b`, "u"))
+      const filteredJson = capture(repo)
+      expect(
+        await coreQueueCommand(
+          repo,
+          filteredJson.io,
+          { command: "list", terms: [status] },
+          { json: true, queue: "main" },
+        ),
+      ).toBe(0)
+      expect(
+        (JSON.parse(filteredJson.stdout()) as { changes: readonly { branch: string; state: string }[] }).changes,
+      ).toEqual([expect.objectContaining({ branch, state: status })])
+      const filteredTable = capture(repo)
+      expect(
+        await coreQueueCommand(repo, filteredTable.io, { command: "list", terms: [status] }, { queue: "main" }),
+      ).toBe(0)
+      expect(
+        filteredTable
+          .stdout()
+          .split("\n")
+          .find((line) => line.includes(`queue ${branch}`)),
+      ).toMatch(new RegExp(`\\b${status}\\b`, "u"))
+    }
+  }, 15_000)
 
   it("submits an unpublished branch, then drops its open change and branch atomically", async () => {
     const repo = await world("{}\n")
