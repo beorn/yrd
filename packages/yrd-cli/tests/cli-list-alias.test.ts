@@ -186,13 +186,13 @@ describe("`yrd list` is `yrd queue list`", () => {
     const work = await queueWithOneChange()
     const canonical = await yrd(work, "submit", "task/one", "--dry-run", "--json", "--submitter", "@dev/7")
     expect(canonical.exitCode, canonical.report).toBe(0)
-    expect(JSON.parse(canonical.stdout)).toMatchObject({ submitter: "@dev/7", verifying: { state: "ready" } })
+    expect(JSON.parse(canonical.stdout)).toMatchObject({ submitter: "@dev/7", verifying: { state: "verified" } })
     expect(canonical.stdout).not.toContain("rebaseRequired")
 
     const alias = await yrd(work, "submit", "task/one", "--dry-run", "--json", "--notify", "@dev/7")
     expect(alias.exitCode, alias.report).toBe(0)
     expect(alias.stderr).toContain("`--notify` is now `--submitter`")
-    expect(JSON.parse(alias.stdout)).toMatchObject({ submitter: "@dev/7", verifying: { state: "ready" } })
+    expect(JSON.parse(alias.stdout)).toMatchObject({ submitter: "@dev/7", verifying: { state: "verified" } })
 
     const help = await yrd(work, "submit", "--help")
     expect(help.stdout).toContain("--submitter <agent>")

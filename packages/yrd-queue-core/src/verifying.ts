@@ -4,9 +4,10 @@ import { gitEnvironment } from "./git.ts"
 import type { Git } from "./records.ts"
 import { freshWorktree, type FreshWorktree, type Worktree } from "./worktree.ts"
 
+/** `descents` records git-super's two-direction ancestry checks of nested pins (24320). */
 export type Verification =
   | Readonly<{
-      state: "ready"
+      state: "verified"
       head: string
       targetHead: string
       candidate: string
@@ -23,7 +24,7 @@ export type Verification =
     }>
 
 export type VerifiedCandidate =
-  | Readonly<{ state: "ready"; verifying: Extract<Verification, { state: "ready" }> }>
+  | Readonly<{ state: "verified"; verifying: Extract<Verification, { state: "verified" }> }>
   | Readonly<{ state: "failed"; verifying: Extract<Verification, { state: "failed" }>; failedWorktree: Worktree }>
 
 export type VerificationOptions = Readonly<{
@@ -71,7 +72,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
     throw new Error(`git-super merge of ${options.head} reported updated without a commit`)
   }
   await worktree.remove()
-  return { state: "ready", verifying: { ...evidence, state: "ready", candidate: result.commit } }
+  return { state: "verified", verifying: { ...evidence, state: "verified", candidate: result.commit } }
 }
 
 async function superMerge(

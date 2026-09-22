@@ -220,7 +220,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     })
     expect(inspected.head).toBe(head)
     expect(inspected.targetHead).toBe(targetHead)
-    expect(inspected.verifying).toMatchObject({ state: "ready", head, targetHead })
+    expect(inspected.verifying).toMatchObject({ state: "verified", head, targetHead })
     expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(before)
 
     const opened = await submit(w.git, "origin", {
@@ -229,7 +229,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
       target: { remote: "origin", branch: "main" },
     })
     expect(opened.head).toBe(head)
-    expect(opened.verifying).toMatchObject({ state: "ready", head, targetHead })
+    expect(opened.verifying).toMatchObject({ state: "verified", head, targetHead })
     expect(opened.verifying.gitlinks).toEqual(inspected.verifying.gitlinks)
     expect(await refAt(gitIn(w.remote), "refs/heads/task/stale-clean")).toBe(head)
   })
