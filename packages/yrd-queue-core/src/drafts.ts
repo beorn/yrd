@@ -31,7 +31,11 @@
 
 import { offTheTarget } from "./git.ts"
 import type { Git } from "./records.ts"
-import type { QueueEntry } from "./remote.ts"
+
+type DraftSource = Readonly<{
+  heads: ReadonlyMap<string, string>
+  changes: readonly Readonly<{ change: Readonly<{ branch: string; head: string }> }>[]
+}>
 
 /** The branch namespaces that are never drafts: the queue's own refs, and branches kept on purpose. */
 export const DRAFT_EXCLUDED_PREFIXES: readonly string[] = ["yrd/", "preserve/"]
@@ -63,7 +67,7 @@ export type DraftReading = Readonly<{
  */
 export async function readDrafts(
   git: Git,
-  read: Readonly<{ heads: ReadonlyMap<string, string>; changes: readonly QueueEntry[] }>,
+  read: DraftSource,
   options: Readonly<{ targetSha: string; since?: Date }>,
 ): Promise<DraftReading> {
   const submittedHeads = new Set(read.changes.map((entry) => `${entry.change.branch}@${entry.change.head}`))

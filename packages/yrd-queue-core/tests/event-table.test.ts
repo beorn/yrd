@@ -91,6 +91,39 @@ describe("event changes use the shared table row", () => {
     )
   })
 
+  it("puts unsubmitted branch heads after folded changes as draft rows", () => {
+    const opened = evolve(
+      initial,
+      event(
+        "opened",
+        QUEUE,
+        [
+          ["Commit", HEAD],
+          ["By", "@dev/2"],
+        ],
+        [HEAD],
+      ),
+    )
+    const draftHead = "f".repeat(40)
+    const committedAt = new Date("2026-09-22T15:00:00.000Z")
+
+    expect(
+      eventRows(new Map([["task/change", opened]]), [
+        { branch: "task/draft", head: draftHead, committedAt, author: "dev", movedSinceSubmit: false },
+      ]),
+    ).toEqual([
+      expect.objectContaining({ branch: "task/change", state: "queued", format: "event" }),
+      {
+        branch: "task/draft",
+        head: draftHead,
+        state: "draft",
+        format: "event",
+        at: committedAt,
+        author: "dev",
+      },
+    ])
+  })
+
   it("uses opening time for working states and ending time for cancellation", () => {
     const since = new Date("2026-09-22T14:00:00.000Z")
     const at = new Date("2026-09-22T14:03:00.000Z")
