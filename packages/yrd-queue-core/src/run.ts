@@ -156,6 +156,8 @@ export type QueueRunOptions = Readonly<{
   checks: readonly CheckSpec[]
   /** The target's `setup:`: one shell command run in every worktree this run makes, before any check runs in it. */
   setup?: string
+  /** The target's retained-environment teardown; event queues refuse it until #25065 defines its event evidence. */
+  teardown?: string
   /** The blob the checks were read from, recorded on every checked record. */
   configBlob: string
   /** The queue workdir: its logs, its worktrees and its temp root; on the root filesystem. */

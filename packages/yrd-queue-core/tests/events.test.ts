@@ -13,7 +13,6 @@ import {
   appendChangeEvent,
   changeInput,
   changesRef,
-  createEventQueue,
   decide,
   drop,
   evolve,
@@ -86,6 +85,33 @@ function event(
     instance: null,
     seq: null,
   }
+}
+
+/** Seed a queue chain in the memory backend; createEventQueue's config guard is covered against real Git. */
+async function seedEventQueue(
+  location: Readonly<{ repo: string; remote: string; backend?: GitomicBackend }>,
+  queue: string,
+  commit: string,
+  at: Date,
+): Promise<string> {
+  const result = await (
+    await openEvents({ ...location, ref: queueRef(queue), writer: "yrd" })
+  ).append(
+    [
+      {
+        type: "created",
+        props: [
+          ["Commit", commit],
+          ["Time", at.toISOString()],
+        ],
+        keeps: [commit],
+      },
+    ],
+    { expect: null },
+  )
+  const created = result.events[0]?.id
+  if (created === undefined) throw new Error("fixture created event was not written")
+  return created
 }
 
 function input(type: string, props: readonly (readonly [string, string])[] = [], keeps: string[] = []): EventInput {
@@ -312,7 +338,7 @@ describe("the queue-format boundary", () => {
     const { store, location } = remoteMemStore("yrd-event-drop")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
-    const queueTip = await createEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
     const branch = await open({ ...store, ref: "refs/heads/task/drop" })
     const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
     await (
@@ -342,7 +368,7 @@ describe("the queue-format boundary", () => {
     const { store, location } = remoteMemStore("yrd-event-drop-draft")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
-    await createEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
     const branch = await open({ ...store, ref: "refs/heads/task/draft" })
     const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
     const dropped = await drop(location, { queue: "lab", branch: "task/draft", by: "@dev/2" })
@@ -362,7 +388,7 @@ describe("the queue-format boundary", () => {
     const { store, location, beforeNextPublish } = remoteMemStore("yrd-event-drop-race")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
-    await createEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
     const branch = await open({ ...store, ref: "refs/heads/task/race" })
     await branch.transact(async (map) => map.set("work", "one"), "first head")
     let rival = ""
@@ -380,7 +406,7 @@ describe("the queue-format boundary", () => {
     const { store, location } = remoteMemStore("yrd-event-drop-absent")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
-    const queueTip = await createEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
     const branchRef = "refs/heads/task/absent"
     const branch = await open({ ...store, ref: branchRef })
     const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
@@ -410,7 +436,7 @@ describe("the queue-format boundary", () => {
     const { store, location } = remoteMemStore("yrd-event-run-writer")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
-    const queueTip = await createEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
+    const queueTip = await seedEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
     const branch = await open({ ...store, ref: "refs/heads/task/42" })
     const head = (await branch.transact(async (map) => map.set("work.txt", "one"), "work")).oid
     const candidate = await open({ ...store, ref: "refs/heads/candidate" })
@@ -474,7 +500,7 @@ describe("the queue-format boundary", () => {
     const { store, location, beforeNextPublish } = remoteMemStore("yrd-event-stuck-resume-race")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
-    const queueTip = await createEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
+    const queueTip = await seedEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
     const branch = await open({ ...store, ref: "refs/heads/task/42" })
     const head = (await branch.transact(async (map) => map.set("work.txt", "one"), "work")).oid
     const ref = changesRef("lab", "task/42")
@@ -504,7 +530,7 @@ describe("the queue-format boundary", () => {
     const { store, location } = remoteMemStore("yrd-event-queue")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
-    const created = await createEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const created = await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
     expect((await readEventQueue(location, "lab")).created).toBe(created)
     await writeQueueEvent(location, "lab", {
       type: "paused",
@@ -536,7 +562,7 @@ describe("the queue-format boundary", () => {
     expect(await queueFormat(location, "lab")).toBe("legacy")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
-    await createEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
+    await seedEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
     expect(await queueFormat(location, "lab")).toBe("event")
     expect(await listChanges(location, "lab")).toEqual(new Map())
     await expect(readStatus(location, "lab", "missing")).rejects.toThrow(

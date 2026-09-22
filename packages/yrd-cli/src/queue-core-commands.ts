@@ -24,6 +24,7 @@ import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import {
   CHANGE_REF_DIAGNOSTICS,
+  assertPlainEventQueueConfig,
   directMergeCommits,
   changeName,
   checksOf,
@@ -768,6 +769,9 @@ export async function coreQueueCommand(
       }
     }
     case "submit": {
+      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
+        assertPlainEventQueueConfig(config, "submit")
+      }
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
       const submission = {
         branch,
@@ -2154,6 +2158,7 @@ function runOptions(
     // A fresh worktree has submodules and no dependencies; `setup:` is what
     // finishes it, once per worktree, before any check runs in it.
     setup: config.setup,
+    teardown: config.teardown,
     target: config.target,
     targetSha: oid,
     workdir,
