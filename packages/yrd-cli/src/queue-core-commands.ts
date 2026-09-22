@@ -2887,6 +2887,11 @@ export async function readListing(
   }>
 > {
   const queue = await readQueue(git, config.target.remote, config.target.branch, targetOid)
+  if (queue.observation.fence.refs.some(({ ref }) => ref === queueRef(config.target.branch))) {
+    throw new Error(
+      `${config.target.remote}#${config.target.branch} changed to event format during legacy read; read the queue again`,
+    )
+  }
   const observation = await git.observe({
     version: 1,
     root: {

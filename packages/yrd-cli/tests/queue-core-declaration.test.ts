@@ -17,12 +17,13 @@ import {
   gitIn,
   listChanges,
   queueRef,
+  readConfig,
   readEventQueue,
   readQueue,
   writePause,
 } from "@yrd/queue-core"
 import { openEvents } from "gitomic/events"
-import { assertEventListingFence, coreQueueCommand } from "../src/queue-core-commands.ts"
+import { assertEventListingFence, coreQueueCommand, readListing } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
@@ -86,12 +87,11 @@ describe("a queue is the selected origin branch carrying config", () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
     const store = { repo, remote: "origin" }
-    const created = await createEventQueue(
-      "main",
-      (await git(["rev-parse", "HEAD"])).trim(),
-      store,
-      new Date("2026-09-22T14:00:00.000Z"),
-    )
+    const targetOid = (await git(["rev-parse", "HEAD"])).trim()
+    const created = await createEventQueue("main", targetOid, store, new Date("2026-09-22T14:00:00.000Z"))
+    const declaration = await readConfig(git, targetOid, { remote: "origin", branch: "main" })
+    if (declaration === undefined) throw new Error("fixture target lost .yrd.yml")
+    await expect(readListing(git, declaration, repo, targetOid)).rejects.toThrow(/event format/)
     await git(["checkout", "--quiet", "-b", "task/event"])
     writeFileSync(join(repo, "work.txt"), "event work\n")
     await git(["add", "work.txt"])
