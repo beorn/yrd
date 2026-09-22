@@ -30,6 +30,8 @@ export const EVENT_TRAILERS = {
   time: "Time",
 } as const
 const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
+/** Only the run path that atomically publishes the target may write merged with this producer. */
+export const QUEUE_RUN_WRITER = "yrd-run"
 
 export const CHANGE_EVENT_TYPES = [
   "opened",
@@ -625,11 +627,13 @@ export async function listChanges(store: QueueLocation, queue: string): Promise<
   return new Map([...histories].map(([branch, history]) => [branch, history.state]))
 }
 
-/** Every merged ending in the selected histories, including an older ending after a branch reopened. */
+/** Queue publications, including older endings after a branch reopened; observed merges are still direct. */
 export function mergedHistoryCommits(histories: ReadonlyMap<string, ChangeHistory>): ReadonlySet<Oid> {
   const commits = new Set<Oid>()
   for (const { events } of histories.values()) {
-    for (const event of events) if (event.type === "merged") commits.add(keptCommit(event))
+    for (const event of events) {
+      if (event.type === "merged" && event.writer === QUEUE_RUN_WRITER) commits.add(keptCommit(event))
+    }
   }
   return commits
 }
