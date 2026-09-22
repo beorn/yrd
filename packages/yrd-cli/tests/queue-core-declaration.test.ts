@@ -16,6 +16,7 @@ import {
   changeRef,
   changesRef,
   createEventQueue,
+  drop,
   eventRows,
   gitIn,
   listChanges,
@@ -513,6 +514,44 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await runYrdProcess(["bun", "yrd", "drop", "task/event-submit", "--queue", "main"], repeated.io)).toBe(0)
     expect(repeated.stdout()).toContain(head.slice(0, 12))
   })
+
+  it("drops a draft pushed by another clone after fetching its kept head", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const remote = join(dirname(repo), "remote.git")
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+
+    const author = join(dirname(repo), "author")
+    await gitIn(dirname(repo))(["clone", "--quiet", remote, author])
+    const authorGit = gitIn(author)
+    await authorGit(["config", "user.name", "yrd author"])
+    await authorGit(["config", "user.email", "author@yrd.invalid"])
+    await authorGit(["checkout", "--quiet", "-b", "task/remote-draft"])
+    writeFileSync(join(author, "remote-draft.txt"), "remote draft\n")
+    await authorGit(["add", "remote-draft.txt"])
+    await authorGit(["commit", "--quiet", "-m", "remote draft"])
+    const head = (await authorGit(["rev-parse", "HEAD"])).trim()
+    await authorGit(["push", "--quiet", "origin", "task/remote-draft"])
+    await expect(git(["cat-file", "-e", `${head}^{commit}`])).rejects.toThrow()
+
+    const store = { repo, remote: "origin" }
+    const dropped = await drop(store, { queue: "main", branch: "task/remote-draft", by: "@dev/2" })
+    expect(dropped).toMatchObject({ branch: "task/remote-draft", head })
+    expect((await listChanges({ repo, remote: "origin" }, "main")).get("task/remote-draft")).toMatchObject({
+      status: "cancelled",
+      commit: head,
+      reason: "dropped",
+    })
+    expect(await git(["ls-remote", "--heads", "origin", "task/remote-draft"])).toBe("")
+    const events = await (
+      await openEvents({ repo, remote: "origin", ref: changesRef("main", "task/remote-draft") })
+    ).events()
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: "cancelled", links: [head] })
+
+    expect(await drop(store, { queue: "main", branch: "task/remote-draft", by: "@dev/2" })).toEqual(dropped)
+  }, 15_000)
 
   it("refuses notify configuration when submitting to an event queue until 25065", async () => {
     const repo = await world("{}\n")

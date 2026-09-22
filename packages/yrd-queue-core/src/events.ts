@@ -6,7 +6,7 @@ import type { GitomicBackend, Oid } from "gitomic"
 import { queueRefPrefix } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
-import { gitIn, refAt } from "./git.ts"
+import { gitIn, readRemoteCommit, refAt } from "./git.ts"
 import type { QueueConfig } from "./config.ts"
 
 export const CHANGE_STATUSES = [
@@ -662,7 +662,10 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   const history = selectedTip === null ? [] : await chain.events({ limit: 1024 })
   const state = selectedTip === null ? initial : project(history, ref, store.repo)
   const branchRef = `refs/heads/${branch}`
-  const head = (await listRefs(branchRef, store)).get(branchRef)
+  const head =
+    store.backend === undefined
+      ? await readRemoteCommit(gitIn(store.repo), store.remote, branchRef)
+      : (await listRefs(branchRef, store)).get(branchRef)
   if (head === undefined) {
     if (state.ending !== undefined && state.reason === "dropped") {
       const ending = history.findLast((event) => event.id === state.ending?.id)
