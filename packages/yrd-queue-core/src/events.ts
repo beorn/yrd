@@ -20,6 +20,30 @@ export type ChangeStatus = (typeof CHANGE_STATUSES)[number]
 export type ChangeEnding = "merged" | "failed" | "cancelled"
 export type CancellationReason = "resubmitted" | "dropped" | "deleted"
 
+export const EVENT_TRAILERS = {
+  commit: "Commit",
+  issue: "Issue",
+  queue: "Queue",
+  reason: "Reason",
+  time: "Time",
+} as const
+
+export const CHANGE_EVENT_TYPES = [
+  "opened",
+  "verifying",
+  "checking",
+  "merging",
+  "merged",
+  "failed",
+  "stuck",
+  "cancelled",
+  "ignored",
+  "unignored",
+  "sent",
+  "observed",
+] as const
+export type ChangeEventType = (typeof CHANGE_EVENT_TYPES)[number]
+
 export type EventChange = Readonly<{
   status: ChangeStatus
   /** The submitted commit of the current or last change. */
@@ -31,6 +55,46 @@ export type EventChange = Readonly<{
 }>
 
 export const initial: EventChange = Object.freeze({ status: "draft", ignored: false })
+
+/** Construct Yrd's required causal trailers; a recorded commit is always kept. */
+export function changeInput(
+  type: ChangeEventType,
+  details: Readonly<{
+    queueTip: string
+    at: Date
+    commit?: string
+    issue?: string
+    reason?: string
+    title?: string
+    content?: string
+  }>,
+): EventInput {
+  const oid = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
+  if (!oid.test(details.queueTip)) throw new TypeError(`Queue: must name a commit oid, got ${details.queueTip}`)
+  if (Number.isNaN(details.at.getTime())) throw new TypeError("Time: needs a valid instant")
+  if ((type === "opened" || type === "verifying") && details.commit === undefined) {
+    throw new TypeError(`${type} needs Commit:`)
+  }
+  if (details.commit !== undefined && !oid.test(details.commit)) {
+    throw new TypeError(`Commit: must name a commit oid, got ${details.commit}`)
+  }
+  if (details.issue !== undefined && details.issue.trim() === "") throw new TypeError("Issue: cannot be empty")
+  if (details.reason !== undefined && details.reason.trim() === "") throw new TypeError("Reason: cannot be empty")
+  const props: [string, string][] = [
+    [EVENT_TRAILERS.queue, details.queueTip],
+    [EVENT_TRAILERS.time, details.at.toISOString()],
+  ]
+  if (details.commit !== undefined) props.push([EVENT_TRAILERS.commit, details.commit])
+  if (details.issue !== undefined) props.push([EVENT_TRAILERS.issue, details.issue])
+  if (details.reason !== undefined) props.push([EVENT_TRAILERS.reason, details.reason])
+  return {
+    type,
+    props,
+    ...(details.commit === undefined ? {} : { keeps: [details.commit] }),
+    ...(details.title === undefined ? {} : { title: details.title }),
+    ...(details.content === undefined ? {} : { content: details.content }),
+  }
+}
 
 /** Queue life is a chain at one reserved leaf, distinct from branch changes. */
 export function queueRef(queue: string): string {
@@ -155,7 +219,8 @@ function pending(input: EventInput): EventShape {
 export function decide(events: readonly Event[], input: EventInput): readonly EventInput[] {
   const state = events.reduce(evolve, initial)
   if (input.type === "opened" && isOpen(state.status)) {
-    const cancelled: EventInput = { type: "cancelled", props: [["Reason", "resubmitted"]] }
+    const cause = (input.props ?? []).filter(([key]) => key === EVENT_TRAILERS.queue || key === EVENT_TRAILERS.time)
+    const cancelled: EventInput = { type: "cancelled", props: [...cause, [EVENT_TRAILERS.reason, "resubmitted"]] }
     evolve(evolve(state, pending(cancelled)), pending(input))
     return [cancelled, input]
   }
