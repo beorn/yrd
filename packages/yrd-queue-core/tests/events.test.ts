@@ -212,12 +212,27 @@ describe("ADR-0016 event fold", () => {
     expect(third).toMatchObject({ status: "verifying", candidate: B, commit: A })
   })
 
-  it("recognizes an observed merge of a verified candidate after a failed ending", () => {
+  it("recognizes an observed target merge after a verified candidate failed", () => {
     const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
     const verified = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
     const failed = evolve(verified, event("failed", "c".repeat(40)))
-    const merged = evolve(failed, event("merged", "d".repeat(40), [["Commit", B]], [B]))
+    const targetMerge = "e".repeat(40)
+    const merged = evolve(
+      failed,
+      event(
+        "merged",
+        "d".repeat(40),
+        [
+          ["Commit", targetMerge],
+          ["Reason", `observed on target at ${targetMerge}`],
+        ],
+        [targetMerge],
+      ),
+    )
     expect(merged).toMatchObject({ status: "merged", commit: A, candidate: B })
+    expect(() => evolve(failed, event("merged", "f".repeat(40), [["Commit", targetMerge]], [targetMerge]))).toThrow(
+      /observed target commit/,
+    )
   })
 
   it("cancels the prior open change before a second opened event", () => {

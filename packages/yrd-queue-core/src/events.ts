@@ -270,12 +270,17 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         throw new Error(`event ${event.id} merged needs the verified candidate`)
       }
       const kept = keptCommit(event)
+      if (state.status === "merging" && kept !== state.candidate) {
+        throw new Error(`event ${event.id} merged must keep candidate ${state.candidate}`)
+      }
       if (
-        (state.status === "merging" && kept !== state.candidate) ||
-        (state.status !== "merging" && kept !== state.commit && kept !== state.candidate)
+        state.status !== "merging" &&
+        kept !== state.commit &&
+        kept !== state.candidate &&
+        prop(event, EVENT_TRAILERS.reason) !== `observed on target at ${kept}`
       ) {
         throw new Error(
-          `event ${event.id} merged must keep ${state.status === "merging" ? `candidate ${state.candidate}` : `submitted commit ${state.commit}${state.candidate === undefined ? "" : ` or candidate ${state.candidate}`}`}`,
+          `event ${event.id} merged must keep submitted commit ${state.commit}, candidate ${state.candidate ?? "absent"}, or name its observed target commit`,
         )
       }
       return {
@@ -724,12 +729,12 @@ export async function listChanges(store: QueueLocation, queue: string): Promise<
   return new Map([...histories].map(([branch, history]) => [branch, history.state]))
 }
 
-/** Queue publications, including older endings after a branch reopened; observed merges are still direct. */
+/** Queue publications and merges observed on the target, including older endings after a branch reopened. */
 export function mergedHistoryCommits(histories: ReadonlyMap<string, ChangeHistory>): ReadonlySet<Oid> {
   const commits = new Set<Oid>()
   for (const { events } of histories.values()) {
     for (const event of events) {
-      if (event.type === "merged" && event.writer === QUEUE_RUN_WRITER) commits.add(keptCommit(event))
+      if (event.type === "merged") commits.add(keptCommit(event))
     }
   }
   return commits
