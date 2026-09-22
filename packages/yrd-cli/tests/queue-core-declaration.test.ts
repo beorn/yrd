@@ -82,6 +82,17 @@ describe("a queue is the selected origin branch carrying config", () => {
       { expect: null },
     )
     expect((await listChanges("main", store)).get("task/event")).toMatchObject({ status: "queued", commit })
+    // A queue selected by its queue chain must display the fold's state. The
+    // legacy ref reader finds zero changes here and would print an empty list.
+    const listed = capture(repo)
+    expect(await coreQueueCommand(repo, listed.io, { command: "list" }, { json: true, queue: "main" })).toBe(0)
+    expect(JSON.parse(listed.stdout())).toMatchObject({
+      changes: [{ branch: "task/event", head: commit, state: "queued", format: "event" }],
+    })
+    const table = capture(repo)
+    expect(await coreQueueCommand(repo, table.io, { command: "list", terms: ["queued"] }, { queue: "main" })).toBe(0)
+    expect(table.stdout()).toContain("task/event")
+    expect(table.stdout()).toContain("queued")
   })
 
   it("submits an unpublished branch and its opened event atomically", async () => {
