@@ -10,6 +10,7 @@ import {
   queueResumedAfter,
   readEventQueue,
   readStatus,
+  type EventChange,
 } from "./events.ts"
 import { eventRows } from "./event-table.ts"
 import { assertPlainEventQueueRun } from "./event-config.ts"
@@ -17,7 +18,7 @@ import { eventDirectMergeCommits } from "./direct.ts"
 import { listRefs } from "gitomic/events"
 import { checkLogPath, runCheck, type CheckResult } from "./check.ts"
 import { queueName } from "./config.ts"
-import { gitIn } from "./git.ts"
+import { gitIn, offTheTarget } from "./git.ts"
 import { openLog } from "./log.ts"
 import { recordProgramResult, recordProgramStart } from "./program-root.ts"
 import { queueRefPrefix } from "./refs.ts"
@@ -135,6 +136,75 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
     log.write({ kind: "pause", reason: queueState.pause.reason, by: queueState.pause.by, sha: queueState.pause.id })
     return result(0, [], [], [], [], { ring: "pause", says: queueState.pause.reason, what: queueState.pause })
   }
+  const observedMerged: string[] = []
+  const observable = [...changes].filter(
+    (entry): entry is [string, EventChange & { commit: string; tip: string }] =>
+      entry[1].status !== "merged" && entry[1].commit !== undefined && entry[1].tip !== undefined,
+  )
+  const offTarget = await offTheTarget(git, [...new Set(observable.map(([, change]) => change.commit))], target)
+  for (const [branch, change] of observable) {
+    if (offTarget.has(change.commit)) continue
+    const row = (
+      await git([
+        "rev-list",
+        "--reverse",
+        "--first-parent",
+        "--ancestry-path",
+        "--parents",
+        `${change.commit}..${target}`,
+      ])
+    )
+      .trim()
+      .split("\n")[0]
+      ?.trim()
+      .split(/\s+/u)
+      .filter((sha) => sha !== "")
+    const merge = row?.[0] ?? change.commit
+    const selectedTip = change.tip
+    try {
+      const written = await appendChangeEvent(store, queue, branch, selectedTip, {
+        type: "merged",
+        at: new Date(),
+        commit: merge,
+        reason: `observed on target at ${merge}`,
+        title: `merged ${branch}`,
+      })
+      const ended = await readStatus(store, queue, branch)
+      if (ended.status !== "merged" || ended.tip !== written || ended.ending?.id !== written) {
+        throw new Error(
+          `event queue ${url}#${queue}: observed merge for ${branch} wrote ${written} but read back ${ended.status} at ${ended.tip ?? "no tip"}`,
+        )
+      }
+      changes.set(branch, ended)
+      observedMerged.push(branch)
+      log.write({
+        kind: "change",
+        branch,
+        head: change.commit,
+        decision: "merged",
+        reason: `already on target at ${merge}`,
+      })
+    } catch (error) {
+      let current
+      try {
+        current = await readStatus(store, queue, branch)
+      } catch (readError) {
+        throw new AggregateError(
+          [error, readError],
+          `event queue ${url}#${queue}: ${branch} observed-merge decision failed and its current chain could not be read`,
+        )
+      }
+      if (current.tip === selectedTip) throw error
+      changes.set(branch, current)
+      log.write({
+        kind: "discarded",
+        branch,
+        head: change.commit,
+        reason: `change advanced to ${current.status} at ${current.tip ?? "no tip"} while this round recorded its target merge: ${error instanceof Error ? error.message : String(error)}`,
+      })
+      if (current.status === "merged") observedMerged.push(branch)
+    }
+  }
   const open: { branch: string; status: string; since: Date; commit: string; tip: string; reason?: string }[] = []
   for (const row of eventRows(changes)) {
     if (row.position === undefined) continue
@@ -207,7 +277,7 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
         decision: "stuck",
         reason: standing.reason ?? "queue could not judge this change",
       })
-      return result(2, [], [], [standing.branch])
+      return result(2, observedMerged, [], [standing.branch])
     }
     log.write({
       kind: "change",
@@ -224,7 +294,7 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
     const { branch, commit: head } = selectedChange
     let tip = selectedChange.tip
     if (options.stopAtMs !== undefined && (options.now?.() ?? Date.now()) >= options.stopAtMs) {
-      return result(0, [], [], [], [branch])
+      return result(0, observedMerged, [], [], [branch])
     }
     const branchRef = `refs/heads/${branch}`
     if (!(await listRefs(branchRef, store)).has(branchRef)) {
@@ -341,7 +411,7 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
           reason: `${stoppedCheck.name} could not judge (${stoppedCheck.why ?? `exit ${String(stoppedCheck.exit)}`}; log ${stoppedCheck.log})`,
         })
         log.write({ kind: "change", branch, head, decision: "stuck", reason: stoppedCheck.name })
-        return result(2, [], failed, [branch])
+        return result(2, observedMerged, failed, [branch])
       }
       if (stoppedCheck?.result === "deferred") {
         throw new Error(
@@ -363,7 +433,7 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
       })
       log.write({ kind: "merge", branch, head, commit: candidate })
       log.write({ kind: "change", branch, head, decision: "merged" })
-      return result(failed.length > 0 ? 1 : 0, [branch], failed, [], [], undefined, candidate)
+      return result(failed.length > 0 ? 1 : 0, [...observedMerged, branch], failed, [], [], undefined, candidate)
     } catch (error) {
       let current
       try {
@@ -383,5 +453,5 @@ export async function eventQueueRun(options: QueueRunOptions): Promise<QueueRunO
       })
     }
   }
-  return result(failed.length > 0 ? 1 : 0, [], failed)
+  return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
 }

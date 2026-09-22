@@ -729,6 +729,25 @@ it("reports a direct merge after the declaration and still merges the queued cha
   expect(later.directMerges).toEqual([])
 })
 
+/** @failure A direct-only target move was reported under a different identity, or silently disappeared before a queue merge accounted for it.
+ * @level l3 @consumer queue operator and notification consumer
+ */
+it("reports a direct-only commit again under the same sha until a queue merge lands above it", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const direct = await pushAroundQueue(w, "direct-only.txt")
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+
+  const first = await queueRun(options)
+  const second = await queueRun(options)
+
+  expect(first.directMerges).toEqual([direct])
+  expect(second.directMerges).toEqual([direct])
+  for (const outcome of [first, second]) {
+    expect(logRecords(outcome).filter((row) => row.kind === "merged-direct")).toMatchObject([{ commit: direct }])
+  }
+})
+
 /** @failure A later event round mistook the queue's own merge for a direct merge.
  * @level l3 @consumer queue operator
  */
@@ -751,10 +770,10 @@ it("accounts for its earlier merged event when scanning a later round", async ()
   expect((await readStatus(store, "main", "task/second")).status).toBe("merged")
 })
 
-/** @failure An observer's merged event hid a submitted commit pushed around the queue.
+/** @failure A prior observed merged event did not account for the direct commit it kept.
  * @level l3 @consumer queue operator
  */
-it("reports an observed direct merge even when its change has a merged event", async () => {
+it("uses an existing observed merged event as the direct boundary", async () => {
   const w = await world()
   const store = { repo: w.work, remote: "origin" }
   await createWorldEventQueue(w)
@@ -788,9 +807,54 @@ it("reports an observed direct merge even when its change has a merged event", a
 
   const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
 
-  expect(outcome).toMatchObject({ exitCode: 0, directMerges: [head], merged: [] })
-  expect(logRecords(outcome).filter((row) => row.kind === "merged-direct")).toMatchObject([{ commit: head }])
+  expect(outcome).toMatchObject({ exitCode: 0, directMerges: [], merged: [] })
+  expect(logRecords(outcome).filter((row) => row.kind === "merged-direct")).toEqual([])
   expect(await remoteTarget(w)).toBe(head)
+})
+
+/** @failure A submitted head merged around the queue stayed open and its direct merge was reported forever.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("observes a submitted head on the target, then uses its merged event as the direct boundary", async () => {
+  const w = await world()
+  const store = { repo: w.work, remote: "origin" }
+  await createWorldEventQueue(w)
+  const head = await submitCommit(w, "task/observed-by-run", "observed.txt")
+  await w.git(["checkout", "--quiet", "main"])
+  await w.git(["merge", "--ff-only", "task/observed-by-run"])
+  await w.git(["push", "--quiet", "origin", "main"])
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+
+  const observed = await queueRun(options)
+
+  expect(observed).toMatchObject({ directMerges: [head], merged: ["task/observed-by-run"] })
+  expect(await readStatus(store, "main", "task/observed-by-run")).toMatchObject({
+    status: "merged",
+    commit: head,
+  })
+  expect((await queueRun(options)).directMerges).toEqual([])
+})
+
+it("keeps the direct merge commit when an observed submitted head landed by no-ff merge", async () => {
+  const w = await world()
+  const store = { repo: w.work, remote: "origin" }
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/observed-no-ff", "observed-no-ff.txt")
+  await w.git(["checkout", "--quiet", "main"])
+  await w.git(["merge", "--quiet", "--no-ff", "-m", "merge submitted head around the queue", "task/observed-no-ff"])
+  const merge = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["push", "--quiet", "origin", "main"])
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+
+  const observed = await queueRun(options)
+
+  expect(observed).toMatchObject({ directMerges: [merge], merged: ["task/observed-no-ff"] })
+  const state = await readStatus(store, "main", "task/observed-no-ff")
+  const ending = (await (await openEvents({ ...store, ref: changesRef("main", "task/observed-no-ff") })).events()).find(
+    (event) => event.id === state.ending?.id,
+  )
+  expect(ending).toMatchObject({ type: "merged", links: [merge] })
+  expect((await queueRun(options)).directMerges).toEqual([])
 })
 
 /** One commit on the target, pushed around the queue: the thing only the queue may do. */
