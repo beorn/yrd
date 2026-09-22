@@ -294,6 +294,7 @@ async function submitEvent(git: Git, remote: string, request: SubmitRequest, roo
   })
   const chain = await openEvents({ ...store, ref, writer: request.submitter })
   let retry = false
+  let retryOpened: string | undefined
   // The opened event keeps `head`; publishing the branch beside it is for the
   // branch ref's meaning, not for object reachability. Gitomic moves both in
   // one atomic publish and refuses a branch lease that went stale.
@@ -307,12 +308,16 @@ async function submitEvent(git: Git, remote: string, request: SubmitRequest, roo
           current.status === "checking" ||
           current.status === "merging" ||
           current.status === "stuck")
+      if (retry) {
+        retryOpened = events.findLast((event) => event.type === "opened")?.id
+        return []
+      }
       return decide(events, input)
     },
     `submit ${request.branch}`,
     { also: [{ ref: branchRef, expect: branchAt, oid: head }] },
   )
-  const opened = result.events.findLast((event) => event.type === "opened")?.id
+  const opened = retryOpened ?? result.events.findLast((event) => event.type === "opened")?.id
   if (opened === undefined) throw new Error(`${ref} in ${root}: submit published no opened event`)
   return {
     branch: request.branch,

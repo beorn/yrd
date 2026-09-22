@@ -582,6 +582,38 @@ it("discards a dropped event check once and continues with the next change", asy
   expect(logRecords(outcome).filter((row) => row.kind === "discarded" && row.branch === "task/a")).toHaveLength(1)
 })
 
+/** @failure A new-head resubmit racing an event check could make the stale round throw and abandon the next change.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("discards a resubmitted event check once and continues with the next change", async () => {
+  const w = await world()
+  const store = { repo: w.work, remote: "origin" }
+  await createWorldEventQueue(w)
+  const first = await submitCommit(w, "task/a", "one.txt")
+  await submitCommit(w, "task/b", "two.txt")
+
+  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25 })), notify: [] })
+  await checkRunning(w)
+  await w.git(["checkout", "--quiet", "task/a"])
+  writeFileSync(join(w.work, "resubmitted.txt"), "new head\n")
+  await w.git(["add", "resubmitted.txt"])
+  await w.git(["commit", "--quiet", "-m", "resubmit task/a"])
+  const next = (await w.git(["rev-parse", "HEAD"])).trim()
+  expect(next).not.toBe(first)
+  const resubmitted = await submit(w.git, "origin", {
+    branch: "task/a",
+    target: { remote: "origin", branch: "main" },
+    submitter: "@dev/2",
+  })
+  expect(resubmitted).toMatchObject({ head: next, retry: false })
+
+  const outcome = await running
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/b"], failed: [], stuck: [] })
+  expect(await readStatus(store, "main", "task/a")).toMatchObject({ status: "queued", commit: next })
+  expect((await readStatus(store, "main", "task/b")).status).toBe("merged")
+  expect(logRecords(outcome).filter((row) => row.kind === "discarded" && row.branch === "task/a")).toHaveLength(1)
+})
+
 /** @failure A pause published during composition was replaced by a fresh queue-tip read, so merge crossed the stop.
  * @level l3 @consumer queue operator
  */

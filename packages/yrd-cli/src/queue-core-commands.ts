@@ -452,6 +452,9 @@ export async function coreQueueCommand(
   ): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
+      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
+        assertPlainEventQueueConfig(config, "run")
+      }
       outcome = await queueRun({
         ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
         foreground: request.command === "run" || request.command === "merge",

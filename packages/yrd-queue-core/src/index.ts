@@ -55,7 +55,6 @@ export {
 } from "./events.ts"
 export type {
   CancellationReason,
-  ChangeEnding,
   ChangeEventType,
   ChangeStatus,
   EventChange,
@@ -63,11 +62,9 @@ export type {
   QueueLocation,
   DropRequest,
   Dropped,
-  WriteQueueEvent,
 } from "./events.ts"
 export { eventRows } from "./event-table.ts"
-export { assertPlainEventQueueConfig, assertPlainEventQueueRun } from "./event-config.ts"
-export type { EventQueueConfigAction } from "./event-config.ts"
+export { assertPlainEventQueueConfig } from "./event-config.ts"
 export {
   appendRecord,
   DIRECT_MERGE,

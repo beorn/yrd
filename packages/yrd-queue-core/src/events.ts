@@ -47,8 +47,6 @@ export const CHANGE_EVENT_TYPES = [
   "cancelled",
   "ignored",
   "unignored",
-  "sent",
-  "observed",
 ] as const
 export type ChangeEventType = (typeof CHANGE_EVENT_TYPES)[number]
 
@@ -297,9 +295,6 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     }
     case "unignored":
       return { ...next, ignored: false }
-    case "sent":
-    case "observed":
-      return next
     default:
       throw new Error(`unknown Yrd change event ${event.type} at ${event.id}`)
   }

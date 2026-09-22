@@ -11,6 +11,7 @@ import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   CHANGE_STATUSES,
+  assertPlainEventQueueConfig,
   changeInput,
   changeRef,
   changesRef,
@@ -35,6 +36,27 @@ import type { QueueConfig } from "@yrd/queue-core"
 const roots: string[] = []
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
+})
+
+it("refuses future event queue and check keys by name", () => {
+  const plain: QueueConfig = {
+    target: { remote: "origin", branch: "main" },
+    checks: [{ name: "verify", run: "true" }],
+    notify: [],
+    blob: "a".repeat(40),
+  }
+  expect(() => assertPlainEventQueueConfig({ ...plain, futureQueueFeature: true } as QueueConfig, "run")).toThrow(
+    /queue key futureQueueFeature:.*#25040.*25065/u,
+  )
+  expect(() =>
+    assertPlainEventQueueConfig(
+      {
+        ...plain,
+        checks: [{ ...plain.checks[0]!, futureCheckFeature: true } as unknown as (typeof plain.checks)[number]],
+      },
+      "run",
+    ),
+  ).toThrow(/check key futureCheckFeature:.*#25040.*25065/u)
 })
 
 function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout(): string }> {
@@ -388,6 +410,11 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(
       (await (await openEvents({ ...store, ref: changesRef("main", "task/event-submit") })).events())[0]?.links,
     ).toContain(head)
+    const beforeRetry = await (await openEvents({ ...store, ref: changesRef("main", "task/event-submit") })).events()
+    const beforeState = (await listChanges(store, "main")).get("task/event-submit")
+    const beforePosition = eventRows(await listChanges(store, "main")).find(
+      (row) => row.branch === "task/event-submit",
+    )?.position
     expect((await git(["ls-remote", "--refs", "origin", "refs/heads/task/event-submit"])).split("\t")[0]).toBe(head)
     expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/task/event-submit@*"])).toBe("")
     const retried = capture(repo)
@@ -395,12 +422,18 @@ describe("a queue is the selected origin branch carrying config", () => {
       await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], retried.io),
       retried.stderr(),
     ).toBe(0)
-    expect(JSON.parse(retried.stdout())).toMatchObject({ branch: "task/event-submit", head, retry: true })
+    expect(JSON.parse(retried.stdout())).toMatchObject({
+      branch: "task/event-submit",
+      head,
+      retry: true,
+      opened: beforeRetry[0]?.id,
+    })
+    const afterRetry = await (await openEvents({ ...store, ref: changesRef("main", "task/event-submit") })).events()
+    expect(afterRetry).toEqual(beforeRetry)
+    expect((await listChanges(store, "main")).get("task/event-submit")).toEqual(beforeState)
     expect(
-      (await (await openEvents({ ...store, ref: changesRef("main", "task/event-submit") })).events()).map(
-        (event) => event.type,
-      ),
-    ).toEqual(["opened", "cancelled", "opened"])
+      eventRows(await listChanges(store, "main")).find((row) => row.branch === "task/event-submit")?.position,
+    ).toBe(beforePosition)
     const refusedWithdraw = capture(repo)
     expect(
       await runYrdProcess(["bun", "yrd", "withdraw", "task/event-submit", "--queue", "main"], refusedWithdraw.io),

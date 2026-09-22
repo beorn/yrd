@@ -10,6 +10,7 @@ import { createMemBackend } from "gitomic/mem"
 import { Conflict, open } from "gitomic"
 import type { GitomicBackend } from "gitomic"
 import {
+  CHANGE_EVENT_TYPES,
   appendChangeEvent,
   changeInput,
   changesRef,
@@ -142,6 +143,21 @@ describe("ADR-0017 ref tree", () => {
 })
 
 describe("ADR-0016 event fold", () => {
+  it("keeps the approved change-event vocabulary exact", () => {
+    expect(CHANGE_EVENT_TYPES).toEqual([
+      "opened",
+      "verifying",
+      "checking",
+      "merging",
+      "merged",
+      "failed",
+      "stuck",
+      "cancelled",
+      "ignored",
+      "unignored",
+    ])
+  })
+
   it("constructs required Yrd trailers and kept commits for a write", () => {
     const at = new Date("2026-09-22T14:00:00.000Z")
     const opened = changeInput("opened", { queueTip: A, at, commit: B, issue: "25040", by: "@dev/2" })
@@ -172,7 +188,7 @@ describe("ADR-0016 event fold", () => {
     expect(evolve(queued, verifying).status).toBe("verifying")
     expect(evolve(evolve(queued, verifying), event("checking", "c".repeat(40))).status).toBe("checking")
     expect(() => evolve(queued, event("checking", "c".repeat(40)))).toThrow(/checking.*verifying/)
-    expect(evolve(evolve(queued, event("failed", B)), event("sent", "d".repeat(40))).status).toBe("failed")
+    expect(evolve(queued, event("failed", B)).status).toBe("failed")
     expect(() =>
       evolve(
         initial,
@@ -245,12 +261,11 @@ describe("ADR-0016 event fold", () => {
     expect(ended.commit).toBe(B)
   })
 
-  it("refuses deciding events after an ending with its kind and sha, but allows reports, reopen and observed merge", () => {
+  it("refuses deciding events after an ending with its kind and sha, but allows reopen and observed merge", () => {
     const current = [event("opened", A, [["Commit", A]], [A]), event("failed", B)]
     for (const kind of ["verifying", "checking", "merging", "stuck", "failed", "cancelled"]) {
       expect(() => decide(current, input(kind)), kind).toThrow(/failed.*bbbbbbbb/)
     }
-    expect(decide(current, input("sent")).map((input) => input.type)).toEqual(["sent"])
     expect(() => decide(current, input("merged"))).toThrow(/Commit/)
     expect(decide(current, input("merged", [["Commit", A]], [A])).map((input) => input.type)).toEqual(["merged"])
     expect(decide(current, input("opened", [["Commit", B]], [B])).map((input) => input.type)).toEqual(["opened"])
@@ -592,7 +607,9 @@ describe("the queue-format boundary", () => {
     expect((await listChanges(location, "lab")).get("task/42")?.status).toBe("queued")
     expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
     // Gitomic's reader defaults to 50; a status must fold the whole chain.
-    const reports = Array.from({ length: 51 }, () => input("sent"))
+    const reports = Array.from({ length: 51 }, (_, index) =>
+      index % 2 === 0 ? input("ignored", [["Reason", "fixture report"]]) : input("unignored"),
+    )
     await branch.append(reports, { expect: await branch.head() })
     expect((await listChanges(location, "lab")).get("task/42")?.status).toBe("queued")
     expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")

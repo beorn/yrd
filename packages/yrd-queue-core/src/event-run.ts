@@ -22,10 +22,16 @@ import type { QueueRunLog } from "./log.ts"
 import type { Git } from "./records.ts"
 import { recordProgramResult, recordProgramStart } from "./program-root.ts"
 import { queueRefPrefix } from "./refs.ts"
-import { remoteUrl } from "./remote.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { prepareWorktree } from "./worktree.ts"
 import type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
+
+function discardedJudgementReason(current: EventChange, error: unknown): string {
+  const failed = error instanceof Error ? error.message : String(error)
+  return current.ending === undefined
+    ? `change advanced to ${current.status} at ${current.tip ?? "no tip"} while this round judged it: ${failed}`
+    : `change ended ${current.ending.kind} at ${current.ending.id} while this round judged it: ${failed}`
+}
 
 export async function eventQueueRun(
   options: QueueRunOptions,
@@ -35,14 +41,14 @@ export async function eventQueueRun(
     hooksPath: string
     log: QueueRunLog
     selected: GitRunner
+    url: string
   }>,
 ): Promise<QueueRunOutcome> {
   assertPlainEventQueueRun(options, options)
   const store = { repo: options.repo, remote: options.target.remote }
   const queue = options.target.branch
-  const { git, gitOptions, hooksPath, log, selected } = prepared
+  const { git, gitOptions, hooksPath, log, selected, url } = prepared
 
-  const url = await remoteUrl(git, options.target.remote)
   log.write({ kind: "queue", queue: queueName(options.target, url) })
   const prefix = queueRefPrefix(queue)
   const advertised = await listRefs(prefix, store)
@@ -423,12 +429,13 @@ export async function eventQueueRun(
           `event queue ${url}#${queue}: ${branch} decision failed and its current chain could not be read`,
         )
       }
-      if (current.ending === undefined) throw error
+      if (current.tip === tip) throw error
+      changes.set(branch, current)
       log.write({
         kind: "discarded",
         branch,
         head,
-        reason: `change ended ${current.ending.kind} at ${current.ending.id} while this round judged it: ${error instanceof Error ? error.message : String(error)}`,
+        reason: discardedJudgementReason(current, error),
       })
     }
   }

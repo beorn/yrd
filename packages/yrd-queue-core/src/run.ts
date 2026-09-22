@@ -82,7 +82,6 @@ import {
   GitExit,
   gitIn,
   isAncestor,
-  readRemoteCommit,
   type GitObservation,
   type ObservationNotice,
   mergeBase,
@@ -103,7 +102,7 @@ import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } fro
 import { narrowingOf } from "./narrowing.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
-import { queueRef } from "./events.ts"
+import { queueFormat } from "./events.ts"
 import { eventQueueRun } from "./event-run.ts"
 import { composed, type RingOptions } from "./rings.ts"
 import {
@@ -492,8 +491,9 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       `queue-owned hooks path ${hooksPath} is not empty (${hooks.join(", ")}); remove the named entries, then run yrd queue run`,
     )
   }
-  if ((await readRemoteCommit(git, options.target.remote, queueRef(options.target.branch))) !== undefined) {
-    return eventQueueRun(options, { git, gitOptions, hooksPath, log, selected })
+  const url = await remoteUrl(git, options.target.remote)
+  if ((await queueFormat({ repo: options.repo, remote: options.target.remote }, options.target.branch)) === "event") {
+    return await eventQueueRun(options, { git, gitOptions, hooksPath, log, selected, url })
   }
   const targetSha = options.targetSha
   // One captured-object refusal earns one retry across the whole round. Keep
@@ -528,7 +528,6 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // direct-merge reader below all judge the chain's ending, never its literal
   // tip (@i/10-yrd/24635, @cto 2026-09-16).
   const changes = await readObscuredEndings(git, queue.changes, options.target.remote, options.target.branch)
-  const url = await remoteUrl(git, options.target.remote)
   const name = queueName(options.target, url)
   // The queue's name, and with it the mark that the Git preamble completed. It
   // is the one value the header cannot carry, because it is readable only once
