@@ -166,6 +166,31 @@ describe("the filter terms", () => {
     expect(matched).toContain("task/merged-ball-conditional-close")
   })
 
+  it("selects every event status by the same word in JSON and in the table", () => {
+    const states = [
+      "draft",
+      "queued",
+      "verifying",
+      "checking",
+      "merging",
+      "merged",
+      "failed",
+      "stuck",
+      "cancelled",
+    ] as const
+    const eventRows = watchRows(
+      states.map((state, index) =>
+        row({ branch: `work/${String(index)}`, format: "event", head: String(index).repeat(40), state }),
+      ),
+    )
+    const jsonWords = eventRows.map((entry) => entry.row.state)
+    const tableWords = eventRows.map((entry) => format.stateWord(entry.row))
+
+    expect(tableWords).toEqual(jsonWords)
+    expect(filterRows(eventRows, jsonWords)).toEqual(eventRows)
+    expect(filterRows(eventRows, tableWords)).toEqual(eventRows)
+  })
+
   it("with no terms is no filter, never no rows", () => {
     expect(filterRows(rows, [])).toHaveLength(3)
     expect(filterRows(rows, ["  "])).toHaveLength(3)
