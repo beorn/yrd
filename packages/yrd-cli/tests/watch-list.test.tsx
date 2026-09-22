@@ -140,7 +140,7 @@ describe("AGE / RUN (ia.md): RUN freezes; AGE is not tip Opened", () => {
 })
 
 describe("changesSuffix for deferred row", () => {
-  it("shows the projected duration and bound with waits for the long check", () => {
+  it("shows the projected duration and bound with > when projected exceeds bound", () => {
     const row: Row = {
       branch: "task/wide",
       head: "a".repeat(40),
@@ -152,6 +152,36 @@ describe("changesSuffix for deferred row", () => {
     expect(suffix).toEqual({
       color: "$fg-accent",
       text: "projected 58m > 30m, waits for the long check",
+    })
+  })
+
+  it("shows the projected duration and bound with < when projected is less than bound", () => {
+    const row: Row = {
+      branch: "task/under",
+      head: "b".repeat(40),
+      state: "deferred" as any,
+      projectedMs: 17 * 60 * 1000,
+      boundMs: 30 * 60 * 1000,
+    }
+    const suffix = changesSuffix(row)
+    expect(suffix).toEqual({
+      color: "$fg-accent",
+      text: "projected 17m < 30m, waits for the long check",
+    })
+  })
+
+  it("shows the projected duration and bound with = when projected equals bound", () => {
+    const row: Row = {
+      branch: "task/equal",
+      head: "c".repeat(40),
+      state: "deferred" as any,
+      projectedMs: 30 * 60 * 1000,
+      boundMs: 30 * 60 * 1000,
+    }
+    const suffix = changesSuffix(row)
+    expect(suffix).toEqual({
+      color: "$fg-accent",
+      text: "projected 30m = 30m, waits for the long check",
     })
   })
 })

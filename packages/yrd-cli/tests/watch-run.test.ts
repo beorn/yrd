@@ -184,6 +184,33 @@ describe("HISTORY and METADATA (watch-change)", () => {
     ])
   })
 
+  it("renders deferred history entries with dynamic comparison relation (<, >, =)", () => {
+    const entries = historyEntries([
+      record("deferred", 0, [
+        ["Reason", "projection-exceeded"],
+        ["ProjectedMs", String(58 * 60_000)],
+        ["BoundMs", String(30 * 60_000)],
+      ]),
+      record("deferred", 1_000, [
+        ["Reason", "projection-exceeded"],
+        ["ProjectedMs", String(17 * 60_000)],
+        ["BoundMs", String(30 * 60_000)],
+      ]),
+      record("deferred", 2_000, [
+        ["Reason", "projection-exceeded"],
+        ["ProjectedMs", String(30 * 60_000)],
+        ["BoundMs", String(30 * 60_000)],
+      ]),
+    ])
+    // Newest record first
+    expect(entries[0]?.text).toBe("deferred projection-exceeded (30m = 30m)")
+    expect(entries[0]?.detail).toBe("waits for the long check")
+    expect(entries[1]?.text).toBe("deferred projection-exceeded (17m < 30m)")
+    expect(entries[1]?.detail).toBe("waits for the long check")
+    expect(entries[2]?.text).toBe("deferred projection-exceeded (58m > 30m)")
+    expect(entries[2]?.detail).toBe("waits for the long check")
+  })
+
   it("lays the metadata out in three groups with the live facts absent", () => {
     const groups = metadataGroups(
       row({
