@@ -312,6 +312,13 @@ it("stops an event queue at a stuck change", async () => {
   await createEventQueue(store, "main", w.target, new Date())
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
+  await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "earlier repair", at: new Date() })
+  await writeQueueEvent(store, "main", {
+    type: "resumed",
+    by: "operator",
+    reason: "earlier repair done",
+    at: new Date(),
+  })
   const first = await readStatus(store, "main", "task/a")
   if (first.tip === undefined) throw new Error("submitted event has no tip")
   await appendChangeEvent(store, "main", "task/a", first.tip, {
@@ -325,6 +332,34 @@ it("stops an event queue at a stuck change", async () => {
   expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/a"], merged: [] })
   expect(await remoteTarget(w)).toBe(w.target)
   expect((await readStatus(store, "main", "task/b")).status).toBe("queued")
+})
+
+/** @failure A resumed event queue still refused its stuck head, so the operator could not restart the line.
+ * @level l3 @consumer queue operator
+ */
+it("retries a stuck event change after an operator resumes the queue", async () => {
+  const w = await world()
+  const store = { repo: w.work, remote: "origin" }
+  await createEventQueue(store, "main", w.target, new Date())
+  await submitCommit(w, "task/stuck-first", "one.txt")
+  await submitCommit(w, "task/behind", "two.txt")
+  const first = await readStatus(store, "main", "task/stuck-first")
+  if (first.tip === undefined) throw new Error("submitted event has no tip")
+  await appendChangeEvent(store, "main", "task/stuck-first", first.tip, {
+    type: "stuck",
+    at: new Date(),
+    reason: "repair needed",
+  })
+  await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "repair", at: new Date() })
+  const held = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(held).toMatchObject({ exitCode: 0, merged: [], stopped: { ring: "pause" } })
+  await writeQueueEvent(store, "main", { type: "resumed", by: "operator", reason: "repaired", at: new Date() })
+
+  const resumed = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+  expect(resumed).toMatchObject({ exitCode: 0, merged: ["task/stuck-first"], stuck: [] })
+  expect((await readStatus(store, "main", "task/stuck-first")).status).toBe("merged")
+  expect((await readStatus(store, "main", "task/behind")).status).toBe("queued")
 })
 
 /** @failure A new round ignored a previously active event phase and left a change in limbo.
