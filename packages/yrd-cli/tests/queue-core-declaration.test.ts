@@ -224,6 +224,12 @@ describe("a queue is the selected origin branch carrying config", () => {
     const commit = (await git(["rev-parse", "HEAD"])).trim()
     const queueTip = await createQueue(repo, "main", commit, new Date("2026-09-22T14:00:00.000Z"))
     const statuses = CHANGE_STATUSES.filter((status) => status !== "draft")
+    await git(["checkout", "--quiet", "-b", "task/draft"])
+    writeFileSync(join(repo, "draft.txt"), "draft\n")
+    await git(["add", "draft.txt"])
+    await git(["commit", "--quiet", "-m", "unsubmitted draft"])
+    await git(["push", "--quiet", "origin", "task/draft"])
+    await git(["checkout", "--quiet", "main"])
 
     for (const [index, status] of statuses.entries()) {
       const branch = `task/status-${String(index)}`
@@ -257,17 +263,18 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await coreQueueCommand(repo, json.io, { command: "list" }, { json: true, queue: "main" })).toBe(0)
     expect(
       (JSON.parse(json.stdout()) as { changes: readonly { state: string }[] }).changes.map((row) => row.state).sort(),
-    ).toEqual([...statuses].sort())
+    ).toEqual([...CHANGE_STATUSES].sort())
 
     const table = capture(repo)
     expect(await coreQueueCommand(repo, table.io, { command: "list" }, { queue: "main" })).toBe(0)
-    for (const [index, status] of statuses.entries()) {
-      const branch = `task/status-${String(index)}`
+    for (const [index, status] of CHANGE_STATUSES.entries()) {
+      const branch = status === "draft" ? "task/draft" : `task/status-${String(index - 1)}`
+      const rowLabel = status === "draft" ? `draft ${branch}` : `queue ${branch}`
       expect(
         table
           .stdout()
           .split("\n")
-          .find((line) => line.includes(`queue ${branch}`)),
+          .find((line) => line.includes(rowLabel)),
       ).toMatch(new RegExp(`\\b${status}\\b`, "u"))
       const filteredJson = capture(repo)
       expect(
@@ -289,7 +296,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         filteredTable
           .stdout()
           .split("\n")
-          .find((line) => line.includes(`queue ${branch}`)),
+          .find((line) => line.includes(rowLabel)),
       ).toMatch(new RegExp(`\\b${status}\\b`, "u"))
     }
   }, 15_000)

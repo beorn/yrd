@@ -1379,8 +1379,9 @@ export async function coreQueueCommand(
           drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
         }>
       > => {
-        // The ending instants a notice hides and the drafts are what a person
-        // reads; `--json` reads neither, so its document is the one it was.
+        // Legacy JSON retains its historical change-only document. An event
+        // queue has one status vocabulary beginning at `draft`, so its JSON
+        // and table both project the same one row per branch.
         const format = await queueFormat({ repo, remote: config.target.remote }, config.target.branch)
         const reading =
           format === "event"
@@ -1412,6 +1413,7 @@ export async function coreQueueCommand(
         const unfiltered = watchRows(all, { journals, perRun: true })
         const changes = filterRows(unfiltered, request.terms ?? []).filter((item) => item.row.state !== "draft")
         const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
+        const documentRows = reading.format === "event" ? rows : changes
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = reading.format === "event" ? reading.pause : reading.queue.stop
@@ -1424,17 +1426,17 @@ export async function coreQueueCommand(
         const filteredScope =
           request.terms === undefined || request.terms.length === 0
             ? undefined
-            : `${String(changes.length)} of ${String(all.filter((row) => row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
-              (changes.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
+            : `${String(documentRows.length)} of ${String(reading.format === "event" ? all.length : all.filter((row) => row.state !== "draft").length)} ${reading.format === "event" ? "branch(es)" : "change(s)"} match ${request.terms.join(" or ")}` +
+              (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
         const scope =
           reading.format === "event"
-            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/; draft branches and direct target commits are outside this reading.${filteredScope === undefined ? "" : ` ${filteredScope}`}`
+            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and branch heads at ${config.target.remote}; direct target commits are outside this reading.${filteredScope === undefined ? "" : ` ${filteredScope}`}`
             : filteredScope
         return {
           observation,
           data: {
             observation,
-            changes: changes.map((row) => row.row),
+            changes: documentRows.map((row) => row.row),
             journal: journalFact(journals),
             pause: pause ?? null,
             // The everyday reader of a stopped line: always present, null while
@@ -2914,7 +2916,7 @@ function checkLines(check: CheckView): readonly string[] {
   ]
 }
 
-/** Read an event queue through Gitomic and project only its branch chains. */
+/** Read an event queue through Gitomic and project its change chains and draft branch heads. */
 async function readEventListing(
   git: GitRunner,
   config: QueueConfig,
@@ -2926,7 +2928,7 @@ async function readEventListing(
     format: "event"
     all: readonly Row[]
     journals: Journals
-    drafts: undefined
+    drafts: DraftReading
     pause: PauseRecord | undefined
     changes: ReadonlyMap<string, EventChange>
     observation: GitObservation
@@ -2935,7 +2937,21 @@ async function readEventListing(
   const store = { repo, remote: config.target.remote }
   const queue = await readEventQueue(store, config.target.branch)
   const changes = await listChanges(store, config.target.branch)
-  const projected = eventRows(changes)
+  const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
+  const [queueRefs, branchRefs] = await Promise.all([listRefs(queuePrefix, store), listRefs("refs/heads/", store)])
+  assertEventListingFence(config.target.branch, queue, changes, queueRefs)
+  const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
+  const drafts = await readDrafts(
+    git,
+    {
+      heads,
+      changes: [...changes].flatMap(([branch, change]) =>
+        change.commit === undefined ? [] : [{ change: { branch, head: change.commit } }],
+      ),
+    },
+    { targetSha: targetOid },
+  )
+  const projected = eventRows(changes, [...drafts.dated, ...drafts.undated])
   const titles = await subjects(
     git,
     projected.map((row) => row.head),
@@ -2944,9 +2960,6 @@ async function readEventListing(
     ...row,
     ...(titles.get(row.head) === undefined ? {} : { subject: titles.get(row.head) }),
   }))
-  const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
-  const [queueRefs, branchRefs] = await Promise.all([listRefs(queuePrefix, store), listRefs("refs/heads/", store)])
-  assertEventListingFence(config.target.branch, queue, changes, queueRefs)
   const observation = await git.observe({
     version: 1,
     root: {
@@ -2964,7 +2977,7 @@ async function readEventListing(
     format: "event",
     all,
     journals: readJournals(join(workdir, "logs")),
-    drafts: undefined,
+    drafts,
     pause: eventPause(queue),
     changes,
     observation,
