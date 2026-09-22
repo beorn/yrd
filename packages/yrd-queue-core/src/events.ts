@@ -1,6 +1,6 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
 import { chainsUnder, listRefs, openEvents } from "gitomic/events"
-import type { Event, EventInput } from "gitomic/events"
+import type { AlsoRef, Event, EventInput } from "gitomic/events"
 import type { GitomicBackend } from "gitomic"
 
 import { queueRefPrefix } from "./refs.ts"
@@ -218,6 +218,9 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     case "merged":
       // A merge observed on main is ground truth even after a recorded ending.
       if (state.commit === undefined) throw new Error(`event ${event.id} merged needs an opened change`)
+      if (keptCommit(event) !== state.commit) {
+        throw new Error(`event ${event.id} merged must keep the submitted Commit: ${state.commit}`)
+      }
       return {
         ...next,
         status: "merged",
@@ -442,6 +445,52 @@ export async function readChangeEvents(
     throw new Error(`${ref} moved after the selected reading: expected ${selectedTip}, read ${state.tip}`)
   }
   return events
+}
+
+/** Write one run decision against the row it judged; a rival tip discards that judgement. */
+export async function appendChangeEvent(
+  queue: string,
+  branch: string,
+  selectedTip: string,
+  write: Readonly<{
+    type: Exclude<ChangeEventType, "opened">
+    at: Date
+    commit?: string
+    issue?: string
+    reason?: string
+    title?: string
+    content?: string
+    writer?: string
+    /** A target or branch ref moved in the same CAS publish as this event. */
+    also?: readonly AlsoRef[]
+  }>,
+  store: EventStore,
+): Promise<string> {
+  const queueTip = (await readEventQueue(queue, store)).tip
+  const history = await readChangeEvents(queue, branch, selectedTip, store)
+  const input = changeInput(write.type, {
+    queueTip,
+    at: write.at,
+    ...(write.commit === undefined ? {} : { commit: write.commit }),
+    ...(write.issue === undefined ? {} : { issue: write.issue }),
+    ...(write.reason === undefined ? {} : { reason: write.reason }),
+    ...(write.title === undefined ? {} : { title: write.title }),
+    ...(write.content === undefined ? {} : { content: write.content }),
+  })
+  const planned = decide(history, input)
+  if (planned.length !== 1) {
+    throw new Error(`${changesRef(queue, branch)}: a run decision wrote ${planned.length} events`)
+  }
+  const ref = changesRef(queue, branch)
+  const result = await (
+    await openEvents({ ...store, ref, writer: write.writer ?? "yrd" })
+  ).append(planned, {
+    expect: selectedTip,
+    ...(write.also === undefined ? {} : { also: write.also }),
+  })
+  const written = result.events.findLast((event) => event.type === write.type)?.id
+  if (written === undefined) throw new Error(`${ref} in ${store.repo}: ${write.type} event was not written`)
+  return written
 }
 
 /** Branch projections for an event queue, with one batched remote fetch and history walk. */
