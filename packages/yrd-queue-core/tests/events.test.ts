@@ -9,6 +9,7 @@ import { openEvents } from "gitomic/events"
 import { createMemBackend } from "gitomic/mem"
 import { open } from "gitomic"
 import {
+  appendChangeEvent,
   changeInput,
   changesRef,
   createEventQueue,
@@ -141,7 +142,8 @@ describe("ADR-0016 event fold", () => {
       expect(() => decide(current, input(kind)), kind).toThrow(/failed.*bbbbbbbb/)
     }
     expect(decide(current, input("sent")).map((input) => input.type)).toEqual(["sent"])
-    expect(decide(current, input("merged")).map((input) => input.type)).toEqual(["merged"])
+    expect(() => decide(current, input("merged"))).toThrow(/Commit/)
+    expect(decide(current, input("merged", [["Commit", A]], [A])).map((input) => input.type)).toEqual(["merged"])
     expect(decide(current, input("opened", [["Commit", B]], [B])).map((input) => input.type)).toEqual(["opened"])
   })
 
@@ -178,6 +180,93 @@ describe("ADR-0016 event fold", () => {
 })
 
 describe("the queue-format boundary", () => {
+  it("writes a runner phase at the selected tip and keeps its candidate, then refuses a stale rival", async () => {
+    const store = { repo: "yrd-event-run-writer", backend: createMemBackend() }
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const queueTip = await createEventQueue("lab", targetCommit, store, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/42" })
+    const head = (await branch.transact(async (map) => map.set("work.txt", "one"), "work")).oid
+    const candidate = await open({ ...store, ref: "refs/heads/candidate" })
+    const composed = (await candidate.transact(async (map) => map.set("work.txt", "composed"), "compose")).oid
+    const ref = changesRef("lab", "task/42")
+    const chain = await openEvents({ ...store, ref })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head })],
+      { expect: null },
+    )
+    const selectedTip = opened.head
+    if (selectedTip === null) throw new Error("fixture opened event has no tip")
+    const verifying = await appendChangeEvent(
+      "lab",
+      "task/42",
+      selectedTip,
+      {
+        type: "verifying",
+        at: new Date("2026-09-22T14:02:00.000Z"),
+        commit: composed,
+      },
+      store,
+    )
+    expect((await readStatus("lab", "task/42", store)).status).toBe("verifying")
+    expect((await chain.events()).at(-1)).toMatchObject({ id: verifying, type: "verifying", links: [composed] })
+    await expect(
+      appendChangeEvent(
+        "lab",
+        "task/42",
+        selectedTip,
+        {
+          type: "checking",
+          at: new Date("2026-09-22T14:03:00.000Z"),
+        },
+        store,
+      ),
+    ).rejects.toThrow(/moved after the selected reading/)
+    const checking = await appendChangeEvent(
+      "lab",
+      "task/42",
+      verifying,
+      {
+        type: "checking",
+        at: new Date("2026-09-22T14:03:00.000Z"),
+      },
+      store,
+    )
+    expect(checking).toMatch(/^[0-9a-f]{40}$/u)
+    expect((await readStatus("lab", "task/42", store)).status).toBe("checking")
+    const merging = await appendChangeEvent(
+      "lab",
+      "task/42",
+      checking,
+      {
+        type: "merging",
+        at: new Date("2026-09-22T14:04:00.000Z"),
+      },
+      store,
+    )
+    const merged = {
+      type: "merged" as const,
+      at: new Date("2026-09-22T14:05:00.000Z"),
+      commit: head,
+      also: [{ ref: "refs/heads/lab", expect: A, oid: composed }],
+    }
+    await expect(appendChangeEvent("lab", "task/42", merging, merged, store)).rejects.toThrow()
+    expect((await readStatus("lab", "task/42", store)).status).toBe("merging")
+    expect(await target.head()).toBe(targetCommit)
+    await appendChangeEvent(
+      "lab",
+      "task/42",
+      merging,
+      {
+        ...merged,
+        also: [{ ref: "refs/heads/lab", expect: targetCommit, oid: composed }],
+      },
+      store,
+    )
+    expect((await readStatus("lab", "task/42", store)).status).toBe("merged")
+    expect(await target.head()).toBe(composed)
+  })
+
   it("requires a declared queue chain and derives its pause from queue events", async () => {
     const store = { repo: "yrd-event-queue", backend: createMemBackend() }
     const target = await open({ ...store, ref: "refs/heads/lab" })
