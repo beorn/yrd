@@ -470,6 +470,36 @@ describe("the queue-format boundary", () => {
     expect(await target.head()).toBe(composed)
   })
 
+  it("refuses a stuck event if a queue resume raced its causal queue tip", async () => {
+    const { store, location, beforeNextPublish } = remoteMemStore("yrd-event-stuck-resume-race")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const queueTip = await createEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/42" })
+    const head = (await branch.transact(async (map) => map.set("work.txt", "one"), "work")).oid
+    const ref = changesRef("lab", "task/42")
+    const opened = await (
+      await openEvents({ ...store, ref })
+    ).append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      { expect: null },
+    )
+    if (opened.head === null) throw new Error("fixture opened event has no tip")
+    beforeNextPublish(async () => {
+      await writeQueueEvent(location, "lab", { type: "paused", by: "operator", reason: "repair", at: new Date() })
+      await writeQueueEvent(location, "lab", { type: "resumed", by: "operator", reason: "repaired", at: new Date() })
+    })
+
+    await expect(
+      appendChangeEvent(location, "lab", "task/42", opened.head, {
+        type: "stuck",
+        at: new Date(),
+        reason: "needs repair",
+      }),
+    ).rejects.toThrow()
+    expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
+  })
+
   it("requires a declared queue chain and derives its pause from queue events", async () => {
     const { store, location } = remoteMemStore("yrd-event-queue")
     const target = await open({ ...store, ref: "refs/heads/lab" })
