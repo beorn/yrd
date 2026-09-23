@@ -1839,8 +1839,8 @@ describe("a diverged component the merge composes", () => {
         phase: "merge",
       },
     ])
-    // Never an amend: the change's own head is untouched and still the second parent's ancestor.
-    expect((await w.git(["rev-parse", `refs/remotes/origin/task/second-side`]).catch(() => head)).trim()).toBe(head)
+    // Never an amend: the change's branch at the remote still names the submitted head.
+    expect(await remoteTip(w.git, "refs/heads/task/second-side")).toBe(head)
     const merged = (
       await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/second-side", head })))
     ).find((record) => record.kind === "merged")

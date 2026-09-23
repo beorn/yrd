@@ -93,6 +93,10 @@ export const LOG_KINDS = [
   "check",
   "result",
   "settle",
+  // A diverged gitlink the queue composed itself (24977): the change's head, the
+  // component main merged in, and the component and root commits that came out.
+  // The re-cut is a new head of the queue's making; nothing is amended.
+  "recut",
   // A submodule main the queue moved at land, children first, to a pin the
   // settling merge kept ahead of it (24454): one row per published path, so the
   // journal says which submodule mains a landing moved and to what.

@@ -43,7 +43,16 @@ import {
   type WriteRecord,
 } from "./records.ts"
 import { changeName } from "./refs.ts"
-import { recordProgramStart, recordProgramResult, short, writeRecord, type Ring, type Run } from "./run.ts"
+import {
+  RECUT_CHECK,
+  recordProgramStart,
+  recordProgramResult,
+  short,
+  shortRecut,
+  writeRecord,
+  type Ring,
+  type Run,
+} from "./run.ts"
 import { tipOf } from "./state.ts"
 import type { QueueEntry } from "./remote.ts"
 
@@ -197,11 +206,16 @@ export function messageFor(
     remedy?: string
     projectedMs?: number
     boundMs?: number
+    /** The ending's `Recut` trailers: the queue composed these gitlinks itself (24977). */
+    recuts?: readonly string[]
   }>,
 ): string {
   switch (kind) {
-    case "merged":
-      return `close your bead: ${short(about.branch, about.head)} merged as ${(about.merge ?? "").slice(0, 12)}`
+    case "merged": {
+      const merged = `close your bead: ${short(about.branch, about.head)} merged as ${(about.merge ?? "").slice(0, 12)}`
+      const recuts = about.recuts ?? []
+      return recuts.length === 0 ? merged : `${merged}; the queue re-cut it: ${recuts.map(shortRecut).join("; ")}`
+    }
     case "failed":
       return `send it back: ${about.subject}; ${about.remedy ?? ""}`.trim()
     case "stuck":
@@ -286,6 +300,7 @@ async function told(
     head: entry.change.head,
     merge: trailer(written, "Merge") ?? "",
     remedy: trailer(written, "Remedy"),
+    recuts: trailers(written, "Recut"),
     subject: written.subject,
     projectedMs: trailer(written, "ProjectedMs") !== undefined ? Number(trailer(written, "ProjectedMs")) : undefined,
     boundMs: trailer(written, "BoundMs") !== undefined ? Number(trailer(written, "BoundMs")) : undefined,
@@ -456,7 +471,17 @@ function said(delivery: Delivery): string {
 }
 
 /** A change ended by its submitter moving on, which is not a failure of anything. */
-const MOVED_ON = new Set(["replaced", "deleted"])
+/**
+ * Failed endings that are not the branch failing its checks again: a head the
+ * submitter replaced or deleted, and a queue re-cut's check failure (24977
+ * constraint 4 -- the attempt was the queue's, so it is never charged).
+ */
+const UNCHARGED = new Set(["replaced", "deleted", RECUT_CHECK])
+
+/** Whether a failed ending with this Reason counts toward "failed twice with the same error". */
+export function isChargedFailure(reason: string | undefined): boolean {
+  return !UNCHARGED.has(reason ?? "")
+}
 
 /**
  * How many times this branch has been sent back, this ending included — the
@@ -518,13 +543,13 @@ async function priorFailureReasonOf(run: Run, entry: QueueEntry, endedRecord: st
     .filter((candidate) => {
       if (candidate.change.branch !== entry.change.branch || candidate.change.head === entry.change.head) return false
       const tip = tipOf(candidate.change)
-      return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
+      return endedKind(tip) === "failed" && isChargedFailure(trailer(tip, "Reason"))
     })
     .map((candidate) => trailer(tipOf(candidate.change), "Reason"))
   // `own` is append-ordered under one ref and its LAST failed record is the
   // ending being written right now, which is not its own predecessor.
   const own = (await readRecords(run.git, endedRecord))
-    .filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? ""))
+    .filter((record) => record.kind === "failed" && isChargedFailure(trailer(record, "Reason")))
     .map((record) => trailer(record, "Reason"))
   return sameFailureReason([...elsewhere, ...own.slice(0, -1)])
 }
@@ -533,13 +558,13 @@ async function failuresOf(run: Run, entry: QueueEntry, endedRecord: string): Pro
   const elsewhere = run.queue.filter((candidate) => {
     if (candidate.change.branch !== entry.change.branch || candidate.change.head === entry.change.head) return false
     const tip = tipOf(candidate.change)
-    return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
+    return endedKind(tip) === "failed" && isChargedFailure(trailer(tip, "Reason"))
   }).length
   // Count through the written ending, regardless of concurrent local ref changes.
   const own = await readRecords(run.git, endedRecord)
   return (
     elsewhere +
-    own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
+    own.filter((record) => record.kind === "failed" && isChargedFailure(trailer(record, "Reason"))).length
   )
 }
 

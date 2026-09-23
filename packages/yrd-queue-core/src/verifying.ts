@@ -182,8 +182,9 @@ export type SettledGitlink = Readonly<{
    */
   /**
    * `merged` is a pin the MERGE composed (24951): the change's pin and the
-   * component main the root records had diverged, they changed disjoint files,
-   * and git-super created the two-parent commit carrying both. It publishes
+   * component main the root records had diverged, their own merge was clean
+   * (24977: merge-tree's answer, no longer file disjointness), and git-super
+   * created the two-parent commit carrying both. It publishes
    * exactly as `kept-ahead` does, because the component main tip is that
    * commit's first parent, so advancing main to it is a fast-forward.
    */

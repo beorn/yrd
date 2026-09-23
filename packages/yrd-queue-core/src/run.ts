@@ -1250,6 +1250,8 @@ type ComposedCandidate =
       worktree: PreparedWorktree
       /** Pins the settling merge kept AHEAD of their submodule main: the land publishes these, children first (24454). */
       publishing: readonly SettledGitlink[]
+      /** Gitlinks this candidate composed itself: a re-cut no submit check has read yet (24977). */
+      recuts: readonly Recut[]
     }>
   | Readonly<{ kind: "failed"; detail: SuperMergeDetail; worktree: Worktree }>
 
@@ -1308,6 +1310,31 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
       state: settled.state,
     })
   }
+  // 24977: every composition is a re-cut of the change, named as one. The settle
+  // row above says how the pin settled; this row says what the queue made of
+  // the change: its head, the component main merged in, and the new commits.
+  const recuts: Recut[] = []
+  for (const settled of verifying.gitlinks) {
+    if (settled.composition === undefined) continue
+    const recut = {
+      composed: settled.from,
+      main: settled.composition.parent,
+      path: settled.path,
+      pin: settled.composition.pin,
+    }
+    recuts.push(recut)
+    run.log.write({
+      branch: entry.change.branch,
+      candidate: mergeCommit,
+      composed: recut.composed,
+      head,
+      kind: "recut",
+      main: recut.main,
+      path: recut.path,
+      phase,
+      pin: recut.pin,
+    })
+  }
   // AFTER the settle rows, so the journal reads parent-then-descent in the order
   // the walk actually ran. `children` is a string list rather than objects
   // because LogRecord fields are scalars or string arrays -- a nested shape
@@ -1346,7 +1373,61 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     // component main after the root merge has passed every check, as it always
     // has.
     publishing: verifying.gitlinks.filter((row) => row.state === "kept-ahead" || row.state === "merged"),
+    recuts,
   }
+}
+
+/**
+ * A diverged gitlink the queue composed itself (24977, @cto e8368e85): the
+ * change's pin, the component main merged into it, and the two-parent commit
+ * that came out. The root candidate carrying it is the re-cut's other new head.
+ */
+export type Recut = Readonly<{ path: string; pin: string; main: string; composed: string }>
+
+/** The failed ending of a re-cut that fails a submit check the change alone passed: the submitter's, uncharged. */
+export const RECUT_CHECK = "recut-check"
+
+/** One `Recut` trailer: `<path> <change pin> + <component main> -> <composed>`. */
+export function recutRow(recut: Recut): string {
+  return `${recut.path} ${recut.pin} + ${recut.main} -> ${recut.composed}`
+}
+
+/** A `Recut` trailer for a person: every sha shortened, and the main named as main. */
+export function shortRecut(row: string): string {
+  const parsed = /^(\S+) (\S+) \+ (\S+) -> (\S+)$/u.exec(row)
+  if (parsed === null) return row
+  const [, path, pin, main, composed] = parsed as unknown as [string, string, string, string, string]
+  return `${path} ${pin.slice(0, 12)} + main ${main.slice(0, 12)} -> ${composed.slice(0, 12)}`
+}
+
+/**
+ * The queue's re-cut fails a submit check the change passed on its own: the
+ * change and the component main it was composed with disagree. That is a
+ * semantic conflict with main, the submitter's to resolve, but the attempt was
+ * the queue's, so it is not charged (@cto 0a3e3838, Q3) and the line goes on.
+ */
+async function recutFailure(
+  run: Run,
+  entry: QueueEntry,
+  results: readonly CheckResult[],
+  failing: readonly CheckResult[],
+  recuts: readonly Recut[],
+): Promise<Ended> {
+  const { branch } = entry.change
+  const names = failing.map((result) => result.name).join(", ")
+  const composed = recuts.map((recut) => `${recut.path} with main ${recut.main.slice(0, 12)}`).join(", ")
+  return run.steps.end(run, entry, "failed", {
+    remedy:
+      `merge each component's main into your component branch (${composed}), make ${names} pass there, ` +
+      `re-stage the gitlink on a merge of ${run.options.target.branch}, push, and submit ${branch} again`,
+    subject: `${branch} fails ${names} only where the queue composed it with ${run.options.target.branch}`,
+    trailers: [
+      ["Reason", RECUT_CHECK],
+      ["Detail", `semantic conflict with main: ${names} fails on the queue's re-cut (${composed}) though ${branch} passed it alone`],
+      ...recuts.map((recut) => ["Recut", recutRow(recut)] as const),
+      ...checkTrailers(results),
+    ],
+  })
 }
 
 /** The queue's merge commit retains its change and actor in Git history. */
@@ -1913,7 +1994,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
   const name = changeName(change)
   const composed = await composeCandidate(run, entry, "merge")
   if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
-  const { mergeCommit, rootChanges, worktree, publishing } = composed
+  const { mergeCommit, rootChanges, worktree, publishing, recuts } = composed
   // 24573: the path to KEEP instead of removing, set when a check fails or the
   // digest above disagrees. @dev/4 went for this root three times on one branch
   // and found it already gone each time, so every diagnosis had to be an
@@ -1996,7 +2077,20 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
         why: `the merge root does not contain ${mergeCommit.slice(0, 12)} at ${divergent.length} path(s) the candidate changed`,
       })
     }
-    const results = await runPhase(run, entry, "merge", worktree.path, merged)
+    // 24977 (@cto e8368e85 constraint 2): a candidate this phase composed is a
+    // tree no submit check has read -- the change was judged before the
+    // component main moved -- and since 25092 nothing else runs at merge. The
+    // submit checks run again on it first, and a failure there is the re-cut's.
+    const recheck = recuts.length === 0 ? [] : await runPhase(run, entry, "submit", worktree.path, merged)
+    const recutFailing = recheck.filter((result) => result.result === "fail")
+    if (recutFailing.length > 0) {
+      retained = worktree.path
+      return await recutFailure(run, entry, recheck, recutFailing, recuts)
+    }
+    const phaseResults = recheck.every((result) => result.result === "pass")
+      ? await runPhase(run, entry, "merge", worktree.path, merged)
+      : []
+    const results = [...recheck, ...phaseResults]
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
       return await run.steps.end(
@@ -2031,13 +2125,13 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
       }
       return await writeDeferredRecord(run, entry, "merge", deferredOne, results)
     }
-    const failing = results.filter((result) => result.result === "fail")
+    const failing = phaseResults.filter((result) => result.result === "fail")
     if (failing.length > 0) {
       retained = worktree.path
       return await attributedFailure(run, entry, results, failing, "merge", rootChanges?.changes ?? [])
     }
     const declaredForMerge = run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes("merge"))
-    if (results.length < declaredForMerge.length) {
+    if (phaseResults.length < declaredForMerge.length) {
       return await writeDeferredRecord(
         run,
         entry,
@@ -2087,6 +2181,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
           ["Base", run.targetSha],
           ["Merged-By", mergedBy(run.options.target.branch, run.log.id)],
           ...publishing.map((row) => ["Published", publishedRow(row)] as const),
+          ...recuts.map((recut) => ["Recut", recutRow(recut)] as const),
           ...checkTrailers(results),
         ],
       },
