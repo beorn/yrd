@@ -34,12 +34,35 @@
  * time, so it has the same sha in every repository and is written at most
  * once per repository.
  *
- * Writing uses `update-ref` with the expected old value, so two writers racing
- * on one change lose loudly instead of interleaving.
+ * Writing uses Gitomic publication with the expected old value, so two writers
+ * racing on one change lose loudly instead of interleaving.
  */
 
-import { refAt, type Git } from "./git.ts"
+import { createShellBackend, type CommitMeta, type GitomicBackend } from "gitomic"
+import type { Git } from "./git.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
+
+type LegacyBackend = GitomicBackend &
+  Required<Pick<GitomicBackend, "fetchRefs" | "listRefs" | "publish" | "readHistory">>
+
+/** The one Gitomic boundary used by the legacy format until #25041 deletes it. */
+export type LegacyStore = Readonly<{ repo: string; backend: LegacyBackend }>
+
+/**
+ * Resolve the repository once, then require every Gitomic capability the
+ * legacy adapter uses. The optional backend is an internal test seam; queue-core's
+ * public functions keep their existing signatures.
+ */
+export async function legacyStore(git: Git, backend: GitomicBackend = createShellBackend()): Promise<LegacyStore> {
+  const repo = (await git(["rev-parse", "--absolute-git-dir"])).trim()
+  if (repo === "") throw new Error("legacy queue store: git rev-parse returned an empty repository store")
+  for (const capability of ["fetchRefs", "listRefs", "publish", "readHistory"] as const) {
+    if (typeof backend[capability] !== "function") {
+      throw new Error(`legacy queue store: Gitomic backend lacks ${capability}`)
+    }
+  }
+  return { repo, backend: backend as LegacyBackend }
+}
 
 /** The one word for a deferred record and state, kept behind one constant (CTO ruling 25029). */
 export const DEFERRED_WORD = "deferred" as const
@@ -224,13 +247,10 @@ export async function readRootChanges(git: Git, merge: string, copied?: string):
   let receipt: RootChanges["receipt"]
   if (copied === undefined) {
     const ref = `refs/git-super/receipts/${merge}`
-    const refs = (await git(["for-each-ref", "--format=%(refname)%00%(objecttype)%00%(objectname)", ref]))
-      .split("\n")
-      .filter((line) => line.split("\0")[0] === ref)
-    if (refs.length === 0) return undefined
-    const row = refs[0]?.split("\0")
-    const receiptOid = row?.[2]
-    if (refs.length !== 1 || row?.[1] !== "commit" || !oid(receiptOid)) {
+    const store = await legacyStore(git)
+    const receiptOid = (await store.backend.listRefs(store.repo, ref)).get(ref)
+    if (receiptOid === undefined) return undefined
+    if (!oid(receiptOid) || (await git(["cat-file", "-t", receiptOid])).trim() !== "commit") {
       invalid(`present receipt ref ${ref} does not name one commit`)
     }
     if ((await git(["show", "-s", "--format=%P", receiptOid])).trim() !== merge) {
@@ -344,7 +364,10 @@ export async function cleanupRootChanges(git: Git, rootChanges: RootChanges, dur
   ) {
     throw new Error(`Root-Changes cleanup: ${rootChanges.receipt.ref} changed; preserve its unexpected value`)
   }
-  await git(["update-ref", "-d", rootChanges.receipt.ref, rootChanges.receipt.oid])
+  const store = await legacyStore(git)
+  await store.backend.publish(store.repo, [
+    { ref: rootChanges.receipt.ref, expect: rootChanges.receipt.oid, oid: null },
+  ])
 }
 
 async function recordRootChanges(
@@ -384,9 +407,10 @@ async function recordRootChanges(
  */
 export async function appendRecord(git: Git, queue: string, write: WriteRecord): Promise<string> {
   const ref = changeRef(queue, write.change)
-  const tip = await refAt(git, ref)
+  const store = await legacyStore(git)
+  const tip = (await store.backend.listRefs(store.repo, ref)).get(ref)
   const sha = await recordCommit(git, write, tip)
-  await git(["update-ref", ref, sha, tip ?? ABSENT])
+  await store.backend.publish(store.repo, [{ ref, expect: tip ?? ABSENT, oid: sha }])
   return sha
 }
 
@@ -395,13 +419,51 @@ async function genesis(git: Git): Promise<string> {
   return (await git(["hash-object", "-w", "-t", "commit", "--stdin"], GENESIS_OBJECT)).trim()
 }
 
+/** Read one exact commit through Gitomic's history seam. */
+export async function readLegacyCommit(git: Git, sha: string): Promise<CommitMeta> {
+  const store = await legacyStore(git)
+  const [meta] = await store.backend.readHistory(store.repo, [sha], { limit: 1 })
+  if (meta?.oid !== sha) throw new Error(`${sha.slice(0, 12)} is not a readable commit`)
+  return meta
+}
+
+/**
+ * The exact legacy pause bytes. Gitomic owns the ref, while this private
+ * compatibility writer survives until #25041 deletes the legacy format.
+ */
+export async function legacyPauseCommit(
+  git: Git,
+  previous: Readonly<{ sha: string }> | undefined,
+  write: Readonly<{
+    kind: "paused" | "resumed"
+    reason: string
+    by: string
+    cause?: "operator" | "stuck"
+    change?: Change
+    next?: string
+  }>,
+  pausedAt?: Date,
+): Promise<string> {
+  const tree = (await git(["mktree"], "")).trim()
+  const trailers = [
+    `Record: ${write.kind}`,
+    `Paused-By: ${write.by}`,
+    ...(pausedAt === undefined ? [] : [`Paused-At: ${pausedAt.toISOString()}`]),
+    ...(write.kind === "paused" ? [`Cause: ${write.cause ?? "operator"}`] : []),
+    ...(write.kind === "paused" && write.change !== undefined ? [`Change: ${changeName(write.change)}`] : []),
+    ...(write.kind === "paused" && write.next !== undefined
+      ? [`Next: ${write.next.replace(/\s+/gu, " ").trim()}`]
+      : []),
+  ]
+  const message = `${write.reason}\n\n${trailers.join("\n")}\n`
+  const args = ["commit-tree", tree]
+  if (previous !== undefined) args.push("-p", previous.sha)
+  return (await git([...args, "-m", message])).trim()
+}
+
 /** The record at `sha`. A commit there that is not a record is loud: a change's ref holds only records. */
 export async function readRecord(git: Git, sha: string): Promise<ChangeRecord> {
-  const [id, at, block, body] = (await git(["log", "-1", `--format=${RECORD_FORMAT}`, sha])).split("\x00")
-  const record =
-    id === undefined || at === undefined || block === undefined || body === undefined
-      ? undefined
-      : recordFrom(id.trim(), at, body, block)
+  const record = recordFromMeta(await readLegacyCommit(git, sha))
   if (record === undefined) throw new Error(`${sha.slice(0, 12)} is not a record; a change's ref holds only records`)
   await recordRootChanges(git, record.trailers, record)
   return record
@@ -412,34 +474,106 @@ async function carriedFrom(git: Git, sha: string): Promise<readonly (readonly [s
   return (await readRecord(git, sha)).trailers.filter(([name]) => (CARRIED as readonly string[]).includes(name))
 }
 
-/** Every record through the captured commit, oldest first. Never re-read a moving ref. */
+/**
+ * Every record through the captured commit, oldest first. A `before..through`
+ * selection returns only records after `before`, preserving the public range
+ * contract used by notification receipt reads. Never re-read a moving ref.
+ */
 export async function readRecords(git: Git, from: string): Promise<readonly ChangeRecord[]> {
-  // %x00 separates the fields and %x01 the records, because a commit message
-  // holds newlines and a naive split would cut a record in half.
-  const out = await git(["log", "--first-parent", `--format=${RECORD_FORMAT}%x01`, from])
+  const store = await legacyStore(git)
+  const separator = from.indexOf("..")
+  if (separator < 0) {
+    const history = await store.backend.readHistory(store.repo, [from])
+    return recordsFromHistory(git, history, from)
+  }
+  const before = from.slice(0, separator)
+  const through = from.slice(separator + 2)
+  const history = await store.backend.readHistory(store.repo, [through], { exclude: [before] })
+  return recordsFromHistorySelection(git, history, through, false)
+}
+
+/**
+ * Reconstruct one first-parent legacy chain from a possibly multi-tip Gitomic
+ * history batch, preserving the legacy validation and oldest-first result.
+ */
+export async function recordsFromHistory(
+  git: Git,
+  history: readonly CommitMeta[],
+  from: string,
+): Promise<readonly ChangeRecord[]> {
+  return recordsFromHistorySelection(git, history, from, true)
+}
+
+async function recordsFromHistorySelection(
+  git: Git,
+  history: readonly CommitMeta[],
+  from: string,
+  complete: boolean,
+): Promise<readonly ChangeRecord[]> {
+  const byOid = new Map(history.map((meta) => [meta.oid, meta] as const))
   const records: ChangeRecord[] = []
-  for (const record of out.split("\x01")) {
-    const row = record.trim()
-    if (row === "") continue
-    const [sha, at, block, body] = row.split("\x00")
-    if (sha === undefined || at === undefined || block === undefined || body === undefined) continue
-    const parsed = recordFrom(sha, at, body, block)
+  let oid: string | null = from
+  while (oid !== null) {
+    const meta = byOid.get(oid)
+    if (meta === undefined) {
+      // A range deliberately excludes its lower bound and everything reachable
+      // from it. The first missing first parent is therefore its exact end;
+      // an unbounded history remains loud when Gitomic omitted a commit.
+      if (!complete) break
+      throw new Error(`history from ${from} did not include first-parent commit ${oid}`)
+    }
+    const parsed = recordFromMeta(meta)
     // The tip is the first record this reads, and the one check that these
     // records are in the format this code understands happens on it, once. It
     // comes BEFORE the walk's own ending below, because a captured tip that is not
     // a record at all is the very case that check is about.
     if (records.length === 0) {
       const where = parsed === undefined ? `history from ${from}` : `${changeOf(parsed, from)} history from ${from}`
-      records.push(tipRecord(parsed, sha, where))
+      records.push(tipRecord(parsed, meta.oid, where))
+      oid = meta.parent
       continue
     }
     // The first-parent walk ends at the genesis, which carries no `Record:`
     // trailer. That is where this change's history ends.
     if (parsed === undefined) break
     records.push(parsed)
+    oid = meta.parent
   }
   for (const record of records) await recordRootChanges(git, record.trailers, record)
   return records.reverse()
+}
+
+/** Git's final trailer paragraph, preserving folded continuation values. */
+export function legacyTrailers(message: string): readonly (readonly [string, string])[] {
+  const paragraphs = message.trimEnd().split(/\n[ \t]*\n/u)
+  if (paragraphs.length < 2) return []
+  const parsed: Array<[string, string]> = []
+  for (const line of (paragraphs.at(-1) ?? "").split("\n")) {
+    if (/^[ \t]+/u.test(line)) {
+      const previous = parsed.at(-1)
+      if (previous === undefined) return []
+      previous[1] = `${previous[1]} ${line.trim()}`
+      continue
+    }
+    const match = /^([A-Za-z0-9][A-Za-z0-9-]*):[ \t]?(.*)$/u.exec(line)
+    if (match === null) return []
+    parsed.push([match[1] as string, match[2] ?? ""])
+  }
+  return parsed
+}
+
+/** Convert Gitomic's one batched history row into the unchanged legacy shape. */
+export function recordFromMeta(meta: CommitMeta): ChangeRecord | undefined {
+  const trailers = legacyTrailers(meta.message)
+  const kind = trailers.find(([name]) => name === "Record")?.[1]
+  if (kind === undefined || !isRecordKind(kind)) return undefined
+  return {
+    at: new Date(meta.timestamp * 1_000),
+    kind,
+    sha: meta.oid,
+    subject: meta.message.split("\n")[0]?.trim() ?? "",
+    trailers,
+  }
 }
 
 /** The message one record commit carries. */

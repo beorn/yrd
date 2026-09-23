@@ -25,8 +25,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { listRefs, openEvents } from "gitomic/events"
 import { targetName, type Target } from "./config.ts"
-import { ABSENT, appendRecord } from "./legacy-records.ts"
-import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, refAt, type Git } from "./git.ts"
+import { ABSENT, legacyStore, recordCommit } from "./legacy-records.ts"
+import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, type Git } from "./git.ts"
 import { changeRef } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
 import { readStop, remoteUrl } from "./remote.ts"
@@ -210,15 +210,6 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
-  // The line's stop, read to be ECHOED: a stopped line accepts the change and
-  // the run is where the stop is enforced. It is read before the refusals
-  // below so a stale or rebased branch is told about the stop too.
-  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-  const store = { repo: root, remote }
-  const stop =
-    (await queueFormat(store, request.target.branch)) === "event"
-      ? eventPause(await readEventQueue(store, request.target.branch))
-      : (await readStop(git, remote, request.target.branch, targetHead)).stop
   const bound = freshnessLine(targetHead)
   if (await isAncestor(git, head, targetHead)) {
     throw new Error(
@@ -232,6 +223,16 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
     )
   }
   const issue = await issueOf(git, request.branch, head, targetHead, request.issue)
+  // The line's stop, read to be ECHOED: a stopped line accepts the change and
+  // the run is where the stop is enforced. Issue conflicts are settled before
+  // repository composition starts; every other refusal below still carries
+  // this captured stop.
+  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
+  const store = { repo: root, remote }
+  const stop =
+    (await queueFormat(store, request.target.branch)) === "event"
+      ? eventPause(await readEventQueue(store, request.target.branch))
+      : (await readStop(git, remote, request.target.branch, targetHead)).stop
   const scratch = mkdtempSync(join(tmpdir(), "yrd-submit-verifying-"))
   const hooksPath = join(scratch, "hooks-disabled")
   mkdirSync(hooksPath)
@@ -268,15 +269,21 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
 }
 
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
+  const inspected = await inspectSubmit(git, remote, request)
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
   if ((await queueFormat({ repo: root, remote }, request.target.branch)) === "event") {
-    return submitEvent(git, remote, request, root)
+    return submitEvent(git, remote, request, root, inspected)
   }
-  return submitLegacy(git, remote, request)
+  return submitLegacy(git, remote, request, inspected)
 }
 
-async function submitEvent(git: Git, remote: string, request: SubmitRequest, root: string): Promise<Submitted> {
-  const inspected = await inspectSubmit(git, remote, request)
+async function submitEvent(
+  git: Git,
+  remote: string,
+  request: SubmitRequest,
+  root: string,
+  inspected: SubmitInspection,
+): Promise<Submitted> {
   const head = inspected.head
   const published = await publishMovedGitlinks(git, root, inspected.targetHead, head)
   const store = { repo: root, remote }
@@ -332,8 +339,12 @@ async function submitEvent(git: Git, remote: string, request: SubmitRequest, roo
   }
 }
 
-async function submitLegacy(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
-  const inspected = await inspectSubmit(git, remote, request)
+async function submitLegacy(
+  git: Git,
+  remote: string,
+  request: SubmitRequest,
+  inspected: SubmitInspection,
+): Promise<Submitted> {
   const { targetHead } = inspected
   const head = inspected.head
   const issue = inspected.issue
@@ -344,53 +355,36 @@ async function submitLegacy(git: Git, remote: string, request: SubmitRequest): P
   const published = await publishMovedGitlinks(git, root, targetHead, head)
   const change = { branch: request.branch, head }
   const ref = changeRef(request.target.branch, change)
-  // Where the remote holds the branch and this change right now, in one
-  // reading: a retry appends to the remote's history of the change, so that
-  // history is fetched first, and the branch's lease is the remote's own value,
-  // never a tracking ref that may be stale or missing in a fresh clone.
-  // ls-remote answers "absent" as an empty list, never as an error, which is
-  // the one honest empty a submit is allowed to swallow.
-  const at = new Map(
-    (await git(["ls-remote", "--refs", remote, `refs/heads/${request.branch}`, ref]))
-      .split("\n")
-      .map((row) => row.trim().split(/\s+/u))
-      .map(([sha, name]) => [name ?? "", sha ?? ""] as const),
-  )
-  const remoteTip = at.get(ref) ?? ""
-  const remoteBranch = at.get(`refs/heads/${request.branch}`) ?? ""
-  const retry = remoteTip !== ""
-  if (retry) await git(["fetch", "--quiet", remote, `+${ref}:${ref}`])
-  // A local change ref the remote does not hold is an orphan of a refused
-  // push; submit is the only writer of these refs, so it goes.
-  else if ((await refAt(git, ref)) !== undefined) await git(["update-ref", "-d", ref])
+  const branchRef = `refs/heads/${request.branch}`
+  const store = await legacyStore(git)
+  const remoteBranch = (await store.backend.listRefs(store.repo, branchRef, remote)).get(branchRef)
+  // A prefix fetch makes absence an honest empty and brings the retry parent
+  // into Gitomic's private namespace without moving an application ref.
+  const remoteTip = (await store.backend.fetchRefs(store.repo, ref, remote)).get(ref)
+  const retry = remoteTip !== undefined
   const trailers: (readonly [string, string])[] = [["Submitter", request.submitter]]
   if (issue !== undefined) trailers.push(["Issue", issue.issue])
-  const opened = await appendRecord(git, request.target.branch, {
-    change,
-    kind: "opened",
-    subject: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
-    trailers,
-  })
-  // Two explicit leases make the push the same compare-and-swap the local
-  // append is: each ref must still be where this submitter just read it (the
-  // zero sha means "absent"), or the whole push refuses and nothing merges —
-  // and then the local change ref goes back to what the remote holds, so a
-  // refused submit leaves no opened record for the next one to chain onto.
-  try {
-    await git([
-      "push",
-      "--quiet",
-      "--atomic",
-      `--force-with-lease=refs/heads/${request.branch}:${remoteBranch === "" ? ABSENT : remoteBranch}`,
-      `--force-with-lease=${ref}:${retry ? remoteTip : ABSENT}`,
-      remote,
-      `${head}:refs/heads/${request.branch}`,
-      `${ref}:${ref}`,
-    ])
-  } catch (error) {
-    await git(retry ? ["update-ref", ref, remoteTip] : ["update-ref", "-d", ref])
-    throw error
-  }
+  const opened = await recordCommit(
+    git,
+    {
+      change,
+      kind: "opened",
+      subject: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
+      trailers,
+    },
+    remoteTip,
+  )
+  // The opened record keeps the submitted commit. Publishing the branch gives
+  // the ref its declared meaning; one Gitomic MULTI leases both names and
+  // lands both or neither without moving a local application ref.
+  await store.backend.publish(
+    store.repo,
+    [
+      { ref: branchRef, expect: remoteBranch ?? ABSENT, oid: head },
+      { ref, expect: remoteTip ?? ABSENT, oid: opened },
+    ],
+    remote,
+  )
   return {
     branch: request.branch,
     head,

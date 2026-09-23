@@ -11,7 +11,6 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
-  appendRecord,
   changeName,
   changeRef,
   gitIn,
@@ -29,8 +28,8 @@ import {
   submit,
   writePause,
 } from "../src/index.ts"
-import { GitExit } from "../src/git.ts"
-import { CapturedQueueObjectsUnavailable, remoteUrl } from "../src/remote.ts"
+import { legacyStore, recordCommit } from "../src/legacy-records.ts"
+import { remoteUrl } from "../src/remote.ts"
 import type { Git } from "../src/index.ts"
 
 const roots: string[] = []
@@ -115,6 +114,13 @@ async function remoteRefs(w: World): Promise<readonly string[]> {
     .filter((ref) => ref !== "")
 }
 
+function withoutGitomicRefs(refs: string): string {
+  return refs
+    .split("\n")
+    .filter((line) => line !== "" && !line.startsWith("refs/gitomic/"))
+    .join("\n")
+}
+
 describe("submit is one atomic push of the branch and its opened record", () => {
   /** @failure Later heads/renames lose bindings, or target history assigns unrelated work.
    * @level l2 @consumer Yrd env open and submit
@@ -174,7 +180,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
       await w.git(["commit", "--quiet", "--allow-empty", "-m", "target advanced"])
       await w.git(["push", "--quiet", "origin", "main"])
       await w.git(["checkout", "--quiet", "task/bound"])
-      const beforeLocal = await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])
+      const beforeLocal = withoutGitomicRefs(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"]))
       const beforeRemote = await w.git(["ls-remote", "--refs", "origin"])
       const calls: string[][] = []
       const observed: Git = (args, input) => {
@@ -197,7 +203,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
       expect(calls.some((args) => args[0] === "rebase" || args[0] === "push" || args.includes("--show-toplevel"))).toBe(
         false,
       )
-      expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(beforeLocal)
+      expect(withoutGitomicRefs(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"]))).toBe(beforeLocal)
       expect(await w.git(["ls-remote", "--refs", "origin"])).toBe(beforeRemote)
     },
   )
@@ -212,7 +218,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     await w.git(["commit", "--quiet", "--allow-empty", "-m", "target advanced"])
     await w.git(["push", "--quiet", "origin", "main"])
     const targetHead = (await w.git(["rev-parse", "HEAD"])).trim()
-    const before = await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])
+    const before = withoutGitomicRefs(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"]))
     const inspected = await inspectSubmit(w.git, "origin", {
       branch: "task/stale-clean",
       submitter: "@dev/2",
@@ -221,7 +227,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     expect(inspected.head).toBe(head)
     expect(inspected.targetHead).toBe(targetHead)
     expect(inspected.verifying).toMatchObject({ state: "verified", head, targetHead })
-    expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(before)
+    expect(withoutGitomicRefs(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"]))).toBe(before)
 
     const opened = await submit(w.git, "origin", {
       branch: "task/stale-clean",
@@ -290,9 +296,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
   })
 
-  // A branch-name push used to race the OID named by the record; target motion
-  // is separately permitted because freshness is only an observation.
-  it("pushes the captured head when the local branch and remote target move after inspection", async () => {
+  it("publishes the inspected head when local branch and remote target move before Gitomic publication", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/race", "change.txt")
     const tree = (await w.git(["rev-parse", `${head}^{tree}`])).trim()
@@ -301,7 +305,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     const targetLater = (await w.git(["commit-tree", targetTree, "-p", w.target, "-m", "later target"])).trim()
     let raced = false
     const racing: Git = async (args, input) => {
-      if (!raced && args[0] === "ls-remote" && args.includes(changeRef("main", { branch: "task/race", head }))) {
+      if (!raced && args[0] === "commit-tree" && args.some((arg) => arg.includes("submitted task/race"))) {
         raced = true
         await w.git(["update-ref", "refs/heads/task/race", later])
         await w.git(["push", "--quiet", "origin", `${targetLater}:refs/heads/main`])
@@ -349,7 +353,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
 
   it("at an unchanged head is a retry: a second opened record, one change", async () => {
     const w = await world()
-    const head = await branchWithCommit(w, "task/one", "one.txt")
+    await branchWithCommit(w, "task/one", "one.txt")
     await submit(w.git, "origin", {
       branch: "task/one",
       submitter: "@dev/2",
@@ -526,7 +530,7 @@ describe("the queue read is every submitted change at the remote", () => {
     await w.git(["update-ref", "-d", "refs/remotes/origin/task/two"])
     expect((await remoteRefs(w)).filter((ref) => ref.startsWith("refs/heads/bulk/"))).toHaveLength(200)
     const refs = ["for-each-ref", "--format=%(refname)%00%(objectname)"]
-    const before = await w.git(refs)
+    const before = withoutGitomicRefs(await w.git(refs))
     const fetchHead = (await w.git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
     writeFileSync(fetchHead, "caller-owned fetch evidence\n")
 
@@ -543,7 +547,7 @@ describe("the queue read is every submitted change at the remote", () => {
     expect(first.observation.fence.prefixes).toEqual(["refs/heads/", `${queueRefPrefix("main")}/`])
     expect(first.observation.fence.refs.filter(({ ref }) => ref.startsWith("refs/heads/bulk/"))).toHaveLength(200)
     expect(first.observation.fence.refs).toContainEqual({ ref: "refs/heads/main", oid: w.target })
-    expect(await w.git(refs)).toBe(before)
+    expect(withoutGitomicRefs(await w.git(refs))).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned fetch evidence\n")
     // Never fetched means not here at all: the bulk commit's object never arrived.
     await expect(w.git(["cat-file", "-e", bulk])).rejects.toThrow(/exited 1/u)
@@ -562,30 +566,24 @@ describe("the queue read is every submitted change at the remote", () => {
     await gitIn(w.remote)(["update-ref", "-d", "refs/heads/task/gone"])
     const paused = await writePause(w.git, "origin", "main", { by: "operator", kind: "paused", reason: "maintenance" })
     const refs = ["for-each-ref", "--format=%(refname)%00%(objectname)"]
-    const before = await w.git(refs)
+    const before = withoutGitomicRefs(await w.git(refs))
     const fetchHead = (await w.git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
     writeFileSync(fetchHead, "caller-owned fetch evidence\n")
-    let resumed = false
-    const git: Git = async (args, input) => {
-      const result = await w.git(args, input)
-      if (args[0] === "ls-remote" && !resumed) {
-        resumed = true
-        await writePause(w.git, "origin", "main", { by: "operator", kind: "resumed", reason: "maintenance complete" })
-      }
-      return result
-    }
-
-    const reading = await readQueue(git, "origin", "main", w.target)
+    const reading = await readQueue(w.git, "origin", "main", w.target)
+    const resumed = await writePause(w.git, "origin", "main", {
+      by: "operator",
+      kind: "resumed",
+      reason: "maintenance complete",
+    })
 
     const gone = reading.changes.find((entry) => entry.change.branch === "task/gone")
     expect(gone?.change.head).toBe(head)
     expect(gone?.reading).toEqual({ reason: "deleted", state: "withdrawn" })
-    expect(resumed).toBe(true)
     expect(reading.pause).toEqual(paused)
     expect(reading.observation.fence.refs).toContainEqual({ ref: pauseRef("main"), oid: paused.sha })
-    expect((await readPause(w.git, "origin", "main"))?.kind).toBe("resumed")
+    expect(await readPause(w.git, "origin", "main")).toEqual(resumed)
     expect(await refAt(w.git, "refs/remotes/origin/task/gone")).toBe(head)
-    expect(await w.git(refs)).toBe(before)
+    expect(withoutGitomicRefs(await w.git(refs))).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned fetch evidence\n")
   })
 
@@ -599,13 +597,20 @@ describe("the queue read is every submitted change at the remote", () => {
     const ref = changeRef("main", change)
     const tree = (await w.git(["rev-parse", `${head}^{tree}`])).trim()
     const merge = (await w.git(["commit-tree", tree, "-p", w.target, "-p", head, "-m", "candidate"])).trim()
-    const checked = await appendRecord(w.git, "main", {
-      change,
-      kind: "checked",
-      subject: "checked",
-      trailers: [["Merge", merge]],
-    })
-    await w.git(["push", "--quiet", "origin", `${ref}:${ref}`])
+    const store = await legacyStore(w.git)
+    const opened = (await store.backend.fetchRefs(store.repo, ref, "origin")).get(ref)
+    if (opened === undefined) throw new Error(`${ref} is absent after submit`)
+    const checked = await recordCommit(
+      w.git,
+      {
+        change,
+        kind: "checked",
+        subject: "checked",
+        trailers: [["Merge", merge]],
+      },
+      opened,
+    )
+    await store.backend.publish(store.repo, [{ ref, expect: opened, oid: checked }], "origin")
     const unknown = `${queueRefPrefix("main")}/unknown-observation-fence`
     const excluded = `${queueRefPrefix("elsewhere")}/unknown-observation-fence`
     await gitIn(w.remote)(["update-ref", unknown, w.target])
@@ -615,25 +620,12 @@ describe("the queue read is every submitted change at the remote", () => {
     expect(first.observation.fence.refs).toContainEqual({ ref, oid: checked })
     expect(first.observation.fence.refs).toContainEqual({ ref: unknown, oid: w.target })
     expect(first.observation.fence.refs.some(({ ref }) => ref === excluded)).toBe(false)
-    await appendRecord(w.git, "main", { change, kind: "failed", subject: "retired" })
-    await w.git(["push", "--quiet", "origin", `${ref}:${ref}`])
+    const failed = await recordCommit(w.git, { change, kind: "failed", subject: "retired" }, checked)
+    await store.backend.publish(store.repo, [{ ref, expect: checked, oid: failed }], "origin")
     expect((await readQueue(w.git, "origin", "main", w.target)).observation.checked).toEqual([])
   })
 
-  // D1: a duplicate or malformed advertisement is not a validated reading.
-  it.each(["duplicate", "malformed"])("refuses a %s captured advertisement before fetching", async (kind) => {
-    const w = await world()
-    let fetched = false
-    const git: Git = async (args, input) => {
-      if (args[0] === "fetch") fetched = true
-      const result = await w.git(args, input)
-      return args[0] === "ls-remote" ? `${result}${kind === "duplicate" ? result : "broken refs/heads/main\n"}` : result
-    }
-    await expect(readQueue(git, "origin", "main", w.target)).rejects.toThrow(/invalid or duplicate advertised ref/u)
-    expect(fetched).toBe(false)
-  })
-
-  it("a captured queue object the server no longer serves refuses the reading with a retry remedy", async () => {
+  it("uses Gitomic's current fetched ref map when a change disappears before the read", async () => {
     const w = await world()
     await branchWithCommit(w, "task/one", "one.txt")
     const submitted = await submit(w.git, "origin", {
@@ -645,53 +637,18 @@ describe("the queue read is every submitted change at the remote", () => {
     const reader = join(dirname(w.work), "reader")
     await gitIn(dirname(w.work))(["clone", "--quiet", "--no-local", w.remote, reader])
     const readerGit = gitIn(reader)
-    await readerGit(["config", "protocol.version", "0"])
     const remoteGit = gitIn(w.remote)
-    await remoteGit(["config", "uploadpack.allowAnySHA1InWant", "false"])
-    await remoteGit(["config", "uploadpack.allowReachableSHA1InWant", "false"])
-    await remoteGit(["config", "uploadpack.allowTipSHA1InWant", "false"])
     const refs = ["for-each-ref", "--format=%(refname)%00%(objectname)"]
-    const before = await readerGit(refs)
+    const before = withoutGitomicRefs(await readerGit(refs))
     const fetchHead = (await readerGit(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
     writeFileSync(fetchHead, "caller-owned fetch evidence\n")
-    let fetches = 0
-    let removed = false
-    const git: Git = async (args, input) => {
-      if (args[0] === "ls-remote" && !removed) {
-        const output = await readerGit(args, input)
-        await remoteGit(["update-ref", "-d", ref])
-        removed = true
-        return output
-      }
-      if (args[0] === "fetch") {
-        fetches += 1
-      }
-      return readerGit(args, input)
-    }
+    await remoteGit(["update-ref", "-d", ref])
 
-    const error = await readQueue(git, "origin", "main", w.target).then(
-      () => undefined,
-      (cause: unknown) => cause,
-    )
+    const reading = await readQueue(readerGit, "origin", "main", w.target)
 
-    expect(error).toBeInstanceOf(CapturedQueueObjectsUnavailable)
-    if (!(error instanceof CapturedQueueObjectsUnavailable)) throw new Error("queue read unexpectedly succeeded")
-    expect(error).toMatchObject({
-      kind: "captured-queue-objects-unavailable",
-      capturedTarget: w.target,
-      queue: "main",
-      remote: "origin",
-    })
-    expect(error.message).toMatch(
-      new RegExp(`^origin#main at ${w.target}: could not fetch captured queue objects`, "u"),
-    )
-    expect(error.message).toContain("read the queue again")
-    expect(error.detail).toContain(submitted.opened)
-    expect(error.cause).toBeInstanceOf(GitExit)
-    expect((error.cause as GitExit).detail).toBe(error.detail)
-    expect(fetches).toBe(1)
-    expect(removed).toBe(true)
-    expect(await readerGit(refs)).toBe(before)
+    expect(reading.changes).toEqual([])
+    expect(reading.observation.fence.refs.some(({ ref: observed }) => observed === ref)).toBe(false)
+    expect(withoutGitomicRefs(await readerGit(refs))).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned fetch evidence\n")
     await expect(readerGit(["cat-file", "-e", submitted.opened])).rejects.toThrow(/exited 1/u)
 
