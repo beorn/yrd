@@ -122,3 +122,21 @@ it("reads every legacy change through one Gitomic multi-tip history process", as
     else process.env.GIT_DIR = previousGitDir
   }
 })
+
+it("reuses Gitomic's executable and repository checks for repeated reads on one Git runner", async () => {
+  const w = await world()
+  const spawn = vi.spyOn(childProcess, "spawn")
+  try {
+    for (let index = 0; index < 2; index += 1) {
+      const store = await legacyStore(w.git)
+      expect(await store.backend.head(store.repo, "refs/heads/main")).toBe(w.target)
+    }
+    const gitArgs = spawn.mock.calls
+      .filter(([command]) => command === "git")
+      .map(([, args]) => args as readonly string[])
+    expect(gitArgs.filter((args) => args.includes("--version"))).toHaveLength(1)
+    expect(gitArgs.filter((args) => args.includes("--git-common-dir"))).toHaveLength(1)
+  } finally {
+    spawn.mockRestore()
+  }
+})

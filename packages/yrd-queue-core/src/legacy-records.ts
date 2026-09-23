@@ -48,12 +48,16 @@ type LegacyBackend = GitomicBackend &
 /** The one Gitomic boundary used by the legacy format until #25041 deletes it. */
 export type LegacyStore = Readonly<{ repo: string; backend: LegacyBackend }>
 
+// A Git runner fixes its checkout and selected executable for its lifetime.
+// Reuse one store so repeated queue reads do not re-probe Git and the common dir.
+const storesByRunner = new WeakMap<Git, Promise<LegacyStore>>()
+
 /**
  * Resolve the repository once, then require every Gitomic capability the
  * legacy adapter uses. The optional backend is an internal test seam; queue-core's
  * public functions keep their existing signatures.
  */
-export async function legacyStore(git: Git, providedBackend?: GitomicBackend): Promise<LegacyStore> {
+async function openLegacyStore(git: Git, providedBackend?: GitomicBackend): Promise<LegacyStore> {
   const repo = (await git(["rev-parse", "--absolute-git-dir"])).trim()
   if (repo === "") throw new Error("legacy queue store: git rev-parse returned an empty repository store")
   const backend = providedBackend ?? createLegacyBackend(executableFor(git))
@@ -63,6 +67,21 @@ export async function legacyStore(git: Git, providedBackend?: GitomicBackend): P
     }
   }
   return { repo, backend: backend as LegacyBackend }
+}
+
+export async function legacyStore(git: Git, providedBackend?: GitomicBackend): Promise<LegacyStore> {
+  if (providedBackend !== undefined) return openLegacyStore(git, providedBackend)
+  let store = storesByRunner.get(git)
+  if (store === undefined) {
+    store = openLegacyStore(git)
+    storesByRunner.set(git, store)
+  }
+  try {
+    return await store
+  } catch (error) {
+    if (storesByRunner.get(git) === store) storesByRunner.delete(git)
+    throw error
+  }
 }
 
 /** The one word for a deferred record and state, kept behind one constant (CTO ruling 25029). */
