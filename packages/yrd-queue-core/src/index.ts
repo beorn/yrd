@@ -92,7 +92,7 @@ export {
   type GitRunner,
   type GitObservation,
 } from "./git.ts"
-export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck } from "./check.ts"
+export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck, skippedChecks } from "./check.ts"
 export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckView } from "./check.ts"
 export {
   CHANGE_REF_DIAGNOSTICS,

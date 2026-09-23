@@ -86,6 +86,7 @@ import {
   readOverrides,
   writeOverride,
   type OverrideFact,
+  skippedChecks,
   HEARTBEAT_GRACE_MS,
   HEARTBEAT_INTERVAL_MS,
   QUEUE_HEALTH_DOCUMENT,
@@ -2115,6 +2116,7 @@ export async function coreQueueCommand(
                   ...(change.row.live.log === undefined ? {} : { log: change.row.live.log }),
                 },
             decided ? undefined : journalFor({ row: change.row }, journals)?.checks,
+            skippedChecks(change.records),
           ),
           ...(declared.note === undefined ? {} : { note: declared.note }),
         })
@@ -2352,8 +2354,19 @@ export function summarize(kind: string, rest: Readonly<Record<string, unknown>>)
     .filter(Boolean)
     .join(" at ")
   switch (kind) {
-    case "run":
-      return `queue run at ${String(rest.target)} ${String(rest.gitlink).slice(0, 12)}`
+    case "run": {
+      // Every merge check an override held off this round, in the header's own
+      // line: a round judged with a check off says so before any change does (25296 C5).
+      const overrides = Array.isArray(rest.overrides) ? rest.overrides.map(String) : []
+      return (
+        `queue run at ${String(rest.target)} ${String(rest.gitlink).slice(0, 12)}` +
+        (overrides.length === 0 ? "" : `; merge check ${overrides.join("; ")}`)
+      )
+    }
+    case "skipped":
+      return `${where}: merge check ${String(rest.check)} skipped: override ${String(rest.record).slice(0, 12)} by ${String(rest.by)}${rest.verified === true ? "" : " (claimed)"} until ${String(rest.until)}`
+    case "override":
+      return `merge check ${String(rest.check)} override ${String(rest.record)}: ${String(rest.reason)}`
     case "change":
       if (typeof rest.text === "string") return rest.text
       return `${where}: ${String(rest.decision ?? rest.state)}`
@@ -2629,6 +2642,7 @@ export async function openDetail(
       ? undefined
       : { name: row.live.check, ...(row.live.log === undefined ? {} : { log: row.live.log }) },
     decided ? undefined : item.run?.checks,
+    skippedChecks(judgementOf(records, item.run?.id)),
   )
   const checks = views.map(readOutput)
   const about = row.state === "direct" ? {} : await headFacts(git, config, row)

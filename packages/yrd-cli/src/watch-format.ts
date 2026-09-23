@@ -159,6 +159,8 @@ export const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
   "not-run": "−",
   passed: "✓",
   running: "◉",
+  // Held off at merge by an override (25296): it did not run, on purpose.
+  skipped: "⊘",
   stuck: "◌",
   unmeasured: "?",
 }
@@ -170,6 +172,7 @@ export const CHECK_COLOR: Readonly<Record<CheckView["state"], string>> = {
   "not-run": "$fg-muted",
   passed: "$fg-success",
   running: "$fg-info",
+  skipped: "$fg-warning",
   stuck: "$fg-warning",
   unmeasured: "$fg-warning",
 }
