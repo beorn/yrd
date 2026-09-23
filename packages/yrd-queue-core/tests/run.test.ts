@@ -23,6 +23,7 @@ import { afterAll, describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import { openEvents } from "gitomic/events"
 import { gitEnvironment } from "../src/git.ts"
+import { incidentTrailers } from "../src/incident.ts"
 import { CapturedQueueObjectsUnavailable } from "../src/remote.ts"
 import {
   appendRecord,
@@ -78,6 +79,20 @@ if (!existsSync(gitSuperBin)) {
 }
 const CHANGES = queueRefPrefix("main")
 const PAUSE_REF = pauseRef("main")
+// A rival writer's stuck record is a whole incident, as every real one is: since
+// 25301 the round reads the queue again after its merge, and a reader refuses a
+// stuck record that does not carry one.
+const RIVAL_STUCK_TRAILERS = [
+  ...incidentTrailers({
+    code: "yrd-rival-writer",
+    subject: "another queue got there first",
+    via: "a rival writer in this test",
+    evidence: "/dev/null",
+    next: "nothing: a test fixture",
+    owner: "the test",
+  }),
+  ["Reason", "crash"],
+] as const
 
 const INCIDENT_FIELDS = ["Code", "Subject", "Via", "Evidence", "Next"] as const
 
@@ -1470,7 +1485,10 @@ describe("a queue run", () => {
     const oneOutput = readFileSync(oneLog, "utf8").trim().split("\n")
     const twoOutput = readFileSync(twoLog, "utf8").trim().split("\n")
     expect(oneOutput).toEqual(["one.txt", expect.stringMatching(/^[0-9a-f]{40}$/u)])
-    expect(twoOutput).toEqual(["two.txt", expect.stringMatching(/^[0-9a-f]{40}$/u)])
+    // Head first (25301): task/two is judged after task/one merged, as the
+    // round's prefetch, on the target that merge left, so one.txt is there.
+    expect(twoOutput).toEqual(["one.txt", expect.stringMatching(/^[0-9a-f]{40}$/u)])
+    expect(twoOutput[1]).not.toBe(oneOutput[1])
     const after = await remoteTarget(w)
     expect(after).not.toBe(w.target)
     await w.git(["fetch", "--quiet", "origin", "main"])
@@ -1546,7 +1564,10 @@ describe("a queue run", () => {
         checkedHeads.push(readFileSync(evidence.artifacts.stdout, "utf8").trim())
       }
       if (invocation.cwd !== w.work && Array.isArray(invocation.args) && invocation.args[0] === "merge-base") {
-        expect(readFileSync(evidence.artifacts.stdout, "utf8").trim()).toBe(w.target)
+        // task/two's prefetch stands on the target task/one's merge left (25301).
+        expect(readFileSync(evidence.artifacts.stdout, "utf8").trim()).toBe(
+          invocation.args[1] === twoOutput[1] ? after : w.target,
+        )
         checkedBases.push(String(invocation.args[1]))
       }
     }
@@ -1642,7 +1663,7 @@ describe("a queue run", () => {
                     change: { branch: "task/one", head },
                     kind: "stuck",
                     subject: "another queue got there first",
-                    trailers: [["Reason", "crash"]],
+                    trailers: RIVAL_STUCK_TRAILERS,
                   })
           // Only the disposable fixture's remote rewinds, under its exact
           // previous value, to exercise an external writer moving backwards.
@@ -1764,6 +1785,170 @@ describe("a queue run", () => {
       reason: "verify",
       submitter: "@dev/2",
     })
+  })
+
+  // @i/10-yrd/25301 A1 (@cto c7115f0f): the head merges before the rest of the line is judged.
+  it("with 40 changes waiting, the head merges before any other change is judged (25301 A1)", async () => {
+    const w = await world()
+    const branches = Array.from({ length: 40 }, (_, i) => `task/c${String(i).padStart(2, "0")}`)
+    const heads: string[] = []
+    for (const branch of branches) heads.push(await submitCommit(w, branch, `${branch.slice(5)}.txt`))
+
+    const outcome = await queueRun(await w.options({ exit: 0, on: ["submit", "merge"] }))
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/c00"])
+    const mergeCommit = await remoteTarget(w)
+    const lines = readFileSync(w.checkLog, "utf8").trim().split("\n")
+    // The check log is in time order. Its first line is the head's judge; its
+    // second is the head's merge check, whose candidate IS the merge that landed;
+    // only then the other 39 judges, the prefetch, each standing on that merge.
+    expect(lines).toHaveLength(41)
+    expect(/candidate=(\S+)/u.exec(lines[1]!)?.[1]).toBe(mergeCommit)
+    expect(lines.map((line) => /base=(\S+)/u.exec(line)?.[1])).toEqual([
+      w.target,
+      w.target,
+      ...Array.from({ length: 39 }, () => mergeCommit),
+    ])
+    expect(outcome.checkedWaiting).toBe(39)
+    // @cto 62ed0395 (2): every prefetch verdict names the target it stood on,
+    // the checked record's Base trailer, and here that is the head's merge.
+    await fetchChanges(w)
+    const tail = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/c39", head: heads[39]! })))!)
+    expect(trailer(tail.find((record) => record.kind === "checked")!, "Base")).toBe(mergeCommit)
+    // review2 25301 r2 record 1: each read step names the target that read stood
+    // on, so the prefetch's and the final re-read's steps name the head's merge.
+    const reads = readFileSync(outcome.log, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind?: string; name?: string; base?: string })
+      .filter((row) => row.kind === "step" && row.name === "read")
+    expect([...new Set(reads.map((row) => row.base))]).toEqual([w.target, mergeCommit])
+  }, 180_000)
+
+  // @cto 62ed0395 (3): a head whose merge changes .yrd.yml leaves the tail unjudged,
+  // so no verdict is written under a declaration the target no longer carries.
+  it("a head whose merge edits .yrd.yml prefetches nothing, and the next round judges the tail (25301)", async () => {
+    const w = await world()
+    // A valid edit: the declaration stays the empty mapping, as another blob.
+    await w.git(["checkout", "--quiet", "-b", "task/declaration", "main"])
+    writeFileSync(join(w.work, ".yrd.yml"), "# edited by the head\n{}\n")
+    await w.git(["add", ".yrd.yml"])
+    await w.git(["commit", "--quiet", "-m", "edit the declaration"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/declaration",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    const tailHead = await submitCommit(w, "task/after", "after.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, on: ["submit", "merge"] }))
+
+    expect(outcome.merged).toEqual(["task/declaration"])
+    expect(outcome.checkedWaiting).toBe(0)
+    // The head's judge and its merge check, and nothing for the tail.
+    expect(readFileSync(w.checkLog, "utf8").trim().split("\n")).toHaveLength(2)
+    const journal = readFileSync(outcome.log, "utf8")
+    expect(journal).toContain("the head's merge changed .yrd.yml")
+    await fetchChanges(w)
+    const tail = (await readQueue(w.git, "origin", "main", await remoteTarget(w))).changes.find(
+      (entry) => entry.change.head === tailHead,
+    )!
+    expect(tail.reading.state).toBe("queued")
+  })
+
+  // @cto ac87d1e5: a head in FRONT of a stuck row merges; the line still stops on
+  // that row in the same round, and one outcome names both.
+  it("a head in front of a stuck change merges, and the same round stops the line on the stuck change (25301)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/a", "a.txt")
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 2, on: ["submit", "merge"] }))
+
+    expect(outcome.merged).toEqual(["task/a"])
+    expect(outcome.stuck).toEqual(["task/one"])
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stopped).toBeDefined()
+    expect(await remoteTarget(w)).not.toBe(w.target)
+  })
+
+  // @cto ac87d1e5: the prefetch is cancellable at the stop-time check and writes no partial verdict.
+  it("a stop time that closes while the head merges leaves the rest of the line unjudged (25301)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/head", "head.txt")
+    await submitCommit(w, "task/tail", "tail.txt")
+    const closed = join(w.workdir, "window-closed.flag")
+    const submitLog = join(w.workdir, "submit-checks.log")
+    const script = (name: string, body: string): string => {
+      const path = join(w.workdir, name)
+      writeFileSync(path, ["#!/bin/sh", body, `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`, "exit 0", ""].join("\n"))
+      chmodSync(path, 0o755)
+      return path
+    }
+    const base = await w.options({ timeoutMs: 1800000 })
+    const onSubmit: CheckSpec = {
+      ...base.checks[0]!,
+      name: "on-submit",
+      on: ["submit"] as const,
+      run: script("on-submit.sh", `echo "$YRD_CANDIDATE_SHA" >> "${submitLog}"`),
+    }
+    const onMerge: CheckSpec = {
+      ...base.checks[0]!,
+      name: "on-merge",
+      on: ["merge"] as const,
+      run: script("on-merge.sh", `touch "${closed}"`),
+    }
+
+    const outcome = await queueRun({
+      ...base,
+      checks: [onSubmit, onMerge],
+      stopAtMs: 2000,
+      // The window closes during the head's on-merge check, after its last stop-time gate.
+      now: () => (existsSync(closed) ? 3000 : 1000),
+    })
+
+    expect(outcome.merged).toEqual(["task/head"])
+    expect(outcome.failed).toEqual([])
+    expect(outcome.deferred).toEqual([])
+    // One on-submit check ran, the head's: the prefetch never started on the tail.
+    expect(readFileSync(submitLog, "utf8").trim().split("\n")).toHaveLength(1)
+    await fetchChanges(w)
+    const tail = (await readQueue(w.git, "origin", "main", await remoteTarget(w))).changes.find(
+      (entry) => entry.change.branch === "task/tail",
+    )!
+    // No partial verdict: the tail's chain holds only its opening record.
+    expect(tail.reading.state).toBe("queued")
+    expect(tail.change.records.map((record) => record.kind)).toEqual(["opened"])
+  })
+
+  // @i/10-yrd/25301 A2 (restated by @cto ac87d1e5): a config edit re-judges no
+  // change before the head merges; each stale verdict is re-judged when reached.
+  it("after a config edit, the round re-judges the head, merges it, then re-judges the next against the new target (25301 A2)", async () => {
+    const w = await world()
+    for (const branch of ["task/c0", "task/c1", "task/c2"]) await submitCommit(w, branch, `${branch.slice(5)}.txt`)
+    const first = await queueRun(await w.options({ exit: 0, on: ["submit", "merge"] }))
+    expect(first.merged).toEqual(["task/c0"])
+    const afterFirst = await remoteTarget(w)
+    const linesBefore = readFileSync(w.checkLog, "utf8").trim().split("\n").length
+
+    // The declared check config changes between the rounds: c1 and c2 were checked under the old one.
+    const second = await queueRun({ ...(await w.options({ exit: 0, on: ["submit", "merge"] })), configBlob: "edited" })
+
+    expect(second.merged).toEqual(["task/c1"])
+    const afterSecond = await remoteTarget(w)
+    const lines = readFileSync(w.checkLog, "utf8").trim().split("\n").slice(linesBefore)
+    const candidates = lines.map((line) => /candidate=(\S+)/u.exec(line)?.[1])
+    // Three checks this round, in time order: c1's re-judge, c1's merge check
+    // (its candidate IS the merge that landed), then c2's re-judge, on the
+    // target c1's merge left. One judge before the head merged: never the
+    // whole line first.
+    expect(lines.map((line) => /base=(\S+)/u.exec(line)?.[1])).toEqual([afterFirst, afterFirst, afterSecond])
+    expect(candidates).toHaveLength(3)
+    expect(candidates[1]).toBe(afterSecond)
+    expect(candidates[2]).not.toBe(afterSecond)
   })
 
   it("stuck: a check that exits 2 stops the run, bills nobody, and is an ending of its own", async () => {
@@ -1947,7 +2132,7 @@ describe("a queue run", () => {
           change: { branch: "task/one", head },
           kind: "stuck",
           subject: `rival sent append ${String(competing.length + 1)}`,
-          trailers: [["Reason", "crash"]],
+          trailers: RIVAL_STUCK_TRAILERS,
         })
         await rival(["push", "--quiet", "origin", `${competingRecord}:${ref}`])
         competing.push(competingRecord)
@@ -2951,7 +3136,7 @@ describe("a queue run", () => {
           change: { branch: "task/one", head },
           kind: "stuck",
           subject: "another queue got there first",
-          trailers: [["Reason", "crash"]],
+          trailers: RIVAL_STUCK_TRAILERS,
         })
         await rival(["push", "--quiet", "origin", `${moved}:${ref}`])
       }

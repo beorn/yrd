@@ -118,6 +118,8 @@ import {
   type DraftReading,
   type Row,
   type StopFact,
+  tipOf,
+  trailer,
 } from "@yrd/queue-core"
 import { noticeLine } from "./watch-notice.ts"
 import { FILTER_FIELDS, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
@@ -3087,7 +3089,40 @@ export async function readListing(
     // Seven days lists the drafts it can date and counts the rest; every draft lists them all, marked.
     ...(drafts === undefined ? {} : { drafts: window === "all" ? [...drafts.dated, ...drafts.undated] : drafts.dated }),
   })
-  return { all, journals, queue, observation, ...(drafts === undefined ? {} : { drafts }) }
+  return {
+    all: markStaleVerdicts(all, queue.changes, config.blob),
+    journals,
+    queue,
+    observation,
+    ...(drafts === undefined ? {} : { drafts }),
+  }
+}
+
+/**
+ * A checked change whose verdict names a check config the target no longer
+ * declares is not yet judged under the current one (@i/10-yrd/25301, @cto
+ * c7115f0f (3)): the round re-judges it when its walk reaches it, so until then
+ * the list says so instead of reading as checked and ready.
+ */
+function markStaleVerdicts(
+  rows: readonly Row[],
+  changes: Awaited<ReturnType<typeof readQueue>>["changes"],
+  blob: string,
+): readonly Row[] {
+  const stale = new Set(
+    changes
+      .filter((entry) => {
+        const tip = tipOf(entry.change)
+        return tip.kind === "checked" && trailer(tip, "Config") !== blob
+      })
+      .map((entry) => `${entry.change.branch}@${entry.change.head}`),
+  )
+  if (stale.size === 0) return rows
+  return rows.map((row) =>
+    row.state === "checked" && stale.has(`${row.branch}@${row.head}`)
+      ? { ...row, reason: `not yet judged under ${blob.slice(0, 12)}` }
+      : row,
+  )
 }
 
 /** A commit's committer instant; undefined only when the name is absent, while unreadable or malformed commits throw. */

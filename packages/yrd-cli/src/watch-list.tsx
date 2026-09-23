@@ -105,6 +105,8 @@ export type ListLayout = Readonly<{
 export function changesSuffix(row: Row): Readonly<{ text: string; color: string }> | undefined {
   if (row.live !== undefined) return { color: "$fg-info", text: row.live.check }
   if (row.state === "failed" && row.reason !== undefined) return { color: "$fg-error", text: `err=${row.reason}` }
+  // A checked row's reason is its stale verdict: judged under a check config the target no longer declares (25301).
+  if (row.state === "checked" && row.reason !== undefined) return { color: "$fg-muted", text: row.reason }
   if (row.state === "stuck" && row.reason !== undefined) {
     return { color: "$fg-warning", text: `${STATE_WORDS.stuck.word}=${row.reason}` }
   }
