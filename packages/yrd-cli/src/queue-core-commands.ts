@@ -13,7 +13,7 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
@@ -86,6 +86,9 @@ import {
   readOverrides,
   writeOverride,
   type OverrideFact,
+  type OverrideEntry,
+  notifyOutsideRound,
+  overrideNotice,
   skippedChecks,
   HEARTBEAT_GRACE_MS,
   HEARTBEAT_INTERVAL_MS,
@@ -486,7 +489,9 @@ export async function coreQueueCommand(
         : await expireOverrides(git, config.target.remote, config.target.branch, Date.now(), STOPPED_BY)
       outcome = await queueRun({
         ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
-        ...(overrides === undefined ? {} : { overrides: overrides.table, overridesExpired: overrides.expired }),
+        ...(overrides === undefined
+          ? {}
+          : { overrides: overrides.table, overridesExpired: overrides.expired, overridesReminded: overrides.reminded }),
         foreground: request.command === "run" || request.command === "merge",
         ...(only === undefined ? {} : { only }),
         ...(tier === undefined ? {} : { tier }),
@@ -816,13 +821,48 @@ export async function coreQueueCommand(
           declaredMerge,
         )
         const standing = written.record.entries.find((entry) => entry.check === request.check)
-        const replaced =
-          written.replaced === undefined ? "" : `; replaces ${overrideLine(written.replaced, now)}`
+        // The page is the override's side effect, never its condition (@cto
+        // ccd8dfa8): a notifier that fails is said on stderr and journaled, and
+        // the override it was telling about stands.
+        // A clear's notice names the entry it ended, told by whoever ended it,
+        // why, and the clear record itself.
+        const noticed =
+          standing ??
+          (written.replaced === undefined
+            ? undefined
+            : {
+                ...written.replaced,
+                by: request.by,
+                reason: request.reason ?? "",
+                record: written.record.sha ?? written.replaced.record,
+                verified: request.verified,
+              })
+        if (noticed === undefined) {
+          throw new Error(
+            `override write for '${request.check ?? ""}' returned neither a standing nor a cleared entry (record ${String(written.record.sha)})`,
+          )
+        }
+        const told = await tellOverride(
+          {
+            config,
+            git,
+            repo,
+            targetSha: captured.oid,
+            workdir,
+            ...(options.env === undefined ? {} : { env: options.env }),
+            ...(options.populateReference === undefined ? {} : { populateReference: options.populateReference }),
+          },
+          written.kind === "clear" ? "clear" : written.kind === "replaced" ? "replace" : "set",
+          noticed,
+          io,
+        )
+        const replaced = written.replaced === undefined ? "" : `; replaces ${overrideLine(written.replaced, now)}`
         emit(
           io,
           options.json,
           {
             kind: written.kind,
+            told,
             overrides: overrideFacts(written.record, now),
             record: written.record.sha ?? null,
             ...(written.replaced === undefined ? {} : { replaces: written.replaced.record }),
@@ -2255,6 +2295,74 @@ function gitlinks(listing: string): readonly Readonly<{ path: string; sha: strin
     if (mode === "160000" && path !== undefined && sha !== undefined) rows.push({ path, sha })
   }
   return rows
+}
+
+/** Where the verb journals each override notice it handed out: beside the run journals, never among them (`logs/*.jsonl` are runs). */
+const OVERRIDE_NOTIFY_JOURNAL = "override-notify.jsonl"
+
+/**
+ * Hand one override notice to the declared `notify:` entries that want
+ * `override`, say each outcome on stderr, and journal it. Never throws: the
+ * override is written already, and the page is its side effect (@cto ccd8dfa8).
+ * No entry wanting the event is said once, naming the override chain as the
+ * record that stands in its place.
+ */
+async function tellOverride(
+  context: Readonly<{
+    config: QueueConfig
+    git: Git
+    repo: string
+    targetSha: string
+    workdir: string
+    env?: NodeJS.ProcessEnv
+    populateReference?: boolean
+  }>,
+  action: "set" | "clear" | "replace",
+  entry: OverrideEntry,
+  io: YrdCliIO,
+): Promise<readonly Readonly<{ name: string; delivery: string; failure?: string }>[]> {
+  const { config } = context
+  const notice = overrideNotice(entry, action, `${config.target.branch}@${context.targetSha}`)
+  let handed: readonly Readonly<{ name: string; delivery: string; failure?: string }>[]
+  try {
+    handed = await notifyOutsideRound(
+      {
+        git: context.git,
+        notify: config.notify,
+        repo: context.repo,
+        targetSha: context.targetSha,
+        workdir: context.workdir,
+        ...(config.setup === undefined ? {} : { setup: config.setup }),
+        ...(context.env === undefined ? {} : { env: context.env }),
+        ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
+      },
+      notice,
+    )
+  } catch (error) {
+    handed = [{ delivery: "failed", failure: error instanceof Error ? error.message : String(error), name: "notify" }]
+  }
+  for (const told of handed) {
+    if (told.delivery === "none") {
+      io.stderr(
+        `yrd: no notify entry in .yrd.yml wants override events, so nobody was told; the override's own record ${entry.record.slice(0, 12)} is the notice\n`,
+      )
+    } else if (told.delivery === "failed") {
+      io.stderr(
+        `yrd: could not tell ${told.name} about the override (it stands): ${told.failure ?? "no reason given"}\n`,
+      )
+    }
+  }
+  try {
+    appendFileSync(
+      join(context.workdir, OVERRIDE_NOTIFY_JOURNAL),
+      `${JSON.stringify({ at: new Date().toISOString(), notice, told: handed })}\n`,
+    )
+  } catch (error) {
+    io.stderr(
+      `yrd: could not journal the override notice in ${join(context.workdir, OVERRIDE_NOTIFY_JOURNAL)}: ${error instanceof Error ? error.message : String(error)}\n`,
+    )
+  }
+  return handed
 }
 
 function runOptions(

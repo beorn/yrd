@@ -184,8 +184,10 @@ export type QueueRunOptions = Readonly<{
    * read no override ref, which holds no check off and fences nothing.
    */
   overrides?: OverrideTable
-  /** The entries whose `expired` record the caller wrote for this round; journaled after the header. */
+  /** The entries whose `expired` record the caller wrote for this round; journaled after the header, and notified. */
   overridesExpired?: readonly OverrideEntry[]
+  /** The entries whose half-window reminder the caller recorded for this round; notified once (25296). */
+  overridesReminded?: readonly OverrideEntry[]
 }> &
   RingOptions
 
@@ -535,9 +537,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const readStep = (at: string) => ({ base: at, name: "read", phase: "run", target: options.target.branch })
   const read = async (at = targetSha) => {
     try {
-      return await timedStep(log, readStep(at), () =>
-        readQueue(git, options.target.remote, options.target.branch, at),
-      )
+      return await timedStep(log, readStep(at), () => readQueue(git, options.target.remote, options.target.branch, at))
     } catch (error) {
       if (retried !== undefined) throw failedAgain(retried, error)
       if (!(error instanceof CapturedQueueObjectsUnavailable)) throw error

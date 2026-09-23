@@ -162,7 +162,16 @@ export {
   stateAt as overrideStateAt,
   writeOverride,
 } from "./override.ts"
-export type { OverrideActor, OverrideEntry, OverrideFact, OverrideState, OverrideTable, OverrideWrite } from "./override.ts"
+export type {
+  OverrideActor,
+  OverrideEntry,
+  OverrideFact,
+  OverrideState,
+  OverrideTable,
+  OverrideWrite,
+} from "./override.ts"
+export { notifyOutsideRound, overrideNotice } from "./with-notify.ts"
+export type { OutsideRound, OverrideNotice } from "./with-notify.ts"
 
 export { remoteUrl } from "./remote.ts"
 

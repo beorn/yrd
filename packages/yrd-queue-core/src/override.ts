@@ -45,12 +45,16 @@ export type OverrideEntry = Readonly<{
   record: string
   /** When the `expired` record was written; absent while no round has written it. */
   expiredAt?: Date
+  /** When the entry was set: the half-window reminder falls halfway from here to `until`. */
+  setAt: Date
+  /** When the half-window reminder was recorded; once, so it never repeats (@cto ccd8dfa8). */
+  remindedAt?: Date
 }>
 
 /** The table at one tip: `sha` is undefined when the ref does not exist. */
 export type OverrideTable = Readonly<{ sha: string | undefined; entries: readonly OverrideEntry[] }>
 
-export type OverrideRecordKind = "set" | "replaced" | "clear" | "expired" | "fence"
+export type OverrideRecordKind = "set" | "replaced" | "clear" | "expired" | "reminded" | "fence"
 
 export type OverrideActor = Readonly<{ by: string; verified: boolean }>
 
@@ -162,7 +166,16 @@ export async function writeOverride(
       kind = standing === undefined ? "set" : "replaced"
       entries = [
         ...others,
-        { by, check: write.check, reason, record: SELF, state: "active", until: write.until, verified: write.actor.verified },
+        {
+          by,
+          check: write.check,
+          reason,
+          record: SELF,
+          setAt: new Date(),
+          state: "active",
+          until: write.until,
+          verified: write.actor.verified,
+        },
       ]
       trailers.push(`Until: ${write.until.toISOString()}`)
       if (standing !== undefined) trailers.push(`Replaces: ${standing.record}`)
@@ -202,12 +215,22 @@ export async function writeOverride(
   )
 }
 
+/** Whether an active entry is past halfway to its `until` and has not been reminded: the half-window reminder. */
+export function reminderDue(entry: OverrideEntry, now: number): boolean {
+  if (!isActive(entry, now) || entry.remindedAt !== undefined) return false
+  const half = entry.setAt.getTime() + (entry.until.getTime() - entry.setAt.getTime()) / 2
+  return now >= half
+}
+
 /**
  * Write the `expired` record for every entry whose window has passed at `now`
- * and has none yet, then return the table the round snapshots. Runs BEFORE the
- * round's snapshot, as its own leased push (@cto 462dfe95), so the merge fence
- * leases the post-expiry tip. A lost lease re-reads: an entry another runner
- * already expired is left alone. Past the bound, loud.
+ * and has none yet, and mark every entry whose half-window reminder is due, in
+ * ONE leased push, then return the table the round snapshots. Runs BEFORE the
+ * round's snapshot (@cto 462dfe95), so the merge fence leases the post-write
+ * tip; the round then notifies what this wrote (@cto ccd8dfa8), and because the
+ * reminder is recorded on the chain it is never sent twice. A lost lease
+ * re-reads, and an entry another runner already expired or reminded is left
+ * alone. Past the bound, loud.
  */
 export async function expireOverrides(
   git: Git,
@@ -215,38 +238,48 @@ export async function expireOverrides(
   queue: string,
   now: number,
   by: string,
-): Promise<Readonly<{ table: OverrideTable; expired: readonly OverrideEntry[] }>> {
+): Promise<Readonly<{ table: OverrideTable; expired: readonly OverrideEntry[]; reminded: readonly OverrideEntry[] }>> {
   const ref = overrideRef(queue)
   let lastError: unknown
   for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
     const previous = await readOverrides(git, remote, queue)
     const due = previous.entries.filter((entry) => entry.state === "active" && !isActive(entry, now))
-    if (due.length === 0) return { expired: [], table: previous }
+    const remind = previous.entries.filter((entry) => reminderDue(entry, now))
+    if (due.length === 0 && remind.length === 0) return { expired: [], reminded: [], table: previous }
     const at = new Date(now)
     const entries = previous.entries.map((entry) =>
-      due.includes(entry) ? { ...entry, expiredAt: at, state: "expired" as const } : entry,
+      due.includes(entry)
+        ? { ...entry, expiredAt: at, state: "expired" as const }
+        : remind.includes(entry)
+          ? { ...entry, remindedAt: at }
+          : entry,
     )
-    const names = due.map((entry) => entry.check)
-    const commit = await overrideCommit(
-      git,
-      previous,
-      "expired",
-      `merge check ${names.join(", ")} back on: override expired`,
-      entries,
-      [
-        ...names.map((name) => `Check: ${name}`),
-        `By: ${by}`,
-        "By-Verified: false",
-        `Reason: ${due.map((entry) => `${entry.check} until ${entry.until.toISOString()} passed`).join("; ")}`,
-      ],
-    )
+    const expiredNames = due.map((entry) => entry.check)
+    const remindedNames = remind.map((entry) => entry.check)
+    const subject =
+      due.length > 0
+        ? `merge check ${expiredNames.join(", ")} back on: override expired`
+        : `merge check ${remindedNames.join(", ")} still off: half its window has passed`
+    const commit = await overrideCommit(git, previous, due.length > 0 ? "expired" : "reminded", subject, entries, [
+      ...expiredNames.map((name) => `Check: ${name}`),
+      ...remindedNames.map((name) => `Reminded: ${name}`),
+      `By: ${by}`,
+      "By-Verified: false",
+      `Reason: ${[
+        ...due.map((entry) => `${entry.check} until ${entry.until.toISOString()} passed`),
+        ...remind.map((entry) => `${entry.check} is past halfway to ${entry.until.toISOString()}`),
+      ].join("; ")}`,
+    ])
     try {
       await git(["push", "--quiet", `--force-with-lease=${ref}:${previous.sha ?? ABSENT}`, remote, `${commit}:${ref}`])
     } catch (error) {
       lastError = error
       continue
     }
-    return { expired: due, table: await parseOverrides(git, commit, `${remote} ${ref}`) }
+    const table = await parseOverrides(git, commit, `${remote} ${ref}`)
+    const written = (entry: OverrideEntry): OverrideEntry =>
+      table.entries.find((next) => next.check === entry.check) ?? entry
+    return { expired: due.map(written), reminded: remind.map(written), table }
   }
   throw new Error(
     `${remote} ${ref} moved under ${String(WRITE_ATTEMPTS)} expiry writes in a row; the round cannot take a snapshot: ` +
@@ -272,10 +305,14 @@ export async function overrideFence(
   by: string,
   subject: string,
 ): Promise<OverrideFence> {
-  const sha = await overrideCommit(git, snapshot, "fence", oneLine(subject, "an override fence names its merge"), snapshot.entries, [
-    `By: ${oneLine(by, "an override fence needs an actor")}`,
-    "By-Verified: false",
-  ])
+  const sha = await overrideCommit(
+    git,
+    snapshot,
+    "fence",
+    oneLine(subject, "an override fence names its merge"),
+    snapshot.entries,
+    [`By: ${oneLine(by, "an override fence needs an actor")}`, "By-Verified: false"],
+  )
   return { expected: snapshot.sha ?? ABSENT, sha }
 }
 
@@ -335,9 +372,11 @@ async function overrideCommit(
         reason: entry.reason,
         record: entry.record,
         state: entry.state,
+        setAt: entry.setAt.toISOString(),
         until: entry.until.toISOString(),
         verified: entry.verified,
         ...(entry.expiredAt === undefined ? {} : { expiredAt: entry.expiredAt.toISOString() }),
+        ...(entry.remindedAt === undefined ? {} : { remindedAt: entry.remindedAt.toISOString() }),
       })}`,
   )
   const message = `${subject}\n\n${[`Record: ${kind}`, ...trailers, ...table].join("\n")}\n`
@@ -349,12 +388,13 @@ async function overrideCommit(
 export async function parseOverrides(git: Git, sha: string, where: string): Promise<OverrideTable> {
   const [commit, , block] = (await git(["log", "-1", `--format=${RECORD_FORMAT}`, sha])).split("\x00")
   const id = commit?.trim()
-  if (id === undefined || id === "") throw new Error(`${where} at ${sha.slice(0, 12)} is not a readable override record`)
+  if (id === undefined || id === "")
+    {throw new Error(`${where} at ${sha.slice(0, 12)} is not a readable override record`)}
   const parsed = commitTrailers(block ?? "")
   const kinds = parsed.filter(([name]) => name === "Record").map(([, value]) => value)
-  if (kinds.length !== 1 || !["set", "replaced", "clear", "expired", "fence"].includes(kinds[0] ?? "")) {
+  if (kinds.length !== 1 || !["set", "replaced", "clear", "expired", "reminded", "fence"].includes(kinds[0] ?? "")) {
     throw new Error(
-      `${where} at ${sha.slice(0, 12)} carries no valid Record: set|replaced|clear|expired|fence trailer ` +
+      `${where} at ${sha.slice(0, 12)} carries no valid Record: set|replaced|clear|expired|reminded|fence trailer ` +
         `(found ${String(kinds.length)}; exactly one is required)`,
     )
   }
@@ -374,15 +414,18 @@ function parseEntry(value: string, self: string, where: string): OverrideEntry {
   } catch (error) {
     throw new Error(`${where} carries an unreadable Override: entry '${value}'`, { cause: error })
   }
-  const field = (name: string): unknown => (raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>)[name] : undefined)
+  const field = (name: string): unknown =>
+    raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>)[name] : undefined
   const text = (name: string): string => {
     const found = field(name)
-    if (typeof found !== "string" || found === "") throw new Error(`${where} carries an Override: entry with no ${name}: '${value}'`)
+    if (typeof found !== "string" || found === "")
+      {throw new Error(`${where} carries an Override: entry with no ${name}: '${value}'`)}
     return found
   }
   const time = (name: string): Date => {
     const found = new Date(text(name))
-    if (Number.isNaN(found.getTime())) throw new Error(`${where} carries an Override: entry with an unreadable ${name}: '${value}'`)
+    if (Number.isNaN(found.getTime()))
+      {throw new Error(`${where} carries an Override: entry with an unreadable ${name}: '${value}'`)}
     return found
   }
   const state = text("state")
@@ -390,17 +433,20 @@ function parseEntry(value: string, self: string, where: string): OverrideEntry {
     throw new Error(`${where} carries an Override: entry in an unknown state '${state}' (active or expired)`)
   }
   const verified = field("verified")
-  if (typeof verified !== "boolean") throw new Error(`${where} carries an Override: entry with no boolean verified: '${value}'`)
+  if (typeof verified !== "boolean")
+    {throw new Error(`${where} carries an Override: entry with no boolean verified: '${value}'`)}
   const record = text("record")
   return Object.freeze({
     by: text("by"),
     check: text("check"),
     reason: text("reason"),
     record: record === SELF ? self : record,
+    setAt: time("setAt"),
     state,
     until: time("until"),
     verified,
     ...(field("expiredAt") === undefined ? {} : { expiredAt: time("expiredAt") }),
+    ...(field("remindedAt") === undefined ? {} : { remindedAt: time("remindedAt") }),
   })
 }
 

@@ -208,7 +208,9 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(colored.stdout).toBe(plain.stdout)
     expect(plain.stdout).not.toContain(ESC)
     const document = JSON.parse(plain.stdout) as Record<string, unknown>
-    expect(Object.keys(document).sort()).toEqual(["changes", "journal", "observation", "pause", "stopped"])
+    // `overrides` is always present (25296 C5): an empty array is "no merge check held off".
+    expect(Object.keys(document).sort()).toEqual(["changes", "journal", "observation", "overrides", "pause", "stopped"])
+    expect(document["overrides"]).toEqual([])
     expect((document as { observation: unknown }).observation).toMatchObject({ contract: "native", notices: [] })
     const [row] = document["changes"] as readonly Record<string, unknown>[]
     expect(row).toMatchObject({ branch: "task/one", position: 1, state: "queued", submitter: "@dev/10" })
@@ -330,6 +332,7 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
       "changes",
       "journal",
       "observation",
+      "overrides",
       "pause",
       "scope",
       "stopped",
