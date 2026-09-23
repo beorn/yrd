@@ -2245,7 +2245,8 @@ export function summarize(kind: string, rest: Readonly<Record<string, unknown>>)
       if (typeof rest.text === "string") return rest.text
       return `${where}: ${String(rest.decision ?? rest.state)}`
     case "check":
-      // Two rows per check: `ms` is the end row's, and its absence is the
+    case "step":
+      // Two rows per check or step: `ms` is the end row's, and its absence is the
       // start row, the one that says a long check is running rather than hung.
       return rest.ms === undefined
         ? `${String(rest.name)} started for ${where}`
