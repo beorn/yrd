@@ -18,4 +18,12 @@ describe("a step row's line", () => {
       "compose ran for task/x at 0123456789ab in 12034 ms",
     )
   })
+
+  it("names the run's target for the queue read, which is no change's step", () => {
+    const read = { base: "fedcba9876543210", name: "read", phase: "run", target: "main" }
+    expect(summarize("step", { ...read, start: "2026-09-23T21:00:00.000Z" })).toBe(
+      "read started for main at fedcba987654",
+    )
+    expect(summarize("step", { ...read, ms: 310 })).toBe("read ran for main at fedcba987654 in 310 ms")
+  })
 })

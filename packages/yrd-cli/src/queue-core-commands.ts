@@ -2245,12 +2245,20 @@ export function summarize(kind: string, rest: Readonly<Record<string, unknown>>)
       if (typeof rest.text === "string") return rest.text
       return `${where}: ${String(rest.decision ?? rest.state)}`
     case "check":
-    case "step":
+    case "step": {
       // Two rows per check or step: `ms` is the end row's, and its absence is the
       // start row, the one that says a long check is running rather than hung.
+      // A run's own step (the queue read) names its target, not a change.
+      const about =
+        where !== "" || typeof rest.target !== "string"
+          ? where
+          : [rest.target, typeof rest.base === "string" ? rest.base.slice(0, 12) : undefined]
+              .filter(Boolean)
+              .join(" at ")
       return rest.ms === undefined
-        ? `${String(rest.name)} started for ${where}`
-        : `${String(rest.name)} ran for ${where} in ${String(rest.ms)} ms`
+        ? `${String(rest.name)} started for ${about}`
+        : `${String(rest.name)} ran for ${about} in ${String(rest.ms)} ms`
+    }
     case "result":
       return `${String(rest.name)} ${String(rest.result)} for ${where}${rest.whose === undefined ? "" : `, ${String(rest.whose)}'s`}`
     case "settle":

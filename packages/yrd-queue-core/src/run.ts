@@ -508,7 +508,9 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       { cause: first },
     )
   }
-  const readStep = { branch: options.target.branch, head: targetSha, name: "read", phase: "run" }
+  // The read is the run's own, not a change's: `target` and `base`, never
+  // `branch` and `head`, which a journal reader takes to name a change.
+  const readStep = { base: targetSha, name: "read", phase: "run", target: options.target.branch }
   const read = async () => {
     try {
       return await timedStep(log, readStep, () =>
@@ -1268,7 +1270,9 @@ type ComposedCandidate =
  */
 async function timedStep<T>(
   log: Pick<QueueRunLog, "write">,
-  about: Readonly<{ branch: string; head: string; name: string; phase: string }>,
+  about: Readonly<
+    { name: string; phase: string } & ({ branch: string; head: string } | { target: string; base: string })
+  >,
   work: () => Promise<T>,
 ): Promise<T> {
   const start = new Date().toISOString()

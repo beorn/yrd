@@ -1519,7 +1519,8 @@ describe("a queue run", () => {
     expect(logRecords(outcome)[kinds.indexOf("queue")]).toMatchObject({ kind: "queue", queue: expect.any(String) })
     // The preamble's Git rows are still journaled: they sit between the header
     // and the queue record, which is where a died-in-preamble run's evidence is.
-    expect(kinds.slice(1, kinds.indexOf("queue")).every((kind) => kind === "git")).toBe(true)
+    // The queue read is part of that preamble and is timed as a `step` (25303 box 1).
+    expect(kinds.slice(1, kinds.indexOf("queue")).every((kind) => kind === "git" || kind === "step")).toBe(true)
     // Addendum 2/T1: every ordinary run invocation is linked before the run
     // summarizes it, including successful calls rebound to a worktree.
     const runRecords = logRecords(outcome)
