@@ -222,9 +222,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const changeTip = "b".repeat(40)
     const moved = "c".repeat(40)
     const queue = { created: before, declaration: before, tip: before }
-    const changes = new Map([
-      ["task/one", { status: "queued" as const, commit: before, tip: changeTip, ignored: false }],
-    ])
+    const changes = new Map([["task/one", { status: "queued" as const, commit: before, tip: changeTip }]])
     const advertised = new Map([
       [queueRef("main"), before],
       [changesRef("main", "task/one"), changeTip],
