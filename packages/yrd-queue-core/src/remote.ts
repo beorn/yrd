@@ -21,6 +21,8 @@
 
 import {
   changeOf,
+  PRIME_FORMAT,
+  primeRecords,
   readRecords,
   recordFrom,
   standsEnded,
@@ -305,14 +307,14 @@ async function tipRecords(
 ): Promise<ReadonlyMap<string, ChangeRecord>> {
   if (captured.length === 0) return new Map()
   const oids = [...new Set(captured.map(({ oid }) => oid))]
-  const out = await git(["log", "--no-walk", "--format=%H%x00%cI%x00%(trailers:only,unfold)%x00%B%x01", ...oids])
+  // ONE log, first-parent over every captured tip, reads each change's whole
+  // record chain for about what the tips alone cost (0.1 s for 1,544 changes on
+  // the garage), and primes the record cache that the round's per-change
+  // readers answer from (@i/10-yrd/25303 f1). The tips are read from it exactly
+  // as before.
+  const out = await git(["log", "--first-parent", `--format=${PRIME_FORMAT}`, ...oids])
   const byOid = new Map<string, ChangeRecord | undefined>()
-  for (const record of out.split("\x01")) {
-    const [sha, at, block, body] = record.replace(/^\n/u, "").split("\x00")
-    const oid = sha?.trim()
-    if (oid === undefined || oid === "" || at === undefined || block === undefined || body === undefined) continue
-    byOid.set(oid, recordFrom(oid, at, body, block))
-  }
+  for (const { sha, at, block, body } of primeRecords(git, out)) byOid.set(sha, recordFrom(sha, at, body, block))
   const tips = new Map<string, ChangeRecord>()
   for (const { change, oid, ref } of captured) {
     const tip = tipRecord(byOid.get(oid), oid, ref)

@@ -1537,7 +1537,8 @@ describe("a queue run", () => {
     expect(logRecords(outcome)[kinds.indexOf("queue")]).toMatchObject({ kind: "queue", queue: expect.any(String) })
     // The preamble's Git rows are still journaled: they sit between the header
     // and the queue record, which is where a died-in-preamble run's evidence is.
-    expect(kinds.slice(1, kinds.indexOf("queue")).every((kind) => kind === "git")).toBe(true)
+    // The queue read is part of that preamble and is timed as a `step` (25303 box 1).
+    expect(kinds.slice(1, kinds.indexOf("queue")).every((kind) => kind === "git" || kind === "step")).toBe(true)
     // Addendum 2/T1: every ordinary run invocation is linked before the run
     // summarizes it, including successful calls rebound to a worktree.
     const runRecords = logRecords(outcome)
@@ -1790,7 +1791,8 @@ describe("a queue run", () => {
   it("with 40 changes waiting, the head merges before any other change is judged (25301 A1)", async () => {
     const w = await world()
     const branches = Array.from({ length: 40 }, (_, i) => `task/c${String(i).padStart(2, "0")}`)
-    for (const branch of branches) await submitCommit(w, branch, `${branch.slice(5)}.txt`)
+    const heads: string[] = []
+    for (const branch of branches) heads.push(await submitCommit(w, branch, `${branch.slice(5)}.txt`))
 
     const outcome = await queueRun(await w.options({ exit: 0, on: ["submit", "merge"] }))
 
@@ -1809,7 +1811,45 @@ describe("a queue run", () => {
       ...Array.from({ length: 39 }, () => mergeCommit),
     ])
     expect(outcome.checkedWaiting).toBe(39)
+    // @cto 62ed0395 (2): every prefetch verdict names the target it stood on,
+    // the checked record's Base trailer, and here that is the head's merge.
+    await fetchChanges(w)
+    const tail = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/c39", head: heads[39]! })))!)
+    expect(trailer(tail.find((record) => record.kind === "checked")!, "Base")).toBe(mergeCommit)
   }, 180_000)
+
+  // @cto 62ed0395 (3): a head whose merge changes .yrd.yml leaves the tail unjudged,
+  // so no verdict is written under a declaration the target no longer carries.
+  it("a head whose merge edits .yrd.yml prefetches nothing, and the next round judges the tail (25301)", async () => {
+    const w = await world()
+    // A valid edit: the declaration stays the empty mapping, as another blob.
+    await w.git(["checkout", "--quiet", "-b", "task/declaration", "main"])
+    writeFileSync(join(w.work, ".yrd.yml"), "# edited by the head\n{}\n")
+    await w.git(["add", ".yrd.yml"])
+    await w.git(["commit", "--quiet", "-m", "edit the declaration"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/declaration",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    const tailHead = await submitCommit(w, "task/after", "after.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, on: ["submit", "merge"] }))
+
+    expect(outcome.merged).toEqual(["task/declaration"])
+    expect(outcome.checkedWaiting).toBe(0)
+    // The head's judge and its merge check, and nothing for the tail.
+    expect(readFileSync(w.checkLog, "utf8").trim().split("\n")).toHaveLength(2)
+    const journal = readFileSync(outcome.log, "utf8")
+    expect(journal).toContain("the head's merge changed .yrd.yml")
+    await fetchChanges(w)
+    const tail = (await readQueue(w.git, "origin", "main", await remoteTarget(w))).changes.find(
+      (entry) => entry.change.head === tailHead,
+    )!
+    expect(tail.reading.state).toBe("queued")
+  })
 
   // @cto ac87d1e5: a head in FRONT of a stuck row merges; the line still stops on
   // that row in the same round, and one outcome names both.
@@ -4892,6 +4932,68 @@ describe("the target's setup", () => {
     const setupRows = logRecords(outcome).filter((record) => record.kind === "check" && record.name === "setup")
     expect(setupRows).toHaveLength(6)
     expect(setupRows.filter((record) => record.end === undefined)).toHaveLength(3)
+  })
+
+  /**
+   * @i/10-yrd/25303 box 1. A compose is one git-super process whose settle rows
+   * are written only after it returns, and a prepare and the queue read had no
+   * rows of their own: on the garage each was a 20 to 28 s silence in the run
+   * journal. Each is now a timed `step`: a start row, then an end row with `ms`.
+   * The compose here is made slow on purpose, so the end row's `ms` is shown to
+   * span the step rather than to exist.
+   */
+  it("brackets the queue read, each compose and each prepare with timed step rows (25303 box 1)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    const slowMs = 300
+    await using runner = createProcess({ cwd: w.work })
+    const slowCompose = {
+      ...runner,
+      run: async (request: Parameters<typeof runner.run>[0]) => {
+        if (request.argv.includes("super") && request.argv.includes("merge")) {
+          await new Promise((resolve) => setTimeout(resolve, slowMs))
+        }
+        return runner.run(request)
+      },
+    }
+
+    const outcome = await queueRun({
+      ...(await w.options({ exit: 0, setup: w.setupCommand(0) })),
+      process: slowCompose,
+    })
+
+    expect(outcome.merged).toEqual(["task/one"])
+    const records = logRecords(outcome)
+    const at = (predicate: (record: Record<string, unknown>) => boolean) => records.findIndex(predicate)
+    const bracketed = (name: string, phase: string) => {
+      const start = at((row) => row.kind === "step" && row.name === name && row.phase === phase && row.ms === undefined)
+      const end = at(
+        (row) =>
+          row.kind === "step" &&
+          row.name === name &&
+          row.phase === phase &&
+          typeof row.ms === "number" &&
+          row.start === records[start]?.start,
+      )
+      return { start, end, ms: records[end]?.ms }
+    }
+    for (const [name, phase] of [
+      ["read", "run"],
+      ["compose", "submit"],
+      ["prepare", "submit"],
+      ["compose", "merge"],
+      ["prepare", "merge"],
+    ] as const) {
+      const step = bracketed(name, phase)
+      expect({ name, phase, started: step.start >= 0 }).toEqual({ name, phase, started: true })
+      expect({ name, phase, endsAfterStart: step.end > step.start }).toEqual({ name, phase, endsAfterStart: true })
+    }
+    // A compose ends before the prepare that uses its merge commit starts, in both phases.
+    for (const phase of ["submit", "merge"]) {
+      expect(bracketed("compose", phase).end).toBeLessThan(bracketed("prepare", phase).start)
+      expect(bracketed("compose", phase).ms).toBeGreaterThanOrEqual(slowMs)
+    }
+    expect(records.filter((row) => row.kind === "step" && row.threw === true)).toEqual([])
   })
 
   /**
