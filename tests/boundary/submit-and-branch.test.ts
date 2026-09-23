@@ -71,7 +71,11 @@ describe("the submit path", { timeout: 120_000 }, () => {
     const target = await refSha(origin, "refs/heads/main")
     const fetchHead = join(repo, ".git", "FETCH_HEAD")
     await writeFile(fetchHead, "the caller's previous fetch\n")
-    const beforeLocal = await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    // Gitomic may cache fetched tips under refs/gitomic/fetched; a dry run
+    // must leave the caller's application refs and FETCH_HEAD untouched.
+    const applicationRefs = () =>
+      git(repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/remotes/", "refs/yrd/")
+    const beforeLocal = await applicationRefs()
     const beforeRemote = await git(origin, "for-each-ref", "--format=%(refname) %(objectname)")
 
     const preview = await runYrd(repo, ...argv, branch, "--dry-run", "--json")
@@ -81,7 +85,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
       targetHead: target,
       verifying: { state: "verified", head, targetHead: target },
     })
-    expect(await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(beforeLocal)
+    expect(await applicationRefs()).toBe(beforeLocal)
     expect(await git(origin, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(beforeRemote)
     expect(await readFile(fetchHead, "utf8")).toBe("the caller's previous fetch\n")
 
