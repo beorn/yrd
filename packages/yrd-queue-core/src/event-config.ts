@@ -17,7 +17,7 @@ type EventQueueRunConfig = Readonly<{
 
 type EventQueueConfigAction = "create" | "run" | "submit"
 
-const QUEUE_KEYS = new Set(["target", "checks", "blob", "notify", "setup", "teardown"])
+const QUEUE_KEYS = new Set(["target", "archiveAfter", "checks", "ignore", "blob", "notify", "setup", "teardown"])
 const CHECK_KEYS = new Set(["name", "run", "timeoutMs", "environmentPassthrough", "on"])
 
 function unsupported(action: EventQueueConfigAction, feature: string, detail = ""): never {

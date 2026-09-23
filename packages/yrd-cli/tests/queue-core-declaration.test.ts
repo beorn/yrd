@@ -42,7 +42,9 @@ afterAll(() => {
 it("refuses future event queue and check keys by name", () => {
   const plain: QueueConfig = {
     target: { remote: "origin", branch: "main" },
+    archiveAfter: "never",
     checks: [{ name: "verify", run: "true" }],
+    ignore: [],
     notify: [],
     blob: "a".repeat(40),
   }
