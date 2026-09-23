@@ -433,7 +433,7 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
 })
 
 describe("the table (items 3, 28, 38)", () => {
-  it("has the operator's columns: TASK AGENT QUEUE / RUN STATE AGE / RUN, and rows that read across them", async () => {
+  it("with one queue, Q is omitted and RUN is separate, with no QUEUE / RUN (items 3, 28, 38)", async () => {
     const text = await paint(<WatchPane snapshot={snapshot()} live={false} />)
 
     const header = text.split("\n").find((line) => line.includes("TASK"))
@@ -441,11 +441,13 @@ describe("the table (items 3, 28, 38)", () => {
     for (const column of [
       "TASK",
       "AGENT",
-      header?.includes("QUEUE / RUN") ? "QUEUE / RUN" : "RUN",
+      "RUN",
       "STATE",
       "AGE / RUN",
     ])
       expect(header).toContain(column)
+    expect(header).not.toContain("QUEUE / RUN")
+    expect(header?.split(/\s+/)).not.toContain("Q")
     expect(header!.trimEnd().endsWith("AGE / RUN")).toBe(true)
     const line = text
       .split("\n")
@@ -455,6 +457,67 @@ describe("the table (items 3, 28, 38)", () => {
     expect(line).toContain("(err=test)")
     expect(line).toContain("@chief")
     expect(line).not.toContain("0badf00d")
+  })
+
+  it("with two tracked queues, shows separate Q and RUN columns with bare numbers and no QUEUE / RUN", async () => {
+    const twoQueues = [
+      { branch: "main", label: "main", path: "/repo" },
+      { branch: "staging", label: "staging", path: "/repo2" },
+    ]
+    const text = await paint(
+      <WatchPane
+        snapshot={snapshot({
+          queues: twoQueues,
+          rows: [{ row: row({ ...failedRow(), run: "42" }) }],
+        })}
+        live={false}
+      />,
+    )
+
+    const header = text.split("\n").find((line) => line.includes("TASK"))
+    expect(header).toBeDefined()
+    for (const column of ["TASK", "AGENT", "Q", "RUN", "STATE", "AGE / RUN"]) {
+      expect(header).toContain(column)
+    }
+    expect(header).not.toContain("QUEUE / RUN")
+
+    const line = text
+      .split("\n")
+      .find((candidate) => candidate.includes("fix the parser") || candidate.includes("task/one"))
+    expect(line).toBeDefined()
+    expect(line).toContain("× failed")
+    expect(line).not.toContain("·")
+    expect(line).toMatch(/\b1\s+42\b/)
+  })
+
+  it("with two tracked queues, filtering to one queue leaves snapshot.queues intact so Q column stays and digits do not change (Sep 21 10:10 rule)", async () => {
+    const twoQueues = [
+      { branch: "main", label: "main", path: "/repo" },
+      { branch: "staging", label: "staging", path: "/repo2" },
+    ]
+    // Press "2" to toggle staging queue off (leaving main queue visible)
+    const text = await paint(
+      <WatchPane
+        snapshot={snapshot({
+          queues: twoQueues,
+          rows: [{ row: row({ ...failedRow(), run: "42" }) }],
+        })}
+        live={false}
+      />,
+      ["2"],
+    )
+
+    const header = text.split("\n").find((line) => line.includes("TASK"))
+    expect(header).toBeDefined()
+    expect(header).toContain("Q")
+    expect(header).toContain("RUN")
+    expect(header).not.toContain("QUEUE / RUN")
+
+    const line = text
+      .split("\n")
+      .find((candidate) => candidate.includes("fix the parser") || candidate.includes("task/one"))
+    expect(line).toBeDefined()
+    expect(line).toMatch(/\b1\s+42\b/)
   })
 
   it("names the queue digit and a dash when the row has no attempt (ia.md drafts/waiting)", async () => {
@@ -1398,7 +1461,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   /** The line stop a stuck change makes, as the queue read derives it (`stopFact`, the page's `stopped`). */
   const STOP = {
     by: "yrd-service",
-    cause: "stuck",
+    cause: "stuck" as const,
     change: `task/s@${"4".repeat(40)}`,
     since: ago(6 * MINUTE).toISOString(),
   }
@@ -1567,7 +1630,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   /** The first table row under the header whose text includes `needle`. */
   function tableRow(painted: readonly string[], needle: string): string {
     const header = painted.findIndex(
-      (line) => line.includes("TASK") && (line.includes("QUEUE / RUN") || line.includes("RUN")),
+      (line) => line.includes("TASK") && line.includes("RUN") && !line.includes("QUEUE / RUN"),
     )
     return header < 0 ? "" : (painted.slice(header + 1).find((line) => line.includes(needle)) ?? "")
   }
@@ -2295,7 +2358,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       )
       const title = painted.findIndex((line) => line.includes("yrd watch"))
       const header = painted.findIndex(
-        (line) => line.includes("TASK") && (line.includes("QUEUE / RUN") || line.includes("RUN")),
+        (line) => line.includes("TASK") && line.includes("RUN") && !line.includes("QUEUE / RUN"),
       )
       // The row under the header opens a band; the change's own row is the
       // first one after that rule.
@@ -2375,7 +2438,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     }
     const painted = app.lines
     const header = painted.findIndex(
-      (line) => line.includes("TASK") && (line.includes("QUEUE / RUN") || line.includes("RUN")),
+      (line) => line.includes("TASK") && line.includes("RUN") && !line.includes("QUEUE / RUN"),
     )
     const held = painted.findIndex(
       (line, index) => index > header && (line.includes("task/x") || (line.includes("◉") && line.includes("checking"))),
@@ -2546,5 +2609,85 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(23 - runnerEnd).toBe(6)
 
     app.unmount()
+  })
+
+  it("renders RUNNER box with status color on border and title for STOPPED and STUCK runner", async () => {
+    // 1. Stopped runner: border and title show status color
+    const stoppedApp = render(
+      <WatchPane
+        snapshot={snapshot({
+          runner: {
+            journalDir: "/w/logs",
+            service: { kind: "stopped", why: "heartbeat overdue", cause: "timeout" },
+          },
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(stoppedApp)
+    const stoppedPainted = stoppedApp.lines
+    const stoppedRunnerLineIdx = stoppedPainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    expect(stoppedRunnerLineIdx).toBeGreaterThan(0)
+    const stoppedLine = stoppedPainted[stoppedRunnerLineIdx]!
+    const stoppedBorderCharIdx = stoppedLine.indexOf("╭")
+    const stoppedTitleCharIdx = stoppedLine.indexOf("RUNNER")
+    const stoppedBorderFg = stoppedApp.cell(stoppedBorderCharIdx, stoppedRunnerLineIdx).fg
+    const stoppedTitleFg = stoppedApp.cell(stoppedTitleCharIdx, stoppedRunnerLineIdx).fg
+
+    expect(stoppedBorderFg).toBeDefined()
+    expect(stoppedTitleFg).toEqual(stoppedBorderFg)
+    stoppedApp.unmount()
+
+    // 2. Stuck runner: border and title show status color (same error color)
+    const stuckApp = render(
+      <WatchPane
+        snapshot={snapshot({
+          runner: RUNNER,
+          stopped: STOP,
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(stuckApp)
+    const stuckPainted = stuckApp.lines
+    const stuckRunnerLineIdx = stuckPainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    expect(stuckRunnerLineIdx).toBeGreaterThan(0)
+    const stuckLine = stuckPainted[stuckRunnerLineIdx]!
+    const stuckBorderCharIdx = stuckLine.indexOf("╭")
+    const stuckTitleCharIdx = stuckLine.indexOf("RUNNER")
+    const stuckBorderFg = stuckApp.cell(stuckBorderCharIdx, stuckRunnerLineIdx).fg
+    const stuckTitleFg = stuckApp.cell(stuckTitleCharIdx, stuckRunnerLineIdx).fg
+
+    expect(stuckBorderFg).toBeDefined()
+    expect(stuckTitleFg).toEqual(stuckBorderFg)
+    expect(stuckBorderFg).not.toEqual(stoppedBorderFg)
+    stuckApp.unmount()
+
+    // 3. Idle runner: border and title use idle color, distinct from stopped/stuck error color
+    const idleApp = render(
+      <WatchPane
+        snapshot={snapshot({
+          runner: RUNNER,
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(idleApp)
+    const idlePainted = idleApp.lines
+    const idleRunnerLineIdx = idlePainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    expect(idleRunnerLineIdx).toBeGreaterThan(0)
+    const idleLine = idlePainted[idleRunnerLineIdx]!
+    const idleBorderCharIdx = idleLine.indexOf("╭")
+    const idleTitleCharIdx = idleLine.indexOf("RUNNER")
+    const idleBorderFg = idleApp.cell(idleBorderCharIdx, idleRunnerLineIdx).fg
+    const idleTitleFg = idleApp.cell(idleTitleCharIdx, idleRunnerLineIdx).fg
+
+    expect(idleBorderFg).toBeDefined()
+    expect(idleTitleFg).toEqual(idleBorderFg)
+    expect(idleBorderFg).not.toEqual(stoppedBorderFg)
+    idleApp.unmount()
   })
 })
