@@ -9,6 +9,6 @@
   "dependencies": {
     "@yrd/process": "workspace:*",
     "git-super": "^0.1.0",
-    "gitomic": "^0.3.0"
+    "gitomic": "github:beorn/gitomic#d4043b305402fa6f1d40ba04acea27175f2f1408"
   }
 }
