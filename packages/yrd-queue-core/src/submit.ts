@@ -210,15 +210,6 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
-  // The line's stop, read to be ECHOED: a stopped line accepts the change and
-  // the run is where the stop is enforced. It is read before the refusals
-  // below so a stale or rebased branch is told about the stop too.
-  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-  const store = { repo: root, remote }
-  const stop =
-    (await queueFormat(store, request.target.branch)) === "event"
-      ? eventPause(await readEventQueue(store, request.target.branch))
-      : (await readStop(git, remote, request.target.branch, targetHead)).stop
   const bound = freshnessLine(targetHead)
   if (await isAncestor(git, head, targetHead)) {
     throw new Error(
@@ -232,6 +223,16 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
     )
   }
   const issue = await issueOf(git, request.branch, head, targetHead, request.issue)
+  // The line's stop, read to be ECHOED: a stopped line accepts the change and
+  // the run is where the stop is enforced. Issue conflicts are settled before
+  // repository composition starts; every other refusal below still carries
+  // this captured stop.
+  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
+  const store = { repo: root, remote }
+  const stop =
+    (await queueFormat(store, request.target.branch)) === "event"
+      ? eventPause(await readEventQueue(store, request.target.branch))
+      : (await readStop(git, remote, request.target.branch, targetHead)).stop
   const scratch = mkdtempSync(join(tmpdir(), "yrd-submit-verifying-"))
   const hooksPath = join(scratch, "hooks-disabled")
   mkdirSync(hooksPath)
@@ -268,15 +269,21 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
 }
 
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
+  const inspected = await inspectSubmit(git, remote, request)
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
   if ((await queueFormat({ repo: root, remote }, request.target.branch)) === "event") {
-    return submitEvent(git, remote, request, root)
+    return submitEvent(git, remote, request, root, inspected)
   }
-  return submitLegacy(git, remote, request)
+  return submitLegacy(git, remote, request, inspected)
 }
 
-async function submitEvent(git: Git, remote: string, request: SubmitRequest, root: string): Promise<Submitted> {
-  const inspected = await inspectSubmit(git, remote, request)
+async function submitEvent(
+  git: Git,
+  remote: string,
+  request: SubmitRequest,
+  root: string,
+  inspected: SubmitInspection,
+): Promise<Submitted> {
   const head = inspected.head
   const published = await publishMovedGitlinks(git, root, inspected.targetHead, head)
   const store = { repo: root, remote }
@@ -332,8 +339,12 @@ async function submitEvent(git: Git, remote: string, request: SubmitRequest, roo
   }
 }
 
-async function submitLegacy(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
-  const inspected = await inspectSubmit(git, remote, request)
+async function submitLegacy(
+  git: Git,
+  remote: string,
+  request: SubmitRequest,
+  inspected: SubmitInspection,
+): Promise<Submitted> {
   const { targetHead } = inspected
   const head = inspected.head
   const issue = inspected.issue
