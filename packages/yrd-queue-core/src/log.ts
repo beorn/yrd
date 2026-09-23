@@ -16,7 +16,10 @@
  * its worktrees: one record per worktree taken down. An eleventh, `orphan`,
  * appears only when a reaped worktree named a merge candidate for a change
  * still "checked": one row for what recovery decided, or for a candidate it
- * found but would not trust (@i/10-yrd/24344). The human line is a
+ * found but would not trust (@i/10-yrd/24344). A twelfth, `step`, times the
+ * round's own steps that are neither a check nor a program (the queue read,
+ * each compose, each prepare): a start row, then an end row with `ms`, so the
+ * journal is never silent across one (@i/10-yrd/25303). The human line is a
  * rendering of the record, never a second source: whatever a reader prints, the
  * file is what happened.
  *
