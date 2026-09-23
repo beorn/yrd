@@ -24,7 +24,7 @@ afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
 
-type World = Readonly<{ git: Git; work: string; target: string }>
+type World = Readonly<{ git: Git; root: string; work: string; target: string }>
 
 async function world(): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-legacy-reader-gitomic-"))
@@ -42,7 +42,7 @@ async function world(): Promise<World> {
   await git(["add", "target.txt"])
   await git(["commit", "--quiet", "-m", "base"])
   await git(["push", "--quiet", "origin", "main"])
-  return { git, target: (await git(["rev-parse", "HEAD"])).trim(), work }
+  return { git, root, target: (await git(["rev-parse", "HEAD"])).trim(), work }
 }
 
 async function publishChange(world: World, branch: string, file: string): Promise<string> {
@@ -84,6 +84,19 @@ it("reads every legacy change through one Gitomic multi-tip history process", as
     kind: "paused",
     reason: "maintenance",
   })
+  const decoyRemote = join(w.root, "decoy.git")
+  const decoyWork = join(w.root, "decoy-work")
+  const seed = gitIn(w.root)
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", decoyRemote])
+  await seed(["clone", "--quiet", decoyRemote, decoyWork])
+  const decoy = gitIn(decoyWork)
+  await decoy(["config", "user.email", "decoy@yrd.test"])
+  await decoy(["config", "user.name", "decoy"])
+  await decoy(["commit", "--quiet", "--allow-empty", "-m", "different main"])
+  await decoy(["push", "--quiet", "origin", "main"])
+
+  const previousGitDir = process.env.GIT_DIR
+  process.env.GIT_DIR = join(decoyWork, ".git")
   const spawn = vi.spyOn(childProcess, "spawn")
   try {
     const reading = await readQueue(w.git, "origin", "main", w.target)
@@ -105,5 +118,7 @@ it("reads every legacy change through one Gitomic multi-tip history process", as
     expect(historyReads[0]).toEqual(expect.arrayContaining([...opened, paused.sha]))
   } finally {
     spawn.mockRestore()
+    if (previousGitDir === undefined) delete process.env.GIT_DIR
+    else process.env.GIT_DIR = previousGitDir
   }
 })

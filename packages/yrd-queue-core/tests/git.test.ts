@@ -671,6 +671,8 @@ describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
     const childWork = join(root, "child-work")
     const parentRemote = join(root, "parent.git")
     const parentWork = join(root, "parent-work")
+    const decoyRemote = join(root, "decoy.git")
+    const decoyWork = join(root, "decoy-work")
     const reader = join(root, "reader")
     const seed = gitIn(root)
 
@@ -707,8 +709,16 @@ describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
     await parent(["push", "--quiet", "origin", "main"])
     const advanced = (await parent(["rev-parse", "HEAD"])).trim()
 
+    await seed(["init", "--quiet", "--bare", "--initial-branch=main", decoyRemote])
+    await seed(["clone", "--quiet", decoyRemote, decoyWork])
+    const decoy = gitIn(decoyWork)
+    await decoy(["config", "user.email", "decoy@yrd.test"])
+    await decoy(["config", "user.name", "decoy"])
+    await decoy(["commit", "--quiet", "--allow-empty", "-m", "different main"])
+    await decoy(["push", "--quiet", "origin", "main"])
+
     const previousGitDir = process.env.GIT_DIR
-    process.env.GIT_DIR = join(root, "ambient-git-dir-must-not-be-used")
+    process.env.GIT_DIR = join(decoyWork, ".git")
     try {
       await expect(gitRunner.readRemoteCommit(read, "origin", "refs/heads/main")).resolves.toBe(advanced)
     } finally {
