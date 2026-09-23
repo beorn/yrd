@@ -481,6 +481,11 @@ async function carriedFrom(git: Git, sha: string): Promise<readonly (readonly [s
  */
 export async function readRecords(git: Git, from: string): Promise<readonly ChangeRecord[]> {
   const store = await legacyStore(git)
+  return readRecordsFromStore(git, from, store)
+}
+
+/** Read a captured legacy chain through an operation's already-resolved store. */
+async function readRecordsFromStore(git: Git, from: string, store: LegacyStore): Promise<readonly ChangeRecord[]> {
   const separator = from.indexOf("..")
   if (separator < 0) {
     const history = await store.backend.readHistory(store.repo, [from])
@@ -736,13 +741,14 @@ export function endingRecord(records: readonly ChangeRecord[]): ChangeRecord | u
 export async function endingRecordThrough(
   git: Git,
   change: Readonly<{ records: readonly ChangeRecord[] }>,
+  store: LegacyStore,
 ): Promise<ChangeRecord | undefined> {
   const held = endingRecord(change.records)
   if (held !== undefined) return held
   if (change.records[0]?.kind === "opened") return undefined
   const tip = change.records.at(-1)
   if (tip === undefined || tip.kind === "opened") return undefined
-  return endingRecord(await readRecords(git, tip.sha))
+  return endingRecord(await readRecordsFromStore(git, tip.sha, store))
 }
 
 /** Parse Git's already-isolated, unfolded trailer block into ordered pairs. */

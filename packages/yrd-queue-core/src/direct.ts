@@ -39,7 +39,14 @@
  * at-least-once, the plan's shape for every message.
  */
 
-import { endedKind, endingRecordThrough, mergedByRun, trailer, type ChangeRecord } from "./legacy-records.ts"
+import {
+  endedKind,
+  endingRecordThrough,
+  legacyStore,
+  mergedByRun,
+  trailer,
+  type ChangeRecord,
+} from "./legacy-records.ts"
 import { gitlinkRows, type Git } from "./git.ts"
 import { changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
@@ -164,9 +171,10 @@ export async function directMergeCommits(
   // Each change's ENDING record, never its literal tip: a stray record
   // appended after a merged ending must not hide the merge, however shallow
   // the caller's capture was (@i/10-yrd/24635).
+  const store = await legacyStore(git)
   const byName = new Map<string, ChangeRecord | undefined>()
   for (const entry of entries) {
-    byName.set(changeName(entry.change), await endingRecordThrough(git, entry.change))
+    byName.set(changeName(entry.change), await endingRecordThrough(git, entry.change, store))
   }
   const accounted = new Set<string>()
   for (const ending of byName.values()) {
