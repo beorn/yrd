@@ -1816,6 +1816,14 @@ describe("a queue run", () => {
     await fetchChanges(w)
     const tail = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/c39", head: heads[39]! })))!)
     expect(trailer(tail.find((record) => record.kind === "checked")!, "Base")).toBe(mergeCommit)
+    // review2 25301 r2 record 1: each read step names the target that read stood
+    // on, so the prefetch's and the final re-read's steps name the head's merge.
+    const reads = readFileSync(outcome.log, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind?: string; name?: string; base?: string })
+      .filter((row) => row.kind === "step" && row.name === "read")
+    expect([...new Set(reads.map((row) => row.base))]).toEqual([w.target, mergeCommit])
   }, 180_000)
 
   // @cto 62ed0395 (3): a head whose merge changes .yrd.yml leaves the tail unjudged,
