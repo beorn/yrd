@@ -1904,7 +1904,6 @@ describe("a diverged component the merge composes", () => {
     expect(trailer(failed!, "Detail")).toContain("submodule-check")
   })
 
-
   // review2 witness (24977 review): the merge-phase re-run of the submit checks must be COMPLETE before a
   // composed candidate lands. A stop window that closes after the first submit check passes ends runPhase early;
   // with no merge-phase checks declared nothing else notices, and the composed candidate would land although the

@@ -2102,7 +2102,11 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     // phases defer on a short list, and so does this one, or a composed
     // candidate lands with submit checks never run on it (review2 de5a4c01).
     const declaredForSubmit = run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes("submit"))
-    if (recuts.length > 0 && recheck.every((result) => result.result === "pass") && recheck.length < declaredForSubmit.length) {
+    if (
+      recuts.length > 0 &&
+      recheck.every((result) => result.result === "pass") &&
+      recheck.length < declaredForSubmit.length
+    ) {
       return await writeDeferredRecord(
         run,
         entry,
