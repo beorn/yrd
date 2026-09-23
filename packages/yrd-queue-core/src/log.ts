@@ -16,7 +16,10 @@
  * its worktrees: one record per worktree taken down. An eleventh, `orphan`,
  * appears only when a reaped worktree named a merge candidate for a change
  * still "checked": one row for what recovery decided, or for a candidate it
- * found but would not trust (@i/10-yrd/24344). The human line is a
+ * found but would not trust (@i/10-yrd/24344). A twelfth, `step`, times the
+ * round's own steps that are neither a check nor a program (the queue read,
+ * each compose, each prepare): a start row, then an end row with `ms`, so the
+ * journal is never silent across one (@i/10-yrd/25303). The human line is a
  * rendering of the record, never a second source: whatever a reader prints, the
  * file is what happened.
  *
@@ -141,6 +144,13 @@ export const LOG_KINDS = [
   // recorded nothing about it reads exactly like a round that skipped it, and
   // the only other account of the work was the crash this replaced.
   "discarded",
+  // A step of the round that is neither a check nor a program, timed so the
+  // journal never goes silent across it (@i/10-yrd/25303 box 1): the queue
+  // read, a candidate's compose, and its prepare. Two rows per step, in the
+  // `setup` shape: `start` as it begins, then `end` and `ms` as it ends, with
+  // `threw` when it ended by throwing. Before these rows, a compose was one
+  // 20 to 28 s silence between the queue read and the first `settle` row.
+  "step",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]

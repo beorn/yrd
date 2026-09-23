@@ -105,6 +105,121 @@ const CARRIED = ["Opened", "Submitter", "Issue"] as const
 export const RECORD_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
 
 /**
+ * The queue read's one record log (@i/10-yrd/25303 f1): {@link RECORD_FORMAT}
+ * with the parents second, records separated by `%x01`, read `--first-parent`
+ * over every captured tip. First-parent from a tip reads exactly that change's
+ * records and stops at the genesis, and it never follows a checked record's
+ * second parent into the target's history (the module comment above).
+ */
+export const PRIME_FORMAT = "%H%x00%P%x00%cI%x00%(trailers:only,unfold)%x00%B%x01"
+
+/** One commit as a prime read it: what `readRecord` parses, plus the first parent that `readRecords` walks. */
+type PrimedCommit = Readonly<{ at: string; block: string; body: string; parent: string | undefined }>
+
+/**
+ * Commits a queue read has already read, per Git instance. A commit is
+ * immutable by its sha, so an entry is never stale, only absent. A round reads
+ * one ended record and its receipts per change (with-notify's repair pass),
+ * which cost two processes per change before this cache: 847 to 1,152 pairs a
+ * round on the garage, 4 to 10 s under load. Primed by the read that already
+ * held every tip, they cost none.
+ */
+const primed = new WeakMap<Git, Map<string, PrimedCommit>>()
+
+/** Ten times the prime the garage measured on 2026-09-23 (7,538 commits, 10.5 MB): past it, say so. */
+const PRIME_WARN_COMMITS = 75_000
+const PRIME_WARN_BYTES = 100 * 1024 * 1024
+
+/** `DEBUG` names yrd the way loggily reads it: `*`, `yrd`, or a `yrd…` prefix pattern in the list. */
+function debugging(): boolean {
+  return (process.env["DEBUG"] ?? "").split(/[\s,]+/u).some((name) => name === "*" || name.startsWith("yrd"))
+}
+
+function debugLine(message: string): void {
+  if (debugging()) console.error(`DEBUG yrd:queue:records ${message}`)
+}
+
+/**
+ * Parse one {@link PRIME_FORMAT} log into rows, and keep every commit for
+ * `readRecord` and `readRecords` on this Git instance. Returns the rows so
+ * the reader that ran the log uses the same parse.
+ */
+export function primeRecords(
+  git: Git,
+  output: string,
+): readonly Readonly<{ sha: string; at: string; block: string; body: string }>[] {
+  const cache = primed.get(git) ?? new Map<string, PrimedCommit>()
+  primed.set(git, cache)
+  const rows: Readonly<{ sha: string; at: string; block: string; body: string }>[] = []
+  for (const record of output.split("\x01")) {
+    const [shaField, parents, at, block, body] = record.replace(/^\n/u, "").split("\x00")
+    const sha = shaField?.trim()
+    if (
+      sha === undefined ||
+      sha === "" ||
+      parents === undefined ||
+      at === undefined ||
+      block === undefined ||
+      body === undefined
+    ) {
+      continue
+    }
+    cache.set(sha, { at, block, body, parent: parents.split(" ")[0] || undefined })
+    rows.push({ sha, at, block, body })
+  }
+  const bytes = Buffer.byteLength(output)
+  debugLine(`record prime: ${rows.length} commits, ${bytes} bytes, ${cache.size} held`)
+  if (rows.length > PRIME_WARN_COMMITS || bytes > PRIME_WARN_BYTES) {
+    console.error(
+      `yrd: the queue read's record log read ${rows.length} commits and ${bytes} bytes, past the ${PRIME_WARN_COMMITS} / ${PRIME_WARN_BYTES} it is watched at; the change refs are growing faster than the read was sized for (@i/10-yrd/25303 f1)`,
+    )
+  }
+  return rows
+}
+
+/** A primed commit, or undefined with the miss named at debug: the caller reads it the way it always did. */
+function primedCommit(git: Git, sha: string, reader: string): PrimedCommit | undefined {
+  const cache = primed.get(git)
+  if (cache === undefined) return undefined
+  const commit = cache.get(sha)
+  if (commit === undefined) debugLine(`record cache miss: ${reader} ${sha}`)
+  return commit
+}
+
+const OBJECT_ID = "[0-9a-f]{40}(?:[0-9a-f]{24})?"
+const TIP_ONLY = new RegExp(`^(${OBJECT_ID})$`, "u")
+const RANGE = new RegExp(`^(${OBJECT_ID})\\.\\.(${OBJECT_ID})$`, "u")
+
+/**
+ * The first-parent chain `readRecords` would log for `from`, from primed
+ * commits alone, newest first; undefined when any commit is absent or `from`
+ * is a shape this walk does not answer. `a..b` stops before `a`, and only
+ * when `a` lies on `b`'s chain; otherwise the log answers it as before.
+ */
+function primedChain(git: Git, from: string): readonly (readonly [string, PrimedCommit])[] | undefined {
+  if (primed.get(git) === undefined) return undefined
+  const range = RANGE.exec(from)
+  const tip = range?.[2] ?? TIP_ONLY.exec(from)?.[1]
+  if (tip === undefined) return undefined
+  const stop = range?.[1]
+  const chain: (readonly [string, PrimedCommit])[] = []
+  let sha: string | undefined = tip
+  while (sha !== undefined && sha !== stop) {
+    const commit = primedCommit(git, sha, `readRecords ${from}:`)
+    if (commit === undefined) return undefined
+    chain.push([sha, commit])
+    sha = commit.parent
+  }
+  // A range whose base is not on the tip's chain excludes what the base reaches,
+  // which this walk cannot see; the log answers it.
+  if (stop !== undefined && sha !== stop) {
+    debugLine(`record cache miss: readRecords ${from}: ${stop} is not on ${tip}'s first-parent chain`)
+    return undefined
+  }
+  return chain
+}
+
+/**
  * A `checked` or `withdrawn` write that arrived on a chain which had already
  * ended (@i/10-yrd/24635, @i/10-yrd/24492). The refusal is correct in every
  * case; the TYPE exists because its two causes want opposite handling and the
@@ -400,7 +515,11 @@ async function genesis(git: Git): Promise<string> {
 
 /** The record at `sha`. A commit there that is not a record is loud: a change's ref holds only records. */
 export async function readRecord(git: Git, sha: string): Promise<ChangeRecord> {
-  const [id, at, block, body] = (await git(["log", "-1", `--format=${RECORD_FORMAT}`, sha])).split("\x00")
+  const held = primedCommit(git, sha, "readRecord")
+  const [id, at, block, body] =
+    held === undefined
+      ? (await git(["log", "-1", `--format=${RECORD_FORMAT}`, sha])).split("\x00")
+      : [sha, held.at, held.block, held.body]
   const record =
     id === undefined || at === undefined || block === undefined || body === undefined
       ? undefined
@@ -419,12 +538,17 @@ async function carriedFrom(git: Git, sha: string): Promise<readonly (readonly [s
 export async function readRecords(git: Git, from: string): Promise<readonly ChangeRecord[]> {
   // %x00 separates the fields and %x01 the records, because a commit message
   // holds newlines and a naive split would cut a record in half.
-  const out = await git(["log", "--first-parent", `--format=${RECORD_FORMAT}%x01`, from])
+  const held = primedChain(git, from)
+  const rows =
+    held === undefined
+      ? (await git(["log", "--first-parent", `--format=${RECORD_FORMAT}%x01`, from]))
+          .split("\x01")
+          .map((record) => record.trim())
+          .filter((row) => row !== "")
+          .map((row) => row.split("\x00"))
+      : held.map(([sha, commit]) => [sha, commit.at, commit.block, commit.body])
   const records: ChangeRecord[] = []
-  for (const record of out.split("\x01")) {
-    const row = record.trim()
-    if (row === "") continue
-    const [sha, at, block, body] = row.split("\x00")
+  for (const [sha, at, block, body] of rows) {
     if (sha === undefined || at === undefined || block === undefined || body === undefined) continue
     const parsed = recordFrom(sha, at, body, block)
     // The tip is the first record this reads, and the one check that these

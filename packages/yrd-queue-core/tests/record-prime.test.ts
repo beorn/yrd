@@ -1,0 +1,205 @@
+/**
+ * @failure  Every round re-read each ended change one record at a time: with-notify's repair pass cost one
+ *           `log -1` and one `log --first-parent` per change, 847 to 1,152 pairs a round on the garage, 4 to
+ *           10 s of silence in the compose window (@i/10-yrd/25303 f1, receipt f/01-measure.log). The queue
+ *           read already held every change's tip; its one record log now reads each whole chain and primes
+ *           the readers.
+ * @level    l2 (a real remote, real submits and real records, read by the real queue read)
+ * @consumer every per-change record reader in a round (with-notify's resend and told, endings, withdraw)
+ */
+
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
+import { appendRecord, gitIn, readQueue, readRecord, readRecords, submit, tipOf, type Git } from "../src/index.ts"
+import { primeRecords } from "../src/records.ts"
+
+const roots: string[] = []
+afterAll(() => {
+  for (const root of roots) rmSync(root, { force: true, recursive: true })
+})
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllEnvs()
+})
+
+type Fixture = Readonly<{
+  git: Git
+  target: string
+  branchHeads: readonly string[]
+  /** Per change: the failed record's sha and the sent record on top of it. */
+  chains: readonly Readonly<{ branch: string; head: string; failed: string; sent: string }>[]
+}>
+
+/** Three submitted changes, each extended to opened → failed → sent and pushed, as a round leaves them. */
+async function queueWithChains(): Promise<Fixture> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-core-record-prime-"))
+  roots.push(root)
+  const remote = join(root, "remote.git")
+  const work = join(root, "work")
+  const seed = gitIn(root)
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, work])
+  const git = gitIn(work)
+  await git(["config", "user.email", "queue@yrd.test"])
+  await git(["config", "user.name", "yrd"])
+  await git(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(work, ".yrd.yml"), "{}\n")
+  await git(["add", ".yrd.yml"])
+  await git(["commit", "--quiet", "-m", "declare the queue"])
+  await git(["commit", "--quiet", "--allow-empty", "-m", "the target moves on"])
+  await git(["push", "--quiet", "origin", "main"])
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  const chains: { branch: string; head: string; failed: string; sent: string }[] = []
+  for (const name of ["task/one", "task/two", "task/three"]) {
+    await git(["checkout", "--quiet", "-b", name, "main"])
+    writeFileSync(join(work, `${name.replace("/", "-")}.txt`), `${name}\n`)
+    await git(["add", "."])
+    await git(["commit", "--quiet", "-m", name])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    await git(["push", "--quiet", "origin", `${head}:refs/heads/${name}`])
+    await submit(git, "origin", { branch: name, submitter: "@dev/1", target: { branch: "main", remote: "origin" } })
+    const change = { branch: name, head }
+    const failed = await appendRecord(git, "main", {
+      change,
+      kind: "failed",
+      subject: `${name} failed`,
+      trailers: [["Reason", "conflict"]],
+    })
+    const sent = await appendRecord(git, "main", {
+      change,
+      kind: "sent",
+      subject: `${name} told`,
+      trailers: [
+        ["For", failed],
+        ["To", "submitter"],
+        ["Delivery", "sent"],
+        ["State", "failed"],
+      ],
+    })
+    chains.push({ branch: name, head, failed, sent })
+  }
+  await git(["push", "--quiet", "origin", "refs/yrd/main/*:refs/yrd/main/*"])
+  return { git, target, branchHeads: chains.map(({ head }) => head), chains }
+}
+
+/** A Git that records every invocation and the stdout of each `log`, over the fixture's own Git. */
+function counting(git: Git): Readonly<{ git: Git; calls: string[][]; logs: string[] }> {
+  const calls: string[][] = []
+  const logs: string[] = []
+  const counted: Git = async (args, input) => {
+    calls.push([...args])
+    const out = await git(args, input)
+    if (args[0] === "log") logs.push(out)
+    return out
+  }
+  return { git: counted, calls, logs }
+}
+
+describe("the queue read's one record log primes every per-change reader (25303 f1)", () => {
+  it("answers N changes' record reads with no process after the read's single record log", async () => {
+    const fixture = await queueWithChains()
+    const { git, calls } = counting(fixture.git)
+
+    const read = await readQueue(git, "origin", "main", fixture.target)
+    const readLogs = calls.filter((args) => args[0] === "log")
+    expect(readLogs).toHaveLength(1)
+    expect(readLogs[0]).toContain("--first-parent")
+
+    calls.length = 0
+    for (const { failed, sent } of fixture.chains) {
+      await readRecord(git, sent)
+      await readRecord(git, failed)
+      await readRecords(git, sent)
+      await readRecords(git, `${failed}..${sent}`)
+    }
+    expect(read.changes).toHaveLength(3)
+    expect(calls).toEqual([])
+  })
+
+  it("answers exactly as the unprimed readers do, record for record", async () => {
+    const fixture = await queueWithChains()
+    const { git } = counting(fixture.git)
+    await readQueue(git, "origin", "main", fixture.target)
+    // A different Git instance holds no prime: it reads the way every reader did before.
+    const unprimed: Git = (args, input) => fixture.git(args, input)
+
+    for (const { failed, sent } of fixture.chains) {
+      expect(await readRecord(git, sent)).toEqual(await readRecord(unprimed, sent))
+      expect(await readRecord(git, failed)).toEqual(await readRecord(unprimed, failed))
+      const whole = await readRecords(git, sent)
+      expect(whole.map(({ kind }) => kind)).toEqual(["opened", "failed", "sent"])
+      expect(whole).toEqual(await readRecords(unprimed, sent))
+      expect(await readRecords(git, `${failed}..${sent}`)).toEqual(await readRecords(unprimed, `${failed}..${sent}`))
+    }
+  })
+
+  it("keeps the queue read's own tip records exactly as the tip-only read gave them", async () => {
+    const fixture = await queueWithChains()
+    const read = await readQueue(fixture.git, "origin", "main", fixture.target)
+    const unprimed: Git = (args, input) => fixture.git(args, input)
+
+    const tips = read.changes.map((entry) => tipOf(entry.change))
+    expect(tips.map(({ sha }) => sha).sort()).toEqual(fixture.chains.map(({ sent }) => sent).sort())
+    for (const tip of tips) expect(tip).toEqual(await readRecord(unprimed, tip.sha))
+  })
+
+  it("never reads into the target's history: no primed commit is on main or is a change's head", async () => {
+    const fixture = await queueWithChains()
+    const { git, logs } = counting(fixture.git)
+    await readQueue(git, "origin", "main", fixture.target)
+
+    const primedShas = (logs[0] ?? "")
+      .split("\x01")
+      .map((row) => row.replace(/^\n/u, "").split("\x00")[0]?.trim() ?? "")
+      .filter((sha) => sha !== "")
+    const onMain = new Set(
+      (await fixture.git(["rev-list", "--first-parent", "origin/main"])).split("\n").filter(Boolean),
+    )
+    // Three chains of three records, plus the one shared genesis.
+    expect(primedShas).toHaveLength(10)
+    expect(primedShas.filter((sha) => onMain.has(sha))).toEqual([])
+    expect(primedShas.filter((sha) => fixture.branchHeads.includes(sha))).toEqual([])
+  })
+
+  it("reads a record written after the prime the way it always did, one process, and names the miss", async () => {
+    const fixture = await queueWithChains()
+    const { git, calls } = counting(fixture.git)
+    await readQueue(git, "origin", "main", fixture.target)
+    const first = fixture.chains[0]
+    if (first === undefined) throw new Error("fixture has no chain")
+    const later = await appendRecord(fixture.git, "main", {
+      change: { branch: first.branch, head: first.head },
+      kind: "sent",
+      subject: "told again",
+      trailers: [
+        ["For", first.failed],
+        ["To", "submitter"],
+        ["Delivery", "sent"],
+        ["State", "failed"],
+      ],
+    })
+    vi.stubEnv("DEBUG", "yrd*")
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined)
+
+    calls.length = 0
+    const record = await readRecord(git, later)
+
+    expect(record.sha).toBe(later)
+    expect(calls).toEqual([["log", "-1", expect.stringContaining("--format="), later]])
+    expect(stderr).toHaveBeenCalledWith(`DEBUG yrd:queue:records record cache miss: readRecord ${later}`)
+  })
+
+  it("warns with the numbers when one prime passes ten times the garage's measured size", () => {
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined)
+    const row = (index: number) =>
+      `${index.toString(16).padStart(40, "0")}\x00\x002026-09-23T13:00:00-07:00\x00\x00x\n\x01`
+    const output = Array.from({ length: 75_001 }, (_, index) => row(index + 1)).join("\n")
+    const git: Git = async () => ""
+
+    expect(primeRecords(git, output)).toHaveLength(75_001)
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining("read 75001 commits"))
+  })
+})

@@ -1537,7 +1537,8 @@ describe("a queue run", () => {
     expect(logRecords(outcome)[kinds.indexOf("queue")]).toMatchObject({ kind: "queue", queue: expect.any(String) })
     // The preamble's Git rows are still journaled: they sit between the header
     // and the queue record, which is where a died-in-preamble run's evidence is.
-    expect(kinds.slice(1, kinds.indexOf("queue")).every((kind) => kind === "git")).toBe(true)
+    // The queue read is part of that preamble and is timed as a `step` (25303 box 1).
+    expect(kinds.slice(1, kinds.indexOf("queue")).every((kind) => kind === "git" || kind === "step")).toBe(true)
     // Addendum 2/T1: every ordinary run invocation is linked before the run
     // summarizes it, including successful calls rebound to a worktree.
     const runRecords = logRecords(outcome)
@@ -4931,6 +4932,68 @@ describe("the target's setup", () => {
     const setupRows = logRecords(outcome).filter((record) => record.kind === "check" && record.name === "setup")
     expect(setupRows).toHaveLength(6)
     expect(setupRows.filter((record) => record.end === undefined)).toHaveLength(3)
+  })
+
+  /**
+   * @i/10-yrd/25303 box 1. A compose is one git-super process whose settle rows
+   * are written only after it returns, and a prepare and the queue read had no
+   * rows of their own: on the garage each was a 20 to 28 s silence in the run
+   * journal. Each is now a timed `step`: a start row, then an end row with `ms`.
+   * The compose here is made slow on purpose, so the end row's `ms` is shown to
+   * span the step rather than to exist.
+   */
+  it("brackets the queue read, each compose and each prepare with timed step rows (25303 box 1)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    const slowMs = 300
+    await using runner = createProcess({ cwd: w.work })
+    const slowCompose = {
+      ...runner,
+      run: async (request: Parameters<typeof runner.run>[0]) => {
+        if (request.argv.includes("super") && request.argv.includes("merge")) {
+          await new Promise((resolve) => setTimeout(resolve, slowMs))
+        }
+        return runner.run(request)
+      },
+    }
+
+    const outcome = await queueRun({
+      ...(await w.options({ exit: 0, setup: w.setupCommand(0) })),
+      process: slowCompose,
+    })
+
+    expect(outcome.merged).toEqual(["task/one"])
+    const records = logRecords(outcome)
+    const at = (predicate: (record: Record<string, unknown>) => boolean) => records.findIndex(predicate)
+    const bracketed = (name: string, phase: string) => {
+      const start = at((row) => row.kind === "step" && row.name === name && row.phase === phase && row.ms === undefined)
+      const end = at(
+        (row) =>
+          row.kind === "step" &&
+          row.name === name &&
+          row.phase === phase &&
+          typeof row.ms === "number" &&
+          row.start === records[start]?.start,
+      )
+      return { start, end, ms: records[end]?.ms }
+    }
+    for (const [name, phase] of [
+      ["read", "run"],
+      ["compose", "submit"],
+      ["prepare", "submit"],
+      ["compose", "merge"],
+      ["prepare", "merge"],
+    ] as const) {
+      const step = bracketed(name, phase)
+      expect({ name, phase, started: step.start >= 0 }).toEqual({ name, phase, started: true })
+      expect({ name, phase, endsAfterStart: step.end > step.start }).toEqual({ name, phase, endsAfterStart: true })
+    }
+    // A compose ends before the prepare that uses its merge commit starts, in both phases.
+    for (const phase of ["submit", "merge"]) {
+      expect(bracketed("compose", phase).end).toBeLessThan(bracketed("prepare", phase).start)
+      expect(bracketed("compose", phase).ms).toBeGreaterThanOrEqual(slowMs)
+    }
+    expect(records.filter((row) => row.kind === "step" && row.threw === true)).toEqual([])
   })
 
   /**

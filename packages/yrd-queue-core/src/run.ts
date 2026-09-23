@@ -515,15 +515,24 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       { cause: first },
     )
   }
+  // The read is the run's own, not a change's: `target` and `base`, never
+  // `branch` and `head`, which a journal reader takes to name a change. Its
+  // `base` is the target it read at: the round's start, or, for the prefetch
+  // and the final re-read, the target the head's merge left (25301).
+  const readStep = (at: string) => ({ base: at, name: "read", phase: "run", target: options.target.branch })
   const read = async (at = targetSha) => {
     try {
-      return await readQueue(git, options.target.remote, options.target.branch, at)
+      return await timedStep(log, readStep(at), () =>
+        readQueue(git, options.target.remote, options.target.branch, at),
+      )
     } catch (error) {
       if (retried !== undefined) throw failedAgain(retried, error)
       if (!(error instanceof CapturedQueueObjectsUnavailable)) throw error
       retried = error
       try {
-        return await readQueue(git, options.target.remote, options.target.branch, at)
+        return await timedStep(log, readStep(at), () =>
+          readQueue(git, options.target.remote, options.target.branch, at),
+        )
       } catch (again) {
         throw failedAgain(error, again)
       }
@@ -1315,28 +1324,67 @@ type ComposedCandidate =
     }>
   | Readonly<{ kind: "failed"; detail: SuperMergeDetail; worktree: Worktree }>
 
+/**
+ * Time one step of the round that is neither a check nor a program, so the
+ * journal never goes silent across it (@i/10-yrd/25303 box 1): a `step` row as
+ * it starts, and one with `end` and `ms` as it ends, `threw` when it threw. A
+ * compose is one git-super process whose settle rows are written only after it
+ * returns; without these rows it was a 20 to 28 s silence on the garage.
+ */
+async function timedStep<T>(
+  log: Pick<QueueRunLog, "write">,
+  about: Readonly<
+    { name: string; phase: string } & ({ branch: string; head: string } | { target: string; base: string })
+  >,
+  work: () => Promise<T>,
+): Promise<T> {
+  const start = new Date().toISOString()
+  const began = performance.now()
+  log.write({ ...about, kind: "step", start })
+  const ended = (threw: boolean) =>
+    log.write({
+      ...about,
+      end: new Date().toISOString(),
+      kind: "step",
+      ms: Math.round(performance.now() - began),
+      start,
+      ...(threw ? { threw: true } : {}),
+    })
+  try {
+    const result = await work()
+    ended(false)
+    return result
+  } catch (error) {
+    ended(true)
+    throw error
+  }
+}
+
 /** Compose and settle the exact tree a phase will judge, then materialize that final commit before setup or checks run. */
 async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePhase): Promise<ComposedCandidate> {
   const { head } = entry.change
-  const composed = await verifyCandidate({
-    git: run.git,
-    repo: run.options.repo,
-    targetHead: run.targetSha,
-    head,
-    path: join(run.worktrees, "compose", phase, head.slice(0, 12)),
-    message: mergeMessage(run, entry),
-    env: run.options.env,
-    process: run.options.process,
-    hooksPath: run.hooksPath,
-    worktree: {
+  const step = { branch: entry.change.branch, head, phase }
+  const composed = await timedStep(run.log, { ...step, name: "compose" }, () =>
+    verifyCandidate({
+      git: run.git,
+      repo: run.options.repo,
+      targetHead: run.targetSha,
+      head,
+      path: join(run.worktrees, "compose", phase, head.slice(0, 12)),
+      message: mergeMessage(run, entry),
       env: run.options.env,
-      gitOptions: gitInvocationOptions(run.options, run.log),
-      plumbing: run.plumbing,
-      populateReference: run.options.populateReference,
       process: run.options.process,
-      selection: run.options.selection,
-    },
-  })
+      hooksPath: run.hooksPath,
+      worktree: {
+        env: run.options.env,
+        gitOptions: gitInvocationOptions(run.options, run.log),
+        plumbing: run.plumbing,
+        populateReference: run.options.populateReference,
+        process: run.options.process,
+        selection: run.options.selection,
+      },
+    }),
+  )
   if (composed.state === "failed") {
     return { detail: composed.verifying.detail, kind: "failed", worktree: composed.failedWorktree }
   }
@@ -1387,7 +1435,9 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
   }
   let worktree: PreparedWorktree
   try {
-    worktree = await run.steps.prepare(run, entry, mergeCommit, join(run.worktrees, phase, head.slice(0, 12)), phase)
+    worktree = await timedStep(run.log, { ...step, name: "prepare" }, () =>
+      run.steps.prepare(run, entry, mergeCommit, join(run.worktrees, phase, head.slice(0, 12)), phase),
+    )
   } catch (error) {
     // The one place that knows both facts the attribution needs: which phase's
     // candidate this was, and what composition settled into it.
