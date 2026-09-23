@@ -1784,4 +1784,95 @@ describe("a diverged component the merge composes", () => {
     expect(await queueSub(["cat-file", "-e", `${changeSide}^{commit}`])).toBe("")
     expect(await queueSub(["cat-file", "-e", `${composed}^{commit}`])).toBe("")
   })
+
+  /**
+   * 24977 (@cto e8368e85 constraint 2; the load-bearing line of the build). The
+   * change was judged while its pin still contained the component's main, so
+   * the submit checks saw no composition; by its merge turn main had moved and
+   * the MERGE phase composed a tree no check had read. The submit-level checks
+   * run again on that composed candidate before it lands.
+   */
+  it("runs the submit checks again on a candidate the merge phase composed (24977)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const ran = join(w.work, "..", "submit-check-runs.txt")
+    const check = { on: ["submit"], run: `echo "$YRD_CANDIDATE_SHA" >> '${ran}'` }
+    await submitGitlink(w, "task/first-side", pins.mainSide)
+    await submitGitlink(w, "task/second-side", pins.changeSide)
+    const landing = await queueRun(await w.options(check))
+    expect(landing).toMatchObject({ exitCode: 0, failed: [], merged: ["task/first-side"], stuck: [] })
+    writeFileSync(ran, "")
+
+    const outcome = await queueRun(await w.options(check))
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/second-side"], stuck: [] })
+    const target = await remoteTip(w.git, "refs/heads/main")
+    expect(readFileSync(ran, "utf8").split("\n").filter(Boolean)).toEqual([target])
+  })
+
+  /** 24977 constraint 1: the re-cut is recorded, naming both heads, and nothing is amended. */
+  it("journals a recut row naming the change head, the component main merged in, and both new commits (24977)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    await submitGitlink(w, "task/first-side", pins.mainSide)
+    const head = await submitGitlink(w, "task/second-side", pins.changeSide)
+    await queueRun(await w.options())
+
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/second-side"] })
+    const target = await remoteTip(w.git, "refs/heads/main")
+    const composed = await gitlinkAt(w, target)
+    const recuts = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.kind === "recut")
+    expect(recuts).toMatchObject([
+      {
+        branch: "task/second-side",
+        candidate: target,
+        composed,
+        head,
+        main: pins.mainSide,
+        path: "submodule",
+        phase: "merge",
+      },
+    ])
+    // Never an amend: the change's own head is untouched and still the second parent's ancestor.
+    expect((await w.git(["rev-parse", `refs/remotes/origin/task/second-side`]).catch(() => head)).trim()).toBe(head)
+    const merged = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/second-side", head })))
+    ).find((record) => record.kind === "merged")
+    expect(trailer(merged!, "Recut")).toBe(`submodule ${pins.changeSide} + ${pins.mainSide} -> ${composed}`)
+  })
+
+  /**
+   * 24977 Q3 (@cto 0a3e3838): a check that fails ONLY on the composed tree is a
+   * semantic conflict with main. It is the submitter's bounce, named
+   * `recut-check`, and the line does not stop on it.
+   */
+  it("bounces a recut whose re-run check fails while the head alone passes, without stopping the line (24977)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    // Passes on either side alone; fails only where both files meet.
+    const check = {
+      on: ["submit"],
+      run: "! { test -f submodule/main-side.txt && test -f submodule/change-side.txt; }",
+    }
+    await submitGitlink(w, "task/first-side", pins.mainSide)
+    const head = await submitGitlink(w, "task/second-side", pins.changeSide)
+    await queueRun(await w.options(check))
+
+    const outcome = await queueRun(await w.options(check))
+
+    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/second-side"], merged: [], stuck: [] })
+    const failed = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/second-side", head })))
+    ).find((record) => record.kind === "failed")
+    expect(failed).toBeDefined()
+    expect(trailer(failed!, "Reason")).toBe("recut-check")
+    expect(trailer(failed!, "Detail")).toContain("semantic conflict with main")
+    expect(trailer(failed!, "Detail")).toContain("submodule-check")
+  })
 })
