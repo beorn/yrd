@@ -146,6 +146,7 @@ type World = Readonly<{
     check: Readonly<{
       exit?: number
       sleep?: number
+      holdUntil?: string
       timeoutMs?: number
       everywhere?: boolean
       setup?: string
@@ -201,6 +202,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     [
       "#!/bin/sh",
       `echo "started" >> "${startedLog}"`,
+      'if [ -n "${FAKE_HOLD_UNTIL:-}" ]; then while [ ! -e "$FAKE_HOLD_UNTIL" ]; do sleep 0.01; done; fi',
       'sleep "${FAKE_SLEEP:-0}"',
       `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
       'if [ -f one.txt ] || [ "${FAKE_EVERYWHERE:-0}" = 1 ]; then exit "${FAKE_EXIT:-0}"; fi',
@@ -236,7 +238,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     options: async (check) => ({
       checks: [
         {
-          environmentPassthrough: ["FAKE_EXIT", "FAKE_SLEEP", "FAKE_EVERYWHERE"],
+          environmentPassthrough: ["FAKE_EXIT", "FAKE_SLEEP", "FAKE_EVERYWHERE", "FAKE_HOLD_UNTIL"],
           name: "verify",
           on: check.on,
           run: fakeCheck,
@@ -249,6 +251,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
         FAKE_EVERYWHERE: check.everywhere === true ? "1" : "0",
         FAKE_EXIT: String(check.exit ?? 0),
         FAKE_SLEEP: String(check.sleep ?? 0),
+        FAKE_HOLD_UNTIL: check.holdUntil ?? "",
         PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
       },
       notify: [{ name: "recorder", on: ["merged", "failed", "stuck", "merged-direct"], run: notifier }],
@@ -627,20 +630,28 @@ it("discards a resubmitted event check once and continues with the next change",
   const first = await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
 
-  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25 })), notify: [] })
-  await checkRunning(w)
-  await w.git(["checkout", "--quiet", "task/a"])
-  writeFileSync(join(w.work, "resubmitted.txt"), "new head\n")
-  await w.git(["add", "resubmitted.txt"])
-  await w.git(["commit", "--quiet", "-m", "resubmit task/a"])
-  const next = (await w.git(["rev-parse", "HEAD"])).trim()
-  expect(next).not.toBe(first)
-  const resubmitted = await submit(w.git, "origin", {
-    branch: "task/a",
-    target: { remote: "origin", branch: "main" },
-    submitter: "@dev/2",
-  })
-  expect(resubmitted).toMatchObject({ head: next, retry: false })
+  const release = join(w.workdir, "release-resubmitted-check")
+  const running = queueRun({ ...(await w.options({ exit: 0, holdUntil: release })), notify: [] })
+  const next = await (async () => {
+    try {
+      await checkRunning(w)
+      await w.git(["checkout", "--quiet", "task/a"])
+      writeFileSync(join(w.work, "resubmitted.txt"), "new head\n")
+      await w.git(["add", "resubmitted.txt"])
+      await w.git(["commit", "--quiet", "-m", "resubmit task/a"])
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      expect(head).not.toBe(first)
+      const resubmitted = await submit(w.git, "origin", {
+        branch: "task/a",
+        target: { remote: "origin", branch: "main" },
+        submitter: "@dev/2",
+      })
+      expect(resubmitted).toMatchObject({ head, retry: false })
+      return head
+    } finally {
+      writeFileSync(release, "")
+    }
+  })()
 
   const outcome = await running
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/b"], failed: [], stuck: [] })
