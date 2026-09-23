@@ -38,8 +38,8 @@
  * racing on one change lose loudly instead of interleaving.
  */
 
-import { createShellBackend, type CommitMeta, type GitomicBackend } from "gitomic"
-import type { Git } from "./git.ts"
+import type { CommitMeta, GitomicBackend } from "gitomic"
+import { createLegacyBackend, type Git } from "./git.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
 
 type LegacyBackend = GitomicBackend &
@@ -53,7 +53,7 @@ export type LegacyStore = Readonly<{ repo: string; backend: LegacyBackend }>
  * legacy adapter uses. The optional backend is an internal test seam; queue-core's
  * public functions keep their existing signatures.
  */
-export async function legacyStore(git: Git, backend: GitomicBackend = createShellBackend()): Promise<LegacyStore> {
+export async function legacyStore(git: Git, backend: GitomicBackend = createLegacyBackend()): Promise<LegacyStore> {
   const repo = (await git(["rev-parse", "--absolute-git-dir"])).trim()
   if (repo === "") throw new Error("legacy queue store: git rev-parse returned an empty repository store")
   for (const capability of ["fetchRefs", "listRefs", "publish", "readHistory"] as const) {
@@ -557,7 +557,7 @@ export function legacyTrailers(message: string): readonly (readonly [string, str
     }
     const match = /^([A-Za-z0-9][A-Za-z0-9-]*):[ \t]?(.*)$/u.exec(line)
     if (match === null) return []
-    parsed.push([match[1] as string, match[2] ?? ""])
+    parsed.push([match[1] as string, (match[2] ?? "").trimEnd()])
   }
   return parsed
 }

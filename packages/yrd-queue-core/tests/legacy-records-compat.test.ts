@@ -12,11 +12,20 @@ import { createProcess } from "@yrd/process"
 import { afterAll, expect, it, vi } from "vitest"
 import { appendRecord, gitIn, writePause } from "../src/index.ts"
 import { gitEnvironment } from "../src/git.ts"
+import { legacyTrailers } from "../src/legacy-records.ts"
 
 const roots: string[] = []
 
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
+})
+
+it("matches Git's legacy trailer projection at whitespace and body boundaries", () => {
+  expect(legacyTrailers("subject\n\nRecord: opened   \nChange: task/one\t \n")).toEqual([
+    ["Record", "opened"],
+    ["Change", "task/one"],
+  ])
+  expect(legacyTrailers("subject\n\nnot a trailer\nRecord: opened\nChange: task/one\n")).toEqual([])
 })
 
 it("keeps the exact legacy record and pause object ids under a fixed clock", async () => {

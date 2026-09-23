@@ -106,14 +106,7 @@ import { changeName, changeRef, type Change } from "./refs.ts"
 import { queueFormat } from "./events.ts"
 import { eventQueueRun } from "./event-run.ts"
 import { composed, type RingOptions } from "./rings.ts"
-import {
-  CapturedQueueObjectsUnavailable,
-  readObscuredEndings,
-  readQueue,
-  remoteUrl,
-  type QueueEntry,
-  type QueueRead,
-} from "./remote.ts"
+import { readObscuredEndings, readQueue, remoteUrl, type QueueEntry, type QueueRead } from "./remote.ts"
 import { GitlinkNotOnRemote, ReferenceUnpopulated } from "./reference.ts"
 import { setupStuckCode, setupStuckNext, transportFaultIn } from "./setup-transport.ts"
 import { inLine, openedAt, tipOf } from "./state.ts"
@@ -497,32 +490,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     return await eventQueueRun(options, { git, gitOptions, hooksPath, log, selected, url })
   }
   const targetSha = options.targetSha
-  // One captured-object refusal earns one retry across the whole round. Keep
-  // that first failure even after a successful retry: if the post-judge read
-  // then fails, the one error names both facts rather than erasing the first.
-  let retried: CapturedQueueObjectsUnavailable | undefined
-  const failedAgain = (first: CapturedQueueObjectsUnavailable, error: unknown): AggregateError => {
-    const later = error instanceof Error ? error.message : String(error)
-    return new AggregateError(
-      [first, error],
-      `${first.message}; after one queue-read retry, another read failed: ${later}`,
-      { cause: first },
-    )
-  }
-  const read = async () => {
-    try {
-      return await readQueue(git, options.target.remote, options.target.branch, targetSha)
-    } catch (error) {
-      if (retried !== undefined) throw failedAgain(retried, error)
-      if (!(error instanceof CapturedQueueObjectsUnavailable)) throw error
-      retried = error
-      try {
-        return await readQueue(git, options.target.remote, options.target.branch, targetSha)
-      } catch (again) {
-        throw failedAgain(error, again)
-      }
-    }
-  }
+  const read = () => readQueue(git, options.target.remote, options.target.branch, targetSha)
   const queue = await read()
   // A captured tip alone cannot say whether its chain has ended, and a chain
   // that has ended leaves the candidate set: admission, bookkeeping and the

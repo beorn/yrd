@@ -50,25 +50,6 @@ export type QueueObservation = Readonly<{
   fence: Readonly<{ prefixes: readonly string[]; refs: readonly Readonly<{ ref: string; oid: string }>[] }>
 }>
 
-/** One captured queue reading whose exact-object fetch failed. */
-export class CapturedQueueObjectsUnavailable extends Error {
-  readonly kind = "captured-queue-objects-unavailable"
-
-  constructor(
-    readonly remote: string,
-    readonly queue: string,
-    readonly capturedTarget: string,
-    readonly detail: string,
-    cause: unknown,
-  ) {
-    super(
-      `${remote}#${queue} at ${capturedTarget}: could not fetch captured queue objects; read the queue again: ${detail}`,
-      { cause },
-    )
-    this.name = "CapturedQueueObjectsUnavailable"
-  }
-}
-
 /**
  * Every change at the remote, read: one entry per change ref, and nothing for
  * a branch nobody submitted (E2; `submit` is the one writer of a change), with
@@ -104,8 +85,9 @@ export async function readQueue(
   // never fetches thousands of unrelated branch objects, while the prefix
   // fetch both names every legacy record ref and brings its history into
   // Gitomic's private namespace. Neither operation moves an application ref.
-  const headRefs = await store.backend.listRefs(store.repo, "refs/heads/", remote)
+  const listedHeadRefs = await store.backend.listRefs(store.repo, "refs/heads/", remote)
   const queueRefs = await store.backend.fetchRefs(store.repo, queueRefPrefix(target), remote)
+  const headRefs = new Map(listedHeadRefs)
   const heads = new Map<string, string>()
   const prefixes = ["refs/heads/", `${queueRefPrefix(target)}/`]
   const changeRefs: Array<Readonly<{ change: Change; oid: string; ref: string }>> = []
@@ -122,6 +104,34 @@ export async function readQueue(
     // at or below it (direct.ts; E5). `submit` refuses to open one, so this
     // is only about the ones a remote already holds.
     if (change !== undefined && change.branch !== target) changeRefs.push({ change, oid, ref })
+  }
+
+  // Listing heads avoids downloading thousands of unrelated draft objects.
+  // Fetch only the current heads of submitted branches: readDrafts must be
+  // able to date a branch pushed again after submit even when this clone has
+  // never seen the new object. Deleted branches remain valid withdrawn changes
+  // and therefore contribute no named ref to this exact fetch.
+  const submittedHeadsByBranch = new Map<string, Set<string>>()
+  for (const { change } of changeRefs) {
+    const heads = submittedHeadsByBranch.get(change.branch) ?? new Set<string>()
+    heads.add(change.head)
+    submittedHeadsByBranch.set(change.branch, heads)
+  }
+  const submittedHeadRefs = [...submittedHeadsByBranch].flatMap(([branch, submittedHeads]) => {
+    const ref = `refs/heads/${branch}`
+    const advertised = headRefs.get(ref)
+    return advertised !== undefined && !submittedHeads.has(advertised) ? [ref] : []
+  })
+  const missingHeadRefs = await missingObjects(
+    git,
+    submittedHeadRefs.map((ref) => ({ oid: headRefs.get(ref) as string, ref })),
+  )
+  if (missingHeadRefs.length > 0) {
+    const fetchedHeads = await store.backend.fetchRefs(store.repo, missingHeadRefs, remote)
+    for (const [ref, oid] of fetchedHeads) {
+      headRefs.set(ref, oid)
+      heads.set(ref.slice("refs/heads/".length), oid)
+    }
   }
 
   const pauseSha = queueRefs.get(pause)
@@ -190,6 +200,28 @@ export async function readQueue(
       },
     },
   }
+}
+
+/** The named refs whose advertised objects this clone lacks, in one local object query. */
+async function missingObjects(
+  git: Git,
+  refs: readonly Readonly<{ oid: string; ref: string }>[],
+): Promise<readonly string[]> {
+  if (refs.length === 0) return []
+  const output = await git(
+    ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+    `${refs.map(({ oid }) => oid).join("\n")}\n`,
+  )
+  const lines = output.trimEnd().split("\n")
+  if (lines.length !== refs.length) {
+    throw new Error(`git cat-file answered ${lines.length} submitted branch heads, expected ${refs.length}`)
+  }
+  return refs.flatMap(({ oid, ref }, index) => {
+    const line = lines[index]
+    if (line === `${oid} missing`) return [ref]
+    if (line?.startsWith(`${oid} `)) return []
+    throw new Error(`git cat-file gave a malformed answer for submitted branch head ${ref}: ${JSON.stringify(line)}`)
+  })
 }
 
 /**

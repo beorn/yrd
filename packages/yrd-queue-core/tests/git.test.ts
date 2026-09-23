@@ -665,6 +665,51 @@ describe("offTheTarget", () => {
 })
 
 describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
+  it("does not recurse into a real child whose remote is broken when submodule.recurse=true", async () => {
+    const root = temporaryRoot("gitomic-no-submodule-recursion")
+    const childRemote = join(root, "child.git")
+    const childWork = join(root, "child-work")
+    const parentRemote = join(root, "parent.git")
+    const parentWork = join(root, "parent-work")
+    const reader = join(root, "reader")
+    const seed = gitIn(root)
+
+    await seed(["init", "--quiet", "--bare", "--initial-branch=main", childRemote])
+    await seed(["clone", "--quiet", childRemote, childWork])
+    const child = gitIn(childWork)
+    await child(["config", "user.email", "queue@yrd.test"])
+    await child(["config", "user.name", "yrd"])
+    writeFileSync(join(childWork, "child.txt"), "child\n")
+    await child(["add", "child.txt"])
+    await child(["commit", "--quiet", "-m", "child"])
+    await child(["push", "--quiet", "origin", "main"])
+
+    await seed(["init", "--quiet", "--bare", "--initial-branch=main", parentRemote])
+    await seed(["clone", "--quiet", parentRemote, parentWork])
+    const parent = gitIn(parentWork)
+    await parent(["config", "user.email", "queue@yrd.test"])
+    await parent(["config", "user.name", "yrd"])
+    await parent(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", childRemote, "child"])
+    await parent(["commit", "--quiet", "-m", "parent with child"])
+    await parent(["push", "--quiet", "origin", "main"])
+
+    await seed(["-c", "protocol.file.allow=always", "clone", "--quiet", "--recurse-submodules", parentRemote, reader])
+    const read = gitIn(reader)
+    await read(["config", "submodule.recurse", "true"])
+    await gitIn(join(reader, "child"))([
+      "remote",
+      "set-url",
+      "origin",
+      join(root, "child-remote-must-not-be-contacted"),
+    ])
+
+    await parent(["commit", "--quiet", "--allow-empty", "-m", "parent advanced"])
+    await parent(["push", "--quiet", "origin", "main"])
+    const advanced = (await parent(["rev-parse", "HEAD"])).trim()
+
+    await expect(gitRunner.readRemoteCommit(read, "origin", "refs/heads/main")).resolves.toBe(advanced)
+  })
+
   // One packed ref whose object is gone makes every fetch fail with git's "bad
   // object" text, which can name a different ref. The failure must name the
   // dangling ref, its local object, origin's value, and the verified-delete cure.

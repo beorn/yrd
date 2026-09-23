@@ -19,7 +19,7 @@ import { randomUUID } from "node:crypto"
 import { accessSync, constants, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
-import { createShellBackend } from "gitomic"
+import { createShellBackend, type GitomicBackend } from "gitomic"
 import type { QueueObservation } from "./remote.ts"
 
 /** One git invocation, returning its stdout; `input` is its stdin. Throws on a non-zero exit. */
@@ -603,6 +603,14 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   }
 }
 
+/** The one configured Gitomic backend for every legacy queue ref operation. */
+export function createLegacyBackend(): GitomicBackend {
+  return createShellBackend({
+    baseEnv: gitEnvironment(globalThis.process.env),
+    remoteTimeoutMs: GIT_ROOT_INVOCATION_MS,
+  })
+}
+
 export class GitExit extends Error {
   constructor(
     readonly args: readonly string[],
@@ -643,7 +651,7 @@ export async function refAt(
 export async function readRemoteCommit(git: Git, remote: string, ref: string): Promise<string | undefined> {
   const repo = (await git(["rev-parse", "--absolute-git-dir"])).trim()
   if (repo === "") throw new Error(`cannot read ${remote} ${ref}: git returned an empty repository store`)
-  const backend = createShellBackend()
+  const backend = createLegacyBackend()
   if (backend.fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs")
   return (await backend.fetchRefs(repo, ref, remote)).get(ref)
 }
