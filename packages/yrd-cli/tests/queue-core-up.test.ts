@@ -55,6 +55,7 @@ import {
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand, endingCode, openDetail, readListing } from "../src/queue-core-commands.ts"
+import { changesSuffix } from "../src/watch-list.tsx"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
@@ -1972,6 +1973,58 @@ describe("yrd watch's own detail pane (openDetail), one change's evidence", () =
       ["affected-tests", "passed"],
       ["never-ran", "not-run"],
     ])
+  })
+})
+
+describe("yrd list marks a stale verdict (@i/10-yrd/25301, @cto c7115f0f (3))", () => {
+  it("a checked change judged under another check config reads 'not yet judged under <blob>'; a current one does not", async () => {
+    const w = await world()
+    await redeclare(w, ["checks:", "  - typecheck:", "      run: bun run typecheck", ""].join("\n"))
+    const base = (await w.git(["rev-parse", "main"])).trim()
+    const target = { branch: "main", remote: "origin" }
+    const oid = await readRemoteCommit(w.git, "origin", "refs/heads/main")
+    if (oid === undefined) throw new Error("test setup: origin/main was not readable")
+    const config = await readConfig(w.git, oid, target)
+    if (config === undefined) throw new Error("test setup: the target carries no .yrd.yml")
+    const checkedUnder = async (branch: string, blob: string) => {
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, `${branch.slice(5)}.txt`), `${branch}\n`)
+      await w.git(["add", "-A"])
+      await w.git(["commit", "--quiet", "-m", branch])
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", { branch, submitter: "@dev/3", target })
+      await appendRecord(w.git, "main", {
+        change: { branch, head },
+        kind: "checked",
+        subject: "on-submit checks passed",
+        trailers: [
+          ["Config", blob],
+          ["Base", base],
+          ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
+        ],
+      })
+      await w.git([
+        "push",
+        "--quiet",
+        "origin",
+        `${changeRef("main", { branch, head })}:${changeRef("main", { branch, head })}`,
+      ])
+    }
+    await checkedUnder("task/stale", "0".repeat(40))
+    await checkedUnder("task/current", config.blob)
+
+    const { all } = await readListing(w.git as GitRunner, config, w.workdir, oid)
+
+    const stale = all.find((row) => row.branch === "task/stale")
+    expect(stale).toMatchObject({ state: "checked", reason: `not yet judged under ${config.blob.slice(0, 12)}` })
+    expect(changesSuffix(stale!)).toEqual({
+      color: "$fg-muted",
+      text: `not yet judged under ${config.blob.slice(0, 12)}`,
+    })
+    const current = all.find((row) => row.branch === "task/current")
+    expect(current?.state).toBe("checked")
+    expect(current?.reason).toBeUndefined()
   })
 })
 
