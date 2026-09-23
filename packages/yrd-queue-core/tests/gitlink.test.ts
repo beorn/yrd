@@ -1796,7 +1796,7 @@ describe("a diverged component the merge composes", () => {
     const w = await world()
     const pins = await divergentSubmoduleCommits(w)
     const ran = join(w.work, "..", "submit-check-runs.txt")
-    const check = { on: ["submit"], run: `echo "$YRD_CANDIDATE_SHA" >> '${ran}'` }
+    const check = { on: ["submit"], run: `echo "$YRD_CANDIDATE_SHA" >> '${ran}'` } as const
     await submitGitlink(w, "task/first-side", pins.mainSide)
     await submitGitlink(w, "task/second-side", pins.changeSide)
     const landing = await queueRun(await w.options(check))
@@ -1859,7 +1859,7 @@ describe("a diverged component the merge composes", () => {
     const check = {
       on: ["submit"],
       run: "! { test -f submodule/main-side.txt && test -f submodule/change-side.txt; }",
-    }
+    } as const
     await submitGitlink(w, "task/first-side", pins.mainSide)
     const head = await submitGitlink(w, "task/second-side", pins.changeSide)
     await queueRun(await w.options(check))
