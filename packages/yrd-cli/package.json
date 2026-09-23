@@ -13,7 +13,7 @@
     "@yrd/bay": "workspace:*",
     "@yrd/process": "workspace:*",
     "@yrd/queue-core": "workspace:*",
-    "gitomic": "github:beorn/gitomic#d4043b305402fa6f1d40ba04acea27175f2f1408",
+    "gitomic": "^0.3.0",
     "loggily": "^0.11.0",
     "react": "^19.2.0",
     "silvery": "^0.24.1"
