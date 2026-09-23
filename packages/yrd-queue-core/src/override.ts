@@ -288,11 +288,8 @@ export function overrideLine(entry: OverrideEntry, now: number): string {
   return `${entry.check} override expired ${(entry.expiredAt ?? entry.until).toISOString()} (by ${entry.by}${verified})`
 }
 
-/** The table as every JSON reader carries it: always an array, so its absence never reads as "no overrides". */
-export function overrideFacts(
-  table: OverrideTable,
-  now: number,
-): readonly Readonly<{
+/** One override entry as every JSON reader and display carries it. */
+export type OverrideFact = Readonly<{
   check: string
   state: OverrideState
   until: string
@@ -300,7 +297,10 @@ export function overrideFacts(
   verified: boolean
   reason: string
   record: string
-}>[] {
+}>
+
+/** The table as every JSON reader carries it: always an array, so its absence never reads as "no overrides". */
+export function overrideFacts(table: OverrideTable, now: number): readonly OverrideFact[] {
   return table.entries.map((entry) => ({
     by: entry.by,
     check: entry.check,

@@ -11,6 +11,7 @@
  * @consumer the operator reading `yrd watch`
  */
 
+import { queueLine } from "../src/watch-frame.tsx"
 import { mkdirSync, writeFileSync } from "node:fs"
 import type React from "react"
 import { act } from "react"
@@ -1688,6 +1689,26 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       `3 ${W.waiting.word} · ${W.checking.word} task/x for 3:21 · line stopped at task/s since ${clock(new Date(STOP.since))}` +
         ` · last merge ${clock(ago(4 * MINUTE + 50_000))}`,
     )
+  })
+
+  // 25296 C5: a merge check an override holds off is in the queue line, and an
+  // expired override reads as expired there, never as nothing.
+  it("names a merge check an override holds off, and one whose override expired, in the queue line", () => {
+    const until = ago(-2 * 60 * MINUTE)
+    const ended = ago(10 * MINUTE)
+    const fact = { by: "@dev/3", reason: "flaky gate", record: "a".repeat(40), verified: false }
+    const line = queueLine(
+      snapshot({
+        overrides: [
+          { ...fact, check: "verify", state: "active", until: until.toISOString() },
+          { ...fact, check: "lint", state: "expired", until: ended.toISOString() },
+        ],
+      } as Partial<WatchSnapshot>),
+      new Date(),
+      200,
+    )
+    expect(line).toContain(`verify OFF until ${clock(until)}`)
+    expect(line).toContain(`lint override expired ${clock(ended)}`)
   })
 
   it("says an operator's pause that names no change as paused, since when and by whom, in the stop's slot, and never drops the word (A2-set-v3 Q3)", async () => {

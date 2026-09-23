@@ -67,7 +67,7 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import type { GitObservation, Row, StopFact } from "@yrd/queue-core"
+import type { GitObservation, OverrideFact, Row, StopFact } from "@yrd/queue-core"
 import { NowProvider, useMinute } from "./watch-clock.ts"
 import { RUNNER_GLYPH, STATE_WORDS, clock, firstLine, legendLines, runShortName, stateGlyph } from "./watch-format.ts"
 import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
@@ -129,6 +129,8 @@ export type WatchSnapshot = Readonly<{
   at: Date
   /** The stop that stands, as the reading derived it (queue-core `stopFact`); null or absent while the line runs. */
   stopped?: StopFact | null
+  /** The merge-check override table (25296): a check held off shows in the queue line while it is. */
+  overrides?: readonly OverrideFact[]
   /** Which drafts the rows list, and how many drafts have a head this repository has not read. */
   drafts?: Readonly<{ window: DraftWindow; unread: number }>
 }>

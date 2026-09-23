@@ -85,6 +85,7 @@ import {
   parseUntil,
   readOverrides,
   writeOverride,
+  type OverrideFact,
   HEARTBEAT_GRACE_MS,
   HEARTBEAT_INTERVAL_MS,
   QUEUE_HEALTH_DOCUMENT,
@@ -1480,6 +1481,8 @@ export async function coreQueueCommand(
           journals: Journals
           /** The stop that stands, as the reading derived it. */
           stopped: StopFact | null
+          /** The merge-check override table, active and expired entries alike (25296); empty on an event queue. */
+          overrides: readonly OverrideFact[]
           /** Which drafts the rows list, and the heads of the drafts this repository has not read. */
           drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
         }>
@@ -1522,6 +1525,12 @@ export async function coreQueueCommand(
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = reading.format === "event" ? reading.pause : reading.queue.stop
+        // The override table beside the stop (25296 C5). An event queue has no
+        // override (the verb refuses there), so it carries none.
+        const overrides =
+          reading.format === "event"
+            ? []
+            : overrideFacts(await readOverrides(git, config.target.remote, config.target.branch), Date.now())
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table. Zero
         // rows also names the fields the term was checked against, so a state
@@ -1547,6 +1556,8 @@ export async function coreQueueCommand(
             // The everyday reader of a stopped line: always present, null while
             // the line runs, so a stop can never be read as absent.
             stopped: stopFact(pause),
+            // Always present: an empty array is "no overrides", never an absent field.
+            overrides,
             ...(scope === undefined ? {} : { scope }),
           },
           entries: reading.format === "event" ? undefined : reading.queue.changes,
@@ -1567,6 +1578,7 @@ export async function coreQueueCommand(
           unfiltered,
           changes,
           stopped: stopFact(pause),
+          overrides,
           ...(drafts === undefined
             ? {}
             : { drafts: { unread: drafts.undated.map((draft) => draft.head), window: draftWindow } }),
@@ -2734,6 +2746,7 @@ function snapshotOf(
     runner: RunnerFacts
     decisions: readonly RunDecision[]
     stopped: StopFact | null
+    overrides?: readonly OverrideFact[]
     drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
   }>,
 ): WatchSnapshot {
@@ -2747,6 +2760,7 @@ function snapshotOf(
     unfiltered: round.unfiltered,
     runner: round.runner,
     stopped: round.stopped,
+    ...(round.overrides === undefined ? {} : { overrides: round.overrides }),
     ...(round.drafts === undefined
       ? {}
       : { drafts: { unread: round.drafts.unread.length, window: round.drafts.window } }),

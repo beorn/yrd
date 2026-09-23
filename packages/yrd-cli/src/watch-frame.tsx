@@ -129,6 +129,13 @@ export function queueLine(snapshot: WatchSnapshot, now: Date, width: number): st
         parts.push(`line stopped${names ? ` at ${branch}` : ""}${since}`)
       }
     }
+    // A merge check an override holds off, and one whose override expired: as
+    // loud as the stop, at every level, because a check that is not running is
+    // the fact a reader most needs (25296 C5).
+    for (const off of snapshot.overrides ?? []) {
+      const until = times ? ` ${clock(new Date(off.until))}` : ""
+      parts.push(off.state === "active" ? `${off.check} OFF until${until}` : `${off.check} override expired${until}`)
+    }
     if (merged !== undefined && level < 4) {
       parts.push(`last merge ${clock(merged.at)}${level < 3 ? ` (${merged.branch})` : ""}`)
     }

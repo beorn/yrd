@@ -162,7 +162,7 @@ export {
   stateAt as overrideStateAt,
   writeOverride,
 } from "./override.ts"
-export type { OverrideActor, OverrideEntry, OverrideState, OverrideTable, OverrideWrite } from "./override.ts"
+export type { OverrideActor, OverrideEntry, OverrideFact, OverrideState, OverrideTable, OverrideWrite } from "./override.ts"
 
 export { remoteUrl } from "./remote.ts"
 
