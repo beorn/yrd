@@ -18,6 +18,7 @@ import {
   drop,
   evolve,
   initial,
+  listChangeHistories,
   listChanges,
   queueFormat,
   queueRef,
@@ -676,6 +677,23 @@ describe("the queue-format boundary", () => {
     await branch.append(reports, { expect: await branch.head() })
     expect((await listChanges(location, "lab")).get("task/42")?.status).toBe("queued")
     expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
+  })
+
+  it("reuses only a validated queue read from the same location", async () => {
+    const first = remoteMemStore("yrd-event-first")
+    const second = remoteMemStore("yrd-event-second")
+    const target = await open({ ...first.store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(first.location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const queue = await readEventQueue(first.location, "lab")
+    expect(await listChangeHistories(first.location, "lab", { knownQueue: queue })).toEqual(new Map())
+    await expect(listChangeHistories(second.location, "lab", { knownQueue: queue })).rejects.toThrow(
+      /validated queue.*same location/,
+    )
+    await expect(listChangeHistories(first.location, "other", { knownQueue: queue })).rejects.toThrow(
+      /validated queue.*same location/,
+    )
+    expect(await listChangeHistories(first.location, "lab")).toEqual(new Map())
   })
 
   it("ignores and unignores only an existing open change with a reason and actor", async () => {

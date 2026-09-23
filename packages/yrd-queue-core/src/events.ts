@@ -371,7 +371,7 @@ export type SetBranchIgnoredRequest = Readonly<
   { queue: string; branch: string; by: string } & ({ ignored: true; reason: string } | { ignored: false })
 >
 
-export type EventQueue = Readonly<{
+type EventQueueProjection = Readonly<{
   created: string
   /** Derived from the created event's kept commit. This is the queue's start, not legacy run.ts's resolved .yrd.yml declaration. */
   declaration: Oid
@@ -379,8 +379,15 @@ export type EventQueue = Readonly<{
   pause?: Readonly<{ id: string; at: Date; reason: string; by: string }>
 }>
 
+const validatedQueue = Symbol("validated event queue")
+export type EventQueue = EventQueueProjection & Readonly<{ [validatedQueue]: true }>
+const queueLocations = new WeakMap<
+  EventQueue,
+  Readonly<{ repo: string; remote: string; queue: string; backend?: GitomicBackend }>
+>()
+
 /** The queue stop in the existing command response shape. */
-export function eventPause(queue: EventQueue): PauseRecord | undefined {
+export function eventPause(queue: EventQueueProjection): PauseRecord | undefined {
   if (queue.pause === undefined) return undefined
   return {
     kind: "paused",
@@ -449,7 +456,9 @@ export async function createEventQueue(
 export async function readEventQueue(store: QueueLocation, queue: string): Promise<EventQueue> {
   const ref = queueRef(queue)
   const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
-  return projectEventQueue(events, ref, store.repo)
+  const result: EventQueue = { ...projectEventQueue(events, ref, store.repo), [validatedQueue]: true }
+  queueLocations.set(result, { repo: store.repo, remote: store.remote, queue, backend: store.backend })
+  return result
 }
 
 /** Whether the queue was explicitly resumed after this change's latest stuck event. */
@@ -510,7 +519,7 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   return written
 }
 
-function projectEventQueue(events: readonly Event[], ref: string, repo: string): EventQueue {
+function projectEventQueue(events: readonly Event[], ref: string, repo: string): EventQueueProjection {
   const first = events[0]
   if (first === undefined) throw new Error(`missing event queue chain ${ref} in ${repo}`)
   if (first.parent !== null) {
@@ -518,7 +527,7 @@ function projectEventQueue(events: readonly Event[], ref: string, repo: string):
   }
   let previous: string | undefined
   let declaration: string | undefined
-  let pause: EventQueue["pause"]
+  let pause: EventQueueProjection["pause"]
   for (const [index, event] of events.entries()) {
     if (index === 0) {
       if (event.type !== "created") throw new Error(`${ref}: first event ${event.id} must be created`)
@@ -799,11 +808,24 @@ type ChangeHistory = Readonly<{ state: EventChange; events: readonly Event[] }>
 export async function listChangeHistories(
   store: QueueLocation,
   queue: string,
+  options: Readonly<{ knownQueue?: EventQueue }> = {},
 ): Promise<ReadonlyMap<string, ChangeHistory>> {
-  if ((await queueFormat(store, queue)) !== "event") {
-    throw new Error(`queue ${queue} in ${store.repo} has no event queue chain`)
+  if (options.knownQueue === undefined) {
+    if ((await queueFormat(store, queue)) !== "event") {
+      throw new Error(`queue ${queue} in ${store.repo} has no event queue chain`)
+    }
+    await readEventQueue(store, queue)
+  } else {
+    const location = queueLocations.get(options.knownQueue)
+    if (
+      location?.repo !== store.repo ||
+      location.remote !== store.remote ||
+      location.queue !== queue ||
+      location.backend !== store.backend
+    ) {
+      throw new Error(`validated queue must come from the same location: ${store.remote}#${queue} in ${store.repo}`)
+    }
   }
-  await readEventQueue(store, queue)
   const prefix = `${queueRefPrefix(queue)}/changes/`
   const chains = await chainsUnder(prefix, { ...store, limit: 1024 })
   const changes = new Map<string, ChangeHistory>()

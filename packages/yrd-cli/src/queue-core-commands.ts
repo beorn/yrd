@@ -2986,7 +2986,7 @@ async function readEventListing(
 > {
   const store = { repo, remote: config.target.remote }
   const queue = await readEventQueue(store, config.target.branch)
-  const histories = await listChangeHistories(store, config.target.branch)
+  const histories = await listChangeHistories(store, config.target.branch, { knownQueue: queue })
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
   const directMerges = await eventDirectMergeCommits(git, config.target.branch, targetOid, queue.declaration, histories)
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
@@ -3046,7 +3046,7 @@ async function readEventListing(
 /** A history read and its final observation must name the same event tips. */
 export function assertEventListingFence(
   name: string,
-  queue: EventQueue,
+  queue: Pick<EventQueue, "tip">,
   changes: ReadonlyMap<string, EventChange>,
   advertised: ReadonlyMap<string, string>,
 ): void {
