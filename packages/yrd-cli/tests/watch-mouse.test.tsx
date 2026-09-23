@@ -90,9 +90,13 @@ describe("the pointer in the live pane", () => {
       const bravo = rowOf(lines, "task/bravo")
       const charlie = rowOf(lines, "task/charlie")
       const column = lines[alpha]!.indexOf("task/alpha")
+      // Click alpha first: idle runner is default selected, so click selects alpha.
+      await term.mouse.click(column, alpha)
+      await sleep(80)
+      await handle.waitForLayoutStable()
       const selected = term.cell(alpha, column).bg
       const plain = term.cell(charlie, column).bg
-      expect(selected, "the cursor starts on the first row and paints it selected").not.toEqual(plain)
+      expect(selected, "a click on alpha selects it and paints it selected").not.toEqual(plain)
 
       // Hover over the third row: a tint of its own, neither the selection nor nothing.
       await term.mouse.move(column, charlie)
@@ -104,6 +108,8 @@ describe("the pointer in the live pane", () => {
       expect(term.cell(alpha, column).bg, "hover does not move the selection").toEqual(selected)
 
       // Click the second row: the selection moves there, and only there.
+      // Wait past MULTI_CLICK_TIME_MS (300ms) so clicking adjacent row is not treated as a double-click.
+      await sleep(350)
       await term.mouse.click(column, bravo)
       await sleep(80)
       await handle.waitForLayoutStable()

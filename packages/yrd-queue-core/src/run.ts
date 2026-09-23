@@ -235,6 +235,14 @@ export type Run = Readonly<{
    * after it carries `Retried: 1`.
    */
   retried: Set<string>
+  /**
+   * The change whose submit checks the merge phase is running again on a
+   * re-cut, and the composed candidate they read (24977 constraint 2). Their
+   * logs and program roots sit beside the judge's from the same run, never on
+   * them: a check log is opened create-only, and the shared path crashed the
+   * queue (merge 447, 24977 P0).
+   */
+  recutting: Map<string, string>
   /** The target OID this run successfully pushed, or its captured starting OID. */
   targetAfter: { sha: string }
   /**
@@ -561,6 +569,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     pause: queue.pause,
     lineStop: queue.stop,
     retried: new Set<string>(),
+    recutting: new Map<string, string>(),
     // The caller's trace half, kept exactly as it was passed, plus this run's
     // journal, which is always wired: the two halves answer different questions
     // and only one of them is a git transcript nobody turned on.
@@ -2138,7 +2147,15 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     // tree no submit check has read -- the change was judged before the
     // component main moved -- and since 25092 nothing else runs at merge. The
     // submit checks run again on it first, and a failure there is the re-cut's.
-    const recheck = recuts.length === 0 ? [] : await runPhase(run, entry, "submit", worktree.path, merged)
+    let recheck: readonly CheckResult[] = []
+    if (recuts.length > 0) {
+      run.recutting.set(name, mergeCommit)
+      try {
+        recheck = await runPhase(run, entry, "submit", worktree.path, merged)
+      } finally {
+        run.recutting.delete(name)
+      }
+    }
     const recutFailing = recheck.filter((result) => result.result === "fail")
     if (recutFailing.length > 0) {
       retained = worktree.path
@@ -2647,7 +2664,13 @@ function checkLogDir(run: Run, entry: QueueEntry, phase: Phase): string {
   // the only evidence of the fault the retry cleared (a check log is opened
   // create-only, so a shared path would crash the retry instead).
   const attempt = run.retried.has(change) ? ["retry-1"] : []
-  return join(run.options.workdir, "checks", change, run.log.id, ...attempt, phase)
+  return join(run.options.workdir, "checks", change, run.log.id, ...attempt, ...recutSegment(run, entry), phase)
+}
+
+/** The path segment a merge-phase re-run of the submit checks writes under; none otherwise. */
+function recutSegment(run: Run, entry: QueueEntry): string[] {
+  const composed = run.recutting.get(changeName(entry.change))
+  return composed === undefined ? [] : [`recut-${composed.slice(0, 12)}`]
 }
 
 async function runPhase(
@@ -2694,7 +2717,14 @@ async function check(
         branch: entry.change.branch,
         head: entry.change.head,
         phase,
-        root: join(run.worktrees, "program", phase, entry.change.head.slice(0, 12), spec.name),
+        root: join(
+          run.worktrees,
+          "program",
+          phase,
+          entry.change.head.slice(0, 12),
+          ...recutSegment(run, entry),
+          spec.name,
+        ),
         logDir: checkLogDir(run, entry, phase),
         tmpdir: run.tmpdir,
         log: run.log,

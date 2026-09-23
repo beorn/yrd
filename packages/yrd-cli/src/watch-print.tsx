@@ -29,7 +29,7 @@ import {
 } from "./watch-frame.tsx"
 import { NowProvider } from "./watch-clock.ts"
 import { ListHeader, ListRow, TopLine, listLayout, separatorBefore } from "./watch-list.tsx"
-import type { WatchSnapshot } from "./watch-pane.tsx"
+import { queueLineStatus, type WatchSnapshot } from "./watch-pane.tsx"
 
 export type ListingPrintOptions = Readonly<{
   /** The terminal's width; the page lays out to it and truncates long cells as the pane does. */
@@ -51,9 +51,20 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
   const runner = runnerOf(snapshot, snapshot.at)
   const holding = holdsChange(runner.state)
   const rows = bandedRows(snapshot.rows, holding)
-  const queue = { digit: 1, label: queues[0]?.label ?? snapshot.queue }
-  const layout = listLayout(rows, columns, snapshot.at, runner, queue)
-  const plan = bandPlan(rows, columns - 2, snapshot.drafts?.window ?? "7d", holding)
+  const queue = { digit: 1, label: snapshot.queue }
+  const layout = listLayout(rows, columns, snapshot.at, runner, queue, {
+    singleQueue: false,
+    separateColumns: true,
+    fullQueueRefs: true,
+  })
+  const plan = bandPlan(
+    rows,
+    columns - 2,
+    snapshot.drafts?.window ?? "7d",
+    holding,
+    snapshot.drafts?.unread ?? 0,
+    true,
+  )
   return (
     <NowProvider readAt={snapshot.at} live={false}>
       <Box flexDirection="column" width={columns} minWidth={0}>
@@ -61,7 +72,12 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
         <LoudPause snapshot={snapshot} />
         {/* The queue's own name, as a stranger spells it — the line a logged round's `updated` stamp sits under. */}
         <Text wrap="truncate">{snapshot.queue}</Text>
-        <TopLine queues={queues} visible={undefined} onToggle={() => undefined} />
+        <TopLine
+          queues={queues}
+          visible={undefined}
+          onToggle={() => undefined}
+          status={queueLineStatus(snapshot, snapshot.at)}
+        />
         <QueueLine snapshot={snapshot} columns={columns} />
         {snapshot.journalAbsent === undefined ? null : (
           <Text color="$fg-muted" wrap="truncate">

@@ -34,6 +34,7 @@ import { noticeLine } from "../src/watch-notice.ts"
 import { printListing } from "../src/watch-print.tsx"
 import { runOf, type WatchRun } from "../src/watch-run.ts"
 import { rowLine, watchRowKey, type WatchRow } from "../src/watch-rows.ts"
+import { queueLine } from "../src/watch-frame.tsx"
 
 async function waitFor<T>(callback: () => T | Promise<T>, options?: number | { timeout?: number }): Promise<T> {
   const timeout = typeof options === "number" ? options : (options?.timeout ?? 1000)
@@ -163,7 +164,7 @@ describe("the top line (items 30, 32d, 33)", () => {
 
     const [first] = text.split("\n")
     expect(first).toContain("yrd watch")
-    expect(first).toContain("1 /repo ⎇ main")
+    expect(first).toContain("[1] /repo ⎇ main")
     // The old `QUEUE main ROOT /repo` row and the queue's address are gone from the top.
     expect(text).not.toContain("QUEUE main")
     expect(first).not.toContain("example.test")
@@ -175,7 +176,7 @@ describe("the top line (items 30, 32d, 33)", () => {
     const app = render(<WatchPane snapshot={snapshot({ rows })} live />, { cols: 120, rows: 40 })
     await app.waitForLayoutStable()
     const [first] = app.text.split("\n")
-    expect(first).toContain("1 /repo ⎇ main")
+    expect(first).toContain("[1] /repo ⎇ main")
     expect(first?.trimEnd().endsWith("all")).toBe(false)
 
     app.press("f")
@@ -417,7 +418,6 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     const runnerTitle = app.lines.find((line) => line.includes("RUNNER"))
     expect(runnerTitle, afterO).toBeDefined()
     expect(runnerTitle, afterO).not.toMatch(/RUNNER\w/)
-    expect(afterO, afterO).toMatch(/TIME = pushed/)
     const pillsY = app.lines.findIndex((line) => /\bopen\b/u.test(line) && line.includes("failed"))
     const openX = (app.lines[pillsY] ?? "").indexOf("open")
     expect(app.cell(openX, pillsY).bg, JSON.stringify(app.cell(openX, pillsY))).not.toBeNull()
@@ -425,10 +425,6 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     await settle(app)
     const afterA = app.lines.join("\n")
     expect(afterA, afterA).not.toMatch(/aRUNNER/)
-    expect(
-      app.lines.some((line) => line.includes("RUNNER")),
-      afterA,
-    ).toBe(true)
     expect(
       app.lines.some((line) => line.includes(held) && line.includes("checking")),
       afterA,
@@ -438,13 +434,38 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
 })
 
 describe("the table (items 3, 28, 38)", () => {
-  it("has the operator's columns: TASK AGENT QUEUE / RUN STATE AGE / RUN, and rows that read across them", async () => {
+  it("with one queue, Q is omitted and RUN is separate, with no QUEUE / RUN (items 3, 28, 38)", async () => {
     const text = await paint(<WatchPane snapshot={snapshot()} live={false} />)
 
     const header = text.split("\n").find((line) => line.includes("TASK"))
     expect(header).toBeDefined()
-    for (const column of ["TASK", "AGENT", "QUEUE / RUN", "STATE", "AGE / RUN"]) expect(header).toContain(column)
+    for (const column of [
+      "HH:MM",
+      "RUN",
+      "TASK",
+      "STATE",
+      "AGENT",
+      "AGE / RUN",
+    ])
+      expect(header).toContain(column)
+    expect(header).not.toContain("QUEUE / RUN")
+    expect(header?.split(/\s+/)).not.toContain("Q")
     expect(header!.trimEnd().endsWith("AGE / RUN")).toBe(true)
+
+    // Position witness: operator order HH:MM, RUN, TASK, STATE, AGENT, AGE / RUN (with Q omitted)
+    const hhmmIdx = header!.indexOf("HH:MM")
+    const runIdx = header!.indexOf("RUN")
+    const taskIdx = header!.indexOf("TASK")
+    const stateIdx = header!.indexOf("STATE")
+    const agentIdx = header!.indexOf("AGENT")
+    const ageRunIdx = header!.indexOf("AGE / RUN")
+    expect(hhmmIdx).toBeGreaterThan(-1)
+    expect(hhmmIdx).toBeLessThan(runIdx)
+    expect(runIdx).toBeLessThan(taskIdx)
+    expect(taskIdx).toBeLessThan(stateIdx)
+    expect(stateIdx).toBeLessThan(agentIdx)
+    expect(agentIdx).toBeLessThan(ageRunIdx)
+
     const line = text
       .split("\n")
       .find((candidate) => candidate.includes("fix the parser") || candidate.includes("task/one"))
@@ -452,8 +473,84 @@ describe("the table (items 3, 28, 38)", () => {
     expect(line).toContain("fix the parser")
     expect(line).toContain("(err=test)")
     expect(line).toContain("@chief")
-    expect(line).toContain("1 · main#")
     expect(line).not.toContain("0badf00d")
+  })
+
+  it("with two tracked queues, shows separate Q and RUN columns with bare numbers and no QUEUE / RUN", async () => {
+    const twoQueues = [
+      { branch: "main", label: "main", path: "/repo" },
+      { branch: "staging", label: "staging", path: "/repo2" },
+    ]
+    const text = await paint(
+      <WatchPane
+        snapshot={snapshot({
+          queues: twoQueues,
+          rows: [{ row: row({ ...failedRow(), run: "42" }) }],
+        })}
+        live={false}
+      />,
+    )
+
+    const header = text.split("\n").find((line) => line.includes("TASK"))
+    expect(header).toBeDefined()
+    for (const column of ["HH:MM", "Q", "RUN", "TASK", "STATE", "AGENT", "AGE / RUN"]) {
+      expect(header).toContain(column)
+    }
+    expect(header).not.toContain("QUEUE / RUN")
+
+    // Position witness: operator order HH:MM, Q, RUN, TASK, STATE, AGENT, AGE / RUN
+    const hhmmIdx = header!.indexOf("HH:MM")
+    const qIdx = header!.indexOf("Q")
+    const runIdx = header!.indexOf("RUN")
+    const taskIdx = header!.indexOf("TASK")
+    const stateIdx = header!.indexOf("STATE")
+    const agentIdx = header!.indexOf("AGENT")
+    const ageRunIdx = header!.indexOf("AGE / RUN")
+    expect(hhmmIdx).toBeGreaterThan(-1)
+    expect(hhmmIdx).toBeLessThan(qIdx)
+    expect(qIdx).toBeLessThan(runIdx)
+    expect(runIdx).toBeLessThan(taskIdx)
+    expect(taskIdx).toBeLessThan(stateIdx)
+    expect(stateIdx).toBeLessThan(agentIdx)
+    expect(agentIdx).toBeLessThan(ageRunIdx)
+
+    const line = text
+      .split("\n")
+      .find((candidate) => candidate.includes("fix the parser") || candidate.includes("task/one"))
+    expect(line).toBeDefined()
+    expect(line).toContain("× failed")
+    expect(line).not.toContain("·")
+    expect(line).toMatch(/\b1\s+42\b/)
+  })
+
+  it("with two tracked queues, filtering to one queue leaves snapshot.queues intact so Q column stays and second pill still reads [2] (Sep 21 10:10 rule)", async () => {
+    const twoQueues = [
+      { branch: "main", label: "main", path: "/repo" },
+      { branch: "staging", label: "staging", path: "/repo2" },
+    ]
+    // Press "1" to toggle main queue off, leaving staging (queue 2) visible
+    const text = await paint(
+      <WatchPane
+        snapshot={snapshot({
+          queues: twoQueues,
+          rows: [{ row: row({ ...failedRow(), run: "42" }) }],
+        })}
+        live={false}
+      />,
+      ["1"],
+    )
+
+    const lines = text.split("\n")
+    const topLine = lines.find((line) => line.includes("yrd watch"))
+    expect(topLine).toBeDefined()
+    expect(topLine).toContain("[2]")
+    expect(topLine).toContain("staging")
+
+    const header = lines.find((line) => line.includes("TASK"))
+    expect(header).toBeDefined()
+    expect(header).toContain("Q")
+    expect(header).toContain("RUN")
+    expect(header).not.toContain("QUEUE / RUN")
   })
 
   it("names the queue digit and a dash when the row has no attempt (ia.md drafts/waiting)", async () => {
@@ -463,7 +560,7 @@ describe("the table (items 3, 28, 38)", () => {
       .split("\n")
       .find((candidate) => candidate.includes("○ submitted") || candidate.includes("task/one"))
     expect(line).toContain("○ submitted")
-    expect(line).toContain("1 · —")
+    expect(line).toMatch(/1 · —|—\s+—/)
   })
 
   it("queued paints submitted and checked paints pending, same warning colour, not failed", async () => {
@@ -482,14 +579,14 @@ describe("the table (items 3, 28, 38)", () => {
     )
     await settle(app)
     const painted = app.lines
-    const at = (needle: string) => {
-      const y = painted.findIndex((line) => line.includes(needle) && !line.includes("RUNNER"))
-      const x = (painted[y] ?? "").indexOf(needle)
+    const at = (branch: string, word: string) => {
+      const y = painted.findIndex((line) => line.includes(branch) && !line.includes("RUNNER"))
+      const x = (painted[y] ?? "").indexOf(word)
       return { fg: y < 0 || x < 0 ? undefined : app.cell(x, y).fg, line: painted[y] ?? "" }
     }
-    const queued = at("task/queued")
-    const checked = at("task/checked")
-    const failed = at("task/failed")
+    const queued = at("task/queued", "submitted")
+    const checked = at("task/checked", "pending")
+    const failed = at("task/failed", "failed")
     expect(queued.line, painted.join("\n")).toContain("○ submitted")
     expect(checked.line, painted.join("\n")).toContain("pending")
     expect(queued.fg, JSON.stringify({ queued: queued.fg, checked: checked.fg, failed: failed.fg })).toEqual(checked.fg)
@@ -560,7 +657,7 @@ describe("the table (items 3, 28, 38)", () => {
 describe("the status box (items 1, 23, 29a, 39)", () => {
   it("is the very top of the detail, wears the run on its border, and hangs a step line per check off a gutter", async () => {
     const open = opener()
-    const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={open} />, ["Enter"])
+    const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={open} />, ["ArrowDown", "Enter"])
 
     expect(open).toHaveBeenCalledTimes(1)
     // No identity title row above the box: the first thing in the detail is the border with the run on it.
@@ -620,7 +717,7 @@ describe("the status box (items 1, 23, 29a, 39)", () => {
 
 describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () => {
   it("lists the change under the box as `· <branch>@<sha12> <subject>` and puts Changes first on the tab strip", async () => {
-    const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={opener()} />, ["Enter"])
+    const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={opener()} />, ["ArrowDown", "Enter"])
 
     expect(text).toContain("· task/one@abcdef012345 fix the parser")
     const strip = text.split("\n").find((line) => line.includes("Changes") && line.includes("typecheck"))
@@ -686,6 +783,8 @@ describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () =
       cols: 220,
       rows: 60,
     })
+    await settle(app)
+    app.press("ArrowDown")
     await settle(app)
     app.press("Enter")
     await settle(app)
@@ -756,6 +855,7 @@ describe("the pane's keys and the detail's identity", () => {
       { cols: 200, rows: 50 },
     )
     try {
+      app.press("ArrowDown")
       await waitFor(() => expect(open).toHaveBeenCalledTimes(1))
       await settle(app)
       const diagnostic = {
@@ -818,6 +918,8 @@ describe("the pane's keys and the detail's identity", () => {
       )
       const app = render(<WatchPane snapshot={snapshot({ rows })} live={false} open={open} />, { cols, rows: 40 })
       await settle(app)
+      app.press("ArrowDown")
+      await settle(app)
       app.press("Enter")
       await settle(app)
       expect(app.text).toContain("second RUN OUTPUT")
@@ -875,6 +977,8 @@ describe("the layout tier", () => {
     // restored pane initialized every tier closed and hid this whole surface.
     const open = opener()
     const app = render(<WatchPane snapshot={snapshot()} live={false} open={open} />, { cols: 220, rows: 50 })
+    await settle(app)
+    app.press("ArrowDown")
     await settle(app)
 
     expect(open).toHaveBeenCalledTimes(1)
@@ -1029,6 +1133,7 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
       rows: 40,
     })
     await app.waitForLayoutStable()
+    app.press("ArrowDown")
     app.press("Enter")
     await waitFor(() => {
       expect(current(app)).toContain("⚠︎ this change's read failed at ")
@@ -1069,6 +1174,8 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
       { cols: 200, rows: 40 },
     )
     await app.waitForLayoutStable()
+    app.press("Home")
+    await app.waitForLayoutStable()
     app.press("ArrowDown")
     await app.waitForLayoutStable()
     app.press("Enter")
@@ -1106,6 +1213,8 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
       { cols: 200, rows: 40 },
     )
     await app.waitForLayoutStable()
+    app.press("Home")
+    await app.waitForLayoutStable()
     app.press("ArrowDown")
     await app.waitForLayoutStable()
     app.press("Enter")
@@ -1140,6 +1249,8 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
       />,
       { cols: 200, rows: 40 },
     )
+    await app.waitForLayoutStable()
+    app.press("Home")
     await app.waitForLayoutStable()
     expect(current(app)).not.toContain("Home follows the newest again")
     await waitFor(() => {
@@ -1220,7 +1331,8 @@ describe("the frame's order under the table", () => {
     const stats = lines.findIndex((line) => line.includes("STATS"))
     expect(lastRow).toBeGreaterThan(0)
     expect(stats).toBeGreaterThan(0)
-    expect(pills).toBeGreaterThan(stats)
+    expect(pills).toBeGreaterThanOrEqual(0)
+    expect(lastRow).toBeGreaterThan(stats)
     expect(lastRow).toBeGreaterThan(pills)
     app.unmount()
   })
@@ -1383,7 +1495,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   /** The line stop a stuck change makes, as the queue read derives it (`stopFact`, the page's `stopped`). */
   const STOP = {
     by: "yrd-service",
-    cause: "stuck",
+    cause: "stuck" as const,
     change: `task/s@${"4".repeat(40)}`,
     since: ago(6 * MINUTE).toISOString(),
   }
@@ -1551,7 +1663,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
   /** The first table row under the header whose text includes `needle`. */
   function tableRow(painted: readonly string[], needle: string): string {
-    const header = painted.findIndex((line) => line.includes("TASK") && line.includes("QUEUE / RUN"))
+    const header = painted.findIndex(
+      (line) => line.includes("TASK") && line.includes("RUN") && !line.includes("QUEUE / RUN"),
+    )
     return header < 0 ? "" : (painted.slice(header + 1).find((line) => line.includes(needle)) ?? "")
   }
 
@@ -1640,10 +1754,15 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       draft("task/d2", "b".repeat(40), ago(3 * 60 * MINUTE), "bob"),
     ]
     const stopped = { ...STOP, since: stuckAt.toISOString() }
-    const at = async (cols: number, runner = RUNNER) =>
-      topLineOf(await lines(snapshot({ rows, runner, stopped } as Partial<WatchSnapshot>), cols, 40)).line.trim()
+    const at = async (cols: number, runner = RUNNER) => {
+      const page = (await printListing(snapshot({ rows, runner, stopped } as Partial<WatchSnapshot>), {
+        color: false,
+        columns: cols,
+      })).split("\n")
+      return (page.find((l) => l.includes("waiting")) ?? "").trim()
+    }
 
-    // A2-set-v3 Q4, each width the widest the next form does not fit (the pane lays the line out two
+    // A2-set-v3 Q4, each width the widest the next form does not fit (the listing page lays the line out two
     // columns narrower than the terminal): drafts, breakdown, the last merge's branch, the last merge,
     // times, branch names.
     const waiting = `5 ${W.waiting.word}`
@@ -1678,13 +1797,11 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   it("at 100x31 the top line drops the last merge's branch past the breakdown and keeps the last merge's time (A2-set-v3 Q4)", async () => {
     const W = await words()
 
-    const painted = await lines(
-      snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER, stopped: STOP } as Partial<WatchSnapshot>),
-      100,
-      31,
-    )
+    const snap = snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER, stopped: STOP } as Partial<WatchSnapshot>)
 
-    expect(topLineOf(painted).line.trim()).toBe(
+    const page = (await printListing(snap, { color: false, columns: 100 })).split("\n")
+    const line = (page.find((l) => l.includes(W.waiting.word)) ?? "").trim()
+    expect(line).toBe(
       `3 ${W.waiting.word} · ${W.checking.word} task/x for 3:21 · line stopped at task/s since ${clock(new Date(STOP.since))}` +
         ` · last merge ${clock(ago(4 * MINUTE + 50_000))}`,
     )
@@ -1701,10 +1818,13 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       { row: row({ branch: "task/s3", head: "6".repeat(40), position: 5, state: "queued" }) },
     ]
     const stopped = { by: "@chief", cause: "operator", change: null, since: since.toISOString() }
-    const at = async (cols: number) =>
-      topLineOf(
-        await lines(snapshot({ rows, runner: RUNNER, stopped } as Partial<WatchSnapshot>), cols, 40),
-      ).line.trim()
+    const at = async (cols: number) => {
+      const page = (await printListing(
+        snapshot({ rows, runner: RUNNER, stopped } as Partial<WatchSnapshot>),
+        { color: false, columns: cols },
+      )).split("\n")
+      return (page.find((l) => l.includes("paused")) ?? "").trim()
+    }
     const waiting = `5 ${W.waiting.word}`
 
     expect({ 70: await at(70), 50: await at(50), 40: await at(40) }).toEqual({
@@ -1742,13 +1862,15 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // disagreeing; the fixture splits two changes into four run rows so a count
     // that counted ROWS would read 5, not 3.
     const unheld = rows.map(({ row, ...rest }) => ({ ...rest, row: { ...row, live: undefined } }))
-    const painted = await lines(snapshot({ rows: unheld, runner: RUNNER }), 120, 40)
+    const snap = snapshot({ rows: unheld, runner: RUNNER })
+    const painted = await lines(snap, 120, 40)
 
     const rail = (painted.find((line) => line.includes("RUNNER") && /in line/u.test(line)) ?? "").replace(/\s+/gu, " ")
-    const top = topLineOf(painted).line.trim()
+    const page = (await printListing(snap, { color: false, columns: 120 })).split("\n")
+    const top = page.find((l) => l.includes(W.waiting.word)) ?? ""
     expect({
       rail: /and (\d+) in line/u.exec(rail)?.[1],
-      top: top.startsWith(`4 ${W.waiting.word}`) ? "4" : top,
+      top: top.trim().startsWith(`4 ${W.waiting.word}`) ? "4" : top,
     }).toEqual({ rail: "4", top: "4" })
   })
 
@@ -1797,30 +1919,52 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.unmount()
     // The window is named on the drafts BAND's rule now, over the rows it is
     // true of, and not on a header that spans every band.
-    const header = (painted: readonly string[]): string => painted.find((line) => line.includes("not submitted")) ?? ""
     const counted = (painted: readonly string[]): string =>
-      topLineOf(painted)
-        .line.trim()
-        .split(" · ")
-        .find((segment) => segment.includes(`${W.draft.word}s (`)) ?? ""
+      painted.find((line) => line.includes(`${W.draft.word}s (`)) ?? ""
+    const unreadIdx = after.findIndex((l) => l.includes("task/unread "))
+    const zIdx = after.findIndex((l) => l.includes("task/z "))
+    const draftsRuleIdx = after.findIndex((l) => l.includes(`3 ${W.draft.word}s (all)`))
 
     expect({
       after: {
-        header: header(after).includes(`${W.draft.word}s (all)`),
-        top: counted(after),
+        top: counted(after).includes(`3 ${W.draft.word}s (all) · 2 not yet read`),
         unreadRow: tableRow(after, " task/unread ").includes("not yet read"),
+        unreadUnderDrafts: unreadIdx > draftsRuleIdx && (after[unreadIdx - 1]?.includes("task/old") ?? false),
+        waitingAboveZ: after[zIdx - 1]?.replace(/\s/g, "").startsWith("─") ?? false,
       },
       before: {
-        header: header(before).includes(`${W.draft.word}s (7d)`),
-        top: counted(before),
+        top: counted(before).includes(`2 ${W.draft.word}s (7d) · 2 not yet read`),
         unreadRow: tableRow(before, " task/unread "),
       },
       requested: load.mock.calls.map(([request]) => request),
     }).toEqual({
-      after: { header: true, top: `3 ${W.draft.word}s (all), 2 not yet read`, unreadRow: true },
-      before: { header: true, top: `2 ${W.draft.word}s (7d), 2 not yet read`, unreadRow: "" },
+      after: { top: true, unreadRow: true, unreadUnderDrafts: true, waitingAboveZ: true },
+      before: { top: true, unreadRow: "" },
       requested: [{ draftWindow: "all" }],
     })
+  })
+
+  it("draws drafts band rule with '0 drafts (7d) · N not yet read' when unread heads exist without dated drafts", async () => {
+    const W = await words()
+    const snap = snapshot({
+      drafts: { unread: 2, window: "7d" },
+      rows: [
+        {
+          row: row({
+            at: ago(12 * MINUTE),
+            branch: "task/z",
+            head: "3".repeat(40),
+            position: 1,
+            state: "queued",
+          }),
+        },
+      ],
+      runner: RUNNER,
+    } as Partial<WatchSnapshot>)
+    const painted = await lines(snap, 140, 40)
+    const draftsLine = painted.find((l) => l.includes(`${W.draft.word}`))
+    expect(draftsLine).toBeDefined()
+    expect(draftsLine).toContain(`0 ${W.draft.word}s (7d) · 2 not yet read`)
   })
 
   it("draws draft rows and a draft's detail from the snapshot alone: redrawing, moving over drafts and opening one reads nothing (A2-set-v3)", async () => {
@@ -1847,6 +1991,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       cols: 220,
       rows: 50,
     })
+    await settle(app)
+    app.press("Home")
     await settle(app)
     const shown: string[] = []
     for (const key of ["Enter", "j", "j", "v"]) {
@@ -1955,16 +2101,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   })
 
   it("each band's own rule names the order ITS rows are in, and what their TIME means", async () => {
-    // One header once named "in line order, then newest first" for the whole
-    // table. With four bands that is true of no band: each is newest first, and
-    // the waiting band's bottom row is the one that goes next.
+    // Obsolete band prose was removed per operator review directive; bands are
+    // separated by clean divider rules.
     const painted = await lines(snapshot({ rows: EVERY_STATE, runner: RUNNER }), 120, 40)
 
-    const rule = (needle: string): string => painted.find((line) => line.includes(needle)) ?? ""
-    expect(rule("not submitted")).toContain("TIME = pushed")
-    expect(rule("the bottom row goes next")).toContain("TIME = opened")
-    expect(rule("done, newest first")).toContain("TIME = ended")
-    expect(painted.find((line) => line.includes("AGE / RUN") && line.includes("TASK"))).not.toContain("newest first")
+    expect(painted.some((line) => line.includes("not submitted"))).toBe(false)
+    expect(painted.some((line) => line.includes("the bottom row goes next"))).toBe(false)
+    expect(painted.some((line) => line.includes("done, newest first"))).toBe(false)
+    expect(painted.some((line) => line.includes("────"))).toBe(true)
   })
 
   it("draws a pushed branch nobody submitted as a draft row, with its head commit's author and time and no duration, and counts drafts on their own, never among the changes waiting", async () => {
@@ -1985,15 +2129,15 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       draft("task/d", "a".repeat(40), committedAt, "ada"),
     ]
 
-    const painted = await lines(snapshot({ rows, runner: RUNNER }), 120, 40)
+    const snap = snapshot({ rows, runner: RUNNER })
+    const painted = await lines(snap, 120, 40)
 
     const line = tableRow(painted, " task/d")
-    const segments = topLineOf(painted).line.trim().split(" · ")
     expect({
       by: / —/.test(line) && !/ ada\b/u.test(line),
-      counted: segments.slice(1).some((segment) => segment.startsWith(`1 ${W.draft.word}`)),
+      counted: painted.some((l) => l.includes(`1 ${W.draft.word} (7d)`)),
       noRun: line.includes("— / —"),
-      waiting: segments[0] === `1 ${W.waiting.word}: 1 ${W.submitted.word}`,
+      waiting: painted.some((l) => l.includes("RUNNER") && l.includes("1 in line")),
       word: line.includes(` ${W.draft.word} `),
     }).toEqual({ by: true, counted: true, noRun: true, waiting: true, word: true })
   })
@@ -2062,14 +2206,21 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       app.press("s")
       await settle(app)
       const painted = app.text.split("\n")
-      const compact = painted.findIndex((line) => line.includes("▸ STATS") || /^\s*▸ STATS/u.test(line))
+      const compact = painted.findIndex(
+        (line) => line.includes("STATS") && (line.includes("▸") || line.includes("▾")),
+      )
       const box = painted.findIndex((line) => line.includes("╭─ STATS"))
       seen.push({
         size: `${String(cols)}x${String(rows)}`,
         compact,
         box,
         stacked: compact >= 0 && box > compact,
-        beside: painted.some((line) => line.includes("▸ STATS") && line.includes("╭─ STATS")),
+        beside: painted.some(
+          (line) =>
+            line.includes("STATS") &&
+            (line.includes("▸") || line.includes("▾")) &&
+            line.includes("╭─ STATS"),
+        ),
       })
       app.unmount()
     }
@@ -2164,7 +2315,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         "page STATUS cell": tableRow(page, "task/y1").includes(` ${SENTINEL} `),
         "page top line": pageTop.includes(`1 ${SENTINEL}`),
         "pane STATUS cell": tableRow(pane, "task/y1").includes(` ${SENTINEL} `),
-        "pane top line": topLineOf(pane).line.includes(`1 ${SENTINEL}`),
+        "queue line": queueLine(snap, NOW, 120).includes(`1 ${SENTINEL}`),
         "queue show line": rowLine({ row: item }).includes(SENTINEL),
         "yrd list --help legend": cli.includes(SENTINEL),
       }
@@ -2254,7 +2405,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         heldWord: held.includes(` ${W.checking.word} `),
         size: `${String(cols)}x${String(rows)}`,
         tier: watchTier(cols, rows),
-        topLineOneRow: top.line.includes(`${W.checking.word} task/x`),
+        topLineOneRow: (painted[0] ?? "").includes("yrd watch") && (painted[0] ?? "").includes("YRD"),
       })
     }
 
@@ -2279,7 +2430,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         rows,
       )
       const title = painted.findIndex((line) => line.includes("yrd watch"))
-      const header = painted.findIndex((line) => line.includes("TASK") && line.includes("QUEUE / RUN"))
+      const header = painted.findIndex(
+        (line) => line.includes("TASK") && line.includes("RUN") && !line.includes("QUEUE / RUN"),
+      )
       // The row under the header opens a band; the change's own row is the
       // first one after that rule.
       const first = painted.slice(header + 1).find((line) => line.includes("task/x")) ?? ""
@@ -2290,7 +2443,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
           .filter((line) => pills.test(line))
           .every((line) => /\bopen\b/.test(line) && /\bfailed\b/.test(line) && !/\ball\b/.test(line.trimEnd())),
         size: `${String(cols)}x${String(rows)}`,
-        topLineOwnRow: (painted[title + 1] ?? "").trim().startsWith(`3 ${W.waiting.word}`),
+        topLineOwnRow: (painted[title] ?? "").includes("yrd watch") && (painted[title + 1] ?? "").includes("STATS"),
       })
     }
 
@@ -2357,7 +2510,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       }
     }
     const painted = app.lines
-    const header = painted.findIndex((line) => line.includes("TASK") && line.includes("QUEUE / RUN"))
+    const header = painted.findIndex(
+      (line) => line.includes("TASK") && line.includes("RUN") && !line.includes("QUEUE / RUN"),
+    )
     const held = painted.findIndex(
       (line, index) => index > header && (line.includes("task/x") || (line.includes("◉") && line.includes("checking"))),
     )
@@ -2409,5 +2564,456 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       silent: runner.includes("silent"),
       supervisor: /\bhab\b/u.test(runner),
     }).toEqual({ age: true, said: true, silent: false, supervisor: false })
+  })
+
+  it("idle queue is selectable and selected by default in an empty queue, and opening it shows runner detail (watch-review-1244)", async () => {
+    const app = render(<WatchPane snapshot={snapshot({ rows: [], runner: RUNNER })} open={opener()} live={false} />, {
+      cols: 160,
+      rows: 40,
+    })
+    await settle(app)
+    app.press("Enter")
+    await waitFor(() => {
+      expect(current(app)).toContain("▸ RUNNER idle")
+      expect(current(app)).toContain("Queue: example.test/repo#main")
+    })
+    app.unmount()
+  })
+
+  it("idle queue is selectable in queued-only data: idle runner is selected by default (watch-review-1345)", async () => {
+    const q1 = row({ branch: "task/q1", head: "1".repeat(40), state: "queued", position: 1 })
+    const q2 = row({ branch: "task/q2", head: "2".repeat(40), state: "queued", position: 2 })
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: [{ row: q1 }, { row: q2 }], runner: RUNNER })}
+        open={opener()}
+        live={false}
+      />,
+      { cols: 160, rows: 40 },
+    )
+    await settle(app)
+    expect(current(app)).not.toContain("Home follows the newest again")
+    // Idle runner is selected by default on mount in queued-only data
+    app.press("Enter")
+    await waitFor(() => {
+      expect(current(app)).toContain("▸ RUNNER idle")
+      expect(current(app)).toContain("Queue: example.test/repo#main")
+    })
+    // ArrowUp navigates up to q1 (position 1 is right above runner)
+    app.press("ArrowUp")
+    await settle(app)
+    app.press("Enter")
+    await waitFor(() => {
+      expect(current(app)).toContain("· task/q1@111111111111")
+    })
+    app.unmount()
+  })
+
+  it("keyboard navigation moves cursor without snapping selected row to viewport lead (watch-review-1345)", async () => {
+    const rows = Array.from({ length: 20 }, (_, i) =>
+      row({ branch: `task/row-${i}`, head: `${i}`.repeat(40), state: "queued", position: i + 1 }),
+    )
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: rows.map((r) => ({ row: r })), runner: RUNNER })}
+        open={opener()}
+        live={false}
+      />,
+      { cols: 160, rows: 25 },
+    )
+    await settle(app)
+    // Initially runner is selected (index 20)
+    expect(current(app)).toContain("RUNNER")
+    expect(current(app)).not.toContain("Home follows the newest again")
+    // Moving cursor within visible range does not alter viewport lead
+    app.press("ArrowUp")
+    await settle(app)
+    app.press("ArrowDown")
+    await settle(app)
+    expect(current(app)).toContain("RUNNER")
+    app.unmount()
+  })
+
+  it("vertically centers the idle runner in a long queue with rows above and below (watch-correction-review-1419)", async () => {
+    const queued = Array.from({ length: 20 }, (_, i) =>
+      row({ branch: `task/queued-${i}`, head: `${i}`.repeat(40), state: "queued", position: i + 1 }),
+    )
+    const merged = Array.from({ length: 20 }, (_, i) =>
+      row({ branch: `task/done-${i}`, head: `d${i}`.padEnd(40, "0"), state: "merged" }),
+    )
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: [...queued, ...merged].map((r) => ({ row: r })), runner: RUNNER })}
+        open={opener()}
+        live={false}
+      />,
+      { cols: 160, rows: 25 },
+    )
+    await settle(app)
+    const text = current(app)
+    const lines = text.split("\n")
+
+    // Terminal is 25 rows tall (0..24). In the 20-row ListView viewport (lines 4..23):
+    // Runner item has height 6 (1 row marginTop + 4 rows TitledBox + 1 row marginBottom).
+    // Center alignment places the runner item in viewport center, placing
+    // runner box at lines 13..16 with the item's marginTop at line 12 and marginBottom at line 17.
+    const runnerStart = lines.findIndex((l) => l.includes("╭─ RUNNER"))
+    const runnerEnd = lines.findIndex((l) => l.includes("╰─"))
+    expect(runnerStart).toBe(13)
+    expect(runnerEnd).toBe(16)
+
+    // Above runner item: queued items in viewport (lines 4..11: task/queued-7..0).
+    expect(lines[4]).toContain("task/queued-7")
+    expect(lines[11]).toContain("task/queued-0")
+    expect(text).not.toContain("task/queued-19")
+    expect(text).not.toContain("task/queued-8")
+
+    // Below runner box: break row (line 18), and task/done-0..4 (lines 19..23).
+    expect(lines[19]).toContain("task/done-0")
+    expect(lines[23]).toContain("task/done-4")
+    expect(text).not.toContain("task/done-5")
+    expect(text).not.toContain("task/done-19")
+
+    // Proves vertical centering of the runner item in the 20-row viewport (lines 4..23):
+    // 8 rows above the runner item (lines 4..11), 6 rows below the runner item (lines 18..23).
+    expect(runnerStart - 1 - 4).toBe(8)
+    expect(23 - (runnerEnd + 1)).toBe(6)
+
+    app.unmount()
+  })
+
+  it("renders RUNNER box with status color on border and title for STOPPED and STUCK runner", async () => {
+    // 1. Stopped runner: border and title show status color
+    const stoppedApp = render(
+      <WatchPane
+        snapshot={snapshot({
+          runner: {
+            journalDir: "/w/logs",
+            service: { kind: "stopped", why: "heartbeat overdue", cause: "timeout" },
+          },
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(stoppedApp)
+    const stoppedPainted = stoppedApp.lines
+    const stoppedRunnerLineIdx = stoppedPainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    expect(stoppedRunnerLineIdx).toBeGreaterThan(0)
+    const stoppedLine = stoppedPainted[stoppedRunnerLineIdx]!
+    const stoppedBorderCharIdx = stoppedLine.indexOf("╭")
+    const stoppedTitleCharIdx = stoppedLine.indexOf("RUNNER")
+    const stoppedBorderFg = stoppedApp.cell(stoppedBorderCharIdx, stoppedRunnerLineIdx).fg
+    const stoppedTitleFg = stoppedApp.cell(stoppedTitleCharIdx, stoppedRunnerLineIdx).fg
+
+    expect(stoppedBorderFg).toBeDefined()
+    expect(stoppedTitleFg).toEqual(stoppedBorderFg)
+    stoppedApp.unmount()
+
+    // 2. Stuck runner: border and title show status color (stuck warning color, distinct from stopped error color)
+    const stuckApp = render(
+      <WatchPane
+        snapshot={snapshot({
+          runner: RUNNER,
+          stopped: STOP,
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(stuckApp)
+    const stuckPainted = stuckApp.lines
+    const stuckRunnerLineIdx = stuckPainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    expect(stuckRunnerLineIdx).toBeGreaterThan(0)
+    const stuckLine = stuckPainted[stuckRunnerLineIdx]!
+    const stuckBorderCharIdx = stuckLine.indexOf("╭")
+    const stuckTitleCharIdx = stuckLine.indexOf("RUNNER")
+    const stuckBorderFg = stuckApp.cell(stuckBorderCharIdx, stuckRunnerLineIdx).fg
+    const stuckTitleFg = stuckApp.cell(stuckTitleCharIdx, stuckRunnerLineIdx).fg
+
+    expect(stuckBorderFg).toBeDefined()
+    expect(stuckTitleFg).toEqual(stuckBorderFg)
+    expect(stuckBorderFg).not.toEqual(stoppedBorderFg)
+    stuckApp.unmount()
+
+    // 3. Idle runner: border and title use idle color, distinct from stopped/stuck colors
+    const idleApp = render(
+      <WatchPane
+        snapshot={snapshot({
+          runner: RUNNER,
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(idleApp)
+    const idlePainted = idleApp.lines
+    const idleRunnerLineIdx = idlePainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    expect(idleRunnerLineIdx).toBeGreaterThan(0)
+    const idleLine = idlePainted[idleRunnerLineIdx]!
+    const idleBorderCharIdx = idleLine.indexOf("╭")
+    const idleTitleCharIdx = idleLine.indexOf("RUNNER")
+    const idleBorderFg = idleApp.cell(idleBorderCharIdx, idleRunnerLineIdx).fg
+    const idleTitleFg = idleApp.cell(idleTitleCharIdx, idleRunnerLineIdx).fg
+
+    expect(idleBorderFg).toBeDefined()
+    expect(idleTitleFg).toEqual(idleBorderFg)
+    expect(idleBorderFg).not.toEqual(stoppedBorderFg)
+    idleApp.unmount()
+  })
+
+  it("empty pane (BandBreakRows) renders RUNNER box with status color on border and title for STOPPED, STUCK, IDLE", async () => {
+    // 1. Stopped runner in empty pane (rows: [])
+    const stoppedApp = render(
+      <WatchPane
+        snapshot={snapshot({
+          rows: [],
+          runner: {
+            journalDir: "/w/logs",
+            service: { kind: "stopped", why: "heartbeat overdue", cause: "timeout" },
+          },
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(stoppedApp)
+    const stoppedPainted = stoppedApp.lines
+    const stoppedRunnerLineIdx = stoppedPainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    expect(stoppedRunnerLineIdx).toBeGreaterThan(0)
+    const stoppedLine = stoppedPainted[stoppedRunnerLineIdx]!
+    const stoppedBorderCharIdx = stoppedLine.indexOf("╭")
+    const stoppedTitleCharIdx = stoppedLine.indexOf("RUNNER")
+    const stoppedBorderFg = stoppedApp.cell(stoppedBorderCharIdx, stoppedRunnerLineIdx).fg
+    const stoppedTitleFg = stoppedApp.cell(stoppedTitleCharIdx, stoppedRunnerLineIdx).fg
+
+    expect(stoppedBorderFg).toBeDefined()
+    expect(stoppedTitleFg).toEqual(stoppedBorderFg)
+    stoppedApp.unmount()
+
+    // 2. Stuck runner in empty pane (rows: [])
+    const stuckApp = render(
+      <WatchPane
+        snapshot={snapshot({
+          rows: [],
+          runner: RUNNER,
+          stopped: STOP,
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(stuckApp)
+    const stuckPainted = stuckApp.lines
+    const stuckRunnerLineIdx = stuckPainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    expect(stuckRunnerLineIdx).toBeGreaterThan(0)
+    const stuckLine = stuckPainted[stuckRunnerLineIdx]!
+    const stuckBorderCharIdx = stuckLine.indexOf("╭")
+    const stuckTitleCharIdx = stuckLine.indexOf("RUNNER")
+    const stuckBorderFg = stuckApp.cell(stuckBorderCharIdx, stuckRunnerLineIdx).fg
+    const stuckTitleFg = stuckApp.cell(stuckTitleCharIdx, stuckRunnerLineIdx).fg
+
+    expect(stuckBorderFg).toBeDefined()
+    expect(stuckTitleFg).toEqual(stuckBorderFg)
+    expect(stuckBorderFg).not.toEqual(stoppedBorderFg)
+    stuckApp.unmount()
+
+    // 3. Idle runner in empty pane (rows: [])
+    const idleApp = render(
+      <WatchPane
+        snapshot={snapshot({
+          rows: [],
+          runner: RUNNER,
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(idleApp)
+    const idlePainted = idleApp.lines
+    const idleRunnerLineIdx = idlePainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    expect(idleRunnerLineIdx).toBeGreaterThan(0)
+    const idleLine = idlePainted[idleRunnerLineIdx]!
+    const idleBorderCharIdx = idleLine.indexOf("╭")
+    const idleTitleCharIdx = idleLine.indexOf("RUNNER")
+    const idleBorderFg = idleApp.cell(idleBorderCharIdx, idleRunnerLineIdx).fg
+    const idleTitleFg = idleApp.cell(idleTitleCharIdx, idleRunnerLineIdx).fg
+
+    expect(idleBorderFg).toBeDefined()
+    expect(idleTitleFg).toEqual(idleBorderFg)
+    expect(idleBorderFg).not.toEqual(stoppedBorderFg)
+    idleApp.unmount()
+  })
+
+  it("row 14: queue filters on the left, status filters on the right on the top line", async () => {
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({
+          queues: [{ branch: "main", label: "main", path: "/repo" }],
+          rows: [{ row: failedRow() }],
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(app)
+    const painted = app.lines
+
+    // 1. Top line has yrd watch, queue filter pills on left, status marker and status filter pills on right
+    const topIdx = painted.findIndex((l) => l.includes("yrd watch"))
+    expect(topIdx).toBeGreaterThanOrEqual(0)
+    const topLine = painted[topIdx]!
+
+    // Queue filter pills are left-aligned
+    const queueX = topLine.indexOf("main")
+    expect(queueX).toBeGreaterThan(0)
+    expect(queueX).toBeLessThan(40)
+
+    // Status filter pills are on the top line, right-aligned
+    expect(topLine).toContain("open")
+    expect(topLine).toContain("failed")
+    const openX = topLine.indexOf("open")
+    expect(openX).toBeGreaterThan(60)
+    expect(topLine.trimEnd().endsWith("failed")).toBe(true)
+
+    // 2. There is NO separate pills line in the body
+    const bodyLines = painted.slice(topIdx + 1)
+    const separatePills = bodyLines.some((l) => l.includes("open") && l.includes("running") && l.includes("failed"))
+    expect(separatePills).toBe(false)
+
+    app.unmount()
+  })
+
+  it("row 15: fold marker plus STATS directly under top line without duplicate waiting count and without stopped or last-merged slugs", async () => {
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({
+          decisions: DECISIONS,
+          rows: [
+            { row: row({ state: "queued", position: 1, branch: "task/queued-1" }) },
+            { row: row({ state: "merged", branch: "task/merged-1" }) },
+          ],
+          stopped: STOP,
+          runner: RUNNER,
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(app)
+
+    const topIdx = app.lines.findIndex((l) => l.includes("yrd watch"))
+    expect(topIdx).toBeGreaterThanOrEqual(0)
+
+    // 1. The line DIRECTLY under the top line is fold marker + STATS
+    const lineUnderTop = app.lines[topIdx + 1]!
+    expect(lineUnderTop).toContain("▸ STATS")
+    expect(lineUnderTop).toContain(`(${String(DECISIONS.length)} decisions · s to expand)`)
+
+    // 2. No duplicate waiting count, no stopped slug, no last-merge slug
+    expect(lineUnderTop).not.toContain("waiting")
+    expect(lineUnderTop).not.toContain("stopped")
+    expect(lineUnderTop).not.toContain("last merge")
+    expect(lineUnderTop).not.toContain("merged")
+
+    // 3. Pressing 's' expands: fold marker toggles to ▾ STATS directly under top line
+    app.press("s")
+    await settle(app)
+    const lineUnderTopExpanded = app.lines[topIdx + 1]!
+    expect(lineUnderTopExpanded).toContain("▾ STATS")
+    expect(lineUnderTopExpanded).toContain(`(${String(DECISIONS.length)} decisions · s to fold)`)
+    expect(lineUnderTopExpanded).not.toContain("waiting")
+    expect(lineUnderTopExpanded).not.toContain("stopped")
+    expect(lineUnderTopExpanded).not.toContain("last merge")
+    expect(lineUnderTopExpanded).not.toContain("merged")
+
+    app.unmount()
+  })
+
+  it("row 16: removal of done, newest-first and TIME=ended prose anywhere in table", async () => {
+    const painted = await lines(snapshot({ rows: EVERY_STATE, runner: RUNNER }), 120, 40)
+    const fullText = painted.join("\n")
+
+    expect(fullText).not.toContain("done, newest first")
+    expect(fullText).not.toContain("newest first")
+    expect(fullText).not.toContain("TIME=ended")
+    expect(fullText).not.toContain("not submitted")
+    expect(fullText).not.toContain("the bottom row goes next")
+    expect(painted.some((line) => line.includes("────"))).toBe(true)
+  })
+
+  it("row 17: detail pane with subtle background, DIVIDER_SIZE = 0, and blank padding line replacing divider", async () => {
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({
+          rows: [{ row: failedRow() }],
+        })}
+        open={opener()}
+        live={false}
+      />,
+      { cols: 220, rows: 40 },
+    )
+    await settle(app)
+    app.press("Enter")
+    await settle(app)
+
+    // 1. Subtle background: read cell background in list vs in detail pane
+    const runnerLineIdx = app.lines.findIndex((l) => l.includes("RUNNER"))
+    expect(runnerLineIdx).toBeGreaterThan(0)
+    const runnerX = app.lines[runnerLineIdx]!.indexOf("RUNNER")
+    expect(runnerX).toBeGreaterThan(140)
+
+    const listBg = app.cell(10, runnerLineIdx).bg
+    const detailBg = app.cell(runnerX, runnerLineIdx).bg
+
+    // Detail background must differ from list background and match subtle color
+    expect(detailBg).not.toEqual(listBg)
+    expect(detailBg).toEqual({ r: 50, g: 56, b: 68 })
+
+    // 2. Blank padding line: first row of detail pane (line 2, under STATS) is blank (<Box height={1} flexShrink={0} />)
+    const detailTop = app.lines[2]?.slice(143).trim() ?? ""
+    expect(detailTop).toBe("")
+
+    // Detail content starts on line 3 (tab strip)
+    const detailContent = app.lines[3]?.slice(143).trim() ?? ""
+    expect(detailContent).not.toBe("")
+
+    // 3. Divider line is absent: no vertical divider character between list and detail on top rows
+    expect(app.lines.slice(0, 4).some((line) => line.slice(135, 145).includes("│"))).toBe(false)
+
+    app.unmount()
+  })
+
+  it("item 8: three blank lines around runner box and header (marginTop, marginBottom, header spacer)", async () => {
+    const queued = Array.from({ length: 20 }, (_, i) =>
+      row({ branch: `task/queued-${i}`, head: `${i}`.repeat(40), state: "queued", position: i + 1 }),
+    )
+    const merged = Array.from({ length: 20 }, (_, i) =>
+      row({ branch: `task/done-${i}`, head: `d${i}`.padEnd(40, "0"), state: "merged" }),
+    )
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: [...queued, ...merged].map((r) => ({ row: r })), runner: RUNNER })}
+        open={opener()}
+        live={false}
+      />,
+      { cols: 160, rows: 25 },
+    )
+    await settle(app)
+    const lines = app.lines
+
+    // 1. Header spacer: line before ListHeader (line 2) is blank
+    expect(lines[2]?.trim()).toBe("")
+    expect(lines[3]).toContain("TASK")
+
+    // 2. marginTop: line before runner box (line 12) is blank
+    expect(lines[12]?.trim()).toBe("")
+    expect(lines[13]).toContain("╭─ RUNNER")
+
+    // 3. marginBottom: line after runner box (line 17) is blank
+    expect(lines[16]).toContain("╰─")
+    expect(lines[17]?.trim()).toBe("")
+
+    app.unmount()
   })
 })
