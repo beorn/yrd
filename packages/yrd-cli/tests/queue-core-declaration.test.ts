@@ -596,6 +596,15 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).toBe(0)
     expect(cleared.stderr()).toBe("")
     expect(JSON.parse(cleared.stdout())).toEqual({ branch: "task/one", ignored: null })
+    const human = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "ignore", "task/one", "--reason", "second hold", "--notify", "@dev/4"],
+        human.io,
+      ),
+      human.stderr(),
+    ).toBe(0)
+    expect(human.stdout()).toContain("ignored task/one by @dev/4: second hold")
   }, 30_000)
 
   it("drops a draft pushed by another clone after fetching its kept head", async () => {

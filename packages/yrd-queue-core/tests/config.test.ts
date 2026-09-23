@@ -100,7 +100,7 @@ describe("the queue declaration grammar", () => {
     [
       "positive retention is halted",
       "archive-after: 1\n",
-      /yrd-archive-after-disabled: \.yrd\.yml archive-after 1: ref deletion is disabled.*25041/u,
+      /yrd-archive-after-disabled: \.yrd\.yml archive-after 1 days: ref deletion is disabled.*25041/u,
     ],
     [
       "zero retention",

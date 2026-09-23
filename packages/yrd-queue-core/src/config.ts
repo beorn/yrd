@@ -172,7 +172,7 @@ function readArchiveAfter(value: unknown): "never" {
   if (value === undefined || value === "never") return "never"
   if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
     throw new Error(
-      `yrd-archive-after-disabled: .yrd.yml archive-after ${value}: ref deletion is disabled by the halt; #25041 lifts it`,
+      `yrd-archive-after-disabled: .yrd.yml archive-after ${value} days: ref deletion is disabled by the halt; #25041 lifts it`,
     )
   }
   throw new Error(

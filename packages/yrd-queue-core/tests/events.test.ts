@@ -219,7 +219,18 @@ describe("ADR-0016 event fold", () => {
 
   it("keeps ignore attribution separate from a change's reason and refuses malformed overlays", () => {
     const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
-    const failedCheck = evolve(opened, event("verifying", B, [["Commit", B]], [B]))
+    const failedCheck = evolve(
+      opened,
+      event(
+        "verifying",
+        B,
+        [
+          ["Commit", B],
+          ["Reason", "rechecking"],
+        ],
+        [B],
+      ),
+    )
     const ignored = evolve(
       failedCheck,
       event("ignored", "c".repeat(40), [
@@ -228,7 +239,7 @@ describe("ADR-0016 event fold", () => {
       ]),
     )
     expect(ignored).toMatchObject({ status: "verifying", ignored: { reason: "waiting", by: "@dev/2" } })
-    expect(ignored.reason).toBeUndefined()
+    expect(ignored.reason).toBe("rechecking")
     expect(() =>
       evolve(
         ignored,
@@ -687,11 +698,17 @@ describe("the queue-format boundary", () => {
       setBranchIgnored(location, { ...request, ignored: false, reason: "invalid" } as never),
     ).rejects.toThrow(/yrd-ignore-reason-conflict/u)
     await expect(setBranchIgnored(location, { ...request, ignored: true, reason: "waiting" })).resolves.toBeUndefined()
+    expect((await branch.events({ limit: 1024 })).map((event) => event.type)).toEqual(["opened", "ignored"])
     expect((await readStatus(location, "lab", "task/42")).ignored).toEqual({ reason: "waiting", by: "@dev/2" })
     await expect(setBranchIgnored(location, { ...request, ignored: true, reason: "again" })).rejects.toThrow(
       /yrd-ignore-state-unchanged/u,
     )
     await expect(setBranchIgnored(location, { ...request, ignored: false })).resolves.toBeUndefined()
+    expect((await branch.events({ limit: 1024 })).map((event) => event.type)).toEqual([
+      "opened",
+      "ignored",
+      "unignored",
+    ])
     expect((await readStatus(location, "lab", "task/42")).ignored).toBeUndefined()
     await expect(setBranchIgnored(location, { ...request, ignored: false })).rejects.toThrow(
       /yrd-ignore-state-unchanged/u,
