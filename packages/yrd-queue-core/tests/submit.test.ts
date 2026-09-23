@@ -24,6 +24,7 @@ import {
   readRecords,
   readQueue,
   readPause,
+  selectionFor,
   refAt,
   submit,
   writePause,
@@ -101,6 +102,7 @@ it("a queue reading with N changes asks ancestry once", async () => {
     if (args[0] === "merge-base" && args.includes("--is-ancestor")) mergeBaseIsAncestor++
     return w.git(args, input)
   }
+  Object.assign(git, { selection: selectionFor(w.git) })
   const reading = await readQueue(git, "origin", "main", w.target)
   expect(reading.changes).toHaveLength(3)
   expect(revListStdin).toBe(1)
@@ -187,6 +189,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
         calls.push([...args])
         return w.git(args, input)
       }
+      Object.assign(observed, { selection: selectionFor(w.git) })
       for (const call of [inspectSubmit, submit]) {
         const attempt = call(observed, "origin", {
           branch: "task/bound",
@@ -286,6 +289,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     ).rejects.toThrow(`found no merge base, expected ${w.target}`)
     const broken: Git = (args, input) =>
       args[0] === "merge-base" ? w.git(["merge-base", "missing-object", w.target]) : w.git(args, input)
+    Object.assign(broken, { selection: selectionFor(w.git) })
     await expect(
       inspectSubmit(broken, "origin", {
         branch: "task/unrelated",
@@ -312,6 +316,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
       }
       return w.git(args, input)
     }
+    Object.assign(racing, { selection: selectionFor(w.git) })
     const opened = await submit(racing, "origin", {
       branch: "task/race",
       submitter: "@dev/3",

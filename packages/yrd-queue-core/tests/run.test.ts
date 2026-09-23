@@ -51,6 +51,7 @@ import {
   readPause,
   runCheck,
   runDiedInPreamble,
+  selectionFor,
   submit,
   trailer,
   trailers,
@@ -1663,6 +1664,7 @@ describe("a queue run", () => {
         }
         return w.git(args, input)
       }
+      Object.assign(git, { selection: selectionFor(w.git) })
 
       const outcome = await queueRun({ ...(await w.options({ exit: 0, on: ["submit"] })), git })
 
@@ -5111,6 +5113,7 @@ describe("a failing check bills the submitter at once", () => {
       }
       return output
     }
+    Object.assign(git, { selection: selectionFor(w.git) })
     const retried = await queueRun({ ...(await w.options({ exit: 1, on: ["submit"] })), git })
     expect(poisoned).toBe(true)
     expect(messages(w).at(-1)).toMatchObject({ record: "failed", failures: 3 })
