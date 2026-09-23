@@ -269,9 +269,19 @@ export function gitIn(
     }
     const first = await attempt(env)
     if (observation || !isRetryableRead(args) || !isSettledPublickeyRefusal(first)) return first
+    if (options.signal?.aborted) return first
     const effectiveEnv = env ?? gitEnvironment(globalThis.process.env)
-    const config = effectiveEnv.GIT_SSH_COMMAND === undefined ? await readCoreSshCommand(cwd, effectiveEnv) : undefined
-    const verbose = verboseSshRetryEnvironment(effectiveEnv, config)
+    let verbose: ReturnType<typeof verboseSshRetryEnvironment>
+    try {
+      const config =
+        effectiveEnv.GIT_SSH_COMMAND === undefined ? await readCoreSshCommand(cwd, effectiveEnv) : undefined
+      verbose = verboseSshRetryEnvironment(effectiveEnv, config)
+    } catch (error) {
+      console.error(
+        `yrd: git ${args.join(" ")} in ${cwd}: Permission denied (publickey).; SSH retry skipped: ${String(error)}`,
+      )
+      return first
+    }
     console.error(
       `yrd: git ${args.join(" ")} in ${cwd}: Permission denied (publickey).; ` +
         `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms with ${verbose.command}`,
@@ -749,8 +759,17 @@ async function retryLegacyPublickeyRead<T>(
     return await read()
   } catch (error) {
     if (!isLegacyPublickeyRefusal(error, verb)) throw error
-    const config = baseEnv.GIT_SSH_COMMAND === undefined ? await readCoreSshCommand(repo, baseEnv) : undefined
-    const verbose = verboseSshRetryEnvironment(baseEnv, config)
+    let verbose: ReturnType<typeof verboseSshRetryEnvironment>
+    try {
+      const config = baseEnv.GIT_SSH_COMMAND === undefined ? await readCoreSshCommand(repo, baseEnv) : undefined
+      verbose = verboseSshRetryEnvironment(baseEnv, config)
+    } catch (configError) {
+      console.error(
+        `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: ${error.message}; ` +
+          `SSH retry skipped: ${String(configError)}`,
+      )
+      throw error
+    }
     console.error(
       `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: ${error.message}; ` +
         `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms with ${verbose.command}`,

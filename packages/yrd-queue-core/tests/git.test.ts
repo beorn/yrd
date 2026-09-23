@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it, vi } from "vitest"
@@ -100,6 +100,62 @@ describe("the git runner", () => {
     expect(readFileSync(join(root, "calls"), "utf8").trim().split("\n")).toHaveLength(1)
   })
 
+  it.each(["exit 128", "timeout"] as const)(
+    "keeps the first refusal and names a failed SSH config lookup (%s)",
+    async (failure) => {
+      const root = temporaryRoot("config-read-failure")
+      const executable = publickeyExecutable(root, 1)
+      const bin = join(root, "bin")
+      mkdirSync(bin)
+      writeFileSync(
+        join(bin, "git"),
+        failure === "exit 128"
+          ? "#!/bin/sh\nprintf 'fatal: broken config\\n' >&2\nexit 128\n"
+          : "#!/usr/bin/env bun\nawait Bun.sleep(6000)\n",
+        { mode: 0o700 },
+      )
+      const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        const git = gitIn(
+          root,
+          undefined,
+          { executable, contract: "native", scope: "local", origin: "fixture" },
+          { env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } },
+        )
+        await expect(git(["ls-remote", "origin"])).rejects.toThrow("Permission denied (publickey).")
+        expect(readFileSync(join(root, "calls"), "utf8").trim().split("\n")).toHaveLength(1)
+        expect(announced.mock.calls[0]?.[0]).toContain("SSH retry skipped")
+        expect(announced.mock.calls[0]?.[0]).toContain("cannot read core.sshCommand")
+      } finally {
+        announced.mockRestore()
+      }
+    },
+  )
+
+  it("aborts during publickey backoff without running a second Git read", async () => {
+    const root = temporaryRoot("publickey-abort")
+    const executable = publickeyExecutable(root, 1)
+    const controller = new AbortController()
+    const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const git = gitIn(
+        root,
+        undefined,
+        { executable, contract: "native", scope: "local", origin: "fixture" },
+        {
+          env: { ...process.env, GIT_SSH_COMMAND: "ssh -i /tmp/fleet-key" },
+          signal: controller.signal,
+          onInvocation: () => setTimeout(() => controller.abort(), 50),
+        },
+      )
+      await expect(git(["fetch", "origin"])).rejects.toThrow("Permission denied (publickey).")
+      expect(readFileSync(join(root, "calls"), "utf8").trim().split("\n")).toHaveLength(1)
+      expect(announced).toHaveBeenCalledOnce()
+    } finally {
+      announced.mockRestore()
+    }
+  })
+
   // 25282: legacy event-ref reads spawn Gitomic's shell backend directly.
   // The gitIn case above cannot catch a retry omitted from this seam.
   it.each([
@@ -157,6 +213,53 @@ describe("the git runner", () => {
       else process.env.GIT_SSH_COMMAND = previous
       if (previousVariant === undefined) delete process.env.GIT_SSH_VARIANT
       else process.env.GIT_SSH_VARIANT = previousVariant
+    }
+  })
+
+  it("keeps Gitomic's first refusal when SSH config cannot be read", async () => {
+    const { repo, ssh, calls } = legacyPublickeyRepo(1)
+    const bin = join(resolve(repo, ".."), "bin")
+    mkdirSync(bin)
+    const nativeGit = Bun.which("git")
+    if (nativeGit === null) throw new Error("Fixture needs native git")
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh
+if [ "$1" = "config" ] && [ "$2" = "--get" ]; then
+  printf 'fatal: broken config\\n' >&2
+  exit 128
+fi
+exec ${JSON.stringify(nativeGit)} "$@"
+`,
+      { mode: 0o700 },
+    )
+    const previousCommand = process.env.GIT_SSH_COMMAND
+    const previousProgram = process.env.GIT_SSH
+    const previousVariant = process.env.GIT_SSH_VARIANT
+    const previousPath = process.env.PATH
+    delete process.env.GIT_SSH_COMMAND
+    process.env.GIT_SSH = ssh
+    process.env.GIT_SSH_VARIANT = "ssh"
+    process.env.PATH = `${bin}:${previousPath ?? ""}`
+    const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const backend = gitRunner.createLegacyBackend()
+      await expect(backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")).rejects.toThrow(
+        "Permission denied (publickey).",
+      )
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1)
+      expect(announced.mock.calls[0]?.[0]).toContain("SSH retry skipped")
+      expect(announced.mock.calls[0]?.[0]).toContain("cannot read core.sshCommand")
+    } finally {
+      announced.mockRestore()
+      if (previousCommand === undefined) delete process.env.GIT_SSH_COMMAND
+      else process.env.GIT_SSH_COMMAND = previousCommand
+      if (previousProgram === undefined) delete process.env.GIT_SSH
+      else process.env.GIT_SSH = previousProgram
+      if (previousVariant === undefined) delete process.env.GIT_SSH_VARIANT
+      else process.env.GIT_SSH_VARIANT = previousVariant
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
     }
   })
 
