@@ -99,7 +99,7 @@ export type Row<Status extends string = ChangeState | ChangeStatus | "direct" | 
    * off the queue's own machine for anything not yet merged.
    */
   run?: string
-  /** When checking began — the journal's first check-start for this change, or the tip's own instant when the tip IS the checked record. */
+  /** When this run's checks began — its first check-start, or the tip's own instant when no journal exists and the tip IS the checked record. */
   startedAt?: Date
   /** When the actual ending record was written; absent when only its sent notice was read, while queued or checked, or for an ending git read (`replaced`, `deleted`, a direct ancestor). */
   endedAt?: Date
@@ -601,14 +601,13 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
 }
 
 /**
- * When checking began: the earliest check-start any run journal recorded for
- * this change, else the checked record's own instant when the tip IS that
- * record. Absent otherwise — and absent is the honest answer off the queue's
- * machine, where there is no journal and the tip has moved past `checked`.
+ * When this run's checks began: the newest journal run's first check-start.
+ * An earlier run cannot lend its start to a new round that has not started a
+ * check. Without a journal, the checked tip's own instant is the only measured
+ * start; otherwise absent is the honest answer.
  */
 function checkingBegan(runs: readonly JournalRun[], tip: ChangeRecord, ended: ChangeRecord["kind"]): Date | undefined {
-  const starts = runs.flatMap((run) => run.checks.map((check) => check.startedAt.getTime()))
-  if (starts.length > 0) return new Date(Math.min(...starts))
+  if (runs.length > 0) return runs[0]?.checks[0]?.startedAt
   return ended === "checked" ? tip.at : undefined
 }
 

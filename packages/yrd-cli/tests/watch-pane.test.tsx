@@ -2035,6 +2035,28 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     })
   })
 
+  it("shows a five-hour queue age under CREATED and four-minute current round under RUN (25293)", async () => {
+    const startedAt = ago(4 * MINUTE)
+    const held = row({
+      branch: "task/long-wait",
+      live: { check: "affected-tests", phase: "merge", run: RUN_ID, since: startedAt },
+      position: 1,
+      run: RUN_ID,
+      since: ago((5 * 60 + 37) * MINUTE),
+      startedAt,
+      state: "checked",
+    })
+    const listing = await lines(snapshot({ rows: [{ row: held }], runner: RUNNER }), 120, 40)
+    const header = listing.find((line) => line.includes("TASK") && line.includes("AGE / RUN")) ?? ""
+    const change = tableRow(listing, " task/long-wait ")
+    const detail = await paint(at(<WatchDetail detail={detailOf({ row: held }, [])} selected={CHANGES_TAB} />), [], 100)
+
+    expect(header).toContain("AGE / RUN")
+    expect(change).toContain("— / 4:00")
+    expect(change).not.toContain("5h37m")
+    expect(detail).toMatch(/CREATED\s+\d\d:\d\d:\d\d · 5h37m ago/u)
+  })
+
   it("a stuck row whose own stuck record the reading cannot date shows no duration, never the wait it keeps in line (A2-set-v4)", async () => {
     const W = await words()
     // A stuck change keeps its place in line, so the core still measures its wait; its one cell is stuck's alone,
