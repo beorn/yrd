@@ -143,6 +143,9 @@ function assertBranch(branch: string): void {
 
 type EventShape = Pick<Event, "id" | "type" | "props" | "links">
 
+/** What the queue projection reads; a not-yet-written event is validated in this shape, never as a full Event. */
+type QueueEventShape = EventShape & Pick<Event, "parent" | "writer">
+
 function prop(event: EventShape, key: string): string | undefined {
   const found = event.props.filter(([name]) => name === key)
   if (found.length > 1) throw new Error(`event ${event.id} repeats ${key}:`)
@@ -446,17 +449,13 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
         [EVENT_TRAILERS.reason, write.reason],
       ],
     }
-    const pending: Event = {
+    const pending: QueueEventShape = {
       id: "pending",
       parent: current.tip,
       links: [],
       type: input.type,
-      title: input.type,
-      content: "",
       props: input.props ?? [],
       writer: write.by,
-      instance: null,
-      seq: null,
     }
     projectEventQueue([...events, pending], ref, store.repo)
     return [input]
@@ -466,7 +465,7 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   return written
 }
 
-function projectEventQueue(events: readonly Event[], ref: string, repo: string): EventQueue {
+function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo: string): EventQueue {
   const first = events[0]
   if (first === undefined) throw new Error(`missing event queue chain ${ref} in ${repo}`)
   if (first.parent !== null) {
