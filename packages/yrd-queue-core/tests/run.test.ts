@@ -1790,7 +1790,8 @@ describe("a queue run", () => {
   it("with 40 changes waiting, the head merges before any other change is judged (25301 A1)", async () => {
     const w = await world()
     const branches = Array.from({ length: 40 }, (_, i) => `task/c${String(i).padStart(2, "0")}`)
-    for (const branch of branches) await submitCommit(w, branch, `${branch.slice(5)}.txt`)
+    const heads: string[] = []
+    for (const branch of branches) heads.push(await submitCommit(w, branch, `${branch.slice(5)}.txt`))
 
     const outcome = await queueRun(await w.options({ exit: 0, on: ["submit", "merge"] }))
 
@@ -1809,7 +1810,45 @@ describe("a queue run", () => {
       ...Array.from({ length: 39 }, () => mergeCommit),
     ])
     expect(outcome.checkedWaiting).toBe(39)
+    // @cto 62ed0395 (2): every prefetch verdict names the target it stood on,
+    // the checked record's Base trailer, and here that is the head's merge.
+    await fetchChanges(w)
+    const tail = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/c39", head: heads[39]! })))!)
+    expect(trailer(tail.find((record) => record.kind === "checked")!, "Base")).toBe(mergeCommit)
   }, 180_000)
+
+  // @cto 62ed0395 (3): a head whose merge changes .yrd.yml leaves the tail unjudged,
+  // so no verdict is written under a declaration the target no longer carries.
+  it("a head whose merge edits .yrd.yml prefetches nothing, and the next round judges the tail (25301)", async () => {
+    const w = await world()
+    // A valid edit: the declaration stays the empty mapping, as another blob.
+    await w.git(["checkout", "--quiet", "-b", "task/declaration", "main"])
+    writeFileSync(join(w.work, ".yrd.yml"), "# edited by the head\n{}\n")
+    await w.git(["add", ".yrd.yml"])
+    await w.git(["commit", "--quiet", "-m", "edit the declaration"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/declaration",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    const tailHead = await submitCommit(w, "task/after", "after.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, on: ["submit", "merge"] }))
+
+    expect(outcome.merged).toEqual(["task/declaration"])
+    expect(outcome.checkedWaiting).toBe(0)
+    // The head's judge and its merge check, and nothing for the tail.
+    expect(readFileSync(w.checkLog, "utf8").trim().split("\n")).toHaveLength(2)
+    const journal = readFileSync(outcome.log, "utf8")
+    expect(journal).toContain("the head's merge changed .yrd.yml")
+    await fetchChanges(w)
+    const tail = (await readQueue(w.git, "origin", "main", await remoteTarget(w))).changes.find(
+      (entry) => entry.change.head === tailHead,
+    )!
+    expect(tail.reading.state).toBe("queued")
+  })
 
   // @cto ac87d1e5: a head in FRONT of a stuck row merges; the line still stops on
   // that row in the same round, and one outcome names both.

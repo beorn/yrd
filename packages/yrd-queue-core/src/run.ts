@@ -85,6 +85,7 @@ import {
   type GitObservation,
   type ObservationNotice,
   mergeBase,
+  refAt,
   type GitInvocationOptions,
   type GitSelection,
 } from "./git.ts"
@@ -826,7 +827,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // composes. Each judge starts only inside the stop window, and a judge writes
   // its verdict whole or not at all, so stopping here leaves no partial
   // verdict. A scoped round has no tail.
-  if (acted !== undefined && !stoppedByTime && options.only === undefined) {
+  if (acted !== undefined && !stoppedByTime && options.only === undefined && !(await declarationMoved(run))) {
     run.targetSha = run.targetAfter.sha
     const tail = ordered((await read(run.targetSha)).changes, undefined, "queued", "stuck", "checked").filter(
       (entry) => !sameChange(entry, acted) && needsJudge(entry),
@@ -867,6 +868,28 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
  * name, so a ring that wraps one sees every call to it.
  */
 const BASE: Steps = { bookkeep, direct, observed, end, ended, judge, merge, open, prepare, push, stopLine }
+
+/**
+ * Whether the head's merge changed `.yrd.yml`, logged when it did (@cto
+ * 62ed0395 (3)). The prefetch judges under the declaration this round read, so
+ * every verdict it wrote after such a merge would name a config blob the target
+ * no longer declares and be judged again next round: the whole-line re-judge
+ * this round exists to remove. So that round prefetches nothing, and the next
+ * round judges each change under the new declaration as the walk reaches it.
+ */
+async function declarationMoved(run: Run): Promise<boolean> {
+  if (run.targetAfter.sha === run.targetSha) return false
+  const before = await refAt(run.git, `${run.targetSha}:.yrd.yml`, "blob")
+  const after = await refAt(run.git, `${run.targetAfter.sha}:.yrd.yml`, "blob")
+  if (before === after) return false
+  run.log.write({
+    kind: "observation",
+    why:
+      `the head's merge changed .yrd.yml (${before?.slice(0, 12) ?? "absent"} -> ${after?.slice(0, 12) ?? "absent"}); ` +
+      "no prefetch this round: the next round judges each change under the new declaration",
+  })
+  return true
+}
 
 /** The same change: one branch at one head. */
 function sameChange(left: QueueEntry, right: QueueEntry): boolean {
