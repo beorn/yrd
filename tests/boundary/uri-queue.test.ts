@@ -186,6 +186,7 @@ describe("a queue started by address on a host with no checkout", () => {
       .filter(({ cwd }) => cwd === author)
       .map(({ args }) => gitSubcommand(args))
       .find((call) => call?.name === "push")
+    expect(authorPush, "selected author Git saw no push verb").toBeDefined()
     expect(authorPush?.tail).toContain("--atomic")
     expect(authorPush?.tail.filter((arg) => arg.startsWith("--force-with-lease="))).toHaveLength(2)
     expect(
