@@ -1852,6 +1852,32 @@ describe("a diverged component the merge composes", () => {
    * semantic conflict with main. It is the submitter's bounce, named
    * `recut-check`, and the line does not stop on it.
    */
+  /**
+   * The same re-cut met at JUDGE: the component main moved before the change
+   * was ever judged, so its first candidate is already composed and the head
+   * alone was never checked. Nothing proves the failure is the re-cut's rather
+   * than the change's, so it stays the ordinary check failure it was before
+   * 24977 -- and, measured, it does not stop the line.
+   */
+  it("fails a change whose first, already-composed candidate fails a submit check, without stopping the line (24977)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const check = {
+      on: ["submit"],
+      run: "! { test -f submodule/main-side.txt && test -f submodule/change-side.txt; }",
+    } as const
+    const head = await submitGitlink(w, "task/walled-recut", pins.changeSide)
+    await gitlinkAroundQueue(w, pins.mainSide)
+
+    const outcome = await queueRun(await w.options(check))
+
+    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/walled-recut"], merged: [], stuck: [] })
+    const failed = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/walled-recut", head })))
+    ).find((record) => record.kind === "failed")
+    expect(trailer(failed!, "Reason")).toBe("submodule-check")
+  })
+
   it("bounces a recut whose re-run check fails while the head alone passes, without stopping the line (24977)", async () => {
     const w = await world()
     const pins = await divergentSubmoduleCommits(w)
