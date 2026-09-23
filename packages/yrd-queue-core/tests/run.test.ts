@@ -4,7 +4,7 @@
  * Every case asserts on what the plan says a reader can see: the exit code,
  * the target's commits, the change's records at the remote, and the message the
  * notifier was handed. Nothing internal.
- * @reach fs-walk <fixture-only: root = mkdtempSync(join(tmpdir(), ...)); readdirSync(logs)/readdirSync(hooksPath) target subdirs of this temp root; gitSuperBin is only existsSync-...>
+ * @reach fs-walk <fixture-only: mkdtemp repos; existsSync then runs git-super/bin/git-super>
  */
 
 import { spawnSync } from "node:child_process"

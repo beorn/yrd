@@ -11,7 +11,7 @@
  *           `coreQueueCommand` driven directly, no process boundary)
  * @consumer every seat that runs `yrd check <name>` before submitting, and
  *           expects it to say what the queue will say
- * @reach fs-walk <fixture-only: root = mkdtempSync(join(tmpdir(), ...)); every readdirSync targets w.workdir subdirs under this temp root.>
+ * @reach fs-walk <fixture-only: root=mkdtempSync(tmpdir()); readdirSync scoped to it>
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
