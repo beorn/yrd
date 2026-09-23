@@ -442,7 +442,9 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       expect(warning?.message).toMatch(/remote [0-9a-f]{40}, intended [0-9a-f]{40} \(diverged\); inspect: git -C /u)
     }
     // Three rounds launch the real selected executable for every Git call.
-  }, 15_000)
+    // Even after backend reuse, this integration launches 235 selected Git wrappers
+    // and 876 native Git processes; under host load one run took 14.79s.
+  }, 30_000)
 
   // 24472: legacy branch-name inference must be visible in both submit modes;
   // the domain reader tests cannot prove the CLI tells its caller.
