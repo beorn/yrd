@@ -95,6 +95,7 @@ import {
   LoudPause,
   QueueLine,
   RunnerDetail,
+  RunnerTitledBox,
   bandHeight,
   bandOf,
   bandPlan,
@@ -175,8 +176,9 @@ const LIST_NATURAL_WIDTH = 140
 const DETAIL_NATURAL_WIDTH = 72
 const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
-const DIVIDER_SIZE = 0
-const DEFAULT_SPLIT_RATIO = 0.65
+export const DIVIDER_SIZE = 0
+export const DEFAULT_SPLIT_RATIO = 0.65
+export const DETAIL_BG = "$bg-subtle"
 /** Below this many terminal rows the STATS box would push the table off the screen, so it yields (the retired pane's own rule). */
 /** The TIME rows under the counts cost five more; below this height the list keeps them. */
 
@@ -225,6 +227,15 @@ const HELP = [
 type HeldDetail = Readonly<{ key: string; tipAt: number | undefined; detail: ChangeDetail }>
 
 const HELD_DETAILS = 2
+
+function rowQueueOf(row: Row, queues: readonly WatchQueue[]): WatchQueue | undefined {
+  const rowQueueName = (row as { queue?: string }).queue
+  if (rowQueueName !== undefined) {
+    const found = queues.find((q) => q.label === rowQueueName || q.branch === rowQueueName)
+    if (found !== undefined) return found
+  }
+  return queues[0]
+}
 
 export function WatchPane({
   snapshot,
@@ -324,7 +335,9 @@ export function WatchPane({
     shown.rows.filter(
       (item) =>
         buckets.has(bucketOf(item.row)) &&
-        (visibleQueues === undefined || shown.queues.length === 0 || visibleQueues.has(shown.queues[0]?.label ?? "")),
+        (visibleQueues === undefined ||
+          shown.queues.length === 0 ||
+          visibleQueues.has(rowQueueOf(item.row, shown.queues)?.label ?? "")),
     ),
     holding,
   )
@@ -591,7 +604,7 @@ export function WatchPane({
       flexGrow={1}
       minHeight={0}
       minWidth={0}
-      backgroundColor="$bg-subtle"
+      backgroundColor={DETAIL_BG}
     >
       <Box height={1} flexShrink={0} />
       {detailContent}
@@ -608,7 +621,7 @@ export function WatchPane({
       stats={
         <Box flexDirection="column" flexShrink={0} minWidth={0}>
           <Text wrap="truncate">
-            ▸ STATS{shown.decisions === undefined ? "" : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
+            {statsOpen ? "▾" : "▸"} STATS{shown.decisions === undefined ? "" : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
           </Text>
           {statsOpen && shown.decisions !== undefined ? (
             <StatsBox
@@ -895,25 +908,24 @@ function Table({
           onCursor={onCursor}
           renderItem={(item: WatchPaneItem, index: number, meta: { isHovered: boolean }) => {
             if (item.kind === "runner") {
-              const color = STATE_WORDS[item.line.state].color
               return (
-                <Box flexDirection="column" marginTop={1} marginBottom={1}>
-                  <TitledBox title={STATE_WORDS.runner.word} flushTop borderColor={color}>
-                    <RunnerRow
-                      line={item.line}
-                      layout={layout}
-                      cursor={index === cursor}
-                      queueDigit={queue.digit}
-                      queueLabel={queue.label}
-                    />
-                    <RunnerDetail snapshot={snapshot} />
-                  </TitledBox>
-                </Box>
+                <RunnerTitledBox
+                  line={item.line}
+                  snapshot={snapshot}
+                  layout={layout}
+                  cursor={index === cursor}
+                  queueDigit={queue.digit}
+                  queueLabel={queue.label}
+                />
               )
             }
             const rowIndex = rows.indexOf(item.item)
             const separator = rowIndex >= 0 ? separatorBefore(rows, rowIndex) : undefined
             const brk = rowIndex >= 0 ? plan.before.get(rowIndex) : undefined
+            const rowQ = rowQueueOf(item.item.row, snapshot.queues)
+            const qIdx = rowQ === undefined ? -1 : snapshot.queues.indexOf(rowQ)
+            const rowQueueDigit = qIdx >= 0 ? qIdx + 1 : queue.digit
+            const rowQueueLabel = rowQ?.label ?? queue.label
             const row = (
               <ListRow
                 item={item.item}
@@ -921,8 +933,8 @@ function Table({
                 cursor={index === cursor}
                 hovered={meta.isHovered}
                 live={live}
-                queueDigit={queue.digit}
-                queueLabel={queue.label}
+                queueDigit={rowQueueDigit}
+                queueLabel={rowQueueLabel}
               />
             )
             if (separator === undefined && brk === undefined && plan.holding !== rowIndex) return row

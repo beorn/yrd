@@ -3,15 +3,14 @@
  * pills (watch-redesign items 3, 28, 30–33, 38):
  *
  *   yrd watch                                                  1 /hh ⎇ main   ← title + queue pills right, no All
- *   TASK                          AGENT   QUEUE / RUN     STATE      AGE / RUN
- *   ── drafts (7d): pushed to the remote, not submitted ─────
- *   Improve table expansion       @dev/7  1 · —           draft      — / —
- *   ── 2 waiting, newest first; the bottom row goes next ─
- *   Validate staffing roots       @dev/8  1 · —           waiting    — / —
- *   Correct staffing selection    @dev/8  1 · main#2342   checking   — / 00:42
+ *   yrd watch                                                  1 /hh ⎇ main   ← title + queue pills right, no All
+ *   HH:MM  Q   RUN    TASK                          STATE      AGENT   AGE / RUN
+ *   ────────────────────────────────────────────────────────────────────────
+ *   12:00  1   —      Improve table expansion       draft      @dev/7  — / —
+ *   12:01  1   —      Validate staffing roots       waiting    @dev/8  — / —
+ *   12:05  1   2342   Correct staffing selection    checking   @dev/8  — / 00:42
  *             ▶ Step: focused checks · heartbeat 1s ago
- *   ── done, newest first ────────────────────────────
- *   Expose close-path option      @dev/2  1 · main#2341   merged     — / 04:55
+ *   12:10  1   2341   Expose close-path option      merged     @dev/2  — / 04:55
  *                                                                 open  running  done  failed   ← status pills, right; no All
  *
  * Every row has ONE clock, the instant its place in its band is ordered by.
@@ -37,6 +36,7 @@ import {
   RUNNING_GLYPH,
   STATE_WORDS,
   ageRunText,
+  clock,
   friendlyPath,
   queueRunText,
   runIdentifier,
@@ -90,6 +90,7 @@ export function pillLabel(queue: WatchQueue, digit: number, brackets = false): s
 }
 
 export type ListLayout = Readonly<{
+  timeWidth?: number
   agentWidth: number
   qWidth?: number
   runWidth?: number
@@ -150,6 +151,7 @@ export function listLayout(
   const separate = options?.separateColumns ?? false
   const single = options?.singleQueue ?? true
   const fullQueue = options?.fullQueueRefs ?? false
+  const timeWidth = 5
   const statusWidth = Math.max(6, runnerWord.length + 2, ...rows.map((item) => stateWord(item.row).length + 2))
   const agentWidth =
     columns < 100
@@ -162,10 +164,11 @@ export function listLayout(
       )
     : 0
   const ageRunWidth = Math.max(9, (runner?.duration ?? "").length, ...rows.map((item) => ageRunText(item.row, now).length))
-  const fixedExceptQ = statusWidth + agentWidth + (separate ? runWidth : 0) + ageRunWidth + 8
+  const fixedExceptQ = timeWidth + statusWidth + agentWidth + (separate ? runWidth : 0) + ageRunWidth + 8
   const maxAvailableForQ = Math.max(16, columns - fixedExceptQ - 36)
   const qWidth = separate ? (fullQueue ? Math.max(16, Math.min(queue.label.length, maxAvailableForQ)) : single ? 0 : 3) : 0
   return {
+    timeWidth,
     statusWidth,
     agentWidth,
     qWidth,
@@ -312,12 +315,13 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
   return (
     <Cells layout={layout}>
       {{
-        agent: label("AGENT"),
-        task: label("TASK"),
+        time: label("HH:MM"),
         q: (layout.qWidth ?? 0) === 0 ? null : label(layout.isFullQueue ? "QUEUE" : "Q"),
         run: label("RUN"),
         queueRun: label("QUEUE / RUN"),
+        task: label("TASK"),
         status: label("STATE"),
+        agent: label("AGENT"),
         ageRun: label("AGE / RUN"),
       }}
     </Cells>
@@ -418,6 +422,8 @@ export const ListRow = memo(function ListRow({
   const held = row.live === undefined ? undefined : "$fg-info"
   const color = stateColor(row)
   const suffix = changesSuffix(row)
+  const at = clockOf(row)
+  const timeText = at !== undefined ? clock(at) : "—"
   const title =
     row.subject ??
     (row.state === "direct"
@@ -435,9 +441,25 @@ export const ListRow = memo(function ListRow({
     >
       <Cells layout={layout}>
         {{
-          agent: (
+          time: (
             <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
-              {row.submitter ?? "—"}
+              {timeText}
+            </Text>
+          ),
+          q:
+            (layout.qWidth ?? 0) === 0 ? null : (
+              <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
+                {layout.isFullQueue ? queueLabel : String(queueDigit)}
+              </Text>
+            ),
+          run: (
+            <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
+              {runIdentifier(item.run?.id ?? row.run)}
+            </Text>
+          ),
+          queueRun: (
+            <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
+              {queueRunText(queueDigit, queueLabel, item.run?.id ?? row.run)}
             </Text>
           ),
           task: (
@@ -457,23 +479,6 @@ export const ListRow = memo(function ListRow({
               )}
             </Box>
           ),
-          q:
-            (layout.qWidth ?? 0) === 0 ? null : (
-              <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
-                {layout.isFullQueue ? queueLabel : String(queueDigit)}
-              </Text>
-            ),
-          run: (
-            <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
-              {runIdentifier(item.run?.id ?? row.run)}
-            </Text>
-          ),
-          queueRun: (
-            <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
-              {queueRunText(queueDigit, queueLabel, item.run?.id ?? row.run)}
-            </Text>
-          ),
-          ageRun: <AgeRunCell row={row} color={forced ?? held} />,
           status: (
             <Box flexDirection="row" minWidth={0}>
               {/* The held row's glyph is the one pulse on screen, cursor or
@@ -511,6 +516,12 @@ export const ListRow = memo(function ListRow({
               </Text>
             </Box>
           ),
+          agent: (
+            <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
+              {row.submitter ?? "—"}
+            </Text>
+          ),
+          ageRun: <AgeRunCell row={row} color={forced ?? held} />,
         }}
       </Cells>
     </Box>
@@ -543,13 +554,17 @@ export function RunnerRow({
 }) {
   const { color, word } = STATE_WORDS[line.state]
   const forced = cursor ? "$fg-on-selected" : undefined
+  const timeText = line.at !== undefined ? clock(line.at) : "—"
   return (
     <Box minWidth={0} width="100%" backgroundColor={cursor ? "$bg-selected" : undefined}>
       <Cells layout={layout}>
         {{
-          agent: (
+          time: <Text color={forced ?? "$fg-muted"}>{timeText}</Text>,
+          q: (layout.qWidth ?? 0) === 0 ? null : <Text color={forced ?? "$fg-muted"}>{layout.isFullQueue ? queueLabel : String(queueDigit)}</Text>,
+          run: <Text color={forced ?? "$fg-muted"}>—</Text>,
+          queueRun: (
             <Text color={forced ?? "$fg-muted"} wrap="truncate">
-              {line.by ?? "—"}
+              {queueRunText(queueDigit, queueLabel, undefined)}
             </Text>
           ),
           task: (
@@ -570,18 +585,6 @@ export function RunnerRow({
               </Box>
             </Box>
           ),
-          q: (layout.qWidth ?? 0) === 0 ? null : <Text color={forced ?? "$fg-muted"}>{layout.isFullQueue ? queueLabel : String(queueDigit)}</Text>,
-          run: <Text color={forced ?? "$fg-muted"}>—</Text>,
-          queueRun: (
-            <Text color={forced ?? "$fg-muted"} wrap="truncate">
-              {queueRunText(queueDigit, queueLabel, undefined)}
-            </Text>
-          ),
-          ageRun: (
-            <Text color={forced ?? color} wrap="truncate">
-              {line.duration ?? " "}
-            </Text>
-          ),
           status: (
             <Box flexDirection="row" minWidth={0}>
               <Text color={forced ?? color} flexShrink={0}>
@@ -593,19 +596,30 @@ export function RunnerRow({
               </Text>
             </Box>
           ),
+          agent: (
+            <Text color={forced ?? "$fg-muted"} wrap="truncate">
+              {line.by ?? "—"}
+            </Text>
+          ),
+          ageRun: (
+            <Text color={forced ?? color} wrap="truncate">
+              {line.duration ?? " "}
+            </Text>
+          ),
         }}
       </Cells>
     </Box>
   )
 }
 
-/** The five cells in their one geometry, consumed by header, rows and the runner alike. */
+/** The seven cells in their one geometry, consumed by header, rows and the runner alike. */
 function Cells({
   layout,
   children,
 }: {
   layout: ListLayout
   children: Readonly<{
+    time?: React.ReactNode
     task: React.ReactNode
     agent: React.ReactNode
     q?: React.ReactNode
@@ -617,14 +631,9 @@ function Cells({
 }) {
   return (
     <Box height={1} width="100%" flexDirection="row" gap={1} minWidth={0} overflow="hidden" paddingRight={1}>
-      <Box flexGrow={1} flexBasis={0} minWidth={12}>
-        {children.task}
+      <Box width={layout.timeWidth ?? 5} flexShrink={0}>
+        {children.time}
       </Box>
-      {layout.agentWidth === 0 ? null : (
-        <Box width={layout.agentWidth} flexShrink={0}>
-          {children.agent}
-        </Box>
-      )}
       {layout.isSeparateColumns ? (
         <>
           {(layout.qWidth ?? 0) === 0 ? null : (
@@ -641,9 +650,17 @@ function Cells({
           {children.queueRun}
         </Box>
       )}
+      <Box flexGrow={1} flexBasis={0} minWidth={12}>
+        {children.task}
+      </Box>
       <Box width={layout.statusWidth} flexShrink={0} flexDirection="row">
         {children.status}
       </Box>
+      {layout.agentWidth === 0 ? null : (
+        <Box width={layout.agentWidth} flexShrink={0}>
+          {children.agent}
+        </Box>
+      )}
       <Box width={layout.ageRunWidth} flexShrink={0} justifyContent="flex-end">
         {children.ageRun}
       </Box>

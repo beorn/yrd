@@ -293,6 +293,44 @@ export function runnerOf(snapshot: WatchSnapshot, now: Date) {
  * share its index is `done`'s — drafts and waiting have already advanced past
  * it — and the runner stands between waiting and done, never under done.
  */
+/**
+ * The RUNNER box, drawn in rounded border chrome with its title and border
+ * wearing the runner state's color (items 7, 27). The one component for the
+ * RUNNER box across both the list view item (watch-pane.tsx) and the empty
+ * pane/print break rows (BandBreakRows).
+ */
+export function RunnerTitledBox({
+  line,
+  snapshot,
+  layout,
+  cursor = false,
+  queueDigit = 1,
+  queueLabel = "main",
+}: {
+  line: ReturnType<typeof runnerOf>
+  snapshot: WatchSnapshot
+  layout: ListLayout
+  cursor?: boolean
+  queueDigit?: number
+  queueLabel?: string
+}) {
+  const color = STATE_WORDS[line.state].color
+  return (
+    <Box flexDirection="column" marginTop={1} marginBottom={1}>
+      <TitledBox title={STATE_WORDS.runner.word} flushTop borderColor={color}>
+        <RunnerRow
+          line={line}
+          layout={layout}
+          cursor={cursor}
+          queueDigit={queueDigit}
+          queueLabel={queueLabel}
+        />
+        <RunnerDetail snapshot={snapshot} />
+      </TitledBox>
+    </Box>
+  )
+}
+
 export function BandBreakRows({
   brk,
   snapshot,
@@ -307,16 +345,10 @@ export function BandBreakRows({
   const now = useNow()
   if (brk === undefined) return null
   const runner = runnerOf(snapshot, now)
-  const color = STATE_WORDS[runner.state].color
   return (
     <Box flexDirection="column" flexShrink={0} minWidth={0}>
       {brk.runner && includeRunner ? (
-        <Box flexDirection="column" marginTop={1} marginBottom={1}>
-          <TitledBox title={STATE_WORDS.runner.word} flushTop borderColor={color}>
-            <RunnerRow line={runner} layout={layout} />
-            <RunnerDetail snapshot={snapshot} />
-          </TitledBox>
-        </Box>
+        <RunnerTitledBox line={runner} snapshot={snapshot} layout={layout} />
       ) : null}
       {brk.rules.map((rule, idx) => (
         <Text key={`${rule}-${idx}`} color="$fg-muted" wrap="truncate">
