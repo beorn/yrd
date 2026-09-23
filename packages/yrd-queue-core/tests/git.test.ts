@@ -707,7 +707,14 @@ describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
     await parent(["push", "--quiet", "origin", "main"])
     const advanced = (await parent(["rev-parse", "HEAD"])).trim()
 
-    await expect(gitRunner.readRemoteCommit(read, "origin", "refs/heads/main")).resolves.toBe(advanced)
+    const previousGitDir = process.env.GIT_DIR
+    process.env.GIT_DIR = join(root, "ambient-git-dir-must-not-be-used")
+    try {
+      await expect(gitRunner.readRemoteCommit(read, "origin", "refs/heads/main")).resolves.toBe(advanced)
+    } finally {
+      if (previousGitDir === undefined) delete process.env.GIT_DIR
+      else process.env.GIT_DIR = previousGitDir
+    }
   })
 
   // One packed ref whose object is gone makes every fetch fail with git's "bad
