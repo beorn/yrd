@@ -63,6 +63,7 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
     snapshot.drafts?.window ?? "7d",
     holding,
     snapshot.drafts?.unread ?? 0,
+    true,
   )
   return (
     <NowProvider readAt={snapshot.at} live={false}>

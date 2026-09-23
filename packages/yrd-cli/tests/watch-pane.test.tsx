@@ -1762,7 +1762,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       return (page.find((l) => l.includes("waiting")) ?? "").trim()
     }
 
-    // A2-set-v3 Q4, each width the widest the next form does not fit (the pane lays the line out two
+    // A2-set-v3 Q4, each width the widest the next form does not fit (the listing page lays the line out two
     // columns narrower than the terminal): drafts, breakdown, the last merge's branch, the last merge,
     // times, branch names.
     const waiting = `5 ${W.waiting.word}`
@@ -1919,14 +1919,18 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.unmount()
     // The window is named on the drafts BAND's rule now, over the rows it is
     // true of, and not on a header that spans every band.
-    const header = (painted: readonly string[]): string => painted.find((line) => line.includes("not submitted")) ?? ""
     const counted = (painted: readonly string[]): string =>
       painted.find((line) => line.includes(`${W.draft.word}s (`)) ?? ""
+    const unreadIdx = after.findIndex((l) => l.includes("task/unread "))
+    const zIdx = after.findIndex((l) => l.includes("task/z "))
+    const draftsRuleIdx = after.findIndex((l) => l.includes(`3 ${W.draft.word}s (all)`))
 
     expect({
       after: {
         top: counted(after).includes(`3 ${W.draft.word}s (all) · 2 not yet read`),
         unreadRow: tableRow(after, " task/unread ").includes("not yet read"),
+        unreadUnderDrafts: unreadIdx > draftsRuleIdx && (after[unreadIdx - 1]?.includes("task/old") ?? false),
+        waitingAboveZ: after[zIdx - 1]?.replace(/\s/g, "").startsWith("─") ?? false,
       },
       before: {
         top: counted(before).includes(`2 ${W.draft.word}s (7d) · 2 not yet read`),
@@ -1934,10 +1938,33 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       },
       requested: load.mock.calls.map(([request]) => request),
     }).toEqual({
-      after: { top: true, unreadRow: true },
+      after: { top: true, unreadRow: true, unreadUnderDrafts: true, waitingAboveZ: true },
       before: { top: true, unreadRow: "" },
       requested: [{ draftWindow: "all" }],
     })
+  })
+
+  it("draws drafts band rule with '0 drafts (7d) · N not yet read' when unread heads exist without dated drafts", async () => {
+    const W = await words()
+    const snap = snapshot({
+      drafts: { unread: 2, window: "7d" },
+      rows: [
+        {
+          row: row({
+            at: ago(12 * MINUTE),
+            branch: "task/z",
+            head: "3".repeat(40),
+            position: 1,
+            state: "queued",
+          }),
+        },
+      ],
+      runner: RUNNER,
+    } as Partial<WatchSnapshot>)
+    const painted = await lines(snap, 140, 40)
+    const draftsLine = painted.find((l) => l.includes(`${W.draft.word}`))
+    expect(draftsLine).toBeDefined()
+    expect(draftsLine).toContain(`0 ${W.draft.word}s (7d) · 2 not yet read`)
   })
 
   it("draws draft rows and a draft's detail from the snapshot alone: redrawing, moving over drafts and opening one reads nothing (A2-set-v3)", async () => {
@@ -2288,7 +2315,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         "page STATUS cell": tableRow(page, "task/y1").includes(` ${SENTINEL} `),
         "page top line": pageTop.includes(`1 ${SENTINEL}`),
         "pane STATUS cell": tableRow(pane, "task/y1").includes(` ${SENTINEL} `),
-        "queue line": page.some((line) => line.includes(`1 ${SENTINEL}`)),
+        "queue line": queueLine(snap, NOW, 120).includes(`1 ${SENTINEL}`),
         "queue show line": rowLine({ row: item }).includes(SENTINEL),
         "yrd list --help legend": cli.includes(SENTINEL),
       }

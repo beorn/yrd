@@ -344,4 +344,32 @@ describe("the flow page: four bands, one row per change", () => {
     expect(header).toContain("RUN")
     expect(header).not.toContain("QUEUE / RUN")
   })
+
+  it("ListingPage at 160 columns names the drafts count once (in QueueLine, drafts band rule is bare)", async () => {
+    const text = await paint(
+      flowSnapshot({
+        drafts: { unread: 1, window: "7d" },
+        rows: [
+          ...watchRows(
+            [
+              ...flowRows(),
+              change({
+                at: new Date(READ_AT.getTime() - 60_000),
+                author: "bob",
+                branch: "task/draft2",
+                head: "7".repeat(40),
+                state: "draft",
+              }),
+            ],
+            { journals: flowJournals() },
+          ),
+        ],
+      }),
+      160,
+    )
+    const occurrences = text.split("\n").filter((l) => l.includes("drafts (7d)"))
+    expect(occurrences).toHaveLength(1)
+    expect(occurrences[0]).toContain("waiting")
+  })
 })
+

@@ -250,6 +250,7 @@ export function bandPlan(
   draftWindow = "7d",
   holds = true,
   unread = 0,
+  bareDrafts = false,
 ): BandPlan {
   const before = new Map<number, BandBreak>()
   const opening = new Map<number, string[]>()
@@ -258,21 +259,28 @@ export function bandPlan(
   let cursor = 0
   let runnerAt: number | undefined
   for (const band of BANDS) {
-    const count =
-      band === "drafts"
-        ? rows.filter((item) => bandOf(item.row, holds) === band && item.row.at !== undefined).length
-        : rows.filter((item) => bandOf(item.row, holds) === band).length
+    const total = rows.filter((item) => bandOf(item.row, holds) === band).length
     if (band === "runner") {
-      if (count === 0) runnerAt = cursor
+      if (total === 0) runnerAt = cursor
       else holding = cursor
-      cursor += count
+      cursor += total
       continue
     }
-    if (count === 0) continue
+    if (band === "drafts") {
+      if (total > 0 || unread > 0) {
+        const datedCount = rows.filter((item) => bandOf(item.row, holds) === band && item.row.at !== undefined).length
+        const rules = opening.get(cursor) ?? []
+        rules.push(bareDrafts ? "─".repeat(Math.max(1, width)) : bandRule(band, datedCount, width, draftWindow, unread))
+        opening.set(cursor, rules)
+      }
+      cursor += total
+      continue
+    }
+    if (total === 0) continue
     const rules = opening.get(cursor) ?? []
-    rules.push(bandRule(band, count, width, draftWindow, unread))
+    rules.push(bandRule(band, total, width, draftWindow, unread))
     opening.set(cursor, rules)
-    cursor += count
+    cursor += total
   }
   for (const [index, rules] of opening) {
     before.set(index, { rules, runner: index === runnerAt })
