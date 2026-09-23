@@ -41,7 +41,7 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
         ? `run result: ${row.result}`
         : (row.reason ?? row.result)
   // The state's own word, the check overlay apart below; `direct` is no change and says what happened instead.
-  const word = row.state === "direct" ? "went around the queue" : stateWord({ state: row.state })
+  const word = row.state === "direct" ? "went around the queue" : stateWord({ state: row.state, format: row.format })
   const state = joinedRun ? `change ${word}` : word
   const next =
     row.incident !== undefined

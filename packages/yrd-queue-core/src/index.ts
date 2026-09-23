@@ -1,11 +1,10 @@
 /**
  * The queue's core: one store, which is the git repository.
  *
- * A branch is its ref at the queue's remote; a change is the ref
- * `refs/yrd/changes/<branch>@<sha>`, whose commits are its records; a merge is
- * one `--no-ff` merge commit on the target, naming its change. Nothing else is
- * written and nothing is remembered: every state a reader sees is derived from
- * those refs and the target's ancestry at the moment they ask.
+ * A branch is its ref at the queue's remote. Event queues have one queue chain
+ * and one change chain per branch under `refs/yrd/<queue>/`; their status is a
+ * fold over those events. Unmigrated queues retain their legacy `Record:`
+ * format until #25041 converts it. The queue-format selector chooses one.
  *
  * This package is the replacement core of the [plan](../../../../pm/@i/10-yrd/plan.md)
  * § Milestones M4. It reuses the git wrapper, submodule materialization, the
@@ -33,6 +32,39 @@ export {
   refOfChange,
 } from "./refs.ts"
 export type { Change } from "./refs.ts"
+export {
+  CHANGE_EVENT_TYPES,
+  CHANGE_STATUSES,
+  EVENT_TRAILERS,
+  changeInput,
+  changesRef,
+  createEventQueue,
+  decide,
+  drop,
+  eventPause,
+  evolve,
+  initial,
+  listChangeHistories,
+  listChanges,
+  queueFormat,
+  queueRef,
+  readChangeEvents,
+  readEventQueue,
+  readStatus,
+  writeQueueEvent,
+} from "./events.ts"
+export type {
+  CancellationReason,
+  ChangeEventType,
+  ChangeStatus,
+  EventChange,
+  EventQueue,
+  QueueLocation,
+  DropRequest,
+  Dropped,
+} from "./events.ts"
+export { eventRows } from "./event-table.ts"
+export { assertPlainEventQueueConfig } from "./event-config.ts"
 export {
   appendRecord,
   DIRECT_MERGE,
@@ -98,8 +130,8 @@ export type { Clocks, ListOptions, Row, WatchRow, WatchRowOptions } from "./tabl
 export { readHistories, readQueue, readStop, resolveRemote } from "./remote.ts"
 export { DRAFT_EXCLUDED_PREFIXES, DRAFT_WINDOW_MS, readDrafts } from "./drafts.ts"
 export type { Draft, DraftReading } from "./drafts.ts"
-export { directMergeCommits, directMergeLine } from "./direct.ts"
-export { refuseTarget, inspectSubmit, refuseDivergedMovedPins, freshnessLine, submit, issueOf } from "./submit.ts"
+export { directMergeCommits, directMergeLine, eventDirectMergeCommits } from "./direct.ts"
+export { refuseTarget, inspectSubmit, freshnessLine, submit, issueOf } from "./submit.ts"
 export type { IssueResolution } from "./submit.ts"
 export { withdraw, NothingToWithdraw } from "./withdraw.ts"
 export type { WithdrawRequest, Withdrawn, WithdrawnChange } from "./withdraw.ts"

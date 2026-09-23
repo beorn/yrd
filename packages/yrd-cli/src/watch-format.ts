@@ -9,7 +9,7 @@
  */
 
 import { homedir } from "node:os"
-import { clocks, runStartedAt, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
+import { clocks, runStartedAt, type ChangeStatus, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
 import { STATE_WORDS, type DisplayState } from "./watch-words.ts"
 
 export {
@@ -27,8 +27,28 @@ export {
  * reads checking whatever its records say; otherwise the core's state, in the
  * operator's word (`queued` paints submitted, `checked` paints pending).
  */
-export function displayState(row: Pick<Row, "state" | "live">): DisplayState {
+type DisplayRow = Pick<Row<Row["state"] | ChangeStatus>, "state" | "live" | "format">
+
+export function displayState(row: DisplayRow): DisplayState {
   if (row.live !== undefined) return "checking"
+  if (row.format === "event") {
+    switch (row.state) {
+      case "verifying":
+        return "event-verifying"
+      case "draft":
+      case "queued":
+      case "checking":
+      case "merging":
+      case "merged":
+      case "failed":
+      case "stuck":
+      case "cancelled":
+      case "direct":
+        return row.state
+      default:
+        throw new Error(`event row has a legacy status: ${row.state}`)
+    }
+  }
   switch (row.state) {
     case "queued":
       return "submitted"
@@ -36,13 +56,20 @@ export function displayState(row: Pick<Row, "state" | "live">): DisplayState {
       return "pending"
     case "withdrawn":
       return "cancelled"
-    default:
+    case "draft":
+    case "direct":
+    case "deferred":
+    case "merged":
+    case "failed":
+    case "stuck":
       return row.state
+    default:
+      throw new Error(`legacy row has an event status without its format: ${row.state}`)
   }
 }
 
 /** The word for a row, read from the one table when it draws. */
-export function stateWord(row: Pick<Row, "state" | "live">): string {
+export function stateWord(row: DisplayRow): string {
   return STATE_WORDS[displayState(row)].word
 }
 
@@ -90,15 +117,19 @@ export function diagnosticLines(
 }
 
 /** The one glyph per state — the retired watch's, kept because the operator already reads them. */
-export const STATE_GLYPH: Readonly<Record<Row["state"], string>> = {
+export const STATE_GLYPH: Readonly<Record<DisplayRow["state"], string>> = {
+  cancelled: "⊘",
   checked: "◉",
+  checking: "◉",
   deferred: "☾",
   direct: "→",
   draft: "◇",
   failed: "×",
   merged: "✓",
+  merging: "◉",
   queued: "○",
   stuck: "◌",
+  verifying: "◉",
   withdrawn: "⊘",
 }
 
@@ -114,8 +145,11 @@ export const RUNNING_GLYPH = "◉"
 export const RUNNER_GLYPH = "▸"
 
 /** The glyph for a row: the running one while a check runs on it, else its state's. */
-export function stateGlyph(row: Pick<Row, "state" | "live">): string {
-  return row.live === undefined ? STATE_GLYPH[row.state] : RUNNING_GLYPH
+export function stateGlyph(row: DisplayRow): string {
+  if (row.live !== undefined) return RUNNING_GLYPH
+  const glyph = STATE_GLYPH[row.state]
+  if (glyph === undefined) throw new Error(`no glyph for ${row.state}`)
+  return glyph
 }
 
 /** The one glyph per check state, so the tab strip, the step lines and the one-shot print cannot disagree about a check. */
@@ -148,7 +182,7 @@ export const CHECK_COLOR: Readonly<Record<CheckView["state"], string>> = {
  * `checking`, rather than through a second overlay nobody could see in the
  * table beside it.
  */
-export function stateColor(row: Pick<Row, "state" | "live">): string {
+export function stateColor(row: DisplayRow): string {
   return STATE_WORDS[displayState(row)].color
 }
 

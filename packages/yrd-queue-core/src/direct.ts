@@ -44,6 +44,7 @@ import { gitlinkRows } from "./git.ts"
 import { changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
 import { tipOf } from "./state.ts"
+import { mergedHistoryCommits } from "./events.ts"
 
 export type DirectMerge = Readonly<{
   /** The branch it moved: the queue's target. */
@@ -58,6 +59,91 @@ export type DirectMerge = Readonly<{
   /** Why it is not the queue's, in plain words. */
   why: string
 }>
+
+type FirstParentCommit = Readonly<{
+  commit: string
+  parents: readonly string[]
+  at: Date
+  subject: string
+  changes: readonly string[]
+}>
+
+/** The shared first-parent reader for legacy and event direct-merge accounting. Newest first. */
+async function firstParentLine(git: Git, targetSha: string, boundary: string): Promise<readonly FirstParentCommit[]> {
+  const out = await git([
+    "log",
+    "--first-parent",
+    boundary,
+    "--format=%H%x00%P%x00%cI%x00%s%x00%(trailers:key=Change,valueonly)%x01",
+    targetSha,
+  ])
+  const line: FirstParentCommit[] = []
+  for (const record of out.split("\x01")) {
+    const text = record.replace(/^\n/u, "")
+    if (text.trim() === "") continue
+    const fields = text.split("\x00")
+    if (fields.length !== 5) throw new Error(`malformed first-parent git log record for ${targetSha}`)
+    const [commit, parentList, at, subject, changes] = fields
+    if (
+      commit === undefined ||
+      commit === "" ||
+      parentList === undefined ||
+      at === undefined ||
+      subject === undefined
+    ) {
+      throw new Error(`incomplete first-parent git log record for ${targetSha}`)
+    }
+    const instant = new Date(at)
+    if (Number.isNaN(instant.getTime())) throw new Error(`invalid first-parent commit time for ${commit}: ${at}`)
+    line.push({
+      commit,
+      parents: parentList.split(" ").filter((parent) => parent !== ""),
+      at: instant,
+      subject,
+      changes: (changes ?? "")
+        .split("\n")
+        .map((name) => name.trim())
+        .filter((name) => name !== ""),
+    })
+  }
+  return line
+}
+
+/**
+ * Event queue E5: declaration is the exact first-parent boundary; merged
+ * events account for queue publications and target merges the runner observed.
+ * A direct-only commit is deliberately returned again on every run until such
+ * an event stands above it, always under the commit sha as its identity. This
+ * keeps legacy `run.ts`'s `reportDirectMerges` at-least-once contract.
+ */
+export async function eventDirectMergeCommits(
+  git: Git,
+  target: string,
+  targetSha: string,
+  declaration: string,
+  histories: Parameters<typeof mergedHistoryCommits>[0],
+): Promise<readonly DirectMerge[]> {
+  const accounted = mergedHistoryCommits(histories)
+  const line = await firstParentLine(git, targetSha, `${declaration}..${targetSha}`)
+  if (targetSha !== declaration && line.at(-1)?.parents[0] !== declaration) {
+    throw new Error(`${target} at ${targetSha}: queue declaration ${declaration} is not on its first-parent line`)
+  }
+  const found: DirectMerge[] = []
+  for (const row of line) {
+    if (accounted.has(row.commit)) break
+    const first = row.parents[0]
+    if (first === undefined) {
+      throw new Error(`${target} at ${row.commit}: first-parent line ended after declaration ${declaration}`)
+    }
+    found.push({
+      ...row,
+      target,
+      gitlinks: (await gitlinkRows(git, first, row.commit)).map((link) => link.path),
+      why: "its commit has no merged event in this queue",
+    })
+  }
+  return found.reverse()
+}
 
 /**
  * The direct merges on the target's first-parent line since the moment that
@@ -87,34 +173,10 @@ export async function directMergeCommits(
     const merge = ending === undefined || endedKind(ending) !== "merged" ? undefined : trailer(ending, "Merge")
     if (merge !== undefined) accounted.add(merge)
   }
-  // Newest first, each commit as one record: sha, parents, committer date,
-  // subject, then every `Change:` trailer value on its own line. `%x01` ends
-  // the record, because the trailer block holds newlines.
-  const out = await git([
-    "log",
-    "--first-parent",
-    `--since=${started}`,
-    "--format=%H%x00%P%x00%cI%x00%s%x00%(trailers:key=Change,valueonly)%x01",
-    targetSha,
-  ])
+  const line = await firstParentLine(git, targetSha, `--since=${started}`)
   const found: DirectMerge[] = []
-  for (const record of out.split("\x01")) {
-    const [commit, parentList, at, subject, changes] = record.replace(/^\n/u, "").split("\x00")
-    if (
-      commit === undefined ||
-      commit === "" ||
-      parentList === undefined ||
-      at === undefined ||
-      subject === undefined
-    ) {
-      continue
-    }
-    const parents = parentList.split(" ").filter((parent) => parent !== "")
-    const names = (changes ?? "")
-      .split("\n")
-      .map((name) => name.trim())
-      .filter((name) => name !== "")
-    const why = notTheQueues(commit, parents, names, byName)
+  for (const { commit, parents, at, subject, changes } of line) {
+    const why = notTheQueues(commit, parents, changes, byName)
     if (why === undefined || accounted.has(commit)) break
     // A commit with no parent is where this branch's history begins, not
     // something pushed onto it, and there is nothing older to walk to. It can
@@ -124,7 +186,7 @@ export async function directMergeCommits(
     const first = parents[0]
     if (first === undefined) break
     const gitlinks = (await gitlinkRows(git, first, commit)).map((row) => row.path)
-    found.push({ at: new Date(at), commit, gitlinks, parents, subject, target, why })
+    found.push({ at, commit, gitlinks, parents, subject, target, why })
   }
   return found.reverse()
 }

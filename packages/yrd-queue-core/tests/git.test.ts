@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process"
 import { appendFileSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import { gitIn } from "../src/git.ts"
 import * as gitRunner from "../src/git.ts"
@@ -291,7 +291,17 @@ describe("the git runner", () => {
         onInvocation: log.writeGitInvocation,
       },
     )
-    await expect(git(["status"])).rejects.toThrow("capture is incomplete")
+    // The truncation is the point of this test, so it owns the two warnings the
+    // process layer logs for it (stdout and stderr) instead of leaking them.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      await expect(git(["status"])).rejects.toThrow("capture is incomplete")
+      const warned = warn.mock.calls.map((call) => call.map(String).join(" "))
+      expect(warned).toHaveLength(2)
+      for (const line of warned) expect(line).toContain("produced more output than Yrd captures")
+    } finally {
+      warn.mockRestore()
+    }
     const artifacts = git.lastInvocation?.artifacts
     expect(artifacts?.complete).toBe(true)
     if (artifacts === undefined) throw new Error("Missing raw artifact paths")
@@ -651,5 +661,47 @@ describe("offTheTarget", () => {
     const missing = "a".repeat(40)
     await expect(gitRunner.isAncestor(git, missing, target)).rejects.toThrow()
     await expect(gitRunner.offTheTarget(git, [onTarget, missing], target)).rejects.toThrow()
+  })
+})
+
+describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
+  // One packed ref whose object is gone makes every fetch fail with git's "bad
+  // object" text, which can name a different ref. The failure must name the
+  // dangling ref, its local object, origin's value, and the verified-delete cure.
+  it("names each dangling ref with origin's value and the cure, instead of 'probably repo corruption'", async () => {
+    const root = temporaryRoot("dangling")
+    const origin = join(root, "origin")
+    const clone = join(root, "clone")
+    const run = (cwd: string, ...args: string[]) => {
+      const result = spawnSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@t",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@t",
+        },
+      })
+      if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${result.stderr}`)
+      return result.stdout.trim()
+    }
+    spawnSync("git", ["init", "-q", "-b", "main", origin])
+    run(origin, "commit", "-q", "--allow-empty", "-m", "one")
+    spawnSync("git", ["clone", "-q", origin, clone])
+    const ref = "refs/yrd/main/task/lost@abc"
+    const lost = run(clone, "commit-tree", run(clone, "write-tree"), "-p", "HEAD", "-m", "record")
+    run(clone, "update-ref", ref, lost)
+    run(clone, "pack-refs", "--all")
+    const { rmSync } = await import("node:fs")
+    rmSync(join(clone, ".git", "objects", lost.slice(0, 2), lost.slice(2)))
+    run(origin, "commit", "-q", "--allow-empty", "-m", "two")
+
+    const failure = gitRunner.readRemoteCommit(gitIn(clone), "origin", "refs/heads/main")
+
+    await expect(failure).rejects.toThrow(`${ref} local=${lost} origin=absent object missing locally`)
+    await expect(failure).rejects.toThrow(`git update-ref -d ${ref} ${lost}`)
+    await expect(failure).rejects.not.toThrow(/probably due to repo corruption/u)
   })
 })

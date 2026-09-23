@@ -9,7 +9,7 @@
 
 import { describe, expect, it, vi } from "vitest"
 import type { Journals, Row } from "@yrd/queue-core"
-import { journalKey } from "@yrd/queue-core"
+import { CHANGE_STATUSES, journalKey } from "@yrd/queue-core"
 import * as format from "../src/watch-format.ts"
 import { noticeLine, watchNotice } from "../src/watch-notice.ts"
 import { filterRows, rowLine, watchRows, watchRowKey } from "../src/watch-rows.ts"
@@ -166,6 +166,20 @@ describe("the filter terms", () => {
     expect(matched).toContain("task/merged-ball-conditional-close")
   })
 
+  it("selects every event status by the same word in JSON and in the table", () => {
+    const eventRows = watchRows(
+      CHANGE_STATUSES.map((state, index) =>
+        row({ branch: `work/${String(index)}`, format: "event", head: String(index).repeat(40), state }),
+      ),
+    )
+    const jsonWords = eventRows.map((entry) => entry.row.state)
+    const tableWords = eventRows.map((entry) => format.stateWord(entry.row))
+
+    expect(tableWords).toEqual(jsonWords)
+    expect(filterRows(eventRows, jsonWords)).toEqual(eventRows)
+    expect(filterRows(eventRows, tableWords)).toEqual(eventRows)
+  })
+
   it("with no terms is no filter, never no rows", () => {
     expect(filterRows(rows, [])).toHaveLength(3)
     expect(filterRows(rows, ["  "])).toHaveLength(3)
@@ -243,14 +257,18 @@ describe("the notice", () => {
   it("reads every state's word from the one word table, so it cannot drift from the table; direct apart", () => {
     // Every state a row can have, each its own value: a state the core adds fails to compile here until listed.
     const states = Object.values({
+      cancelled: "cancelled",
       checked: "checked",
+      checking: "checking",
       deferred: "deferred",
       direct: "direct",
       draft: "draft",
       failed: "failed",
       merged: "merged",
+      merging: "merging",
       queued: "queued",
       stuck: "stuck",
+      verifying: "verifying",
       withdrawn: "withdrawn",
     } as const satisfies { readonly [S in Row["state"]]: S })
     // The table answers with a word no second map could hold, so a notice reading a map of its own cannot match.

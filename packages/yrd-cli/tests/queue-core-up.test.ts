@@ -54,7 +54,7 @@ import {
 } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
-import { coreQueueCommand, openDetail, readListing } from "../src/queue-core-commands.ts"
+import { coreQueueCommand, endingCode, openDetail, readListing } from "../src/queue-core-commands.ts"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
@@ -73,6 +73,21 @@ process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
 process.env.GIT_CONFIG_VALUE_0 = "always"
 
 const roots: string[] = []
+
+// A selected event change must keep the watch open through every working phase;
+// the legacy watch tests only exercise queued and checked.
+describe("event watch selector endings", () => {
+  it("waits through working phases and reports each ending", () => {
+    for (const phase of ["queued", "verifying", "checking", "merging", "checked"] as const) {
+      expect(endingCode([phase])).toBeUndefined()
+    }
+    expect(endingCode(["merged"])).toBe(0)
+    expect(endingCode(["failed"])).toBe(1)
+    expect(endingCode(["cancelled"])).toBe(1)
+    expect(endingCode(["stuck"])).toBe(2)
+    expect(endingCode(["merged", "checking"])).toBeUndefined()
+  })
+})
 // Resolve the queue's declared dependency; the CLI need not install a second copy.
 const queueCoreEntry = Bun.resolveSync("@yrd/queue-core", import.meta.dirname)
 const gitSuperBin = resolve(Bun.resolveSync("git-super", dirname(queueCoreEntry)), "../../bin")
@@ -3597,7 +3612,9 @@ describe("yrd queue run --tier long", () => {
     const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes.filter(
       (r) => r.branch !== "main",
     )
-    expect(rows.map((r) => [r.branch, r.state])).toEqual([
+    // Both deferred; not their order. Ended rows sort newest first by the record commit's
+    // whole-second time, so two records written ~150 ms apart tie or split by the clock.
+    expect(rows.map((r) => [r.branch, r.state]).sort()).toEqual([
       ["task/older", "deferred"],
       ["task/younger", "deferred"],
     ])

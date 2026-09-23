@@ -20,6 +20,7 @@
  */
 
 import { DIRECT_MERGE, trailer, type ChangeRecord, type Row } from "@yrd/queue-core"
+import type { Event } from "gitomic/events"
 import { STATE_WORDS, clock, mediaDuration } from "./watch-format.ts"
 
 export type HistoryEntry = Readonly<{
@@ -28,6 +29,27 @@ export type HistoryEntry = Readonly<{
   /** Something more the record said, rendered after ` — `. */
   detail?: string
 }>
+
+/** Every selected event as a history line; the event fold has already validated Time:. */
+export function eventHistoryEntries(events: readonly Event[]): readonly HistoryEntry[] {
+  return [...events].reverse().map((event) => {
+    const field = (key: string) => event.props.find(([name]) => name === key)?.[1]
+    const time = field("Time")
+    if (time === undefined) throw new Error(`event ${event.id} has no Time:`)
+    const at = new Date(time)
+    if (Number.isNaN(at.getTime())) throw new Error(`event ${event.id} has invalid Time: ${time}`)
+    const reason = field("Reason")
+    const commit = field("Commit")
+    const detail = [reason, commit === undefined ? undefined : `commit ${commit.slice(0, 12)}`]
+      .filter((part): part is string => part !== undefined)
+      .join(" · ")
+    return {
+      at,
+      text: `${event.type}${event.writer === null ? "" : ` by ${event.writer}`}`,
+      ...(detail === "" ? {} : { detail }),
+    }
+  })
+}
 
 /** The records of one change as history rows, newest first. */
 export function historyEntries(records: readonly ChangeRecord[]): readonly HistoryEntry[] {
@@ -102,9 +124,19 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
       const reason = trailer(record, "Reason")
       const projectedMs = trailer(record, "ProjectedMs")
       const boundMs = trailer(record, "BoundMs")
-      const projected = projectedMs !== undefined ? `${Math.round(Number(projectedMs) / 60000)}m` : undefined
-      const bound = boundMs !== undefined ? `${Math.round(Number(boundMs) / 60000)}m` : undefined
-      const timing = projected && bound ? ` (${projected} > ${bound})` : ""
+      const projNum = projectedMs !== undefined ? Number(projectedMs) : undefined
+      const boundNum = boundMs !== undefined ? Number(boundMs) : undefined
+      const projected = projNum !== undefined && !Number.isNaN(projNum) ? `${Math.round(projNum / 60000)}m` : undefined
+      const bound = boundNum !== undefined && !Number.isNaN(boundNum) ? `${Math.round(boundNum / 60000)}m` : undefined
+      const rel =
+        projNum !== undefined && boundNum !== undefined && !Number.isNaN(projNum) && !Number.isNaN(boundNum)
+          ? projNum > boundNum
+            ? ">"
+            : projNum < boundNum
+              ? "<"
+              : "="
+          : ">"
+      const timing = projected && bound ? ` (${projected} ${rel} ${bound})` : ""
       return {
         at: record.at,
         text:

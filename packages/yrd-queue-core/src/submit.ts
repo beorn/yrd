@@ -7,9 +7,9 @@
  * branch without its change or a change without its branch. A submit at an
  * unchanged head appends a new opened record to the existing change: that is a
  * retry, and the change keeps its place in line from its first opened record.
- * The branch is always pushed with a lease, because a rebased branch is the
- * ordinary case and a lease is what stops it clobbering a head the submitter
- * never saw.
+ * Verification composes the submitted head with the observed target without
+ * rewriting that head. A lease keeps the branch push from clobbering a remote
+ * head the submitter never saw.
  *
  * A stopped line still takes work (the andon, operator 2026-09-16): a pause —
  * a person's or a stuck change's — stops checking and merging, never
@@ -20,14 +20,18 @@
  * the same derivation every other reader uses.
  */
 
-import { readdir } from "node:fs/promises"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { listRefs, openEvents } from "gitomic/events"
 import { targetName, type Target } from "./config.ts"
 import { ABSENT, appendRecord, type Git } from "./records.ts"
 import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
-import { readStop } from "./remote.ts"
+import { readStop, remoteUrl } from "./remote.ts"
+import { changeInput, changesRef, decide, eventPause, evolve, initial, queueFormat, readEventQueue } from "./events.ts"
+import { verifyCandidate, type Verification } from "./verifying.ts"
 
 export type SubmitRequest = Readonly<{
   /** The branch being submitted: the change's own. */
@@ -36,8 +40,6 @@ export type SubmitRequest = Readonly<{
   target: Target
   submitter: string
   issue?: string
-  /** Explicit permission to rebase this clean, checked-out branch onto the captured target. */
-  rebase?: boolean
 }>
 
 export type IssueResolution = Readonly<{
@@ -52,12 +54,13 @@ export type Submitted = Readonly<{
   head: string
   /** The target commit observed during preflight; the queue checks again at merge. */
   targetHead: string
-  /** The opened record's sha. */
+  /** The opened event or legacy record's sha. */
   opened: string
-  /** True when the change already existed at this head, so this was a retry. */
+  /** True when this branch already had an open change at this head, so this was a retry. */
   retry: boolean
   /** Gitlinks this change moved whose commits submit published to their submodule remotes (24454). */
   published: readonly PublishedGitlink[]
+  verifying: Verification
   issue?: IssueResolution
   /** The stop the line stood under when this was accepted: the change waits behind it. */
   stop?: PauseRecord
@@ -118,7 +121,8 @@ export async function publishMovedGitlinks(
     const path = prefix === "" ? row.path : `${prefix}/${row.path}`
     const checkout = join(root, row.path)
     const child = gitIn(checkout)
-    const remote = (await child(["remote", "get-url", "origin"])).trim()
+    // The DECLARED submodule url is what the record names; the transport rewrite is the host's.
+    const remote = await remoteUrl(child, "origin")
     // Where the pin is: this checkout, else the remote under some ref (a branch
     // somebody pushed by hand; the queue fetches by sha, so ask the same way),
     // else nowhere, which is a refusal before anything is pushed.
@@ -189,7 +193,7 @@ export type SubmitInspection = Readonly<{
   head: string
   targetHead: string
   base: string
-  rebaseRequired: boolean
+  verifying: Verification
   issue?: IssueResolution
   /** The stop the line stands under, echoed and never refused on. */
   stop?: PauseRecord
@@ -206,10 +210,6 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
-  // The line's stop, read to be ECHOED: a stopped line accepts the change and
-  // the run is where the stop is enforced. It is read before the refusals
-  // below so a stale or rebased branch is told about the stop too.
-  const { stop } = await readStop(git, remote, request.target.branch, targetHead)
   const bound = freshnessLine(targetHead)
   if (await isAncestor(git, head, targetHead)) {
     throw new Error(
@@ -222,132 +222,137 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
       `${request.branch} at ${head} has no common base with ${targetName(request.target)}; found no merge base, expected ${targetHead}. Start a change from that target; ${bound}`,
     )
   }
-  const rebaseRequired = !(await isAncestor(git, targetHead, head))
-  if (rebaseRequired && request.rebase !== true) {
-    throw new Error(
-      `${request.branch} is stale: found merge base ${base}, expected ${targetName(request.target)} at ${targetHead}. Rebase onto that target and retry, or check out this branch and use yrd submit --rebase; ${bound}`,
-    )
-  }
   const issue = await issueOf(git, request.branch, head, targetHead, request.issue)
-  if (request.rebase === true) await requireRebaseWorktree(git, request.branch, bound)
-  await refuseDivergedMovedPins(git, targetHead, head, request.branch)
+  // The line's stop, read to be ECHOED: a stopped line accepts the change and
+  // the run is where the stop is enforced. Issue conflicts are settled before
+  // repository composition starts; every other refusal below still carries
+  // this captured stop.
+  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
+  const store = { repo: root, remote }
+  const stop =
+    (await queueFormat(store, request.target.branch)) === "event"
+      ? eventPause(await readEventQueue(store, request.target.branch))
+      : (await readStop(git, remote, request.target.branch, targetHead)).stop
+  const scratch = mkdtempSync(join(tmpdir(), "yrd-submit-verifying-"))
+  const hooksPath = join(scratch, "hooks-disabled")
+  mkdirSync(hooksPath)
+  let verifying: Verification
+  try {
+    const composed = await verifyCandidate({
+      git,
+      repo: root,
+      targetHead,
+      head,
+      path: join(scratch, "candidate"),
+      message: `verify ${request.branch} at ${head} against ${targetHead}`,
+      hooksPath,
+    })
+    verifying = composed.verifying
+    if (composed.state === "failed") {
+      await composed.failedWorktree.remove()
+      throw new Error(
+        `${request.branch} at ${head} cannot be composed with ${targetName(request.target)} at ${targetHead}: ` +
+          `${composed.verifying.detail.code}: ${composed.verifying.detail.message}; ${bound}`,
+      )
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
   return {
     head,
     targetHead,
     base,
-    rebaseRequired,
+    verifying,
     ...(issue === undefined ? {} : { issue }),
     ...(stop === undefined ? {} : { stop }),
   }
 }
 
-/**
- * 24463: a moved gitlink that has diverged from that component's current
- * `refs/heads/main` will fail at merge as gitlink-off-main. Refuse at submit
- * instead, naming the merge-and-pin cure, before a queue cycle.
- *
- * Equal, behind (pin ancestor of main), and ahead (main ancestor of pin) pass:
- * the queue can settle or publish those. Diverged cannot.
- */
-export async function refuseDivergedMovedPins(git: Git, from: string, to: string, branch: string): Promise<void> {
-  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-  for (const row of await gitlinkRows(git, from, to)) {
-    if (row.newMode !== "160000" || ZERO_SHA.test(row.sha)) continue
-    const child = gitIn(join(root, row.path))
-    const componentMain = await readRemoteCommit(child, "origin", "refs/heads/main")
-    if (componentMain === undefined) {
-      throw new Error(`${row.path} origin has no refs/heads/main; cannot check pin ${row.sha} against component main`)
-    }
-    try {
-      await child(["cat-file", "-e", `${row.sha}^{commit}`])
-    } catch {
-      // Missing object: 24454 publishMovedGitlinks names the checkout and remote.
-      continue
-    }
-    if ((await isAncestor(child, row.sha, componentMain)) || (await isAncestor(child, componentMain, row.sha))) {
-      continue
-    }
-    throw new Error(
-      `${row.path} pin ${row.sha} has diverged from refs/heads/main at ${componentMain}. ` +
-        `Merge ${row.path}'s current main into ${branch}, pin the merge commit, and resubmit.`,
-    )
-  }
-}
-
-async function requireRebaseWorktree(git: Git, branch: string, bound: string): Promise<void> {
-  const checkedOut = (await git(["branch", "--show-current"])).trim()
-  if (checkedOut !== branch) {
-    throw new Error(
-      `--rebase needs ${branch} checked out here; found ${checkedOut === "" ? "detached HEAD" : checkedOut}. Check out ${branch} and retry; ${bound}`,
-    )
-  }
-  const gitdir = (await git(["rev-parse", "--absolute-git-dir"])).trim()
-  const entries = await readdir(gitdir)
-  const operation = entries.find((name) =>
-    [
-      "rebase-merge",
-      "rebase-apply",
-      "sequencer",
-      "MERGE_HEAD",
-      "CHERRY_PICK_HEAD",
-      "REVERT_HEAD",
-      "BISECT_LOG",
-    ].includes(name),
-  )
-  if (operation !== undefined) {
-    throw new Error(
-      `--rebase refused: ${operation} in ${gitdir} marks an active Git operation; finish it before retrying; ${bound}`,
-    )
-  }
-  const dirty = (await git(["status", "--porcelain=v1", "--untracked-files=all"])).trim()
-  if (dirty !== "") {
-    throw new Error(
-      `--rebase needs a clean worktree and index, including untracked files; commit or move this work before retrying; ${bound}:\n${dirty}`,
-    )
-  }
-}
-
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   const inspected = await inspectSubmit(git, remote, request)
-  const { targetHead } = inspected
-  let head = inspected.head
-  let issue = inspected.issue
-  if (inspected.rebaseRequired) {
-    try {
-      await git(["rebase", "--no-autostash", "--no-update-refs", targetHead])
-    } catch (cause) {
-      throw new Error(
-        `rebase of ${request.branch} onto ${targetHead} stopped; no change was opened. Inspect Git's error and status; resolve conflicts and run git rebase --continue, then rerun yrd submit. ${String(cause)}`,
-        { cause },
-      )
-    }
-    head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
-    if (!(await isAncestor(git, targetHead, head))) {
-      throw new Error(
-        `rebase left ${request.branch} at ${head} without captured target ${targetHead}; no change was opened`,
-      )
-    }
-    if (head === targetHead) {
-      throw new Error(
-        `nothing new to submit after rebase: ${targetName(request.target)} at ${targetHead} already contains this change; ${freshnessLine(targetHead)}`,
-      )
-    }
-    const priorBinding = inspected.issue?.source === "binding" ? inspected.issue : undefined
-    issue = await issueOf(git, request.branch, head, targetHead, request.issue ?? priorBinding?.issue)
-    if (priorBinding !== undefined && issue?.source !== "binding") {
-      throw new Error(
-        `rebase lost issue binding ${priorBinding.issue} at ${priorBinding.commit} on ${request.branch}; resulting head ${head} has no explicit binding. Rebind the issue before submitting; no change was opened`,
-      )
-    }
+  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
+  if ((await queueFormat({ repo: root, remote }, request.target.branch)) === "event") {
+    return submitEvent(git, remote, request, root, inspected)
   }
+  return submitLegacy(git, remote, request, inspected)
+}
+
+async function submitEvent(
+  git: Git,
+  remote: string,
+  request: SubmitRequest,
+  root: string,
+  inspected: SubmitInspection,
+): Promise<Submitted> {
+  const head = inspected.head
+  const published = await publishMovedGitlinks(git, root, inspected.targetHead, head)
+  const store = { repo: root, remote }
+  const queue = await readEventQueue(store, request.target.branch)
+  const ref = changesRef(request.target.branch, request.branch)
+  const branchRef = `refs/heads/${request.branch}`
+  const branchAt = (await listRefs(branchRef, store)).get(branchRef) ?? null
+  const input = changeInput("opened", {
+    queueTip: queue.tip,
+    at: new Date(),
+    commit: head,
+    by: request.submitter,
+    ...(inspected.issue === undefined ? {} : { issue: inspected.issue.issue }),
+    title: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
+  })
+  const chain = await openEvents({ ...store, ref, writer: request.submitter })
+  let retry = false
+  let retryOpened: string | undefined
+  // The opened event keeps `head`; publishing the branch beside it is for the
+  // branch ref's meaning, not for object reachability. Gitomic moves both in
+  // one atomic publish and refuses a branch lease that went stale.
+  const result = await chain.transact(
+    (events) => {
+      const current = events.reduce(evolve, initial)
+      retry =
+        current.commit === head &&
+        (current.status === "queued" ||
+          current.status === "verifying" ||
+          current.status === "checking" ||
+          current.status === "merging" ||
+          current.status === "stuck")
+      if (retry) {
+        retryOpened = events.findLast((event) => event.type === "opened")?.id
+        return []
+      }
+      return decide(events, input)
+    },
+    `submit ${request.branch}`,
+    { also: [{ ref: branchRef, expect: branchAt, oid: head }] },
+  )
+  const opened = retryOpened ?? result.events.findLast((event) => event.type === "opened")?.id
+  if (opened === undefined) throw new Error(`${ref} in ${root}: submit published no opened event`)
+  return {
+    branch: request.branch,
+    head,
+    targetHead: inspected.targetHead,
+    opened,
+    retry,
+    published,
+    verifying: inspected.verifying,
+    ...(inspected.issue === undefined ? {} : { issue: inspected.issue }),
+    ...(inspected.stop === undefined ? {} : { stop: inspected.stop }),
+  }
+}
+
+async function submitLegacy(
+  git: Git,
+  remote: string,
+  request: SubmitRequest,
+  inspected: SubmitInspection,
+): Promise<Submitted> {
+  const { targetHead } = inspected
+  const head = inspected.head
+  const issue = inspected.issue
   // 24454: every gitlink this head moved is fetchable from its submodule
   // remote before the change exists, or the submit refuses with the commit and
   // checkout named. A refused publication opens nothing.
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
   const published = await publishMovedGitlinks(git, root, targetHead, head)
-  // 24463 row 5: re-measure immediately before the push; a verdict is void
-  // the moment component main moves.
-  await refuseDivergedMovedPins(git, targetHead, head, request.branch)
   const change = { branch: request.branch, head }
   const ref = changeRef(request.target.branch, change)
   // Where the remote holds the branch and this change right now, in one
@@ -404,6 +409,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
     opened,
     retry,
     published,
+    verifying: inspected.verifying,
     ...(issue === undefined ? {} : { issue }),
     ...(inspected.stop === undefined ? {} : { stop: inspected.stop }),
   }

@@ -19,16 +19,30 @@ import { dirname, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
+import { listRefs } from "gitomic/events"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import {
   CHANGE_REF_DIAGNOSTICS,
+  assertPlainEventQueueConfig,
   directMergeCommits,
   changeName,
   checksOf,
   claimWorktrees,
   directMergeLine,
+  drop,
   pauseLine,
+  eventDirectMergeCommits,
+  eventPause,
+  eventRows,
+  listChangeHistories,
+  queueFormat,
+  queueRef,
+  queueRefPrefix,
+  changesRef,
+  readChangeEvents,
+  readEventQueue,
+  writeQueueEvent,
   prepareWorktree,
   checkedTree,
   programRootCheck,
@@ -99,6 +113,8 @@ import {
   type RuntimeGitlinkOff,
   type ChangeRecord,
   type Change,
+  type EventChange,
+  type EventQueue,
   type DraftReading,
   type Row,
   type StopFact,
@@ -205,18 +221,17 @@ export type CoreQueueCommand =
       submitter: string
       issue?: string
       dryRun?: boolean
-      rebase?: boolean
     }>
   | Readonly<{ command: "pause"; by: string; reason: string }>
   | Readonly<{ command: "resume"; by: string; reason?: string }>
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string }>
+  | Readonly<{ command: "drop"; branch: string; by: string; reason?: string }>
   | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
   | Readonly<{
       command: "merge"
       branch: string
       submitter: string
       issue?: string
-      rebase?: boolean
       /**
        * The author's checkout, which a change that is not open is submitted
        * from; absent when the command runs outside a clone, which can merge
@@ -316,6 +331,7 @@ export type CoreQueueCommand =
 /** What each command is called when it has to say it needs a queue. */
 const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   check: "check",
+  drop: "drop",
   pause: "queue pause",
   list: "queue list",
   merge: "merge",
@@ -436,6 +452,9 @@ export async function coreQueueCommand(
   ): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
+      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
+        assertPlainEventQueueConfig(config, "run")
+      }
       outcome = await queueRun({
         ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
         foreground: request.command === "run" || request.command === "merge",
@@ -646,9 +665,52 @@ export async function coreQueueCommand(
   }
 
   switch (request.command) {
+    case "drop": {
+      const eventStore = { repo, remote: config.target.remote }
+      const dropped = await drop(eventStore, {
+        queue: config.target.branch,
+        branch: request.branch,
+        by: request.by,
+        ...(request.reason === undefined ? {} : { note: request.reason }),
+      })
+      emit(
+        io,
+        options.json,
+        dropped,
+        `dropped ${request.branch} at ${dropped.head.slice(0, 12)}; ending ${dropped.event.slice(0, 12)} kept its commit`,
+      )
+      return 0
+    }
     case "pause":
     case "resume": {
       try {
+        const eventStore = { repo, remote: config.target.remote }
+        if ((await queueFormat(eventStore, config.target.branch)) === "event") {
+          const now = await readEventQueue(eventStore, config.target.branch)
+          const standing = eventPause(now)
+          if (request.command === "pause" && standing !== undefined) {
+            throw new QueuePaused(standing, config.target.remote, config.target.branch)
+          }
+          if (request.command === "resume" && standing === undefined) throw new QueueNotPaused()
+          const at = new Date()
+          const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
+          const id = await writeQueueEvent(eventStore, config.target.branch, {
+            type: request.command === "pause" ? "paused" : "resumed",
+            reason,
+            by: request.by,
+            at,
+          })
+          const written: PauseRecord = {
+            kind: request.command === "pause" ? "paused" : "resumed",
+            sha: id,
+            at,
+            reason,
+            by: request.by,
+            cause: "operator",
+          }
+          emit(io, options.json, written, pauseLine(written))
+          return 0
+        }
         // Whether a stop STANDS is the one derivation's answer, never the tip's
         // kind alone: a stuck stop whose change has left the line is over, so a
         // pause may follow it and there is nothing for a resume to end.
@@ -676,6 +738,12 @@ export async function coreQueueCommand(
       }
     }
     case "withdraw": {
+      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
+        io.stderr(
+          `yrd: ${config.target.remote}#${config.target.branch} is an event queue; use yrd drop ${request.branch}\n`,
+        )
+        return 1
+      }
       try {
         const taken = await withdraw(git, config.target.remote, {
           branch: request.branch,
@@ -705,28 +773,29 @@ export async function coreQueueCommand(
       }
     }
     case "submit": {
+      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
+        assertPlainEventQueueConfig(config, "submit")
+      }
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
       const submission = {
         branch,
         submitter: request.submitter,
         target: config.target,
         ...(request.issue === undefined ? {} : { issue: request.issue }),
-        ...(request.rebase === true ? { rebase: true } : {}),
       }
       // A stopped line ACCEPTS the submit (the andon, operator 2026-09-16): the
       // stop is echoed — who, why, and what lifts it — and never refused on.
       if (request.dryRun === true) {
         const inspected = await inspectSubmit(git, config.target.remote, submission)
-        const { head, targetHead, rebaseRequired } = inspected
+        const { head, targetHead, verifying } = inspected
         const issue = inspected.issue
         emit(
           io,
           options.json,
           {
-            ...(rebaseRequired
-              ? { branch, headBeforeRebase: head, rebaseRequired }
-              : { change: changeName({ branch, head }) }),
+            change: changeName({ branch, head }),
             dryRun: true,
+            verifying,
             submitter: request.submitter,
             target: targetName(config.target),
             targetHead,
@@ -734,9 +803,7 @@ export async function coreQueueCommand(
             stopped: stopFact(inspected.stop),
             ...issueOutput(io, branch, issue),
           },
-          (rebaseRequired
-            ? `would rebase ${branch} at ${head} onto ${targetHead}, then open its new head (unknown until rebase)`
-            : `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}`) +
+          `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}` +
             `${issue === undefined ? "" : ` (issue ${issue.issue})`}; nothing was pushed; ${freshnessLine(targetHead)}`,
         )
         echoStop(inspected.stop)
@@ -833,7 +900,6 @@ export async function coreQueueCommand(
           submitter: request.submitter,
           target: { branch: config.target.branch, remote },
           ...(request.issue === undefined ? {} : { issue: request.issue }),
-          ...(request.rebase === true ? { rebase: true } : {}),
         })
         // The stop the submit was accepted under is not echoed here: this
         // command does not wait for it to lift, and the stop that still stands
@@ -1308,7 +1374,8 @@ export async function coreQueueCommand(
           /** Every decision the rows carry, one per run per change and unfiltered, for the STATS box. */
           decisions: readonly RunDecision[]
           /** The queue read the rows came from, so a detail opened later reads the same tip. */
-          entries: QueueEntries
+          entries: QueueEntries | undefined
+          eventChanges: ReadonlyMap<string, EventChange> | undefined
           journals: Journals
           /** The stop that stands, as the reading derived it. */
           stopped: StopFact | null
@@ -1316,15 +1383,24 @@ export async function coreQueueCommand(
           drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
         }>
       > => {
-        // The ending instants a notice hides and the drafts are what a person
-        // reads; `--json` reads neither, so its document is the one it was.
-        const { queue, journals, all, drafts, observation } = await readListing(
-          git,
-          declared.config,
-          workdir,
-          declared.oid,
-          options.json === true ? {} : { shown: { draftWindow } },
-        )
+        // Legacy JSON retains its historical change-only document. An event
+        // queue has one status vocabulary beginning at `draft`, so its JSON
+        // and table both project the same one row per branch.
+        const format = await queueFormat({ repo, remote: config.target.remote }, config.target.branch)
+        const reading =
+          format === "event"
+            ? await readEventListing(git, declared.config, repo, workdir, declared.oid)
+            : {
+                format: "legacy" as const,
+                ...(await readListing(
+                  git,
+                  declared.config,
+                  workdir,
+                  declared.oid,
+                  options.json === true ? {} : { shown: { draftWindow } },
+                )),
+              }
+        const { journals, all, drafts, observation } = reading
         if (options.json !== true) narrateMalformed(io, journals, said)
         // TWO LENSES OVER ONE READING, and which is which is the whole of S1.
         //
@@ -1341,25 +1417,30 @@ export async function coreQueueCommand(
         const unfiltered = watchRows(all, { journals, perRun: true })
         const changes = filterRows(unfiltered, request.terms ?? []).filter((item) => item.row.state !== "draft")
         const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
+        const documentRows = reading.format === "event" ? rows : changes
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
-        const pause = queue.stop
+        const pause = reading.format === "event" ? reading.pause : reading.queue.stop
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table. Zero
         // rows also names the fields the term was checked against, so a state
         // name that found nothing is told it WAS considered, not skipped —
         // the same message on `--json` as on the page (AC1,
         // a-state-name-filters-to-zero-rows-and-exit-zero).
-        const scope =
+        const filteredScope =
           request.terms === undefined || request.terms.length === 0
             ? undefined
-            : `${String(changes.length)} of ${String(all.filter((row) => row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
-              (changes.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
+            : `${String(documentRows.length)} of ${String(reading.format === "event" ? all.length : all.filter((row) => row.state !== "draft").length)} ${reading.format === "event" ? "branch(es)" : "change(s)"} match ${request.terms.join(" or ")}` +
+              (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
+        const scope =
+          reading.format === "event"
+            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.${filteredScope === undefined ? "" : ` ${filteredScope}`}`
+            : filteredScope
         return {
           observation,
           data: {
             observation,
-            changes: changes.map((row) => row.row),
+            changes: documentRows.map((row) => row.row),
             journal: journalFact(journals),
             pause: pause ?? null,
             // The everyday reader of a stopped line: always present, null while
@@ -1367,7 +1448,8 @@ export async function coreQueueCommand(
             stopped: stopFact(pause),
             ...(scope === undefined ? {} : { scope }),
           },
-          entries: queue.changes,
+          entries: reading.format === "event" ? undefined : reading.queue.changes,
+          eventChanges: reading.format === "event" ? reading.changes : undefined,
           journals,
           queue: queueName(config.target, await remoteUrl(git, config.target.remote)),
           // Pre-M8 a repository has exactly one queue: the target's branch, on
@@ -1523,7 +1605,8 @@ export async function coreQueueCommand(
         let ending: YrdCliExitCode | undefined
         // The queue read the LAST round made: a detail opened between rounds
         // reads the same tips the table shows, never a fresher or staler one.
-        let entries: QueueEntries = first.entries
+        let entries: QueueEntries | undefined = first.entries
+        let eventChanges = first.eventChanges
         let journals = first.journals
         let seen: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }> = first
         const app = await run(
@@ -1541,11 +1624,30 @@ export async function coreQueueCommand(
                 io.stderr(`${next.observation.message}\n`)
               }
               entries = next.entries
+              eventChanges = next.eventChanges
               journals = next.journals
               return snapshotOf(next)
             },
             loadDiff: (item) => readDiff(git, config, item),
-            open: (item) => openDetail(git, config, entries, item, config.target.branch, journalFor(item, journals)),
+            open: (item) => {
+              if (entries === undefined) {
+                if (item.row.state === "direct") {
+                  return openDetail(git, config, [], item, config.target.branch, journalFor(item, journals))
+                }
+                const selected = eventChanges?.get(item.row.branch)
+                if (selected === undefined) throw new Error(`event change ${item.row.branch} left the selected listing`)
+                return openEventDetail(
+                  git,
+                  config,
+                  item,
+                  config.target.branch,
+                  repo,
+                  selected,
+                  journalFor(item, journals),
+                )
+              }
+              return openDetail(git, config, entries, item, config.target.branch, journalFor(item, journals))
+            },
             onEnding:
               request.terms === undefined || request.terms.length === 0
                 ? undefined
@@ -1805,6 +1907,58 @@ export async function coreQueueCommand(
       return 0
     }
     case "show": {
+      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
+        const reading = await readEventListing(git, config, repo, workdir, captured.oid)
+        if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
+          io.stderr(`${reading.observation.message}\n`)
+          return 2
+        }
+        const name = queueName(config.target, await remoteUrl(git, config.target.remote))
+        const row = reading.all.find((candidate) => candidate.branch === request.branch)
+        const selected = reading.changes.get(request.branch)
+        if ((row === undefined) !== (selected === undefined)) {
+          throw new Error(`event listing for ${request.branch} disagrees with its change fold`)
+        }
+        if (selected !== undefined && selected.tip === undefined) {
+          throw new Error(`event change ${request.branch} has no selected tip`)
+        }
+        const events =
+          selected === undefined
+            ? []
+            : await readChangeEvents(
+                { repo, remote: config.target.remote },
+                config.target.branch,
+                request.branch,
+                selected.tip as string,
+              )
+        const scope =
+          `Read ${changesRef(config.target.branch, request.branch)} at ${config.target.remote}; ` +
+          "draft branches and direct target commits are outside this reading; check results are not projected from events yet."
+        emit(
+          io,
+          options.json,
+          {
+            queue: name,
+            changes: row === undefined ? [] : [{ ...row, queue: config.target.branch, events }],
+            journal: journalFact(reading.journals),
+            observation: reading.observation,
+            scope,
+          },
+          row === undefined
+            ? `no change for ${request.branch} on ${name}. ${scope}`
+            : [
+                rowLine({ row }),
+                `  queue: ${config.target.branch}`,
+                ...events.map((event) => {
+                  const at = event.props.find(([key]) => key === "Time")?.[1]
+                  if (at === undefined) throw new Error(`event ${event.id} has no Time:`)
+                  const reason = event.props.find(([key]) => key === "Reason")?.[1]
+                  return `  ${at} ${event.type}${event.writer === null ? "" : ` by ${event.writer}`}${reason === undefined ? "" : ` — ${reason}`}`
+                }),
+              ].join("\n"),
+        )
+        return 0
+      }
       const queue = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
       const journals = readJournals(join(workdir, "logs"))
       if (options.json !== true) narrateMalformed(io, journals, new Set())
@@ -2013,6 +2167,7 @@ function runOptions(
     // A fresh worktree has submodules and no dependencies; `setup:` is what
     // finishes it, once per worktree, before any check runs in it.
     setup: config.setup,
+    teardown: config.teardown,
     target: config.target,
     targetSha: oid,
     workdir,
@@ -2263,6 +2418,37 @@ function missedSelector(terms: readonly string[], queue: string, matched: number
 /** One reading of the queue as the pane consumes it. */
 /** The entries one queue read yields: the type `readQueue` returns, named here rather than widened in the core. */
 type QueueEntries = Awaited<ReturnType<typeof readQueue>>["changes"]
+
+/** Open exactly the event tip shown in the table, including every event in its history. */
+export async function openEventDetail(
+  git: Git,
+  config: QueueConfig,
+  item: WatchRow,
+  label: string,
+  repo: string,
+  selected: EventChange,
+  journal?: JournalRun,
+): Promise<ChangeDetail> {
+  const { row } = item
+  if (
+    row.format !== "event" ||
+    selected.commit !== row.head ||
+    selected.status !== row.state ||
+    selected.tip === undefined
+  ) {
+    throw new Error(`event detail for ${row.branch} disagrees with the selected table row`)
+  }
+  const events = await readChangeEvents({ repo, remote: config.target.remote }, label, row.branch, selected.tip)
+  return {
+    row,
+    run: runOf(row, label, [], item.run?.id ?? row.run),
+    checks: [],
+    events,
+    ...(journal === undefined ? {} : { journal }),
+    ...(await headFacts(git, config, row)),
+    note: "Check results are not projected from event history in this detail.",
+  }
+}
 
 /**
  * One change's detail, read for the row under the cursor and for nothing else
@@ -2600,10 +2786,21 @@ function lockWaitFact(wait: RoundLockWait): Readonly<Record<string, unknown>> {
  * withdrawn change stands on the failed rung: it did not land, and the next
  * move is its submitter's (@i/10-yrd/24492).
  */
-function endingCode(states: readonly Row["state"][]): YrdCliExitCode | undefined {
-  if (states.some((state) => state === "queued" || state === "checked")) return undefined
+export function endingCode(states: readonly Row["state"][]): YrdCliExitCode | undefined {
+  if (
+    states.some(
+      (state) =>
+        state === "queued" ||
+        state === "verifying" ||
+        state === "checking" ||
+        state === "merging" ||
+        state === "checked",
+    )
+  ) {
+    return undefined
+  }
   if (states.some((state) => state === "stuck")) return 2
-  if (states.some((state) => state === "failed" || state === "withdrawn")) return 1
+  if (states.some((state) => state === "failed" || state === "withdrawn" || state === "cancelled")) return 1
   return 0
 }
 
@@ -2726,19 +2923,109 @@ function checkLines(check: CheckView): readonly string[] {
   ]
 }
 
+/** Read an event queue through Gitomic and project its change chains and draft branch heads. */
+async function readEventListing(
+  git: GitRunner,
+  config: QueueConfig,
+  repo: string,
+  workdir: string,
+  targetOid: string,
+): Promise<
+  Readonly<{
+    format: "event"
+    all: readonly Row[]
+    journals: Journals
+    drafts: DraftReading
+    pause: PauseRecord | undefined
+    changes: ReadonlyMap<string, EventChange>
+    observation: GitObservation
+  }>
+> {
+  const store = { repo, remote: config.target.remote }
+  const queue = await readEventQueue(store, config.target.branch)
+  const histories = await listChangeHistories(store, config.target.branch)
+  const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
+  const directMerges = await eventDirectMergeCommits(git, config.target.branch, targetOid, queue.declaration, histories)
+  const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
+  const [queueRefs, branchRefs] = await Promise.all([listRefs(queuePrefix, store), listRefs("refs/heads/", store)])
+  assertEventListingFence(config.target.branch, queue, changes, queueRefs)
+  const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
+  const drafts = await readDrafts(
+    git,
+    {
+      heads,
+      changes: [...changes].flatMap(([branch, change]) =>
+        change.commit === undefined ? [] : [{ change: { branch, head: change.commit } }],
+      ),
+    },
+    { targetSha: targetOid },
+  )
+  const projected = [
+    ...eventRows(changes),
+    ...list([], { directMerges }),
+    ...eventRows(new Map(), [...drafts.dated, ...drafts.undated]),
+  ]
+  const titles = await subjects(
+    git,
+    projected.map((row) => row.head),
+  )
+  const all = projected.map((row) => ({
+    ...row,
+    ...(titles.get(row.head) === undefined ? {} : { subject: titles.get(row.head) }),
+  }))
+  const observation = await git.observe({
+    version: 1,
+    root: {
+      remote: await remoteUrl(git, config.target.remote),
+      targetRef: `refs/heads/${config.target.branch}`,
+      targetOid,
+    },
+    checked: [],
+    fence: {
+      prefixes: ["refs/heads/", queuePrefix],
+      refs: [...queueRefs, ...branchRefs].map(([ref, oid]) => ({ ref, oid })),
+    },
+  })
+  return {
+    format: "event",
+    all,
+    journals: readJournals(join(workdir, "logs")),
+    drafts,
+    pause: eventPause(queue),
+    changes,
+    observation,
+  }
+}
+
+/** A history read and its final observation must name the same event tips. */
+export function assertEventListingFence(
+  name: string,
+  queue: EventQueue,
+  changes: ReadonlyMap<string, EventChange>,
+  advertised: ReadonlyMap<string, string>,
+): void {
+  const expected = new Map<string, string>([[queueRef(name), queue.tip]])
+  for (const [branch, change] of changes) {
+    if (change.tip === undefined) throw new Error(`event change ${branch} has no selected chain tip`)
+    expected.set(changesRef(name, branch), change.tip)
+  }
+  const changePrefix = `${queueRefPrefix(name)}/changes/`
+  for (const [ref, tip] of expected) {
+    if (advertised.get(ref) !== tip) {
+      throw new Error(`${ref} moved during event list: read ${tip}, observed ${advertised.get(ref) ?? "absent"}`)
+    }
+  }
+  for (const [ref, tip] of advertised) {
+    if (ref.startsWith(changePrefix) && !expected.has(ref)) {
+      throw new Error(`${ref} appeared during event list at ${tip}; read the queue again`)
+    }
+  }
+}
+
 /**
- * One reading of the queue as the list, the watch and the stats consume it:
- * the change refs at the remote, the run journal on THIS machine, the direct
- * commits on the target (E5) and the head subjects, in one batched read. A
- * machine that runs no queue has no journal, and `journals.absent` is the
- * sentence that says so rather than a row that reads as if nothing were
- * running. Nothing here derives a state: `list()` does, once, for everyone.
- *
- * `shown` asks for what only a person reads (@i/10-yrd/24196): the instants of
- * the endings a notice hides, which the table times and orders ended rows by,
- * and the drafts of one window (queue-core drafts.ts), both in batched reads
- * made here and never in a redraw. `--json` and `yrd queue stats` ask for
- * neither.
+ * One legacy queue reading for list, watch and stats: change refs, the local
+ * run journal, direct target commits and head subjects. `shown` adds ending
+ * instants and draft branches for the human table.
  */
 export async function readListing(
   git: GitRunner,
@@ -2757,6 +3044,11 @@ export async function readListing(
   }>
 > {
   const queue = await readQueue(git, config.target.remote, config.target.branch, targetOid)
+  if (queue.observation.fence.refs.some(({ ref }) => ref === queueRef(config.target.branch))) {
+    throw new Error(
+      `${config.target.remote}#${config.target.branch} changed to event format during legacy read; read the queue again`,
+    )
+  }
   const observation = await git.observe({
     version: 1,
     root: {

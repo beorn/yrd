@@ -57,6 +57,7 @@ export function bucketOf(row: Pick<Row, "state" | "live">): StatusBucket {
     case "merged":
     case "direct":
     case "withdrawn":
+    case "cancelled":
       return "done"
     case "failed":
       return "failed"
@@ -66,6 +67,10 @@ export function bucketOf(row: Pick<Row, "state" | "live">): StatusBucket {
     case "draft":
     case "deferred":
       return "open"
+    case "verifying":
+    case "checking":
+    case "merging":
+      return "running"
   }
 }
 
@@ -108,7 +113,15 @@ export function changesSuffix(row: Row): Readonly<{ text: string; color: string 
   if (row.state === "deferred") {
     const projected = row.projectedMs !== undefined ? `${Math.round(row.projectedMs / 60000)}m` : undefined
     const bound = row.boundMs !== undefined ? `${Math.round(row.boundMs / 60000)}m` : undefined
-    const timing = projected && bound ? `projected ${projected} > ${bound}, ` : ""
+    const rel =
+      row.projectedMs !== undefined && row.boundMs !== undefined
+        ? row.projectedMs > row.boundMs
+          ? ">"
+          : row.projectedMs < row.boundMs
+            ? "<"
+            : "="
+        : ">"
+    const timing = projected && bound ? `projected ${projected} ${rel} ${bound}, ` : ""
     return {
       color: "$fg-accent",
       text: `${timing}waits for the long check`,

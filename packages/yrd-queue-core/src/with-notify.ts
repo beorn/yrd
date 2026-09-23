@@ -187,7 +187,7 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
 }
 
 /** The one message an ended change sends, in the plan's three shapes (§ Commands). */
-function messageFor(
+export function messageFor(
   kind: "merged" | "failed" | "stuck" | "deferred",
   about: Readonly<{
     branch: string
@@ -209,9 +209,17 @@ function messageFor(
     case "deferred": {
       const projMin = about.projectedMs !== undefined ? Math.round(about.projectedMs / 60_000) : undefined
       const boundMin = about.boundMs !== undefined ? Math.round(about.boundMs / 60_000) : undefined
+      const rel =
+        about.projectedMs !== undefined && about.boundMs !== undefined
+          ? about.projectedMs > about.boundMs
+            ? ">"
+            : about.projectedMs < about.boundMs
+              ? "<"
+              : "="
+          : ">"
       const timing =
         projMin !== undefined && boundMin !== undefined
-          ? `projected ${projMin}m > ${boundMin}m`
+          ? `projected ${projMin}m ${rel} ${boundMin}m`
           : "projection exceeded bound"
       return `waits for long check: ${short(about.branch, about.head)} (${timing})`
     }

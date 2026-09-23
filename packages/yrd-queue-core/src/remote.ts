@@ -364,7 +364,7 @@ export async function resolveRemote(git: Git, declared: string): Promise<string>
     throw new Error(`.yrd.yml remote: ${declared} is neither a remote of this repository nor a URL`)
   }
   if (names.includes(YRD)) {
-    const url = (await git(["remote", "get-url", YRD])).trim()
+    const url = await remoteUrl(git, YRD)
     if (url !== declared) throw new Error(`the remote ${YRD} is at ${url}, not at the declared ${declared}`)
     return YRD
   }

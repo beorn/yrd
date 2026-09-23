@@ -19,7 +19,7 @@ Yrd is a merge queue that lives inside a Git repository. A queue runs on a branc
 ## Terms
 
 - **change**: one branch at one commit, submitted to the queue; the nearest everyday thing is a pull request without a number or a review. Its name is `<branch>@<sha>`. Move the branch and submit again for a new change. A branch pushed and not submitted at that head, and not already on the queue branch, is a **draft**: the list and the watch show it, and the queue does not check or merge it until it is submitted.
-- **submitter**: whoever ran `yrd submit`, a person or an agent, named by the string given with `--notify`. The queue passes that string to the notify commands and reads nothing into it.
+- **submitter**: whoever ran `yrd submit`, a person or an agent, named by `--submitter` or `YRD_DEFAULT_SUBMITTER`. The queue passes that string to the notify commands and reads nothing into it.
 - **queue branch**: the branch the queue runs on and merges into, selected with `--queue <branch>` or defaulting to `origin/HEAD`. A change's own branch is the change's branch.
 - **check**: one command the queue runs, on submit or on merge, named in `.yrd.yml` on the queue branch.
 - **result**: pass, fail or stuck, of a check or of a queue run. A fail is the submitter's: the check ran and its command exited non-zero. Stuck means the queue itself cannot go on with that change (a crash, a missing script, a check past its time limit); the change waits in line for repair and is nobody's fault, and the line stops until the change leaves it, withdrawn with `yrd queue withdraw` or merged. `yrd merge` lands a repair ahead of it and judges the stuck change again.
@@ -31,8 +31,8 @@ Yrd is a merge queue that lives inside a Git repository. A queue runs on a branc
 ## Commands
 
 ```
-yrd submit [branch] [--notify <who>] [--issue <id>] [--dry-run] [--rebase]   push the branch (the current one when none is named) and open its change; same head again is a retry
-yrd merge <branch> [--notify <who>] [--issue <id>] [--rebase]      merge the branch now, ahead of the line and on a stopped line too: submit it unless its change is in line, then run its checks and its merge in this process
+yrd submit [branch] [--submitter <agent>] [--issue <id>] [--dry-run]   verify and push the unchanged branch head (the current one when none is named); same head again is a retry
+yrd merge <branch> [--submitter <agent>] [--issue <id>]      merge the branch now, ahead of the line and on a stopped line too: submit it unless its change is in line, then run its checks and its merge in this process
 yrd queue run                                                     one queue run; a round already running in the queue's workdir finishes first
 yrd queue up [--interval <seconds>]                               queue runs on a loop, every 15 seconds by default; run this under your supervisor
 yrd queue pause --reason <text> [--notify <seat>]                        stop checking and merging; submits are still accepted and wait in line
@@ -74,7 +74,7 @@ Close reads teardown from the environment's current commit and refuses dirty, lo
 
 **Using the queue.** Commit on your own branch, then do one of three things with it. The examples use `fix-login` and the default queue, `origin#main`.
 
-1. **Submit** it to wait its turn: `yrd submit fix-login --notify <who>`. If the queue branch has moved, rebase first (`git fetch origin main`, then `git rebase FETCH_HEAD`) or pass `--rebase`. A push alone leaves the branch outside the queue, a draft that the list and the watch show until it is submitted. Follow it with `yrd queue list` and `yrd queue show fix-login`; a failure's log is on the machine running the queue. After a fix, commit and submit again: the same head is a retry, a new head a new change.
+1. **Submit** it to wait its turn: `yrd submit fix-login --submitter <agent>`. Submit verifies the branch's commit against the current queue branch with git-super, including gitlinks. It accepts an older head when the merge composes cleanly and never rewrites that head. A push alone leaves the branch outside the queue, a draft that the list and the watch show until it is submitted. Follow it with `yrd queue list` and `yrd queue show fix-login`; a failure's log is on the machine running the queue. After a fix, commit and submit again: the same head is a retry, a new head a new change.
 2. **Merge** it now: `yrd merge fix-login` checks and merges that branch in this process, ahead of the line and even while the line is stopped, reusing its change if it is already in line. Every check still runs, and a fail goes back to its submitter. It exits with the change's state: 0 merged, 1 failed or withdrawn, 2 stuck or still in line. This is how a repair for a stuck line lands.
 3. **Withdraw** it: `yrd queue withdraw fix-login --reason <text>` ends its open change and takes it out of the line. The branch stays, and submitting again re-opens it.
 
@@ -83,12 +83,12 @@ In a superproject, `git super status`, `git super diff` and `git super push` wor
 **What submit does, in order:**
 
 1. Refuses the queue branch, reads the local branch head, then reads and fetches the configured target's advertised commit. Fetch obtains the commit objects without pulling or integrating them into your branch. It reads whether the line is stopped only to say so: a stopped line accepts the submit, and no check runs at submit.
-2. Checks shared history and whether your branch contains that target commit. It refuses a head already contained by the target or, by default, a stale branch.
-3. With explicit `--rebase`, rebases a stale branch onto that captured target. This requires the named branch checked out here, a clean worktree and index including untracked files, and no active Git operation. It never auto-stashes or updates other branch refs. A conflict stops submission before a change opens; resolve it with Git and submit again.
-4. Creates the opened record for the exact resulting commit after any requested rebase, then publishes that commit as the branch head together with the record in one atomic push. Both refs use leases against the remote values just observed; a concurrent ref change refuses the whole push.
+2. Checks shared history and refuses a head already contained by the target.
+3. Composes the submitted commit onto the observed target and settles gitlinks with git-super. A conflict refuses submission before a change opens, naming the conflict. The submitted commit remains unchanged.
+4. Creates the opened record for that submitted commit, then publishes it as the branch head together with the record in one atomic push. Both refs use leases against the remote values just observed; a concurrent ref change refuses the whole push.
 5. Returns the submitted change. The queue runs checks and merges later, revalidating against the target at merge time. Successful submission means queued, not merged.
 
-`--dry-run` performs the admission checks without pushing or opening a change. Combined with `--rebase`, it describes the required rewrite without performing it or predicting the resulting commit. Submission captures a target commit at one instant; it does not reserve the target.
+`--dry-run` performs the same git-only verification without pushing or opening a change and reports its result. Submission captures a target commit at one instant; it does not reserve the target. `--notify` remains a deprecated alias for `--submitter` for one release and prints a warning.
 
 ## The config, `.yrd.yml`
 

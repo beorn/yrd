@@ -6,6 +6,7 @@ import {
   gitIn,
   populateReferenceStores,
   queueName,
+  remoteUrl,
   resolveGitSelection,
   type GitSelection,
   type ReferenceStore,
@@ -92,7 +93,9 @@ async function ensureOwnedClone(
     ])
   }
   const git = gitIn(repo, undefined, selection, { env })
-  const actual = (await git(["remote", "get-url", "origin"])).trim()
+  // Identity is the DECLARED url (remoteUrl); `remote get-url` expands url.<base>.insteadOf, so a
+  // host's transport rewrite would read as a clone of another repository.
+  const actual = await remoteUrl(git, "origin")
   if (actual !== address.transport) {
     throw new Error(
       `queue clone ${repo} has origin ${actual}, not ${address.transport}; move the mismatched clone aside and retry ${address.canonical}`,
@@ -126,8 +129,7 @@ export async function resolveQueueLocation(
   let address: QueueAddress
   if (inside !== undefined && !addressed) {
     const queue = value ?? (await originHead(git))
-    const transport = (await git(["remote", "get-url", "origin"])).trim()
-    address = parseQueueAddress(queueName({ branch: queue, remote: "origin" }, transport))
+    address = parseQueueAddress(queueName({ branch: queue, remote: "origin" }, await remoteUrl(git, "origin")))
   } else {
     if (value === undefined || !addressed) {
       throw new Error(
@@ -139,8 +141,7 @@ export async function resolveQueueLocation(
     const split = selected.indexOf("#")
     const repository = selected.slice(0, split)
     if (inside !== undefined && (await git(["remote"])).trim().split("\n").includes(repository)) {
-      const transport = (await git(["remote", "get-url", repository])).trim()
-      selected = queueName({ branch: selected.slice(split + 1), remote: repository }, transport)
+      selected = queueName({ branch: selected.slice(split + 1), remote: repository }, await remoteUrl(git, repository))
     }
     address = parseQueueAddress(selected)
   }
