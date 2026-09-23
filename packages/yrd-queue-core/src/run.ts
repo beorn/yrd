@@ -738,90 +738,114 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
   }
 
-  // On-submit: every queued change, oldest first, in a fresh worktree of its
-  // head. A stuck change kept its place, and this run takes it again from
-  // here, first among the changes still to judge; so does a checked change
-  // whose checks ran under a check config the target no longer declares
-  // (§ The queue run: a checked record is reused only while the config blob is
-  // the one it names). A judge that ends stuck ENDS THE ROUND: nothing behind
-  // it is judged, nothing is merged, and the line stops on it (the andon,
-  // operator 2026-09-16, which overruled @i/10-yrd/24492's step-over).
-  for (const entry of ordered(entries, options.only, "queued", "stuck", "checked").filter(
-    (entry) => entry.reading.state !== "checked" || staleChecked(run, entry),
-  )) {
-    if (isStopWindowClosed(options)) {
-      log.write({
-        kind: "observation",
-        why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting new checks`,
-      })
-      break
-    }
-    const outcome = await judged(run, entry, () => run.steps.judge(run, entry))
-    if (outcome === "stuck") {
-      stuck.push(entry.change.branch)
-      return finish(
-        run,
-        2,
-        { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred },
-        await run.steps.stopLine(run, entry),
-      )
-    }
-    if (outcome === "failed") failed.push(entry.change.branch)
-    else if (outcome === "deferred") deferred.push(entry.change.branch)
+  // Head first (@i/10-yrd/25301, @cto c7115f0f and ac87d1e5). The line is walked
+  // in order and its head merges the moment it is judged: judging the rest of
+  // the line is a prefetch AFTER that merge, never a gate before it. A change is
+  // judged when it needs it — queued, stuck, or checked under a check config the
+  // target no longer declares (§ The queue run: a checked record is reused only
+  // while the config blob is the one it names) — so a config edit re-judges each
+  // change when the walk reaches it, never the whole line first. A judge that
+  // ends stuck ENDS THE ROUND and the line stops on it (the andon, operator
+  // 2026-09-16), so nothing behind a stuck row is judged or merged; a head in
+  // FRONT of a stuck row merges first, because nothing merges past it.
+  const needsJudge = (entry: QueueEntry): boolean => entry.reading.state !== "checked" || staleChecked(run, entry)
+  const pastStopTime = (): boolean => {
+    if (!isStopWindowClosed(options)) return false
+    log.write({
+      kind: "observation",
+      why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting new checks`,
+    })
+    return true
+  }
+  const andon = async (entry: QueueEntry): Promise<QueueRunOutcome> => {
+    stuck.push(entry.change.branch)
+    return finish(
+      run,
+      2,
+      { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred },
+      await run.steps.stopLine(run, entry),
+    )
   }
 
-  // On-merge: the first checked change in line, re-read so this run's own
-  // checked records count. The line is cut at its first stuck row: a checked
-  // change behind a stuck one never merges past it. A round scoped to one
-  // change selects it before the cut, so a stuck change ahead of it is not in
-  // the line this round cuts.
-  const reread = ordered((await read()).changes, options.only, "checked", "stuck")
-  const blocked = reread.findIndex((entry) => entry.reading.state === "stuck")
-  const line = (blocked === -1 ? reread : reread.slice(0, blocked)).filter((entry) => !staleChecked(run, entry))
-  let stoppedIndex = -1
-  for (const [i, checked] of line.entries()) {
-    if (isStopWindowClosed(options)) {
-      log.write({
-        kind: "observation",
-        why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting new checks`,
-      })
+  // Phase A: the head. Judge each change as the walk reaches it, and merge the
+  // first one that is checked; one merge per round (ruling D4). A change that
+  // fails or defers hands the head to the next. A round scoped to one change
+  // selects it before anything else, so it walks that change alone.
+  let acted: QueueEntry | undefined
+  let stoppedByTime = false
+  for (const entry of ordered(entries, options.only, "queued", "stuck", "checked")) {
+    if (pastStopTime()) {
+      stoppedByTime = true
       break
     }
-    const outcome = await judged(run, checked, () => run.steps.merge(run, checked))
-    if (outcome === "stuck") {
-      stuck.push(checked.change.branch)
-      return finish(
-        run,
-        2,
-        { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred },
-        await run.steps.stopLine(run, checked),
-      )
+    let head = entry
+    if (needsJudge(entry)) {
+      const judgedAs = await judged(run, entry, () => run.steps.judge(run, entry))
+      if (judgedAs === "stuck") return andon(entry)
+      if (judgedAs === "failed") {
+        failed.push(entry.change.branch)
+        continue
+      }
+      if (judgedAs === "deferred") {
+        deferred.push(entry.change.branch)
+        continue
+      }
+      // Re-read, so the merge acts on the checked record this run just wrote.
+      const fresh = (await read()).changes.find((candidate) => sameChange(candidate, entry))
+      if (fresh === undefined || fresh.reading.state !== "checked" || staleChecked(run, fresh)) continue
+      head = fresh
+      // Judged, but the window closed before its merge could start: no merge and no prefetch.
+      if (pastStopTime()) {
+        stoppedByTime = true
+        break
+      }
     }
-    if (outcome === "deferred") {
-      deferred.push(checked.change.branch)
+    const mergedAs = await judged(run, head, () => run.steps.merge(run, head))
+    if (mergedAs === "stuck") return andon(head)
+    if (mergedAs === "deferred") {
+      deferred.push(head.change.branch)
       continue
     }
-    if (outcome === "failed") {
-      failed.push(checked.change.branch)
-      stoppedIndex = i
-      break
-    }
-    if (outcome === "merged") {
-      merged.push(checked.change.branch)
-      stoppedIndex = i
-      break
-    }
-    stoppedIndex = i
+    if (mergedAs === "failed") failed.push(head.change.branch)
+    else if (mergedAs === "merged") merged.push(head.change.branch)
+    acted = head
     break
   }
 
-  const checkedWaiting = stoppedIndex !== -1 ? Math.max(0, line.length - 1 - stoppedIndex) : 0
+  // Phase B: the prefetch. Once the head has been acted on, judge the rest of
+  // the line against the target as it now stands, in line order, from a fresh
+  // read (the merge moved the target and wrote records). Each judge starts only
+  // inside the stop window, and a judge writes its verdict whole or not at all,
+  // so stopping here leaves no partial verdict. A scoped round has no tail.
+  if (acted !== undefined && !stoppedByTime && options.only === undefined) {
+    const tail = ordered((await read()).changes, undefined, "queued", "stuck", "checked").filter(
+      (entry) => !sameChange(entry, acted) && needsJudge(entry),
+    )
+    for (const entry of tail) {
+      if (pastStopTime()) break
+      const judgedAs = await judged(run, entry, () => run.steps.judge(run, entry))
+      if (judgedAs === "stuck") return andon(entry)
+      if (judgedAs === "failed") failed.push(entry.change.branch)
+      else if (judgedAs === "deferred") deferred.push(entry.change.branch)
+    }
+  }
+
+  // Everything this run left checked, current and not behind a stuck row, once
+  // the head was acted on: the changes ready for the next round the moment this
+  // one ends. Read once, after the prefetch, because the prefetch is what
+  // turned them checked.
+  let checkedWaiting = 0
+  if (acted !== undefined) {
+    const reread = ordered((await read()).changes, options.only, "checked", "stuck")
+    const blocked = reread.findIndex((entry) => entry.reading.state === "stuck")
+    checkedWaiting = (blocked === -1 ? reread : reread.slice(0, blocked)).filter(
+      (entry) => entry.reading.state === "checked" && !staleChecked(run, entry) && !sameChange(entry, acted),
+    ).length
+  }
 
   return finish(
     run,
     stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0,
-    // Everything this run left checked behind the one it acted on. Read from
-    // the line it already re-read, so saying it costs no second look.
     { checkedWaiting, directMerges, failed, merged, stuck, deferred },
     stopped,
   )
@@ -833,6 +857,11 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
  * name, so a ring that wraps one sees every call to it.
  */
 const BASE: Steps = { bookkeep, direct, observed, end, ended, judge, merge, open, prepare, push, stopLine }
+
+/** The same change: one branch at one head. */
+function sameChange(left: QueueEntry, right: QueueEntry): boolean {
+  return left.change.branch === right.change.branch && left.change.head === right.change.head
+}
 
 /** A checked change whose checked record names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
