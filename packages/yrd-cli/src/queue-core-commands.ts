@@ -672,6 +672,9 @@ export async function coreQueueCommand(
   switch (request.command) {
     case "ignore":
     case "unignore": {
+      if (request.command === "unignore" && "reason" in request) {
+        throw new TypeError(`yrd-ignore-reason-conflict: ${request.branch}: unignore does not accept --reason`)
+      }
       const eventStore = { repo, remote: config.target.remote }
       if ((await queueFormat(eventStore, config.target.branch)) !== "event") {
         io.stderr(`yrd: ${request.command} needs an event queue at ${config.target.remote}#${config.target.branch}\n`)
@@ -1466,10 +1469,16 @@ export async function coreQueueCommand(
             ? undefined
             : `${String(documentRows.length)} of ${String(reading.format === "event" ? all.length : all.filter((row) => row.state !== "draft").length)} ${reading.format === "event" ? "branch(es)" : "change(s)"} match ${request.terms.join(" or ")}` +
               (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
-        const scope =
+        const baseScope =
           reading.format === "event"
-            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.${filteredScope === undefined ? "" : ` ${filteredScope}`}`
-            : filteredScope
+            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
+            : undefined
+        const ignoreScope =
+          config.ignore.length === 0
+            ? undefined
+            : `Excluded draft heads matching .yrd.yml ignore: ${config.ignore.map((pattern) => JSON.stringify(pattern)).join(", ")}.`
+        const scopeParts = [baseScope, filteredScope, ignoreScope].filter((part) => part !== undefined)
+        const scope = scopeParts.length === 0 ? undefined : scopeParts.join(" ")
         return {
           observation,
           data: {

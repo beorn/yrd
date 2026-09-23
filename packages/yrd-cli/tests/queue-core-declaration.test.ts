@@ -549,6 +549,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(shown).toContain("task/kept")
       expect(shown).toContain("other/task/hidden")
       if (Array.isArray(shown)) {
+        expect((JSON.parse(run.stdout()) as { scope: string }).scope).toContain("task/hidden*")
         expect(shown).not.toContain("task/hidden")
         expect(shown).not.toContain("scratch/nested")
         expect(shown).toContain("task/hidden-submitted")
