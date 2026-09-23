@@ -19,11 +19,13 @@ import {
   drop,
   evolve,
   initial,
+  listChangeHistories,
   listChanges,
   queueFormat,
   queueRef,
   readEventQueue,
   readStatus,
+  setBranchIgnored,
   writeQueueEvent,
 } from "../src/events.ts"
 
@@ -215,6 +217,63 @@ describe("ADR-0016 event fold", () => {
         ],
       }),
     ).toThrow(/Time/)
+  })
+
+  it("keeps ignore attribution separate from a change's reason and refuses malformed overlays", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const failedCheck = evolve(
+      opened,
+      event(
+        "verifying",
+        B,
+        [
+          ["Commit", B],
+          ["Reason", "rechecking"],
+        ],
+        [B],
+      ),
+    )
+    const ignored = evolve(
+      failedCheck,
+      event("ignored", "c".repeat(40), [
+        ["Reason", "waiting"],
+        ["By", "@dev/2"],
+      ]),
+    )
+    expect(ignored).toMatchObject({ status: "verifying", ignored: { reason: "waiting", by: "@dev/2" } })
+    expect(ignored.reason).toBe("rechecking")
+    expect(() =>
+      evolve(
+        ignored,
+        event("ignored", "d".repeat(40), [
+          ["Reason", "again"],
+          ["By", "@dev/2"],
+        ]),
+      ),
+    ).toThrow(/yrd-ignore-state-unchanged/u)
+    expect(evolve(ignored, event("unignored", "e".repeat(40), [["By", "@dev/3"]])).ignored).toBeUndefined()
+    expect(() => evolve(opened, event("ignored", "f".repeat(40), [["Reason", "why"]]))).toThrow(
+      /yrd-ignore-event-malformed:.*By:/u,
+    )
+    expect(() =>
+      evolve(
+        opened,
+        event("unignored", "f".repeat(40), [
+          ["By", "@dev/2"],
+          ["Reason", "why"],
+        ]),
+      ),
+    ).toThrow(/yrd-ignore-event-malformed:.*Reason:/u)
+    const ended = evolve(opened, event("failed", "f".repeat(40), [["Reason", "check failed"]]))
+    expect(() =>
+      evolve(
+        ended,
+        event("ignored", "1".repeat(40), [
+          ["By", "@dev/2"],
+          ["Reason", "waiting"],
+        ]),
+      ),
+    ).toThrow(/yrd-ignore-change-ended/u)
   })
 
   it("re-verifies an interrupted checking or merging change with its new kept candidate", () => {
@@ -609,11 +668,98 @@ describe("the queue-format boundary", () => {
     expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
     // Gitomic's reader defaults to 50; a status must fold the whole chain.
     const reports = Array.from({ length: 51 }, (_, index) =>
-      index % 2 === 0 ? input("ignored", [["Reason", "fixture report"]]) : input("unignored"),
+      index % 2 === 0
+        ? input("ignored", [
+            ["Reason", "fixture report"],
+            ["By", "@dev/2"],
+          ])
+        : input("unignored", [["By", "@dev/2"]]),
     )
     await branch.append(reports, { expect: await branch.head() })
     expect((await listChanges(location, "lab")).get("task/42")?.status).toBe("queued")
     expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
+  })
+
+  it("reuses only a validated queue read from the same location", async () => {
+    const first = remoteMemStore("yrd-event-first")
+    const second = remoteMemStore("yrd-event-second")
+    const target = await open({ ...first.store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(first.location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const queue = await readEventQueue(first.location, "lab")
+    expect(await listChangeHistories(first.location, "lab", { knownQueue: queue })).toEqual(new Map())
+    await expect(listChangeHistories(second.location, "lab", { knownQueue: queue })).rejects.toThrow(
+      /validated queue.*same location/,
+    )
+    await expect(listChangeHistories(first.location, "other", { knownQueue: queue })).rejects.toThrow(
+      /validated queue.*same location/,
+    )
+    expect(await listChangeHistories(first.location, "lab")).toEqual(new Map())
+  })
+
+  it("ignores and unignores only an existing open change with a reason and actor", async () => {
+    const { store, location } = remoteMemStore("yrd-event-ignore")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const request = { queue: "lab", branch: "task/42", by: "@dev/2" } as const
+    await expect(setBranchIgnored(location, { ...request, ignored: true, reason: "waiting" })).rejects.toThrow(
+      /yrd-ignore-change-missing:.*task\/42.*changes\/task\/42/u,
+    )
+    const branch = await openEvents({ ...store, ref: changesRef("lab", "task/42") })
+    await branch.append([changeInput("opened", { queueTip, at: new Date(), commit: base, by: "@dev/2" })], {
+      expect: null,
+    })
+    await expect(setBranchIgnored(location, { ...request, ignored: true, reason: "" })).rejects.toThrow(
+      /yrd-ignore-reason-required/u,
+    )
+    await expect(
+      setBranchIgnored(location, { ...request, ignored: false, reason: "invalid" } as never),
+    ).rejects.toThrow(/yrd-ignore-reason-conflict/u)
+    await expect(setBranchIgnored(location, { ...request, ignored: true, reason: "waiting" })).resolves.toBeUndefined()
+    expect((await branch.events({ limit: 1024 })).map((event) => event.type)).toEqual(["opened", "ignored"])
+    expect((await readStatus(location, "lab", "task/42")).ignored).toEqual({ reason: "waiting", by: "@dev/2" })
+    await expect(setBranchIgnored(location, { ...request, ignored: true, reason: "again" })).rejects.toThrow(
+      /yrd-ignore-state-unchanged/u,
+    )
+    await expect(setBranchIgnored(location, { ...request, ignored: false })).resolves.toBeUndefined()
+    expect((await branch.events({ limit: 1024 })).map((event) => event.type)).toEqual([
+      "opened",
+      "ignored",
+      "unignored",
+    ])
+    expect((await readStatus(location, "lab", "task/42")).ignored).toBeUndefined()
+    await expect(setBranchIgnored(location, { ...request, ignored: false })).rejects.toThrow(
+      /yrd-ignore-state-unchanged/u,
+    )
+    const selected = await branch.head()
+    await branch.append([changeInput("failed", { queueTip, at: new Date(), reason: "check failed" })], {
+      expect: selected,
+    })
+    await expect(setBranchIgnored(location, { ...request, ignored: true, reason: "again" })).rejects.toThrow(
+      /yrd-ignore-change-ended/u,
+    )
+  })
+
+  it("loses the ignore write when a rival advances the selected change tip", async () => {
+    const { store, location, beforeNextPublish } = remoteMemStore("yrd-event-ignore-race")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await openEvents({ ...store, ref: changesRef("lab", "task/race") })
+    await branch.append([changeInput("opened", { queueTip, at: new Date(), commit: base, by: "@dev/2" })], {
+      expect: null,
+    })
+    beforeNextPublish(async () => {
+      await branch.append([changeInput("verifying", { queueTip, at: new Date(), commit: base })], {
+        expect: await branch.head(),
+      })
+    })
+    await expect(
+      setBranchIgnored(location, { queue: "lab", branch: "task/race", by: "@dev/2", ignored: true, reason: "hold" }),
+    ).rejects.toBeInstanceOf(Conflict)
+    expect((await readStatus(location, "lab", "task/race")).ignored).toBeUndefined()
+    expect((await readStatus(location, "lab", "task/race")).status).toBe("verifying")
   })
 
   it("refuses a present but malformed queue chain instead of showing empty changes", async () => {

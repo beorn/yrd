@@ -65,10 +65,10 @@ export type EventChange = Readonly<{
   /** This chain's latest ending, including the event that recorded it. */
   ending?: { kind: ChangeEnding; id: string }
   reason?: string
-  ignored: boolean
+  ignored?: Readonly<{ reason: string; by: string }>
 }>
 
-export const initial: EventChange = Object.freeze({ status: "draft", ignored: false })
+export const initial: EventChange = Object.freeze({ status: "draft" })
 
 /** Construct Yrd's required causal trailers; a recorded commit is always kept. */
 export function changeInput(
@@ -91,6 +91,15 @@ export function changeInput(
   }
   if (type === "opened" && (details.by === undefined || details.by.trim() === "")) {
     throw new TypeError("opened needs By:")
+  }
+  if ((type === "ignored" || type === "unignored") && (details.by === undefined || details.by.trim() === "")) {
+    throw new TypeError(`yrd-ignore-event-malformed: ${type} needs By:`)
+  }
+  if (type === "ignored" && (details.reason === undefined || details.reason.trim() === "")) {
+    throw new TypeError("yrd-ignore-reason-required: ignored needs Reason:")
+  }
+  if (type === "unignored" && details.reason !== undefined) {
+    throw new TypeError("yrd-ignore-reason-conflict: unignored cannot carry Reason:")
   }
   if (details.commit !== undefined && !COMMIT_OID.test(details.commit)) {
     throw new TypeError(`Commit: must name a commit oid, got ${details.commit}`)
@@ -186,8 +195,9 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       if (isOpen(state.status)) throw new Error(`event ${event.id} opens a second change before the first ends`)
       const submitter = prop(event, EVENT_TRAILERS.by)
       if (submitter === undefined || submitter.trim() === "") throw new Error(`event ${event.id} opened needs By:`)
+      const { ignored: _previousIgnore, ...fresh } = next
       return {
-        ...next,
+        ...fresh,
         status: "queued",
         commit: keptCommit(event),
         candidate: undefined,
@@ -290,11 +300,42 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       }
     case "ignored": {
       const reason = prop(event, "Reason")
-      if (reason === undefined || reason.length === 0) throw new Error(`event ${event.id} ignored needs Reason:`)
-      return { ...next, ignored: true }
+      const by = prop(event, "By")
+      if (reason === undefined || reason.trim() === "") {
+        throw new Error(`yrd-ignore-event-malformed: event ${event.id} ignored needs Reason:`)
+      }
+      if (by === undefined || by.trim() === "") {
+        throw new Error(`yrd-ignore-event-malformed: event ${event.id} ignored needs By:`)
+      }
+      if (!isOpen(state.status)) {
+        throw new Error(
+          `yrd-ignore-change-ended: event ${event.id} ignored follows ${state.status} at ${state.ending?.id ?? state.tip}`,
+        )
+      }
+      if (state.ignored !== undefined) {
+        throw new Error(`yrd-ignore-state-unchanged: event ${event.id} change is already ignored at ${state.tip}`)
+      }
+      return { ...next, ignored: { reason, by } }
     }
-    case "unignored":
-      return { ...next, ignored: false }
+    case "unignored": {
+      if (prop(event, "Reason") !== undefined) {
+        throw new Error(`yrd-ignore-event-malformed: event ${event.id} unignored cannot carry Reason:`)
+      }
+      const by = prop(event, "By")
+      if (by === undefined || by.trim() === "") {
+        throw new Error(`yrd-ignore-event-malformed: event ${event.id} unignored needs By:`)
+      }
+      if (!isOpen(state.status)) {
+        throw new Error(
+          `yrd-ignore-change-ended: event ${event.id} unignored follows ${state.status} at ${state.ending?.id ?? state.tip}`,
+        )
+      }
+      if (state.ignored === undefined) {
+        throw new Error(`yrd-ignore-state-unchanged: event ${event.id} change is already not ignored at ${state.tip}`)
+      }
+      const { ignored: _previousIgnore, ...unignored } = next
+      return unignored
+    }
     default:
       throw new Error(`unknown Yrd change event ${event.type} at ${event.id}`)
   }
@@ -326,8 +367,11 @@ export function decide(events: readonly Event[], input: EventInput): readonly Ev
 export type QueueLocation = Readonly<{ repo: string; remote: string; selection: GitSelection; backend: GitomicBackend }>
 export type DropRequest = Readonly<{ queue: string; branch: string; by: string; note?: string }>
 export type Dropped = Readonly<{ queue: string; branch: string; head: string; event: string }>
+export type SetBranchIgnoredRequest = Readonly<
+  { queue: string; branch: string; by: string } & ({ ignored: true; reason: string } | { ignored: false })
+>
 
-export type EventQueue = Readonly<{
+type EventQueueProjection = Readonly<{
   created: string
   /** Derived from the created event's kept commit. This is the queue's start, not legacy run.ts's resolved .yrd.yml declaration. */
   declaration: Oid
@@ -335,8 +379,15 @@ export type EventQueue = Readonly<{
   pause?: Readonly<{ id: string; at: Date; reason: string; by: string }>
 }>
 
+const validatedQueue = Symbol("validated event queue")
+export type EventQueue = EventQueueProjection & Readonly<{ [validatedQueue]: true }>
+const queueLocations = new WeakMap<
+  EventQueue,
+  Readonly<{ repo: string; remote: string; queue: string; backend?: GitomicBackend }>
+>()
+
 /** The queue stop in the existing command response shape. */
-export function eventPause(queue: EventQueue): PauseRecord | undefined {
+export function eventPause(queue: EventQueueProjection): PauseRecord | undefined {
   if (queue.pause === undefined) return undefined
   return {
     kind: "paused",
@@ -405,7 +456,9 @@ export async function createEventQueue(
 export async function readEventQueue(store: QueueLocation, queue: string): Promise<EventQueue> {
   const ref = queueRef(queue)
   const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
-  return projectEventQueue(events, ref, store.repo)
+  const result: EventQueue = { ...projectEventQueue(events, ref, store.repo), [validatedQueue]: true }
+  queueLocations.set(result, { repo: store.repo, remote: store.remote, queue, backend: store.backend })
+  return result
 }
 
 /** Whether the queue was explicitly resumed after this change's latest stuck event. */
@@ -466,7 +519,7 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   return written
 }
 
-function projectEventQueue(events: readonly Event[], ref: string, repo: string): EventQueue {
+function projectEventQueue(events: readonly Event[], ref: string, repo: string): EventQueueProjection {
   const first = events[0]
   if (first === undefined) throw new Error(`missing event queue chain ${ref} in ${repo}`)
   if (first.parent !== null) {
@@ -474,7 +527,7 @@ function projectEventQueue(events: readonly Event[], ref: string, repo: string):
   }
   let previous: string | undefined
   let declaration: string | undefined
-  let pause: EventQueue["pause"]
+  let pause: EventQueueProjection["pause"]
   for (const [index, event] of events.entries()) {
     if (index === 0) {
       if (event.type !== "created") throw new Error(`${ref}: first event ${event.id} must be created`)
@@ -540,6 +593,54 @@ export async function readStatus(store: QueueLocation, queue: string, branch: st
   const chain = await openEvents({ ...store, ref })
   if ((await chain.head()) === null) throw new Error(`missing event chain ${ref} in ${store.repo}`)
   return project(await chain.events({ limit: 1024 }), ref, store.repo)
+}
+
+/** Toggle one open change's attributed ignore overlay under its selected chain tip. */
+export async function setBranchIgnored(store: QueueLocation, request: SetBranchIgnoredRequest): Promise<void> {
+  const { queue, branch, by } = request
+  if (request.ignored !== true && request.ignored !== false) {
+    throw new TypeError(`yrd-ignore-event-malformed: ${branch}: ignored must be true or false`)
+  }
+  if (typeof by !== "string" || by.trim() === "") {
+    throw new TypeError(`yrd-ignore-event-malformed: ${branch}: By: must name the actor`)
+  }
+  if (request.ignored) {
+    if (typeof request.reason !== "string" || request.reason.trim() === "") {
+      throw new TypeError(`yrd-ignore-reason-required: ${branch}: ignoring an open change requires --reason <text>`)
+    }
+  } else if ("reason" in request) {
+    throw new TypeError(`yrd-ignore-reason-conflict: ${branch}: unignore does not accept --reason`)
+  }
+  const ref = changesRef(queue, branch)
+  const queueTip = (await readEventQueue(store, queue)).tip
+  const chain = await openEvents({ ...store, ref, writer: by })
+  const selectedTip = await chain.head()
+  if (selectedTip === null) {
+    throw new Error(`yrd-ignore-change-missing: ${branch}: ${ref} is absent in ${store.repo}; submit the branch first`)
+  }
+  const state = project(await chain.events({ limit: 1024 }), ref, store.repo)
+  if (!isOpen(state.status)) {
+    throw new Error(
+      `yrd-ignore-change-ended: ${branch}: change ended ${state.status} at ${state.ending?.id ?? selectedTip}; only an open change can be ignored`,
+    )
+  }
+  if ((state.ignored !== undefined) === request.ignored) {
+    throw new Error(
+      `yrd-ignore-state-unchanged: ${branch}: change is already ${request.ignored ? "ignored" : "not ignored"} at ${selectedTip}`,
+    )
+  }
+  const type = request.ignored ? "ignored" : "unignored"
+  const input = changeInput(type, {
+    queueTip,
+    at: new Date(),
+    by,
+    ...(request.ignored ? { reason: request.reason } : {}),
+  })
+  evolve(state, pending(input))
+  const result = await chain.append([input], { expect: selectedTip })
+  if (result.events.length !== 1 || result.events[0]?.type !== type) {
+    throw new Error(`${ref} in ${store.repo}: ${type} event was not written`)
+  }
 }
 
 /** Read the history selected by a table row; refuse a changed tip instead of showing another snapshot. */
@@ -706,11 +807,24 @@ type ChangeHistory = Readonly<{ state: EventChange; events: readonly Event[] }>
 export async function listChangeHistories(
   store: QueueLocation,
   queue: string,
+  options: Readonly<{ knownQueue?: EventQueue }> = {},
 ): Promise<ReadonlyMap<string, ChangeHistory>> {
-  if ((await queueFormat(store, queue)) !== "event") {
-    throw new Error(`queue ${queue} in ${store.repo} has no event queue chain`)
+  if (options.knownQueue === undefined) {
+    if ((await queueFormat(store, queue)) !== "event") {
+      throw new Error(`queue ${queue} in ${store.repo} has no event queue chain`)
+    }
+    await readEventQueue(store, queue)
+  } else {
+    const location = queueLocations.get(options.knownQueue)
+    if (
+      location?.repo !== store.repo ||
+      location.remote !== store.remote ||
+      location.queue !== queue ||
+      location.backend !== store.backend
+    ) {
+      throw new Error(`validated queue must come from the same location: ${store.remote}#${queue} in ${store.repo}`)
+    }
   }
-  await readEventQueue(store, queue)
   const prefix = `${queueRefPrefix(queue)}/changes/`
   const chains = await chainsUnder(prefix, { ...store, limit: 1024 })
   const changes = new Map<string, ChangeHistory>()

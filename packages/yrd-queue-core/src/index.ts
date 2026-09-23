@@ -51,6 +51,7 @@ export {
   readChangeEvents,
   readEventQueue,
   readStatus,
+  setBranchIgnored,
   writeQueueEvent,
 } from "./events.ts"
 export type { Event } from "./git.ts"
@@ -61,6 +62,7 @@ export type {
   EventChange,
   EventQueue,
   QueueLocation,
+  SetBranchIgnoredRequest,
   DropRequest,
   Dropped,
 } from "./events.ts"
