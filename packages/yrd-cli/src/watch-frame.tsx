@@ -288,12 +288,6 @@ export function runnerOf(snapshot: WatchSnapshot, now: Date) {
 }
 
 /**
- * One break, drawn: the runner's own row when this is its place, THEN the band
- * rules that open here. The runner comes first because the only rule that can
- * share its index is `done`'s — drafts and waiting have already advanced past
- * it — and the runner stands between waiting and done, never under done.
- */
-/**
  * The RUNNER box, drawn in rounded border chrome with its title and border
  * wearing the runner state's color (items 7, 27). The one component for the
  * RUNNER box across both the list view item (watch-pane.tsx) and the empty
@@ -331,6 +325,12 @@ export function RunnerTitledBox({
   )
 }
 
+/**
+ * One break, drawn: the runner's own row when this is its place, THEN the band
+ * rules that open here. The runner comes first because the only rule that can
+ * share its index is `done`'s — drafts and waiting have already advanced past
+ * it — and the runner stands between waiting and done, never under done.
+ */
 export function BandBreakRows({
   brk,
   snapshot,

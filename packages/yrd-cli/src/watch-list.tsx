@@ -1,9 +1,9 @@
 /**
  * The watch's LIST view — the table, its header, the top line and the filter
- * pills (watch-redesign items 3, 28, 30–33, 38):
+ * pills (watch-redesign items 3, 28, 30–33, 38; 24196):
  *
- *   yrd watch                                                  1 /hh ⎇ main   ← title + queue pills right, no All
- *   yrd watch                                                  1 /hh ⎇ main   ← title + queue pills right, no All
+ *   yrd watch  [1 main]                                ● YRD RUNNING  [open] [running] [done] [failed]
+ *   ▸ STATS (N decisions · s to expand)
  *   HH:MM  Q   RUN    TASK                          STATE      AGENT   AGE / RUN
  *   ────────────────────────────────────────────────────────────────────────
  *   12:00  1   —      Improve table expansion       draft      @dev/7  — / —
@@ -11,7 +11,6 @@
  *   12:05  1   2342   Correct staffing selection    checking   @dev/8  — / 00:42
  *             ▶ Step: focused checks · heartbeat 1s ago
  *   12:10  1   2341   Expose close-path option      merged     @dev/2  — / 04:55
- *                                                                 open  running  done  failed   ← status pills, right; no All
  *
  * Every row has ONE clock, the instant its place in its band is ordered by.
  * AGE / RUN is that attempt's runtime, with AGE unknown when the beginning is
@@ -223,12 +222,14 @@ export function TopLine({
   visible,
   onToggle,
   status,
+  statusPills,
 }: {
   queues: readonly WatchQueue[]
   /** The labels of the queues shown; `undefined` means every one. */
   visible: ReadonlySet<string> | undefined
   onToggle: (label: string) => void
   status?: LineStatus
+  statusPills?: React.ReactNode
 }) {
   return (
     <Box
@@ -258,12 +259,15 @@ export function TopLine({
           />
         ))}
       </Box>
-      <Box flexDirection="row" flexShrink={0} gap={1}>
-        <Text color={status?.color ?? "$fg-info"}>{status?.marker ?? RUNNING_GLYPH}</Text>
-        <Text bold>YRD</Text>
-        <Text bold color={status?.color ?? "$fg-info"}>
-          {status?.word ?? "RUNNING"}
-        </Text>
+      <Box flexDirection="row" flexShrink={0} gap={2} alignItems="center">
+        <Box flexDirection="row" flexShrink={0} gap={1}>
+          <Text color={status?.color ?? "$fg-info"}>{status?.marker ?? RUNNING_GLYPH}</Text>
+          <Text bold>YRD</Text>
+          <Text bold color={status?.color ?? "$fg-info"}>
+            {status?.word ?? "RUNNING"}
+          </Text>
+        </Box>
+        {statusPills}
       </Box>
     </Box>
   )

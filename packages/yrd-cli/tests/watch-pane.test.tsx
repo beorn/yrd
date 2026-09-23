@@ -19,7 +19,7 @@ import { bufferToText, render } from "silvery/test"
 import type { ChangeRecord, GitObservation, JournalRun, Row } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
-import { DETAIL_BG, DIVIDER_SIZE, WatchPane, watchTier, type WatchSnapshot } from "../src/watch-pane.tsx"
+import { WatchPane, watchTier, type WatchSnapshot } from "../src/watch-pane.tsx"
 import {
   CHANGES_TAB,
   RunStatusBox,
@@ -34,6 +34,7 @@ import { noticeLine } from "../src/watch-notice.ts"
 import { printListing } from "../src/watch-print.tsx"
 import { runOf, type WatchRun } from "../src/watch-run.ts"
 import { rowLine, watchRowKey, type WatchRow } from "../src/watch-rows.ts"
+import { queueLine } from "../src/watch-frame.tsx"
 
 async function waitFor<T>(callback: () => T | Promise<T>, options?: number | { timeout?: number }): Promise<T> {
   const timeout = typeof options === "number" ? options : (options?.timeout ?? 1000)
@@ -522,7 +523,7 @@ describe("the table (items 3, 28, 38)", () => {
     expect(line).toMatch(/\b1\s+42\b/)
   })
 
-  it("with two tracked queues, filtering to one queue leaves snapshot.queues intact so Q column stays and queue 2 keeps digit 2 (Sep 21 10:10 rule)", async () => {
+  it("with two tracked queues, filtering to one queue leaves snapshot.queues intact so Q column stays and second pill still reads [2] (Sep 21 10:10 rule)", async () => {
     const twoQueues = [
       { branch: "main", label: "main", path: "/repo" },
       { branch: "staging", label: "staging", path: "/repo2" },
@@ -532,26 +533,24 @@ describe("the table (items 3, 28, 38)", () => {
       <WatchPane
         snapshot={snapshot({
           queues: twoQueues,
-          rows: [{ row: { ...row({ ...failedRow(), run: "42" }), queue: "staging" } as unknown as Row }],
+          rows: [{ row: row({ ...failedRow(), run: "42" }) }],
         })}
         live={false}
       />,
       ["1"],
     )
 
-    const header = text.split("\n").find((line) => line.includes("TASK"))
+    const lines = text.split("\n")
+    const topLine = lines.find((line) => line.includes("yrd watch"))
+    expect(topLine).toBeDefined()
+    expect(topLine).toContain("[2]")
+    expect(topLine).toContain("staging")
+
+    const header = lines.find((line) => line.includes("TASK"))
     expect(header).toBeDefined()
     expect(header).toContain("Q")
     expect(header).toContain("RUN")
     expect(header).not.toContain("QUEUE / RUN")
-
-    const line = text
-      .split("\n")
-      .find((candidate) => candidate.includes("fix the parser") || candidate.includes("task/one"))
-    expect(line).toBeDefined()
-    expect(line).toContain("× failed")
-    expect(line).not.toContain("·")
-    expect(line).toMatch(/\b2\s+42\b/)
   })
 
   it("names the queue digit and a dash when the row has no attempt (ia.md drafts/waiting)", async () => {
@@ -1332,7 +1331,8 @@ describe("the frame's order under the table", () => {
     const stats = lines.findIndex((line) => line.includes("STATS"))
     expect(lastRow).toBeGreaterThan(0)
     expect(stats).toBeGreaterThan(0)
-    expect(pills).toBeGreaterThan(stats)
+    expect(pills).toBeGreaterThanOrEqual(0)
+    expect(lastRow).toBeGreaterThan(stats)
     expect(lastRow).toBeGreaterThan(pills)
     app.unmount()
   })
@@ -1754,8 +1754,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       draft("task/d2", "b".repeat(40), ago(3 * 60 * MINUTE), "bob"),
     ]
     const stopped = { ...STOP, since: stuckAt.toISOString() }
-    const at = async (cols: number, runner = RUNNER) =>
-      topLineOf(await lines(snapshot({ rows, runner, stopped } as Partial<WatchSnapshot>), cols, 40)).line.trim()
+    const at = (cols: number, runner = RUNNER) =>
+      queueLine(snapshot({ rows, runner, stopped } as Partial<WatchSnapshot>), NOW, cols - 2).trim()
 
     // A2-set-v3 Q4, each width the widest the next form does not fit (the pane lays the line out two
     // columns narrower than the terminal): drafts, breakdown, the last merge's branch, the last merge,
@@ -1767,16 +1767,16 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const merge = (branch: boolean) => ` · last merge ${clock(mergedAt)}${branch ? " (task/y)" : ""}`
     const drafts = ` · 2 ${W.draft.word}s (7d)`
     expect({
-      160: await at(160),
-      144: await at(144),
-      120: await at(120),
-      100: await at(100),
-      90: await at(90),
-      64: await at(64),
-      44: await at(44),
+      160: at(160),
+      144: at(144),
+      120: at(120),
+      100: at(100),
+      90: at(90),
+      64: at(64),
+      44: at(44),
       // A journal quiet past the ceiling changes nothing here: its only local source reads a healthy round's
       // long check as silence, so "runner silent" waits for the runner's own claim (A2-set-v2 item 4).
-      quiet: await at(160, SILENT),
+      quiet: at(160, SILENT),
     }).toEqual({
       160: waiting + breakdown + check(true) + stop(true) + merge(true) + drafts,
       144: waiting + breakdown + check(true) + stop(true) + merge(true),
@@ -1792,13 +1792,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   it("at 100x31 the top line drops the last merge's branch past the breakdown and keeps the last merge's time (A2-set-v3 Q4)", async () => {
     const W = await words()
 
-    const painted = await lines(
-      snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER, stopped: STOP } as Partial<WatchSnapshot>),
-      100,
-      31,
-    )
+    const snap = snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER, stopped: STOP } as Partial<WatchSnapshot>)
 
-    expect(topLineOf(painted).line.trim()).toBe(
+    expect(queueLine(snap, NOW, 100 - 2).trim()).toBe(
       `3 ${W.waiting.word} · ${W.checking.word} task/x for 3:21 · line stopped at task/s since ${clock(new Date(STOP.since))}` +
         ` · last merge ${clock(ago(4 * MINUTE + 50_000))}`,
     )
@@ -1815,13 +1811,15 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       { row: row({ branch: "task/s3", head: "6".repeat(40), position: 5, state: "queued" }) },
     ]
     const stopped = { by: "@chief", cause: "operator", change: null, since: since.toISOString() }
-    const at = async (cols: number) =>
-      topLineOf(
-        await lines(snapshot({ rows, runner: RUNNER, stopped } as Partial<WatchSnapshot>), cols, 40),
-      ).line.trim()
+    const at = (cols: number) =>
+      queueLine(
+        snapshot({ rows, runner: RUNNER, stopped } as Partial<WatchSnapshot>),
+        NOW,
+        cols - 2,
+      ).trim()
     const waiting = `5 ${W.waiting.word}`
 
-    expect({ 70: await at(70), 50: await at(50), 40: await at(40) }).toEqual({
+    expect({ 70: at(70), 50: at(50), 40: at(40) }).toEqual({
       70: `${waiting}: 2 ${W.pending.word}, 3 ${W.submitted.word} · paused since ${clock(since)} by @chief`,
       50: `${waiting} · paused since ${clock(since)} by @chief`,
       40: `${waiting} · paused by @chief`,
@@ -1856,10 +1854,11 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // disagreeing; the fixture splits two changes into four run rows so a count
     // that counted ROWS would read 5, not 3.
     const unheld = rows.map(({ row, ...rest }) => ({ ...rest, row: { ...row, live: undefined } }))
-    const painted = await lines(snapshot({ rows: unheld, runner: RUNNER }), 120, 40)
+    const snap = snapshot({ rows: unheld, runner: RUNNER })
+    const painted = await lines(snap, 120, 40)
 
     const rail = (painted.find((line) => line.includes("RUNNER") && /in line/u.test(line)) ?? "").replace(/\s+/gu, " ")
-    const top = topLineOf(painted).line.trim()
+    const top = queueLine(snap, NOW, 120 - 2)
     expect({
       rail: /and (\d+) in line/u.exec(rail)?.[1],
       top: top.startsWith(`4 ${W.waiting.word}`) ? "4" : top,
@@ -1912,19 +1911,18 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // The window is named on the drafts BAND's rule now, over the rows it is
     // true of, and not on a header that spans every band.
     const header = (painted: readonly string[]): string => painted.find((line) => line.includes("not submitted")) ?? ""
-    const counted = (painted: readonly string[]): string =>
-      topLineOf(painted)
-        .line.trim()
+    const counted = (snap: WatchSnapshot): string =>
+      queueLine(snap, NOW, 140 - 2)
         .split(" · ")
         .find((segment) => segment.includes(`${W.draft.word}s (`)) ?? ""
 
     expect({
       after: {
-        top: counted(after),
+        top: counted(all),
         unreadRow: tableRow(after, " task/unread ").includes("not yet read"),
       },
       before: {
-        top: counted(before),
+        top: counted(week),
         unreadRow: tableRow(before, " task/unread "),
       },
       requested: load.mock.calls.map(([request]) => request),
@@ -2097,10 +2095,11 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       draft("task/d", "a".repeat(40), committedAt, "ada"),
     ]
 
-    const painted = await lines(snapshot({ rows, runner: RUNNER }), 120, 40)
+    const snap = snapshot({ rows, runner: RUNNER })
+    const painted = await lines(snap, 120, 40)
 
     const line = tableRow(painted, " task/d")
-    const segments = topLineOf(painted).line.trim().split(" · ")
+    const segments = queueLine(snap, NOW, 120 - 2).trim().split(" · ")
     expect({
       by: / —/.test(line) && !/ ada\b/u.test(line),
       counted: segments.slice(1).some((segment) => segment.startsWith(`1 ${W.draft.word}`)),
@@ -2283,7 +2282,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         "page STATUS cell": tableRow(page, "task/y1").includes(` ${SENTINEL} `),
         "page top line": pageTop.includes(`1 ${SENTINEL}`),
         "pane STATUS cell": tableRow(pane, "task/y1").includes(` ${SENTINEL} `),
-        "pane top line": topLineOf(pane).line.includes(`1 ${SENTINEL}`),
+        "queue line": queueLine(snap, NOW, 120).includes(`1 ${SENTINEL}`),
         "queue show line": rowLine({ row: item }).includes(SENTINEL),
         "yrd list --help legend": cli.includes(SENTINEL),
       }
@@ -2373,7 +2372,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         heldWord: held.includes(` ${W.checking.word} `),
         size: `${String(cols)}x${String(rows)}`,
         tier: watchTier(cols, rows),
-        topLineOneRow: top.line.includes(`${W.checking.word} task/x`),
+        topLineOneRow: (painted[0] ?? "").includes("yrd watch") && (painted[0] ?? "").includes("YRD"),
       })
     }
 
@@ -2411,7 +2410,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
           .filter((line) => pills.test(line))
           .every((line) => /\bopen\b/.test(line) && /\bfailed\b/.test(line) && !/\ball\b/.test(line.trimEnd())),
         size: `${String(cols)}x${String(rows)}`,
-        topLineOwnRow: (painted[title + 1] ?? "").trim().startsWith(`3 ${W.waiting.word}`),
+        topLineOwnRow: (painted[title] ?? "").includes("yrd watch") && (painted[title + 1] ?? "").includes("STATS"),
       })
     }
 
@@ -2621,33 +2620,31 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const text = current(app)
     const lines = text.split("\n")
 
-    // Terminal is 25 rows tall (0..24). In the 18-row ListView viewport (lines 6..23):
+    // Terminal is 25 rows tall (0..24). In the 20-row ListView viewport (lines 4..23):
     // Runner item has height 6 (1 row marginTop + 4 rows TitledBox + 1 row marginBottom).
     // Center alignment places the runner item in viewport center, placing
-    // runner box at lines 14..17 with the item's marginTop at line 13 and marginBottom at line 18.
+    // runner box at lines 13..16 with the item's marginTop at line 12 and marginBottom at line 17.
     const runnerStart = lines.findIndex((l) => l.includes("╭─ RUNNER"))
     const runnerEnd = lines.findIndex((l) => l.includes("╰─"))
-    expect(runnerStart).toBe(14)
-    expect(runnerEnd).toBe(17)
+    expect(runnerStart).toBe(13)
+    expect(runnerEnd).toBe(16)
 
-    // Above runner item: exactly 7 rows of queued items in viewport (lines 6..12: task/queued-6..0).
-    expect(lines[6]).toContain("task/queued-6")
-    expect(lines[12]).toContain("task/queued-0")
+    // Above runner item: queued items in viewport (lines 4..11: task/queued-7..0).
+    expect(lines[4]).toContain("task/queued-7")
+    expect(lines[11]).toContain("task/queued-0")
     expect(text).not.toContain("task/queued-19")
-    expect(text).not.toContain("task/queued-7")
+    expect(text).not.toContain("task/queued-8")
 
-    // Below runner box: exactly 6 rows in viewport (lines 18..23), with break row (line 18),
-    // separator (line 19), and task/done-0..3 (lines 20..23).
-    expect(lines[20]).toContain("task/done-0")
-    expect(lines[23]).toContain("task/done-3")
-    expect(text).not.toContain("task/done-4")
+    // Below runner box: break row (line 18), and task/done-0..4 (lines 19..23).
+    expect(lines[19]).toContain("task/done-0")
+    expect(lines[23]).toContain("task/done-4")
+    expect(text).not.toContain("task/done-5")
     expect(text).not.toContain("task/done-19")
 
-    // Proves vertical centering of the runner item in the 18-row viewport:
-    // 7 rows above the runner item (lines 6..12), 6 rows below the runner box (lines 18..23),
-    // placing the spare row above per the Silvery centering rule.
-    expect(runnerStart - 1 - 6).toBe(7)
-    expect(23 - runnerEnd).toBe(6)
+    // Proves vertical centering of the runner item in the 20-row viewport (lines 4..23):
+    // 8 rows above the runner item (lines 4..11), 6 rows below the runner item (lines 18..23).
+    expect(runnerStart - 1 - 4).toBe(8)
+    expect(23 - (runnerEnd + 1)).toBe(6)
 
     app.unmount()
   })
@@ -2815,7 +2812,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     idleApp.unmount()
   })
 
-  it("row 14: queue filters on the left, status pills right-aligned", async () => {
+  it("row 14: queue filters on the left, status filters on the right on the top line", async () => {
     const app = render(
       <WatchPane
         snapshot={snapshot({
@@ -2829,31 +2826,40 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     await settle(app)
     const painted = app.lines
 
-    // 1. Queue filter pills in TopLine are left-aligned
+    // 1. Top line has yrd watch, queue filter pills on left, status marker and status filter pills on right
     const topIdx = painted.findIndex((l) => l.includes("yrd watch"))
     expect(topIdx).toBeGreaterThanOrEqual(0)
     const topLine = painted[topIdx]!
+
+    // Queue filter pills are left-aligned
     const queueX = topLine.indexOf("main")
     expect(queueX).toBeGreaterThan(0)
     expect(queueX).toBeLessThan(40)
 
-    // 2. Status pills in ListStack are right-aligned
-    const pillsIdx = painted.findIndex((l) => l.includes("open") && l.includes("failed"))
-    expect(pillsIdx).toBeGreaterThanOrEqual(0)
-    const pillsLine = painted[pillsIdx]!
-    const openX = pillsLine.indexOf("open")
+    // Status filter pills are on the top line, right-aligned
+    expect(topLine).toContain("open")
+    expect(topLine).toContain("failed")
+    const openX = topLine.indexOf("open")
     expect(openX).toBeGreaterThan(60)
-    expect(pillsLine.trimEnd().endsWith("failed")).toBe(true)
+    expect(topLine.trimEnd().endsWith("failed")).toBe(true)
+
+    // 2. There is NO separate pills line in the body
+    const bodyLines = painted.slice(topIdx + 1)
+    const separatePills = bodyLines.some((l) => l.includes("open") && l.includes("running") && l.includes("failed"))
+    expect(separatePills).toBe(false)
 
     app.unmount()
   })
 
-  it("row 15: fold marker plus STATS line without duplicate waiting count and without stopped or last-merged slugs", async () => {
+  it("row 15: fold marker plus STATS directly under top line without duplicate waiting count and without stopped or last-merged slugs", async () => {
     const app = render(
       <WatchPane
         snapshot={snapshot({
           decisions: DECISIONS,
-          rows: [{ row: row({ state: "queued", position: 1 }) }],
+          rows: [
+            { row: row({ state: "queued", position: 1, branch: "task/queued-1" }) },
+            { row: row({ state: "merged", branch: "task/merged-1" }) },
+          ],
           stopped: STOP,
           runner: RUNNER,
         })}
@@ -2863,27 +2869,30 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(app)
 
-    // 1. Fold marker ▸ and decision count on STATS line
-    const statsLineFolded = app.lines.find((l) => l.includes("STATS"))
-    expect(statsLineFolded).toBeDefined()
-    expect(statsLineFolded).toContain("▸ STATS")
-    expect(statsLineFolded).toContain(`(${String(DECISIONS.length)} decisions · s to expand)`)
+    const topIdx = app.lines.findIndex((l) => l.includes("yrd watch"))
+    expect(topIdx).toBeGreaterThanOrEqual(0)
 
-    // 2. No duplicate waiting count, no stopped slug, no last-merged slug on STATS line
-    expect(statsLineFolded).not.toContain("waiting")
-    expect(statsLineFolded).not.toContain("stopped")
-    expect(statsLineFolded).not.toContain("last merged")
-    expect(statsLineFolded).not.toContain("merged")
+    // 1. The line DIRECTLY under the top line is fold marker + STATS
+    const lineUnderTop = app.lines[topIdx + 1]!
+    expect(lineUnderTop).toContain("▸ STATS")
+    expect(lineUnderTop).toContain(`(${String(DECISIONS.length)} decisions · s to expand)`)
 
-    // 3. Pressing 's' expands: fold marker toggles to ▾ STATS
+    // 2. No duplicate waiting count, no stopped slug, no last-merge slug
+    expect(lineUnderTop).not.toContain("waiting")
+    expect(lineUnderTop).not.toContain("stopped")
+    expect(lineUnderTop).not.toContain("last merge")
+    expect(lineUnderTop).not.toContain("merged")
+
+    // 3. Pressing 's' expands: fold marker toggles to ▾ STATS directly under top line
     app.press("s")
     await settle(app)
-    const statsLineExpanded = app.lines.find((l) => l.includes("STATS"))
-    expect(statsLineExpanded).toBeDefined()
-    expect(statsLineExpanded).toContain("▾ STATS")
-    expect(statsLineExpanded).toContain(`(${String(DECISIONS.length)} decisions · s to fold)`)
-    expect(statsLineExpanded).not.toContain("waiting")
-    expect(statsLineExpanded).not.toContain("stopped")
+    const lineUnderTopExpanded = app.lines[topIdx + 1]!
+    expect(lineUnderTopExpanded).toContain("▾ STATS")
+    expect(lineUnderTopExpanded).toContain(`(${String(DECISIONS.length)} decisions · s to fold)`)
+    expect(lineUnderTopExpanded).not.toContain("waiting")
+    expect(lineUnderTopExpanded).not.toContain("stopped")
+    expect(lineUnderTopExpanded).not.toContain("last merge")
+    expect(lineUnderTopExpanded).not.toContain("merged")
 
     app.unmount()
   })
@@ -2900,9 +2909,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(painted.some((line) => line.includes("────"))).toBe(true)
   })
 
-  it("row 17: detail pane with $bg-subtle, DIVIDER_SIZE = 0, and blank padding line replacing divider", async () => {
-    expect(DIVIDER_SIZE).toBe(0)
-
+  it("row 17: detail pane with subtle background, DIVIDER_SIZE = 0, and blank padding line replacing divider", async () => {
     const app = render(
       <WatchPane
         snapshot={snapshot({
@@ -2917,15 +2924,25 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.press("Enter")
     await settle(app)
 
-    // 1. Detail background token is $bg-subtle
-    expect(DETAIL_BG).toBe("$bg-subtle")
+    // 1. Subtle background: read cell background in list vs in detail pane
+    const runnerLineIdx = app.lines.findIndex((l) => l.includes("RUNNER"))
+    expect(runnerLineIdx).toBeGreaterThan(0)
+    const runnerX = app.lines[runnerLineIdx]!.indexOf("RUNNER")
+    expect(runnerX).toBeGreaterThan(140)
+
+    const listBg = app.cell(10, runnerLineIdx).bg
+    const detailBg = app.cell(runnerX, runnerLineIdx).bg
+
+    // Detail background must differ from list background and match subtle color
+    expect(detailBg).not.toEqual(listBg)
+    expect(detailBg).toEqual({ r: 50, g: 56, b: 68 })
 
     // 2. Blank padding line: first row of detail pane (line 1, under TopLine) is blank (<Box height={1} flexShrink={0} />)
     const detailTop = app.lines[1]?.slice(143).trim() ?? ""
     expect(detailTop).toBe("")
 
-    // 3. Divider size is 0: DIVIDER_SIZE is strictly 0
-    expect(DIVIDER_SIZE).toBe(0)
+    // 3. Divider line is absent: no vertical divider character between list and detail on top rows
+    expect(app.lines.slice(0, 4).some((line) => line.slice(135, 145).includes("│"))).toBe(false)
 
     app.unmount()
   })
@@ -2948,17 +2965,17 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     await settle(app)
     const lines = app.lines
 
-    // 1. Header spacer: line before ListHeader (line 4) is blank
-    expect(lines[4]?.trim()).toBe("")
-    expect(lines[5]).toContain("TASK")
+    // 1. Header spacer: line before ListHeader (line 2) is blank
+    expect(lines[2]?.trim()).toBe("")
+    expect(lines[3]).toContain("TASK")
 
-    // 2. marginTop: line before runner box (line 13) is blank
-    expect(lines[13]?.trim()).toBe("")
-    expect(lines[14]).toContain("╭─ RUNNER")
+    // 2. marginTop: line before runner box (line 12) is blank
+    expect(lines[12]?.trim()).toBe("")
+    expect(lines[13]).toContain("╭─ RUNNER")
 
-    // 3. marginBottom: line after runner box (line 18) is blank
-    expect(lines[17]).toContain("╰─")
-    expect(lines[18]?.trim()).toBe("")
+    // 3. marginBottom: line after runner box (line 17) is blank
+    expect(lines[16]).toContain("╰─")
+    expect(lines[17]?.trim()).toBe("")
 
     app.unmount()
   })

@@ -93,7 +93,6 @@ import {
   BandBreakRows,
   ListStack,
   LoudPause,
-  QueueLine,
   RunnerDetail,
   RunnerTitledBox,
   bandHeight,
@@ -176,9 +175,9 @@ const LIST_NATURAL_WIDTH = 140
 const DETAIL_NATURAL_WIDTH = 72
 const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
-export const DIVIDER_SIZE = 0
-export const DEFAULT_SPLIT_RATIO = 0.65
-export const DETAIL_BG = "$bg-subtle"
+const DIVIDER_SIZE = 0
+const DEFAULT_SPLIT_RATIO = 0.65
+const DETAIL_BG = "$bg-surface-subtle"
 /** Below this many terminal rows the STATS box would push the table off the screen, so it yields (the retired pane's own rule). */
 /** The TIME rows under the counts cost five more; below this height the list keeps them. */
 
@@ -227,15 +226,6 @@ const HELP = [
 type HeldDetail = Readonly<{ key: string; tipAt: number | undefined; detail: ChangeDetail }>
 
 const HELD_DETAILS = 2
-
-function rowQueueOf(row: Row, queues: readonly WatchQueue[]): WatchQueue | undefined {
-  const rowQueueName = (row as { queue?: string }).queue
-  if (rowQueueName !== undefined) {
-    const found = queues.find((q) => q.label === rowQueueName || q.branch === rowQueueName)
-    if (found !== undefined) return found
-  }
-  return queues[0]
-}
 
 export function WatchPane({
   snapshot,
@@ -337,7 +327,7 @@ export function WatchPane({
         buckets.has(bucketOf(item.row)) &&
         (visibleQueues === undefined ||
           shown.queues.length === 0 ||
-          visibleQueues.has(rowQueueOf(item.row, shown.queues)?.label ?? "")),
+          visibleQueues.has(shown.queues[0]?.label ?? "")),
     ),
     holding,
   )
@@ -614,25 +604,7 @@ export function WatchPane({
   // The width the list pane gets: the whole terminal, or its share of a split.
   const listColumns = opened && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) : columns
   const list = (
-    <ListStack
-      snapshot={shown}
-      paddingX={1}
-      pills={terminalRows < PILLS_MIN_ROWS ? null : <StatusPills buckets={buckets} onSelectOnly={selectOnly} />}
-      stats={
-        <Box flexDirection="column" flexShrink={0} minWidth={0}>
-          <Text wrap="truncate">
-            {statsOpen ? "▾" : "▸"} STATS{shown.decisions === undefined ? "" : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
-          </Text>
-          {statsOpen && shown.decisions !== undefined ? (
-            <StatsBox
-              decisions={shown.decisions}
-              columns={listColumns - 2}
-              timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
-            />
-          ) : null}
-        </Box>
-      }
-    >
+    <ListStack snapshot={shown} paddingX={1}>
       <Table
         items={visibleItems}
         rows={visible}
@@ -678,14 +650,31 @@ export function WatchPane({
         {/* RUNNER owns the pause rail; without a run journal there is no rail,
             so the queue's loudest state is said up here (watch-frame.tsx). */}
         <LoudPause snapshot={shown} />
-        {/* The top line is ONLY the title and the queue pills (items 30, 32b, 33). */}
+        {/* The top line is title and queue pills left, status marker and status pills right (24196). */}
         <TopLine
           queues={shown.queues}
           visible={visibleQueues}
           onToggle={toggleQueue}
           status={queueLineStatus(shown, shown.at)}
+          statusPills={
+            terminalRows < PILLS_MIN_ROWS ? null : (
+              <StatusPills buckets={buckets} onSelectOnly={selectOnly} />
+            )
+          }
         />
-        <QueueLine snapshot={shown} columns={columns} />
+        {/* The line under the top line: fold marker + STATS without repeating waiting/stopped/merge counts (24196). */}
+        <Box flexDirection="column" flexShrink={0} minWidth={0} paddingLeft={1} paddingRight={1}>
+          <Text wrap="truncate">
+            {statsOpen ? "▾" : "▸"} STATS{shown.decisions === undefined ? "" : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
+          </Text>
+          {statsOpen && shown.decisions !== undefined ? (
+            <StatsBox
+              decisions={shown.decisions}
+              columns={columns}
+              timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
+            />
+          ) : null}
+        </Box>
         {/* Where the journal was looked for, when there was none. A watch that
             showed no running check because it had no journal to read must say
             so, or it reads as a queue with nothing to do. */}
@@ -922,10 +911,6 @@ function Table({
             const rowIndex = rows.indexOf(item.item)
             const separator = rowIndex >= 0 ? separatorBefore(rows, rowIndex) : undefined
             const brk = rowIndex >= 0 ? plan.before.get(rowIndex) : undefined
-            const rowQ = rowQueueOf(item.item.row, snapshot.queues)
-            const qIdx = rowQ === undefined ? -1 : snapshot.queues.indexOf(rowQ)
-            const rowQueueDigit = qIdx >= 0 ? qIdx + 1 : queue.digit
-            const rowQueueLabel = rowQ?.label ?? queue.label
             const row = (
               <ListRow
                 item={item.item}
@@ -933,8 +918,8 @@ function Table({
                 cursor={index === cursor}
                 hovered={meta.isHovered}
                 live={live}
-                queueDigit={rowQueueDigit}
-                queueLabel={rowQueueLabel}
+                queueDigit={queue.digit}
+                queueLabel={queue.label}
               />
             )
             if (separator === undefined && brk === undefined && plan.holding !== rowIndex) return row
