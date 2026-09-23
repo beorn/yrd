@@ -141,6 +141,14 @@ export const LOG_KINDS = [
   // recorded nothing about it reads exactly like a round that skipped it, and
   // the only other account of the work was the crash this replaced.
   "discarded",
+  // A merge check an override held off for one change's merge (25296): one row
+  // per skipped check, naming the override record, its actor and its window.
+  // Never a `result` row: a skip is not a check that ran, and a skip counted
+  // as a result would let a phase that stopped early read as complete.
+  "skipped",
+  // A write to the override ref this run made itself: the `expired` record for
+  // a window that passed, written before the round took its snapshot (25296).
+  "override",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]
