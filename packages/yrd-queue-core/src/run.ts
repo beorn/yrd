@@ -183,6 +183,8 @@ export type QueueRunOptions = Readonly<{
    * read no override ref, which holds no check off and fences nothing.
    */
   overrides?: OverrideTable
+  /** The entries whose `expired` record the caller wrote for this round; journaled after the header. */
+  overridesExpired?: readonly OverrideEntry[]
 }> &
   RingOptions
 
@@ -552,6 +554,16 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // record after it is a run that died in that preamble, and its Git rows above
   // name the call that failed (@i/10-yrd/24470).
   log.write({ kind: "queue", queue: name })
+  for (const entry of options.overridesExpired ?? []) {
+    log.write({
+      by: entry.by,
+      check: entry.check,
+      kind: "override",
+      record: "expired",
+      reason: entry.reason,
+      until: entry.until.toISOString(),
+    })
+  }
 
   const observation = await selected.observe({
     version: 1,

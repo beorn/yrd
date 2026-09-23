@@ -27,6 +27,7 @@ export {
   encodeQueueComponent,
   parseChangeName,
   parseChangeRef,
+  overrideRef,
   pauseRef,
   queueRefPrefix,
   refOfChange,
@@ -148,6 +149,20 @@ export {
 } from "./pause.ts"
 export type { PauseCause, PauseRecord, PauseKind, StopFact, WritePause } from "./pause.ts"
 export { pauseStop, STOPPED_BY } from "./with-pause.ts"
+export {
+  NO_OVERRIDES,
+  OVERRIDE_MAX_HOURS,
+  OverrideRefused,
+  expireOverrides,
+  isActive as isOverrideActive,
+  overrideFacts,
+  overrideLine,
+  parseUntil,
+  readOverrides,
+  stateAt as overrideStateAt,
+  writeOverride,
+} from "./override.ts"
+export type { OverrideActor, OverrideEntry, OverrideState, OverrideTable, OverrideWrite } from "./override.ts"
 
 export { remoteUrl } from "./remote.ts"
 

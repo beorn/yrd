@@ -266,8 +266,13 @@ export async function expireOverrides(
  * fence does: a new commit carrying the snapshot's table unchanged, leased at
  * the snapshot, in the SAME atomic push as the target. Preparation moves no ref.
  */
-export async function overrideFence(git: Git, snapshot: OverrideTable, by: string): Promise<OverrideFence> {
-  const sha = await overrideCommit(git, snapshot, "fence", "merge fence: the table this merge was judged under", snapshot.entries, [
+export async function overrideFence(
+  git: Git,
+  snapshot: OverrideTable,
+  by: string,
+  subject: string,
+): Promise<OverrideFence> {
+  const sha = await overrideCommit(git, snapshot, "fence", oneLine(subject, "an override fence names its merge"), snapshot.entries, [
     `By: ${oneLine(by, "an override fence needs an actor")}`,
     "By-Verified: false",
   ])

@@ -77,6 +77,8 @@ import {
   NothingToWithdraw,
   liftLine,
   pauseStop,
+  STOPPED_BY,
+  expireOverrides,
   HEARTBEAT_GRACE_MS,
   HEARTBEAT_INTERVAL_MS,
   QUEUE_HEALTH_DOCUMENT,
@@ -454,11 +456,19 @@ export async function coreQueueCommand(
   ): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
-      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
-        assertPlainEventQueueConfig(config, "run")
-      }
+      const event = (await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event"
+      if (event) assertPlainEventQueueConfig(config, "run")
+      // Expire, then snapshot, BEFORE the run and so before its header (25296,
+      // @cto 462dfe95): a window that passed gets its `expired` record in its
+      // own leased push, and the round is judged, and its merge fenced, under
+      // the table that write left. An event queue has no override (refused at
+      // the verb), so it reads none.
+      const overrides = event
+        ? undefined
+        : await expireOverrides(git, config.target.remote, config.target.branch, Date.now(), STOPPED_BY)
       outcome = await queueRun({
         ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
+        ...(overrides === undefined ? {} : { overrides: overrides.table, overridesExpired: overrides.expired }),
         foreground: request.command === "run" || request.command === "merge",
         ...(only === undefined ? {} : { only }),
         ...(tier === undefined ? {} : { tier }),
@@ -657,6 +667,8 @@ export async function coreQueueCommand(
         return "the change's own record ref moved after this round read it, so the merge was not pushed"
       case "pause-moved":
         return "the queue's pause record moved after this round read it, so the merge was not pushed"
+      case "override-moved":
+        return `the queue's merge-check override moved${saw} after this round read it, so the merge was not pushed; the next round judges it under the new table`
       case undefined:
         return outcome.stopped === undefined
           ? "this round did not reach it"
