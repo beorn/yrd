@@ -219,8 +219,6 @@ export type Run = Readonly<{
   /** An asserted-empty directory that isolates queue-owned Git commits from repository hooks. */
   hooksPath: string
   worktrees: string
-  /** The caller's declaration-captured target; every judgement is against it. */
-  targetSha: string
   /** The pause record captured in the same remote advertisement as the queue. */
   pause: PauseRecord | undefined
   /**
@@ -259,7 +257,15 @@ export type Run = Readonly<{
   steps: Steps
   /** Say a ring stopped this round before it could merge; the outcome carries what it said. */
   stop: (stopped: Stopped) => void
-}>
+}> & {
+  /**
+   * The target every judgement stands on: the caller's declaration-captured
+   * target, until the round's head merges. The prefetch then judges the tail
+   * on the target that merge left, the one the next round merges onto, so it is
+   * the one field a step may see change within a round (@i/10-yrd/25301).
+   */
+  targetSha: string
+}
 
 /**
  * How one step left one change. `discarded` is the only one that is not an
@@ -508,15 +514,15 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       { cause: first },
     )
   }
-  const read = async () => {
+  const read = async (at = targetSha) => {
     try {
-      return await readQueue(git, options.target.remote, options.target.branch, targetSha)
+      return await readQueue(git, options.target.remote, options.target.branch, at)
     } catch (error) {
       if (retried !== undefined) throw failedAgain(retried, error)
       if (!(error instanceof CapturedQueueObjectsUnavailable)) throw error
       retried = error
       try {
-        return await readQueue(git, options.target.remote, options.target.branch, targetSha)
+        return await readQueue(git, options.target.remote, options.target.branch, at)
       } catch (again) {
         throw failedAgain(error, again)
       }
@@ -781,7 +787,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     let head = entry
     if (needsJudge(entry)) {
       const judgedAs = await judged(run, entry, () => run.steps.judge(run, entry))
-      if (judgedAs === "stuck") return andon(entry)
+      if (judgedAs === "stuck") return await andon(entry)
       if (judgedAs === "failed") {
         failed.push(entry.change.branch)
         continue
@@ -801,7 +807,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       }
     }
     const mergedAs = await judged(run, head, () => run.steps.merge(run, head))
-    if (mergedAs === "stuck") return andon(head)
+    if (mergedAs === "stuck") return await andon(head)
     if (mergedAs === "deferred") {
       deferred.push(head.change.branch)
       continue
@@ -814,17 +820,21 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 
   // Phase B: the prefetch. Once the head has been acted on, judge the rest of
   // the line against the target as it now stands, in line order, from a fresh
-  // read (the merge moved the target and wrote records). Each judge starts only
-  // inside the stop window, and a judge writes its verdict whole or not at all,
-  // so stopping here leaves no partial verdict. A scoped round has no tail.
+  // read (the merge moved the target and wrote records). Judging on the round's
+  // starting target instead would weigh a moved gitlink against the component
+  // main the head's merge already advanced, and refuse a pin that merge turn
+  // composes. Each judge starts only inside the stop window, and a judge writes
+  // its verdict whole or not at all, so stopping here leaves no partial
+  // verdict. A scoped round has no tail.
   if (acted !== undefined && !stoppedByTime && options.only === undefined) {
-    const tail = ordered((await read()).changes, undefined, "queued", "stuck", "checked").filter(
+    run.targetSha = run.targetAfter.sha
+    const tail = ordered((await read(run.targetSha)).changes, undefined, "queued", "stuck", "checked").filter(
       (entry) => !sameChange(entry, acted) && needsJudge(entry),
     )
     for (const entry of tail) {
       if (pastStopTime()) break
       const judgedAs = await judged(run, entry, () => run.steps.judge(run, entry))
-      if (judgedAs === "stuck") return andon(entry)
+      if (judgedAs === "stuck") return await andon(entry)
       if (judgedAs === "failed") failed.push(entry.change.branch)
       else if (judgedAs === "deferred") deferred.push(entry.change.branch)
     }
@@ -836,7 +846,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // turned them checked.
   let checkedWaiting = 0
   if (acted !== undefined) {
-    const reread = ordered((await read()).changes, options.only, "checked", "stuck")
+    const reread = ordered((await read(run.targetSha)).changes, options.only, "checked", "stuck")
     const blocked = reread.findIndex((entry) => entry.reading.state === "stuck")
     checkedWaiting = (blocked === -1 ? reread : reread.slice(0, blocked)).filter(
       (entry) => entry.reading.state === "checked" && !staleChecked(run, entry) && !sameChange(entry, acted),
@@ -2893,7 +2903,7 @@ function finish(
   if (exitCode !== 2) rmSync(run.worktrees, { force: true, recursive: true })
   return {
     observation: run.observation,
-    base: run.targetSha,
+    base: run.options.targetSha,
     config: run.options.configBlob,
     exitCode,
     ...(stopped === undefined ? {} : { stopped }),

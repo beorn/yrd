@@ -1486,9 +1486,9 @@ describe("a queue run", () => {
     const twoOutput = readFileSync(twoLog, "utf8").trim().split("\n")
     expect(oneOutput).toEqual(["one.txt", expect.stringMatching(/^[0-9a-f]{40}$/u)])
     // Head first (25301): task/two is judged after task/one merged, as the
-    // round's prefetch, on the base the round read; its merge re-checks it on
-    // the target as it then stands.
-    expect(twoOutput).toEqual(["two.txt", expect.stringMatching(/^[0-9a-f]{40}$/u)])
+    // round's prefetch, on the target that merge left, so one.txt is there.
+    expect(twoOutput).toEqual(["one.txt", expect.stringMatching(/^[0-9a-f]{40}$/u)])
+    expect(twoOutput[1]).not.toBe(oneOutput[1])
     const after = await remoteTarget(w)
     expect(after).not.toBe(w.target)
     await w.git(["fetch", "--quiet", "origin", "main"])
@@ -1563,7 +1563,10 @@ describe("a queue run", () => {
         checkedHeads.push(readFileSync(evidence.artifacts.stdout, "utf8").trim())
       }
       if (invocation.cwd !== w.work && Array.isArray(invocation.args) && invocation.args[0] === "merge-base") {
-        expect(readFileSync(evidence.artifacts.stdout, "utf8").trim()).toBe(w.target)
+        // task/two's prefetch stands on the target task/one's merge left (25301).
+        expect(readFileSync(evidence.artifacts.stdout, "utf8").trim()).toBe(
+          invocation.args[1] === twoOutput[1] ? after : w.target,
+        )
         checkedBases.push(String(invocation.args[1]))
       }
     }
@@ -1794,17 +1797,17 @@ describe("a queue run", () => {
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/c00"])
     const mergeCommit = await remoteTarget(w)
-    const candidates = readFileSync(w.checkLog, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => /candidate=(\S+)/u.exec(line)?.[1])
+    const lines = readFileSync(w.checkLog, "utf8").trim().split("\n")
     // The check log is in time order. Its first line is the head's judge; its
     // second is the head's merge check, whose candidate IS the merge that landed;
-    // only then the other 39 judges, the prefetch.
-    expect(candidates).toHaveLength(41)
-    expect(candidates[0]).not.toBe(mergeCommit)
-    expect(candidates[1]).toBe(mergeCommit)
-    expect(candidates.slice(2)).not.toContain(mergeCommit)
+    // only then the other 39 judges, the prefetch, each standing on that merge.
+    expect(lines).toHaveLength(41)
+    expect(/candidate=(\S+)/u.exec(lines[1]!)?.[1]).toBe(mergeCommit)
+    expect(lines.map((line) => /base=(\S+)/u.exec(line)?.[1])).toEqual([
+      w.target,
+      w.target,
+      ...Array.from({ length: 39 }, () => mergeCommit),
+    ])
     expect(outcome.checkedWaiting).toBe(39)
   }, 180_000)
 
@@ -1822,6 +1825,55 @@ describe("a queue run", () => {
     expect(outcome.exitCode).toBe(2)
     expect(outcome.stopped).toBeDefined()
     expect(await remoteTarget(w)).not.toBe(w.target)
+  })
+
+  // @cto ac87d1e5: the prefetch is cancellable at the stop-time check and writes no partial verdict.
+  it("a stop time that closes while the head merges leaves the rest of the line unjudged (25301)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/head", "head.txt")
+    await submitCommit(w, "task/tail", "tail.txt")
+    const closed = join(w.workdir, "window-closed.flag")
+    const submitLog = join(w.workdir, "submit-checks.log")
+    const script = (name: string, body: string): string => {
+      const path = join(w.workdir, name)
+      writeFileSync(path, ["#!/bin/sh", body, `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`, "exit 0", ""].join("\n"))
+      chmodSync(path, 0o755)
+      return path
+    }
+    const base = await w.options({ timeoutMs: 1800000 })
+    const onSubmit: CheckSpec = {
+      ...base.checks[0]!,
+      name: "on-submit",
+      on: ["submit"] as const,
+      run: script("on-submit.sh", `echo "$YRD_CANDIDATE_SHA" >> "${submitLog}"`),
+    }
+    const onMerge: CheckSpec = {
+      ...base.checks[0]!,
+      name: "on-merge",
+      on: ["merge"] as const,
+      run: script("on-merge.sh", `touch "${closed}"`),
+    }
+
+    const outcome = await queueRun({
+      ...base,
+      checks: [onSubmit, onMerge],
+      stopAtMs: 2000,
+      // The window closes during the head's on-merge check, after its last stop-time gate.
+      now: () => (existsSync(closed) ? 3000 : 1000),
+    })
+
+    expect(outcome.merged).toEqual(["task/head"])
+    expect(outcome.failed).toEqual([])
+    expect(outcome.deferred).toEqual([])
+    // One on-submit check ran, the head's: the prefetch never started on the tail.
+    expect(readFileSync(submitLog, "utf8").trim().split("\n")).toHaveLength(1)
+    await fetchChanges(w)
+    const tail = (await readQueue(w.git, "origin", "main", await remoteTarget(w))).changes.find(
+      (entry) => entry.change.branch === "task/tail",
+    )!
+    // No partial verdict: the tail's chain holds only its opening record.
+    expect(tail.reading.state).toBe("queued")
+    expect(tail.change.records.map((record) => record.kind)).toEqual(["opened"])
   })
 
   // @i/10-yrd/25301 A2 (restated by @cto ac87d1e5): a config edit re-judges no
@@ -1842,9 +1894,10 @@ describe("a queue run", () => {
     const lines = readFileSync(w.checkLog, "utf8").trim().split("\n").slice(linesBefore)
     const candidates = lines.map((line) => /candidate=(\S+)/u.exec(line)?.[1])
     // Three checks this round, in time order: c1's re-judge, c1's merge check
-    // (its candidate IS the merge that landed), then c2's re-judge. One judge
-    // before the head merged: never the whole line first.
-    expect(lines.map((line) => /base=(\S+)/u.exec(line)?.[1])).toEqual([afterFirst, afterFirst, afterFirst])
+    // (its candidate IS the merge that landed), then c2's re-judge, on the
+    // target c1's merge left. One judge before the head merged: never the
+    // whole line first.
+    expect(lines.map((line) => /base=(\S+)/u.exec(line)?.[1])).toEqual([afterFirst, afterFirst, afterSecond])
     expect(candidates).toHaveLength(3)
     expect(candidates[1]).toBe(afterSecond)
     expect(candidates[2]).not.toBe(afterSecond)
