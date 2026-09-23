@@ -1903,4 +1903,40 @@ describe("a diverged component the merge composes", () => {
     expect(trailer(failed!, "Detail")).toContain("semantic conflict with main")
     expect(trailer(failed!, "Detail")).toContain("submodule-check")
   })
+
+
+  // review2 witness (24977 review): the merge-phase re-run of the submit checks must be COMPLETE before a
+  // composed candidate lands. A stop window that closes after the first submit check passes ends runPhase early;
+  // with no merge-phase checks declared nothing else notices, and the composed candidate would land although the
+  // second (walled) check never ran on it. The judge and merge phases each defer on a short result list; the
+  // re-run must too.
+  it("defers, never lands, a re-cut whose submit re-run a stop window cut short (24977, review2 de5a4c01)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const closed = join(w.work, "..", "review2-window-closed")
+    const checks = [
+      { name: "closes-the-window", on: ["submit"], run: `touch '${closed}'` },
+      {
+        name: "walled",
+        on: ["submit"],
+        run: "! { test -f submodule/main-side.txt && test -f submodule/change-side.txt; }",
+      },
+    ] as const
+    await submitGitlink(w, "task/first-side", pins.mainSide)
+    await submitGitlink(w, "task/second-side", pins.changeSide)
+    const landing = await queueRun({ ...(await w.options()), checks })
+    expect(landing).toMatchObject({ exitCode: 0, failed: [], merged: ["task/first-side"], stuck: [] })
+    rmSync(closed, { force: true })
+    const stopAtMs = Date.now() + 3_600_000
+
+    const outcome = await queueRun({
+      ...(await w.options()),
+      checks,
+      stopAtMs,
+      now: () => (existsSync(closed) ? stopAtMs : stopAtMs - 1),
+    })
+
+    expect(existsSync(closed)).toBe(true)
+    expect(outcome.merged).toEqual([])
+  })
 })
