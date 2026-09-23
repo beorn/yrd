@@ -146,7 +146,6 @@ type World = Readonly<{
     check: Readonly<{
       exit?: number
       sleep?: number
-      holdUntil?: string
       timeoutMs?: number
       everywhere?: boolean
       setup?: string
@@ -202,7 +201,6 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     [
       "#!/bin/sh",
       `echo "started" >> "${startedLog}"`,
-      'if [ -n "${FAKE_HOLD_UNTIL:-}" ]; then while [ ! -e "$FAKE_HOLD_UNTIL" ]; do sleep 0.01; done; fi',
       'sleep "${FAKE_SLEEP:-0}"',
       `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
       'if [ -f one.txt ] || [ "${FAKE_EVERYWHERE:-0}" = 1 ]; then exit "${FAKE_EXIT:-0}"; fi',
@@ -238,7 +236,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     options: async (check) => ({
       checks: [
         {
-          environmentPassthrough: ["FAKE_EXIT", "FAKE_SLEEP", "FAKE_EVERYWHERE", "FAKE_HOLD_UNTIL"],
+          environmentPassthrough: ["FAKE_EXIT", "FAKE_SLEEP", "FAKE_EVERYWHERE"],
           name: "verify",
           on: check.on,
           run: fakeCheck,
@@ -251,7 +249,6 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
         FAKE_EVERYWHERE: check.everywhere === true ? "1" : "0",
         FAKE_EXIT: String(check.exit ?? 0),
         FAKE_SLEEP: String(check.sleep ?? 0),
-        FAKE_HOLD_UNTIL: check.holdUntil ?? "",
         PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
       },
       notify: [{ name: "recorder", on: ["merged", "failed", "stuck", "merged-direct"], run: notifier }],
@@ -610,9 +607,33 @@ it("discards a dropped event check once and continues with the next change", asy
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
 
-  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25 })), notify: [] })
-  await checkRunning(w)
-  await drop(store, { queue: "main", branch: "task/a", by: "operator" })
+  const verify = verifying.verifyCandidate
+  let entered!: () => void
+  const checking = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  let release!: () => void
+  const continueRun = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let held = false
+  using _held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
+    const outcome = await verify(options)
+    if (!held) {
+      held = true
+      entered()
+      await continueRun
+    }
+    return outcome
+  })
+
+  const running = queueRun({ ...(await w.options({ exit: 0 })), notify: [] })
+  try {
+    await checking
+    await drop(store, { queue: "main", branch: "task/a", by: "operator" })
+  } finally {
+    release()
+  }
 
   const outcome = await running
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/b"], failed: [], stuck: [] })
@@ -630,11 +651,30 @@ it("discards a resubmitted event check once and continues with the next change",
   const first = await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
 
-  const release = join(w.workdir, "release-resubmitted-check")
-  const running = queueRun({ ...(await w.options({ exit: 0, holdUntil: release })), notify: [] })
+  const verify = verifying.verifyCandidate
+  let entered!: () => void
+  const checking = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  let release!: () => void
+  const continueRun = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let held = false
+  using _held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
+    const outcome = await verify(options)
+    if (!held) {
+      held = true
+      entered()
+      await continueRun
+    }
+    return outcome
+  })
+
+  const running = queueRun({ ...(await w.options({ exit: 0 })), notify: [] })
   const next = await (async () => {
     try {
-      await checkRunning(w)
+      await checking
       await w.git(["checkout", "--quiet", "task/a"])
       writeFileSync(join(w.work, "resubmitted.txt"), "new head\n")
       await w.git(["add", "resubmitted.txt"])
@@ -649,7 +689,7 @@ it("discards a resubmitted event check once and continues with the next change",
       expect(resubmitted).toMatchObject({ head, retry: false })
       return head
     } finally {
-      writeFileSync(release, "")
+      release()
     }
   })()
 
