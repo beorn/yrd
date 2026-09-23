@@ -2520,6 +2520,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       const x = (painted[y] ?? "").indexOf(needle)
       return x < 0 ? undefined : JSON.stringify(app.cell(x, y).fg)
     }
+    const heldCell = held < 0 ? undefined : app.cell(Math.max(0, (painted[held] ?? "").indexOf("task/x")), held).fg
+    const heldIsBlue = heldCell != null && heldCell.b > heldCell.r && heldCell.b > heldCell.g
     const heldBranch = fgOf(held, "task/x")
     const waitingBranch = fgOf(
       painted.findIndex((line, index) => index > header && line.includes("task/z")),
@@ -2527,6 +2529,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     app.unmount()
     return {
+      heldIsBlue,
       heldTextStandsOut: heldBranch !== undefined && waitingBranch !== undefined && heldBranch !== waitingBranch,
       markers,
       onlyTheHeldRow: pulsingRows.size === 1 && pulsingRows.has(held),
@@ -2536,7 +2539,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   it("marks the change the runner holds now, and only it: its row in the working colour with a pulsing marker, and nothing else on screen pulses", async () => {
     // The cursor is on the top row, which is a draft: the held row shows the
     // colour it has on its own.
-    expect(await onePulse(100, 31, 0)).toEqual({ heldTextStandsOut: true, markers: 1, onlyTheHeldRow: true })
+    expect(await onePulse(100, 31, 0)).toEqual({ heldIsBlue: true, heldTextStandsOut: true, markers: 1, onlyTheHeldRow: true })
   }, 10_000)
 
   // The held row still carries the one pulse when the cursor sits ON it, in the selection's own colours, and

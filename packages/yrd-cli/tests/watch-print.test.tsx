@@ -371,5 +371,60 @@ describe("the flow page: four bands, one row per change", () => {
     expect(occurrences).toHaveLength(1)
     expect(occurrences[0]).toContain("waiting")
   })
+
+  it("the top line says how many changes wait, what runs now and when the last merge landed (24196)", async () => {
+    const ago = (minutes: number): Date => new Date(READ_AT.getTime() - minutes * 60_000)
+    const rows = [
+      change({
+        branch: "task/live",
+        head: "9".repeat(40),
+        live: { check: "test", phase: "merge", run: "q-1", since: ago(2) },
+        position: 1,
+        since: ago(15),
+      }),
+      change({ branch: "task/next", head: "1".repeat(40), position: 2, since: ago(10) }),
+      change({ at: ago(5), branch: "task/merged", endedAt: ago(5), head: "4".repeat(40), state: "merged" }),
+    ]
+    const text = await paint(flowSnapshot({ rows: rows.map((r) => ({ row: r })) }), 160)
+    const queueLine = text.split("\n").find((l) => l.includes("waiting"))
+    expect(queueLine).toBeDefined()
+    expect(queueLine).toContain("1 waiting")
+    expect(queueLine).toContain("checking task/live for 2:00")
+    expect(queueLine).toMatch(/last merge \d\d:\d\d \(task\/merged\)/)
+  })
+
+  it("a paused runner shows its resume command in full, and a stuck row shows its reason in full at 80 and 120 columns (25348)", async () => {
+    const snap = (cols: number) =>
+      flowSnapshot({
+        stopped: {
+          since: READ_AT.toISOString(),
+          by: "@chief",
+          change: null,
+          cause: "operator",
+        },
+        rows: [
+          {
+            row: row({
+              branch: "task/incident",
+              head: "1".repeat(40),
+              state: "stuck",
+              reason: "yrd-check-unresolved",
+              since: READ_AT,
+              at: READ_AT,
+              submitter: "@dev/3",
+              subject: "test incident",
+            }),
+          },
+        ],
+      })
+
+    const text120 = await paint(snap(120), 120)
+    expect(text120).toContain("resume: yrd queue resume")
+    expect(text120).toContain("stuck=yrd-check-unresolved")
+
+    const text80 = await paint(snap(80), 80)
+    expect(text80).toContain("resume: yrd queue resume")
+    expect(text80).toContain("stuck=yrd-check-unresolved")
+  })
 })
 
