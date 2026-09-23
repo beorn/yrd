@@ -392,5 +392,39 @@ describe("the flow page: four bands, one row per change", () => {
     expect(queueLine).toContain("checking task/live for 2:00")
     expect(queueLine).toMatch(/last merge \d\d:\d\d \(task\/merged\)/)
   })
+
+  it("a paused runner shows its resume command in full, and a stuck row shows its reason in full at 80 and 120 columns (25348)", async () => {
+    const snap = (cols: number) =>
+      flowSnapshot({
+        stopped: {
+          since: READ_AT.toISOString(),
+          by: "@chief",
+          change: null,
+          cause: "operator",
+        },
+        rows: [
+          {
+            row: row({
+              branch: "task/incident",
+              head: "1".repeat(40),
+              state: "stuck",
+              reason: "yrd-check-unresolved",
+              since: READ_AT,
+              at: READ_AT,
+              submitter: "@dev/3",
+              subject: "test incident",
+            }),
+          },
+        ],
+      })
+
+    const text120 = await paint(snap(120), 120)
+    expect(text120).toContain("resume: yrd queue resume")
+    expect(text120).toContain("stuck=yrd-check-unresolved")
+
+    const text80 = await paint(snap(80), 80)
+    expect(text80).toContain("resume: yrd queue resume")
+    expect(text80).toContain("stuck=yrd-check-unresolved")
+  })
 })
 

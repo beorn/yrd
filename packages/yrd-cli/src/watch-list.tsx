@@ -89,6 +89,7 @@ export function pillLabel(queue: WatchQueue, digit: number, brackets = false): s
 }
 
 export type ListLayout = Readonly<{
+  columns?: number
   timeWidth?: number
   agentWidth: number
   qWidth?: number
@@ -164,9 +165,10 @@ export function listLayout(
     : 0
   const ageRunWidth = Math.max(9, (runner?.duration ?? "").length, ...rows.map((item) => ageRunText(item.row, now).length))
   const fixedExceptQ = timeWidth + statusWidth + agentWidth + (separate ? runWidth : 0) + ageRunWidth + 8
-  const maxAvailableForQ = Math.max(16, columns - fixedExceptQ - 36)
+  const maxAvailableForQ = Math.max(16, columns - fixedExceptQ - 56)
   const qWidth = separate ? (fullQueue ? Math.max(16, Math.min(queue.label.length, maxAvailableForQ)) : single ? 0 : 3) : 0
   return {
+    columns,
     timeWidth,
     statusWidth,
     agentWidth,
@@ -437,8 +439,10 @@ export const ListRow = memo(function ListRow({
           ? "not yet read"
           : row.head.slice(0, 12)
         : `${row.head.slice(0, 12)} (subject not fetched)`)
+  const separateLineSuffix = (layout.columns ?? 120) < 100 && row.state === "stuck" && suffix !== undefined
   return (
     <Box
+      flexDirection="column"
       backgroundColor={cursor ? "$bg-selected" : hovered ? "$bg-surface-hover" : undefined}
       minWidth={0}
       width="100%"
@@ -475,7 +479,7 @@ export const ListRow = memo(function ListRow({
                 {" "}
                 {row.branch}
               </Text>
-              {suffix === undefined ? null : (
+              {suffix === undefined || separateLineSuffix ? null : (
                 <Text color={forced ?? suffix.color} flexShrink={0} wrap="truncate">
                   {" "}
                   ({suffix.text})
@@ -528,6 +532,24 @@ export const ListRow = memo(function ListRow({
           ageRun: <AgeRunCell row={row} color={forced ?? held} />,
         }}
       </Cells>
+      {separateLineSuffix && suffix !== undefined ? (
+        <Box height={1} flexDirection="row" minWidth={0} overflow="hidden">
+          <Box
+            width={
+              (layout.timeWidth ?? 5) +
+              1 +
+              (layout.isSeparateColumns
+                ? (((layout.qWidth ?? 0) > 0 ? (layout.qWidth ?? 0) + 1 : 0) +
+                   ((layout.runWidth ?? 0) > 0 ? (layout.runWidth ?? 0) + 1 : 0))
+                : ((layout.queueRunWidth ?? 0) > 0 ? (layout.queueRunWidth ?? 0) + 1 : 0))
+            }
+            flexShrink={0}
+          />
+          <Text color={forced ?? suffix.color} wrap="truncate">
+            {stateGlyph(row)} {suffix.text}
+          </Text>
+        </Box>
+      ) : null}
     </Box>
   )
 }, sameRow)
@@ -543,6 +565,26 @@ export const ListRow = memo(function ListRow({
  * subject, the submitter and `checking 16m` in these same five cells, and
  * drawing a second line for it is the duplication the band replaced.
  */
+/**
+ * Splits a runner line's holds text into the status text and the cure command if present,
+ * so narrow terminal layouts (under 100 columns) can render the cure on its own line without truncation.
+ */
+export function splitRunnerCure(holds: string): { text: string; cure?: string } {
+  const resumeMatch = holds.match(/^(.*?) · (resume: .*)$/)
+  if (resumeMatch) {
+    return { text: resumeMatch[1]!, cure: resumeMatch[2]! }
+  }
+  const startMatch = holds.match(/^(.*?) · (start: .*)$/)
+  if (startMatch) {
+    return { text: startMatch[1]!, cure: startMatch[2]! }
+  }
+  const fixMatch = holds.match(/^(.*?) — (fix and .*)$/)
+  if (fixMatch) {
+    return { text: fixMatch[1]!, cure: fixMatch[2]! }
+  }
+  return { text: holds }
+}
+
 export function RunnerRow({
   line,
   layout,
@@ -559,18 +601,16 @@ export function RunnerRow({
   const { color, word } = STATE_WORDS[line.state]
   const forced = cursor ? "$fg-on-selected" : undefined
   const timeText = line.at !== undefined ? clock(line.at) : "—"
+  const isNarrow = (layout.columns ?? 120) < 100
+  const parsed = isNarrow ? splitRunnerCure(line.holds) : { text: line.holds }
   return (
-    <Box minWidth={0} width="100%" backgroundColor={cursor ? "$bg-selected" : undefined}>
+    <Box flexDirection="column" minWidth={0} width="100%" backgroundColor={cursor ? "$bg-selected" : undefined}>
       <Cells layout={layout}>
         {{
           time: <Text color={forced ?? "$fg-muted"}>{timeText}</Text>,
-          q: (layout.qWidth ?? 0) === 0 ? null : <Text color={forced ?? "$fg-muted"}>{layout.isFullQueue ? queueLabel : String(queueDigit)}</Text>,
-          run: <Text color={forced ?? "$fg-muted"}>—</Text>,
-          queueRun: (
-            <Text color={forced ?? "$fg-muted"} wrap="truncate">
-              {queueRunText(queueDigit, queueLabel, undefined)}
-            </Text>
-          ),
+          q: null,
+          run: null,
+          queueRun: null,
           task: (
             <Box flexDirection="row" minWidth={0} overflow="hidden">
               <Text bold color={forced ?? color} flexShrink={0}>
@@ -584,7 +624,7 @@ export function RunnerRow({
                     stopped one's is loud because `stopped` is. Item 14's muted
                     rail is the detail line below, which is metadata. */}
                 <Text color={forced ?? color} wrap="truncate" minWidth={0}>
-                  {line.holds}
+                  {parsed.text}
                 </Text>
               </Box>
             </Box>
@@ -612,6 +652,19 @@ export function RunnerRow({
           ),
         }}
       </Cells>
+      {parsed.cure === undefined ? null : (
+        <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
+          <Box width={2} flexShrink={0} />
+          <Box flexGrow={1} flexBasis={0} minWidth={0} overflow="hidden" flexDirection="row">
+            <Text color={forced ?? color} flexShrink={0}>
+              {RUNNER_GLYPH}{" "}
+            </Text>
+            <Text color={forced ?? color} wrap="truncate" minWidth={0}>
+              {parsed.cure}
+            </Text>
+          </Box>
+        </Box>
+      )}
     </Box>
   )
 }
@@ -640,19 +693,23 @@ function Cells({
       </Box>
       {layout.isSeparateColumns ? (
         <>
-          {(layout.qWidth ?? 0) === 0 ? null : (
+          {(layout.qWidth ?? 0) === 0 || children.q == null ? null : (
             <Box width={layout.qWidth ?? 0} flexShrink={0}>
               {children.q}
             </Box>
           )}
-          <Box width={layout.runWidth ?? 0} flexShrink={0}>
-            {children.run}
-          </Box>
+          {children.run == null ? null : (
+            <Box width={layout.runWidth ?? 0} flexShrink={0}>
+              {children.run}
+            </Box>
+          )}
         </>
       ) : (
-        <Box width={layout.queueRunWidth} flexShrink={0}>
-          {children.queueRun}
-        </Box>
+        children.queueRun == null ? null : (
+          <Box width={layout.queueRunWidth} flexShrink={0}>
+            {children.queueRun}
+          </Box>
+        )
       )}
       <Box flexGrow={1} flexBasis={0} minWidth={12}>
         {children.task}
