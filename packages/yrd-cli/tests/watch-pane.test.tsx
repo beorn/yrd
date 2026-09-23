@@ -9,6 +9,7 @@
  *           its log; two rows of one change opened one detail.
  * @level    l2 (a real silvery render into a headless terminal buffer)
  * @consumer the operator reading `yrd watch`
+ * @reach fs-walk <fixture-only: no filesystem directory walk; "join" calls are Array.join on rendered terminal lines, and process.cwd() is passed as plain config data, not enumera...>
  */
 
 import { mkdirSync, writeFileSync } from "node:fs"

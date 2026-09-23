@@ -56,6 +56,7 @@
  * `whose` on a result says who it is billed to: a stuck result and anything
  * the setup did are the queue's, a failing check the submitter's. A passing
  * result is nobody's, so only the stuck case below reads it.
+ * @reach fs-walk <fixture-only: path/dirname(path) come from logOfQueueRun(run) over a boundaryRepository() fixture cleaned up via removeTemporaryRoots(); "walk" mentions are pros...>
  */
 import { readdir, readFile } from "node:fs/promises"
 import { basename, dirname } from "node:path"

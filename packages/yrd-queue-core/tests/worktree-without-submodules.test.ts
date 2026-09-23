@@ -4,6 +4,7 @@
  *           unmaterialized and the failure surfaces later as missing files.
  * @level    l1 (pure — the Git handles are stubs; the condition is the subject)
  * @consumer freshWorktree, and closeEnvironment in yrd-cli
+ * @reach fs-walk <fixture-only: no filesystem access at all: git reads/mutations are recorded via an in-memory Git function stub keyed on ls-tree/worktree args; the matched idiom...>
  */
 
 import { describe, expect, it } from "vitest"

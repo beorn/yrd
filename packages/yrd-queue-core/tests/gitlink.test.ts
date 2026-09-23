@@ -9,6 +9,7 @@
  * submodule state no main had ever carried. Measured the same day on this
  * core before E4: asking every submodule of the root's tree cost 15 fetches
  * and 13.7 s per judged change.
+ * @reach fs-walk <fixture-only: root = mkdtempSync(join(tmpdir(), ...)); readdirSync(nestedPath) targets a path under this temp fixture tree; gitSuperBin is only existsSync-checke...>
  */
 
 import {

@@ -13,6 +13,7 @@
  * @consumer hab, which runs `yrd queue up` as the service and relaunches it on
  *           a gitlink-move exit · the mechanic, who edits the target's declaration and
  *           expects the next round to read it
+ * @reach fs-walk <fixture-only: root = mkdtempSync(join(tmpdir(), ...)); gitSuperBin/import.meta.dirname are only used to resolve a binary path to spawn, not to walk a directory.>
  */
 
 import * as fs from "node:fs"

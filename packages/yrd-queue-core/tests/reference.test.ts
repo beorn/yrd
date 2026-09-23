@@ -3,6 +3,7 @@
  *          compose clones that submodule from the network instead of borrowing it.
  * @level   l2 (real repositories, real submodules, real `git super worktree add`)
  * @consumer every queue run, `yrd check` and `yrd env` compose — all borrow from one reference
+ * @reach fs-walk <fixture-only: every root is mkdtempSync(join(tmpdir(), ...)); gitSuperBin is only existsSync-checked, not walked.>
  */
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
