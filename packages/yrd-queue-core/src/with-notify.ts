@@ -461,7 +461,6 @@ function said(delivery: Delivery): string {
   return delivery === "sent" ? "told" : delivery === "none" ? "told nobody:" : "could not tell"
 }
 
-/** A change ended by its submitter moving on, which is not a failure of anything. */
 /**
  * The failed ending of a re-cut that fails a submit check the change alone passed:
  * the submitter's, uncharged. It lives here, not in run.ts, because UNCHARGED reads
