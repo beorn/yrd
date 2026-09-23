@@ -201,8 +201,22 @@ export function bandedRows(rows: readonly WatchRow[], holding = true): readonly 
   return [...of("drafts"), ...waiting, ...of("runner"), ...of("done")]
 }
 
-/** A band's rule: the divider that opens it, drawn to the table's width without prose. */
-export function bandRule(_band: Band, _count: number, width: number, _draftWindow = "7d"): string {
+/** A band's rule: the divider that opens it, drawn to the table's width. */
+export function bandRule(
+  band: Band,
+  count: number,
+  width: number,
+  draftWindow = "7d",
+  unread = 0,
+): string {
+  if (band === "drafts") {
+    const draftWord = STATE_WORDS.draft.word
+    const plural = count === 1 ? "" : "s"
+    const unreadPart = unread > 0 ? ` · ${String(unread)} not yet read` : ""
+    const said = `${String(count)} ${draftWord}${plural} (${draftWindow})${unreadPart}`
+    const rule = `── ${said} `
+    return rule.padEnd(Math.max(rule.length, width), "─")
+  }
   return "─".repeat(Math.max(1, width))
 }
 
@@ -230,7 +244,13 @@ export type BandPlan = Readonly<{
   holding: number | undefined
 }>
 
-export function bandPlan(rows: readonly WatchRow[], width: number, draftWindow = "7d", holds = true): BandPlan {
+export function bandPlan(
+  rows: readonly WatchRow[],
+  width: number,
+  draftWindow = "7d",
+  holds = true,
+  unread = 0,
+): BandPlan {
   const before = new Map<number, BandBreak>()
   const opening = new Map<number, string[]>()
   let after: BandBreak | undefined
@@ -238,7 +258,10 @@ export function bandPlan(rows: readonly WatchRow[], width: number, draftWindow =
   let cursor = 0
   let runnerAt: number | undefined
   for (const band of BANDS) {
-    const count = rows.filter((item) => bandOf(item.row, holds) === band).length
+    const count =
+      band === "drafts"
+        ? rows.filter((item) => bandOf(item.row, holds) === band && item.row.at !== undefined).length
+        : rows.filter((item) => bandOf(item.row, holds) === band).length
     if (band === "runner") {
       if (count === 0) runnerAt = cursor
       else holding = cursor
@@ -247,7 +270,7 @@ export function bandPlan(rows: readonly WatchRow[], width: number, draftWindow =
     }
     if (count === 0) continue
     const rules = opening.get(cursor) ?? []
-    rules.push(bandRule(band, count, width, draftWindow))
+    rules.push(bandRule(band, count, width, draftWindow, unread))
     opening.set(cursor, rules)
     cursor += count
   }

@@ -57,7 +57,13 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
     separateColumns: true,
     fullQueueRefs: true,
   })
-  const plan = bandPlan(rows, columns - 2, snapshot.drafts?.window ?? "7d", holding)
+  const plan = bandPlan(
+    rows,
+    columns - 2,
+    snapshot.drafts?.window ?? "7d",
+    holding,
+    snapshot.drafts?.unread ?? 0,
+  )
   return (
     <NowProvider readAt={snapshot.at} live={false}>
       <Box flexDirection="column" width={columns} minWidth={0}>

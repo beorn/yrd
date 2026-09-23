@@ -117,7 +117,7 @@ export function RunnerDetailPane({ snapshot }: { snapshot: WatchSnapshot }) {
   const runner = runnerOf(snapshot, now)
   const color = STATE_WORDS[runner.state].color
   return (
-    <Box flexDirection="column" padding={1} gap={1} minWidth={0}>
+    <Box flexDirection="column" paddingX={1} gap={1} minWidth={0}>
       <Box flexDirection="row" gap={1}>
         <Text bold color={color}>
           {RUNNER_GLYPH} RUNNER {STATE_WORDS[runner.state].word}
@@ -670,7 +670,7 @@ export function WatchPane({
           {statsOpen && shown.decisions !== undefined ? (
             <StatsBox
               decisions={shown.decisions}
-              columns={columns}
+              columns={columns - 2}
               timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
             />
           ) : null}
@@ -858,7 +858,13 @@ function Table({
     singleQueue: isSingleQueue,
     separateColumns: true,
   })
-  const plan: BandPlan = bandPlan(rows, columns - 4, snapshot.drafts?.window ?? "7d", holdsChange(runner.state))
+  const plan: BandPlan = bandPlan(
+    rows,
+    columns - 4,
+    snapshot.drafts?.window ?? "7d",
+    holdsChange(runner.state),
+    snapshot.drafts?.unread ?? 0,
+  )
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       <Box height={1} flexShrink={0} />

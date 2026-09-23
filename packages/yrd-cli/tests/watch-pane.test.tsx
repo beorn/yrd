@@ -1754,8 +1754,13 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       draft("task/d2", "b".repeat(40), ago(3 * 60 * MINUTE), "bob"),
     ]
     const stopped = { ...STOP, since: stuckAt.toISOString() }
-    const at = (cols: number, runner = RUNNER) =>
-      queueLine(snapshot({ rows, runner, stopped } as Partial<WatchSnapshot>), NOW, cols - 2).trim()
+    const at = async (cols: number, runner = RUNNER) => {
+      const page = (await printListing(snapshot({ rows, runner, stopped } as Partial<WatchSnapshot>), {
+        color: false,
+        columns: cols,
+      })).split("\n")
+      return (page.find((l) => l.includes("waiting")) ?? "").trim()
+    }
 
     // A2-set-v3 Q4, each width the widest the next form does not fit (the pane lays the line out two
     // columns narrower than the terminal): drafts, breakdown, the last merge's branch, the last merge,
@@ -1767,16 +1772,16 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const merge = (branch: boolean) => ` · last merge ${clock(mergedAt)}${branch ? " (task/y)" : ""}`
     const drafts = ` · 2 ${W.draft.word}s (7d)`
     expect({
-      160: at(160),
-      144: at(144),
-      120: at(120),
-      100: at(100),
-      90: at(90),
-      64: at(64),
-      44: at(44),
+      160: await at(160),
+      144: await at(144),
+      120: await at(120),
+      100: await at(100),
+      90: await at(90),
+      64: await at(64),
+      44: await at(44),
       // A journal quiet past the ceiling changes nothing here: its only local source reads a healthy round's
       // long check as silence, so "runner silent" waits for the runner's own claim (A2-set-v2 item 4).
-      quiet: at(160, SILENT),
+      quiet: await at(160, SILENT),
     }).toEqual({
       160: waiting + breakdown + check(true) + stop(true) + merge(true) + drafts,
       144: waiting + breakdown + check(true) + stop(true) + merge(true),
@@ -1794,7 +1799,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
     const snap = snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER, stopped: STOP } as Partial<WatchSnapshot>)
 
-    expect(queueLine(snap, NOW, 100 - 2).trim()).toBe(
+    const page = (await printListing(snap, { color: false, columns: 100 })).split("\n")
+    const line = (page.find((l) => l.includes(W.waiting.word)) ?? "").trim()
+    expect(line).toBe(
       `3 ${W.waiting.word} · ${W.checking.word} task/x for 3:21 · line stopped at task/s since ${clock(new Date(STOP.since))}` +
         ` · last merge ${clock(ago(4 * MINUTE + 50_000))}`,
     )
@@ -1811,15 +1818,16 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       { row: row({ branch: "task/s3", head: "6".repeat(40), position: 5, state: "queued" }) },
     ]
     const stopped = { by: "@chief", cause: "operator", change: null, since: since.toISOString() }
-    const at = (cols: number) =>
-      queueLine(
+    const at = async (cols: number) => {
+      const page = (await printListing(
         snapshot({ rows, runner: RUNNER, stopped } as Partial<WatchSnapshot>),
-        NOW,
-        cols - 2,
-      ).trim()
+        { color: false, columns: cols },
+      )).split("\n")
+      return (page.find((l) => l.includes("paused")) ?? "").trim()
+    }
     const waiting = `5 ${W.waiting.word}`
 
-    expect({ 70: at(70), 50: at(50), 40: at(40) }).toEqual({
+    expect({ 70: await at(70), 50: await at(50), 40: await at(40) }).toEqual({
       70: `${waiting}: 2 ${W.pending.word}, 3 ${W.submitted.word} · paused since ${clock(since)} by @chief`,
       50: `${waiting} · paused since ${clock(since)} by @chief`,
       40: `${waiting} · paused by @chief`,
@@ -1858,10 +1866,11 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const painted = await lines(snap, 120, 40)
 
     const rail = (painted.find((line) => line.includes("RUNNER") && /in line/u.test(line)) ?? "").replace(/\s+/gu, " ")
-    const top = queueLine(snap, NOW, 120 - 2)
+    const page = (await printListing(snap, { color: false, columns: 120 })).split("\n")
+    const top = page.find((l) => l.includes(W.waiting.word)) ?? ""
     expect({
       rail: /and (\d+) in line/u.exec(rail)?.[1],
-      top: top.startsWith(`4 ${W.waiting.word}`) ? "4" : top,
+      top: top.trim().startsWith(`4 ${W.waiting.word}`) ? "4" : top,
     }).toEqual({ rail: "4", top: "4" })
   })
 
@@ -1911,24 +1920,22 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // The window is named on the drafts BAND's rule now, over the rows it is
     // true of, and not on a header that spans every band.
     const header = (painted: readonly string[]): string => painted.find((line) => line.includes("not submitted")) ?? ""
-    const counted = (snap: WatchSnapshot): string =>
-      queueLine(snap, NOW, 140 - 2)
-        .split(" · ")
-        .find((segment) => segment.includes(`${W.draft.word}s (`)) ?? ""
+    const counted = (painted: readonly string[]): string =>
+      painted.find((line) => line.includes(`${W.draft.word}s (`)) ?? ""
 
     expect({
       after: {
-        top: counted(all),
+        top: counted(after).includes(`3 ${W.draft.word}s (all) · 2 not yet read`),
         unreadRow: tableRow(after, " task/unread ").includes("not yet read"),
       },
       before: {
-        top: counted(week),
+        top: counted(before).includes(`2 ${W.draft.word}s (7d) · 2 not yet read`),
         unreadRow: tableRow(before, " task/unread "),
       },
       requested: load.mock.calls.map(([request]) => request),
     }).toEqual({
-      after: { top: `3 ${W.draft.word}s (all), 2 not yet read`, unreadRow: true },
-      before: { top: `2 ${W.draft.word}s (7d), 2 not yet read`, unreadRow: "" },
+      after: { top: true, unreadRow: true },
+      before: { top: true, unreadRow: "" },
       requested: [{ draftWindow: "all" }],
     })
   })
@@ -2099,12 +2106,11 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const painted = await lines(snap, 120, 40)
 
     const line = tableRow(painted, " task/d")
-    const segments = queueLine(snap, NOW, 120 - 2).trim().split(" · ")
     expect({
       by: / —/.test(line) && !/ ada\b/u.test(line),
-      counted: segments.slice(1).some((segment) => segment.startsWith(`1 ${W.draft.word}`)),
+      counted: painted.some((l) => l.includes(`1 ${W.draft.word} (7d)`)),
       noRun: line.includes("— / —"),
-      waiting: segments[0] === `1 ${W.waiting.word}: 1 ${W.submitted.word}`,
+      waiting: painted.some((l) => l.includes("RUNNER") && l.includes("1 in line")),
       word: line.includes(` ${W.draft.word} `),
     }).toEqual({ by: true, counted: true, noRun: true, waiting: true, word: true })
   })
@@ -2282,7 +2288,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         "page STATUS cell": tableRow(page, "task/y1").includes(` ${SENTINEL} `),
         "page top line": pageTop.includes(`1 ${SENTINEL}`),
         "pane STATUS cell": tableRow(pane, "task/y1").includes(` ${SENTINEL} `),
-        "queue line": queueLine(snap, NOW, 120).includes(`1 ${SENTINEL}`),
+        "queue line": page.some((line) => line.includes(`1 ${SENTINEL}`)),
         "queue show line": rowLine({ row: item }).includes(SENTINEL),
         "yrd list --help legend": cli.includes(SENTINEL),
       }
@@ -2937,9 +2943,13 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(detailBg).not.toEqual(listBg)
     expect(detailBg).toEqual({ r: 50, g: 56, b: 68 })
 
-    // 2. Blank padding line: first row of detail pane (line 1, under TopLine) is blank (<Box height={1} flexShrink={0} />)
-    const detailTop = app.lines[1]?.slice(143).trim() ?? ""
+    // 2. Blank padding line: first row of detail pane (line 2, under STATS) is blank (<Box height={1} flexShrink={0} />)
+    const detailTop = app.lines[2]?.slice(143).trim() ?? ""
     expect(detailTop).toBe("")
+
+    // Detail content starts on line 3 (tab strip)
+    const detailContent = app.lines[3]?.slice(143).trim() ?? ""
+    expect(detailContent).not.toBe("")
 
     // 3. Divider line is absent: no vertical divider character between list and detail on top rows
     expect(app.lines.slice(0, 4).some((line) => line.slice(135, 145).includes("│"))).toBe(false)
