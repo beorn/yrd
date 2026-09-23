@@ -342,5 +342,6 @@ describe("the flow page: four bands, one row per change", () => {
     const header = lines.find((line) => line.includes("TASK"))
     expect(header).toContain("QUEUE")
     expect(header).toContain("RUN")
+    expect(header).not.toContain("QUEUE / RUN")
   })
 })
