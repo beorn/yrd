@@ -1821,7 +1821,7 @@ describe("a diverged component the merge composes", () => {
   it("lands a change judged and re-cut in one run, the recheck's logs beside the judge's (24977 P0)", async () => {
     const w = await world()
     const pins = await divergentSubmoduleCommits(w)
-    const check = { name: "submit-check", on: ["submit"], run: "true" } as const
+    const check = { on: ["submit"], run: "true" } as const
     const head = await submitGitlink(w, "task/stale-at-judge", pins.changeSide)
     await gitlinkAroundQueue(w, pins.mainSide)
 
@@ -1829,15 +1829,13 @@ describe("a diverged component the merge composes", () => {
 
     expect(readFileSync(outcome.log, "utf8")).not.toContain("a check log already exists")
     expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/stale-at-judge"], stuck: [] })
-    const records = await readRecords(
-      w.git,
-      await remoteTip(w.git, changeRef("main", { branch: "task/stale-at-judge", head })),
-    )
-    const logs = records
-      .filter((record) => record.kind === "check" && trailer(record, "Name") === "submit-check")
-      .map((record) => trailer(record, "Log"))
-    expect(logs).toHaveLength(2)
-    expect(new Set(logs).size).toBe(2)
+    // The judge and the merge phase's re-run each ran the submit check once, both as phase "submit", each
+    // into its own log.
+    const judged = readJournals(dirname(outcome.log)).runs.get(journalKey("task/stale-at-judge", head))?.[0]
+    const checks = (judged?.checks ?? []).map((check) => ({ phase: check.phase, log: check.log }))
+    expect(checks.map((check) => check.phase)).toEqual(["submit", "submit"])
+    expect(new Set(checks.map((check) => check.log)).size).toBe(2)
+    expect(checks[1]?.log).toMatch(/\/recut-[0-9a-f]{12}\/submit\/[^/]+\.log$/u)
   })
 
   /** 24977 constraint 1: the re-cut is recorded, naming both heads, and nothing is amended. */
