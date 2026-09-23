@@ -1810,6 +1810,36 @@ describe("a diverged component the merge composes", () => {
     expect(readFileSync(ran, "utf8").split("\n").filter(Boolean)).toEqual([target])
   })
 
+  /**
+   * P0 after 24977 landed (merge 447, q-20260923T223516964Z-7c5234c0): a pin
+   * already behind the component main when the change is judged is composed at
+   * JUDGE, passes, and is composed again at MERGE, whose re-run of the submit
+   * checks wrote into the judge's own check-log directory in the same run. A
+   * check log is opened create-only, so the second open crashed the queue and
+   * stopped the line. Each re-run writes beside the judge's logs, never over them.
+   */
+  it("lands a change judged and re-cut in one run, the recheck's logs beside the judge's (24977 P0)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const check = { name: "submit-check", on: ["submit"], run: "true" } as const
+    const head = await submitGitlink(w, "task/stale-at-judge", pins.changeSide)
+    await gitlinkAroundQueue(w, pins.mainSide)
+
+    const outcome = await queueRun(await w.options(check))
+
+    expect(readFileSync(outcome.log, "utf8")).not.toContain("a check log already exists")
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/stale-at-judge"], stuck: [] })
+    const records = await readRecords(
+      w.git,
+      await remoteTip(w.git, changeRef("main", { branch: "task/stale-at-judge", head })),
+    )
+    const logs = records
+      .filter((record) => record.kind === "check" && trailer(record, "Name") === "submit-check")
+      .map((record) => trailer(record, "Log"))
+    expect(logs).toHaveLength(2)
+    expect(new Set(logs).size).toBe(2)
+  })
+
   /** 24977 constraint 1: the re-cut is recorded, naming both heads, and nothing is amended. */
   it("journals a recut row naming the change head, the component main merged in, and both new commits (24977)", async () => {
     const w = await world()
