@@ -183,6 +183,13 @@ async function gitlinkAroundQueue(w: World, sha: string): Promise<string> {
   return (await w.git(["rev-parse", "HEAD"])).trim()
 }
 
+/** The work clone's main, fast-forwarded to the remote main a queue round moved. */
+async function mainAfterRound(w: World): Promise<void> {
+  await w.git(["checkout", "--quiet", "main"])
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  await w.git(["merge", "--quiet", "--ff-only", "FETCH_HEAD"])
+}
+
 /** A change that touches a file and no gitlink, submitted. */
 async function submitFile(w: World, branch: string): Promise<string> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
@@ -1916,9 +1923,15 @@ describe("a diverged component the merge composes", () => {
       on: ["submit"],
       run: "! { test -f submodule/main-side.txt && test -f submodule/change-side.txt; }",
     } as const
-    await submitGitlink(w, "task/first-side", pins.mainSide)
+    // 25301: a round judges the line after its head merges, on the target that
+    // merge left. The head here is a plain file, so second-side is checked on a
+    // tree it alone moves, and passes; main then moves the gitlink around the
+    // queue, so only the next round's merge composes the two sides.
+    await submitFile(w, "task/unrelated-head")
     const head = await submitGitlink(w, "task/second-side", pins.changeSide)
-    await queueRun(await w.options(check))
+    expect(await queueRun(await w.options(check))).toMatchObject({ merged: ["task/unrelated-head"], failed: [] })
+    await mainAfterRound(w)
+    await gitlinkAroundQueue(w, pins.mainSide)
 
     const outcome = await queueRun(await w.options(check))
 
@@ -1949,10 +1962,15 @@ describe("a diverged component the merge composes", () => {
         run: "! { test -f submodule/main-side.txt && test -f submodule/change-side.txt; }",
       },
     ] as const
-    await submitGitlink(w, "task/first-side", pins.mainSide)
+    // 25301: as above, the first round merges a plain-file head and checks
+    // second-side on a tree it alone moves; main's gitlink then moves around
+    // the queue, so the second round's merge is the one that composes.
+    await submitFile(w, "task/unrelated-head")
     await submitGitlink(w, "task/second-side", pins.changeSide)
     const landing = await queueRun({ ...(await w.options()), checks })
-    expect(landing).toMatchObject({ exitCode: 0, failed: [], merged: ["task/first-side"], stuck: [] })
+    expect(landing).toMatchObject({ exitCode: 0, failed: [], merged: ["task/unrelated-head"], stuck: [] })
+    await mainAfterRound(w)
+    await gitlinkAroundQueue(w, pins.mainSide)
     rmSync(closed, { force: true })
     const stopAtMs = Date.now() + 3_600_000
 
