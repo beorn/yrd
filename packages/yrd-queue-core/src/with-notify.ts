@@ -44,7 +44,6 @@ import {
 } from "./records.ts"
 import { changeName } from "./refs.ts"
 import {
-  RECUT_CHECK,
   recordProgramStart,
   recordProgramResult,
   short,
@@ -471,6 +470,13 @@ function said(delivery: Delivery): string {
 }
 
 /** A change ended by its submitter moving on, which is not a failure of anything. */
+/**
+ * The failed ending of a re-cut that fails a submit check the change alone passed:
+ * the submitter's, uncharged. It lives here, not in run.ts, because UNCHARGED reads
+ * it at module init and run.ts -> rings.ts -> with-notify.ts is an import cycle.
+ */
+export const RECUT_CHECK = "recut-check"
+
 /**
  * Failed endings that are not the branch failing its checks again: a head the
  * submitter replaced or deleted, and a queue re-cut's check failure (24977

@@ -105,6 +105,7 @@ import { changeName, changeRef, type Change } from "./refs.ts"
 import { queueFormat } from "./events.ts"
 import { eventQueueRun } from "./event-run.ts"
 import { composed, type RingOptions } from "./rings.ts"
+import { RECUT_CHECK } from "./with-notify.ts"
 import {
   CapturedQueueObjectsUnavailable,
   readObscuredEndings,
@@ -1436,9 +1437,6 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
  * that came out. The root candidate carrying it is the re-cut's other new head.
  */
 export type Recut = Readonly<{ path: string; pin: string; main: string; composed: string }>
-
-/** The failed ending of a re-cut that fails a submit check the change alone passed: the submitter's, uncharged. */
-export const RECUT_CHECK = "recut-check"
 
 /** One `Recut` trailer: `<path> <change pin> + <component main> -> <composed>`. */
 export function recutRow(recut: Recut): string {
