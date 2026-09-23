@@ -21,9 +21,10 @@ import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
+import * as gitomic from "gitomic"
 import { openEvents } from "gitomic/events"
+import type { RefUpdate } from "gitomic"
 import { gitEnvironment } from "../src/git.ts"
-import { CapturedQueueObjectsUnavailable } from "../src/remote.ts"
 import {
   appendRecord,
   changeName,
@@ -45,7 +46,6 @@ import {
   readStatus,
   readRecords,
   refAt,
-  readRecord,
   readQueue,
   readPause,
   runCheck,
@@ -67,6 +67,7 @@ import type {
   QueueRunOutcome,
 } from "../src/index.ts"
 import { resolveGitSelection } from "../src/git.ts"
+import { ABSENT, legacyStore, recordCommit, type WriteRecord } from "../src/legacy-records.ts"
 import * as verifying from "../src/verifying.ts"
 import { appendChangeEvent, appendPublishedMerge } from "../src/events.ts"
 
@@ -78,6 +79,38 @@ if (!existsSync(gitSuperBin)) {
 }
 const CHANGES = queueRefPrefix("main")
 const PAUSE_REF = pauseRef("main")
+
+/** Intercept the real Gitomic publication seam while retaining its shell backend. */
+function beforeGitomicPublish(
+  before: (repo: string, updates: readonly RefUpdate[], remote?: string) => Promise<void>,
+  beforeFetchRefs?: (repo: string, refs: string | readonly string[], remote: string) => Promise<void>,
+): ReturnType<typeof vi.spyOn> {
+  const createBackend = gitomic.createShellBackend
+  return vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+    const backend = createBackend(options)
+    const publish = backend.publish
+    const fetchRefs = backend.fetchRefs
+    if (publish === undefined) throw new Error("Gitomic shell backend has no publish capability")
+    if (fetchRefs === undefined) throw new Error("Gitomic shell backend has no fetchRefs capability")
+    return {
+      ...backend,
+      fetchRefs: async (repo, refs, remote) => {
+        await beforeFetchRefs?.(repo, refs, remote)
+        return fetchRefs(repo, refs, remote)
+      },
+      publish: async (repo, updates, remote) => {
+        await before(repo, updates, remote)
+        return publish(repo, updates, remote)
+      },
+    }
+  })
+}
+
+/** The record kind of a just-written commit, without requiring its carried objects to be fetched yet. */
+async function recordKindOf(git: Git, oid: string): Promise<string | undefined> {
+  const message = await git(["show", "-s", "--format=%B", oid])
+  return /^Record: (.+)$/mu.exec(message)?.[1]
+}
 
 const INCIDENT_FIELDS = ["Code", "Subject", "Via", "Evidence", "Next"] as const
 
@@ -631,7 +664,7 @@ it("leases the queue tip observed before an event merge", async () => {
   const continueRun = new Promise<void>((resolve) => {
     release = resolve
   })
-  using held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
+  using _held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
     const outcome = await verify(options)
     entered()
     await continueRun
@@ -666,7 +699,7 @@ it("discards a dropped event judgement and continues the round", async () => {
   const continueRun = new Promise<void>((resolve) => {
     release = resolve
   })
-  using held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
+  using _held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
     const outcome = await verify(options)
     if (options.head === (await readStatus(store, "main", "task/a")).commit) {
       entered()
@@ -997,14 +1030,21 @@ async function trailerOn(w: World, commit: string, key: string): Promise<string>
  * at 03:33 PDT. `submit` refuses that now, so the ref is written here instead.
  */
 async function plantTargetChange(w: World, head: string): Promise<void> {
-  await appendRecord(w.git, "main", {
+  await appendRemoteRecord(w.git, "main", {
     change: { branch: "main", head },
     kind: "opened",
     subject: "unknown submitted main to main",
     trailers: [["Submitter", "unknown"]],
   })
-  const ref = changeRef("main", { branch: "main", head })
-  await w.git(["push", "--quiet", "origin", `${ref}:${ref}`])
+}
+
+async function appendRemoteRecord(git: Git, queue: string, write: WriteRecord): Promise<string> {
+  const ref = changeRef(queue, write.change)
+  const store = await legacyStore(git)
+  const tip = (await store.backend.fetchRefs(store.repo, ref, "origin")).get(ref)
+  const record = await recordCommit(git, write, tip)
+  await store.backend.publish(store.repo, [{ ref, expect: tip ?? ABSENT, oid: record }], "origin")
+  return record
 }
 
 async function fetchChanges(w: World): Promise<void> {
@@ -1198,62 +1238,25 @@ describe("a check log is written once", () => {
 })
 
 describe("a queue run", () => {
-  it("retries one typed queue read in the whole round, preserves both failures, and never retries another error", async () => {
+  it("surfaces one Gitomic queue read failure without retrying retired captured-advertisement errors", async () => {
     const w = await world()
-    const head = await submitCommit(w, "task/one", "one.txt")
+    await submitCommit(w, "task/one", "one.txt")
     const base = await w.options({ exit: 0, on: ["submit"] })
-
-    const ordinary = new Error("the object reader itself broke")
-    let ordinaryReads = 0
-    const untypedGit: Git = async (args, input) => {
-      if (args[0] === "ls-remote") {
-        ordinaryReads += 1
-        throw ordinary
-      }
-      return w.git(args, input)
-    }
-    await expect(queueRun({ ...base, git: untypedGit })).rejects.toBe(ordinary)
-    expect(ordinaryReads).toBe(1)
-
-    const firstCause = new Error("first upload-pack refusal")
-    const secondCause = new Error("post-judge upload-pack refusal")
+    const failure = new Error("Gitomic queue fetch refused")
     let queueFetches = 0
-    const fetchedTargets: boolean[] = []
-    const typedGit: Git = async (args, input) => {
-      if (args[0] === "fetch" && args.includes("--no-write-fetch-head") && args.includes("--refmap=")) {
-        queueFetches += 1
-        fetchedTargets.push(args.includes(w.target))
-        if (queueFetches === 1) throw firstCause
-        if (queueFetches === 3) throw secondCause
-      }
-      return w.git(args, input)
-    }
-
-    const error = await queueRun({ ...base, git: typedGit }).then(
-      () => undefined,
-      (cause: unknown) => cause,
+    using _reader = beforeGitomicPublish(
+      async () => {},
+      async (_repo, refs) => {
+        if (refs === CHANGES) {
+          queueFetches += 1
+          throw failure
+        }
+      },
     )
 
-    expect(error).toBeInstanceOf(AggregateError)
-    if (!(error instanceof AggregateError)) throw new Error("the second queue read unexpectedly succeeded")
-    expect(error.message).toContain(firstCause.message)
-    expect(error.message).toContain(secondCause.message)
-    expect(error.errors).toHaveLength(2)
-    const [first, second] = error.errors
-    expect(first).toBeInstanceOf(CapturedQueueObjectsUnavailable)
-    expect(second).toBeInstanceOf(CapturedQueueObjectsUnavailable)
-    expect(first).toMatchObject({ capturedTarget: w.target, cause: firstCause, detail: firstCause.message })
-    expect(second).toMatchObject({ capturedTarget: w.target, cause: secondCause, detail: secondCause.message })
-    expect(error.cause).toBe(first)
-    expect(queueFetches).toBe(3)
-    expect(fetchedTargets).toEqual([true, true, true])
+    await expect(queueRun(base)).rejects.toBe(failure)
+    expect(queueFetches).toBe(1)
     expect(await remoteTarget(w)).toBe(w.target)
-    await fetchChanges(w)
-    expect(
-      (await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)).map(
-        (record) => record.kind,
-      ),
-    ).toEqual(["opened", "checked"])
   })
 
   // The protocol fixtures below cannot prove the actual producer accepts
@@ -1599,6 +1602,7 @@ describe("a queue run", () => {
       const w = await world()
       const head = await submitCommit(w, "task/one", "one.txt")
       const ref = changeRef("main", { branch: "task/one", head })
+      const queueRepo = (await w.git(["rev-parse", "--absolute-git-dir"])).trim()
       const rivalPath = join(w.workdir, "..", "record-rival")
       await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
       const rival = gitIn(rivalPath)
@@ -1608,50 +1612,53 @@ describe("a queue run", () => {
       let concurrent: string | undefined
       let intended: string | undefined
       let raced = 0
+      using _publication = beforeGitomicPublish(async (repo, updates) => {
+        if (repo !== queueRepo) return
+        // Between the tip this run read the change at and its leased publish, a
+        // second queue appends a record of its own and publishes it first.
+        const update = updates.find((candidate) => candidate.ref === ref)
+        if (
+          raced >= refusals ||
+          update?.oid === null ||
+          update?.oid === undefined ||
+          (await recordKindOf(w.git, update.oid)) !== kind
+        ) {
+          return
+        }
+        raced += 1
+        intended = update.oid
+        await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
+        const previous = (await rival(["rev-parse", ref])).trim()
+        if (relation === "behind" || relation === "equal" || relation === "ahead") {
+          // A real second writer already has our intended record (or has
+          // appended after it), but our captured lease still names its parent.
+          await rival(["fetch", "--quiet", w.work, intended])
+          await rival(["update-ref", ref, intended])
+        }
+        concurrent =
+          relation === "ahead"
+            ? (await rival(["rev-parse", `${intended}^^`])).trim()
+            : relation === "equal"
+              ? intended
+              : await appendRecord(rival, "main", {
+                  change: { branch: "task/one", head },
+                  kind: "stuck",
+                  subject: "another queue got there first",
+                  trailers: [["Reason", "crash"]],
+                })
+        // Only the disposable fixture's remote rewinds, under its exact
+        // previous value, to exercise an external writer moving backwards.
+        await rival([
+          "push",
+          "--quiet",
+          ...(relation === "ahead" ? [`--force-with-lease=${ref}:${previous}`] : []),
+          "origin",
+          `${concurrent}:${ref}`,
+        ])
+      })
       const git: Git = async (args, input) => {
         if (relation === "unknown" && args[0] === "merge-base" && args[1] === intended && args[2] === concurrent) {
           throw new Error("diagnostic ancestry read unavailable")
-        }
-        // Between the tip this run read the change at and its leased push, a
-        // second queue appends a record of its own and pushes it first. A real
-        // writer at the real remote, not a reading of this one's argv.
-        const refspec = args.find((arg) => arg.endsWith(`:${ref}`))
-        if (
-          raced < refusals &&
-          args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`)) &&
-          refspec !== undefined &&
-          (await readRecord(w.git, refspec.slice(0, -ref.length - 1))).kind === kind
-        ) {
-          raced += 1
-          intended = refspec.slice(0, -ref.length - 1)
-          await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
-          const previous = (await rival(["rev-parse", ref])).trim()
-          if (relation === "behind" || relation === "equal" || relation === "ahead") {
-            // A real second writer already has our intended record (or has
-            // appended after it), but our captured lease still names its parent.
-            await rival(["fetch", "--quiet", w.work, intended])
-            await rival(["update-ref", ref, intended])
-          }
-          concurrent =
-            relation === "ahead"
-              ? (await rival(["rev-parse", `${intended}^^`])).trim()
-              : relation === "equal"
-                ? intended
-                : await appendRecord(rival, "main", {
-                    change: { branch: "task/one", head },
-                    kind: "stuck",
-                    subject: "another queue got there first",
-                    trailers: [["Reason", "crash"]],
-                  })
-          // Only the disposable fixture's remote rewinds, under its exact
-          // previous value, to exercise an external writer moving backwards.
-          await rival([
-            "push",
-            "--quiet",
-            ...(relation === "ahead" ? [`--force-with-lease=${ref}:${previous}`] : []),
-            "origin",
-            `${concurrent}:${ref}`,
-          ])
         }
         return w.git(args, input)
       }
@@ -1661,7 +1668,7 @@ describe("a queue run", () => {
       // The lease refused the first push, so the rival's record stands; the same
       // record was written again onto it and pushed, so neither is lost and the
       // run went on to merge.
-      expect(outcome.exitCode).toBe(0)
+      expect(outcome.exitCode, readFileSync(outcome.log, "utf8")).toBe(0)
       expect(outcome.merged).toEqual(["task/one"])
       await fetchChanges(w)
       const records = await readRecords(w.git, (await refAt(w.git, ref))!)
@@ -1726,12 +1733,11 @@ describe("a queue run", () => {
     const ref = changeRef("main", { branch: "task/one", head })
     const before = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0]
     const refused = new Error("record transport refused")
-    const git: Git = async (args, input) => {
-      if (args[0] === "push" && args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))) throw refused
-      return w.git(args, input)
-    }
+    using _publication = beforeGitomicPublish(async (_repo, updates) => {
+      if (updates.some((update) => update.ref === ref)) throw refused
+    })
 
-    await expect(queueRun({ ...(await w.options({ exit: 0, on: ["submit"] })), git })).rejects.toBe(refused)
+    await expect(queueRun(await w.options({ exit: 0, on: ["submit"] }))).rejects.toBe(refused)
     expect((await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0]).toBe(before)
     expect(await remoteTarget(w)).toBe(w.target)
   })
@@ -1929,34 +1935,26 @@ describe("a queue run", () => {
     let mergePushed = false
     const attempted: string[] = []
     const competing: string[] = []
-    const git: Git = async (args, input) => {
-      if (args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) mergePushed = true
-      const recordPush =
-        mergePushed &&
-        args[0] === "push" &&
-        !args.includes("--atomic") &&
-        args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))
-      if (recordPush) {
-        const refspec = args.find((arg) => arg.endsWith(`:${ref}`))
-        const record = refspec?.slice(0, -`:${ref}`.length)
-        if (record === undefined || record === "") throw new Error("sent push names no record")
-        attempted.push(record)
-        await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
-        const competingRecord = await appendRecord(rival, "main", {
-          change: { branch: "task/one", head },
-          kind: "stuck",
-          subject: `rival sent append ${String(competing.length + 1)}`,
-          trailers: [["Reason", "crash"]],
-        })
-        await rival(["push", "--quiet", "origin", `${competingRecord}:${ref}`])
-        competing.push(competingRecord)
-      }
-      return w.git(args, input)
-    }
+    using _publication = beforeGitomicPublish(async (_repo, updates, remote) => {
+      if (remote === undefined) return
+      if (updates.some((update) => update.ref === "refs/heads/main")) mergePushed = true
+      const update = updates.find((candidate) => candidate.ref === ref)
+      if (!mergePushed || update?.oid === null || update?.oid === undefined) return
+      if ((await recordKindOf(w.git, update.oid)) !== "sent") return
+      attempted.push(update.oid)
+      await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
+      const competingRecord = await appendRecord(rival, "main", {
+        change: { branch: "task/one", head },
+        kind: "stuck",
+        subject: `rival sent append ${String(competing.length + 1)}`,
+        trailers: [["Reason", "crash"]],
+      })
+      await rival(["push", "--quiet", "origin", `${competingRecord}:${ref}`])
+      competing.push(competingRecord)
+    })
 
     const outcome = await queueRun({
       ...(await w.options({ exit: 0 })),
-      git,
       notify: [
         { name: "first", on: ["merged"], run: w.notifier },
         { name: "second", on: ["merged"], run: w.notifier },
@@ -2214,7 +2212,7 @@ describe("a queue run", () => {
   it("a deferred result writes the record, does not stop the line, and the next change in line is judged in the same round", async () => {
     const w = await world()
     const headOne = await submitCommit(w, "task/one", "one.txt")
-    const headTwo = await submitCommit(w, "task/two", "two.txt")
+    await submitCommit(w, "task/two", "two.txt")
 
     const check = join(w.workdir, "deferred-check.sh")
     writeFileSync(
@@ -2708,7 +2706,7 @@ describe("a queue run", () => {
 
   it("two checked changes, the first fails at merge, the second is not judged in that round", async () => {
     const w = await world()
-    const headOne = await submitCommit(w, "task/one", "one.txt")
+    await submitCommit(w, "task/one", "one.txt")
     const headTwo = await submitCommit(w, "task/two", "two.txt")
 
     const check = join(w.workdir, "merge-fail-check.sh")
@@ -2897,20 +2895,19 @@ describe("a queue run", () => {
     await rival(["config", "user.name", "rival"])
 
     let moved: string | undefined
-    const git: Git = async (args, input) => {
+    using _publication = beforeGitomicPublish(async (_repo, updates, remote) => {
       // The window the lease exists for: the run has read the remote heads and
-      // is about to push, and somebody else merges onto the target in between.
-      if (moved === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
+      // is about to publish, and somebody else merges onto the target in between.
+      if (remote !== undefined && moved === undefined && updates.some((update) => update.ref === "refs/heads/main")) {
         writeFileSync(join(rivalPath, "rival.txt"), "rival\n")
         await rival(["add", "rival.txt"])
         await rival(["commit", "--quiet", "-m", "the target moved under the change"])
         await rival(["push", "--quiet", "origin", "main"])
         moved = (await rival(["rev-parse", "HEAD"])).trim()
       }
-      return w.git(args, input)
-    }
+    })
 
-    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), git })
+    const outcome = await queueRun(await w.options({ exit: 0 }))
 
     // The change keeps its place and is judged again at the new target next
     // run: nothing merged, nothing ended, and nobody was told anything.
@@ -2942,8 +2939,8 @@ describe("a queue run", () => {
 
     let expected = ""
     let moved: string | undefined
-    const git: Git = async (args, input) => {
-      if (moved === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
+    using _publication = beforeGitomicPublish(async (_repo, updates, remote) => {
+      if (remote !== undefined && moved === undefined && updates.some((update) => update.ref === "refs/heads/main")) {
         expected = (await rival(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
         await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
         moved = await appendRecord(rival, "main", {
@@ -2954,10 +2951,9 @@ describe("a queue run", () => {
         })
         await rival(["push", "--quiet", "origin", `${moved}:${ref}`])
       }
-      return w.git(args, input)
-    }
+    })
 
-    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), git })
+    const outcome = await queueRun(await w.options({ exit: 0 }))
 
     expect(moved).toBeDefined()
     expect(outcome.merged).toEqual([])
@@ -3052,28 +3048,37 @@ describe("a queue run", () => {
       const head = await submitCommit(w, "task/one", "one.txt")
       await writePause(w.git, "origin", "main", { by: "@chief", kind: "paused", reason: "initial pause" })
       const ref = changeRef("main", { branch: "task/one", head })
-      let reads = 0
+      let raceStarted = false
       let raced: PauseRecord | undefined
       let changeBefore = ""
-      const git: Git = async (args, input) => {
-        if (args[0] === "ls-remote" && args.includes(PAUSE_REF)) reads += 1
-        // Admission now comes from readQueue's broad captured advertisement;
-        // this is the first separate pause read, immediately before the fence.
-        const fence = when === "before-fence" && args[0] === "ls-remote" && args.includes(PAUSE_REF) && reads === 1
-        const push =
-          when === "before-push" && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))
-        if (raced === undefined && (fence || push)) {
-          changeBefore = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
-          await writePause(w.git, "origin", "main", { by: "operator", kind: "resumed", reason: "new decision" })
-          raced = await writePause(w.git, "origin", "main", {
-            by: "operator",
-            kind: "paused",
-            reason: "stop this round",
-          })
-        }
-        return w.git(args, input)
+      const racePause = async () => {
+        raceStarted = true
+        changeBefore = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
+        await writePause(w.git, "origin", "main", { by: "operator", kind: "resumed", reason: "new decision" })
+        raced = await writePause(w.git, "origin", "main", {
+          by: "operator",
+          kind: "paused",
+          reason: "stop this round",
+        })
       }
-      const outcome = await queueRun({ ...(await w.options({ exit: 0 })), foreground: true, git })
+      using _publication = beforeGitomicPublish(
+        async (_repo, updates, remote) => {
+          if (
+            when === "before-push" &&
+            remote !== undefined &&
+            !raceStarted &&
+            updates.some((update) => update.ref === "refs/heads/main")
+          ) {
+            await racePause()
+          }
+        },
+        async (_repo, refs) => {
+          // Admission comes from readQueue's broad capture; the exact pause
+          // fetch is the separate authority read immediately before the fence.
+          if (when === "before-fence" && !raceStarted && refs === PAUSE_REF) await racePause()
+        },
+      )
+      const outcome = await queueRun({ ...(await w.options({ exit: 0 })), foreground: true })
       expect(raced?.reason).toBe("stop this round")
       expect(outcome.merged).toEqual([])
       expect(outcome.stopped?.what).toEqual(raced)
@@ -3097,14 +3102,12 @@ describe("a queue run", () => {
 
     // One ended change has no sent record, so resend would mutate it.
     const unsent = await submitCommit(w, "task/unsent", "unsent.txt")
-    const unsentRef = changeRef("main", { branch: "task/unsent", head: unsent })
-    const failed = await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/unsent", head: unsent },
       kind: "failed",
       subject: "task/unsent failed verify",
       trailers: [["Reason", "verify"]],
     })
-    await w.git(["push", "--quiet", "origin", `${failed}:${unsentRef}`])
 
     // One admitted branch is gone, so retirement would append a failed record;
     // another remains queued, so the submit phase would judge it.
@@ -3163,8 +3166,8 @@ describe("a queue run", () => {
     let paused: PauseRecord | undefined
     let targetBeforePush = ""
     let changeBeforePush = ""
-    const git: Git = async (args, input) => {
-      if (paused === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
+    using _publication = beforeGitomicPublish(async (_repo, updates, remote) => {
+      if (remote !== undefined && paused === undefined && updates.some((update) => update.ref === "refs/heads/main")) {
         targetBeforePush = await remoteTarget(w)
         changeBeforePush = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
         paused = await writePause(rival, "origin", "main", {
@@ -3173,10 +3176,9 @@ describe("a queue run", () => {
           reason: "stop before merge",
         })
       }
-      return await w.git(args, input)
-    }
+    })
 
-    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), git })
+    const outcome = await queueRun(await w.options({ exit: 0 }))
 
     expect(paused).toBeDefined()
     expect(outcome.stopped?.what).toEqual(paused)
@@ -3201,28 +3203,25 @@ describe("a queue run", () => {
     await rival(["config", "user.email", "rival@yrd.test"])
     await rival(["config", "user.name", "rival"])
 
-    let reads = 0
     let malformed = ""
-    const git: Git = async (args, input) => {
-      if (args[0] === "ls-remote" && args.includes(PAUSE_REF)) {
-        reads += 1
-        if (reads === 1) {
-          const tree = (await rival(["mktree"], "")).trim()
-          malformed = (
-            await rival([
-              "commit-tree",
-              tree,
-              "-m",
-              "authority cannot be parsed\n\nRecord: wedged\nPaused-By: operator\n",
-            ])
-          ).trim()
-          await rival(["push", "--quiet", "origin", `${malformed}:${PAUSE_REF}`])
-        }
-      }
-      return await w.git(args, input)
-    }
+    using _authority = beforeGitomicPublish(
+      async () => undefined,
+      async (_repo, refs) => {
+        if (refs !== PAUSE_REF || malformed !== "") return
+        const tree = (await rival(["mktree"], "")).trim()
+        malformed = (
+          await rival([
+            "commit-tree",
+            tree,
+            "-m",
+            "authority cannot be parsed\n\nRecord: wedged\nPaused-By: operator\n",
+          ])
+        ).trim()
+        await rival(["push", "--quiet", "origin", `${malformed}:${PAUSE_REF}`])
+      },
+    )
 
-    await expect(queueRun({ ...(await w.options({ exit: 0 })), git })).rejects.toThrow(
+    await expect(queueRun(await w.options({ exit: 0 }))).rejects.toThrow(
       `origin ${PAUSE_REF} could not be read: origin ${PAUSE_REF} at`,
     )
 
@@ -3439,13 +3438,12 @@ describe("a queue run", () => {
     const w = await world()
     const head = await submitCommit(w, "task/unsent", "unsent.txt")
     const change = { branch: "task/unsent", head }
-    const failed = await appendRecord(w.git, "main", {
+    const failed = await appendRemoteRecord(w.git, "main", {
       change,
       kind: "failed",
       subject: "task/unsent failed verify",
       trailers: [["Reason", "verify"]],
     })
-    await w.git(["push", "--quiet", "origin", `${failed}:${changeRef("main", change)}`])
 
     const repaired = await queueRun(await w.options({ exit: 0 }))
 
@@ -3530,10 +3528,9 @@ describe("a queue run", () => {
     const ref = changeRef("main", { branch: "task/one", head })
     let concurrent: string | undefined
     let advance = true
-    const git: Git = async (args, input) => {
-      const refspec = args.find((arg) => arg.endsWith(`:${ref}`))
-      const leased = args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))
-      if (advance && leased && refspec !== undefined) {
+    using _publication = beforeGitomicPublish(async (_repo, updates, remote) => {
+      const update = updates.find((candidate) => candidate.ref === ref)
+      if (remote !== undefined && advance && update !== undefined) {
         advance = false
         await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
         concurrent = await appendRecord(rival, "main", {
@@ -3548,10 +3545,9 @@ describe("a queue run", () => {
         })
         await rival(["push", "--quiet", "origin", `${concurrent}:${ref}`])
       }
-      return w.git(args, input)
-    }
+    })
 
-    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), git })
+    const outcome = await queueRun(await w.options({ exit: 0 }))
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual([])
@@ -4006,7 +4002,7 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
     const ref = changeRef("main", { branch: "task/one", head })
     // Take the change to "checked" directly, the shape a real on-submit judge
     // leaves (this run's own checks apply only at merge, ruling A1).
-    const checkedRecord = await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/one", head },
       kind: "checked",
       subject: `task/one passed the on-submit checks at main ${w.target.slice(0, 12)}`,
@@ -4015,7 +4011,6 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
         ["Base", w.target],
       ],
     })
-    await w.git(["push", "--quiet", "origin", `${checkedRecord}:${ref}`])
 
     // The crash window itself: composed, never pushed, its worktree left
     // standing exactly as `composeCandidate`'s `prepare` would leave it.
@@ -4056,7 +4051,7 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
     const head = await submitCommit(w, "task/one", "one.txt")
     const ref = changeRef("main", { branch: "task/one", head })
     // Take the change to "checked" directly, exactly as the sibling case above.
-    const checkedRecord = await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/one", head },
       kind: "checked",
       subject: `task/one passed the on-submit checks at main ${w.target.slice(0, 12)}`,
@@ -4065,7 +4060,6 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
         ["Base", w.target],
       ],
     })
-    await w.git(["push", "--quiet", "origin", `${checkedRecord}:${ref}`])
 
     // A worktree at task/one's own naming slot, checked out cleanly, then its
     // OWN git-internal HEAD registration corrupted directly — the shape a
@@ -4107,7 +4101,7 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     const ref = changeRef("main", { branch: "task/one", head })
-    const checkedRecord = await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/one", head },
       kind: "checked",
       subject: `task/one passed the on-submit checks at main ${w.target.slice(0, 12)}`,
@@ -4116,7 +4110,6 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
         ["Base", w.target],
       ],
     })
-    await w.git(["push", "--quiet", "origin", `${checkedRecord}:${ref}`])
 
     // A commit that never goes near the queue, purely to give the "wrong"
     // merge below a real, unrelated parent of its own.
@@ -4276,8 +4269,7 @@ describe("a stuck change stops the line (the andon, operator 2026-09-16)", () =>
   it("a bookkeeping stuck stops the line too, before the first judge", async () => {
     const w = await world()
     const headOne = await submitCommit(w, "task/one", "one.txt")
-    const ref = changeRef("main", { branch: "task/one", head: headOne })
-    const checkedRecord = await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/one", head: headOne },
       kind: "checked",
       subject: `task/one passed the on-submit checks at main ${w.target.slice(0, 12)}`,
@@ -4286,7 +4278,6 @@ describe("a stuck change stops the line (the andon, operator 2026-09-16)", () =>
         ["Base", w.target],
       ],
     })
-    await w.git(["push", "--quiet", "origin", `${checkedRecord}:${ref}`])
     const orphan = await composeMergeCandidate(w, headOne, `merge task/one@${headOne.slice(0, 12)} into main`)
     await deadMergeWorktree(w, "q-dead-merge", headOne, orphan, exitedPid())
     const headTwo = await submitCommit(w, "task/two", "two.txt")

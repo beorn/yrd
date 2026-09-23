@@ -19,8 +19,16 @@
  * tip and re-checks the ending before appending again (legacy-records.ts).
  */
 
-import { refAt, type Git } from "./git.ts"
-import { endedKind, endingRecord, readRecords, recordCommit, type WriteRecord } from "./legacy-records.ts"
+import type { Git } from "./git.ts"
+import {
+  endedKind,
+  endingRecord,
+  legacyStore,
+  recordCommit,
+  recordsFromHistory,
+  type LegacyStore,
+  type WriteRecord,
+} from "./legacy-records.ts"
 import { parseChangeRef, queueRefPrefix, type Change } from "./refs.ts"
 
 export type WithdrawRequest = Readonly<{
@@ -59,16 +67,17 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
   const queue = request.target.branch
   const prefix = queueRefPrefix(queue)
   const branchRef = `refs/heads/${request.branch}`
-  const rows = (await git(["ls-remote", "--refs", remote, branchRef, `${prefix}/${request.branch}@*`]))
-    .split("\n")
-    .map((row) => row.trim())
-    .filter((row) => row !== "")
-    .map((row) => row.split(/\s+/u))
-  // Where the branch points now, read in the same listing as its changes;
-  // withdrawOne judges it after the records, so a recorded ending is reported
-  // as what it is and only an open head the branch still carries is ended.
-  const branchHead = rows.find(([, ref]) => ref === branchRef)?.[0]
-  const listed = rows.filter(([, ref]) => ref !== branchRef)
+  const store = await legacyStore(git)
+  const [remoteQueue, remoteBranch] = await Promise.all([
+    store.backend.fetchRefs(store.repo, prefix, remote),
+    store.backend.listRefs(store.repo, branchRef, remote),
+  ])
+  // Where the branch points now. withdrawOne judges it after the records, so
+  // a recorded ending is reported as what it is and only an open head the
+  // branch still carries is ended.
+  const branchHead = remoteBranch.get(branchRef)
+  const changePrefix = `${prefix}/${request.branch}@`
+  const listed = [...remoteQueue].filter(([ref]) => ref.startsWith(changePrefix))
   if (listed.length === 0) {
     throw new NothingToWithdraw(
       `no change for ${request.branch} on ${queue}: nothing to withdraw` +
@@ -77,13 +86,12 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
   }
   const withdrawn: WithdrawnChange[] = []
   const alreadyEnded: string[] = []
-  for (const [tip, ref] of listed) {
-    if (tip === undefined || ref === undefined) continue
+  for (const [ref, tip] of listed) {
     const change = parseChangeRef(queue, ref)
     if (change === undefined) {
       throw new Error(`${ref} matched ${request.branch}'s changes on ${queue} but is not a change ref`)
     }
-    const one = await withdrawOne(git, remote, queue, ref, change, branchHead, request)
+    const one = await withdrawOne(git, store, remote, queue, prefix, ref, tip, change, branchHead, request)
     if ("record" in one) withdrawn.push({ branch: change.branch, head: change.head, record: one.record })
     else alreadyEnded.push(one.ended)
   }
@@ -103,18 +111,21 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
  */
 async function withdrawOne(
   git: Git,
+  store: LegacyStore,
   remote: string,
   queue: string,
+  prefix: string,
   ref: string,
+  initialTip: string,
   change: Change,
   branchHead: string | undefined,
   request: WithdrawRequest,
 ): Promise<Readonly<{ record: string }> | Readonly<{ ended: string }>> {
-  await git(["fetch", "--quiet", remote, `+${ref}:${ref}`])
-  let onto = await refAt(git, ref)
+  let onto: string | undefined = initialTip
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (onto === undefined) throw new Error(`${ref} vanished from ${remote} between the listing and the read`)
-    const stands = endingRecord(await readRecords(git, onto))
+    const history = await store.backend.readHistory(store.repo, [onto])
+    const stands = endingRecord(await recordsFromHistory(git, history, onto))
     if (stands !== undefined) {
       return {
         ended:
@@ -146,14 +157,12 @@ async function withdrawOne(
     }
     const record = await recordCommit(git, write, onto)
     try {
-      await git(["push", "--quiet", `--force-with-lease=${ref}:${onto}`, remote, `${record}:${ref}`])
-      await git(["update-ref", ref, record])
+      await store.backend.publish(store.repo, [{ ref, expect: onto, oid: record }], remote)
       return { record }
     } catch (error) {
       // The remote moved between the read and the push: take the winner's tip
       // and judge again — it may have ended the change itself.
-      await git(["fetch", "--quiet", remote, `+${ref}:${ref}`])
-      const moved = await refAt(git, ref)
+      const moved = (await store.backend.fetchRefs(store.repo, prefix, remote)).get(ref)
       if (attempt === 1 || moved === undefined || moved === onto) throw error
       onto = moved
     }

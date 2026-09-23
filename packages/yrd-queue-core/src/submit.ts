@@ -25,8 +25,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { listRefs, openEvents } from "gitomic/events"
 import { targetName, type Target } from "./config.ts"
-import { ABSENT, appendRecord } from "./legacy-records.ts"
-import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, refAt, type Git } from "./git.ts"
+import { ABSENT, legacyStore, recordCommit } from "./legacy-records.ts"
+import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, type Git } from "./git.ts"
 import { changeRef } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
 import { readStop, remoteUrl } from "./remote.ts"
@@ -355,53 +355,36 @@ async function submitLegacy(
   const published = await publishMovedGitlinks(git, root, targetHead, head)
   const change = { branch: request.branch, head }
   const ref = changeRef(request.target.branch, change)
-  // Where the remote holds the branch and this change right now, in one
-  // reading: a retry appends to the remote's history of the change, so that
-  // history is fetched first, and the branch's lease is the remote's own value,
-  // never a tracking ref that may be stale or missing in a fresh clone.
-  // ls-remote answers "absent" as an empty list, never as an error, which is
-  // the one honest empty a submit is allowed to swallow.
-  const at = new Map(
-    (await git(["ls-remote", "--refs", remote, `refs/heads/${request.branch}`, ref]))
-      .split("\n")
-      .map((row) => row.trim().split(/\s+/u))
-      .map(([sha, name]) => [name ?? "", sha ?? ""] as const),
-  )
-  const remoteTip = at.get(ref) ?? ""
-  const remoteBranch = at.get(`refs/heads/${request.branch}`) ?? ""
-  const retry = remoteTip !== ""
-  if (retry) await git(["fetch", "--quiet", remote, `+${ref}:${ref}`])
-  // A local change ref the remote does not hold is an orphan of a refused
-  // push; submit is the only writer of these refs, so it goes.
-  else if ((await refAt(git, ref)) !== undefined) await git(["update-ref", "-d", ref])
+  const branchRef = `refs/heads/${request.branch}`
+  const store = await legacyStore(git)
+  const remoteBranch = (await store.backend.listRefs(store.repo, branchRef, remote)).get(branchRef)
+  // A prefix fetch makes absence an honest empty and brings the retry parent
+  // into Gitomic's private namespace without moving an application ref.
+  const remoteTip = (await store.backend.fetchRefs(store.repo, ref, remote)).get(ref)
+  const retry = remoteTip !== undefined
   const trailers: (readonly [string, string])[] = [["Submitter", request.submitter]]
   if (issue !== undefined) trailers.push(["Issue", issue.issue])
-  const opened = await appendRecord(git, request.target.branch, {
-    change,
-    kind: "opened",
-    subject: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
-    trailers,
-  })
-  // Two explicit leases make the push the same compare-and-swap the local
-  // append is: each ref must still be where this submitter just read it (the
-  // zero sha means "absent"), or the whole push refuses and nothing merges —
-  // and then the local change ref goes back to what the remote holds, so a
-  // refused submit leaves no opened record for the next one to chain onto.
-  try {
-    await git([
-      "push",
-      "--quiet",
-      "--atomic",
-      `--force-with-lease=refs/heads/${request.branch}:${remoteBranch === "" ? ABSENT : remoteBranch}`,
-      `--force-with-lease=${ref}:${retry ? remoteTip : ABSENT}`,
-      remote,
-      `${head}:refs/heads/${request.branch}`,
-      `${ref}:${ref}`,
-    ])
-  } catch (error) {
-    await git(retry ? ["update-ref", ref, remoteTip] : ["update-ref", "-d", ref])
-    throw error
-  }
+  const opened = await recordCommit(
+    git,
+    {
+      change,
+      kind: "opened",
+      subject: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
+      trailers,
+    },
+    remoteTip,
+  )
+  // The opened record keeps the submitted commit. Publishing the branch gives
+  // the ref its declared meaning; one Gitomic MULTI leases both names and
+  // lands both or neither without moving a local application ref.
+  await store.backend.publish(
+    store.repo,
+    [
+      { ref: branchRef, expect: remoteBranch ?? ABSENT, oid: head },
+      { ref, expect: remoteTip ?? ABSENT, oid: opened },
+    ],
+    remote,
+  )
   return {
     branch: request.branch,
     head,

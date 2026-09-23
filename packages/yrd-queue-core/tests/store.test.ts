@@ -115,6 +115,30 @@ describe("a change's records are its commits", () => {
     expect(records[1]?.trailers.filter(([name]) => name === "Check")).toHaveLength(2)
   })
 
+  // Requirement: readRecords' public input accepts the lower-exclusive Git
+  // range used to find notification receipts appended after an ending. A
+  // single-OID reader test cannot catch passing the whole range to Gitomic's
+  // OID validator or accidentally returning the excluded record.
+  it("reads a lower-exclusive legacy record range through Gitomic history inputs", async () => {
+    const { git, head } = await repository()
+    const change = { branch: "task/one", head }
+    const opened = await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    const failed = await appendRecord(git, "main", { change, kind: "failed", subject: "checks failed" })
+    const sent = await appendRecord(git, "main", {
+      change,
+      kind: "sent",
+      subject: "failure told",
+      trailers: [
+        ["For", failed],
+        ["To", "@dev/2"],
+        ["Delivery", "sent"],
+      ],
+    })
+
+    expect((await readRecords(git, `${opened}..${sent}`)).map(({ kind }) => kind)).toEqual(["failed", "sent"])
+    expect(await readRecords(git, `${sent}..${sent}`)).toEqual([])
+  })
+
   // Requirement: a root-only checked intent retains its candidate merge with
   // the records, without making that merge a first-parent record. Before this
   // case, checked records had only their prior record as a parent, so a fresh
@@ -273,7 +297,7 @@ describe("a change's records are its commits", () => {
     const readFailure = new Error("receipt ref read failed in the selected repository")
     await expect(
       readRootChanges(async (args, input) => {
-        if (args[0] === "for-each-ref") throw readFailure
+        if (args[0] === "rev-parse" && args[1] === "--absolute-git-dir") throw readFailure
         return git(args, input)
       }, merge),
     ).rejects.toBe(readFailure)
