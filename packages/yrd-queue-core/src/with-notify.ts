@@ -563,8 +563,7 @@ async function failuresOf(run: Run, entry: QueueEntry, endedRecord: string): Pro
   // Count through the written ending, regardless of concurrent local ref changes.
   const own = await readRecords(run.git, endedRecord)
   return (
-    elsewhere +
-    own.filter((record) => record.kind === "failed" && isChargedFailure(trailer(record, "Reason"))).length
+    elsewhere + own.filter((record) => record.kind === "failed" && isChargedFailure(trailer(record, "Reason"))).length
   )
 }
 

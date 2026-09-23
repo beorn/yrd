@@ -1423,7 +1423,10 @@ async function recutFailure(
     subject: `${branch} fails ${names} only where the queue composed it with ${run.options.target.branch}`,
     trailers: [
       ["Reason", RECUT_CHECK],
-      ["Detail", `semantic conflict with main: ${names} fails on the queue's re-cut (${composed}) though ${branch} passed it alone`],
+      [
+        "Detail",
+        `semantic conflict with main: ${names} fails on the queue's re-cut (${composed}) though ${branch} passed it alone`,
+      ],
       ...recuts.map((recut) => ["Recut", recutRow(recut)] as const),
       ...checkTrailers(results),
     ],

@@ -14,9 +14,7 @@ describe("messageFor deferred timing relation", () => {
       projectedMs: 58 * 60_000,
       boundMs: 30 * 60_000,
     })
-    expect(msg).toBe(
-      "waits for long check: task/25029-fix@abcdef123456 (projected 58m > 30m)",
-    )
+    expect(msg).toBe("waits for long check: task/25029-fix@abcdef123456 (projected 58m > 30m)")
   })
 
   it("formats < when projected duration is less than bound", () => {
@@ -25,9 +23,7 @@ describe("messageFor deferred timing relation", () => {
       projectedMs: 17 * 60_000,
       boundMs: 30 * 60_000,
     })
-    expect(msg).toBe(
-      "waits for long check: task/25029-fix@abcdef123456 (projected 17m < 30m)",
-    )
+    expect(msg).toBe("waits for long check: task/25029-fix@abcdef123456 (projected 17m < 30m)")
   })
 
   it("formats = when projected duration equals bound", () => {
@@ -36,9 +32,7 @@ describe("messageFor deferred timing relation", () => {
       projectedMs: 30 * 60_000,
       boundMs: 30 * 60_000,
     })
-    expect(msg).toBe(
-      "waits for long check: task/25029-fix@abcdef123456 (projected 30m = 30m)",
-    )
+    expect(msg).toBe("waits for long check: task/25029-fix@abcdef123456 (projected 30m = 30m)")
   })
 
   it("falls back to projection exceeded bound when timing is undefined", () => {
@@ -47,9 +41,7 @@ describe("messageFor deferred timing relation", () => {
       projectedMs: undefined,
       boundMs: undefined,
     })
-    expect(msg).toBe(
-      "waits for long check: task/25029-fix@abcdef123456 (projection exceeded bound)",
-    )
+    expect(msg).toBe("waits for long check: task/25029-fix@abcdef123456 (projection exceeded bound)")
   })
 })
 
@@ -59,7 +51,9 @@ describe("messageFor names a queue re-cut (24977)", () => {
     head: "abcdef1234567890abcdef1234567890abcdef12",
     subject: "task/24977-recut merged into main as 0123456789ab",
     merge: "0123456789abcdef0123456789abcdef01234567",
-    recuts: ["ag 1111111111111111111111111111111111111111 + 2222222222222222222222222222222222222222 -> 3333333333333333333333333333333333333333"],
+    recuts: [
+      "ag 1111111111111111111111111111111111111111 + 2222222222222222222222222222222222222222 -> 3333333333333333333333333333333333333333",
+    ],
   }
 
   it("says the merged change was re-cut, naming the change's pin, the main merged in, and the composed commit", () => {
