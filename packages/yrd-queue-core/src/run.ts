@@ -1213,6 +1213,11 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
       return await writeDeferredRecord(run, entry, "submit", deferredOne, results)
     }
     const failing = results.filter((result) => result.result === "fail")
+    // 24977 (@cto c6c014ba): a candidate the queue composed is not the
+    // submitter's head, first judged or not, so its failure is the re-cut's.
+    if (failing.length > 0 && composed.recuts.length > 0) {
+      return await recutFailure(run, entry, results, failing, composed.recuts, composed.mergeCommit)
+    }
     if (failing.length > 0) {
       return await attributedFailure(run, entry, results, failing, "submit", composed.rootChanges?.changes ?? [])
     }
@@ -1401,10 +1406,11 @@ export function shortRecut(row: string): string {
 }
 
 /**
- * The queue's re-cut fails a submit check the change passed on its own: the
- * change and the component main it was composed with disagree. That is a
- * semantic conflict with main, the submitter's to resolve, but the attempt was
- * the queue's, so it is not charged (@cto 0a3e3838, Q3) and the line goes on.
+ * A submit check fails on a candidate the queue composed: the change and the
+ * component main it was composed with disagree. That is a semantic conflict
+ * with main, the submitter's to resolve, but the candidate was the queue's,
+ * not the submitter's head, so it is not charged (constraint 4) and the line
+ * goes on -- at judge and at merge alike (@cto 0a3e3838 Q3, c6c014ba).
  */
 async function recutFailure(
   run: Run,
@@ -1412,8 +1418,9 @@ async function recutFailure(
   results: readonly CheckResult[],
   failing: readonly CheckResult[],
   recuts: readonly Recut[],
+  candidate: string,
 ): Promise<Ended> {
-  const { branch } = entry.change
+  const { branch, head } = entry.change
   const names = failing.map((result) => result.name).join(", ")
   const composed = recuts.map((recut) => `${recut.path} with main ${recut.main.slice(0, 12)}`).join(", ")
   return run.steps.end(run, entry, "failed", {
@@ -1425,7 +1432,8 @@ async function recutFailure(
       ["Reason", RECUT_CHECK],
       [
         "Detail",
-        `semantic conflict with main: ${names} fails on the queue's re-cut (${composed}) though ${branch} passed it alone`,
+        `semantic conflict with main: ${names} fails on the queue's re-cut ${candidate.slice(0, 12)} of ` +
+          `${short(branch, head)} (${recuts.map((recut) => shortRecut(recutRow(recut))).join("; ")})`,
       ],
       ...recuts.map((recut) => ["Recut", recutRow(recut)] as const),
       ...checkTrailers(results),
@@ -2088,7 +2096,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     const recutFailing = recheck.filter((result) => result.result === "fail")
     if (recutFailing.length > 0) {
       retained = worktree.path
-      return await recutFailure(run, entry, recheck, recutFailing, recuts)
+      return await recutFailure(run, entry, recheck, recutFailing, recuts, mergeCommit)
     }
     const phaseResults = recheck.every((result) => result.result === "pass")
       ? await runPhase(run, entry, "merge", worktree.path, merged)

@@ -1854,12 +1854,11 @@ describe("a diverged component the merge composes", () => {
    */
   /**
    * The same re-cut met at JUDGE: the component main moved before the change
-   * was ever judged, so its first candidate is already composed and the head
-   * alone was never checked. Nothing proves the failure is the re-cut's rather
-   * than the change's, so it stays the ordinary check failure it was before
-   * 24977 -- and, measured, it does not stop the line.
+   * was ever judged, so its first candidate is already composed. That
+   * candidate is the queue's, not the submitter's head, so its failure is the
+   * re-cut's too, uncharged (@cto c6c014ba), and the line goes on.
    */
-  it("fails a change whose first, already-composed candidate fails a submit check, without stopping the line (24977)", async () => {
+  it("bounces a change whose first, already-composed candidate fails a submit check as recut-check (24977)", async () => {
     const w = await world()
     const pins = await divergentSubmoduleCommits(w)
     const check = {
@@ -1875,7 +1874,10 @@ describe("a diverged component the merge composes", () => {
     const failed = (
       await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/walled-recut", head })))
     ).find((record) => record.kind === "failed")
-    expect(trailer(failed!, "Reason")).toBe("submodule-check")
+    expect(trailer(failed!, "Reason")).toBe("recut-check")
+    // Both heads named: the change's, and the queue's re-cut of it.
+    expect(trailer(failed!, "Detail")).toContain(`task/walled-recut@${head.slice(0, 12)}`)
+    expect(trailer(failed!, "Recut")).toContain(`submodule ${pins.changeSide} + ${pins.mainSide} -> `)
   })
 
   it("bounces a recut whose re-run check fails while the head alone passes, without stopping the line (24977)", async () => {
