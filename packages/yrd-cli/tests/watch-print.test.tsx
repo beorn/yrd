@@ -371,5 +371,26 @@ describe("the flow page: four bands, one row per change", () => {
     expect(occurrences).toHaveLength(1)
     expect(occurrences[0]).toContain("waiting")
   })
+
+  it("the top line says how many changes wait, what runs now and when the last merge landed (24196)", async () => {
+    const ago = (minutes: number): Date => new Date(READ_AT.getTime() - minutes * 60_000)
+    const rows = [
+      change({
+        branch: "task/live",
+        head: "9".repeat(40),
+        live: { check: "test", phase: "merge", run: "q-1", since: ago(2) },
+        position: 1,
+        since: ago(15),
+      }),
+      change({ branch: "task/next", head: "1".repeat(40), position: 2, since: ago(10) }),
+      change({ at: ago(5), branch: "task/merged", endedAt: ago(5), head: "4".repeat(40), state: "merged" }),
+    ]
+    const text = await paint(flowSnapshot({ rows: rows.map((r) => ({ row: r })) }), 160)
+    const queueLine = text.split("\n").find((l) => l.includes("waiting"))
+    expect(queueLine).toBeDefined()
+    expect(queueLine).toContain("1 waiting")
+    expect(queueLine).toContain("checking task/live for 2:00")
+    expect(queueLine).toMatch(/last merge \d\d:\d\d \(task\/merged\)/)
+  })
 })
 
