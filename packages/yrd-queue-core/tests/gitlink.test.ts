@@ -416,6 +416,24 @@ describe("settling gitlinks", () => {
     await expect(submitGitlink(w, "task/carrier-format-fail", formatFailSha)).rejects.toThrow(
       /check.*README\.md \(346ms\): Format issues found/u,
     )
+
+    // After fixing the format script, submit succeeds
+    writeFileSync(
+      join(submoduleWork, "package.json"),
+      JSON.stringify({
+        name: "submodule",
+        scripts: {
+          check: "bun run format",
+          format: "echo 'format ok'",
+        },
+      }),
+    )
+    await submodule(["add", "package.json"])
+    await submodule(["commit", "--quiet", "-m", "fix format script"])
+    await submodule(["push", "--quiet", "origin", "main"])
+    const formatPassSha = (await submodule(["rev-parse", "HEAD"])).trim()
+
+    await expect(submitGitlink(w, "task/carrier-format-pass", formatPassSha)).resolves.toMatch(/^[0-9a-f]{40}$/u)
   })
 
   it("a pin that is an ancestor of refs/heads/main submits silently", async () => {
