@@ -299,10 +299,10 @@ describe("the flow page: four bands, one row per change", () => {
   it("draws drafts, waiting, the runner and done in that order, with each change on one row", async () => {
     const text = await paint(flowSnapshot())
     const lines = table(text)
-    const drafts = lines.findIndex((line) => line.includes("not submitted"))
-    const waiting = lines.findIndex((line) => line.includes("the bottom row goes next"))
+    const drafts = lines.findIndex((line) => line.includes("task/draft"))
+    const waiting = lines.findIndex((line) => line.includes("task/late"))
     const runner = lines.findIndex((line) => line.includes("RUNNER"))
-    const done = lines.findIndex((line) => line.includes("done, newest first"))
+    const done = lines.findIndex((line) => line.includes("task/merged"))
 
     expect(drafts, text).toBeGreaterThanOrEqual(0)
     expect(waiting, text).toBeGreaterThan(drafts)
@@ -339,7 +339,37 @@ describe("the flow page: four bands, one row per change", () => {
     expect(runner, text).toBeDefined()
     expect(runner).toContain("?")
     expect(text).toContain("╭─ RUNNER")
-    // The RUN column is gone from every row.
-    expect(lines.find((line) => line.includes("TASK"))).toContain("QUEUE / RUN")
+    const header = lines.find((line) => line.includes("TASK"))
+    expect(header).toContain("QUEUE")
+    expect(header).toContain("RUN")
+    expect(header).not.toContain("QUEUE / RUN")
+  })
+
+  it("ListingPage at 160 columns names the drafts count once (in QueueLine, drafts band rule is bare)", async () => {
+    const text = await paint(
+      flowSnapshot({
+        drafts: { unread: 1, window: "7d" },
+        rows: [
+          ...watchRows(
+            [
+              ...flowRows(),
+              change({
+                at: new Date(READ_AT.getTime() - 60_000),
+                author: "bob",
+                branch: "task/draft2",
+                head: "7".repeat(40),
+                state: "draft",
+              }),
+            ],
+            { journals: flowJournals() },
+          ),
+        ],
+      }),
+      160,
+    )
+    const occurrences = text.split("\n").filter((l) => l.includes("drafts (7d)"))
+    expect(occurrences).toHaveLength(1)
+    expect(occurrences[0]).toContain("waiting")
   })
 })
+
