@@ -9,6 +9,7 @@ import { listRefs, openEvents } from "gitomic/events"
 import { createMemBackend } from "gitomic/mem"
 import { Conflict, open } from "gitomic"
 import type { GitomicBackend } from "gitomic"
+import { gitIn } from "../src/git.ts"
 import {
   CHANGE_EVENT_TYPES,
   appendChangeEvent,
@@ -58,7 +59,7 @@ function remoteMemStore(repo: string) {
   const store = { repo, backend: proxy }
   return {
     store,
-    location: { ...store, remote: "origin" },
+    location: { ...store, remote: "origin", selection: gitIn(repo).selection },
     beforeNextPublish: (hook: () => Promise<void>) => (beforePublish = hook),
   }
 }

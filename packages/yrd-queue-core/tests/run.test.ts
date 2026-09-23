@@ -31,6 +31,7 @@ import {
   changeRef,
   checkLogPath,
   createEventQueue,
+  createEventStore,
   changeInput,
   changesRef,
   drop,
@@ -272,7 +273,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
 async function createWorldEventQueue(w: World, commit = w.target, at = new Date()): Promise<string> {
   const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
   if (config === undefined) throw new Error(`fixture target ${commit} lost .yrd.yml`)
-  return createEventQueue({ repo: w.work, remote: "origin" }, "main", commit, config, at)
+  return createEventQueue(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", commit, config, at)
 }
 
 /** Wait for the check to say it has begun, so a mid-check case never rests on a fixed delay. */
@@ -337,7 +338,7 @@ it("runs a check-free event change through one atomic merge", async () => {
   const outcome = await queueRun(options)
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-run"] })
-  const state = await readStatus({ repo: w.work, remote: "origin" }, "main", "task/event-run")
+  const state = await readStatus(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", "task/event-run")
   expect(state).toMatchObject({ status: "merged", commit: head })
   expect(state.candidate).toBe(await remoteTarget(w))
   expect(state.candidate).not.toBe(head)
@@ -350,7 +351,7 @@ it("runs a check-free event change through one atomic merge", async () => {
  */
 it("ends a deleted event branch with its last commit kept, then continues the line", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   const deleted = await submitCommit(w, "task/deleted-event", "deleted.txt")
   await submitCommit(w, "task/after-deleted", "after.txt")
@@ -380,7 +381,7 @@ it("ends a deleted event branch with its last commit kept, then continues the li
  */
 it("stops an event queue at a stuck change", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
@@ -411,7 +412,7 @@ it("stops an event queue at a stuck change", async () => {
  */
 it("retries a stuck event change after an operator resumes the queue", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/stuck-first", "one.txt")
   await submitCommit(w, "task/behind", "two.txt")
@@ -439,7 +440,7 @@ it("retries a stuck event change after an operator resumes the queue", async () 
  */
 it("reverifies an unfinished event phase in a later round", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   const head = await submitCommit(w, "task/reverify", "one.txt")
   const queued = await readStatus(store, "main", "task/reverify")
@@ -461,7 +462,7 @@ it("reverifies an unfinished event phase in a later round", async () => {
  */
 it("runs a configured event change's default merge check before merging", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/configured-event", "one.txt")
 
@@ -537,7 +538,7 @@ it.each([
 
 it("refuses an undeclared deferred event result instead of leaving a successful outcome", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/deferred-event", "one.txt")
   const base = await w.options({ exit: 0 })
@@ -564,7 +565,7 @@ it("refuses an undeclared deferred event result instead of leaving a successful 
  */
 it("ends a failed configured event check and continues with the next change", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
@@ -582,7 +583,7 @@ it("ends a failed configured event check and continues with the next change", as
  */
 it("ends a queue-owned configured event check stuck and holds the next change", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
@@ -600,7 +601,7 @@ it("ends a queue-owned configured event check stuck and holds the next change", 
  */
 it("discards a dropped event check once and continues with the next change", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
@@ -620,7 +621,7 @@ it("discards a dropped event check once and continues with the next change", asy
  */
 it("discards a resubmitted event check once and continues with the next change", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   const first = await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
@@ -652,7 +653,7 @@ it("discards a resubmitted event check once and continues with the next change",
  */
 it("leases the queue tip observed before an event merge", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/paused-event", "one.txt")
   const verify = verifying.verifyCandidate
@@ -686,7 +687,7 @@ it("leases the queue tip observed before an event merge", async () => {
  */
 it("discards a dropped event judgement and continues the round", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
@@ -724,7 +725,7 @@ it("discards a dropped event judgement and continues the round", async () => {
  */
 it("refuses a component-bearing event change until pin publication is implemented", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   const child = join(w.workdir, "child")
   await w.git(["init", "--quiet", "--initial-branch=main", child])
   const childGit = gitIn(child)
@@ -775,7 +776,7 @@ it("refuses a component-bearing event change until pin publication is implemente
  */
 it("reports a direct merge after the declaration and still merges the queued change", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   const direct = await pushAroundQueue(w, "direct.txt")
   const secondDirect = await editDeclarationAroundQueue(w, "# edited around the queue\n{}\n")
@@ -818,7 +819,7 @@ it("reports a direct-only commit again under the same sha until a queue merge la
  */
 it("accounts for its earlier merged event when scanning a later round", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/first", "one.txt")
   const first = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
@@ -840,7 +841,7 @@ it("accounts for its earlier merged event when scanning a later round", async ()
  */
 it("uses an existing observed merged event as the direct boundary", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   const head = await submitCommit(w, "task/observed-direct", "one.txt")
   await w.git(["checkout", "--quiet", "main"])
@@ -882,7 +883,7 @@ it("uses an existing observed merged event as the direct boundary", async () => 
  */
 it("observes a submitted head on the target, then uses its merged event as the direct boundary", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   const head = await submitCommit(w, "task/observed-by-run", "observed.txt")
   await w.git(["checkout", "--quiet", "main"])
@@ -902,7 +903,7 @@ it("observes a submitted head on the target, then uses its merged event as the d
 
 it("keeps the direct merge commit when an observed submitted head landed by no-ff merge", async () => {
   const w = await world()
-  const store = { repo: w.work, remote: "origin" }
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/observed-no-ff", "observed-no-ff.txt")
   await w.git(["checkout", "--quiet", "main"])

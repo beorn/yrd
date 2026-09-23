@@ -39,7 +39,7 @@
 import { hyperlink } from "@silvery/ansi"
 import { Box, MarkdownView, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
 import type { ChangeRecord, CheckView, JournalRun, Row } from "@yrd/queue-core"
-import type { Event } from "gitomic/events"
+import type { Event } from "@yrd/queue-core"
 import {
   diffSummary,
   eventHistoryEntries,

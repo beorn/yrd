@@ -14,7 +14,7 @@ import {
 import { eventRows } from "./event-table.ts"
 import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
-import { listRefs } from "gitomic/events"
+import { createEventStore, selectionFor, listRefs } from "./git.ts"
 import { checkLogPath, runCheck, type CheckResult } from "./check.ts"
 import { queueName } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
@@ -44,7 +44,11 @@ export async function eventQueueRun(
   }>,
 ): Promise<QueueRunOutcome> {
   assertPlainEventQueueRun(options, options)
-  const store = { repo: options.repo, remote: options.target.remote }
+  const store = createEventStore(
+    options.repo,
+    options.target.remote,
+    options.selection ?? selectionFor(prepared.selected),
+  )
   const queue = options.target.branch
   const { git, gitOptions, hooksPath, log, selected, url } = prepared
 

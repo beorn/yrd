@@ -29,7 +29,7 @@ import {
   type ChangeRecord,
 } from "./legacy-records.ts"
 import { offTheTarget, type Git } from "./git.ts"
-import type { CommitMeta } from "gitomic"
+import type { CommitMeta } from "./git.ts"
 import { lineStop, pauseFromMeta, readPause, type PauseRecord } from "./pause.ts"
 import { changeName, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
 import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"

@@ -38,7 +38,7 @@
  * racing on one change lose loudly instead of interleaving.
  */
 
-import type { CommitMeta, GitomicBackend } from "gitomic"
+import type { CommitMeta, GitomicBackend } from "./git.ts"
 import { createLegacyBackend, executableFor, type Git } from "./git.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
 

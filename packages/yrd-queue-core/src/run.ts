@@ -80,6 +80,8 @@ import {
 import { queueName, readConfig, type Target } from "./config.ts"
 import {
   GitExit,
+  createEventStore,
+  selectionFor,
   gitIn,
   isAncestor,
   type Git,
@@ -486,7 +488,12 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     )
   }
   const url = await remoteUrl(git, options.target.remote)
-  if ((await queueFormat({ repo: options.repo, remote: options.target.remote }, options.target.branch)) === "event") {
+  if (
+    (await queueFormat(
+      createEventStore(options.repo, options.target.remote, options.selection ?? selectionFor(selected)),
+      options.target.branch,
+    )) === "event"
+  ) {
     return await eventQueueRun(options, { git, gitOptions, hooksPath, log, selected, url })
   }
   const targetSha = options.targetSha

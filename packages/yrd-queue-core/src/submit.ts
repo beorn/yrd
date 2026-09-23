@@ -23,7 +23,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { listRefs, openEvents } from "gitomic/events"
+import { createEventStore, selectionFor, listRefs, openEvents } from "./git.ts"
 import { targetName, type Target } from "./config.ts"
 import { ABSENT, legacyStore, recordCommit } from "./legacy-records.ts"
 import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, type Git } from "./git.ts"
@@ -228,7 +228,7 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
   // repository composition starts; every other refusal below still carries
   // this captured stop.
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-  const store = { repo: root, remote }
+  const store = createEventStore(root, remote, selectionFor(git))
   const stop =
     (await queueFormat(store, request.target.branch)) === "event"
       ? eventPause(await readEventQueue(store, request.target.branch))
@@ -271,7 +271,7 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   const inspected = await inspectSubmit(git, remote, request)
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-  if ((await queueFormat({ repo: root, remote }, request.target.branch)) === "event") {
+  if ((await queueFormat(createEventStore(root, remote, selectionFor(git)), request.target.branch)) === "event") {
     return submitEvent(git, remote, request, root, inspected)
   }
   return submitLegacy(git, remote, request, inspected)
@@ -286,7 +286,7 @@ async function submitEvent(
 ): Promise<Submitted> {
   const head = inspected.head
   const published = await publishMovedGitlinks(git, root, inspected.targetHead, head)
-  const store = { repo: root, remote }
+  const store = createEventStore(root, remote, selectionFor(git))
   const queue = await readEventQueue(store, request.target.branch)
   const ref = changesRef(request.target.branch, request.branch)
   const branchRef = `refs/heads/${request.branch}`

@@ -8,6 +8,19 @@ import { gitIn } from "../src/git.ts"
 import * as gitRunner from "../src/git.ts"
 import { openLog, readRunLog } from "../src/log.ts"
 
+it("requires a Git runner's fixed selection before opening Gitomic", () => {
+  const selected = {
+    executable: "/tmp/yrd-selected-git",
+    contract: "native" as const,
+    scope: "local" as const,
+    origin: "fixture",
+  }
+  const runner = gitIn("/tmp", undefined, selected)
+  expect(gitRunner.selectionFor(runner)).toBe(selected)
+  expect(gitRunner.executableFor(runner)).toBe(selected.executable)
+  expect(() => gitRunner.selectionFor(async () => "")).toThrow(/needs a Yrd Git runner with a resolved selection/u)
+})
+
 function temporaryRoot(name: string): string {
   return mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), `yrd-git-runner-${name}-`))
 }

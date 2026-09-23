@@ -53,6 +53,7 @@ export {
   readStatus,
   writeQueueEvent,
 } from "./events.ts"
+export type { Event } from "./git.ts"
 export type {
   CancellationReason,
   ChangeEventType,
@@ -83,7 +84,11 @@ export { holdsPlaceInLine, inLine, nextOwner, readChange, tipOf } from "./state.
 export type { NextOwner } from "./state.ts"
 export {
   configValue,
+  createEventStore,
+  executableFor,
+  selectionFor,
   gitIn,
+  listRefs,
   readRemoteCommit,
   refAt,
   resolveGitSelection,

@@ -32,7 +32,7 @@ import {
   standsEnded,
   type ChangeRecord,
 } from "./legacy-records.ts"
-import type { CommitMeta } from "gitomic"
+import type { CommitMeta } from "./git.ts"
 import type { Git } from "./git.ts"
 
 import { changeName, parseChangeName, pauseRef, type Change } from "./refs.ts"

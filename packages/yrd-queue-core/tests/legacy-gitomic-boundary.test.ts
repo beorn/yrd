@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { readFileSync, readdirSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 
 const REF_COMMAND = /\[\s*"(ls-remote|for-each-ref|update-ref|fetch|push)"/gu
@@ -32,13 +32,22 @@ describe("the legacy Gitomic boundary", () => {
     expect(run).toContain('["push", "--recurse-submodules=only", target.remote')
   })
 
-  it("constructs every production Gitomic shell backend in git.ts", () => {
-    const owners = ["git.ts", "legacy-records.ts", "pause.ts", "remote.ts", "submit.ts", "withdraw.ts"].filter((name) =>
-      source(name).includes("createShellBackend("),
-    )
-    expect(owners).toEqual(["git.ts"])
-    expect(source("git.ts")).toContain("const backend = createLegacyBackend()")
-    expect(source("legacy-records.ts")).toContain("backend: GitomicBackend = createLegacyBackend()")
+  it("imports Gitomic only through the configured git seam", () => {
+    const modules = ["yrd-queue-core", "yrd-cli"].flatMap((name) => {
+      const directory = new URL(`../../${name}/src/`, import.meta.url)
+      return readdirSync(directory, { recursive: true })
+        .filter((path) => /\.[cm]?[jt]sx?$/u.test(String(path)))
+        .map((path) => ({
+          path: `${name}/${String(path)}`,
+          text: readFileSync(new URL(String(path), directory), "utf8"),
+        }))
+    })
+    const imports = modules
+      .filter(({ text }) => /(?:from|import\s*\()\s*["']gitomic(?:\/[^"']*)?["']/u.test(text))
+      .map(({ path }) => path)
+    expect(imports).toEqual(["yrd-queue-core/git.ts"])
+    expect(source("git.ts").match(/createShellBackend\(/gu)).toHaveLength(1)
+    expect(source("git.ts")).toContain("backend: createLegacyBackend(selection.executable)")
   })
 
   it("selects Yrd's scrubbed environment and five-minute bound for both production paths", () => {
@@ -46,7 +55,8 @@ describe("the legacy Gitomic boundary", () => {
     expect(git).toContain("const GIT_ROOT_INVOCATION_MS = 5 * 60_000")
     expect(git).toContain("baseEnv: gitEnvironment(globalThis.process.env)")
     expect(git).toContain("remoteTimeoutMs: GIT_ROOT_INVOCATION_MS")
-    expect(git).toContain("const backend = createLegacyBackend()")
-    expect(source("legacy-records.ts")).toContain("backend: GitomicBackend = createLegacyBackend()")
+    expect(git).toContain("gitExecutable,")
+    expect(source("legacy-records.ts")).toContain("createLegacyBackend(executableFor(git))")
+    expect(source("events.ts")).toContain("backend: GitomicBackend")
   })
 })

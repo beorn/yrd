@@ -20,6 +20,9 @@ import { accessSync, constants, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createShellBackend, type GitomicBackend } from "gitomic"
+export { chainsUnder, listRefs, openEvents } from "gitomic/events"
+export type { AlsoRef, Event, EventInput } from "gitomic/events"
+export type { CommitMeta, GitomicBackend, Oid } from "gitomic"
 import type { QueueObservation } from "./remote.ts"
 
 /** One git invocation, returning its stdout; `input` is its stdin. Throws on a non-zero exit. */
@@ -86,6 +89,7 @@ export type GitInvocationOptions = Readonly<{
 
 export type GitRunner = Git &
   Readonly<{
+    selection: GitSelection
     /** Bounded evidence for the latest settled call, including successful stderr.
      * Run owners use onInvocation to retain every call in their existing log. */
     lastInvocation: GitInvocation | undefined
@@ -223,6 +227,12 @@ export function gitIn(
   selection?: GitSelection,
   options: GitInvocationOptions = {},
 ): GitRunner {
+  const selected: GitSelection = selection ?? {
+    executable: "git",
+    contract: "native",
+    scope: "default",
+    origin: "native git",
+  }
   const env = options.env === undefined ? undefined : gitEnvironment(options.env)
   const runner = process ?? createProcess({ cwd, env: env ?? gitEnvironment(globalThis.process.env) })
   let lastInvocation: GitInvocation | undefined
@@ -271,6 +281,7 @@ export function gitIn(
     return result.stdout
   }
   return Object.defineProperties(git, {
+    selection: { value: selected },
     lastInvocation: { get: () => lastInvocation },
     observe: {
       value: async (input: GitObservationInput): Promise<GitObservation> => {
@@ -612,9 +623,20 @@ export function createLegacyBackend(gitExecutable = "git"): GitomicBackend {
   })
 }
 
+/** The configured event store; every event opener receives this backend. */
+export function createEventStore(repo: string, remote: string, selection: GitSelection) {
+  return { repo, remote, selection, backend: createLegacyBackend(selection.executable) }
+}
+
 /** Use the executable that handled this runner's immediately preceding call. */
+export function selectionFor(git: Git): GitSelection {
+  const selection = (git as Partial<GitRunner>).selection
+  if (selection === undefined) throw new TypeError("Gitomic needs a Yrd Git runner with a resolved selection")
+  return selection
+}
+
 export function executableFor(git: Git): string {
-  return (git as Partial<GitRunner>).lastInvocation?.selection?.executable ?? "git"
+  return selectionFor(git).executable
 }
 
 export class GitExit extends Error {
