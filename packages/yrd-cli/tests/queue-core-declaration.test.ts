@@ -691,6 +691,48 @@ describe("a queue is the selected origin branch carrying config", () => {
     await expect(readQueue(git, "origin", "release/1.x", advanced)).rejects.toThrow(malformedRef)
   })
 
+  // 25296: the verb end to end, against the FETCHED target's declaration.
+  it("queue override sets, lists, refuses an unknown check and clears, touching only the override ref", async () => {
+    const repo = await world('checks:\n  - verify: {run: "true", on: [merge]}\n  - lint: {run: "true", on: [submit]}\n')
+    const yrd = async (...args: string[]) => {
+      const run = capture(repo)
+      const code = await runYrdProcess(["bun", "yrd", "queue", "override", "--queue", "main", ...args], run.io)
+      return { code, stderr: run.stderr(), stdout: run.stdout() }
+    }
+    const refs = async (): Promise<string> =>
+      (await gitIn(join(dirname(repo), "remote.git"))(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).trim()
+
+    const unknown = await yrd("--check", "nope", "--off", "--until", "23:59", "--reason", "x")
+    expect(unknown.code).toBe(1)
+    expect(unknown.stderr).toContain("no merge check named 'nope' is declared; the declared merge checks are: verify")
+    // A submit-only check is not a merge check, so it cannot be held off at merge.
+    expect((await yrd("--check", "lint", "--off", "--until", "23:59", "--reason", "x")).stderr).toContain(
+      "the declared merge checks are: verify",
+    )
+    expect((await yrd("--check", "verify", "--off", "--reason", "x")).stderr).toContain("needs --until <time>")
+    expect(await refs()).toBe("")
+
+    const until = new Date(Date.now() + 3_600_000).toISOString()
+    const set = await yrd("--check", "verify", "--off", "--until", until, "--reason", "flaky gate", "--json")
+    expect(set.code, set.stderr).toBe(0)
+    expect(JSON.parse(set.stdout)).toMatchObject({
+      kind: "set",
+      overrides: [{ check: "verify", reason: "flaky gate", state: "active", until, verified: false }],
+    })
+    expect(await refs()).toBe("refs/yrd/main/override")
+
+    const listed = await yrd("--list")
+    expect(listed.code).toBe(0)
+    expect(listed.stdout).toContain(`verify OFF until ${until}`)
+
+    const cleared = await yrd("--check", "verify", "--clear", "--reason", "gate fixed", "--json")
+    expect(cleared.code, cleared.stderr).toBe(0)
+    expect(JSON.parse(cleared.stdout)).toMatchObject({ kind: "clear", overrides: [] })
+    const again = await yrd("--check", "verify", "--clear", "--reason", "twice")
+    expect(again.code).toBe(1)
+    expect(again.stderr).toContain("no override stands on 'verify' to clear")
+  })
+
   it("requires pause --reason before any pause ref changes", async () => {
     const repo = await world("{}\n")
     const run = capture(repo)
