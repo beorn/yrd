@@ -1156,6 +1156,9 @@ describe("yrd queue list, the table", () => {
       submitter: "@dev/3",
       target: { branch: "main", remote: "origin" },
     })
+    // Submit publishes remotely without moving an application ref here. This
+    // fixture appends local legacy records, so seed their parent explicitly.
+    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
     const evidence = join(w.workdir, "incident", "q-lossless.jsonl")
     mkdirSync(join(w.workdir, "incident"), { recursive: true })
     writeFileSync(evidence, '{"kind":"change","decision":"stuck"}\n')
@@ -1302,6 +1305,7 @@ describe("yrd queue show, one change's evidence", () => {
       submitter: "@dev/3",
       target: { branch: "main", remote: "origin" },
     })
+    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
     await appendRecord(w.git, "main", {
       change,
       kind: "stuck",
@@ -1388,6 +1392,7 @@ describe("yrd queue show, one change's evidence", () => {
       submitter: "@dev/3",
       target: { branch: "main", remote: "origin" },
     })
+    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
     await appendRecord(w.git, "main", {
       change,
       kind: "checked",
@@ -1477,6 +1482,7 @@ describe("yrd queue show, one change's evidence", () => {
       submitter: "@dev/3",
       target: { branch: "main", remote: "origin" },
     })
+    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
     // A repeated name on one record: a run writes one `Check` per result, so
     // any shape that maps a name to a single value loses all but one of them.
     await appendRecord(w.git, "main", {
@@ -1572,6 +1578,7 @@ describe("yrd queue show, one change's evidence", () => {
       submitter: "@dev/3",
       target: { branch: "main", remote: "origin" },
     })
+    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
     await appendRecord(w.git, "main", {
       change,
       kind: "checked",
@@ -1899,6 +1906,7 @@ describe("yrd watch's own detail pane (openDetail), one change's evidence", () =
       submitter: "@dev/3",
       target: { branch: "main", remote: "origin" },
     })
+    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
     await appendRecord(w.git, "main", {
       change,
       kind: "checked",

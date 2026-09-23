@@ -17,6 +17,32 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..")
 const roots: string[] = []
 const gitSuperBin = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin")
 
+function gitSubcommand(args: readonly string[]): Readonly<{ name: string; tail: readonly string[] }> | undefined {
+  const withValue = new Set(["--git-dir", "--work-tree", "--namespace", "--config-env", "-C", "-c"])
+  const alone = new Set([
+    "--bare",
+    "--no-pager",
+    "--paginate",
+    "--literal-pathspecs",
+    "--glob-pathspecs",
+    "--noglob-pathspecs",
+    "--icase-pathspecs",
+    "--no-replace-objects",
+    "--no-lazy-fetch",
+  ])
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!
+    if (withValue.has(arg)) {
+      index++
+      continue
+    }
+    if (alone.has(arg) || /^(?:--git-dir|--work-tree|--namespace|--config-env)=/u.test(arg)) continue
+    if (arg.startsWith("-")) return undefined
+    return { name: arg, tail: args.slice(index + 1) }
+  }
+  return undefined
+}
+
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
@@ -147,7 +173,14 @@ describe("a queue started by address on a host with no checkout", () => {
     const selectedCalls = selected.readCalls()
     expect(selectedCalls.some(({ cwd, args }) => cwd === dirname(owned) && args[0] === "clone")).toBe(true)
     expect(selectedCalls.some(({ cwd, args }) => cwd === owned && args[0] === "remote")).toBe(true)
-    expect(selectedCalls.some(({ cwd, args }) => cwd === author && args[0] === "push")).toBe(true)
+    // Gitomic places global options before the subcommand. The selected
+    // executable still owns the one atomic, leased author publication.
+    const authorPush = selectedCalls
+      .filter(({ cwd }) => cwd === author)
+      .map(({ args }) => gitSubcommand(args))
+      .find((call) => call?.name === "push")
+    expect(authorPush?.tail).toContain("--atomic")
+    expect(authorPush?.tail.filter((arg) => arg.startsWith("--force-with-lease="))).toHaveLength(2)
     expect(result, `${stderr}\n${readFileSync(result.log, "utf8")}`).toMatchObject({
       exitCode: 0,
       merged: ["task/uri"],

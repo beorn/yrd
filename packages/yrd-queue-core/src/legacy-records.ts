@@ -39,7 +39,7 @@
  */
 
 import type { CommitMeta, GitomicBackend } from "gitomic"
-import { createLegacyBackend, type Git } from "./git.ts"
+import { createLegacyBackend, executableFor, type Git } from "./git.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
 
 type LegacyBackend = GitomicBackend &
@@ -53,9 +53,10 @@ export type LegacyStore = Readonly<{ repo: string; backend: LegacyBackend }>
  * legacy adapter uses. The optional backend is an internal test seam; queue-core's
  * public functions keep their existing signatures.
  */
-export async function legacyStore(git: Git, backend: GitomicBackend = createLegacyBackend()): Promise<LegacyStore> {
+export async function legacyStore(git: Git, providedBackend?: GitomicBackend): Promise<LegacyStore> {
   const repo = (await git(["rev-parse", "--absolute-git-dir"])).trim()
   if (repo === "") throw new Error("legacy queue store: git rev-parse returned an empty repository store")
+  const backend = providedBackend ?? createLegacyBackend(executableFor(git))
   for (const capability of ["fetchRefs", "listRefs", "publish", "readHistory"] as const) {
     if (typeof backend[capability] !== "function") {
       throw new Error(`legacy queue store: Gitomic backend lacks ${capability}`)

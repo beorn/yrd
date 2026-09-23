@@ -604,11 +604,17 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 /** The one configured Gitomic backend for every legacy queue ref operation. */
-export function createLegacyBackend(): GitomicBackend {
+export function createLegacyBackend(gitExecutable = "git"): GitomicBackend {
   return createShellBackend({
     baseEnv: gitEnvironment(globalThis.process.env),
+    gitExecutable,
     remoteTimeoutMs: GIT_ROOT_INVOCATION_MS,
   })
+}
+
+/** Use the executable that handled this runner's immediately preceding call. */
+export function executableFor(git: Git): string {
+  return (git as Partial<GitRunner>).lastInvocation?.selection?.executable ?? "git"
 }
 
 export class GitExit extends Error {
@@ -651,7 +657,7 @@ export async function refAt(
 export async function readRemoteCommit(git: Git, remote: string, ref: string): Promise<string | undefined> {
   const repo = (await git(["rev-parse", "--absolute-git-dir"])).trim()
   if (repo === "") throw new Error(`cannot read ${remote} ${ref}: git returned an empty repository store`)
-  const backend = createLegacyBackend()
+  const backend = createLegacyBackend(executableFor(git))
   if (backend.fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs")
   return (await backend.fetchRefs(repo, ref, remote)).get(ref)
 }
