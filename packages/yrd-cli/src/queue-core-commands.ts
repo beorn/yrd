@@ -78,7 +78,13 @@ import {
   liftLine,
   pauseStop,
   STOPPED_BY,
+  OverrideRefused,
   expireOverrides,
+  overrideFacts,
+  overrideLine,
+  parseUntil,
+  readOverrides,
+  writeOverride,
   HEARTBEAT_GRACE_MS,
   HEARTBEAT_INTERVAL_MS,
   QUEUE_HEALTH_DOCUMENT,
@@ -228,6 +234,15 @@ export type CoreQueueCommand =
     }>
   | Readonly<{ command: "pause"; by: string; reason: string }>
   | Readonly<{ command: "resume"; by: string; reason?: string }>
+  | Readonly<{
+      command: "override"
+      action: "off" | "clear" | "list"
+      check?: string
+      until?: string
+      reason?: string
+      by: string
+      verified: boolean
+    }>
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string }>
   | Readonly<{ command: "drop"; branch: string; by: string; reason?: string }>
   | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
@@ -339,6 +354,7 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   pause: "queue pause",
   list: "queue list",
   merge: "merge",
+  override: "queue override",
   run: "queue run",
   show: "queue show",
   stats: "queue stats",
@@ -745,6 +761,77 @@ export async function coreQueueCommand(
         return 0
       } catch (error) {
         if (error instanceof QueuePaused || error instanceof QueueNotPaused) {
+          io.stderr(`yrd: ${error.message}\n`)
+          return 1
+        }
+        throw error
+      }
+    }
+    case "override": {
+      // The merge-check override (25296). An event queue has its own merge
+      // selection (event-run.ts) that no override reaches, so it refuses rather
+      // than accept a switch nothing would read (X4).
+      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
+        io.stderr(
+          `yrd: ${config.target.remote}#${config.target.branch} is an event queue; a merge-check override is not ` +
+            "supported there, and nothing would read it\n",
+        )
+        return 1
+      }
+      const now = Date.now()
+      if (request.action === "list") {
+        const table = await readOverrides(git, config.target.remote, config.target.branch)
+        emit(
+          io,
+          options.json,
+          { overrides: overrideFacts(table, now), record: table.sha ?? null },
+          table.entries.length === 0
+            ? `no merge-check overrides on ${targetLabel}`
+            : table.entries.map((entry) => overrideLine(entry, now)).join("\n"),
+        )
+        return 0
+      }
+      try {
+        // The declared merge checks, read from the FETCHED target's `.yrd.yml`
+        // (captured above), never a local clone's copy.
+        const declaredMerge = config.checks
+          .filter((spec) => (spec.on ?? ["merge"]).includes("merge"))
+          .map((spec) => spec.name)
+        const actor = { by: request.by, verified: request.verified }
+        const written = await writeOverride(
+          git,
+          config.target.remote,
+          config.target.branch,
+          request.action === "off"
+            ? {
+                actor,
+                check: request.check ?? "",
+                kind: "off",
+                reason: request.reason ?? "",
+                until: parseUntil(request.until ?? "", now),
+              }
+            : { actor, check: request.check ?? "", kind: "clear", reason: request.reason ?? "" },
+          declaredMerge,
+        )
+        const standing = written.record.entries.find((entry) => entry.check === request.check)
+        const replaced =
+          written.replaced === undefined ? "" : `; replaces ${overrideLine(written.replaced, now)}`
+        emit(
+          io,
+          options.json,
+          {
+            kind: written.kind,
+            overrides: overrideFacts(written.record, now),
+            record: written.record.sha ?? null,
+            ...(written.replaced === undefined ? {} : { replaces: written.replaced.record }),
+          },
+          standing === undefined
+            ? `merge check ${request.check ?? ""} back on for ${targetLabel} (record ${String(written.record.sha).slice(0, 12)})`
+            : `${overrideLine(standing, now)} on ${targetLabel} (record ${String(written.record.sha).slice(0, 12)})${replaced}`,
+        )
+        return 0
+      } catch (error) {
+        if (error instanceof OverrideRefused) {
           io.stderr(`yrd: ${error.message}\n`)
           return 1
         }
