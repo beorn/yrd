@@ -63,6 +63,8 @@ function remoteMemStore(repo: string) {
   }
 }
 
+const FIXTURE_IDENT = { name: "yrd fixture", email: "fixture@yrd.invalid" } as const
+
 function event(
   type: string,
   id: string,
@@ -85,6 +87,8 @@ function event(
     writer: "yrd",
     instance: null,
     seq: null,
+    author: FIXTURE_IDENT,
+    committer: FIXTURE_IDENT,
   }
 }
 
