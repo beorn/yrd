@@ -24,7 +24,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join, resolve } from "node:path"
-import { afterAll, describe, expect, it, vi } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import { gitIn, readJournals, readRunLog, submit, type Git, type LogRecord } from "@yrd/queue-core"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
@@ -82,7 +82,21 @@ async function renderedDetails(snapshot: WatchSnapshot): Promise<readonly Change
 const roots: string[] = []
 const gitSuperBin = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin")
 
+// Rows assert commit authors the fixtures set with `user.name`; a caller's exported git identity (every
+// seat exports one) outranks that config, so it is lifted for this file and put back after.
+const GIT_IDENTITY = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] as const
+const liftedIdentity = new Map<string, string>()
+beforeAll(() => {
+  for (const key of GIT_IDENTITY) {
+    const value = process.env[key]
+    if (value === undefined) continue
+    liftedIdentity.set(key, value)
+    delete process.env[key]
+  }
+})
+
 afterAll(() => {
+  for (const [key, value] of liftedIdentity) process.env[key] = value
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
 
@@ -1064,12 +1078,17 @@ exec '${realGit}' "$@"
         execFileSync(realGit, ["--git-dir", join(root, "remote.git"), "update-ref", "-d", "refs/heads/task/good"])
       },
     }
+    // A reader confirms a missing branch only once its change is older than the deletion grace (at least
+    // 60 s, 25541), so the watch reads from two minutes on. Only Date is faked: the 1 s interval stays real.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 120_000 })
     const exit = await coreQueueCommand(
       w.work,
       io,
       { command: "list", intervalSeconds: 1, terms: ["task/good"], watch: true },
       { selection: { contract: "native", executable, origin: "fixture", scope: "local" }, workdir: w.workdir },
-    ).catch((error: unknown) => `threw: ${error instanceof Error ? error.message : String(error)}`)
+    )
+      .catch((error: unknown) => `threw: ${error instanceof Error ? error.message : String(error)}`)
+      .finally(() => vi.useRealTimers())
 
     expect(
       {
