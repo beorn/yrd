@@ -57,6 +57,7 @@ import {
   mediaDuration,
   stateColor,
   stateGlyph,
+  withoutGitConflictsBlock,
 } from "./watch-format.ts"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
 import { explanationLine, headlineOf, runTitle, timingRows, type WatchRun, type WatchStep } from "./watch-run.ts"
@@ -174,6 +175,7 @@ export function WatchDetail({
             <Tab key={String(at)} value={String(at)}>
               <Text color={CHECK_COLOR[check.state]}>
                 {CHECK_GLYPH[check.state]} {check.name}
+                {check.state === "off" ? " off" : ""}
                 {check.phase !== undefined && detail.checks.filter((other) => other.name === check.name).length > 1
                   ? ` (${check.phase})`
                   : ""}
@@ -270,7 +272,14 @@ function StepLine({ step, since }: { step: WatchStep; since?: Date }) {
   const color = CHECK_COLOR[step.state]
   const active = step.state === "running"
   const failed = step.state === "failed" || step.state === "stuck"
-  const duration = step.state === "not-run" ? "not run" : step.ms === undefined ? "" : mediaDuration(step.ms)
+  const duration =
+    step.state === "not-run"
+      ? "not run"
+      : step.state === "off"
+        ? "off"
+        : step.ms === undefined
+          ? ""
+          : mediaDuration(step.ms)
   return (
     <MarkerRow
       marker={
@@ -351,6 +360,7 @@ function ChangeBox({
     ...(detail.run.id === undefined ? {} : { runId: detail.run.id }),
   })
   const keyWidth = metadataKeyWidth(groups)
+  const body = detail.body === undefined ? "" : withoutGitConflictsBlock(detail.body).trim()
   return (
     <TitledBox>
       <Text color="$fg-warning" wrap="truncate">
@@ -360,7 +370,7 @@ function ChangeBox({
       <Text bold wrap="wrap">
         {row.subject ?? subjectAbsent(row)}
       </Text>
-      {detail.body === undefined || detail.body.trim() === "" ? null : <MarkdownView source={detail.body} />}
+      {body === "" ? null : <MarkdownView source={body} />}
       {history === undefined ? null : (
         <>
           <Box height={1} flexShrink={0} />

@@ -854,6 +854,20 @@ describe("the declared checks, joined to what ran", () => {
     expect(views[1]?.log).toBe("/w/test.log")
   })
 
+  it('reads a check declared `run: "true"` as off, never passed, whether or not it ran (25422)', () => {
+    const views = checksOf(["typecheck exit=0 ms=0 log=/w/typecheck.log"], "merged", [
+      { name: "typecheck", run: "true" },
+      { name: "affected-tests", run: " true " },
+      { name: "test", run: "bun run test" },
+    ])
+
+    expect(views.map((view) => [view.name, view.state])).toEqual([
+      ["typecheck", "off"],
+      ["affected-tests", "off"],
+      ["test", "not-run"],
+    ])
+  })
+
   it("reads a packed exit=3 as stuck: cannot-judge is never a fail (@cto 7645ec3a)", () => {
     const views = checksOf(["affected-tests exit=3 ms=5 log=/w/affected.log"], "stuck", [
       { name: "affected-tests", run: "bun run affected-tests" },

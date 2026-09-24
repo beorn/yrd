@@ -405,11 +405,13 @@ describe("settling gitlinks", () => {
     expect(options.env?.PATH?.split(":")[0]).toBe(gitSuperBin)
   })
 
-  // The shared verifier applies git-super's pin verdict before opening a change.
-  it("yrd submit refuses a gitlink that diverged from refs/heads/main", async () => {
+  // The shared verifier applies git-super's pin verdict before opening a change. The pin forks
+  // from main and both sides changed lib.txt, so git-super composes it and refuses the conflict
+  // (25389), naming the file and the component merge.
+  it("yrd submit refuses a forked gitlink whose component merge conflicts, naming the file", async () => {
     const w = await world()
     await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(
-      new RegExp(`gitlink-off-main.*${w.offMain}.*${w.main}`, "u"),
+      new RegExp(`gitlink-compose-refused.*lib\\.txt.*${w.offMain} forks from submodule main ${w.main}`, "u"),
     )
   })
 
@@ -422,10 +424,11 @@ describe("settling gitlinks", () => {
   // the submitter's defect and FAILS back to them. It used to wait (H5) for a
   // person to move main under it; the queue now moves main itself, forward only,
   // so nothing could ever clear that wait. 24463 now refuses at submit; the
-  // merge-time failure remains for a change opened by hand.
+  // merge-time failure remains for a change opened by hand. Since 25389 a clean fork is composed
+  // instead; this one conflicts in lib.txt, so it is still the submitter's.
   it("an off-main gitlink fails back to its submitter while the next change proceeds", async () => {
     const w = await world()
-    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/gitlink-off-main/u)
+    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/gitlink-compose-refused/u)
     await submitFile(w, "task/next")
 
     const outcome = await queueRun(await w.options())
@@ -465,7 +468,7 @@ describe("settling gitlinks", () => {
   // is the submitter's, not a queue incident).
   it("an off-main pin never opens a change, so readers see no incident", async () => {
     const w = await world()
-    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/gitlink-off-main/u)
+    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/gitlink-compose-refused/u)
     const head = await submitFile(w, "task/file")
 
     const outcome = await queueRun(await w.options())
@@ -1507,6 +1510,46 @@ describe("a diverged component the merge composes", () => {
     expect(merged).toBeDefined()
     expect(trailer(merged!, "Published")).toBe(`submodule ${pins.mainSide} -> ${composed}`)
     expect(first).not.toBe(second)
+  })
+
+  /**
+   * THE ONE-SIDED FORK (25389). The carrier's component work began on an older component main, and only the
+   * carrier moves the gitlink, so the ROOT merge is clean and has no conflict to compose from. Submit admits
+   * the carrier as written, and the round composes it.
+   */
+  it("admits a forked pin without rewriting it, and the round composes it to merged (25389)", async () => {
+    const w = await world()
+    const submoduleWork = join(w.work, "..", "submodule-work")
+    const submodule = gitIn(submoduleWork)
+    await submodule(["checkout", "--quiet", "-b", "fork-side", w.onMain])
+    writeFileSync(join(submoduleWork, "fork-side.txt"), "work begun on an older main\n")
+    await submodule(["add", "fork-side.txt"])
+    await submodule(["commit", "--quiet", "-m", "a file only the fork changes"])
+    const fork = (await submodule(["rev-parse", "HEAD"])).trim()
+    await submodule(["checkout", "--quiet", "main"])
+    await submodule(["push", "--quiet", "origin", "fork-side"])
+
+    const head = await submitGitlink(w, "task/fork", fork)
+
+    // Submit opened the carrier at its own head, whose gitlink is still the fork.
+    expect(await gitlinkAt(w, head)).toBe(fork)
+    const changed = changeRef("main", { branch: "task/fork", head })
+    expect((await readRecords(w.git, await remoteTip(w.git, changed))).map((record) => record.kind)).toEqual(["opened"])
+
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/fork"], stuck: [] })
+    const target = await remoteTip(w.git, "refs/heads/main")
+    const composed = await gitlinkAt(w, target)
+    expect(composed).not.toBe(fork)
+    const bare = gitIn(join(w.work, "..", "submodule.git"))
+    expect((await bare(["show", "-s", "--format=%P", composed])).trim()).toBe(`${w.main} ${fork}`)
+    expect(await submoduleRemoteRef(w, `refs/git-super/pins/${composed}`)).toBe(composed)
+    expect(await submoduleMain(w)).toBe(composed)
+    expect(await w.git(["show", "-s", "--format=%B", target])).toContain(
+      `Settled: submodule@${composed} merged submodule-main@${w.main}`,
+    )
+    expect((await readRecords(w.git, await remoteTip(w.git, changed))).map((record) => record.kind)).toContain("merged")
   })
 
   /**

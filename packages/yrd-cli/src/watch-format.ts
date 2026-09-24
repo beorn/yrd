@@ -157,6 +157,8 @@ export const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
   deferred: "☾",
   failed: "×",
   "not-run": "−",
+  // Switched off by a `run: "true"` declaration (25422): it ran and tested nothing.
+  off: "○",
   passed: "✓",
   running: "◉",
   // Held off at merge by an override (25296): it did not run, on purpose.
@@ -170,6 +172,7 @@ export const CHECK_COLOR: Readonly<Record<CheckView["state"], string>> = {
   deferred: "$fg-accent",
   failed: "$fg-error",
   "not-run": "$fg-muted",
+  off: "$fg-muted",
   passed: "$fg-success",
   running: "$fg-info",
   skipped: "$fg-warning",
@@ -339,6 +342,31 @@ export function timingLine(row: Row, now: Date): string {
 }
 
 /** A local wall-clock time, `HH:MM` or `HH:MM:SS`, for the absolute half of every time on screen. */
+/** git's default comment character, the one its conflicts block is written with. */
+const GIT_COMMENT_CHAR = "#"
+
+/**
+ * A commit body without the conflicts block git appends to a conflicted
+ * merge's message (sequencer `append_conflicts_hint`): the `# Conflicts:`
+ * line, each `#<TAB><path>` line after it, and the blank line before it.
+ * `git commit --no-edit` keeps the block (cleanup=whitespace), so a
+ * hand-resolved merge's note read as the queue's verdict (25423). Only this
+ * block is git's; every other line, `#123 keep me` included, is the author's.
+ */
+export function withoutGitConflictsBlock(body: string): string {
+  const lines = body.split("\n")
+  const kept: string[] = []
+  for (let at = 0; at < lines.length; at++) {
+    if (lines[at] !== `${GIT_COMMENT_CHAR} Conflicts:`) {
+      kept.push(lines[at] ?? "")
+      continue
+    }
+    if (kept.at(-1) === "") kept.pop()
+    while (lines[at + 1]?.startsWith(`${GIT_COMMENT_CHAR}\t`) === true) at++
+  }
+  return kept.join("\n")
+}
+
 /** The first line of what went wrong, for a sentence on screen: an error's message, else the value as text. */
 export function firstLine(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error)

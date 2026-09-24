@@ -907,7 +907,10 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // is what drained 29 changes in hours. The judge starts only inside the stop
   // window and writes its verdict whole or not at all. A scoped round has no
   // next head.
-  if (acted !== undefined && !stoppedByTime && options.only === undefined && !(await declarationMoved(run))) {
+  // The declaration the target ends this round on: the one the round started under,
+  // unless the head's merge changed .yrd.yml (read once; logged when it moved).
+  const declared = acted === undefined ? run.options.configBlob : await declarationAfter(run)
+  if (acted !== undefined && !stoppedByTime && options.only === undefined && declared === run.options.configBlob) {
     run.targetSha = run.targetAfter.sha
     const next = ordered((await read(run.targetSha)).changes, undefined, "queued", "stuck", "checked").find(
       (entry) => !sameChange(entry, acted),
@@ -923,13 +926,15 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // Everything this run left checked, current and not behind a stuck row, once
   // the head was acted on: the changes ready for the next round the moment this
   // one ends. Read once, after the prefetch, because the prefetch is what
-  // turned them checked.
+  // turned them checked. Current means judged under the declaration the target
+  // ends on (@i/10-yrd/25351): after a head that changed .yrd.yml, a verdict
+  // under the old one is judged again next round, so it is not ready.
   let checkedWaiting = 0
   if (acted !== undefined) {
     const reread = ordered((await read(run.targetSha)).changes, options.only, "checked", "stuck")
     const blocked = reread.findIndex((entry) => entry.reading.state === "stuck")
     checkedWaiting = (blocked === -1 ? reread : reread.slice(0, blocked)).filter(
-      (entry) => entry.reading.state === "checked" && !staleChecked(run, entry) && !sameChange(entry, acted),
+      (entry) => entry.reading.state === "checked" && !staleChecked(run, entry, declared) && !sameChange(entry, acted),
     ).length
   }
 
@@ -955,19 +960,21 @@ const BASE: Steps = { bookkeep, direct, observed, end, ended, judge, merge, open
  * no longer declares and be judged again next round: the whole-line re-judge
  * this round exists to remove. So that round prefetches nothing, and the next
  * round judges each change under the new declaration as the walk reaches it.
+ * Returns the config blob the target ends on: `run.options.configBlob` when the
+ * merge left `.yrd.yml` alone, else the new blob (undefined when it was removed).
  */
-async function declarationMoved(run: Run): Promise<boolean> {
-  if (run.targetAfter.sha === run.targetSha) return false
+async function declarationAfter(run: Run): Promise<string | undefined> {
+  if (run.targetAfter.sha === run.targetSha) return run.options.configBlob
   const before = await refAt(run.git, `${run.targetSha}:.yrd.yml`, "blob")
   const after = await refAt(run.git, `${run.targetAfter.sha}:.yrd.yml`, "blob")
-  if (before === after) return false
+  if (before === after) return run.options.configBlob
   run.log.write({
     kind: "observation",
     why:
       `the head's merge changed .yrd.yml (${before?.slice(0, 12) ?? "absent"} -> ${after?.slice(0, 12) ?? "absent"}); ` +
       "no prefetch this round: the next round judges each change under the new declaration",
   })
-  return true
+  return after
 }
 
 /** The same change: one branch at one head. */
@@ -975,10 +982,10 @@ function sameChange(left: QueueEntry, right: QueueEntry): boolean {
   return left.change.branch === right.change.branch && left.change.head === right.change.head
 }
 
-/** A checked change whose checked record names a config blob the target no longer declares. */
-function staleChecked(run: Run, entry: QueueEntry): boolean {
+/** A checked change whose checked record names a config blob other than `declared` (default: the round's own). */
+function staleChecked(run: Run, entry: QueueEntry, declared: string | undefined = run.options.configBlob): boolean {
   const tip = tipOf(entry.change)
-  return tip.kind === "checked" && trailer(tip, "Config") !== run.options.configBlob
+  return tip.kind === "checked" && trailer(tip, "Config") !== declared
 }
 
 /** The entries in the named states, in line order: only the change `only` names, when it names one. */
