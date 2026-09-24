@@ -93,6 +93,7 @@ import { stuckCures, type PauseRecord } from "./pause.ts"
 import {
   gitSuperExecution,
   readSuperMergeDetail,
+  type SuperMergeStep,
   verifyCandidate,
   type SuperMergeDetail,
   type SettledGitlink,
@@ -1297,6 +1298,22 @@ async function timedStep<T>(
   }
 }
 
+/**
+ * git-super's own account of a compose: one `step` row per phase it timed, in
+ * the order they ran, written after the compose's end row and before its settle
+ * rows (@i/10-yrd/25303 tier 2). Each has only `ms`, because git-super reports
+ * durations once the call returns. `within` says whose phase it was, so a
+ * git-super `merge` is never read as the queue's merge phase. A name git-super
+ * does not document is written as given: the journal is where drift is seen.
+ */
+function writeComposeSteps(
+  log: Pick<QueueRunLog, "write">,
+  about: Readonly<{ branch: string; head: string; phase: string }>,
+  steps: readonly SuperMergeStep[] | undefined,
+): void {
+  for (const step of steps ?? []) log.write({ ...about, kind: "step", ms: step.ms, name: step.name, within: "compose" })
+}
+
 async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePhase): Promise<ComposedCandidate> {
   const { head } = entry.change
   const step = { branch: entry.change.branch, head, phase }
@@ -1311,6 +1328,7 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
       env: run.options.env,
       process: run.options.process,
       hooksPath: run.hooksPath,
+      timed: (name, work) => timedStep(run.log, { ...step, name }, work),
       worktree: {
         env: run.options.env,
         gitOptions: gitInvocationOptions(run.options, run.log),
@@ -1321,6 +1339,7 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
       },
     }),
   )
+  writeComposeSteps(run.log, step, composed.verifying.steps)
   if (composed.state === "failed") {
     return { detail: composed.verifying.detail, kind: "failed", worktree: composed.failedWorktree }
   }
