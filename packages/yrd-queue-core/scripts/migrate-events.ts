@@ -30,6 +30,7 @@ import { inputsForLegacy, migratedStatus, type LegacyMigrationChange } from "../
 import { tipOf } from "../src/state.ts"
 import { trailer } from "../src/legacy-records.ts"
 import { subjects } from "../src/table.ts"
+import { directMergeCommits, eventDirectMergeCommits } from "../src/direct.ts"
 
 type Phase = "plan" | "apply" | "rollback"
 type Options = Readonly<{ phase: Phase; repo: string; remote: string; queue: string; journal: string }>
@@ -60,6 +61,7 @@ type Plan = Readonly<{
   changes: readonly Ref[]
   legacyRows: readonly LegacyRow[]
   recordCount: number
+  directCommits: readonly string[]
   pause: Ref
   override?: Ref
   bundle: string
@@ -174,7 +176,7 @@ async function legacyRows(
     .sort((a, b) => a.ref.localeCompare(b.ref))
 }
 
-async function remoteAdvertisement(git: Git, remote: string, queue: string): Promise<Advertisement> {
+export async function remoteAdvertisement(git: Git, remote: string, queue: string): Promise<Advertisement> {
   const prefix = `${queueRefPrefix(queue)}/`
   const listed = rows(
     await git(["ls-remote", "--refs", remote, "refs/heads/*", `${prefix}*`]),
@@ -190,7 +192,7 @@ async function remoteAdvertisement(git: Git, remote: string, queue: string): Pro
   return { heads, queue: queueRefs, target }
 }
 
-function classify(
+export function classify(
   queue: string,
   refs: readonly Ref[],
 ): Readonly<{ changes: readonly Ref[]; pause: Ref; override?: Ref }> {
@@ -287,6 +289,10 @@ async function plan(options: Options, git: Git, selection: GitSelection, pin: st
     reading: entry.reading,
   }))
   const projected = await legacyRows(git, options.queue, sources)
+  const directCommits = (await directMergeCommits(git, options.queue, first.target, reading.changes)).map(
+    ({ commit }) => commit,
+  )
+  const directMapping = assertDirectParity(directCommits, [], first.target)
   const recordCount = sources.reduce((count, source) => count + source.change.records.length, 0)
   const second = await remoteAdvertisement(git, options.remote, options.queue)
   if (!equalRefs(first.queue, second.queue) || !equalRefs(first.heads, second.heads)) {
@@ -340,6 +346,7 @@ async function plan(options: Options, git: Git, selection: GitSelection, pin: st
     oldRefs: first.queue,
     changes: classified.changes,
     legacyRows: projected,
+    directCommits,
     recordCount,
     pause: classified.pause,
     ...(classified.override === undefined ? {} : { override: classified.override }),
@@ -357,6 +364,7 @@ async function plan(options: Options, git: Git, selection: GitSelection, pin: st
       changes: classified.changes.length,
       records: recordCount,
       heads: first.heads.length,
+      directCommits: directCommits.length,
     },
     paths: {
       journal: join(options.journal, "plan.json"),
@@ -365,12 +373,13 @@ async function plan(options: Options, git: Git, selection: GitSelection, pin: st
       snapshot,
     },
     target: first.target,
+    directMapping,
     runtimePin: pin,
     bundleSha256: evidence.bundleSha256,
   }
 }
 
-function readPlan(options: Options): Plan {
+export function readPlan(options: Options): Plan {
   const path = join(options.journal, "plan.json")
   if (!existsSync(path)) failure("missing-journal", path, "plan.json is required; run plan first")
   const parsed: unknown = JSON.parse(readFileSync(path, "utf8"))
@@ -384,13 +393,18 @@ function readPlan(options: Options): Plan {
   ) {
     failure("journal-scope", path, "plan repo, remote, queue or journal differs from this invocation")
   }
-  if (!OID.test(value.target) || value.oldRefs.length === 0 || value.changes.length === 0) {
+  if (
+    !OID.test(value.target) ||
+    value.oldRefs.length === 0 ||
+    value.changes.length === 0 ||
+    !Array.isArray(value.directCommits)
+  ) {
     failure("invalid-journal", path, "plan has no valid target or old change census")
   }
   return value
 }
 
-function assertAdvertised(plan: Plan, found: Advertisement, phase: string): void {
+export function assertAdvertised(plan: Plan, found: Advertisement, phase: string): void {
   if (!equalRefs(plan.oldRefs, found.queue) || !equalRefs(plan.heads, found.heads) || plan.target !== found.target) {
     failure(
       "changed-census",
@@ -531,7 +545,7 @@ function branchGroups(
     }))
 }
 
-function readbackStatus(
+export function readbackStatus(
   oldRefs: readonly Ref[],
   newRefs: readonly Ref[],
   found: Advertisement,
@@ -541,6 +555,25 @@ function readbackStatus(
   if (equalRefs(found.queue, newRefs)) return "committed"
   if (equalRefs(found.queue, oldRefs)) return "unchanged"
   return "divergent"
+}
+
+/** A legacy direct row at the created event's Commit is represented by that event. */
+export function assertDirectParity(
+  legacy: readonly string[],
+  event: readonly string[],
+  createdCommit: string,
+): Readonly<{ creationCommit?: string; directCommits: readonly string[] }> {
+  const creation = legacy.filter((commit) => commit === createdCommit)
+  if (creation.length > 1) failure("direct-parity", createdCommit, "legacy direct census repeats queue creation commit")
+  const remaining = legacy.filter((commit) => commit !== createdCommit)
+  if (JSON.stringify(remaining) !== JSON.stringify(event)) {
+    failure(
+      "direct-parity",
+      createdCommit,
+      `legacy direct commits outside queue creation ${JSON.stringify(remaining)} differ from event direct commits ${JSON.stringify(event)}`,
+    )
+  }
+  return { ...(creation.length === 0 ? {} : { creationCommit: createdCommit }), directCommits: event }
 }
 
 async function apply(options: Options, plan: Plan, git: Git, selection: GitSelection): Promise<unknown> {
@@ -700,12 +733,20 @@ async function apply(options: Options, plan: Plan, git: Git, selection: GitSelec
       )
     }
   }
+  if (remote.queue.declaration !== plan.target) {
+    failure("direct-parity", options.queue, `created event kept ${remote.queue.declaration}, planned ${plan.target}`)
+  }
+  const eventDirect = (
+    await eventDirectMergeCommits(git, options.queue, plan.target, remote.queue.declaration, remote.histories)
+  ).map(({ commit }) => commit)
+  const directMapping = assertDirectParity(plan.directCommits, eventDirect, remote.queue.declaration)
   const postflight = {
     phase: "postflight",
     state: "clean",
     branchChains: groups.length,
     sourceRecords: expectedSources.size,
     queuePaused: true,
+    directMapping,
   }
   immutableJson(join(options.journal, "postflight.json"), postflight)
   return { ...result, postflight: join(options.journal, "postflight.json") }
@@ -732,10 +773,12 @@ function readStaged(options: Options, plan: Plan): Staged {
 async function rollback(options: Options, plan: Plan, git: Git, selection: GitSelection): Promise<unknown> {
   const resultPath = join(options.journal, "apply-result.json")
   const rollbackPath = join(options.journal, "rollback-result.json")
-  if (existsSync(rollbackPath))
-    {failure("already-rolled-back", rollbackPath, "one rollback attempt may have happened; inspect full readback")}
-  if (!existsSync(resultPath))
-    {failure("missing-journal", resultPath, "apply readback receipt is required before rollback")}
+  if (existsSync(rollbackPath)) {
+    failure("already-rolled-back", rollbackPath, "one rollback attempt may have happened; inspect full readback")
+  }
+  if (!existsSync(resultPath)) {
+    failure("missing-journal", resultPath, "apply readback receipt is required before rollback")
+  }
   const applied: unknown = JSON.parse(readFileSync(resultPath, "utf8"))
   if (typeof applied !== "object" || applied === null || !("state" in applied) || applied.state !== "committed") {
     failure("invalid-journal", resultPath, "apply receipt did not prove exact committed ref readback")
@@ -747,8 +790,9 @@ async function rollback(options: Options, plan: Plan, git: Git, selection: GitSe
   const snapshotGit = gitIn(plan.snapshot, undefined, selection)
   await snapshotGit(["bundle", "verify", plan.bundle])
   const bundled = rows(await snapshotGit(["bundle", "list-heads", plan.bundle]), plan.bundle)
-  if (!equalRefs(bundled, plan.oldRefs))
-    {failure("invalid-bundle", plan.bundle, "bundle ref listing differs from the original census")}
+  if (!equalRefs(bundled, plan.oldRefs)) {
+    failure("invalid-bundle", plan.bundle, "bundle ref listing differs from the original census")
+  }
   const lastSource = new Map<string, string>()
   const count = new Map<string, number>()
   for (const source of staged.sources) {
@@ -778,8 +822,9 @@ async function rollback(options: Options, plan: Plan, git: Git, selection: GitSe
     )
   }
   const backend = createEventStore(options.repo, options.remote, selection).backend
-  if (typeof backend.publish !== "function")
-    {failure("backend", options.repo, "Gitomic backend lacks atomic publish for rollback")}
+  if (typeof backend.publish !== "function") {
+    failure("backend", options.repo, "Gitomic backend lacks atomic publish for rollback")
+  }
   const absent = "0".repeat(40)
   const updates = [
     ...plan.oldRefs.map(({ ref, oid }) => ({ ref, expect: absent, oid })),
