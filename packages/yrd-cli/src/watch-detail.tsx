@@ -37,7 +37,7 @@
  */
 
 import { hyperlink } from "@silvery/ansi"
-import { Box, MarkdownView, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
+import { Box, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
 import type { ChangeRecord, CheckView, JournalRun, Row } from "@yrd/queue-core"
 import type { Event } from "@yrd/queue-core"
 import {
@@ -46,7 +46,9 @@ import {
   historyEntries,
   metadataGroups,
   metadataKeyWidth,
+  timelineOf,
   type ChangeCommits,
+  type HistoryEntry,
 } from "./watch-change.ts"
 import { useMinute, useNow } from "./watch-clock.ts"
 import {
@@ -60,7 +62,7 @@ import {
   withoutGitConflictsBlock,
 } from "./watch-format.ts"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
-import { explanationLine, headlineOf, runTitle, timingRows, type WatchRun, type WatchStep } from "./watch-run.ts"
+import { runTitle, statusLineOf, timingRows, type WatchRun, type WatchStep } from "./watch-run.ts"
 
 /**
  * A check with what its log actually held. The output is read by whatever
@@ -169,17 +171,22 @@ export function WatchDetail({
       >
         <TabList flexWrap="wrap">
           <Tab key={CHANGES_TAB} value={CHANGES_TAB}>
-            <Text bold={tab === CHANGES_TAB}>Changes{(row.diagnostics?.length ?? 0) === 0 ? "" : " ⚠"}</Text>
+            Timeline{(row.diagnostics?.length ?? 0) === 0 ? "" : " ⚠"}
+            {"\n"}
+            <Text color="$fg-muted">{cutCounter(detail)}</Text>
           </Tab>
           {detail.checks.map((check, at) => (
             <Tab key={String(at)} value={String(at)}>
-              <Text color={CHECK_COLOR[check.state]}>
-                {CHECK_GLYPH[check.state]} {check.name}
-                {check.state === "off" ? " off" : ""}
-                {check.phase !== undefined && detail.checks.filter((other) => other.name === check.name).length > 1
-                  ? ` (${check.phase})`
-                  : ""}
-              </Text>
+              <StageLabel
+                name={
+                  check.phase !== undefined && detail.checks.filter((other) => other.name === check.name).length > 1
+                    ? `${check.name} (${check.phase})`
+                    : check.name
+                }
+                step={detail.run.steps[at]}
+                state={check.state}
+                {...(check.state === "running" && row.live?.check === check.name ? { since: row.live.since } : {})}
+              />
             </Tab>
           ))}
         </TabList>
@@ -195,6 +202,12 @@ export function WatchDetail({
         </TabPanel>
         {detail.checks.map((check, at) => (
           <TabPanel key={String(at)} value={String(at)}>
+            {/* A failed check's remedy, which rode its step line in the status box before 25441. */}
+            {detail.run.steps[at]?.remedy === undefined ? null : (
+              <Text color={CHECK_COLOR[check.state]} wrap="wrap">
+                {detail.run.steps[at]?.remedy}
+              </Text>
+            )}
             <CheckBody check={check} />
           </TabPanel>
         ))}
@@ -204,15 +217,57 @@ export function WatchDetail({
 }
 
 /**
- * The status box IS the run (items 1, 39): identity on the border, headline,
- * explanation, timing, then one step line per step. It reads a `WatchRun` and
- * nothing else, so a run of another kind renders through it untouched (37m).
+ * A stage tab's two lines (25441, the operator's Sep 4 sketch): the stage name,
+ * then its glyph and how long it took. The status colour sits on the glyph
+ * only, so the tab's name keeps silvery `Tab`'s own active and idle colour.
+ * An off check reads `off` and a check that never ran `not run`, never a tick.
+ */
+function StageLabel({
+  name,
+  step,
+  state,
+  since,
+}: {
+  name: string
+  step: WatchStep | undefined
+  state: CheckView["state"]
+  since?: Date
+}) {
+  const said =
+    state === "off"
+      ? " off"
+      : state === "not-run"
+        ? " not run"
+        : since === undefined && step?.ms !== undefined
+          ? ` ${mediaDuration(step.ms)}`
+          : ""
+  return (
+    <>
+      {name}
+      {"\n"}
+      <Text color={CHECK_COLOR[state]}>{CHECK_GLYPH[state]}</Text>
+      {since === undefined ? said : <RunningFor since={since} />}
+    </>
+  )
+}
+
+/** The running stage's own clock: its own leaf on the second, so the tab strip does not re-render for it. */
+function RunningFor({ since }: { since: Date }) {
+  const now = useNow()
+  return <Text> {mediaDuration(now.getTime() - since.getTime())}</Text>
+}
+
+/**
+ * The status box IS the run (items 1, 39; one line since 25441): identity on
+ * the border, then the marker, the bold status and its explanation, e.g.
+ * `✓ Merged as 2f5d9fbe7653 at 21:04:20`. The checks are tabs, not lines here.
+ * It reads a `WatchRun` and nothing else, so a run of another kind renders
+ * through it untouched (37m).
  */
 export function RunStatusBox({ run, joinedRun = false }: { run: WatchRun; joinedRun?: boolean }) {
   const { row } = run
   const color = stateColor(row)
-  const headline = headlineOf(row, joinedRun)
-  const explanation = explanationLine(row)
+  const { status, explanation } = statusLineOf(row, joinedRun)
   return (
     <TitledBox {...(runTitle(run) === undefined ? {} : { titleRight: runTitle(run) })} borderColor={color}>
       <MarkerRow
@@ -223,79 +278,41 @@ export function RunStatusBox({ run, joinedRun = false }: { run: WatchRun; joined
           </Text>
         }
       >
-        <Text color={color} bold wrap="wrap" minWidth={0}>
-          {headline}
+        <Text wrap="truncate" minWidth={0}>
+          <Text color={color} bold>
+            {status}
+          </Text>
+          {explanation === undefined ? null : <Text color={color}> {explanation}</Text>}
         </Text>
       </MarkerRow>
-      {explanation === undefined ? null : (
-        <MarkerRow>
-          <Text color={color} wrap="wrap" minWidth={0}>
-            {explanation}
-          </Text>
-        </MarkerRow>
-      )}
-      <TimingRows row={row} />
-      {run.steps.map((step, index) => (
-        <StepLine
-          key={`${String(index)}:${step.name}`}
-          step={step}
-          {...(step.state === "running" && row.live?.check === step.name ? { since: row.live.since } : {})}
-        />
-      ))}
     </TitledBox>
   )
 }
 
-/** The clocks rows, the one part of the status box that moves every second: its own leaf on the second clock. */
+/** The clocks rows, the one part of the timeline that moves every second: its own leaf on the second clock. */
 function TimingRows({ row }: { row: Row }) {
   const now = useNow()
-  const timing = timingRows(row, now)
   return (
     <>
-      {timing.map((line) => (
-        <MarkerRow key={line}>
-          <Text wrap="truncate">{line}</Text>
-        </MarkerRow>
+      {timingRows(row, now).map((line) => (
+        <Text key={line} color="$fg-muted" wrap="truncate">
+          {line}
+        </Text>
       ))}
     </>
   )
 }
 
-/** The running step's own clock: its own leaf on the second, so the box does not re-render for it. */
-function RunningFor({ since }: { since: Date }) {
-  const now = useNow()
-  return <Text color="$fg-muted"> {mediaDuration(now.getTime() - since.getTime())}</Text>
+/** The change's history from whichever source was read: the event chain, else the legacy records. */
+function historyOf(detail: ChangeDetail): readonly HistoryEntry[] | undefined {
+  if (detail.events !== undefined) return eventHistoryEntries(detail.events)
+  return detail.records === undefined ? undefined : historyEntries(detail.records)
 }
 
-/** One step: hanging glyph, name, duration, and the remedy on a failed one (item 39). Kind-agnostic. */
-function StepLine({ step, since }: { step: WatchStep; since?: Date }) {
-  const color = CHECK_COLOR[step.state]
-  const active = step.state === "running"
-  const failed = step.state === "failed" || step.state === "stuck"
-  const duration =
-    step.state === "not-run"
-      ? "not run"
-      : step.state === "off"
-        ? "off"
-        : step.ms === undefined
-          ? ""
-          : mediaDuration(step.ms)
-  return (
-    <MarkerRow
-      marker={
-        <Text color={color} flexShrink={0}>
-          {CHECK_GLYPH[step.state]}
-        </Text>
-      }
-    >
-      <Text wrap="wrap" minWidth={0}>
-        <Text color={failed ? color : active ? "$fg-info" : undefined}>{step.name}</Text>
-        {since === undefined ? null : <RunningFor since={since} />}
-        {duration === "" ? null : <Text color="$fg-muted"> {duration}</Text>}
-        {step.remedy === undefined ? null : <Text color={color}> — {step.remedy}</Text>}
-      </Text>
-    </MarkerRow>
-  )
+/** The first tab's second line: which of the branch's cuts this is, e.g. `cut 2/3`. */
+function cutCounter(detail: ChangeDetail): string {
+  const { cut, cuts } = timelineOf(historyOf(detail) ?? [], undefined)
+  return `cut ${String(cut)}/${String(cuts)}`
 }
 
 /** The change list under the status box (item 2): `· <branch>@<sha12> <bold subject>`, ellipsis-truncated. */
@@ -349,12 +366,7 @@ function ChangeBox({
   // History and metadata print `ago` to the minute; the seconds are noise here.
   const now = useMinute()
   const { row } = detail
-  const history =
-    detail.events === undefined
-      ? detail.records === undefined
-        ? undefined
-        : historyEntries(detail.records)
-      : eventHistoryEntries(detail.events)
+  const timeline = timelineOf(historyOf(detail) ?? [], detail.commits?.last)
   const groups = metadataGroups(row, now, {
     ...(detail.commits === undefined ? {} : { commits: detail.commits }),
     ...(detail.run.id === undefined ? {} : { runId: detail.run.id }),
@@ -363,6 +375,27 @@ function ChangeBox({
   const body = detail.body === undefined ? "" : withoutGitConflictsBlock(detail.body).trim()
   return (
     <TitledBox>
+      {/* The timeline first (25441): this cut's history, oldest first, each with its time to the next. */}
+      {historyOf(detail) === undefined ? null : timeline.entries.length === 0 ? (
+        <Text color="$fg-muted">no records were read for this change</Text>
+      ) : (
+        timeline.entries.map((entry) => (
+          <Box key={`${entry.at.toISOString()} ${entry.text}`} flexDirection="row" minWidth={0}>
+            <Text color="$fg-muted" flexShrink={0}>
+              {clock(entry.at, { seconds: true })}
+              {"  "}
+            </Text>
+            <Text wrap="wrap" minWidth={0}>
+              {entry.text.charAt(0).toUpperCase() + entry.text.slice(1)}
+              {entry.detail === undefined ? "" : ` — ${entry.detail}`}
+              {entry.toNextMs === undefined ? null : <Text color="$fg-muted"> · {mediaDuration(entry.toNextMs)}</Text>}
+            </Text>
+          </Box>
+        ))
+      )}
+      {/* The clocks and the table cell's own duration, moved here from the status box (25441). */}
+      <TimingRows row={row} />
+      <Box height={1} flexShrink={0} />
       <Text color="$fg-warning" wrap="truncate">
         {changeId(row)}
       </Text>
@@ -370,27 +403,9 @@ function ChangeBox({
       <Text bold wrap="wrap">
         {row.subject ?? subjectAbsent(row)}
       </Text>
-      {body === "" ? null : <MarkdownView source={body} />}
-      {history === undefined ? null : (
-        <>
-          <Box height={1} flexShrink={0} />
-          {history.length === 0 ? (
-            <Text color="$fg-muted">no records were read for this change</Text>
-          ) : (
-            history.map((entry) => (
-              <Box key={`${entry.at.toISOString()} ${entry.text}`} flexDirection="row" minWidth={0}>
-                <Text color="$fg-muted" flexShrink={0}>
-                  {clock(entry.at)} · {mediaDuration(now.getTime() - entry.at.getTime())} ago{"  "}
-                </Text>
-                <Text wrap="wrap" minWidth={0}>
-                  {entry.text}
-                  {entry.detail === undefined ? "" : ` — ${entry.detail}`}
-                </Text>
-              </Box>
-            ))
-          )}
-        </>
-      )}
+      {/* Plain text, never Markdown (25441, 25423 option B): a commit body is git's text, and a
+          `#` line in it is the author's words or git's own comment, not a heading. */}
+      {body === "" ? null : <Text wrap="wrap">{body}</Text>}
       {groups.map((group, index) => (
         <Box key={String(index)} flexDirection="column" minWidth={0}>
           <Box height={1} flexShrink={0} />
