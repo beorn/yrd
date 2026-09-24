@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `yrd-queue-core` reads a validated event queue and its change histories concurrently for listings, retaining the separate ref scopes and complete chain folds (25203).
+- `yrd-cli` uses the combined queue/change read for `yrd list`, while keeping its fresh ref fence before rendering (25203).
+
 - Queue-run failure exit 1 is exported as `QUEUE_RUN_FAILED_EXIT` and used by the failure paths.
 
 - `hab.projects.ts` no longer declares `TRIBE_NAME` for the `yrd` service: hab scrubs every caller identity name

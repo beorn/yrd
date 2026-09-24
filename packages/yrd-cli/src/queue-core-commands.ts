@@ -34,7 +34,6 @@ import {
   eventDirectMergeCommits,
   eventPause,
   eventRows,
-  listChangeHistories,
   createEventStore,
   selectionFor,
   listRefs,
@@ -44,6 +43,7 @@ import {
   changesRef,
   readChangeEvents,
   readEventQueue,
+  readEventQueueWithChanges,
   setBranchIgnored,
   writeQueueEvent,
   prepareWorktree,
@@ -3390,8 +3390,7 @@ async function readEventListing(
   }>
 > {
   const store = createEventStore(repo, config.target.remote, selection)
-  const queue = await readEventQueue(store, config.target.branch)
-  const histories = await listChangeHistories(store, config.target.branch, { knownQueue: queue })
+  const { queue, histories } = await readEventQueueWithChanges(store, config.target.branch)
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
   const directMerges = await eventDirectMergeCommits(git, config.target.branch, targetOid, queue.declaration, histories)
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`

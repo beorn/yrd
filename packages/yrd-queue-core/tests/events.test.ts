@@ -10,6 +10,7 @@ import { createMemBackend } from "gitomic/mem"
 import { Conflict, open } from "gitomic"
 import type { GitomicBackend } from "gitomic"
 import { gitIn } from "../src/git.ts"
+import { pauseRef } from "../src/refs.ts"
 import {
   CHANGE_EVENT_TYPES,
   appendChangeEvent,
@@ -24,6 +25,7 @@ import {
   queueFormat,
   queueRef,
   readEventQueue,
+  readEventQueueWithChanges,
   readStatus,
   setBranchIgnored,
   writeQueueEvent,
@@ -1038,6 +1040,45 @@ describe("the queue-format boundary", () => {
       /validated queue.*same location/,
     )
     expect(await listChangeHistories(first.location, "lab")).toEqual(new Map())
+  })
+
+  it("reads the queue and change histories together with the same projection", async () => {
+    const { store, location } = remoteMemStore("yrd-concurrent-list")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const queueTip = await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await openEvents({ ...store, ref: changesRef("lab", "task/42") })
+    await branch.append([changeInput("opened", { queueTip, at: new Date(), commit, by: "@dev/2" })], {
+      expect: null,
+    })
+    const legacyPause = await openEvents({ ...store, ref: pauseRef("lab") })
+    await legacyPause.append([input("paused")], { expect: null })
+    const { queue, histories } = await readEventQueueWithChanges(location, "lab")
+    expect(queue).toEqual(await readEventQueue(location, "lab"))
+    expect(histories).toEqual(await listChangeHistories(location, "lab", { knownQueue: queue }))
+    expect([...histories.keys()]).toEqual(["task/42"])
+  })
+
+  it("rejects an invalid queue chain through the combined read", async () => {
+    const { store, location } = remoteMemStore("yrd-invalid-concurrent-list")
+    const branch = await openEvents({ ...store, ref: queueRef("lab") })
+    await branch.append([input("paused")], { expect: null })
+    await expect(readEventQueueWithChanges(location, "lab")).rejects.toThrow(/refs\/yrd\/lab\/queue.*must be created/)
+  })
+
+  it("rejects a queue chain beyond the complete-read limit through the combined read", async () => {
+    const { store, location } = remoteMemStore("yrd-long-concurrent-list")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const queueTip = await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await openEvents({ ...store, ref: queueRef("lab") })
+    await branch.append(
+      Array.from({ length: 1024 }, () => input("resumed")),
+      { expect: queueTip },
+    )
+    await expect(readEventQueueWithChanges(location, "lab")).rejects.toThrow(
+      /refs\/yrd\/lab\/queue.*exceeds 1024 events/,
+    )
   })
 
   it("ignores and unignores only an existing open change with a reason and actor", async () => {

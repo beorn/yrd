@@ -51,6 +51,7 @@ export {
   queueRef,
   readChangeEvents,
   readEventQueue,
+  readEventQueueWithChanges,
   readStatus,
   setBranchIgnored,
   writeQueueEvent,

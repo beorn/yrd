@@ -1210,6 +1210,31 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
 
 type ChangeHistory = Readonly<{ state: EventChange; events: readonly Event[] }>
 
+function projectChangeHistories(
+  chains: ReadonlyMap<string, readonly Event[]>,
+  prefix: string,
+  repo: string,
+): ReadonlyMap<string, ChangeHistory> {
+  const changes = new Map<string, ChangeHistory>()
+  for (const [ref, events] of chains) {
+    changes.set(ref.slice(prefix.length), { state: project(events, ref, repo), events })
+  }
+  return changes
+}
+
+/** Read the validated queue and its change chains concurrently for a listing. */
+export async function readEventQueueWithChanges(
+  store: QueueLocation,
+  queue: string,
+): Promise<Readonly<{ queue: EventQueue; histories: ReadonlyMap<string, ChangeHistory> }>> {
+  const prefix = `${queueRefPrefix(queue)}/changes/`
+  const [queueState, chains] = await Promise.all([
+    readEventQueue(store, queue),
+    chainsUnder(prefix, { ...store, limit: 1024 }),
+  ])
+  return { queue: queueState, histories: projectChangeHistories(chains, prefix, store.repo) }
+}
+
 /** Branch histories and projections from one batched remote fetch. */
 export async function listChangeHistories(
   store: QueueLocation,
@@ -1234,11 +1259,7 @@ export async function listChangeHistories(
   }
   const prefix = `${queueRefPrefix(queue)}/changes/`
   const chains = await chainsUnder(prefix, { ...store, limit: 1024 })
-  const changes = new Map<string, ChangeHistory>()
-  for (const [ref, events] of chains) {
-    changes.set(ref.slice(prefix.length), { state: project(events, ref, store.repo), events })
-  }
-  return changes
+  return projectChangeHistories(chains, prefix, store.repo)
 }
 
 /** Branch projections for an event queue. */
