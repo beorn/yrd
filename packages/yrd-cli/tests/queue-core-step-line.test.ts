@@ -26,4 +26,16 @@ describe("a step row's line", () => {
     )
     expect(summarize("step", { ...read, ms: 310 })).toBe("read ran for main at fedcba987654 in 310 ms")
   })
+
+  it("names the compose that owns a git-super phase, so its merge is not the queue's (25303 tier 2)", () => {
+    const phase = {
+      branch: "task/x",
+      head: "0123456789abcdef",
+      ms: 812,
+      name: "merge",
+      phase: "merge",
+      within: "compose",
+    }
+    expect(summarize("step", phase)).toBe("compose/merge ran for task/x at 0123456789ab in 812 ms")
+  })
 })
