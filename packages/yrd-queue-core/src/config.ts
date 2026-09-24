@@ -86,7 +86,10 @@ const TARGET_GRAMMAR = "must be <remote>#<branch>, e.g. origin#main"
 const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]"
 
 /** The endings the queue can notify about; it has no others to run a command on. */
-export const ENDINGS = ["merged", "failed", "stuck", "merged-direct", "observed", "deferred"] as const
+// `override` is a merge-check override's own event (25296, @cto ccd8dfa8): the
+// verb's set, clear and replace, and a round's expiry and half-window reminder.
+// Not a default: only an entry that names it hears it.
+export const ENDINGS = ["merged", "failed", "stuck", "merged-direct", "observed", "deferred", "override"] as const
 const DEFAULT_ENDINGS = ["merged", "failed", "stuck", "merged-direct"] as const
 
 export type Ending = (typeof ENDINGS)[number]

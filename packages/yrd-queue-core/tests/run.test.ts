@@ -26,6 +26,7 @@ import { openEvents } from "gitomic/events"
 import type { RefUpdate } from "gitomic"
 import { gitEnvironment } from "../src/git.ts"
 import { incidentTrailers } from "../src/incident.ts"
+import { reminderDue } from "../src/override.ts"
 import { CapturedQueueObjectsUnavailable } from "../src/remote.ts"
 import {
   appendRecord,
@@ -60,6 +61,12 @@ import {
   withdraw,
   writeQueueEvent,
   writePause,
+  expireOverrides,
+  OverrideRefused,
+  overrideRef,
+  parseUntil,
+  readOverrides,
+  writeOverride,
 } from "../src/index.ts"
 import type {
   ChangeRecord,
@@ -1848,8 +1855,10 @@ describe("a queue run", () => {
     })
   })
 
-  // @i/10-yrd/25301 A1 (@cto c7115f0f): the head merges before the rest of the line is judged.
-  it("with 40 changes waiting, the head merges before any other change is judged (25301 A1)", async () => {
+  // @i/10-yrd/25301 A1 (@cto c7115f0f): the head merges before the rest of the line is judged,
+  // and (@cto 20a360d8, cure (a)) the round then prepares only the NEXT head: the rest of the
+  // line is judged when the walk of a later round reaches it, never all at once after a merge.
+  it("with 40 changes waiting, the head merges, the next head is judged, and the other 38 wait unjudged (25301 A1)", async () => {
     const w = await world()
     const branches = Array.from({ length: 40 }, (_, i) => `task/c${String(i).padStart(2, "0")}`)
     const heads: string[] = []
@@ -1861,24 +1870,28 @@ describe("a queue run", () => {
     expect(outcome.merged).toEqual(["task/c00"])
     const mergeCommit = await remoteTarget(w)
     const lines = readFileSync(w.checkLog, "utf8").trim().split("\n")
-    // The check log is in time order. Its first line is the head's judge; its
-    // second is the head's merge check, whose candidate IS the merge that landed;
-    // only then the other 39 judges, the prefetch, each standing on that merge.
-    expect(lines).toHaveLength(41)
+    // The check log is in time order: the head's judge, the head's merge check
+    // (whose candidate IS the merge that landed), then ONE judge, the next
+    // head's, standing on that merge. Nothing else in the line is judged.
+    expect(lines).toHaveLength(3)
     expect(/candidate=(\S+)/u.exec(lines[1]!)?.[1]).toBe(mergeCommit)
-    expect(lines.map((line) => /base=(\S+)/u.exec(line)?.[1])).toEqual([
-      w.target,
-      w.target,
-      ...Array.from({ length: 39 }, () => mergeCommit),
-    ])
-    expect(outcome.checkedWaiting).toBe(39)
-    // @cto 62ed0395 (2): every prefetch verdict names the target it stood on,
-    // the checked record's Base trailer, and here that is the head's merge.
+    expect(lines.map((line) => /base=(\S+)/u.exec(line)?.[1])).toEqual([w.target, w.target, mergeCommit])
+    expect(outcome.checkedWaiting).toBe(1)
     await fetchChanges(w)
-    const tail = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/c39", head: heads[39]! })))!)
-    expect(trailer(tail.find((record) => record.kind === "checked")!, "Base")).toBe(mergeCommit)
+    // @cto 62ed0395 (2): the prepared head's verdict names the target it stood on.
+    const next = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/c01", head: heads[1]! })))!,
+    )
+    expect(trailer(next.find((record) => record.kind === "checked")!, "Base")).toBe(mergeCommit)
+    // The last change was never judged: its chain holds only its opening record.
+    const last = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/c39", head: heads[39]! })))!,
+    )
+    expect(last.map((record) => record.kind)).toEqual(["opened"])
     // review2 25301 r2 record 1: each read step names the target that read stood
-    // on, so the prefetch's and the final re-read's steps name the head's merge.
+    // on, so the next head's read and the final re-read name the head's merge.
     const reads = readFileSync(outcome.log, "utf8")
       .trim()
       .split("\n")
@@ -1945,7 +1958,10 @@ describe("a queue run", () => {
     const submitLog = join(w.workdir, "submit-checks.log")
     const script = (name: string, body: string): string => {
       const path = join(w.workdir, name)
-      writeFileSync(path, ["#!/bin/sh", body, `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`, "exit 0", ""].join("\n"))
+      writeFileSync(
+        path,
+        ["#!/bin/sh", body, `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`, "exit 0", ""].join("\n"),
+      )
       chmodSync(path, 0o755)
       return path
     }
@@ -1985,6 +2001,35 @@ describe("a queue run", () => {
     expect(tail.change.records.map((record) => record.kind)).toEqual(["opened"])
   })
 
+  // @i/10-yrd/25301 row 3: a withdrawn record is never composed or judged. The round
+  // re-reads each change's state before it judges it; one withdrawn meanwhile is
+  // skipped with one journal line (the service judged task/25314-fence-eof after it
+  // had been withdrawn, 2026-09-23).
+  it("a change withdrawn while an earlier change is judged is skipped with one journal line, never judged (25301 row 3)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    const twoHead = await submitCommit(w, "task/two", "two.txt")
+
+    // task/one fails its judge (its file is one.txt); while that check runs,
+    // task/two is withdrawn, so the walk reaches a change that has left the line.
+    const running = queueRun(await w.options({ exit: 1, sleep: 2, on: ["submit", "merge"] }))
+    await checkRunning(w)
+    await withdraw(w.git, "origin", { branch: "task/two", by: "@chief", target: { branch: "main", remote: "origin" } })
+    const outcome = await running
+
+    expect(outcome.failed).toEqual(["task/one"])
+    expect(outcome.merged).toEqual([])
+    expect(await remoteTarget(w)).toBe(w.target)
+    // One judge ran, task/one's; task/two was never composed or judged.
+    expect(readFileSync(w.checkLog, "utf8").trim().split("\n")).toHaveLength(1)
+    const skips = logRecords(outcome).filter(
+      (record) => record.kind === "observation" && String(record.why ?? "").includes("left the line"),
+    )
+    expect(skips).toHaveLength(1)
+    expect(String(skips[0]?.why)).toContain(`task/two@${twoHead.slice(0, 12)}`)
+    expect(String(skips[0]?.why)).toContain("withdrawn")
+  })
+
   // @i/10-yrd/25301 A2 (restated by @cto ac87d1e5): a config edit re-judges no
   // change before the head merges; each stale verdict is re-judged when reached.
   it("after a config edit, the round re-judges the head, merges it, then re-judges the next against the new target (25301 A2)", async () => {
@@ -2010,6 +2055,303 @@ describe("a queue run", () => {
     expect(candidates).toHaveLength(3)
     expect(candidates[1]).toBe(afterSecond)
     expect(candidates[2]).not.toBe(afterSecond)
+  })
+
+  describe("a merge-check override (25296)", () => {
+    const actor = { by: "@dev/3", verified: false }
+    const hour = 3_600_000
+    const lines = (w: World): string[] => readFileSync(w.checkLog, "utf8").trim().split("\n").filter(Boolean)
+
+    // @cto 842fdb30 (7): set -> the next rounds merge without the check and with
+    // no .yrd.yml change; clear -> the following round runs it again.
+    it("set holds the merge check off with no declaration change and no re-judge; clear turns it back on", async () => {
+      const w = await world()
+      const heads: string[] = []
+      for (let i = 0; i < 10; i++) heads.push(await submitCommit(w, `task/o${String(i)}`, `o${String(i)}.txt`))
+      const base = await w.options({ exit: 0, on: ["submit", "merge"] })
+      const declared = structuredClone(base.checks)
+      const set = await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "a flaky gate", until: new Date(Date.now() + hour) },
+        ["verify"],
+      )
+      expect(set.kind).toBe("set")
+
+      const first = await queueRun({ ...base, overrides: await readOverrides(w.git, "origin", "main") })
+
+      expect(first.merged).toEqual(["task/o0"])
+      // The head's submit judge and the next head's judge (25301 cure (a)),
+      // and no merge check: with the check on, this round writes three lines.
+      expect(lines(w)).toHaveLength(2)
+      const journal = readFileSync(first.log, "utf8")
+      expect(journal).toContain('"kind":"skipped"')
+      expect(journal).toContain("verify OFF until")
+      await fetchChanges(w)
+      const records = await readRecords(
+        w.git,
+        (await refAt(w.git, changeRef("main", { branch: "task/o0", head: heads[0]! })))!,
+      )
+      const record = records.find((entry) => entry.kind === "merged")!
+      expect(trailer(record, "Skipped")).toContain(`verify override=${set.record.sha}`)
+      // (C3) the declaration the run was given is untouched.
+      expect(base.checks).toEqual(declared)
+
+      // (C2) the next round re-judges nothing: o1 is checked, and its merge check is still off.
+      const second = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        overrides: await readOverrides(w.git, "origin", "main"),
+      })
+      expect(second.merged).toEqual(["task/o1"])
+      // o1 merges on round one's verdict with no merge check; the one new line is
+      // the next head's (o2's) first judge, not a re-judge of o1.
+      expect(lines(w)).toHaveLength(3)
+
+      await writeOverride(w.git, "origin", "main", { actor, check: "verify", kind: "clear", reason: "gate fixed" }, [
+        "verify",
+      ])
+      const third = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        overrides: await readOverrides(w.git, "origin", "main"),
+      })
+      expect(third.merged).toEqual(["task/o2"])
+      // o2 was judged by round two, so its merge check runs with no re-judge;
+      // then o3, the next head, is judged: two new lines.
+      expect(lines(w)).toHaveLength(5)
+    }, 180_000)
+
+    // (C4) the next round after expiry runs the check, and the entry reads expired, never absent.
+    it("an expired override is written expired by the round's caller and the check runs again", async () => {
+      const w = await world()
+      await submitCommit(w, "task/expiry", "expiry.txt")
+      const now = Date.now()
+      await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "window", until: new Date(now + hour) },
+        ["verify"],
+      )
+      const later = now + 2 * hour
+      const expired = await expireOverrides(w.git, "origin", "main", later, "yrd")
+      expect(expired.expired.map((entry) => entry.check)).toEqual(["verify"])
+      expect(expired.table.entries).toMatchObject([{ check: "verify", state: "expired" }])
+
+      const paged = join(w.workdir, "paged.jsonl")
+      const outcome = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        notify: [{ name: "pager", on: ["override"], run: `cat >> ${paged}` }],
+        now: () => later,
+        overrides: expired.table,
+        overridesExpired: expired.expired,
+      })
+
+      expect(outcome.merged).toEqual(["task/expiry"])
+      // @cto ccd8dfa8: the round pages the expiry once, naming itself.
+      const [notice, ...more] = readFileSync(paged, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+      expect(more).toEqual([])
+      expect(notice).toMatchObject({
+        action: "expired",
+        check: "verify",
+        owner: "@dev/3",
+        reason: "window",
+        record: "override",
+      })
+      expect(notice?.["round"]).toEqual(expect.any(String))
+      expect(readFileSync(outcome.log, "utf8")).toContain(String(notice?.["round"]))
+      expect(readFileSync(outcome.log, "utf8")).toContain("told pager that merge check verify override expired")
+      // Its submit judge and its merge check: the check ran at merge again.
+      expect(lines(w)).toHaveLength(2)
+      const journal = readFileSync(outcome.log, "utf8")
+      expect(journal).toContain('"kind":"override"')
+      expect(journal).toContain("verify override expired")
+      // A second expiry pass writes nothing more.
+      expect((await expireOverrides(w.git, "origin", "main", later, "yrd")).expired).toEqual([])
+    })
+
+    // @cto ccd8dfa8: the half-window reminder is recorded on the chain, so the
+    // round pages it once and the next round does not page it again.
+    it("pages the half-window reminder once, recorded on the override chain", async () => {
+      const w = await world()
+      await submitCommit(w, "task/remind", "remind.txt")
+      const now = Date.now()
+      await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "window", until: new Date(now + 2 * hour) },
+        ["verify"],
+      )
+      const early = await expireOverrides(w.git, "origin", "main", now + hour / 2, "yrd")
+      expect(early.reminded).toEqual([])
+      const halfway = now + 1.5 * hour
+      const reminded = await expireOverrides(w.git, "origin", "main", halfway, "yrd")
+      expect(reminded.expired).toEqual([])
+      expect(reminded.reminded.map((entry) => entry.check)).toEqual(["verify"])
+      expect(reminderDue(reminded.table.entries[0]!, halfway)).toBe(false)
+      expect(reminded.table.entries).toMatchObject([
+        { check: "verify", state: "active", remindedAt: new Date(halfway) },
+      ])
+
+      const paged = join(w.workdir, "paged.jsonl")
+      const outcome = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        notify: [{ name: "pager", on: ["override"], run: `cat >> ${paged}` }],
+        now: () => halfway,
+        overrides: reminded.table,
+        overridesExpired: reminded.expired,
+        overridesReminded: reminded.reminded,
+      })
+
+      expect(outcome.merged).toEqual(["task/remind"])
+      const notices = readFileSync(paged, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+      expect(notices).toMatchObject([
+        { action: "reminder", check: "verify", owner: "@dev/3", round: expect.any(String) },
+      ])
+      // Recorded on the chain: a later pass reminds nobody.
+      expect((await expireOverrides(w.git, "origin", "main", halfway + 60_000, "yrd")).reminded).toEqual([])
+    })
+
+    // r3 triage F5: a skip is never a result, so a merge phase that stopped
+    // before an un-overridden check defers on stop time instead of merging.
+    it("a skipped check never counts as a result: a stop before the next merge check defers, never merges", async () => {
+      const w = await world()
+      await submitCommit(w, "task/f5", "f5.txt")
+      const flag = join(w.workdir, "window.flag")
+      const ran = join(w.workdir, "second.log")
+      const script = (name: string, body: string): string => {
+        const path = join(w.workdir, name)
+        writeFileSync(path, ["#!/bin/sh", body, "exit 0", ""].join("\n"))
+        chmodSync(path, 0o755)
+        return path
+      }
+      const base = await w.options({ exit: 0 })
+      const spec = base.checks[0]!
+      const checks: CheckSpec[] = [
+        { ...spec, name: "held", on: ["merge"], run: script("held.sh", "true") },
+        { ...spec, name: "closer", on: ["merge"], run: script("closer.sh", `touch "${flag}"`) },
+        { ...spec, name: "second", on: ["merge"], run: script("second.sh", `echo ran >> "${ran}"`) },
+      ]
+      await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "held", kind: "off", reason: "f5", until: new Date(Date.now() + hour) },
+        ["held", "closer", "second"],
+      )
+
+      const outcome = await queueRun({
+        ...base,
+        checks,
+        now: () => (existsSync(flag) ? 3000 : 1000),
+        overrides: await readOverrides(w.git, "origin", "main"),
+        stopAtMs: 2000,
+      })
+
+      expect(outcome.merged).toEqual([])
+      expect(outcome.deferred).toEqual(["task/f5"])
+      expect(existsSync(ran)).toBe(false)
+    })
+
+    // @cto e2642976 (3): probe B as a test. A rival override write after the
+    // round's snapshot refuses the merge push; main does not move, and the
+    // ending names the rival.
+    it("a rival override write after the snapshot refuses the merge, and the ending names it", async () => {
+      const w = await world()
+      await submitCommit(w, "task/fenced", "fenced.txt")
+      const snapshot = await readOverrides(w.git, "origin", "main")
+      const rival = await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "rival", until: new Date(Date.now() + hour) },
+        ["verify"],
+      )
+      const before = await remoteTarget(w)
+
+      const outcome = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        overrides: snapshot,
+      })
+
+      expect(outcome.merged).toEqual([])
+      expect(await remoteTarget(w)).toBe(before)
+      const row = readFileSync(outcome.log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((entry) => entry.kind === "change" && entry.reason === "override-moved")
+      expect(row).toMatchObject({ branch: "task/fenced", saw: rival.record.sha })
+    })
+
+    it("a merge fence advances the override ref and names the merge; the next write chains on it", async () => {
+      const w = await world()
+      const head = await submitCommit(w, "task/fence-audit", "audit.txt")
+      const outcome = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        overrides: await readOverrides(w.git, "origin", "main"),
+      })
+      expect(outcome.merged).toEqual(["task/fence-audit"])
+      const table = await readOverrides(w.git, "origin", "main")
+      expect(table.sha).toBeDefined()
+      const subject = (await w.git(["log", "-1", "--format=%s", table.sha!])).trim()
+      expect(subject).toBe(`merge fence: task/fence-audit@${head} in round ${outcome.run}`)
+      expect(table.entries).toEqual([])
+    })
+
+    it("refuses an unknown check, an out-of-window --until, a clear with nothing standing, and an unreadable tip", async () => {
+      const w = await world()
+      const now = Date.now()
+      await expect(
+        writeOverride(
+          w.git,
+          "origin",
+          "main",
+          { actor, check: "nope", kind: "off", reason: "x", until: new Date(now + hour) },
+          ["verify"],
+        ),
+      ).rejects.toThrow("no merge check named 'nope' is declared; the declared merge checks are: verify")
+      expect(() => parseUntil(new Date(now + 13 * hour).toISOString(), now)).toThrow(OverrideRefused)
+      expect(() => parseUntil(new Date(now - hour).toISOString(), now)).toThrow("must be after now")
+      expect(() => parseUntil("tomorrow", now)).toThrow("neither an ISO instant")
+      await expect(
+        writeOverride(w.git, "origin", "main", { actor, check: "verify", kind: "clear", reason: "x" }, ["verify"]),
+      ).rejects.toThrow("no override stands on 'verify' to clear")
+      // A tip that is not an override record is loud, never read as "no overrides".
+      const junk = (await w.git(["commit-tree", (await w.git(["mktree"], "")).trim(), "-m", "not a record"])).trim()
+      await w.git(["push", "--quiet", "origin", `${junk}:${overrideRef("main")}`])
+      await expect(readOverrides(w.git, "origin", "main")).rejects.toThrow("carries no valid Record")
+    })
+
+    it("a second --off on the same check replaces the first and names it", async () => {
+      const w = await world()
+      const first = await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "one", until: new Date(Date.now() + hour) },
+        ["verify"],
+      )
+      const second = await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "two", until: new Date(Date.now() + 2 * hour) },
+        ["verify"],
+      )
+      expect(second.kind).toBe("replaced")
+      expect(second.replaced?.record).toBe(first.record.sha)
+      expect(second.record.entries).toMatchObject([{ check: "verify", reason: "two", record: second.record.sha }])
+      const body = await w.git(["log", "-1", "--format=%B", second.record.sha!])
+      expect(body).toContain(`Replaces: ${first.record.sha!}`)
+    })
   })
 
   it("stuck: a check that exits 2 stops the run, bills nobody, and is an ending of its own", async () => {
@@ -5048,6 +5390,66 @@ describe("the target's setup", () => {
       expect(bracketed("compose", phase).ms).toBeGreaterThanOrEqual(slowMs)
     }
     expect(records.filter((row) => row.kind === "step" && row.threw === true)).toEqual([])
+  })
+
+  /**
+   * @i/10-yrd/25303 tier 2. Box 1's compose row spans the whole git-super call
+   * and says nothing about what inside it was slow. git-super now reports each
+   * of its phases with a duration, and the round writes them: one `step` row per
+   * phase, `within: "compose"`, after the compose's end row and before the
+   * prepare that follows it. The compose's own worktree is timed as a step
+   * inside the compose, so the two together account for the whole span.
+   */
+  it("writes git-super's own phases after each compose and times the compose worktree (25303 tier 2)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, setup: w.setupCommand(0) }))
+
+    expect(outcome.merged).toEqual(["task/one"])
+    const records = logRecords(outcome)
+    const at = (predicate: (record: Record<string, unknown>) => boolean) => records.findIndex(predicate)
+    for (const phase of ["submit", "merge"]) {
+      const step = (name: string, end: boolean) =>
+        at(
+          (row) =>
+            row.kind === "step" &&
+            row.name === name &&
+            row.phase === phase &&
+            (row.ms !== undefined) === end &&
+            row.within === undefined,
+        )
+      const composeStart = step("compose", false)
+      const composeEnd = step("compose", true)
+      const worktreeStart = step("worktree", false)
+      const worktreeEnd = step("worktree", true)
+      expect({
+        phase,
+        order: [composeStart, worktreeStart, worktreeEnd, composeEnd].every(
+          (i, n, all) => i >= 0 && (n === 0 || i > (all[n - 1] ?? -1)),
+        ),
+      }).toEqual({ phase, order: true })
+
+      const inside = records
+        .map((row, index) => ({ row, index }))
+        .filter(({ row }) => row.kind === "step" && row.phase === phase && row.within === "compose")
+      // git-super's closed list, in the order its phases run.
+      expect(inside.map(({ row }) => row.name)).toEqual([
+        "preflight",
+        "merge-tree",
+        "plan",
+        "capture",
+        "checkouts",
+        "merge",
+        "settle",
+        "commit",
+      ])
+      for (const { row, index } of inside) {
+        expect(row).toMatchObject({ branch: "task/one", head: expect.any(String), ms: expect.any(Number) })
+        expect(index).toBeGreaterThan(composeEnd)
+        expect(index).toBeLessThan(step("prepare", false))
+      }
+    }
   })
 
   /**

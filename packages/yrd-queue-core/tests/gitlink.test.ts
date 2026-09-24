@@ -1898,11 +1898,6 @@ describe("a diverged component the merge composes", () => {
   })
 
   /**
-   * 24977 Q3 (@cto 0a3e3838): a check that fails ONLY on the composed tree is a
-   * semantic conflict with main. It is the submitter's bounce, named
-   * `recut-check`, and the line does not stop on it.
-   */
-  /**
    * The same re-cut met at JUDGE: the component main moved before the change
    * was ever judged, so its first candidate is already composed. That
    * candidate is the queue's, not the submitter's head, so its failure is the
@@ -1930,6 +1925,11 @@ describe("a diverged component the merge composes", () => {
     expect(trailer(failed!, "Recut")).toContain(`submodule ${pins.changeSide} + ${pins.mainSide} -> `)
   })
 
+  /**
+   * 24977 Q3 (@cto 0a3e3838): a check that fails ONLY on the composed tree is a
+   * semantic conflict with main. It is the submitter's bounce, named
+   * `recut-check`, and the line does not stop on it.
+   */
   it("bounces a recut whose re-run check fails while the head alone passes, without stopping the line (24977)", async () => {
     const w = await world()
     const pins = await divergentSubmoduleCommits(w)
@@ -1997,6 +1997,6 @@ describe("a diverged component the merge composes", () => {
     })
 
     expect(existsSync(closed)).toBe(true)
-    expect(outcome.merged).toEqual([])
+    expect(outcome).toMatchObject({ deferred: ["task/second-side"], failed: [], merged: [], stuck: [] })
   })
 })

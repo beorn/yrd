@@ -121,21 +121,19 @@ async function paintAge(row: Row) {
   return { first, second }
 }
 
-describe("AGE / RUN (ia.md): RUN freezes; AGE is not tip Opened", () => {
-  it("keeps a merged row's RUN at endedAt − startedAt across a real tick, and does not print Opened as AGE", async () => {
+describe("AGE / RUN (item 5, 24196): every row has AGE, runner and after have RUN", () => {
+  it("shows AGE from since and keeps merged row's RUN at endedAt − startedAt", async () => {
     const { first, second } = await paintAge(DECIDED_ROW)
-    expect(first).toContain("— / 15:00")
-    expect(second).toContain("— / 15:00")
-    expect(first).not.toContain("45:00")
+    expect(first).toContain("45:00 / 15:00")
+    expect(second).toContain("45:01 / 15:00")
     expect(first).not.toContain("took")
   }, 10_000)
 
-  it("does not count an open row's tip Opened as AGE", async () => {
+  it("shows AGE for open row with — for RUN", async () => {
     const { first, second } = await paintAge(OPEN_ROW)
-    expect(first).toContain("— / —")
-    expect(second).toContain("— / —")
+    expect(first).toContain("45:00 / —")
+    expect(second).toContain("45:01 / —")
     expect(first).not.toContain("waiting")
-    expect(first).not.toContain("45:00")
   }, 10_000)
 })
 

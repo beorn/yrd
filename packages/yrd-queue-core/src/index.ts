@@ -27,6 +27,7 @@ export {
   encodeQueueComponent,
   parseChangeName,
   parseChangeRef,
+  overrideRef,
   pauseRef,
   queueRefPrefix,
   refOfChange,
@@ -97,7 +98,7 @@ export {
   type GitObservation,
   type Git,
 } from "./git.ts"
-export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck } from "./check.ts"
+export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck, skippedChecks } from "./check.ts"
 export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckView } from "./check.ts"
 export {
   CHANGE_REF_DIAGNOSTICS,
@@ -154,6 +155,29 @@ export {
 } from "./pause.ts"
 export type { PauseCause, PauseRecord, PauseKind, StopFact, WritePause } from "./pause.ts"
 export { pauseStop, STOPPED_BY } from "./with-pause.ts"
+export {
+  NO_OVERRIDES,
+  OVERRIDE_MAX_HOURS,
+  OverrideRefused,
+  expireOverrides,
+  isActive as isOverrideActive,
+  overrideFacts,
+  overrideLine,
+  parseUntil,
+  readOverrides,
+  stateAt as overrideStateAt,
+  writeOverride,
+} from "./override.ts"
+export type {
+  OverrideActor,
+  OverrideEntry,
+  OverrideFact,
+  OverrideState,
+  OverrideTable,
+  OverrideWrite,
+} from "./override.ts"
+export { notifyOutsideRound, overrideNotice } from "./with-notify.ts"
+export type { OutsideRound, OverrideNotice } from "./with-notify.ts"
 
 export { remoteUrl } from "./remote.ts"
 

@@ -67,7 +67,7 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import type { GitObservation, Row, StopFact } from "@yrd/queue-core"
+import type { GitObservation, OverrideFact, Row, StopFact } from "@yrd/queue-core"
 import { NowProvider, useMinute, useNow } from "./watch-clock.ts"
 import { RUNNER_GLYPH, RUNNING_GLYPH, STATE_WORDS, clock, firstLine, legendLines, runShortName, stateGlyph } from "./watch-format.ts"
 import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
@@ -164,6 +164,8 @@ export type WatchSnapshot = Readonly<{
   at: Date
   /** The stop that stands, as the reading derived it (queue-core `stopFact`); null or absent while the line runs. */
   stopped?: StopFact | null
+  /** The merge-check override table (25296): a check held off shows in the queue line while it is. */
+  overrides?: readonly OverrideFact[]
   /** Which drafts the rows list, and how many drafts have a head this repository has not read. */
   drafts?: Readonly<{ window: DraftWindow; unread: number }>
 }>
@@ -177,7 +179,7 @@ const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
 const DIVIDER_SIZE = 0
 const DEFAULT_SPLIT_RATIO = 0.65
-const DETAIL_BG = "$bg-surface-subtle"
+const DETAIL_BG = "$bg-surface-default"
 /** Below this many terminal rows the STATS box would push the table off the screen, so it yields (the retired pane's own rule). */
 /** The TIME rows under the counts cost five more; below this height the list keeps them. */
 
@@ -663,7 +665,16 @@ export function WatchPane({
           }
         />
         {/* The line under the top line: fold marker + STATS without repeating waiting/stopped/merge counts (24196). */}
-        <Box flexDirection="column" flexShrink={0} minWidth={0} paddingLeft={1} paddingRight={1}>
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          minWidth={0}
+          paddingLeft={1}
+          paddingRight={1}
+          onClick={() => {
+            setStatsOpen((was) => !was)
+          }}
+        >
           <Text wrap="truncate">
             {statsOpen ? "▾" : "▸"} STATS{shown.decisions === undefined ? "" : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
           </Text>

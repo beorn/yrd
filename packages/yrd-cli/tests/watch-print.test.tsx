@@ -115,8 +115,8 @@ describe("the printed page's frame", () => {
   it("puts RUNNER in the table, under the header, in a box", async () => {
     const text = await paint(snapshot({ pause, runner }))
     const lines = text.split("\n").filter((line) => line.trim() !== "")
-    const title = lines.findIndex((line) => line.includes("yrd watch"))
-    const header = lines.findIndex((line) => line.includes("TASK"))
+    const title = lines.findIndex((line) => line.includes("YRD"))
+    const header = lines.findIndex((line) => line.includes("ISSUE / BRANCH"))
     const runnerRow = lines.findIndex((line) => line.includes("RUNNER"))
     expect(title).toBeGreaterThanOrEqual(0)
     expect(header).toBeGreaterThan(title)
@@ -143,7 +143,7 @@ describe("the printed page's frame", () => {
     const text = await paint(snapshot({ runner }))
     const lines = text.split("\n").filter((line) => line.trim() !== "")
     const name = lines.findIndex((line) => line.trim() === "example.test/repo#main")
-    const header = lines.findIndex((line) => line.includes("TASK"))
+    const header = lines.findIndex((line) => line.includes("ISSUE / BRANCH"))
     expect(name).toBeGreaterThanOrEqual(0)
     expect(name).toBeLessThan(header)
   })
@@ -273,7 +273,7 @@ function flowJournals(): Journals {
  */
 function table(text: string): readonly string[] {
   const lines = text.split("\n").filter((line) => line.trim() !== "")
-  return lines.slice(lines.findIndex((line) => line.includes("TASK")))
+  return lines.slice(lines.findIndex((line) => line.includes("ISSUE / BRANCH")))
 }
 
 function flowSnapshot(over: Partial<WatchSnapshot> = {}): WatchSnapshot {
@@ -334,12 +334,12 @@ describe("the flow page: four bands, one row per change", () => {
   it("draws the runner in the table's own columns and says `?` where no status is published", async () => {
     const text = await paint(flowSnapshot({ runner: undefined }))
     const lines = table(text)
-    const runner = lines.find((line) => line.includes("RUNNER") && line.includes("?"))
+    const runner = lines.find((line) => line.includes("?") && line.includes("no runner status"))
 
     expect(runner, text).toBeDefined()
     expect(runner).toContain("?")
     expect(text).toContain("╭─ RUNNER")
-    const header = lines.find((line) => line.includes("TASK"))
+    const header = lines.find((line) => line.includes("ISSUE / BRANCH"))
     expect(header).toContain("QUEUE")
     expect(header).toContain("RUN")
     expect(header).not.toContain("QUEUE / RUN")

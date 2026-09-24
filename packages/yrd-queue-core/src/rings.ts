@@ -10,10 +10,15 @@
 
 import type { Ring, Steps } from "./run.ts"
 import { withNotify, type NotifyOptions } from "./with-notify.ts"
+import { withOverride } from "./with-override.ts"
 import { withPause, type PauseOptions } from "./with-pause.ts"
 
-/** The rings, outermost first: the first named here sees a step call before the rest. */
-export const RINGS: readonly Ring[] = [withPause, withNotify]
+/**
+ * The rings, outermost first: the first named here sees a step call before the
+ * rest. The override ring sits inside the pause ring, so a push the override
+ * refused reaches the pause ring already explained.
+ */
+export const RINGS: readonly Ring[] = [withPause, withOverride, withNotify]
 
 /**
  * Every ring's own options, intersected, so the run's options carry each ring's
