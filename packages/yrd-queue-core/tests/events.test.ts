@@ -10,7 +10,7 @@ import { createMemBackend } from "gitomic/mem"
 import { Conflict, open } from "gitomic"
 import type { GitomicBackend } from "gitomic"
 import { gitIn } from "../src/git.ts"
-import { eventListRows } from "../src/event-table.ts"
+import { eventListRows, eventRows } from "../src/event-table.ts"
 import { pauseRef } from "../src/refs.ts"
 import {
   CHANGE_EVENT_TYPES,
@@ -26,6 +26,7 @@ import {
   listChanges,
   queueFormat,
   queueRef,
+  readChangeEvents,
   readEventQueue,
   readEventQueueWithChanges,
   readStatus,
@@ -1230,6 +1231,77 @@ describe("the queue-format boundary", () => {
     expect(
       eventListRows(new Map([["task/old-drop", segments.map((segment) => segment.state)]]), []).table,
     ).toMatchObject([{ branch: "task/old-drop", state: "cancelled", head }])
+  })
+
+  // @failure 25667: a future event kind made one branch invalid instead of preserving its known events and naming the kind.
+  it("keeps known change events around unknown kinds and diagnoses only their branch", async () => {
+    const { store, location } = remoteMemStore("yrd-unknown-change-kind")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const at = new Date("2026-09-22T14:01:00.000Z")
+    const queueTip = await seedEventQueue(location, "lab", head, at)
+    const changes = await openEvents({ ...store, ref: changesRef("lab", "task/future") })
+    const written = await changes.append(
+      [
+        changeInput("opened", { queueTip, at, commit: head, by: "@dev/2" }),
+        input("adopted"),
+        changeInput("ignored", { queueTip, at, by: "@dev/2", reason: "manual" }),
+        changeInput("unignored", { queueTip, at, by: "@dev/2" }),
+        input("future-audit"),
+      ],
+      { expect: null },
+    )
+    const healthy = await openEvents({ ...store, ref: changesRef("lab", "task/healthy") })
+    await healthy.append([changeInput("opened", { queueTip, at, commit: head, by: "@dev/2" })], { expect: null })
+
+    const { histories, invalid } = await readEventQueueWithChanges(location, "lab")
+    expect(invalid.size).toBe(0)
+    const future = histories.get("task/future")
+    expect(future?.state).toMatchObject({ status: "queued", commit: head, tip: written.events.at(-1)?.id })
+    expect(future?.state.ignored).toBeUndefined()
+    expect(future?.state.diagnostic).toContain("adopted")
+    expect(future?.state.diagnostic).toContain("future-audit")
+    expect(histories.get("task/healthy")?.state.diagnostic).toBeUndefined()
+    expect(eventRows(new Map([...histories].map(([branch, history]) => [branch, history.state])))).toMatchObject([
+      { branch: "task/future", state: "queued", diagnostic: expect.stringContaining("adopted") },
+      { branch: "task/healthy", state: "queued" },
+    ])
+    expect((await readStatus(location, "lab", "task/future")).tip).toBe(written.events.at(-1)?.id)
+    expect(
+      (await readChangeEvents(location, "lab", "task/future", written.events.at(-1)?.id ?? "")).map(
+        (item) => item.type,
+      ),
+    ).toEqual(["opened", "adopted", "ignored", "unignored", "future-audit"])
+    expect(enumerateChangeSegments(future?.events ?? [], changesRef("lab", "task/future"), store.repo)).toMatchObject([
+      { state: { status: "queued", diagnostic: expect.stringContaining("future-audit") } },
+    ])
+    expect(() => decide(future?.events ?? [], input("future-writer"))).toThrow(
+      /cannot write unknown Yrd change event future-writer/,
+    )
+
+    // @failure 25667 CTO ruling: an ended segment's warning must not remain on a clean reopened live row.
+    const closed = await changes.append(
+      [changeInput("cancelled", { queueTip, at, commit: head, by: "@dev/2", reason: "dropped" })],
+      { expect: written.events.at(-1)?.id ?? null },
+    )
+    await changes.append([changeInput("opened", { queueTip, at, commit: head, by: "@dev/2" })], {
+      expect: closed.events[0]?.id ?? null,
+    })
+    const reopened = await readEventQueueWithChanges(location, "lab")
+    expect(reopened.invalid.size).toBe(0)
+    const current = reopened.histories.get("task/future")
+    expect(current?.state.diagnostic).toBeUndefined()
+    const segments = enumerateChangeSegments(current?.events ?? [], changesRef("lab", "task/future"), store.repo)
+    expect(segments).toHaveLength(2)
+    expect(segments[0]?.state.diagnostic).toContain("adopted")
+    expect(segments[1]?.state.diagnostic).toBeUndefined()
+    const document = eventListRows(new Map([["task/future", segments.map((segment) => segment.state)]]), [], {
+      all: true,
+    }).document
+    expect(document.map((row) => row.diagnostic)).toEqual([undefined, expect.stringContaining("adopted")])
+    const currentUnknown = await changes.append([input("future-current")], { expect: current?.state.tip ?? null })
+    expect((await readStatus(location, "lab", "task/future")).diagnostic).toContain("future-current")
+    expect((await readStatus(location, "lab", "task/future")).tip).toBe(currentUnknown.events[0]?.id)
   })
 
   it("rejects an invalid queue chain through the combined read", async () => {

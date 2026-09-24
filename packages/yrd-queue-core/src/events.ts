@@ -70,6 +70,12 @@ export const CHANGE_EVENT_TYPES = [
 ] as const
 export type ChangeEventType = (typeof CHANGE_EVENT_TYPES)[number]
 
+function assertChangeEventType(type: string): asserts type is ChangeEventType {
+  if (!CHANGE_EVENT_TYPES.some((known) => known === type)) {
+    throw new TypeError(`cannot write unknown Yrd change event ${type}`)
+  }
+}
+
 export type EventChange = Readonly<{
   status: ChangeStatus
   /** The submitted commit, or the last head when a branch was dropped before any submit. */
@@ -217,6 +223,7 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
 
 /** Construct Yrd's required causal trailers; a recorded commit is always kept. */
 export function changeInput(type: ChangeEventType, details: ChangeInputDetails): EventInput {
+  assertChangeEventType(type)
   if (!COMMIT_OID.test(details.queueTip)) throw new TypeError(`Queue: must name a commit oid, got ${details.queueTip}`)
   if (Number.isNaN(details.at.getTime())) throw new TypeError("Time: needs a valid instant")
   if ((type === "opened" || type === "verifying" || type === "merging") && details.commit === undefined) {
@@ -500,8 +507,15 @@ function settleNotice(state: EventChange, event: EventShape): EventChange {
   }
 }
 
-/** Pure fold. Unknown kinds and malformed transitions fail at the selected event chain. */
+function diagnose(state: EventChange, message: string): EventChange {
+  return { ...state, diagnostic: state.diagnostic === undefined ? message : `${state.diagnostic}; ${message}` }
+}
+
+/** Pure fold. An unknown kind keeps known state and the selected tip; malformed known transitions fail. */
 export function evolve(state: EventChange, event: EventShape): EventChange {
+  if (!CHANGE_EVENT_TYPES.some((known) => known === event.type)) {
+    return diagnose({ ...state, tip: event.id }, `unknown Yrd change event ${event.type} at ${event.id}`)
+  }
   const at = requireCause(event)
   checkedRows(event)
   if (event.props.some(([key]) => key === "Status")) {
@@ -527,6 +541,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         deferred: _previousDeferred,
         notices: _previousNotices,
         lastNotifiable: _previousNotifiable,
+        diagnostic: _previousDiagnostic,
         ...fresh
       } = next
       return {
@@ -690,6 +705,7 @@ function pending(input: EventInput): EventShape {
 
 /** Decide an append from the current chain; a second submit cancels then opens. */
 export function decide(events: readonly Event[], input: EventInput): readonly EventInput[] {
+  assertChangeEventType(input.type)
   const state = events.reduce(evolve, initial)
   if (input.type === "opened" && isOpen(state.status)) {
     const cause = (input.props ?? []).filter(([key]) => key === EVENT_TRAILERS.queue || key === EVENT_TRAILERS.time)
@@ -1426,7 +1442,7 @@ export function enumerateChangeSegments(events: readonly Event[], ref: string, r
     segments.push({
       opened: first.id,
       head: state.commit,
-      state: { ...state, diagnostic: `${ref}: malformed history has no opened event` },
+      state: diagnose(state, `${ref}: malformed history has no opened event`),
       sources,
     })
   }
@@ -1438,5 +1454,5 @@ export function project(events: readonly Event[], ref: string, repo: string): Ev
   const state = events.reduce(evolve, initial)
   return events.some((event) => event.type === "opened")
     ? state
-    : { ...state, diagnostic: `${ref}: malformed history has no opened event` }
+    : diagnose(state, `${ref}: malformed history has no opened event`)
 }
