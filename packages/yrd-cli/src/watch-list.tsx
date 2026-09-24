@@ -30,10 +30,12 @@ import React, { memo } from "react"
 import { Box, Pulse, Text } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
+import { TimeText } from "./watch-primitives.tsx"
 import {
   RUNNER_GLYPH,
   RUNNING_GLYPH,
   STATE_WORDS,
+  AGE_RUN_MIN_WIDTH,
   ageRunText,
   clock,
   friendlyPath,
@@ -159,16 +161,21 @@ export function listLayout(
     columns < 100
       ? 0
       : Math.max(5, (runner?.by ?? "—").length, ...rows.map((item) => (item.row.submitter ?? "—").length))
-  const runWidth = separate
-    ? Math.max(
-        3,
-        ...rows.map((item) => runIdentifier(runIdOf(item)).length),
-      )
-    : 0
-  const ageRunWidth = Math.max(9, (runner?.duration ?? "").length, ...rows.map((item) => ageRunText(item.row, now).length))
+  const runWidth = separate ? Math.max(3, ...rows.map((item) => runIdentifier(runIdOf(item)).length)) : 0
+  const ageRunWidth = Math.max(
+    AGE_RUN_MIN_WIDTH,
+    (runner?.duration ?? "").length,
+    ...rows.map((item) => ageRunText(item.row, now).length),
+  )
   const fixedExceptQ = timeWidth + statusWidth + agentWidth + (separate ? runWidth : 0) + ageRunWidth + 8
   const maxAvailableForQ = Math.max(16, columns - fixedExceptQ - 56)
-  const qWidth = separate ? (fullQueue ? Math.max(16, Math.min(queue.label.length, maxAvailableForQ)) : single ? 0 : 3) : 0
+  const qWidth = separate
+    ? fullQueue
+      ? Math.max(16, Math.min(queue.label.length, maxAvailableForQ))
+      : single
+        ? 0
+        : 3
+    : 0
   return {
     columns,
     timeWidth,
@@ -340,11 +347,7 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
  */
 const AgeRunCell = memo(function AgeRunCell({ row, color }: { row: Row; color: string | undefined }) {
   const now = useNow()
-  return (
-    <Text color={color ?? "$fg-muted"} wrap="truncate">
-      {ageRunText(row, now)}
-    </Text>
-  )
+  return <TimeText text={ageRunText(row, now)} color={color} />
 })
 
 function diagnosticsEqual(a: Row["diagnostics"], b: Row["diagnostics"]): boolean {
@@ -448,11 +451,7 @@ export const ListRow = memo(function ListRow({
     >
       <Cells layout={layout}>
         {{
-          time: (
-            <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
-              {timeText}
-            </Text>
-          ),
+          time: <TimeText text={timeText} color={forced ?? held} />,
           q:
             (layout.qWidth ?? 0) === 0 ? null : (
               <Text color={forced ?? held ?? "$fg-muted"} wrap="truncate">
@@ -538,9 +537,11 @@ export const ListRow = memo(function ListRow({
               (layout.timeWidth ?? 5) +
               1 +
               (layout.isSeparateColumns
-                ? (((layout.qWidth ?? 0) > 0 ? (layout.qWidth ?? 0) + 1 : 0) +
-                   ((layout.runWidth ?? 0) > 0 ? (layout.runWidth ?? 0) + 1 : 0))
-                : ((layout.queueRunWidth ?? 0) > 0 ? (layout.queueRunWidth ?? 0) + 1 : 0))
+                ? ((layout.qWidth ?? 0) > 0 ? (layout.qWidth ?? 0) + 1 : 0) +
+                  ((layout.runWidth ?? 0) > 0 ? (layout.runWidth ?? 0) + 1 : 0)
+                : (layout.queueRunWidth ?? 0) > 0
+                  ? (layout.queueRunWidth ?? 0) + 1
+                  : 0)
             }
             flexShrink={0}
           />
@@ -569,17 +570,9 @@ export const ListRow = memo(function ListRow({
  * so narrow terminal layouts (under 100 columns) can render the cure on its own line without truncation.
  */
 export function splitRunnerCure(holds: string): { text: string; cure?: string } {
-  const resumeMatch = holds.match(/^(.*?) · (resume: .*)$/)
-  if (resumeMatch) {
-    return { text: resumeMatch[1]!, cure: resumeMatch[2]! }
-  }
-  const startMatch = holds.match(/^(.*?) · (start: .*)$/)
-  if (startMatch) {
-    return { text: startMatch[1]!, cure: startMatch[2]! }
-  }
-  const fixMatch = holds.match(/^(.*?) — (fix and .*)$/)
-  if (fixMatch) {
-    return { text: fixMatch[1]!, cure: fixMatch[2]! }
+  for (const pattern of [/^(.*?) · (resume: .*)$/u, /^(.*?) · (start: .*)$/u, /^(.*?) — (fix and .*)$/u]) {
+    const [, text, cure] = holds.match(pattern) ?? []
+    if (text !== undefined && cure !== undefined) return { text, cure }
   }
   return { text: holds }
 }
@@ -588,8 +581,8 @@ export function RunnerRow({
   line,
   layout,
   cursor = false,
-  queueDigit = 1,
-  queueLabel = "main",
+  queueDigit: _queueDigit = 1,
+  queueLabel: _queueLabel = "main",
 }: {
   line: RunnerLine
   layout: ListLayout
@@ -602,10 +595,7 @@ export function RunnerRow({
   const timeText = line.at !== undefined ? clock(line.at) : "—"
   const parsed = splitRunnerCure(line.holds)
   const isStoppedOrPaused = line.state === "stopped" || line.state === "paused"
-  const displayText =
-    isStoppedOrPaused && !parsed.text.startsWith("STOPPED:")
-      ? `STOPPED: ${parsed.text}`
-      : parsed.text
+  const displayText = isStoppedOrPaused && !parsed.text.startsWith("STOPPED:") ? `STOPPED: ${parsed.text}` : parsed.text
   const cureText =
     parsed.cure === undefined
       ? undefined
@@ -620,7 +610,7 @@ export function RunnerRow({
     <Box flexDirection="column" minWidth={0} width="100%" backgroundColor={cursor ? "$bg-selected" : undefined}>
       <Cells layout={layout}>
         {{
-          time: <Text color={forced ?? color}>{timeText}</Text>,
+          time: <TimeText text={timeText} color={forced ?? color} />,
           q: null,
           run: null,
           queueRun: null,
@@ -711,12 +701,10 @@ function Cells({
             </Box>
           )}
         </>
-      ) : (
-        children.queueRun == null ? null : (
-          <Box width={layout.queueRunWidth} flexShrink={0}>
-            {children.queueRun}
-          </Box>
-        )
+      ) : children.queueRun == null ? null : (
+        <Box width={layout.queueRunWidth} flexShrink={0}>
+          {children.queueRun}
+        </Box>
       )}
       <Box flexGrow={1} flexBasis={0} minWidth={12}>
         {children.task}

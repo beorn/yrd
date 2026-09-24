@@ -105,10 +105,12 @@ import {
   bandOf,
   bandPlan,
   bandedRows,
+  draftsSaid,
   runnerOf,
   type Band,
   type BandPlan,
 } from "./watch-frame.tsx"
+import { TimeText } from "./watch-primitives.tsx"
 import type { RunnerFacts, RunnerLine } from "./watch-runner.ts"
 import type { RunDecision } from "./watch-stats.ts"
 
@@ -171,7 +173,7 @@ export type WatchSnapshot = Readonly<{
   /** The merge-check override table (25296): a check held off shows in the queue line while it is. */
   overrides?: readonly OverrideFact[]
   /** Which drafts the rows list, and how many drafts have a head this repository has not read. */
-  drafts?: Readonly<{ window: DraftWindow; unread: number }>
+  drafts?: Readonly<{ window: DraftWindow; unread: number; older?: number }>
 }>
 
 // The natural sizes the monitor used, and the ratio it settled on: 0.65 is the
@@ -326,6 +328,7 @@ export function WatchPane({
   // bands are applied HERE, before the cursor and the detail read an index, so
   // every one of them addresses the sequence the reader is looking at.
   const runner = runnerOf(shown, shown.at)
+  const draftsLine = draftsSaid(shown.rows, shown.drafts)
   const visible = bandedRows(
     shown.rows.filter(
       (item) =>
@@ -659,6 +662,7 @@ export function WatchPane({
         >
           <Text wrap="truncate">
             {statsOpen ? "▾" : "▸"} STATS
+            {draftsLine === undefined ? "" : ` · ${draftsLine}`}
             {shown.decisions === undefined
               ? ""
               : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
@@ -850,13 +854,7 @@ function Table({
     singleQueue: isSingleQueue,
     separateColumns: true,
   })
-  const plan: BandPlan = bandPlan(
-    rows,
-    columns - 4,
-    snapshot.drafts?.window ?? "7d",
-    false,
-    snapshot.drafts?.unread ?? 0,
-  )
+  const plan: BandPlan = bandPlan(rows, columns - 4)
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       <Box height={1} flexShrink={0} />
@@ -927,8 +925,8 @@ function Table({
                 <Box flexDirection="column">
                   <BandBreakRows brk={brk} snapshot={snapshot} layout={layout} includeRunner={false} />
                   {separator === undefined ? null : (
-                    <Text bold color="$fg-muted">
-                      {separator}
+                    <Text bold>
+                      <TimeText text={separator} />
                     </Text>
                   )}
                   {row}

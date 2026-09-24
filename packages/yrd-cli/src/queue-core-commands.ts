@@ -71,6 +71,7 @@ import {
   refAt,
   readDrafts,
   DRAFT_WINDOW_MS,
+  foldDrafts,
   endingInstants,
   submit,
   withdraw,
@@ -1599,8 +1600,8 @@ export async function coreQueueCommand(
           stopped: StopFact | null
           /** The merge-check override table, active and expired entries alike (25296); empty on an event queue. */
           overrides: readonly OverrideFact[]
-          /** Which drafts the rows list, and the heads of the drafts this repository has not read. */
-          drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
+          /** Which drafts the rows list, the heads of the drafts this repository has not read, and how many older ones fold into a count. */
+          drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
         }>
       > => {
         // Legacy JSON retains its historical change-only document. An event
@@ -1697,7 +1698,13 @@ export async function coreQueueCommand(
           overrides,
           ...(drafts === undefined
             ? {}
-            : { drafts: { unread: drafts.undated.map((draft) => draft.head), window: draftWindow } }),
+            : {
+                drafts: {
+                  unread: drafts.undated.map((draft) => draft.head),
+                  window: draftWindow,
+                  older: "olderDrafts" in reading ? (reading.olderDrafts ?? 0) : 0,
+                },
+              }),
         }
       }
       /**
@@ -2950,7 +2957,7 @@ function snapshotOf(
     decisions: readonly RunDecision[]
     stopped: StopFact | null
     overrides?: readonly OverrideFact[]
-    drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
+    drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
   }>,
 ): WatchSnapshot {
   return {
@@ -2966,7 +2973,7 @@ function snapshotOf(
     ...(round.overrides === undefined ? {} : { overrides: round.overrides }),
     ...(round.drafts === undefined
       ? {}
-      : { drafts: { unread: round.drafts.unread.length, window: round.drafts.window } }),
+      : { drafts: { unread: round.drafts.unread.length, window: round.drafts.window, older: round.drafts.older } }),
     ...(round.pause === undefined ? {} : { pause: round.pause }),
     ...(round.journalAbsent === undefined ? {} : { journalAbsent: round.journalAbsent }),
   }
@@ -3369,6 +3376,8 @@ export async function readListing(
     all: readonly Row[]
     /** The drafts of the window asked for; absent when none was. */
     drafts?: DraftReading
+    /** The seven-day drafts older than a day, folded into a count rather than listed (25424). */
+    olderDrafts?: number
     observation: GitObservation
   }>
 > {
@@ -3396,6 +3405,7 @@ export async function readListing(
           targetSha: targetOid,
           ...(window === "7d" ? { since: new Date(Date.now() - DRAFT_WINDOW_MS) } : {}),
         })
+  const folded = foldDrafts(drafts?.dated ?? [], new Date())
   const all = list(queue.changes, {
     directMerges: await directMergeCommits(git, config.target.branch, targetOid, queue.changes),
     journals,
@@ -3404,8 +3414,9 @@ export async function readListing(
       queue.changes.map((entry) => entry.change.head),
     ),
     ...(options.shown === undefined ? {} : { endings: await endingInstants(git, queue.changes) }),
-    // Seven days lists the drafts it can date and counts the rest; every draft lists them all, marked.
-    ...(drafts === undefined ? {} : { drafts: window === "all" ? [...drafts.dated, ...drafts.undated] : drafts.dated }),
+    // Seven days lists the drafts of the last day and counts the older ones
+    // and the undated apart; every draft lists them all, marked.
+    ...(drafts === undefined ? {} : { drafts: window === "all" ? [...drafts.dated, ...drafts.undated] : folded.rows }),
   })
   return {
     all: markStaleVerdicts(all, queue.changes, config.blob),
@@ -3413,6 +3424,7 @@ export async function readListing(
     queue,
     observation,
     ...(drafts === undefined ? {} : { drafts }),
+    ...(drafts === undefined || window === "all" ? {} : { olderDrafts: folded.older }),
   }
 }
 

@@ -65,7 +65,7 @@ describe("the status box's own lines", () => {
     const rows = timingRows(held, new Date(NOW_MS))
     expect(rows).toHaveLength(2)
     expect(rows[0]).toMatch(/^Submitted \d\d:\d\d:\d\d, Started \d\d:\d\d:\d\d$/u)
-    expect(rows[1]).toBe("checking 1:00 · runtime 1:00")
+    expect(rows[1]).toBe("checking 1:00 · runtime 01:00")
     expect(timingRows(row({ since: undefined }), new Date(NOW_MS))).toEqual([])
   })
 
@@ -149,10 +149,7 @@ describe("HISTORY and METADATA (watch-change)", () => {
       ]),
     ])
     // Successful notice re-sends write sent records, but are never drawn as runs in the change history
-    expect(entries.map((entry) => entry.text)).toEqual([
-      "pending at 3c285a41af46",
-      "submitted by @chief",
-    ])
+    expect(entries.map((entry) => entry.text)).toEqual(["pending at 3c285a41af46", "submitted by @chief"])
   })
 
   /**

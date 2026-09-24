@@ -4355,7 +4355,7 @@ describe("a queue run", () => {
     expect(await trailerOn(w, merge, "Merged-By")).toBe(by)
     // The queue commits as itself, so a reader tells its merges from a person's
     // with `git log` alone.
-    expect((await w.git(["log", "-1", "--format=%cn <%ce>", merge])).trim()).toMatch(/^yrd-service <yrd-service@/u)
+    expect((await w.git(["log", "-1", "--format=%cn <%ce>", merge])).trim()).toMatch(/^yrd <yrd@/u)
     expect(trailer(merged, "Merge")).toBe(merge)
     // One `Check:` per on-merge check, in the shape the checked record uses.
     expect(trailers(merged, "Check")).toEqual([expect.stringMatching(/^verify exit=0 ms=\d+ log=\S+$/u)])

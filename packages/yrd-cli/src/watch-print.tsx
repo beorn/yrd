@@ -17,6 +17,7 @@
 import React from "react"
 import { Box, Text, renderString } from "silvery"
 import { BandBreakRows, ListStack, LoudPause, QueueLine, bandPlan, bandedRows, runnerOf } from "./watch-frame.tsx"
+import { TimeText } from "./watch-primitives.tsx"
 import { NowProvider } from "./watch-clock.ts"
 import { ListHeader, ListRow, TopLine, listLayout, separatorBefore } from "./watch-list.tsx"
 import { queueLineStatus, type WatchSnapshot } from "./watch-pane.tsx"
@@ -46,7 +47,7 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
     separateColumns: true,
     fullQueueRefs: true,
   })
-  const plan = bandPlan(rows, columns - 2, snapshot.drafts?.window ?? "7d", false, snapshot.drafts?.unread ?? 0, true)
+  const plan = bandPlan(rows, columns - 2, "bare")
   return (
     <NowProvider readAt={snapshot.at} live={false}>
       <Box flexDirection="column" width={columns} minWidth={0}>
@@ -81,8 +82,8 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
               <Box key={key} flexDirection="column" minWidth={0}>
                 <BandBreakRows brk={plan.before.get(index)} snapshot={snapshot} layout={layout} />
                 {separator === undefined ? null : (
-                  <Text bold color="$fg-muted">
-                    {separator}
+                  <Text bold>
+                    <TimeText text={separator} />
                   </Text>
                 )}
                 <ListRow

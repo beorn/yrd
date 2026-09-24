@@ -873,16 +873,16 @@ describe("the drafts a watch reads (24196)", () => {
       listed: { draftRow: true, fetched: false, json: ["task/one"], queueLine: true },
       watched: {
         // Seven days: the draft this clone can date is a row; the head it never read is counted apart.
-        first: { counted: { unread: 1, window: "7d" }, rows: [here] },
+        first: { counted: { older: 0, unread: 1, window: "7d" }, rows: [here] },
         // Every draft: the head first seen a round ago was fetched before this round and is dated now;
         // the one pushed since is a marked row, not yet read.
         all: {
-          counted: { unread: 1, window: "all" },
+          counted: { older: 0, unread: 1, window: "all" },
           rows: [{ author: "grace", branch: "task/first-seen" }, here, { author: undefined, branch: "task/later" }],
         },
         // Back to seven days: every head has been seen once and read, so nothing is left unread.
         week: {
-          counted: { unread: 0, window: "7d" },
+          counted: { older: 0, unread: 0, window: "7d" },
           rows: [{ author: "grace", branch: "task/first-seen" }, here, { author: "grace", branch: "task/later" }],
         },
       },
