@@ -2021,9 +2021,9 @@ describe("a queue run", () => {
       const first = await queueRun({ ...base, overrides: await readOverrides(w.git, "origin", "main") })
 
       expect(first.merged).toEqual(["task/o0"])
-      // The head's submit judge and nine prefetch judges, and no merge check:
-      // with the check on, this round writes eleven lines.
-      expect(lines(w)).toHaveLength(10)
+      // The head's submit judge and the next head's judge (25301 cure (a)),
+      // and no merge check: with the check on, this round writes three lines.
+      expect(lines(w)).toHaveLength(2)
       const journal = readFileSync(first.log, "utf8")
       expect(journal).toContain('"kind":"skipped"')
       expect(journal).toContain("verify OFF until")
@@ -2043,7 +2043,9 @@ describe("a queue run", () => {
         overrides: await readOverrides(w.git, "origin", "main"),
       })
       expect(second.merged).toEqual(["task/o1"])
-      expect(lines(w)).toHaveLength(10)
+      // o1 merges on round one's verdict with no merge check; the one new line is
+      // the next head's (o2's) first judge, not a re-judge of o1.
+      expect(lines(w)).toHaveLength(3)
 
       await writeOverride(w.git, "origin", "main", { actor, check: "verify", kind: "clear", reason: "gate fixed" }, [
         "verify",
@@ -2053,8 +2055,9 @@ describe("a queue run", () => {
         overrides: await readOverrides(w.git, "origin", "main"),
       })
       expect(third.merged).toEqual(["task/o2"])
-      // o2 was checked by round one's prefetch, so its merge check is the one new line.
-      expect(lines(w)).toHaveLength(11)
+      // o2 was judged by round two, so its merge check runs with no re-judge;
+      // then o3, the next head, is judged: two new lines.
+      expect(lines(w)).toHaveLength(5)
     }, 180_000)
 
     // (C4) the next round after expiry runs the check, and the entry reads expired, never absent.
