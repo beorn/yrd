@@ -211,6 +211,10 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
     await run.steps.ended(run, entry, "cancelled", written.sha, tip.sha)
     return
   }
+  // Older queues recorded a replaced or deleted head as failed. It left the
+  // line without a failed check, so no send-back is owed for that record.
+  const reason = trailer(written, "Reason")
+  if (reason === "replaced" || reason === "deleted") return
   if (
     written.kind !== "failed" &&
     written.kind !== "stuck" &&

@@ -443,6 +443,74 @@ it("tells the submitter when the legacy queue withdraws a confirmed absent branc
   expect(readFileSync(w.notifyLog, "utf8").split("\n").filter(Boolean)).toHaveLength(1)
 })
 
+/** @failure Historic failed retirement records became new send-backs after cancelled retry support.
+ * @level l3 @consumer submitters with old replaced or deleted heads
+ */
+it.each(["replaced", "deleted"] as const)("keeps a historic failed %s retirement silent", async (reason) => {
+  const w = await world()
+  const branch = `task/old-${reason}`
+  const head = await submitCommit(w, branch, `${reason}.txt`)
+  const ref = changeRef("main", { branch, head })
+  await appendRemoteRecord(w.git, "main", {
+    change: { branch, head },
+    kind: "failed",
+    subject: `${branch} was retired as ${reason}`,
+    trailers: [["Reason", reason]],
+  })
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    notify: [{ name: "recorder", on: ["failed", "cancelled"], run: w.notifier }],
+  })
+  expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: [], stuck: [] })
+  expect(existsSync(w.notifyLog)).toBe(false)
+  await fetchChanges(w)
+  expect((await readRecords(w.git, (await refAt(w.git, ref))!)).map((record) => record.kind)).toEqual([
+    "opened",
+    "failed",
+  ])
+})
+
+/** @failure A sent receipt from the noisy sweep retriggered the same retired failure in later rounds.
+ * @level l3 @consumer submitters with a historic retirement receipt
+ */
+it("does not resend a historic failed replacement after its old sent receipt", async () => {
+  const w = await world()
+  const branch = "task/old-replaced-sent"
+  const head = await submitCommit(w, branch, "replaced-sent.txt")
+  const ref = changeRef("main", { branch, head })
+  const ended = await appendRemoteRecord(w.git, "main", {
+    change: { branch, head },
+    kind: "failed",
+    subject: `${branch} was retired as replaced`,
+    trailers: [["Reason", "replaced"]],
+  })
+  await appendRemoteRecord(w.git, "main", {
+    change: { branch, head },
+    kind: "sent",
+    subject: "old sweep told the submitter",
+    trailers: [
+      ["For", ended],
+      ["State", "failed"],
+      ["Reason", "replaced"],
+      ["To", "old-notifier"],
+      ["Delivery", "sent"],
+    ],
+  })
+
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    notify: [{ name: "recorder", on: ["failed", "cancelled"], run: w.notifier }],
+  })
+  expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: [], stuck: [] })
+  expect(existsSync(w.notifyLog)).toBe(false)
+  await fetchChanges(w)
+  expect((await readRecords(w.git, (await refAt(w.git, ref))!)).map((record) => record.kind)).toEqual([
+    "opened",
+    "failed",
+    "sent",
+  ])
+})
+
 /** @failure An explicit drop was mistaken for a queue-authored cancellation notice.
  * @level l3 @consumer submitter
  */
