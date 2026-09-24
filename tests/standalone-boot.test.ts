@@ -13,6 +13,8 @@
  * do not have the hh-dev superproject's vendored packages masking a stale
  * public dependency.
  */
+import { copyFile, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
@@ -34,6 +36,38 @@ async function runCli(...args: string[]): Promise<{ stdout: string; stderr: stri
 }
 
 describe("standalone CLI boot", () => {
+  it("imports git-super after a frozen standalone Yrd install", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-standalone-"))
+    try {
+      await copyFile(join(REPO_ROOT, "package.json"), join(root, "package.json"))
+      await copyFile(join(REPO_ROOT, "bun.lock"), join(root, "bun.lock"))
+      for (const entry of await readdir(join(REPO_ROOT, "packages"), { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const packageDir = join(root, "packages", entry.name)
+        await mkdir(packageDir, { recursive: true })
+        await copyFile(join(REPO_ROOT, "packages", entry.name, "package.json"), join(packageDir, "package.json"))
+      }
+
+      const install = Bun.spawn(["bun", "install", "--frozen-lockfile"], {
+        cwd: root,
+        stdout: "ignore",
+        stderr: "pipe",
+      })
+      const [installStderr, installExit] = await Promise.all([new Response(install.stderr).text(), install.exited])
+      expect(installExit, installStderr).toBe(0)
+
+      const imported = Bun.spawn(["bun", "-e", 'await import("git-super")'], {
+        cwd: join(root, "packages", "yrd-bay"),
+        stdout: "ignore",
+        stderr: "pipe",
+      })
+      const [importStderr, importExit] = await Promise.all([new Response(imported.stderr).text(), imported.exited])
+      expect(importExit, importStderr).toBe(0)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("imports and runs --help with no module-resolution errors", async () => {
     const { stdout, stderr, exitCode } = await runCli("--help")
     expect(stderr).not.toMatch(/SyntaxError/)
