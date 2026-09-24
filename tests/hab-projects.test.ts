@@ -15,8 +15,8 @@ import hab, { yrdQueueRunnerDeclarations } from "../hab.projects.ts"
  * change" — which is not a requirement anybody has.
  *
  * It cost three hand-patches in one day (2026-09-11): an owner line, a health
- * probe whose arrival left a stale "no health probe" comment behind, and a
- * `garage` row. Each author found out from a red main they had never run. The
+ * probe whose arrival left a stale "no health probe" comment behind. Each
+ * author found out from a red main they had never run. The
  * answer is not a co-change guard — that would make the double edit MANDATORY
  * instead of removing it — it is to stop keeping the copy.
  *

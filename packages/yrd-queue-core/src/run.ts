@@ -85,6 +85,7 @@ import {
   type GitObservation,
   type ObservationNotice,
   mergeBase,
+  refAt,
   type GitInvocationOptions,
   type GitSelection,
 } from "./git.ts"
@@ -106,6 +107,7 @@ import { changeName, changeRef, type Change } from "./refs.ts"
 import { queueFormat } from "./events.ts"
 import { eventQueueRun } from "./event-run.ts"
 import { composed, type RingOptions } from "./rings.ts"
+import { RECUT_CHECK } from "./with-notify.ts"
 import {
   CapturedQueueObjectsUnavailable,
   readObscuredEndings,
@@ -220,8 +222,6 @@ export type Run = Readonly<{
   /** An asserted-empty directory that isolates queue-owned Git commits from repository hooks. */
   hooksPath: string
   worktrees: string
-  /** The caller's declaration-captured target; every judgement is against it. */
-  targetSha: string
   /** The pause record captured in the same remote advertisement as the queue. */
   pause: PauseRecord | undefined
   /**
@@ -235,6 +235,14 @@ export type Run = Readonly<{
    * after it carries `Retried: 1`.
    */
   retried: Set<string>
+  /**
+   * The change whose submit checks the merge phase is running again on a
+   * re-cut, and the composed candidate they read (24977 constraint 2). Their
+   * logs and program roots sit beside the judge's from the same run, never on
+   * them: a check log is opened create-only, and the shared path crashed the
+   * queue (merge 447, 24977 P0).
+   */
+  recutting: Map<string, string>
   /** The target OID this run successfully pushed, or its captured starting OID. */
   targetAfter: { sha: string }
   /**
@@ -260,7 +268,15 @@ export type Run = Readonly<{
   steps: Steps
   /** Say a ring stopped this round before it could merge; the outcome carries what it said. */
   stop: (stopped: Stopped) => void
-}>
+}> & {
+  /**
+   * The target every judgement stands on: the caller's declaration-captured
+   * target, until the round's head merges. The prefetch then judges the tail
+   * on the target that merge left, the one the next round merges onto, so it is
+   * the one field a step may see change within a round (@i/10-yrd/25301).
+   */
+  targetSha: string
+}
 
 /**
  * How one step left one change. `discarded` is the only one that is not an
@@ -510,20 +526,22 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     )
   }
   // The read is the run's own, not a change's: `target` and `base`, never
-  // `branch` and `head`, which a journal reader takes to name a change.
-  const readStep = { base: targetSha, name: "read", phase: "run", target: options.target.branch }
-  const read = async () => {
+  // `branch` and `head`, which a journal reader takes to name a change. Its
+  // `base` is the target it read at: the round's start, or, for the prefetch
+  // and the final re-read, the target the head's merge left (25301).
+  const readStep = (at: string) => ({ base: at, name: "read", phase: "run", target: options.target.branch })
+  const read = async (at = targetSha) => {
     try {
-      return await timedStep(log, readStep, () =>
-        readQueue(git, options.target.remote, options.target.branch, targetSha),
+      return await timedStep(log, readStep(at), () =>
+        readQueue(git, options.target.remote, options.target.branch, at),
       )
     } catch (error) {
       if (retried !== undefined) throw failedAgain(retried, error)
       if (!(error instanceof CapturedQueueObjectsUnavailable)) throw error
       retried = error
       try {
-        return await timedStep(log, readStep, () =>
-          readQueue(git, options.target.remote, options.target.branch, targetSha),
+        return await timedStep(log, readStep(at), () =>
+          readQueue(git, options.target.remote, options.target.branch, at),
         )
       } catch (again) {
         throw failedAgain(error, again)
@@ -561,6 +579,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     pause: queue.pause,
     lineStop: queue.stop,
     retried: new Set<string>(),
+    recutting: new Map<string, string>(),
     // The caller's trace half, kept exactly as it was passed, plus this run's
     // journal, which is always wired: the two halves answer different questions
     // and only one of them is a git transcript nobody turned on.
@@ -746,90 +765,118 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
   }
 
-  // On-submit: every queued change, oldest first, in a fresh worktree of its
-  // head. A stuck change kept its place, and this run takes it again from
-  // here, first among the changes still to judge; so does a checked change
-  // whose checks ran under a check config the target no longer declares
-  // (§ The queue run: a checked record is reused only while the config blob is
-  // the one it names). A judge that ends stuck ENDS THE ROUND: nothing behind
-  // it is judged, nothing is merged, and the line stops on it (the andon,
-  // operator 2026-09-16, which overruled @i/10-yrd/24492's step-over).
-  for (const entry of ordered(entries, options.only, "queued", "stuck", "checked").filter(
-    (entry) => entry.reading.state !== "checked" || staleChecked(run, entry),
-  )) {
-    if (isStopWindowClosed(options)) {
-      log.write({
-        kind: "observation",
-        why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting new checks`,
-      })
-      break
-    }
-    const outcome = await judged(run, entry, () => run.steps.judge(run, entry))
-    if (outcome === "stuck") {
-      stuck.push(entry.change.branch)
-      return finish(
-        run,
-        2,
-        { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred },
-        await run.steps.stopLine(run, entry),
-      )
-    }
-    if (outcome === "failed") failed.push(entry.change.branch)
-    else if (outcome === "deferred") deferred.push(entry.change.branch)
+  // Head first (@i/10-yrd/25301, @cto c7115f0f and ac87d1e5). The line is walked
+  // in order and its head merges the moment it is judged: judging the rest of
+  // the line is a prefetch AFTER that merge, never a gate before it. A change is
+  // judged when it needs it — queued, stuck, or checked under a check config the
+  // target no longer declares (§ The queue run: a checked record is reused only
+  // while the config blob is the one it names) — so a config edit re-judges each
+  // change when the walk reaches it, never the whole line first. A judge that
+  // ends stuck ENDS THE ROUND and the line stops on it (the andon, operator
+  // 2026-09-16), so nothing behind a stuck row is judged or merged; a head in
+  // FRONT of a stuck row merges first, because nothing merges past it.
+  const needsJudge = (entry: QueueEntry): boolean => entry.reading.state !== "checked" || staleChecked(run, entry)
+  const pastStopTime = (): boolean => {
+    if (!isStopWindowClosed(options)) return false
+    log.write({
+      kind: "observation",
+      why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting new checks`,
+    })
+    return true
+  }
+  const andon = async (entry: QueueEntry): Promise<QueueRunOutcome> => {
+    stuck.push(entry.change.branch)
+    return finish(
+      run,
+      2,
+      { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred },
+      await run.steps.stopLine(run, entry),
+    )
   }
 
-  // On-merge: the first checked change in line, re-read so this run's own
-  // checked records count. The line is cut at its first stuck row: a checked
-  // change behind a stuck one never merges past it. A round scoped to one
-  // change selects it before the cut, so a stuck change ahead of it is not in
-  // the line this round cuts.
-  const reread = ordered((await read()).changes, options.only, "checked", "stuck")
-  const blocked = reread.findIndex((entry) => entry.reading.state === "stuck")
-  const line = (blocked === -1 ? reread : reread.slice(0, blocked)).filter((entry) => !staleChecked(run, entry))
-  let stoppedIndex = -1
-  for (const [i, checked] of line.entries()) {
-    if (isStopWindowClosed(options)) {
-      log.write({
-        kind: "observation",
-        why: `stop time reached (${new Date(options.stopAtMs).toISOString()}); stopping starting new checks`,
-      })
+  // Phase A: the head. Judge each change as the walk reaches it, and merge the
+  // first one that is checked; one merge per round (ruling D4). A change that
+  // fails or defers hands the head to the next. A round scoped to one change
+  // selects it before anything else, so it walks that change alone.
+  let acted: QueueEntry | undefined
+  let stoppedByTime = false
+  for (const entry of ordered(entries, options.only, "queued", "stuck", "checked")) {
+    if (pastStopTime()) {
+      stoppedByTime = true
       break
     }
-    const outcome = await judged(run, checked, () => run.steps.merge(run, checked))
-    if (outcome === "stuck") {
-      stuck.push(checked.change.branch)
-      return finish(
-        run,
-        2,
-        { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred },
-        await run.steps.stopLine(run, checked),
-      )
+    let head = entry
+    if (needsJudge(entry)) {
+      const judgedAs = await judged(run, entry, () => run.steps.judge(run, entry))
+      if (judgedAs === "stuck") return await andon(entry)
+      if (judgedAs === "failed") {
+        failed.push(entry.change.branch)
+        continue
+      }
+      if (judgedAs === "deferred") {
+        deferred.push(entry.change.branch)
+        continue
+      }
+      // Re-read, so the merge acts on the checked record this run just wrote.
+      const fresh = (await read()).changes.find((candidate) => sameChange(candidate, entry))
+      if (fresh === undefined || fresh.reading.state !== "checked" || staleChecked(run, fresh)) continue
+      head = fresh
+      // Judged, but the window closed before its merge could start: no merge and no prefetch.
+      if (pastStopTime()) {
+        stoppedByTime = true
+        break
+      }
     }
-    if (outcome === "deferred") {
-      deferred.push(checked.change.branch)
+    const mergedAs = await judged(run, head, () => run.steps.merge(run, head))
+    if (mergedAs === "stuck") return await andon(head)
+    if (mergedAs === "deferred") {
+      deferred.push(head.change.branch)
       continue
     }
-    if (outcome === "failed") {
-      failed.push(checked.change.branch)
-      stoppedIndex = i
-      break
-    }
-    if (outcome === "merged") {
-      merged.push(checked.change.branch)
-      stoppedIndex = i
-      break
-    }
-    stoppedIndex = i
+    if (mergedAs === "failed") failed.push(head.change.branch)
+    else if (mergedAs === "merged") merged.push(head.change.branch)
+    acted = head
     break
   }
 
-  const checkedWaiting = stoppedIndex !== -1 ? Math.max(0, line.length - 1 - stoppedIndex) : 0
+  // Phase B: the prefetch. Once the head has been acted on, judge the rest of
+  // the line against the target as it now stands, in line order, from a fresh
+  // read (the merge moved the target and wrote records). Judging on the round's
+  // starting target instead would weigh a moved gitlink against the component
+  // main the head's merge already advanced, and refuse a pin that merge turn
+  // composes. Each judge starts only inside the stop window, and a judge writes
+  // its verdict whole or not at all, so stopping here leaves no partial
+  // verdict. A scoped round has no tail.
+  if (acted !== undefined && !stoppedByTime && options.only === undefined && !(await declarationMoved(run))) {
+    run.targetSha = run.targetAfter.sha
+    const tail = ordered((await read(run.targetSha)).changes, undefined, "queued", "stuck", "checked").filter(
+      (entry) => !sameChange(entry, acted) && needsJudge(entry),
+    )
+    for (const entry of tail) {
+      if (pastStopTime()) break
+      const judgedAs = await judged(run, entry, () => run.steps.judge(run, entry))
+      if (judgedAs === "stuck") return await andon(entry)
+      if (judgedAs === "failed") failed.push(entry.change.branch)
+      else if (judgedAs === "deferred") deferred.push(entry.change.branch)
+    }
+  }
+
+  // Everything this run left checked, current and not behind a stuck row, once
+  // the head was acted on: the changes ready for the next round the moment this
+  // one ends. Read once, after the prefetch, because the prefetch is what
+  // turned them checked.
+  let checkedWaiting = 0
+  if (acted !== undefined) {
+    const reread = ordered((await read(run.targetSha)).changes, options.only, "checked", "stuck")
+    const blocked = reread.findIndex((entry) => entry.reading.state === "stuck")
+    checkedWaiting = (blocked === -1 ? reread : reread.slice(0, blocked)).filter(
+      (entry) => entry.reading.state === "checked" && !staleChecked(run, entry) && !sameChange(entry, acted),
+    ).length
+  }
 
   return finish(
     run,
     stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0,
-    // Everything this run left checked behind the one it acted on. Read from
-    // the line it already re-read, so saying it costs no second look.
     { checkedWaiting, directMerges, failed, merged, stuck, deferred },
     stopped,
   )
@@ -841,6 +888,33 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
  * name, so a ring that wraps one sees every call to it.
  */
 const BASE: Steps = { bookkeep, direct, observed, end, ended, judge, merge, open, prepare, push, stopLine }
+
+/**
+ * Whether the head's merge changed `.yrd.yml`, logged when it did (@cto
+ * 62ed0395 (3)). The prefetch judges under the declaration this round read, so
+ * every verdict it wrote after such a merge would name a config blob the target
+ * no longer declares and be judged again next round: the whole-line re-judge
+ * this round exists to remove. So that round prefetches nothing, and the next
+ * round judges each change under the new declaration as the walk reaches it.
+ */
+async function declarationMoved(run: Run): Promise<boolean> {
+  if (run.targetAfter.sha === run.targetSha) return false
+  const before = await refAt(run.git, `${run.targetSha}:.yrd.yml`, "blob")
+  const after = await refAt(run.git, `${run.targetAfter.sha}:.yrd.yml`, "blob")
+  if (before === after) return false
+  run.log.write({
+    kind: "observation",
+    why:
+      `the head's merge changed .yrd.yml (${before?.slice(0, 12) ?? "absent"} -> ${after?.slice(0, 12) ?? "absent"}); ` +
+      "no prefetch this round: the next round judges each change under the new declaration",
+  })
+  return true
+}
+
+/** The same change: one branch at one head. */
+function sameChange(left: QueueEntry, right: QueueEntry): boolean {
+  return left.change.branch === right.change.branch && left.change.head === right.change.head
+}
 
 /** A checked change whose checked record names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
@@ -1221,6 +1295,11 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
       return await writeDeferredRecord(run, entry, "submit", deferredOne, results)
     }
     const failing = results.filter((result) => result.result === "fail")
+    // 24977 (@cto c6c014ba): a candidate the queue composed is not the
+    // submitter's head, first judged or not, so its failure is the re-cut's.
+    if (failing.length > 0 && composed.recuts.length > 0) {
+      return await recutFailure(run, entry, results, failing, composed.recuts, composed.mergeCommit)
+    }
     if (failing.length > 0) {
       return await attributedFailure(run, entry, results, failing, "submit", composed.rootChanges?.changes ?? [])
     }
@@ -1258,10 +1337,11 @@ type ComposedCandidate =
       worktree: PreparedWorktree
       /** Pins the settling merge kept AHEAD of their submodule main: the land publishes these, children first (24454). */
       publishing: readonly SettledGitlink[]
+      /** Gitlinks this candidate composed itself: a re-cut no submit check has read yet (24977). */
+      recuts: readonly Recut[]
     }>
   | Readonly<{ kind: "failed"; detail: SuperMergeDetail; worktree: Worktree }>
 
-/** Compose and settle the exact tree a phase will judge, then materialize that final commit before setup or checks run. */
 /**
  * Time one step of the round that is neither a check nor a program, so the
  * journal never goes silent across it (@i/10-yrd/25303 box 1): a `step` row as
@@ -1314,6 +1394,7 @@ function writeComposeSteps(
   for (const step of steps ?? []) log.write({ ...about, kind: "step", ms: step.ms, name: step.name, within: "compose" })
 }
 
+/** Compose and settle the exact tree a phase will judge, then materialize that final commit before setup or checks run. */
 async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePhase): Promise<ComposedCandidate> {
   const { head } = entry.change
   const step = { branch: entry.change.branch, head, phase }
@@ -1373,6 +1454,31 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
       state: settled.state,
     })
   }
+  // 24977: every composition is a re-cut of the change, named as one. The settle
+  // row above says how the pin settled; this row says what the queue made of
+  // the change: its head, the component main merged in, and the new commits.
+  const recuts: Recut[] = []
+  for (const settled of verifying.gitlinks) {
+    if (settled.composition === undefined) continue
+    const recut = {
+      composed: settled.from,
+      main: settled.composition.parent,
+      path: settled.path,
+      pin: settled.composition.pin,
+    }
+    recuts.push(recut)
+    run.log.write({
+      branch: entry.change.branch,
+      candidate: mergeCommit,
+      composed: recut.composed,
+      head,
+      kind: "recut",
+      main: recut.main,
+      path: recut.path,
+      phase,
+      pin: recut.pin,
+    })
+  }
   // AFTER the settle rows, so the journal reads parent-then-descent in the order
   // the walk actually ran. `children` is a string list rather than objects
   // because LogRecord fields are scalars or string arrays -- a nested shape
@@ -1413,7 +1519,64 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     // component main after the root merge has passed every check, as it always
     // has.
     publishing: verifying.gitlinks.filter((row) => row.state === "kept-ahead" || row.state === "merged"),
+    recuts,
   }
+}
+
+/**
+ * A diverged gitlink the queue composed itself (24977, @cto e8368e85): the
+ * change's pin, the component main merged into it, and the two-parent commit
+ * that came out. The root candidate carrying it is the re-cut's other new head.
+ */
+export type Recut = Readonly<{ path: string; pin: string; main: string; composed: string }>
+
+/** One `Recut` trailer: `<path> <change pin> + <component main> -> <composed>`. */
+export function recutRow(recut: Recut): string {
+  return `${recut.path} ${recut.pin} + ${recut.main} -> ${recut.composed}`
+}
+
+/** A `Recut` trailer for a person: every sha shortened, and the main named as main. */
+export function shortRecut(row: string): string {
+  const parsed = /^(\S+) (\S+) \+ (\S+) -> (\S+)$/u.exec(row)
+  if (parsed === null) return row
+  const [, path, pin, main, composed] = parsed as unknown as [string, string, string, string, string]
+  return `${path} ${pin.slice(0, 12)} + main ${main.slice(0, 12)} -> ${composed.slice(0, 12)}`
+}
+
+/**
+ * A submit check fails on a candidate the queue composed: the change and the
+ * component main it was composed with disagree. That is a semantic conflict
+ * with main, the submitter's to resolve, but the candidate was the queue's,
+ * not the submitter's head, so it is not charged (constraint 4) and the line
+ * goes on -- at judge and at merge alike (@cto 0a3e3838 Q3, c6c014ba).
+ */
+async function recutFailure(
+  run: Run,
+  entry: QueueEntry,
+  results: readonly CheckResult[],
+  failing: readonly CheckResult[],
+  recuts: readonly Recut[],
+  candidate: string,
+): Promise<Ended> {
+  const { branch, head } = entry.change
+  const names = failing.map((result) => result.name).join(", ")
+  const composed = recuts.map((recut) => `${recut.path} with main ${recut.main.slice(0, 12)}`).join(", ")
+  return run.steps.end(run, entry, "failed", {
+    remedy:
+      `merge each component's main into your component branch (${composed}), make ${names} pass there, ` +
+      `re-stage the gitlink on a merge of ${run.options.target.branch}, push, and submit ${branch} again`,
+    subject: `${branch} fails ${names} only where the queue composed it with ${run.options.target.branch}`,
+    trailers: [
+      ["Reason", RECUT_CHECK],
+      [
+        "Detail",
+        `semantic conflict with main: ${names} fails on the queue's re-cut ${candidate.slice(0, 12)} of ` +
+          `${short(branch, head)} (${recuts.map((recut) => shortRecut(recutRow(recut))).join("; ")})`,
+      ],
+      ...recuts.map((recut) => ["Recut", recutRow(recut)] as const),
+      ...checkTrailers(results),
+    ],
+  })
 }
 
 /** The queue's merge commit retains its change and actor in Git history. */
@@ -1980,7 +2143,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
   const name = changeName(change)
   const composed = await composeCandidate(run, entry, "merge")
   if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
-  const { mergeCommit, rootChanges, worktree, publishing } = composed
+  const { mergeCommit, rootChanges, worktree, publishing, recuts } = composed
   // 24573: the path to KEEP instead of removing, set when a check fails or the
   // digest above disagrees. @dev/4 went for this root three times on one branch
   // and found it already gone each time, so every diagnosis had to be an
@@ -2063,7 +2226,45 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
         why: `the merge root does not contain ${mergeCommit.slice(0, 12)} at ${divergent.length} path(s) the candidate changed`,
       })
     }
-    const results = await runPhase(run, entry, "merge", worktree.path, merged)
+    // 24977 (@cto e8368e85 constraint 2): a candidate this phase composed is a
+    // tree no submit check has read -- the change was judged before the
+    // component main moved -- and since 25092 nothing else runs at merge. The
+    // submit checks run again on it first, and a failure there is the re-cut's.
+    let recheck: readonly CheckResult[] = []
+    if (recuts.length > 0) {
+      run.recutting.set(name, mergeCommit)
+      try {
+        recheck = await runPhase(run, entry, "submit", worktree.path, merged)
+      } finally {
+        run.recutting.delete(name)
+      }
+    }
+    const recutFailing = recheck.filter((result) => result.result === "fail")
+    if (recutFailing.length > 0) {
+      retained = worktree.path
+      return await recutFailure(run, entry, recheck, recutFailing, recuts, mergeCommit)
+    }
+    // A re-run the stop window cut short is not a pass: the judge and merge
+    // phases defer on a short list, and so does this one, or a composed
+    // candidate lands with submit checks never run on it (review2 de5a4c01).
+    const declaredForSubmit = run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes("submit"))
+    if (
+      recuts.length > 0 &&
+      recheck.every((result) => result.result === "pass") &&
+      recheck.length < declaredForSubmit.length
+    ) {
+      return await writeDeferredRecord(
+        run,
+        entry,
+        "merge",
+        { name: "stop-time", result: "deferred", why: "stop-time", exit: 0, durationMs: 0, log: "" },
+        recheck,
+      )
+    }
+    const phaseResults = recheck.every((result) => result.result === "pass")
+      ? await runPhase(run, entry, "merge", worktree.path, merged)
+      : []
+    const results = [...recheck, ...phaseResults]
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
       return await run.steps.end(
@@ -2098,13 +2299,13 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
       }
       return await writeDeferredRecord(run, entry, "merge", deferredOne, results)
     }
-    const failing = results.filter((result) => result.result === "fail")
+    const failing = phaseResults.filter((result) => result.result === "fail")
     if (failing.length > 0) {
       retained = worktree.path
       return await attributedFailure(run, entry, results, failing, "merge", rootChanges?.changes ?? [])
     }
     const declaredForMerge = run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes("merge"))
-    if (results.length < declaredForMerge.length) {
+    if (phaseResults.length < declaredForMerge.length) {
       return await writeDeferredRecord(
         run,
         entry,
@@ -2154,6 +2355,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
           ["Base", run.targetSha],
           ["Merged-By", mergedBy(run.options.target.branch, run.log.id)],
           ...publishing.map((row) => ["Published", publishedRow(row)] as const),
+          ...recuts.map((recut) => ["Recut", recutRow(recut)] as const),
           ...checkTrailers(results),
         ],
       },
@@ -2545,7 +2747,13 @@ function checkLogDir(run: Run, entry: QueueEntry, phase: Phase): string {
   // the only evidence of the fault the retry cleared (a check log is opened
   // create-only, so a shared path would crash the retry instead).
   const attempt = run.retried.has(change) ? ["retry-1"] : []
-  return join(run.options.workdir, "checks", change, run.log.id, ...attempt, phase)
+  return join(run.options.workdir, "checks", change, run.log.id, ...attempt, ...recutSegment(run, entry), phase)
+}
+
+/** The path segment a merge-phase re-run of the submit checks writes under; none otherwise. */
+function recutSegment(run: Run, entry: QueueEntry): string[] {
+  const composed = run.recutting.get(changeName(entry.change))
+  return composed === undefined ? [] : [`recut-${composed.slice(0, 12)}`]
 }
 
 async function runPhase(
@@ -2592,7 +2800,14 @@ async function check(
         branch: entry.change.branch,
         head: entry.change.head,
         phase,
-        root: join(run.worktrees, "program", phase, entry.change.head.slice(0, 12), spec.name),
+        root: join(
+          run.worktrees,
+          "program",
+          phase,
+          entry.change.head.slice(0, 12),
+          ...recutSegment(run, entry),
+          spec.name,
+        ),
         logDir: checkLogDir(run, entry, phase),
         tmpdir: run.tmpdir,
         log: run.log,
@@ -2931,7 +3146,7 @@ function finish(
   if (exitCode !== 2) rmSync(run.worktrees, { force: true, recursive: true })
   return {
     observation: run.observation,
-    base: run.targetSha,
+    base: run.options.targetSha,
     config: run.options.configBlob,
     exitCode,
     ...(stopped === undefined ? {} : { stopped }),

@@ -28,6 +28,25 @@ Yrd is a merge queue that lives inside a Git repository. A queue runs on a branc
 - **gitlink**: a submodule pointer, the commit a superproject records for one of its submodules.
 - **direct merge**: a commit on the queue branch that the queue did not make, what GitHub calls a direct push. Reported, never prevented.
 
+## States and legend
+
+The queue surface uses nine state names (ruled 2026-09-16, v3), each stating what it means and what happens next. The same table feeds the live watch pane (`?` help overlay) and `yrd list --help`:
+
+| State | Meaning | What happens next |
+|---|---|---|
+| `draft` | pushed to the remote, not submitted | `yrd submit` |
+| `submitted` | in the queue, waiting for its first check | the runner checks it |
+| `checking` | the runner is testing it now | `pending`, `stuck` or `failed` |
+| `pending` | checks passed; waiting in line to merge | merges when the line reaches it |
+| `merging` | the runner is writing main for it now | `merged` or `failed` |
+| `merged` | on the queue branch; ended | nothing; a revert is a new change |
+| `deferred` | checks exceeded the normal bound; waits for the long check | runs in the long tier |
+| `stuck` | the queue could not judge it and stopped the line (ADR-0015) | repair and resume, merge, or cancel |
+| `failed` | check exited non-zero; ended | author fixes and resubmits |
+| `cancelled` | withdrawn with `yrd cancel` (or `yrd queue withdraw`); ended | resubmitting re-opens it |
+
+A direct merge that reached the queue branch without going through the queue is reported as `direct` apart.
+
 ## Commands
 
 ```
