@@ -22,6 +22,7 @@
  * written again.
  */
 
+import { randomUUID } from "node:crypto"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
@@ -691,11 +692,20 @@ export async function notifyOutsideRound(
   context: OutsideRound,
   notice: OverrideNotice,
 ): Promise<readonly Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>[]> {
-  const wanted = context.notify.filter((entry) => entry.on.includes("override"))
+  return dispatchNotifications(context, "override", notice)
+}
+
+/** Run the declaration's existing notify transport for an event-chain ending. */
+export async function dispatchNotifications(
+  context: OutsideRound,
+  ending: Ending,
+  notice: NotifyRecord,
+): Promise<readonly Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>[]> {
+  const wanted = context.notify.filter((entry) => entry.on.includes(ending))
   if (wanted.length === 0) return [{ delivery: "none", name: NOBODY }]
   await using resources = new AsyncDisposableStack()
   const runner = context.process ?? resources.use(createProcess({ cwd: context.repo }))
-  const stamp = `override-${String(Date.now())}-${String(process.pid)}`
+  const stamp = `notify-${String(Date.now())}-${String(process.pid)}-${randomUUID().slice(0, 8)}`
   let prepared: Promise<Readonly<{ cwd: string; runner: Process }>> | undefined
   const environment = (): Promise<Readonly<{ cwd: string; runner: Process }>> => {
     prepared ??= (async () => {
