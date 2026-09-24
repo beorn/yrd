@@ -148,7 +148,9 @@ describe("`yrd list` prints the watch's page, once", () => {
     // notice a machine that runs no queue prints, G5) the header the pane draws.
     expect(lines[0]).toMatch(/remote\.git#main$/u)
     expect(lines[1]).toContain("YRD")
-    const header = lines.findIndex((line) => line.includes("ISSUE / BRANCH") && line.includes("QUEUE") && line.includes("RUN"))
+    const header = lines.findIndex(
+      (line) => line.includes("ISSUE / BRANCH") && line.includes("QUEUE") && line.includes("RUN"),
+    )
     expect(header, plain.report).toBeGreaterThan(1)
     expect(lines[header], plain.report).toContain("QUEUE")
     expect(lines[header], plain.report).toContain("RUN")
@@ -180,14 +182,12 @@ describe("`yrd list` prints the watch's page, once", () => {
     // One renderer: the coloured page is the plain page with colour on it.
     // (Line by line, trailing blanks aside: a colour reset after padding keeps one blank the plain line drops.)
     const trimmed = (text: string): string[] =>
-      text
-        .split("\n")
-        .map((line) =>
-          line
-            .trimEnd()
-            .replace(/waiting \d+:\d+/u, "waiting XX:XX")
-            .replace(/\d+:\d+ \/ —/u, "XX:XX / —"),
-        )
+      text.split("\n").map((line) =>
+        line
+          .trimEnd()
+          .replace(/waiting \d+:\d+/u, "waiting XX:XX")
+          .replace(/\d+:\d+ \/ —/u, "XX:XX / —"),
+      )
     expect(trimmed(stripAnsi(colored.stdout))).toEqual(trimmed(plain.stdout))
     const row = colored.stdout.split("\n").find((line) => stripAnsi(line).includes("task/one"))
     expect(row, colored.report).toBeDefined()
