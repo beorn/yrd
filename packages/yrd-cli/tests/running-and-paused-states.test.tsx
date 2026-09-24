@@ -199,9 +199,7 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         expect(text).not.toContain("STUCK")
       })
 
-      // The word is 693b0a69's. The detail is 25556's (operator 07:15 PDT, @cto edf63db7): a stopped
-      // queue's top line reads YRD STOPPED and the stop text only if one was given, nothing else.
-      it("case 3 (absent service document, no run): queue line shows STOPPED, with no stop text given none", async () => {
+      it("case 3 (absent service document, no run): queue line shows STOPPED without detail (25556)", async () => {
         const snap = snapshot({
           stopped: null,
           runner: {
@@ -222,7 +220,7 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         expect(text).toContain("■ YRD STOPPED")
       })
 
-      it("case 4 (dead run): queue line shows STOPPED, with no stop text given none", async () => {
+      it("case 4 (dead run): queue line shows STOPPED without detail (25556)", async () => {
         const snap = snapshot({
           stopped: null,
           runner: {
@@ -242,6 +240,31 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
 
         const text = await paint(snap)
         expect(text).toContain("■ YRD STOPPED")
+      })
+
+      it("case 5 (recorded stop reason): queue line shows STOPPED with recorded stop reason (25556)", async () => {
+        const snap = snapshot({
+          stopped: null,
+          runner: {
+            journalDir: "/w/logs",
+            service: {
+              kind: "stopped",
+              cause: "operator-stop",
+              why: "operator requested stop",
+              stopReason: "maintenance in progress",
+            },
+          },
+        })
+
+        const status = queueLineStatus(snap, NOW)
+        expect(status.word).toBe("STOPPED")
+        expect(status.marker).toBe("■")
+        expect(status.color).toBe("$fg-error")
+        expect(status.reason).toBe("maintenance in progress")
+
+        const text = await paint(snap)
+        expect(text).toContain("■ YRD STOPPED")
+        expect(text).toContain("YRD STOPPED maintenance in progress")
       })
     })
   })

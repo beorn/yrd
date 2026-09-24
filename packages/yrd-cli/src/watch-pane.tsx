@@ -77,6 +77,7 @@ import {
   clock,
   firstLine,
   legendLines,
+  mediaDuration,
   runShortName,
   stateGlyph,
 } from "./watch-format.ts"
@@ -287,6 +288,7 @@ export function WatchPane({
   const [outputs, setOutputs] = useState<ReadonlyMap<string, DiffText>>(new Map())
   const [statsOpen, setStatsOpen] = useState(false)
   const centeredRunner = useRef(false)
+  const shouldCenterRunner = useRef(false)
   const listRef = useRef<ListViewHandle | null>(null)
   /** The drafts the reader asked for, read by every round: a round begun before `w` must not undo it. */
   const draftWindow = useRef<DraftWindow>(snapshot.drafts?.window ?? "7d")
@@ -543,8 +545,16 @@ export function WatchPane({
   const pointAtRunner = (): void => {
     if (runnerAt < 0) return
     pointAt(runnerAt)
+    shouldCenterRunner.current = true
     listRef.current?.scrollToItem(runnerAt, "center")
   }
+
+  useEffect(() => {
+    if (shouldCenterRunner.current && runnerAt >= 0) {
+      shouldCenterRunner.current = false
+      listRef.current?.scrollToItem(runnerAt, "center")
+    }
+  })
 
   useInput((input, key) => {
     const character = key.text ?? input
@@ -659,8 +669,9 @@ export function WatchPane({
     </Box>
   )
 
+  const showDetail = opened && !(isRunnerSelected && runnerHolds === undefined)
   // The width the list pane gets: the whole terminal, or its share of a split.
-  const listColumns = opened && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) : columns
+  const listColumns = showDetail && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) : columns
   const list = (
     <ListStack snapshot={shown} paddingX={1}>
       <Table
@@ -671,15 +682,15 @@ export function WatchPane({
         empty={shown.rows.length === 0 ? "nothing in line" : "no change matches the filters"}
         cursor={at}
         listRef={listRef}
-        active={!opened || tier !== "full"}
+        active={!showDetail || tier !== "full"}
         live={live}
         onCursor={pointAt}
       />
     </ListStack>
   )
   const body =
-    tier === "full" || !opened ? (
-      opened ? (
+    tier === "full" || !showDetail ? (
+      showDetail ? (
         detailPane
       ) : (
         list
@@ -706,7 +717,14 @@ export function WatchPane({
           queues={shown.queues}
           visible={visibleQueues}
           onToggle={toggleQueue}
-          status={queueLineStatus(shown, shown.at)}
+          status={
+            statusTimer(shown, shown.at) !== undefined
+              ? {
+                  ...queueLineStatus(shown, shown.at),
+                  timer: <LiveStatusTimer snapshot={shown} fallback={statusTimer(shown, shown.at)} />,
+                }
+              : queueLineStatus(shown, shown.at)
+          }
           live={live}
           onStatusClick={pointAtRunner}
           statusPills={
@@ -723,7 +741,7 @@ export function WatchPane({
               setStatsOpen((was) => !was)
             }}
           >
-            <Text color="$fg-on-inverse" wrap="truncate">
+            <Text color="$fg-on-inverse-muted" wrap="truncate">
               {statsOpen ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} STATS · {statsLine}
             </Text>
           </Box>
@@ -814,13 +832,66 @@ function draftsIn(rows: readonly WatchRow[]): number {
  * detail. A paused line carries its pause sentence. The marker pulses while
  * the line runs or is held with a reason.
  */
+export function statusTimer(snapshot: WatchSnapshot, now: Date): string | undefined {
+  const runner = runnerOf(snapshot, now)
+  const held = snapshot.pause !== undefined || (snapshot.stopped !== undefined && snapshot.stopped !== null)
+  const isRunning = snapshot.runner?.service.kind === "beating" || snapshot.runner?.latest?.alive === true
+  const word =
+    held || runner.state === "paused" || runner.state === "stuck" ? "PAUSED" : isRunning ? "RUNNING" : "STOPPED"
+
+  if (word === "STOPPED") {
+    if (snapshot.runner?.service.kind === "stopped" && snapshot.runner.service.since) {
+      return mediaDuration(Math.max(0, now.getTime() - snapshot.runner.service.since.getTime()))
+    }
+    if (snapshot.stopped?.since) {
+      const at = new Date(snapshot.stopped.since)
+      if (!Number.isNaN(at.getTime())) return mediaDuration(Math.max(0, now.getTime() - at.getTime()))
+    }
+  } else if (word === "PAUSED") {
+    if (snapshot.stopped?.since) {
+      const at = new Date(snapshot.stopped.since)
+      if (!Number.isNaN(at.getTime())) return mediaDuration(Math.max(0, now.getTime() - at.getTime()))
+    }
+    if (runner.duration) {
+      const match = runner.duration.match(/\b\d+:\d+(?::\d+)?\b/u)
+      if (match) return match[0]
+    }
+  } else if (word === "RUNNING") {
+    if (snapshot.runner?.latest?.startedAt) {
+      return mediaDuration(Math.max(0, now.getTime() - snapshot.runner.latest.startedAt.getTime()))
+    }
+    if (runner.duration) {
+      const match = runner.duration.match(/\b\d+:\d+(?::\d+)?\b/u)
+      if (match) return match[0]
+    }
+  }
+  return undefined
+}
+
+function LiveStatusTimer({ snapshot, fallback }: { snapshot: WatchSnapshot; fallback?: React.ReactNode }) {
+  const now = useNow()
+  const timer = statusTimer(snapshot, now)
+  if (timer === undefined) return <>{fallback ?? null}</>
+  return <>{timer}</>
+}
+
 export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
   const runner = runnerOf(snapshot, now)
   const held = snapshot.pause !== undefined || (snapshot.stopped !== undefined && snapshot.stopped !== null)
   const isRunning = snapshot.runner?.service.kind === "beating" || snapshot.runner?.latest?.alive === true
   const word =
     held || runner.state === "paused" || runner.state === "stuck" ? "PAUSED" : isRunning ? "RUNNING" : "STOPPED"
-  if (word === "RUNNING") return { marker: RUNNING_GLYPH, word, color: "$fg-info", pulse: true }
+  const timer = statusTimer(snapshot, now)
+
+  if (word === "RUNNING") {
+    return {
+      marker: RUNNING_GLYPH,
+      word,
+      color: "$fg-info",
+      pulse: true,
+      ...(timer === undefined ? {} : { timer }),
+    }
+  }
   const reason =
     snapshot.pause ??
     (word === "STOPPED"
@@ -835,6 +906,7 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
     word,
     color: word === "PAUSED" ? "$fg-warning" : "$fg-error",
     pulse: reason !== undefined,
+    ...(timer === undefined ? {} : { timer }),
     ...(reason === undefined ? {} : { reason }),
   }
 }

@@ -325,6 +325,7 @@ export function runnerOf(snapshot: WatchSnapshot, now: Date) {
 export function RunnerTitledBox({
   line,
   _snapshot,
+  snapshot,
   layout,
   cursor = false,
   queueDigit = 1,
@@ -338,11 +339,16 @@ export function RunnerTitledBox({
   queueDigit?: number
   queueLabel?: string
 }) {
-  const color = STATE_WORDS[line.state].color
+  const snap = snapshot ?? _snapshot
+  const now = useNow()
+  const liveDuration = snap?.runner ? runnerOf(snap, now).duration : undefined
+  const activeLine = liveDuration !== undefined ? { ...line, duration: liveDuration } : line
+  const color = STATE_WORDS[activeLine.state].color
+  const queueUrl = snap?.queue
   return (
     <Box flexDirection="column" marginTop={1} marginBottom={1}>
-      <TitledBox title={STATE_WORDS.runner.word} flushTop borderColor={color}>
-        <RunnerRow line={line} layout={layout} cursor={cursor} queueDigit={queueDigit} queueLabel={queueLabel} />
+      <TitledBox title={STATE_WORDS.runner.word} titleSuffix={queueUrl} flushTop borderColor={color}>
+        <RunnerRow line={activeLine} layout={layout} cursor={cursor} queueDigit={queueDigit} queueLabel={queueLabel} />
       </TitledBox>
     </Box>
   )
