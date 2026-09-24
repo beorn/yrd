@@ -28,6 +28,25 @@ Yrd is a merge queue that lives inside a Git repository. A queue runs on a branc
 - **gitlink**: a submodule pointer, the commit a superproject records for one of its submodules.
 - **direct merge**: a commit on the queue branch that the queue did not make, what GitHub calls a direct push. Reported, never prevented.
 
+## States and legend
+
+The queue surface uses ten state names (ruled 2026-09-16, v3, with deferred), each stating what it means and what happens next. The same table feeds the live watch pane (`?` help overlay) and `yrd list --help`:
+
+| State | Meaning | What happens next |
+|---|---|---|
+| `draft` | pushed to the remote, not submitted | `yrd submit` |
+| `submitted` | in the queue, waiting for its first check | the runner checks it |
+| `checking` | the runner is testing it now | `pending`, `stuck` or `failed` |
+| `pending` | checks passed; waiting in line to merge | merges when the line reaches it |
+| `merging` | the runner is writing main for it now | `merged` or `failed` |
+| `merged` | on the queue branch; ended | nothing; a revert is a new change |
+| `deferred` | checks exceeded the normal bound; waits for the long check | runs in the long tier |
+| `stuck` | the queue could not judge it and stopped the line (ADR-0015) | repair and resume, merge, or cancel |
+| `failed` | check exited non-zero; ended | author fixes and resubmits |
+| `cancelled` | withdrawn with `yrd cancel` (or `yrd queue withdraw`); ended | resubmitting re-opens it |
+
+A direct merge that reached the queue branch without going through the queue is reported as `direct` apart.
+
 ## Commands
 
 ```
@@ -38,8 +57,8 @@ yrd queue up [--interval <seconds>]                               queue runs on 
 yrd queue pause --reason <text> [--notify <seat>]                        stop checking and merging; submits are still accepted and wait in line
 yrd queue resume [--reason <text>] [--notify <seat>]                       lift a pause or a stuck stop; checking and merging resume on the next service interval
 yrd queue withdraw <branch> [--reason <text>] [--notify <seat>]           end the branch's open change and take it out of the line; the branch stays, and resubmitting re-opens it
-yrd queue list [filter...] [--latest] [--watch]                   the watch's page, once: the queue pills, a line saying how many changes wait and why the line is not moving, the RUNNER box, then one row per run per change in the order the queue takes them (the change under a check, the line by position, the ended newest first, the drafts of the last seven days), each with one time and one duration named by its word; plain when piped; `yrd list` is the same command, and `yrd list --help` prints what each state word means
-yrd watch [filter...]                                             `yrd queue list --watch`: on a terminal, the live pane — keyboard and mouse (click selects, wheel scrolls, drag copies), detail on Enter, `w` for every draft instead of the last seven days', `?` for the keys and the state words, STATS below
+yrd queue list [filter...] [--latest] [--watch]                   the watch's page, once: the top line with status on the far left, queue pills, the RUNNER box aligned with ISSUE / BRANCH in status color, then rows with columns TIME, [Q], [RUN], ISSUE / BRANCH, STATUS, WHO, AGE / RUN; plain when piped; `yrd list` is the same command, and `yrd list --help` prints what each state word means
+yrd watch [filter...]                                             `yrd queue list --watch`: on a terminal, the live pane — keyboard and mouse (click selects, wheel scrolls, drag copies), detail on Enter, `w` for every draft instead of the last seven days', `?` for the keys and the state words, STATS below (clickable fold, fills pane width)
 yrd queue stats [--since 3h|<time>|<sha>] [--by submitter|branch] merged, failed, same-head retries, re-pushed branches, drafts (pushed, never submitted: heads off the queue branch, outside yrd/* and preserve/*, committed within the window; a head not fetched here is counted apart, and nothing is fetched), opened→merged latency; a malformed ref at the remote fails it loudly
 yrd queue show <branch>                                           that branch's changes, newest first, each check's result and log
 yrd check <name...>                                               run the named checks here, now, in a fresh checkout of HEAD

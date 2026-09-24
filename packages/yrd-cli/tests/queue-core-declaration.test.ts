@@ -5,7 +5,7 @@
  * @level l2 (`coreQueueCommand` against a real remote and clone)
  * @consumer Every queue command.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -689,6 +689,126 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await git(refs)).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("another command's fetch result\n")
     await expect(readQueue(git, "origin", "release/1.x", advanced)).rejects.toThrow(malformedRef)
+  })
+
+  // 25296: the verb end to end, against the FETCHED target's declaration.
+  it("queue override sets, lists, refuses an unknown check and clears, touching only the override ref", async () => {
+    const repo = await world('checks:\n  - verify: {run: "true", on: [merge]}\n  - lint: {run: "true", on: [submit]}\n')
+    const yrd = async (...args: string[]) => {
+      const run = capture(repo)
+      const code = await runYrdProcess(["bun", "yrd", "queue", "override", "--queue", "main", ...args], run.io)
+      return { code, stderr: run.stderr(), stdout: run.stdout() }
+    }
+    const refs = async (): Promise<string> =>
+      (await gitIn(join(dirname(repo), "remote.git"))(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).trim()
+
+    const unknown = await yrd("--check", "nope", "--off", "--until", "23:59", "--reason", "x")
+    expect(unknown.code).toBe(1)
+    expect(unknown.stderr).toContain("no merge check named 'nope' is declared; the declared merge checks are: verify")
+    // A submit-only check is not a merge check, so it cannot be held off at merge.
+    expect((await yrd("--check", "lint", "--off", "--until", "23:59", "--reason", "x")).stderr).toContain(
+      "the declared merge checks are: verify",
+    )
+    expect((await yrd("--check", "verify", "--off", "--reason", "x")).stderr).toContain("needs --until <time>")
+    expect(await refs()).toBe("")
+
+    const until = new Date(Date.now() + 3_600_000).toISOString()
+    const set = await yrd("--check", "verify", "--off", "--until", until, "--reason", "flaky gate", "--json")
+    expect(set.code, set.stderr).toBe(0)
+    expect(JSON.parse(set.stdout)).toMatchObject({
+      kind: "set",
+      overrides: [{ check: "verify", reason: "flaky gate", state: "active", until, verified: false }],
+    })
+    expect(await refs()).toBe("refs/yrd/main/override")
+    // No notify entry wants `override`: the verb says so once, naming the record that stands in for the page.
+    expect(set.stderr.match(/no notify entry in \.yrd\.yml wants override events/gu)).toHaveLength(1)
+
+    const listed = await yrd("--list")
+    expect(listed.code).toBe(0)
+    expect(listed.stdout).toContain(`verify OFF until ${until}`)
+
+    const cleared = await yrd("--check", "verify", "--clear", "--reason", "gate fixed", "--json")
+    expect(cleared.code, cleared.stderr).toBe(0)
+    expect(JSON.parse(cleared.stdout)).toMatchObject({ kind: "clear", overrides: [] })
+    const again = await yrd("--check", "verify", "--clear", "--reason", "twice")
+    expect(again.code).toBe(1)
+    expect(again.stderr).toContain("no override stands on 'verify' to clear")
+  })
+
+  // 25296 (@cto ccd8dfa8, ruling A): the verb pages set, replace and clear; a
+  // notifier that fails is said on stderr and journaled, and the override stands.
+  it("queue override hands each write to the notify entries that want it, and a failing one never blocks the override", async () => {
+    const paged = join(tmpdir(), `yrd-override-paged-${String(process.pid)}-${String(Date.now())}.jsonl`)
+    const repo = await world(
+      'checks:\n  - verify: {run: "true", on: [merge]}\n' +
+        `notify:\n  - pager: {on: [override], run: "cat >> ${paged}"}\n` +
+        '  - broken: {on: [override], run: "echo pager down >&2; exit 3"}\n' +
+        '  - merges: {on: [merged], run: "exit 9"}\n',
+    )
+    const state = join(dirname(repo), "state")
+    await gitIn(repo)(["config", "yrd.workdir", state])
+    const yrd = async (...args: string[]) => {
+      const run = capture(repo)
+      const code = await runYrdProcess(["bun", "yrd", "queue", "override", "--queue", "main", ...args], run.io)
+      return { code, stderr: run.stderr(), stdout: run.stdout() }
+    }
+    const until = new Date(Date.now() + 3_600_000).toISOString()
+    const target = (await gitIn(join(dirname(repo), "remote.git"))(["rev-parse", "refs/heads/main"])).trim()
+
+    const set = await yrd("--check", "verify", "--off", "--until", until, "--reason", "flaky gate", "--json")
+    expect(set.code, set.stderr).toBe(0)
+    expect(set.stderr).toContain("yrd: could not tell broken about the override (it stands)")
+    expect(set.stderr).toContain("pager down")
+    expect(set.stderr).not.toContain("no notify entry")
+    const record = JSON.parse(set.stdout) as { record: string; told: readonly { name: string; delivery: string }[] }
+    expect(record.told.map(({ name, delivery }) => `${name} ${delivery}`)).toEqual(["pager sent", "broken failed"])
+    const replaced = await yrd("--check", "verify", "--off", "--until", until, "--reason", "still flaky")
+    expect(replaced.code, replaced.stderr).toBe(0)
+    const cleared = await yrd("--check", "verify", "--clear", "--reason", "gate fixed")
+    expect(cleared.code, cleared.stderr).toBe(0)
+    // The failing notifier blocked nothing: the chain holds set, replace and clear.
+    expect(JSON.parse((await yrd("--list", "--json")).stdout)).toMatchObject({ overrides: [] })
+
+    const notices = readFileSync(paged, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(notices).toEqual([
+      expect.objectContaining({
+        action: "set",
+        check: "verify",
+        owner: expect.any(String),
+        reason: "flaky gate",
+        record: "override",
+        target: `main@${target}`,
+        until,
+        verified: false,
+      }),
+      expect.objectContaining({ action: "replace", reason: "still flaky", until }),
+      expect.objectContaining({ action: "clear", reason: "gate fixed", until }),
+    ])
+    expect(notices.every((notice) => notice["round"] === undefined)).toBe(true)
+    expect(notices[0]?.["override"]).toBe(record.record)
+    // The journal sits in the queue's own workdir, beside (never among) the run journals under logs/.
+    const journals = readdirSync(state, { recursive: true, encoding: "utf8" }).filter((path) =>
+      path.endsWith("override-notify.jsonl"),
+    )
+    expect(journals).toHaveLength(1)
+    const journal = readFileSync(join(state, journals[0] ?? ""), "utf8")
+      .trim()
+      .split("\n")
+    expect(journal.map((line) => (JSON.parse(line) as { notice: { action: string } }).notice.action)).toEqual([
+      "set",
+      "replace",
+      "clear",
+    ])
+    expect(JSON.parse(journal[0] ?? "{}")).toMatchObject({
+      told: [
+        { delivery: "sent", name: "pager" },
+        { delivery: "failed", name: "broken" },
+      ],
+    })
+    rmSync(paged, { force: true })
   })
 
   it("requires pause --reason before any pause ref changes", async () => {

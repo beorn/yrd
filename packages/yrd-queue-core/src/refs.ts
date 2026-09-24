@@ -53,6 +53,11 @@ export function pauseRef(queue: string): string {
   return `${queueRefPrefix(queue)}/pause`
 }
 
+/** The merge-check override ref one queue owns (override.ts). */
+export function overrideRef(queue: string): string {
+  return `${queueRefPrefix(queue)}/override`
+}
+
 /**
  * A change: a branch at a head. Everything that writes about one says both,
  * and its name — `<branch>@<head>` — is the one spelling of the pair.
@@ -94,6 +99,6 @@ export function parseChangeRef(queue: string, ref: string): Change | undefined {
   const prefix = `${queueRefPrefix(queue)}/`
   if (!ref.startsWith(prefix)) return undefined
   const name = ref.slice(prefix.length)
-  if (name === "pause") return undefined
+  if (name === "pause" || name === "override") return undefined
   return parseChangeName(name)
 }

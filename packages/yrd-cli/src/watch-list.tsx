@@ -89,6 +89,7 @@ export function pillLabel(queue: WatchQueue, digit: number, brackets = false): s
 }
 
 export type ListLayout = Readonly<{
+  columns?: number
   timeWidth?: number
   agentWidth: number
   qWidth?: number
@@ -104,6 +105,8 @@ export type ListLayout = Readonly<{
 export function changesSuffix(row: Row): Readonly<{ text: string; color: string }> | undefined {
   if (row.live !== undefined) return { color: "$fg-info", text: row.live.check }
   if (row.state === "failed" && row.reason !== undefined) return { color: "$fg-error", text: `err=${row.reason}` }
+  // A checked row's reason is its stale verdict: judged under a check config the target no longer declares (25301).
+  if (row.state === "checked" && row.reason !== undefined) return { color: "$fg-muted", text: row.reason }
   if (row.state === "stuck" && row.reason !== undefined) {
     return { color: "$fg-warning", text: `${STATE_WORDS.stuck.word}=${row.reason}` }
   }
@@ -164,9 +167,10 @@ export function listLayout(
     : 0
   const ageRunWidth = Math.max(9, (runner?.duration ?? "").length, ...rows.map((item) => ageRunText(item.row, now).length))
   const fixedExceptQ = timeWidth + statusWidth + agentWidth + (separate ? runWidth : 0) + ageRunWidth + 8
-  const maxAvailableForQ = Math.max(16, columns - fixedExceptQ - 36)
+  const maxAvailableForQ = Math.max(16, columns - fixedExceptQ - 56)
   const qWidth = separate ? (fullQueue ? Math.max(16, Math.min(queue.label.length, maxAvailableForQ)) : single ? 0 : 3) : 0
   return {
+    columns,
     timeWidth,
     statusWidth,
     agentWidth,
@@ -243,10 +247,14 @@ export function TopLine({
       paddingRight={1}
       justifyContent="space-between"
     >
-      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" gap={1}>
-        <Text bold flexShrink={0}>
-          yrd watch
-        </Text>
+      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" gap={1} alignItems="center">
+        <Box flexDirection="row" flexShrink={0} gap={1}>
+          <Text color={status?.color ?? "$fg-info"}>{status?.marker ?? RUNNING_GLYPH}</Text>
+          <Text bold>YRD</Text>
+          <Text bold color={status?.color ?? "$fg-info"}>
+            {status?.word ?? "RUNNING"}
+          </Text>
+        </Box>
         {queues.map((queue, index) => (
           <InversePill
             key={`${queue.path}@${queue.branch}`}
@@ -260,13 +268,6 @@ export function TopLine({
         ))}
       </Box>
       <Box flexDirection="row" flexShrink={0} gap={2} alignItems="center">
-        <Box flexDirection="row" flexShrink={0} gap={1}>
-          <Text color={status?.color ?? "$fg-info"}>{status?.marker ?? RUNNING_GLYPH}</Text>
-          <Text bold>YRD</Text>
-          <Text bold color={status?.color ?? "$fg-info"}>
-            {status?.word ?? "RUNNING"}
-          </Text>
-        </Box>
         {statusPills}
       </Box>
     </Box>
@@ -319,13 +320,13 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
   return (
     <Cells layout={layout}>
       {{
-        time: label("HH:MM"),
+        time: label("TIME"),
         q: (layout.qWidth ?? 0) === 0 ? null : label(layout.isFullQueue ? "QUEUE" : "Q"),
         run: label("RUN"),
         queueRun: label("QUEUE / RUN"),
-        task: label("TASK"),
-        status: label("STATE"),
-        agent: label("AGENT"),
+        task: label("ISSUE / BRANCH"),
+        status: label("STATUS"),
+        agent: label("WHO"),
         ageRun: label("AGE / RUN"),
       }}
     </Cells>
@@ -437,8 +438,10 @@ export const ListRow = memo(function ListRow({
           ? "not yet read"
           : row.head.slice(0, 12)
         : `${row.head.slice(0, 12)} (subject not fetched)`)
+  const separateLineSuffix = (layout.columns ?? 120) < 100 && row.state === "stuck" && suffix !== undefined
   return (
     <Box
+      flexDirection="column"
       backgroundColor={cursor ? "$bg-selected" : hovered ? "$bg-surface-hover" : undefined}
       minWidth={0}
       width="100%"
@@ -475,7 +478,7 @@ export const ListRow = memo(function ListRow({
                 {" "}
                 {row.branch}
               </Text>
-              {suffix === undefined ? null : (
+              {suffix === undefined || separateLineSuffix ? null : (
                 <Text color={forced ?? suffix.color} flexShrink={0} wrap="truncate">
                   {" "}
                   ({suffix.text})
@@ -528,6 +531,24 @@ export const ListRow = memo(function ListRow({
           ageRun: <AgeRunCell row={row} color={forced ?? held} />,
         }}
       </Cells>
+      {separateLineSuffix && suffix !== undefined ? (
+        <Box height={1} flexDirection="row" minWidth={0} overflow="hidden">
+          <Box
+            width={
+              (layout.timeWidth ?? 5) +
+              1 +
+              (layout.isSeparateColumns
+                ? (((layout.qWidth ?? 0) > 0 ? (layout.qWidth ?? 0) + 1 : 0) +
+                   ((layout.runWidth ?? 0) > 0 ? (layout.runWidth ?? 0) + 1 : 0))
+                : ((layout.queueRunWidth ?? 0) > 0 ? (layout.queueRunWidth ?? 0) + 1 : 0))
+            }
+            flexShrink={0}
+          />
+          <Text color={forced ?? suffix.color} wrap="truncate">
+            {stateGlyph(row)} {suffix.text}
+          </Text>
+        </Box>
+      ) : null}
     </Box>
   )
 }, sameRow)
@@ -543,6 +564,26 @@ export const ListRow = memo(function ListRow({
  * subject, the submitter and `checking 16m` in these same five cells, and
  * drawing a second line for it is the duplication the band replaced.
  */
+/**
+ * Splits a runner line's holds text into the status text and the cure command if present,
+ * so narrow terminal layouts (under 100 columns) can render the cure on its own line without truncation.
+ */
+export function splitRunnerCure(holds: string): { text: string; cure?: string } {
+  const resumeMatch = holds.match(/^(.*?) · (resume: .*)$/)
+  if (resumeMatch) {
+    return { text: resumeMatch[1]!, cure: resumeMatch[2]! }
+  }
+  const startMatch = holds.match(/^(.*?) · (start: .*)$/)
+  if (startMatch) {
+    return { text: startMatch[1]!, cure: startMatch[2]! }
+  }
+  const fixMatch = holds.match(/^(.*?) — (fix and .*)$/)
+  if (fixMatch) {
+    return { text: fixMatch[1]!, cure: fixMatch[2]! }
+  }
+  return { text: holds }
+}
+
 export function RunnerRow({
   line,
   layout,
@@ -559,34 +600,35 @@ export function RunnerRow({
   const { color, word } = STATE_WORDS[line.state]
   const forced = cursor ? "$fg-on-selected" : undefined
   const timeText = line.at !== undefined ? clock(line.at) : "—"
+  const parsed = splitRunnerCure(line.holds)
+  const isStoppedOrPaused = line.state === "stopped" || line.state === "paused"
+  const displayText =
+    isStoppedOrPaused && !parsed.text.startsWith("STOPPED:")
+      ? `STOPPED: ${parsed.text}`
+      : parsed.text
+  const cureText =
+    parsed.cure === undefined
+      ? undefined
+      : parsed.cure.startsWith("resume:")
+        ? `to resume: ${parsed.cure.slice(7).trim()}`
+        : parsed.cure.startsWith("start:")
+          ? `to start: ${parsed.cure.slice(6).trim()}`
+          : parsed.cure.startsWith("to ")
+            ? parsed.cure
+            : `to ${parsed.cure}`
   return (
-    <Box minWidth={0} width="100%" backgroundColor={cursor ? "$bg-selected" : undefined}>
+    <Box flexDirection="column" minWidth={0} width="100%" backgroundColor={cursor ? "$bg-selected" : undefined}>
       <Cells layout={layout}>
         {{
-          time: <Text color={forced ?? "$fg-muted"}>{timeText}</Text>,
-          q: (layout.qWidth ?? 0) === 0 ? null : <Text color={forced ?? "$fg-muted"}>{layout.isFullQueue ? queueLabel : String(queueDigit)}</Text>,
-          run: <Text color={forced ?? "$fg-muted"}>—</Text>,
-          queueRun: (
-            <Text color={forced ?? "$fg-muted"} wrap="truncate">
-              {queueRunText(queueDigit, queueLabel, undefined)}
-            </Text>
-          ),
+          time: <Text color={forced ?? color}>{timeText}</Text>,
+          q: null,
+          run: null,
+          queueRun: null,
           task: (
             <Box flexDirection="row" minWidth={0} overflow="hidden">
-              <Text bold color={forced ?? color} flexShrink={0}>
-                {STATE_WORDS.runner.word}
+              <Text color={forced ?? color} wrap="truncate" minWidth={0}>
+                {displayText}
               </Text>
-              <Box paddingLeft={1} minWidth={0} overflow="hidden">
-                {/* ITEM 27: the affected text takes the state's OWN colour, and
-                    muting never dims an error. Reading the colour off the same
-                    entry the word came from is what makes that automatic: an
-                    idle runner's text is muted because `idle` is muted, and a
-                    stopped one's is loud because `stopped` is. Item 14's muted
-                    rail is the detail line below, which is metadata. */}
-                <Text color={forced ?? color} wrap="truncate" minWidth={0}>
-                  {line.holds}
-                </Text>
-              </Box>
             </Box>
           ),
           status: (
@@ -601,7 +643,7 @@ export function RunnerRow({
             </Box>
           ),
           agent: (
-            <Text color={forced ?? "$fg-muted"} wrap="truncate">
+            <Text color={forced ?? color} wrap="truncate">
               {line.by ?? "—"}
             </Text>
           ),
@@ -612,6 +654,24 @@ export function RunnerRow({
           ),
         }}
       </Cells>
+      {cureText === undefined ? null : (
+        <Cells layout={layout}>
+          {{
+            time: null,
+            q: null,
+            run: null,
+            queueRun: null,
+            task: (
+              <Text color={forced ?? color} wrap="truncate" minWidth={0}>
+                {cureText}
+              </Text>
+            ),
+            status: null,
+            agent: null,
+            ageRun: null,
+          }}
+        </Cells>
+      )}
     </Box>
   )
 }
@@ -640,19 +700,23 @@ function Cells({
       </Box>
       {layout.isSeparateColumns ? (
         <>
-          {(layout.qWidth ?? 0) === 0 ? null : (
+          {(layout.qWidth ?? 0) === 0 || children.q == null ? null : (
             <Box width={layout.qWidth ?? 0} flexShrink={0}>
               {children.q}
             </Box>
           )}
-          <Box width={layout.runWidth ?? 0} flexShrink={0}>
-            {children.run}
-          </Box>
+          {children.run == null ? null : (
+            <Box width={layout.runWidth ?? 0} flexShrink={0}>
+              {children.run}
+            </Box>
+          )}
         </>
       ) : (
-        <Box width={layout.queueRunWidth} flexShrink={0}>
-          {children.queueRun}
-        </Box>
+        children.queueRun == null ? null : (
+          <Box width={layout.queueRunWidth} flexShrink={0}>
+            {children.queueRun}
+          </Box>
+        )
       )}
       <Box flexGrow={1} flexBasis={0} minWidth={12}>
         {children.task}

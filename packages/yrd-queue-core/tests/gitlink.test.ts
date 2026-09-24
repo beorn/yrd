@@ -183,6 +183,13 @@ async function gitlinkAroundQueue(w: World, sha: string): Promise<string> {
   return (await w.git(["rev-parse", "HEAD"])).trim()
 }
 
+/** The work clone's main, fast-forwarded to the remote main a queue round moved. */
+async function mainAfterRound(w: World): Promise<void> {
+  await w.git(["checkout", "--quiet", "main"])
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  await w.git(["merge", "--quiet", "--ff-only", "FETCH_HEAD"])
+}
+
 /** A change that touches a file and no gitlink, submitted. */
 async function submitFile(w: World, branch: string): Promise<string> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
@@ -1861,6 +1868,34 @@ describe("a diverged component the merge composes", () => {
     expect(readFileSync(ran, "utf8").split("\n").filter(Boolean)).toEqual([target])
   })
 
+  /**
+   * P0 after 24977 landed (merge 447, q-20260923T223516964Z-7c5234c0): a pin
+   * already behind the component main when the change is judged is composed at
+   * JUDGE, passes, and is composed again at MERGE, whose re-run of the submit
+   * checks wrote into the judge's own check-log directory in the same run. A
+   * check log is opened create-only, so the second open crashed the queue and
+   * stopped the line. Each re-run writes beside the judge's logs, never over them.
+   */
+  it("lands a change judged and re-cut in one run, the recheck's logs beside the judge's (24977 P0)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const check = { on: ["submit"], run: "true" } as const
+    const head = await submitGitlink(w, "task/stale-at-judge", pins.changeSide)
+    await gitlinkAroundQueue(w, pins.mainSide)
+
+    const outcome = await queueRun(await w.options(check))
+
+    expect(readFileSync(outcome.log, "utf8")).not.toContain("a check log already exists")
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/stale-at-judge"], stuck: [] })
+    // The judge and the merge phase's re-run each ran the submit check once, both as phase "submit", each
+    // into its own log.
+    const judged = readJournals(dirname(outcome.log)).runs.get(journalKey("task/stale-at-judge", head))?.[0]
+    const checks = (judged?.checks ?? []).map((check) => ({ phase: check.phase, log: check.log }))
+    expect(checks.map((check) => check.phase)).toEqual(["submit", "submit"])
+    expect(new Set(checks.map((check) => check.log)).size).toBe(2)
+    expect(checks[1]?.log).toMatch(/\/recut-[0-9a-f]{12}\/submit\/[^/]+\.log$/u)
+  })
+
   /** 24977 constraint 1: the re-cut is recorded, naming both heads, and nothing is amended. */
   it("journals a recut row naming the change head, the component main merged in, and both new commits (24977)", async () => {
     const w = await world()
@@ -1899,11 +1934,6 @@ describe("a diverged component the merge composes", () => {
   })
 
   /**
-   * 24977 Q3 (@cto 0a3e3838): a check that fails ONLY on the composed tree is a
-   * semantic conflict with main. It is the submitter's bounce, named
-   * `recut-check`, and the line does not stop on it.
-   */
-  /**
    * The same re-cut met at JUDGE: the component main moved before the change
    * was ever judged, so its first candidate is already composed. That
    * candidate is the queue's, not the submitter's head, so its failure is the
@@ -1931,6 +1961,11 @@ describe("a diverged component the merge composes", () => {
     expect(trailer(failed!, "Recut")).toContain(`submodule ${pins.changeSide} + ${pins.mainSide} -> `)
   })
 
+  /**
+   * 24977 Q3 (@cto 0a3e3838): a check that fails ONLY on the composed tree is a
+   * semantic conflict with main. It is the submitter's bounce, named
+   * `recut-check`, and the line does not stop on it.
+   */
   it("bounces a recut whose re-run check fails while the head alone passes, without stopping the line (24977)", async () => {
     const w = await world()
     const pins = await divergentSubmoduleCommits(w)
@@ -1939,9 +1974,15 @@ describe("a diverged component the merge composes", () => {
       on: ["submit"],
       run: "! { test -f submodule/main-side.txt && test -f submodule/change-side.txt; }",
     } as const
-    await submitGitlink(w, "task/first-side", pins.mainSide)
+    // 25301: a round judges the line after its head merges, on the target that
+    // merge left. The head here is a plain file, so second-side is checked on a
+    // tree it alone moves, and passes; main then moves the gitlink around the
+    // queue, so only the next round's merge composes the two sides.
+    await submitFile(w, "task/unrelated-head")
     const head = await submitGitlink(w, "task/second-side", pins.changeSide)
-    await queueRun(await w.options(check))
+    expect(await queueRun(await w.options(check))).toMatchObject({ merged: ["task/unrelated-head"], failed: [] })
+    await mainAfterRound(w)
+    await gitlinkAroundQueue(w, pins.mainSide)
 
     const outcome = await queueRun(await w.options(check))
 
@@ -1972,10 +2013,15 @@ describe("a diverged component the merge composes", () => {
         run: "! { test -f submodule/main-side.txt && test -f submodule/change-side.txt; }",
       },
     ] as const
-    await submitGitlink(w, "task/first-side", pins.mainSide)
+    // 25301: as above, the first round merges a plain-file head and checks
+    // second-side on a tree it alone moves; main's gitlink then moves around
+    // the queue, so the second round's merge is the one that composes.
+    await submitFile(w, "task/unrelated-head")
     await submitGitlink(w, "task/second-side", pins.changeSide)
     const landing = await queueRun({ ...(await w.options()), checks })
-    expect(landing).toMatchObject({ exitCode: 0, failed: [], merged: ["task/first-side"], stuck: [] })
+    expect(landing).toMatchObject({ exitCode: 0, failed: [], merged: ["task/unrelated-head"], stuck: [] })
+    await mainAfterRound(w)
+    await gitlinkAroundQueue(w, pins.mainSide)
     rmSync(closed, { force: true })
     const stopAtMs = Date.now() + 3_600_000
 
@@ -1987,6 +2033,6 @@ describe("a diverged component the merge composes", () => {
     })
 
     expect(existsSync(closed)).toBe(true)
-    expect(outcome.merged).toEqual([])
+    expect(outcome).toMatchObject({ deferred: ["task/second-side"], failed: [], merged: [], stuck: [] })
   })
 })

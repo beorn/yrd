@@ -147,8 +147,8 @@ describe("`yrd list` prints the watch's page, once", () => {
     // The queue's name first, then the identity pills, then the queue line, then (past the journal
     // notice a machine that runs no queue prints, G5) the header the pane draws.
     expect(lines[0]).toMatch(/remote\.git#main$/u)
-    expect(lines[1]).toContain("yrd watch")
-    const header = lines.findIndex((line) => line.includes("TASK") && line.includes("QUEUE") && line.includes("RUN"))
+    expect(lines[1]).toContain("YRD")
+    const header = lines.findIndex((line) => line.includes("ISSUE / BRANCH") && line.includes("QUEUE") && line.includes("RUN"))
     expect(header, plain.report).toBeGreaterThan(1)
     expect(lines[header], plain.report).toContain("QUEUE")
     expect(lines[header], plain.report).toContain("RUN")
@@ -163,7 +163,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     // The runner is a ROW between what waits and what is done, always there:
     // off the queue's own machine it says its status is not published rather
     // than guessing, and nothing invents one to avoid printing `?`.
-    const runnerRow = lines.find((line) => line.includes("RUNNER") && line.includes("?"))
+    const runnerRow = lines.find((line) => line.includes("?") && line.includes("no runner status"))
     expect(runnerRow, plain.report).toBeDefined()
     expect(runnerRow, plain.report).toContain("?")
     expect(lines.indexOf(runnerRow!), plain.report).toBeGreaterThan(header)
@@ -182,7 +182,12 @@ describe("`yrd list` prints the watch's page, once", () => {
     const trimmed = (text: string): string[] =>
       text
         .split("\n")
-        .map((line) => line.trimEnd().replace(/waiting \d+:\d+/u, "waiting XX:XX"))
+        .map((line) =>
+          line
+            .trimEnd()
+            .replace(/waiting \d+:\d+/u, "waiting XX:XX")
+            .replace(/\d+:\d+ \/ —/u, "XX:XX / —"),
+        )
     expect(trimmed(stripAnsi(colored.stdout))).toEqual(trimmed(plain.stdout))
     const row = colored.stdout.split("\n").find((line) => stripAnsi(line).includes("task/one"))
     expect(row, colored.report).toBeDefined()
@@ -200,7 +205,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(widest(wide.stdout)).toBeLessThanOrEqual(160)
     expect(widest(piped.stdout)).toBeLessThanOrEqual(120)
     // The header keeps every column at every width.
-    for (const ran of [narrow, wide, piped]) expect(ran.stdout, ran.report).toMatch(/TASK/u)
+    for (const ran of [narrow, wide, piped]) expect(ran.stdout, ran.report).toMatch(/ISSUE \/ BRANCH/u)
   })
 
   it("leaves `--json` exactly as it was: the same document with or without colour, and never a colour byte", async () => {
@@ -211,7 +216,9 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(colored.stdout).toBe(plain.stdout)
     expect(plain.stdout).not.toContain(ESC)
     const document = JSON.parse(plain.stdout) as Record<string, unknown>
-    expect(Object.keys(document).sort()).toEqual(["changes", "journal", "observation", "pause", "stopped"])
+    // `overrides` is always present (25296 C5): an empty array is "no merge check held off".
+    expect(Object.keys(document).sort()).toEqual(["changes", "journal", "observation", "overrides", "pause", "stopped"])
+    expect(document["overrides"]).toEqual([])
     expect((document as { observation: unknown }).observation).toMatchObject({ contract: "native", notices: [] })
     const [row] = document["changes"] as readonly Record<string, unknown>[]
     expect(row).toMatchObject({ branch: "task/one", position: 1, state: "queued", submitter: "@dev/10" })
@@ -291,7 +298,8 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
 
     expect(positional.exitCode, positional.report).toBe(0)
     // One predicate, two spellings: not "both succeed", but the same document.
-    const normalize = (text: string): string => text.replace(/waiting \d+:\d+/gu, "waiting XX:XX")
+    const normalize = (text: string): string =>
+      text.replace(/waiting \d+:\d+/gu, "waiting XX:XX").replace(/\d+:\d+ \/ —/gu, "XX:XX / —")
     expect(normalize(flagged.stdout), flagged.report).toBe(normalize(positional.stdout))
     expect(flagged.exitCode, flagged.report).toBe(positional.exitCode)
     expect(normalize(aliased.stdout), aliased.report).toBe(normalize(positional.stdout))
@@ -334,6 +342,7 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
       "changes",
       "journal",
       "observation",
+      "overrides",
       "pause",
       "scope",
       "stopped",

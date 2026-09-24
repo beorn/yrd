@@ -37,10 +37,10 @@ const STATS_HOUR_WIDTH = 4
 const STATS_PERIOD_WIDTHS: Readonly<Record<string, number>> = { month: 6, today: 6, week: 6, yesterday: 8 }
 const STATS_PERIODS_WIDTH = Object.values(STATS_PERIOD_WIDTHS).reduce((sum, width) => sum + width, 0)
 
-/** How many hour buckets fit beside the label and the four calendar columns, between 6 and 24. */
+/** How many hour buckets fit beside the label and the four calendar columns, filling pane width. */
 export function statsHoursFor(columns: number): number {
   const fixed = BOX_CHROME + STATS_LABEL_WIDTH + STATS_PERIODS_WIDTH + 2
-  return Math.max(6, Math.min(24, Math.floor((columns - fixed) / STATS_HOUR_WIDTH)))
+  return Math.max(6, Math.floor((columns - fixed) / STATS_HOUR_WIDTH))
 }
 
 /**
