@@ -506,6 +506,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   log.write({
     base: options.targetSha,
     checks: options.checks.map((check) => check.name),
+    effectiveChecks: options.checks.map((check) => (check.run === "true" ? "off" : check.name)),
     config: options.configBlob,
     kind: "run",
     gitlink: options.targetSha,
@@ -2396,39 +2397,45 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     // submodule main ahead of root is the one partial state this landing
     // accepts, and the next run composes on it as an Equal pin.
     if (publishing.length > 0) {
-      const landing = await publishChildren(run, entry, worktree.path, mergeCommit, publishing, rootChanges, results)
+      const landing = await timedStep(run.log, { branch, head, name: "publish", phase: "merge" }, () =>
+        publishChildren(run, entry, worktree.path, mergeCommit, publishing, rootChanges, results),
+      )
       if (landing.kind === "kept") return landing.ended
       expectedTip = landing.record
     }
-    const mergedRecord = await recordCommit(
-      run.git,
-      {
-        change,
-        kind: "merged",
-        subject: `${branch} merged into ${run.options.target.branch} as ${mergeCommit.slice(0, 12)}`,
-        trailers: [
-          ["Merge", mergeCommit],
-          ...(rootChanges === undefined ? [] : [["Root-Changes", rootChanges.encoded] as const]),
-          ["Base", run.targetSha],
-          ["Merged-By", mergedBy(run.options.target.branch, run.log.id)],
-          ...publishing.map((row) => ["Published", publishedRow(row)] as const),
-          ...recuts.map((recut) => ["Recut", recutRow(recut)] as const),
-          ...checkTrailers(results),
-          ...skippedTrailers(run),
-        ],
-      },
-      expectedTip,
+    const mergedRecord = await timedStep(run.log, { branch, head, name: "merge", phase: "merge" }, () =>
+      recordCommit(
+        run.git,
+        {
+          change,
+          kind: "merged",
+          subject: `${branch} merged into ${run.options.target.branch} as ${mergeCommit.slice(0, 12)}`,
+          trailers: [
+            ["Merge", mergeCommit],
+            ...(rootChanges === undefined ? [] : [["Root-Changes", rootChanges.encoded] as const]),
+            ["Base", run.targetSha],
+            ["Merged-By", mergedBy(run.options.target.branch, run.log.id)],
+            ...publishing.map((row) => ["Published", publishedRow(row)] as const),
+            ...recuts.map((recut) => ["Recut", recutRow(recut)] as const),
+            ...checkTrailers(results),
+            ...skippedTrailers(run),
+          ],
+        },
+        expectedTip,
+      ),
     )
-    const pushed = await run.steps.push(run, entry, {
-      leases: [
-        [`refs/heads/${run.options.target.branch}`, run.targetSha],
-        [ref, expectedTip],
-      ],
-      updates: [
-        [mergeCommit, `refs/heads/${run.options.target.branch}`],
-        [mergedRecord, ref],
-      ],
-    })
+    const pushed = await timedStep(run.log, { branch, head, name: "push", phase: "merge" }, () =>
+      run.steps.push(run, entry, {
+        leases: [
+          [`refs/heads/${run.options.target.branch}`, run.targetSha],
+          [ref, expectedTip],
+        ],
+        updates: [
+          [mergeCommit, `refs/heads/${run.options.target.branch}`],
+          [mergedRecord, ref],
+        ],
+      }),
+    )
     if (!pushed.merged) {
       // Something can win after our reads, and then the atomic leases reject
       // every update. A push that read what moved says so and the change simply
