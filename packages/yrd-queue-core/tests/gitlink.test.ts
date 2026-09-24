@@ -908,6 +908,13 @@ async function submoduleMain(w: World): Promise<string> {
   return tip
 }
 
+/** Whether the submodule remote's `of` contains `ancestor`: their merge base is `ancestor` itself. */
+async function isAncestorIn(w: World, ancestor: string, of: string): Promise<boolean> {
+  const submodule = gitIn(join(w.work, "..", "submodule-work"))
+  await submodule(["fetch", "--quiet", "origin"])
+  return (await submodule(["merge-base", ancestor, of])).trim() === ancestor
+}
+
 /** A second owned child remote, with an unpublished commit ahead of its main. */
 async function addSecondChild(w: World): Promise<Readonly<{ main: string; ahead: string; remote: string }>> {
   const root = dirname(w.work)
@@ -1175,6 +1182,56 @@ describe("settling gitlinks", () => {
     expect(await w.git(["show", "-s", "--format=%B", target])).toContain(
       `Settled: submodule@${ahead} kept-ahead submodule-main@${w.main}`,
     )
+  })
+
+  // 25570: a component main that moves after the submit phase composes makes the stored compose's lease stale, so the
+  // merge phase composes fresh over the moved main instead of publishing a lease the remote refuses (the edge row
+  // @dev/review-adhoc5 measured stuck on the compose-once head; @cto c3facf63, 298075b8).
+  it("composes fresh when a component main moved after the submit compose, and lands over the moved main", async () => {
+    const w = await world()
+    const ahead = await aheadOfSubmodule(w, "edge")
+    await submitGitlink(w, "task/edge", ahead)
+    await using real = createProcess({ cwd: w.work })
+    let composes = 0
+    let moved = ""
+    const racing: Process = {
+      ...real,
+      async run(request) {
+        const result = await real.run(request)
+        if (request.argv.includes("super") && request.argv.includes("merge") && composes++ === 0) {
+          const submoduleWork = join(w.work, "..", "submodule-work")
+          const submodule = gitIn(submoduleWork)
+          await submodule(["checkout", "--quiet", "main"])
+          writeFileSync(join(submoduleWork, "unrelated.txt"), "moved between the phases\n")
+          await submodule(["add", "unrelated.txt"])
+          await submodule(["commit", "--quiet", "-m", "an unrelated commit on component main"])
+          await submodule(["push", "--quiet", "origin", "main"])
+          moved = (await submodule(["rev-parse", "HEAD"])).trim()
+        }
+        return result
+      },
+    }
+    const outcome = await queueRun({ ...(await w.options()), process: racing })
+
+    expect(moved).not.toBe("")
+    expect(outcome.stuck).toEqual([])
+    expect(outcome.merged).toEqual(["task/edge"])
+    const rows = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(rows.filter((row) => row.subject === "compose-reused")).toEqual([])
+    expect(rows.filter((row) => row.subject === "compose-reuse-refused")).toMatchObject([
+      { branch: "task/edge", phase: "merge", path: "submodule", expected: w.main, saw: moved },
+    ])
+    const composed = rows.filter(
+      (row) => row.kind === "step" && row.name === "compose" && row.end !== undefined && row.within === undefined,
+    )
+    expect(composed.map((row) => row.phase)).toEqual(["submit", "merge"])
+    // The landed component main holds both the racing commit and the change's pin.
+    const childMain = await submoduleMain(w)
+    expect(await isAncestorIn(w, moved, childMain)).toBe(true)
+    expect(await isAncestorIn(w, ahead, childMain)).toBe(true)
   })
 
   // 24454: the whole landing is one ordinary submit of the root. The author
