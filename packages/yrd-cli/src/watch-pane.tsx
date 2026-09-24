@@ -775,19 +775,18 @@ function draftsIn(rows: readonly WatchRow[]): number {
 
 /**
  * Derive status marker, word, colour and reason for the top line (RUNNING /
- * PAUSED / STOPPED, the 25367 fix-forward). The reason is the pause record's
- * own sentence when the line was paused, else what the runner's row says it
- * holds; the marker pulses while the line runs or is held with a reason (25416).
+ * PAUSED / STOPPED, the 25367 fix-forward). RUNNING only for a beating service
+ * or a live run (CTO 693b0a69, bead 25500); otherwise STOPPED with its detail,
+ * or PAUSED when the queue is held. The reason is the pause record's own sentence
+ * when the line was paused, else what the runner's row says it holds; the marker
+ * pulses while the line runs or is held with a reason (25416).
  */
 export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
   const runner = runnerOf(snapshot, now)
   const held = snapshot.pause !== undefined || (snapshot.stopped !== undefined && snapshot.stopped !== null)
+  const isRunning = snapshot.runner?.service.kind === "beating" || snapshot.runner?.latest?.alive === true
   const word =
-    held || runner.state === "paused" || runner.state === "stuck"
-      ? "PAUSED"
-      : runner.state === "stopped" || runner.state === "silent"
-        ? "STOPPED"
-        : "RUNNING"
+    held || runner.state === "paused" || runner.state === "stuck" ? "PAUSED" : isRunning ? "RUNNING" : "STOPPED"
   if (word === "RUNNING") return { marker: RUNNING_GLYPH, word, color: "$fg-info", pulse: true }
   const reason = snapshot.pause ?? (runner.holds === "" ? undefined : runner.holds)
   return {
