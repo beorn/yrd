@@ -27,7 +27,7 @@ describe("readSuperMergeResult — git-super's phase durations (25303 tier 2)", 
     expect(readSuperMergeResult(merged)).not.toHaveProperty("steps")
   })
 
-  it.each([
+  it.each<[unknown, string]>([
     ["a non-array", "steps"],
     [[{ name: "plan" }], "no ms"],
     [[{ ms: 4 }], "no name"],
