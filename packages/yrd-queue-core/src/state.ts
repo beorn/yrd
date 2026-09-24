@@ -127,14 +127,20 @@ export function readChange(change: ChangeRecords): ChangeReading {
   // exactly as it reads today; this is the one carve-out, and it only fires
   // once the branch has actually moved on AND reached the target
   // (@i/10-yrd/24098).
+  //
+  // A branch that is gone reads the same way, with no later head named:
+  // the queue deletes a merged change's branch (@i/10-yrd/25568), and the
+  // branch was the only witness that a later head carried this one onto the
+  // target. Without this, deleting it re-announced every earlier failed head
+  // as merged. A fabricated `supersededBy` would be worse than none, and the
+  // one case read wrong — a failed head merged by hand at the same head, then
+  // its branch deleted — reads its failure, never a merge nobody recorded
+  // (@cto 2026-09-24).
   const ended = endedKind(last)
-  if (
-    change.headOnTarget &&
-    change.branchHead !== undefined &&
-    change.branchHead !== change.head &&
-    (ended === "failed" || ended === "withdrawn")
-  ) {
-    return { state: ended, reason: "superseded", supersededBy: change.branchHead }
+  if (change.headOnTarget && change.branchHead !== change.head && (ended === "failed" || ended === "withdrawn")) {
+    return change.branchHead === undefined
+      ? { state: ended, reason: "superseded" }
+      : { state: ended, reason: "superseded", supersededBy: change.branchHead }
   }
 
   // Ancestry first, and before anything else the records say. A change merged
