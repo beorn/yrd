@@ -181,6 +181,15 @@ describe("the top line (items 30, 32d, 33)", () => {
     expect(first?.trimEnd().endsWith("all")).toBe(false)
   })
 
+  it("has no bottom help line and no drafts line: the ? help and STATS say those (25417)", async () => {
+    const rows: WatchRow[] = [{ row: row({ branch: "task/queued", state: "queued" }) }, { row: failedRow() }]
+    const app = render(<WatchPane snapshot={snapshot({ rows })} live />, { cols: 120, rows: 40 })
+    await app.waitForLayoutStable()
+    expect(app.text).toContain("task/queued")
+    for (const gone of ["? for help", "q leaves", "change(s) ·", "draft(s) ·"]) expect(app.text).not.toContain(gone)
+    app.unmount()
+  })
+
   it("has no queue All pill; the a key still shows every status", async () => {
     const rows: WatchRow[] = [{ row: row({ branch: "task/queued", state: "queued" }) }, { row: failedRow() }]
     const app = render(<WatchPane snapshot={snapshot({ rows })} live />, { cols: 120, rows: 40 })
