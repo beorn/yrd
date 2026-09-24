@@ -709,18 +709,21 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 /** The one configured Gitomic backend for every legacy queue ref operation. */
 export function createLegacyBackend(gitExecutable = "git"): GitomicBackend {
   const baseEnv = gitEnvironment(globalThis.process.env)
-  const makeBackend = (env: NodeJS.ProcessEnv) =>
-    createShellBackend({
+  const makeReader = (env: NodeJS.ProcessEnv) => {
+    const backend = createShellBackend({
       baseEnv: env,
       gitExecutable,
       remoteTimeoutMs: GIT_ROOT_INVOCATION_MS,
     })
-  const backend = makeBackend(baseEnv)
-  if (backend.fetchRefs === undefined || backend.listRefs === undefined) {
-    throw new Error("yrd: the selected Gitomic shell backend lacks fetchRefs or listRefs")
+    const { fetchRefs, listRefs } = backend
+    if (fetchRefs === undefined || listRefs === undefined) {
+      throw new Error("yrd: the selected Gitomic shell backend lacks fetchRefs or listRefs")
+    }
+    return { backend, fetchRefs: fetchRefs.bind(backend), listRefs: listRefs.bind(backend) }
   }
+  const first = makeReader(baseEnv)
   return {
-    ...backend,
+    ...first.backend,
     fetchRefs: (repo, refs, remote) =>
       retryLegacyPublickeyRead(
         "fetch",
@@ -728,20 +731,20 @@ export function createLegacyBackend(gitExecutable = "git"): GitomicBackend {
         remote,
         refs,
         baseEnv,
-        () => backend.fetchRefs!(repo, refs, remote),
-        (env) => makeBackend(env).fetchRefs!(repo, refs, remote),
+        () => first.fetchRefs(repo, refs, remote),
+        (env) => makeReader(env).fetchRefs(repo, refs, remote),
       ),
     listRefs: (repo, prefix, remote) =>
       remote === undefined
-        ? backend.listRefs!(repo, prefix)
+        ? first.listRefs(repo, prefix)
         : retryLegacyPublickeyRead(
             "ls-remote",
             repo,
             remote,
             prefix,
             baseEnv,
-            () => backend.listRefs!(repo, prefix, remote),
-            (env) => makeBackend(env).listRefs!(repo, prefix, remote),
+            () => first.listRefs(repo, prefix, remote),
+            (env) => makeReader(env).listRefs(repo, prefix, remote),
           ),
   }
 }
