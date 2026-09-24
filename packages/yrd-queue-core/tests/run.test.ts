@@ -26,6 +26,7 @@ import { openEvents } from "gitomic/events"
 import type { RefUpdate } from "gitomic"
 import { gitEnvironment } from "../src/git.ts"
 import { incidentTrailers } from "../src/incident.ts"
+import { QUEUE_RUN_FAILED_EXIT } from "../src/run.ts"
 import { reminderDue } from "../src/override.ts"
 import { CapturedQueueObjectsUnavailable } from "../src/remote.ts"
 import {
@@ -601,7 +602,7 @@ it("ends a failed configured event check and continues with the next change", as
 
   const outcome = await queueRun({ ...(await w.options({ exit: 1 })), notify: [] })
 
-  expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/a"], merged: ["task/b"], stuck: [] })
+  expect(outcome).toMatchObject({ exitCode: QUEUE_RUN_FAILED_EXIT, failed: ["task/a"], merged: ["task/b"], stuck: [] })
   expect(await remoteTarget(w)).not.toBe(w.target)
   expect((await readStatus(store, "main", "task/a")).status).toBe("failed")
   expect((await readStatus(store, "main", "task/b")).status).toBe("merged")
