@@ -317,9 +317,12 @@ function CheckLabel({ detail, at }: { detail: ChangeDetail; at: number }) {
       ? " off"
       : check.state === "not-run"
         ? " not run"
-        : step?.ms === undefined
-          ? ""
-          : ` ${mediaDuration(step.ms)}`
+        : // Started and never ended: the step tabs' own word for it (25521), never a blank beside `?`.
+          check.state === "unmeasured" && check.result === undefined
+          ? " unended"
+          : step?.ms === undefined
+            ? ""
+            : ` ${mediaDuration(step.ms)}`
   return (
     <StageLabel
       name={twice ? `${check.name} (${String(check.phase)})` : check.name}
