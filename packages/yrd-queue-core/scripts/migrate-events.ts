@@ -23,17 +23,31 @@ import {
 import { readHistories, readQueue } from "../src/remote.ts"
 import { isActive, readOverrides } from "../src/override.ts"
 import { changeRef, overrideRef, parseChangeRef, pauseRef, queueRefPrefix } from "../src/refs.ts"
-import { changesRef, enumerateChangeSegments, queueRef, readEventQueueWithChanges } from "../src/events.ts"
+import { changesRef, enumerateChangeSegments, queueFormat, queueRef, readEventQueueWithChanges } from "../src/events.ts"
 import { readConfig } from "../src/config.ts"
 import { assertPlainEventQueueConfig } from "../src/event-config.ts"
 import { inputsForLegacy, migratedStatus, type LegacyMigrationChange } from "../src/migration.ts"
 import { tipOf } from "../src/state.ts"
 import { trailer } from "../src/legacy-records.ts"
+import { subjects } from "../src/table.ts"
 
 type Phase = "plan" | "apply" | "rollback"
 type Options = Readonly<{ phase: Phase; repo: string; remote: string; queue: string; journal: string }>
 type Ref = Readonly<{ ref: string; oid: string }>
 type Advertisement = Readonly<{ heads: readonly Ref[]; queue: readonly Ref[]; target: string }>
+type LegacyRow = Readonly<{
+  ref: string
+  branch: string
+  head: string
+  state: string
+  reason?: string
+  supersededBy?: string
+  at: string
+  opened: string
+  subject: string
+  submitter: string
+  issue?: string
+}>
 type Plan = Readonly<{
   version: 1
   options: Pick<Options, "repo" | "remote" | "queue" | "journal">
@@ -44,6 +58,8 @@ type Plan = Readonly<{
   heads: readonly Ref[]
   oldRefs: readonly Ref[]
   changes: readonly Ref[]
+  legacyRows: readonly LegacyRow[]
+  recordCount: number
   pause: Ref
   override?: Ref
   bundle: string
@@ -121,6 +137,41 @@ function rows(text: string, subject: string): readonly Ref[] {
 
 function equalRefs(left: readonly Ref[], right: readonly Ref[]): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
+}
+
+async function legacyRows(
+  git: Git,
+  queue: string,
+  entries: readonly LegacyMigrationChange[],
+): Promise<readonly LegacyRow[]> {
+  const titles = await subjects(
+    git,
+    entries.map(({ change }) => change.head),
+  )
+  return entries
+    .map(({ ref, change, reading }) => {
+      const tip = tipOf(change)
+      const subject = titles.get(change.head)
+      const opened = trailer(tip, "Opened")
+      const submitter = trailer(tip, "Submitter")
+      if (subject === undefined || opened === undefined || submitter === undefined) {
+        failure("unread-change", ref, `subject, Opened: or Submitter: missing at ${tip.sha}`)
+      }
+      return {
+        ref,
+        branch: change.branch,
+        head: change.head,
+        state: reading.state,
+        ...(reading.reason === undefined ? {} : { reason: reading.reason }),
+        ...(reading.supersededBy === undefined ? {} : { supersededBy: reading.supersededBy }),
+        at: tip.at.toISOString(),
+        opened,
+        subject,
+        submitter,
+        ...(trailer(tip, "Issue") === undefined ? {} : { issue: trailer(tip, "Issue") }),
+      }
+    })
+    .sort((a, b) => a.ref.localeCompare(b.ref))
 }
 
 async function remoteAdvertisement(git: Git, remote: string, queue: string): Promise<Advertisement> {
@@ -229,6 +280,14 @@ async function plan(options: Options, git: Git, selection: GitSelection, pin: st
       `read ${reading.changes.length} changes from ${classified.changes.length} census refs`,
     )
   }
+  const histories = await readHistories(git, reading.changes, options.remote, options.queue)
+  const sources = histories.map((entry) => ({
+    ref: changeRef(options.queue, entry.change),
+    change: entry.change,
+    reading: entry.reading,
+  }))
+  const projected = await legacyRows(git, options.queue, sources)
+  const recordCount = sources.reduce((count, source) => count + source.change.records.length, 0)
   const second = await remoteAdvertisement(git, options.remote, options.queue)
   if (!equalRefs(first.queue, second.queue) || !equalRefs(first.heads, second.heads)) {
     failure(
@@ -280,6 +339,8 @@ async function plan(options: Options, git: Git, selection: GitSelection, pin: st
     heads: first.heads,
     oldRefs: first.queue,
     changes: classified.changes,
+    legacyRows: projected,
+    recordCount,
     pause: classified.pause,
     ...(classified.override === undefined ? {} : { override: classified.override }),
     bundle,
@@ -287,11 +348,22 @@ async function plan(options: Options, git: Git, selection: GitSelection, pin: st
     snapshot,
   }
   immutableJson(join(options.journal, "plan.json"), evidence)
+  immutableJson(join(options.journal, "legacy-rows.json"), projected)
   return {
     phase: "plan",
     queue: `${options.remote}#${options.queue}`,
-    count: { oldRefs: first.queue.length, changes: classified.changes.length, heads: first.heads.length },
-    paths: { journal: join(options.journal, "plan.json"), bundle, snapshot },
+    count: {
+      oldRefs: first.queue.length,
+      changes: classified.changes.length,
+      records: recordCount,
+      heads: first.heads.length,
+    },
+    paths: {
+      journal: join(options.journal, "plan.json"),
+      legacyRows: join(options.journal, "legacy-rows.json"),
+      bundle,
+      snapshot,
+    },
     target: first.target,
     runtimePin: pin,
     bundleSha256: evidence.bundleSha256,
@@ -639,6 +711,146 @@ async function apply(options: Options, plan: Plan, git: Git, selection: GitSelec
   return { ...result, postflight: join(options.journal, "postflight.json") }
 }
 
+function readStaged(options: Options, plan: Plan): Staged {
+  const path = join(options.journal, "staged.json")
+  if (!existsSync(path)) failure("missing-journal", path, "staged manifest is required for rollback")
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"))
+  if (typeof parsed !== "object" || parsed === null || !("version" in parsed) || parsed.version !== 1) {
+    failure("invalid-journal", path, "expected staged manifest version 1")
+  }
+  const value = parsed as Staged
+  if (
+    value.queue.ref !== queueRef(options.queue) ||
+    !OID.test(value.queue.oid) ||
+    value.sources.length !== plan.recordCount
+  ) {
+    failure("invalid-journal", path, "staged queue or source record count differs from plan")
+  }
+  return value
+}
+
+async function rollback(options: Options, plan: Plan, git: Git, selection: GitSelection): Promise<unknown> {
+  const resultPath = join(options.journal, "apply-result.json")
+  const rollbackPath = join(options.journal, "rollback-result.json")
+  if (existsSync(rollbackPath))
+    {failure("already-rolled-back", rollbackPath, "one rollback attempt may have happened; inspect full readback")}
+  if (!existsSync(resultPath))
+    {failure("missing-journal", resultPath, "apply readback receipt is required before rollback")}
+  const applied: unknown = JSON.parse(readFileSync(resultPath, "utf8"))
+  if (typeof applied !== "object" || applied === null || !("state" in applied) || applied.state !== "committed") {
+    failure("invalid-journal", resultPath, "apply receipt did not prove exact committed ref readback")
+  }
+  const staged = readStaged(options, plan)
+  if (!existsSync(plan.bundle) || (await sha256(plan.bundle)) !== plan.bundleSha256) {
+    failure("invalid-bundle", plan.bundle, "bundle is missing or its SHA256 differs from plan")
+  }
+  const snapshotGit = gitIn(plan.snapshot, undefined, selection)
+  await snapshotGit(["bundle", "verify", plan.bundle])
+  const bundled = rows(await snapshotGit(["bundle", "list-heads", plan.bundle]), plan.bundle)
+  if (!equalRefs(bundled, plan.oldRefs))
+    {failure("invalid-bundle", plan.bundle, "bundle ref listing differs from the original census")}
+  const lastSource = new Map<string, string>()
+  const count = new Map<string, number>()
+  for (const source of staged.sources) {
+    const key = sourceKey(source.ref, source.oid)
+    count.set(key, (count.get(key) ?? 0) + 1)
+    lastSource.set(source.ref, source.oid)
+  }
+  if (staged.sources.length !== plan.recordCount || [...count.values()].some((number) => number !== 1)) {
+    failure("source-accounting", options.queue, "staged Migrated-From entries do not account for every old record once")
+  }
+  for (const old of plan.changes) {
+    if (lastSource.get(old.ref) !== old.oid) {
+      failure(
+        "source-accounting",
+        old.ref,
+        `last Migrated-From record ${lastSource.get(old.ref) ?? "absent"} differs from bundled tip ${old.oid}`,
+      )
+    }
+  }
+  const newRefs: readonly Ref[] = [staged.queue, ...staged.changes].sort((a, b) => a.ref.localeCompare(b.ref))
+  const before = await remoteAdvertisement(git, options.remote, options.queue)
+  if (!equalRefs(before.queue, newRefs) || !equalRefs(before.heads, plan.heads)) {
+    failure(
+      "changed-census",
+      `${options.remote}#${options.queue}`,
+      "new ref OIDs or branch heads differ from staged apply receipt; rollback lease is unsafe",
+    )
+  }
+  const backend = createEventStore(options.repo, options.remote, selection).backend
+  if (typeof backend.publish !== "function")
+    {failure("backend", options.repo, "Gitomic backend lacks atomic publish for rollback")}
+  const absent = "0".repeat(40)
+  const updates = [
+    ...plan.oldRefs.map(({ ref, oid }) => ({ ref, expect: absent, oid })),
+    ...newRefs.map(({ ref, oid }) => ({ ref, expect: oid, oid: null })),
+  ]
+  const started = performance.now()
+  let publicationError: string | undefined
+  try {
+    await backend.publish(options.repo, updates, options.remote)
+  } catch (error) {
+    publicationError = error instanceof Error ? error.message : String(error)
+  }
+  const seconds = (performance.now() - started) / 1000
+  const after = await remoteAdvertisement(git, options.remote, options.queue)
+  const state = equalRefs(after.heads, plan.heads)
+    ? equalRefs(after.queue, plan.oldRefs)
+      ? "restored"
+      : equalRefs(after.queue, newRefs)
+        ? "unchanged"
+        : "divergent"
+    : "divergent"
+  const result = {
+    phase: "rollback",
+    state,
+    queue: `${options.remote}#${options.queue}`,
+    refUpdates: updates.length,
+    pushSeconds: seconds,
+    ...(publicationError === undefined ? {} : { publicationError }),
+    paths: {
+      plan: join(options.journal, "plan.json"),
+      bundle: plan.bundle,
+      staged: join(options.journal, "staged.json"),
+      result: rollbackPath,
+    },
+    readback: after.queue,
+  }
+  immutableJson(rollbackPath, result)
+  if (state !== "restored") {
+    failure(
+      "rollback-readback",
+      `${options.remote}#${options.queue}`,
+      `${state} after one atomic rollback attempt; ${publicationError ?? "push returned success"}; see ${rollbackPath}`,
+    )
+  }
+  const store = createEventStore(options.repo, options.remote, selection)
+  if ((await queueFormat(store, options.queue)) !== "legacy") {
+    failure(
+      "rollback-format",
+      `${options.remote}#${options.queue}`,
+      "queueFormat still selects event after exact old ref restoration",
+    )
+  }
+  const restored = await legacyChanges(plan, git)
+  const projected = await legacyRows(git, options.queue, restored)
+  if (JSON.stringify(projected) !== JSON.stringify(plan.legacyRows)) {
+    failure(
+      "rollback-parity",
+      `${options.remote}#${options.queue}`,
+      `restored legacy rows differ from ${join(options.journal, "legacy-rows.json")}`,
+    )
+  }
+  const postflight = {
+    phase: "rollback-postflight",
+    state: "clean",
+    legacyRows: projected.length,
+    queueFormat: "legacy",
+  }
+  immutableJson(join(options.journal, "rollback-postflight.json"), postflight)
+  return { ...result, postflight: join(options.journal, "rollback-postflight.json") }
+}
+
 async function main(argv: readonly string[]): Promise<void> {
   const options = optionsOf(argv)
   const pin = await runtimePin()
@@ -662,11 +874,7 @@ async function main(argv: readonly string[]): Promise<void> {
     process.stdout.write(`${JSON.stringify(await apply(options, evidence, git, selection))}\n`)
     return
   }
-  failure(
-    "unfinished-phase",
-    `${options.phase} ${evidence.options.remote}#${evidence.options.queue}`,
-    "phase implementation is not ready",
-  )
+  process.stdout.write(`${JSON.stringify(await rollback(options, evidence, git, selection))}\n`)
 }
 
 if (import.meta.main) {
