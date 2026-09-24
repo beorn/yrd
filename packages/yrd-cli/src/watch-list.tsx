@@ -220,6 +220,8 @@ export type LineStatus = Readonly<{
   marker: string
   word: string
   color: string
+  /** How long the queue has been in that status, not bolded (25556). */
+  timer?: React.ReactNode
   /** Why the line is stopped, in the pause record's or the runner's own words; absent while it runs. */
   reason?: string
   /** The marker pulses while the line runs, or while it is stopped with a reason (25416). */
@@ -297,6 +299,11 @@ export function TopLine({
         <Text bold color={statusInk} flexShrink={0}>
           {status.word}
         </Text>
+        {status.timer === undefined ? null : (
+          <Text color={statusInk} flexShrink={0}>
+            {status.timer}
+          </Text>
+        )}
         {status.reason === undefined ? null : (
           <Text color={statusInk} wrap="truncate">
             {status.reason}
@@ -309,6 +316,7 @@ export function TopLine({
             key={`${queue.path}@${queue.branch}`}
             label={pillLabel(queue, index + 1, true)}
             active={visible === undefined || visible.has(queue.label)}
+            activeTreatment="accentText"
             onToggle={() => {
               onToggle(queue.label)
             }}
@@ -328,17 +336,18 @@ function TopPill({
   label,
   active,
   onToggle,
-  boldFirstLetter = false,
+  activeTreatment = "warningText",
 }: {
   label: string
   active: boolean
   onToggle: () => void
-  boldFirstLetter?: boolean
+  activeTreatment?: "accentText" | "warningText"
 }) {
-  const text = useInteractionTreatment("control", active ? "warningText" : "inverseText", true, {
+  const text = useInteractionTreatment("control", active ? activeTreatment : "inverseText", true, {
     selected: active,
   })
-  const color = active ? `mix($fg-on-inverse, ${text.treatment.color ?? "$fg-warning"}, 30%)` : text.treatment.color
+  const activeToken = activeTreatment === "accentText" ? "$fg-accent" : "$fg-warning"
+  const color = active ? `mix($fg-on-inverse, ${activeToken}, 30%)` : text.treatment.color
   return (
     <Box
       flexShrink={0}
@@ -350,16 +359,9 @@ function TopPill({
         text.onMouseLeave(event)
       }}
     >
-      {boldFirstLetter && label.length > 0 ? (
-        <>
-          <Text color={color} bold>
-            {label.slice(0, 1)}
-          </Text>
-          <Text color={color}>{label.slice(1)}</Text>
-        </>
-      ) : (
-        <Text color={color}>{label}</Text>
-      )}
+      <Text color={color} bold={active}>
+        {label}
+      </Text>
     </Box>
   )
 }
@@ -796,9 +798,9 @@ export function StatusPills({
       {BUCKETS.map((bucket) => (
         <TopPill
           key={bucket}
-          label={bucket}
-          boldFirstLetter
+          label={`[${bucket.slice(0, 1)}]${bucket.slice(1)}`}
           active={buckets.has(bucket)}
+          activeTreatment="warningText"
           onToggle={() => {
             onSelectOnly(bucket)
           }}
