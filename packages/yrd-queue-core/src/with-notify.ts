@@ -48,7 +48,7 @@ import { recordProgramStart, recordProgramResult, short, shortRecut, writeRecord
 import { tipOf } from "./state.ts"
 import type { QueueEntry } from "./remote.ts"
 import type { OverrideEntry } from "./override.ts"
-import type { Git } from "./records.ts"
+import type { Git } from "./git.ts"
 
 /** This ring's own option, which the run's options carry for it (rings.ts). */
 export type NotifyOptions = Readonly<{

@@ -22,7 +22,8 @@
  */
 
 import { readRemoteCommit } from "./git.ts"
-import { ABSENT, RECORD_FORMAT, commitTrailers, type Git } from "./records.ts"
+import { ABSENT, RECORD_FORMAT, commitTrailers } from "./legacy-records.ts"
+import type { Git } from "./git.ts"
 import { overrideRef } from "./refs.ts"
 
 /** The longest window one override may hold a check off: a hard maximum, checked at write. */
