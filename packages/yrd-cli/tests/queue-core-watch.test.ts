@@ -30,7 +30,7 @@ import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import type { ChangeDetail } from "../src/watch-detail.tsx"
-import { runShortName } from "../src/watch-format.ts"
+import { runIdentifier, runShortName } from "../src/watch-format.ts"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
 import type { WatchRow } from "../src/watch-rows.ts"
 
@@ -733,12 +733,12 @@ describe("what a watch says it looked at", () => {
     expect(changeLines, plain.stdout()).toHaveLength(1)
     expect(changeLines[0], plain.stdout()).toContain("task/history")
     expect(
-      pageLines.some((line) => line.includes("RUNNER") && line.includes("stopped")),
+      pageLines.some((line) => line.includes("RUNNER")) && pageLines.some((line) => line.includes("stopped")),
       plain.stdout(),
     ).toBe(true)
     // QUEUE / RUN names the latest attempt as `1 · main#…` (ia.md); historical
     // run ids stay in `--json` and in the change's own detail, not as extra rows.
-    expect(changeLines[0], plain.stdout()).toContain(runShortName("main", secondId))
+    expect(changeLines[0], plain.stdout()).toContain(runIdentifier(secondId))
 
     rendered.snapshot = undefined
     const interactive = capture(w.work)
@@ -943,9 +943,9 @@ describe("the timing a one-row page prints under its row (24196)", () => {
     const lines = page.stdout().split("\n")
     const row = lines.find((line) => line.includes("task/good") && line.includes("○ submitted")) ?? ""
     expect(row, page.stdout()).toContain("task/good")
-    // AGE / RUN is unknown with no attempt (ia.md). The one-row timing line
+    // AGE is real age; RUN is — with no attempt (item 5, 24196). The one-row timing line
     // under `next:` is still the cell's duration word, never Age or Wait time.
-    expect(row.trimEnd(), page.stdout()).toMatch(/— \/ —\s*$/u)
+    expect(row.trimEnd(), page.stdout()).toMatch(/\d+:\d+ \/ —\s*$/u)
     const notice = lines.findIndex((line) => line.includes("next: "))
     expect(lines[notice + 1]?.trim(), page.stdout()).toMatch(/^waiting \d/u)
     expect(page.stdout()).not.toContain("Age")
@@ -988,7 +988,7 @@ describe("the queue line under a selector (24196)", () => {
     const lines = page.stdout().split("\n")
     expect(
       {
-        queueLine: lines[lines.findIndex((line) => line.includes("yrd watch")) + 1]?.trim(),
+        queueLine: lines[lines.findIndex((line) => line.includes("YRD")) + 1]?.trim(),
         // The runner's ROW carries the count now, and it counts the QUEUE and
         // not the view: the selector shows one change, the row says two.
         rail: /nothing under a check, and \d+ in line/u.exec(page.stdout())?.[0],

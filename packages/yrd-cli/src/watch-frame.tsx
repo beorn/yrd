@@ -276,10 +276,7 @@ export function bandPlan(
       cursor += total
       continue
     }
-    if (total === 0) continue
-    const rules = opening.get(cursor) ?? []
-    rules.push(bandRule(band, total, width, draftWindow, unread))
-    opening.set(cursor, rules)
+    // Operator item 7: remove rule below drafts and rule below RUNNER box
     cursor += total
   }
   for (const [index, rules] of opening) {
@@ -350,7 +347,6 @@ export function RunnerTitledBox({
           queueDigit={queueDigit}
           queueLabel={queueLabel}
         />
-        <RunnerDetail snapshot={snapshot} />
       </TitledBox>
     </Box>
   )
@@ -391,32 +387,10 @@ export function BandBreakRows({
 }
 
 /**
- * The runner's second line: host-only detail, hung under the row it belongs to,
- * and NEVER blank — off the queue's machine it says where it looked and that
- * nothing is published, because a blank line where a fact belongs reads as a
- * queue with nothing to say.
- *
- * `named` when the row above is a CHANGE's row: the runner holds it, so that
- * row is the runner's row and nothing else on it says so. Under the runner's
- * own row the word is already in the cell above, and saying it twice is noise.
+ * The runner's second line: dropped per operator item 3 ("yes, perhaps don't even say anything?").
  */
-export function RunnerDetail({ snapshot, named = false }: { snapshot: WatchSnapshot; named?: boolean }) {
-  const now = useNow()
-  const line = runnerOf(snapshot, now)
-  return (
-    <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-      <Box width={2} flexShrink={0} />
-      <Box flexGrow={1} flexBasis={0} minWidth={0} overflow="hidden" flexDirection="row">
-        <Text color={STATE_WORDS[line.state].color} flexShrink={0}>
-          {RUNNER_GLYPH}
-          {named ? ` ${STATE_WORDS.runner.word} ·` : ""}{" "}
-        </Text>
-        <Text color="$fg-muted" wrap="truncate" minWidth={0}>
-          {line.detail}
-        </Text>
-      </Box>
-    </Box>
-  )
+export function RunnerDetail(_props: { snapshot: WatchSnapshot; named?: boolean }) {
+  return null
 }
 
 /**
