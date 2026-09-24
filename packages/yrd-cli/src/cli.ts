@@ -31,6 +31,7 @@ import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { drainOutput } from "loggily"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
 import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
+import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere } from "./declaration.ts"
 import { resolveQueueLocation } from "./queue-location.ts"
@@ -929,6 +930,26 @@ function buildProgram(
     )
     .option("--json", "emit stable JSON")
     .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
+
+  const mirror = program
+    .command("mirror")
+    .description("this host's local copy of each hosted repository, read by composes")
+  mirror.helpCommand(false)
+  mirror
+    .command("refresh")
+    .description(
+      "create or fetch the mirror of every hosted repository this repository declares, nested ones included, " +
+        `under the store \`git config ${MIRROR_STORE_SETTING}\` names`,
+    )
+    .option("--commit <rev>", "read the declarations at this commit (default HEAD)")
+    .option("--json", "emit stable JSON")
+    .addHelpSection(
+      "On refresh:",
+      "One clone --mirror or fetch --prune per repository, under that mirror's exclusive lock; a refresh that " +
+        "waited on another one that finished meanwhile fetches nothing. Exits 0 with every mirror refreshed " +
+        "(each skipped path is named), 1 when a mirror could not be created, fetched or locked.",
+    )
+    .action(async (options) => setExit(await refreshMirrors(options as MirrorRefreshOptions, io)))
 
   addExamples(program, name)
   return program

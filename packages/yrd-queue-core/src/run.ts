@@ -96,7 +96,13 @@ import {
 import { incidentTrailers, type Incident } from "./incident.ts"
 import { stuckCures, type PauseRecord } from "./pause.ts"
 import { isActive, overrideLine, type OverrideEntry, type OverrideTable } from "./override.ts"
-import { type SuperMergeStep, verifyCandidate, type SuperMergeDetail, type SettledGitlink } from "./verifying.ts"
+import {
+  type SuperMergeStep,
+  verifyCandidate,
+  type SuperMergeDetail,
+  type SettledGitlink,
+  type VerifiedCandidate,
+} from "./verifying.ts"
 import { publishCheckedChildren } from "./publication.ts"
 export { readSuperMergeResult } from "./verifying.ts"
 import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } from "./log.ts"
@@ -293,6 +299,11 @@ export type Run = Readonly<{
   steps: Steps
   /** Say a ring stopped this round before it could merge; the outcome carries what it said. */
   stop: (stopped: Stopped) => void
+  /**
+   * The submit phase's successful composes, by {@link composeKey}, so the merge phase of the same head on the
+   * same target reuses the commit instead of composing it again (25570, @cto 0de59b3c). This round's only.
+   */
+  composed: Map<string, Extract<VerifiedCandidate, { state: "verified" }>>
 }> & {
   /**
    * The target every judgement stands on: the caller's declaration-captured
@@ -675,6 +686,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       stopped = said
     },
     tmpdir: join(options.workdir, "tmp"),
+    composed: new Map(),
     targetSha,
     targetAfter: { sha: targetSha },
     branches: [],
@@ -1532,14 +1544,53 @@ function writeComposeSteps(
 async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePhase): Promise<ComposedCandidate> {
   const { head } = entry.change
   const step = { branch: entry.change.branch, head, phase }
-  const composed = await timedStep(run.log, { ...step, name: "compose" }, () =>
+  const message = mergeMessage(run, entry)
+  const key = composeKey(head, run.targetSha, message)
+  const reused = phase === "merge" ? run.composed.get(key) : undefined
+  if (reused !== undefined) {
+    run.log.write({
+      ...step,
+      base: run.targetSha,
+      candidate: reused.verifying.candidate,
+      from: "submit",
+      kind: "observation",
+      subject: "compose-reused",
+    })
+  }
+  const composed = reused ?? (await composeFresh(run, entry, phase, message))
+  if (reused === undefined) writeComposeSteps(run.log, step, composed.verifying.steps)
+  if (phase === "submit" && composed.state === "verified") run.composed.set(key, composed)
+  if (composed.state === "failed") {
+    return { detail: composed.verifying.detail, kind: "failed", worktree: composed.failedWorktree }
+  }
+  return readyCandidate(run, entry, phase, composed)
+}
+
+/**
+ * What makes two composes the same compose: the head, the target it merges onto, and the merge message, which is
+ * all git-super's merge is given. A child main can still move between a round's two phases; a kept-ahead pin then
+ * meets the publication's lease, which refuses rather than landing over it.
+ */
+function composeKey(head: string, target: string, message: string): string {
+  return `${head} ${target} ${message}`
+}
+
+async function composeFresh(
+  run: Run,
+  entry: QueueEntry,
+  phase: CandidatePhase,
+  message: string,
+): Promise<VerifiedCandidate> {
+  const { head } = entry.change
+  const step = { branch: entry.change.branch, head, phase }
+  return timedStep(run.log, { ...step, name: "compose" }, () =>
     verifyCandidate({
       git: run.git,
       repo: run.options.repo,
       targetHead: run.targetSha,
       head,
       path: join(run.worktrees, "compose", phase, head.slice(0, 12)),
-      message: mergeMessage(run, entry),
+      message,
       env: run.options.env,
       process: run.options.process,
       hooksPath: run.hooksPath,
@@ -1554,10 +1605,17 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
       },
     }),
   )
-  writeComposeSteps(run.log, step, composed.verifying.steps)
-  if (composed.state === "failed") {
-    return { detail: composed.verifying.detail, kind: "failed", worktree: composed.failedWorktree }
-  }
+}
+
+/** The settle, re-cut and descent rows of a composed candidate, then the worktree its phase judges. */
+async function readyCandidate(
+  run: Run,
+  entry: QueueEntry,
+  phase: CandidatePhase,
+  composed: Extract<VerifiedCandidate, { state: "verified" }>,
+): Promise<ComposedCandidate> {
+  const { head } = entry.change
+  const step = { branch: entry.change.branch, head, phase }
   const { verifying } = composed
   const mergeCommit = verifying.candidate
   const rootChanges = await readRootChanges(run.git, mergeCommit)

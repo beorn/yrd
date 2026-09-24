@@ -22,6 +22,9 @@ describe("the legacy Gitomic boundary", () => {
         .filter(([, commands]) => commands.length > 0),
     )
     expect(sites).toEqual({
+      // The host mirror's own `fetch --prune` (25570 row 1): it refreshes a store of hosted repositories and reads
+      // or writes no queue ref.
+      "mirror.ts": ["fetch"],
       "override.ts": ["push", "push"],
       "publication.ts": ["push"],
       "reference.ts": ["update-ref", "fetch", "ls-remote"],

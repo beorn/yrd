@@ -338,7 +338,7 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
  * @level l2 @consumer the submitter and the queue runner
  * Separate behaviour tests cannot prove both entry points invoke one verifier.
  */
-it("submit and both queue phases call the same git-only verifier", async () => {
+it("submit and the queue compose through the same git-only verifier, once per head and target in a round", async () => {
   const w = await world()
   using calls = vi.spyOn(verifying, "verifyCandidate")
   const head = await submitCommit(w, "task/shared-verifier", "one.txt")
@@ -347,8 +347,12 @@ it("submit and both queue phases call the same git-only verifier", async () => {
 
   const outcome = await queueRun(await w.options({ exit: 0 }))
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/shared-verifier"] })
-  expect(calls).toHaveBeenCalledTimes(3)
-  expect(calls.mock.calls.slice(1).map(([options]) => options.head)).toEqual([head, head])
+  // The submit phase composes; the merge phase of the same head on the same target reuses that compose (25570).
+  expect(calls).toHaveBeenCalledTimes(2)
+  expect(calls.mock.calls.slice(1).map(([options]) => options.head)).toEqual([head])
+  expect(
+    logRecords(outcome).filter((row) => row.kind === "observation" && row.subject === "compose-reused"),
+  ).toMatchObject([{ head, phase: "merge", from: "submit" }])
 })
 
 async function remoteTarget(w: Pick<World, "git">): Promise<string> {
@@ -6379,18 +6383,20 @@ describe("the target's setup", () => {
       ["read", "run"],
       ["compose", "submit"],
       ["prepare", "submit"],
-      ["compose", "merge"],
       ["prepare", "merge"],
     ] as const) {
       const step = bracketed(name, phase)
       expect({ name, phase, started: step.start >= 0 }).toEqual({ name, phase, started: true })
       expect({ name, phase, endsAfterStart: step.end > step.start }).toEqual({ name, phase, endsAfterStart: true })
     }
-    // A compose ends before the prepare that uses its merge commit starts, in both phases.
-    for (const phase of ["submit", "merge"]) {
-      expect(bracketed("compose", phase).end).toBeLessThan(bracketed("prepare", phase).start)
-      expect(bracketed("compose", phase).ms).toBeGreaterThanOrEqual(slowMs)
-    }
+    // A compose ends before the prepare that uses its merge commit starts.
+    expect(bracketed("compose", "submit").end).toBeLessThan(bracketed("prepare", "submit").start)
+    expect(bracketed("compose", "submit").ms).toBeGreaterThanOrEqual(slowMs)
+    // The merge phase reuses that compose (25570): no compose step, and the reuse is said before its prepare starts.
+    expect(at((row) => row.kind === "step" && row.name === "compose" && row.phase === "merge")).toBe(-1)
+    const reused = at((row) => row.kind === "observation" && row.subject === "compose-reused" && row.phase === "merge")
+    expect(reused).toBeGreaterThan(bracketed("compose", "submit").end)
+    expect(reused).toBeLessThan(bracketed("prepare", "merge").start)
     expect(records.filter((row) => row.kind === "step" && row.threw === true)).toEqual([])
   })
 
@@ -6411,7 +6417,11 @@ describe("the target's setup", () => {
     expect(outcome.merged).toEqual(["task/one"])
     const records = logRecords(outcome)
     const at = (predicate: (record: Record<string, unknown>) => boolean) => records.findIndex(predicate)
-    for (const phase of ["submit", "merge"]) {
+    // The merge phase reuses the submit phase's compose (25570), so git-super's phases are written once.
+    expect(records.filter((row) => row.kind === "step" && row.phase === "merge" && row.within === "compose")).toEqual(
+      [],
+    )
+    for (const phase of ["submit"]) {
       const step = (name: string, end: boolean) =>
         at(
           (row) =>
