@@ -54,6 +54,7 @@ export {
   readEventQueue,
   readEventQueueWithChanges,
   readStatus,
+  resetQueueFormatCache,
   setBranchIgnored,
   writeQueueEvent,
 } from "./events.ts"

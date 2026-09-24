@@ -413,7 +413,7 @@ export function ListStack({
   const said =
     observation === undefined ||
     observation.contract === "native" ||
-    (observation.outcome === "observed" && observation.notices.length === 0)
+    (observation.outcome === "observed" && (!observation.notices || observation.notices.length === 0))
       ? undefined
       : observation
   const failed = said?.contract === "root-v1" && said.outcome !== "observed"
@@ -422,7 +422,7 @@ export function ListStack({
       {said === undefined ? null : (
         <Box flexDirection="column" flexShrink={0}>
           <Text {...(failed ? { bold: true, color: "$fg-error" } : {})}>{said.message}</Text>
-          {said.notices.map((notice) => (
+          {said.notices?.map((notice) => (
             <Text key={notice.id}>{notice.text}</Text>
           ))}
         </Box>

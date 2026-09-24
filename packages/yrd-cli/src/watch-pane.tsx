@@ -65,6 +65,7 @@ import {
   resolveSplitPaneLayout,
   useInput,
   useScopeEffect,
+  useTerminalFocused,
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
@@ -245,6 +246,9 @@ export function WatchPane({
   loadDiff,
   loadCommandOutput,
   intervalMs = 5000,
+  unfocusedIntervalMs = 30000,
+  focused: focusedProp,
+  now: nowProp,
   live = true,
   onEnding,
 }: {
@@ -258,6 +262,9 @@ export function WatchPane({
   /** One git command's output from the round's raw files, read only when its stage tab opens (25441). */
   loadCommandOutput?: (command: JournalCommand) => Promise<DiffText>
   intervalMs?: number
+  unfocusedIntervalMs?: number
+  focused?: boolean
+  now?: Date
   /** False in a test or a single frame: the tick that ages the screen stands still and nothing pulses. */
   live?: boolean
   /** Called with the ending's code when every watched change has ended, so the command can exit with it. */
@@ -293,6 +300,9 @@ export function WatchPane({
   /** The drafts the reader asked for, read by every round: a round begun before `w` must not undo it. */
   const draftWindow = useRef<DraftWindow>(snapshot.drafts?.window ?? "7d")
 
+  const terminalFocused = useTerminalFocused()
+  const focused = focusedProp ?? (terminalFocused !== false)
+
   const refresh = useCallback(async () => {
     if (load === undefined) return
     const asked = draftWindow.current
@@ -303,15 +313,34 @@ export function WatchPane({
     if (code !== undefined) onEnding?.(code)
   }, [load, onEnding])
 
-  // ONE loop, owned by the scope, so leaving the pane stops it. `scope.sleep`
-  // is interruptible; a bare setTimeout would keep a stopped watch alive for
-  // one more interval.
+  const wasFocusedRef = useRef(focused)
+  const isFirstRun = useRef(true)
+
+  // ONE loop, owned by the scope, so leaving the pane stops it. Focus-aware:
+  // refresh at once on focus-in, every 5 s while focused, about every 30 s while
+  // unfocused, never paused.
   useScopeEffect(
     (scope) => {
       if (load === undefined || !live) return
+      const currentInterval = focused ? intervalMs : unfocusedIntervalMs
+
       void (async () => {
+        // Refresh at once on focus-in
+        if (!isFirstRun.current && focused && !wasFocusedRef.current) {
+          try {
+            await refresh()
+            setReadFailure(undefined)
+          } catch (error: unknown) {
+            if (scope.signal.aborted) return
+            setShown(({ observation: _stale, ...current }) => current)
+            setReadFailure({ at: new Date(), message: firstLine(error) })
+          }
+        }
+        isFirstRun.current = false
+        wasFocusedRef.current = focused
+
         while (!scope.signal.aborted) {
-          await scope.sleep(intervalMs)
+          await scope.sleep(currentInterval)
           if (scope.signal.aborted) return
           try {
             await refresh()
@@ -329,7 +358,7 @@ export function WatchPane({
         setFailure(error instanceof Error ? error : new Error(String(error)))
       })
     },
-    [intervalMs, live, load, refresh],
+    [focused, intervalMs, unfocusedIntervalMs, live, load, refresh],
   )
 
   // The rows on screen: the status buckets and the queue pills are ON/OFF
@@ -709,7 +738,7 @@ export function WatchPane({
     )
 
   return (
-    <NowProvider readAt={shown.at} live={live}>
+    <NowProvider readAt={nowProp ?? shown.at} live={live}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
         {/* The top line: the status and its reason left, the queue tabs and filter group right (24196, 25416).
             It carries the pause sentence, so the pane draws no LoudPause line of its own. */}
@@ -718,12 +747,18 @@ export function WatchPane({
           visible={visibleQueues}
           onToggle={toggleQueue}
           status={
-            statusTimer(shown, shown.at) !== undefined
+            statusTimer(shown, nowProp ?? shown.at) !== undefined ||
+            Math.max(0, (nowProp ?? shown.at).getTime() - shown.at.getTime()) > 120_000
               ? {
-                  ...queueLineStatus(shown, shown.at),
-                  timer: <LiveStatusTimer snapshot={shown} fallback={statusTimer(shown, shown.at)} />,
+                  ...queueLineStatus(shown, nowProp ?? shown.at),
+                  timer: (
+                    <LiveStatusTimer
+                      snapshot={shown}
+                      fallback={queueLineStatus(shown, nowProp ?? shown.at).timer}
+                    />
+                  ),
                 }
-              : queueLineStatus(shown, shown.at)
+              : queueLineStatus(shown, nowProp ?? shown.at)
           }
           live={live}
           onStatusClick={pointAtRunner}
@@ -871,8 +906,19 @@ export function statusTimer(snapshot: WatchSnapshot, now: Date): string | undefi
 function LiveStatusTimer({ snapshot, fallback }: { snapshot: WatchSnapshot; fallback?: React.ReactNode }) {
   const now = useNow()
   const timer = statusTimer(snapshot, now)
-  if (timer === undefined) return <>{fallback ?? null}</>
-  return <>{timer}</>
+  const ageMs = Math.max(0, now.getTime() - snapshot.at.getTime())
+  const ageText = ageMs > 120_000 ? `(data ${mediaDuration(ageMs)} old)` : undefined
+
+  if (timer === undefined && ageText === undefined) return <>{fallback ?? null}</>
+  if (timer !== undefined && ageText !== undefined) {
+    return (
+      <>
+        {timer} <Text color="$fg-on-inverse-muted">{ageText}</Text>
+      </>
+    )
+  }
+  if (timer !== undefined) return <>{timer}</>
+  return <Text color="$fg-on-inverse-muted">{ageText}</Text>
 }
 
 export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
@@ -882,6 +928,14 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
   const word =
     held || runner.state === "paused" || runner.state === "stuck" ? "PAUSED" : isRunning ? "RUNNING" : "STOPPED"
   const timer = statusTimer(snapshot, now)
+  const ageMs = Math.max(0, now.getTime() - snapshot.at.getTime())
+  const ageText = ageMs > 120_000 ? `(data ${mediaDuration(ageMs)} old)` : undefined
+  const displayTimer =
+    timer === undefined
+      ? ageText
+      : ageText === undefined
+        ? timer
+        : `${timer} ${ageText}`
 
   if (word === "RUNNING") {
     return {
@@ -889,7 +943,7 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
       word,
       color: "$fg-info",
       pulse: true,
-      ...(timer === undefined ? {} : { timer }),
+      ...(displayTimer === undefined ? {} : { timer: displayTimer }),
     }
   }
   const reason =
@@ -906,7 +960,7 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
     word,
     color: word === "PAUSED" ? "$fg-warning" : "$fg-error",
     pulse: reason !== undefined,
-    ...(timer === undefined ? {} : { timer }),
+    ...(displayTimer === undefined ? {} : { timer: displayTimer }),
     ...(reason === undefined ? {} : { reason }),
   }
 }

@@ -997,10 +997,24 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   return { created: first.id, declaration, tip: previous, observed, notices, ...(pause === undefined ? {} : { pause }) }
 }
 
-/** One advertisement selects the format. An event queue with no changes is empty. */
+const formatCache = new Map<string, "event" | "legacy">()
+
+/** Reset the process-wide queue format cache (for tests). */
+export function resetQueueFormatCache(): void {
+  formatCache.clear()
+}
+
+/** One advertisement selects the format. An event queue with no changes is empty. Cached once per process. */
 export async function queueFormat(store: QueueLocation, queue: string): Promise<"event" | "legacy"> {
+  const key = `${store.repo}#${store.remote ?? ""}#${queue}`
+  const cached = formatCache.get(key)
+  if (cached !== undefined) return cached
   const refs = await listRefs(queueRefPrefix(queue), store)
-  return refs.has(queueRef(queue)) ? "event" : "legacy"
+  const format = refs.has(queueRef(queue)) ? "event" : "legacy"
+  if (format === "event") {
+    formatCache.set(key, format)
+  }
+  return format
 }
 
 /** Read one existing branch chain; a missing selected chain is a data error. */

@@ -3429,33 +3429,115 @@ function checkLines(check: CheckView): readonly string[] {
   ]
 }
 
+function areRefMapsEqual(
+  a: ReadonlyMap<string, string> | undefined,
+  b: ReadonlyMap<string, string> | undefined,
+): boolean {
+  if (a === b) return true
+  if (a === undefined || b === undefined) return false
+  if (a.size !== b.size) return false
+  for (const [key, val] of a) {
+    if (b.get(key) !== val) return false
+  }
+  return true
+}
+
+export type EventListingResult = Readonly<{
+  format: "event"
+  all: readonly Row[]
+  document: readonly Row[]
+  journals: Journals
+  drafts: DraftReading
+  pause: PauseRecord | undefined
+  changes: ReadonlyMap<string, EventChange>
+  observation: GitObservation
+}>
+
+interface EventListingCache {
+  queuePrefix: string
+  queueRefs: ReadonlyMap<string, string>
+  targetOid: string
+  branchRefs: ReadonlyMap<string, string>
+  lastHeadListingAt: number
+  reading: EventListingResult
+}
+
+const eventListingCaches = new Map<string, EventListingCache>()
+
+/** Reset the process-wide event listing cache (for tests). */
+export function clearEventListingCache(): void {
+  eventListingCaches.clear()
+}
+
 /** Read an event queue through Gitomic and project its change chains and draft branch heads. */
-async function readEventListing(
+export async function readEventListing(
   git: GitRunner,
   config: QueueConfig,
   repo: string,
   workdir: string,
   targetOid: string,
   selection: GitSelection,
-  options: Readonly<{ all?: boolean; drafts?: boolean }> = {},
-): Promise<
-  Readonly<{
-    format: "event"
-    all: readonly Row[]
-    document: readonly Row[]
-    journals: Journals
-    drafts: DraftReading
-    pause: PauseRecord | undefined
-    changes: ReadonlyMap<string, EventChange>
-    observation: GitObservation
-  }>
-> {
+  options: Readonly<{
+    all?: boolean
+    drafts?: boolean
+    now?: number | Date
+    forceFresh?: boolean
+  }> = {},
+): Promise<EventListingResult> {
   const store = createEventStore(repo, config.target.remote, selection)
+  const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
+  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}`
+  const cache = eventListingCaches.get(cacheKey)
+  const nowMs = typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
+
+  // 1. Fetch event refs first
+  const queueRefs = await listRefs(queuePrefix, store)
+
+  const eventRefsUnchanged =
+    cache !== undefined &&
+    cache.targetOid === targetOid &&
+    areRefMapsEqual(cache.queueRefs, queueRefs)
+
+  const headListingRecent =
+    cache !== undefined &&
+    nowMs - cache.lastHeadListingAt < 60_000
+
+  // 2. An unchanged event-ref fetch reuses the last round if head listing is recent
+  if (options?.forceFresh !== true && eventRefsUnchanged && headListingRecent) {
+    return {
+      ...cache.reading,
+      journals: readJournals(join(workdir, "logs")),
+    }
+  }
+
+  // 3. Head listing: runs at most once a minute, or when event-ref fetch reports a change
+  let branchRefs: ReadonlyMap<string, string>
+  let headListingAt: number
+  if (options?.forceFresh === true || !eventRefsUnchanged || !headListingRecent) {
+    branchRefs = await listRefs("refs/heads/", store)
+    headListingAt = nowMs
+  } else {
+    branchRefs = cache.branchRefs
+    headListingAt = cache.lastHeadListingAt
+  }
+
+  // If event refs were unchanged and branch heads also didn't change:
+  if (
+    options?.forceFresh !== true &&
+    eventRefsUnchanged &&
+    areRefMapsEqual(cache?.branchRefs, branchRefs)
+  ) {
+    cache.lastHeadListingAt = headListingAt
+    return {
+      ...cache.reading,
+      journals: readJournals(join(workdir, "logs")),
+    }
+  }
+
+  // 4. Full read
   const { queue, histories } = await readEventQueueWithChanges(store, config.target.branch)
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
   const directMerges = await eventDirectMergeCommits(git, config.target.branch, targetOid, queue.declaration, histories)
-  const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
-  const [queueRefs, branchRefs] = await Promise.all([listRefs(queuePrefix, store), listRefs("refs/heads/", store)])
   assertEventListingFence(config.target.branch, queue, changes, queueRefs)
   const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
   const drafts = await readDrafts(
@@ -3482,9 +3564,13 @@ async function readEventListing(
         ] as const,
     ),
   )
-  const selected = eventListRows(segmentStates, [...drafts.dated, ...drafts.undated], options)
-  const now = new Date()
-  const directRows = list([], { directMerges, now, ...(options.all ? { sinceMs: Number.POSITIVE_INFINITY } : {}) })
+  const listNow = options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
+  const selected = eventListRows(segmentStates, [...drafts.dated, ...drafts.undated], {
+    all: options.all,
+    drafts: options.drafts,
+    now: listNow,
+  })
+  const directRows = list([], { directMerges, now: listNow, ...(options.all ? { sinceMs: Number.POSITIVE_INFINITY } : {}) })
   const projected = [...selected.table, ...selected.document, ...directRows]
   const titles = await subjects(
     git,
@@ -3510,7 +3596,7 @@ async function readEventListing(
       refs: [...queueRefs, ...branchRefs].map(([ref, oid]) => ({ ref, oid })),
     },
   })
-  return {
+  const reading: EventListingResult = {
     format: "event",
     all,
     document,
@@ -3520,6 +3606,17 @@ async function readEventListing(
     changes,
     observation,
   }
+
+  eventListingCaches.set(cacheKey, {
+    queuePrefix,
+    queueRefs,
+    targetOid,
+    branchRefs,
+    lastHeadListingAt: headListingAt,
+    reading,
+  })
+
+  return reading
 }
 
 /** A history read and its final observation must name the same event tips. */
