@@ -540,13 +540,16 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     // thing an operator most needs to see behind "I am not on that machine".
     // The row says the WORD and the cure; the record's own sentence is the loud
     // line above and is said exactly once.
-    // Boxed RUNNER puts `╭─ RUNNER` on its own title line; the status row
-    // inside still names the WORD and the cure (24196).
-    const runnerRow = page.find((line) => line.includes("RUNNER") && line.includes("paused"))
-    expect(runnerRow, listed.stdout()).toBeDefined()
-    expect(runnerRow, listed.stdout()).toContain("paused")
-    expect(runnerRow, listed.stdout()).toContain("resume: yrd queue resume")
-    expect(runnerRow, listed.stdout()).not.toContain("refs/yrd/main/runner")
+    // Boxed RUNNER puts its title, status and cure on separate lines; the
+    // section still names the WORD and the cure (24196).
+    const runnerStart = page.findIndex((line) => line.includes("RUNNER"))
+    const runnerEnd = page.findIndex((line, index) => index > runnerStart && line.startsWith("╰"))
+    expect(runnerStart, listed.stdout()).toBeGreaterThanOrEqual(0)
+    expect(runnerEnd, listed.stdout()).toBeGreaterThan(runnerStart)
+    const runner = page.slice(runnerStart, runnerEnd).join("\n")
+    expect(runner).toContain("paused")
+    expect(runner).toContain("to resume: yrd queue resume")
+    expect(runner).not.toContain("refs/yrd/main/runner")
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
       0,
