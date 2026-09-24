@@ -100,22 +100,22 @@ describe("the queue declaration grammar", () => {
     [
       "positive retention is halted",
       "archive-after: 1\n",
-      /yrd-archive-after-disabled: \.yrd\.yml archive-after 1 days: ref deletion is disabled.*25041/u,
+      /yrd-archive-after-disabled: \.yrd\.yml archive-after 1 days: ref deletion is disabled; the only accepted value is never/u,
     ],
     [
       "zero retention",
       "archive-after: 0\n",
-      /yrd-archive-after-invalid: \.yrd\.yml archive-after: expected never or a positive integer/u,
+      /yrd-archive-after-invalid: \.yrd\.yml archive-after: the only accepted value is never/u,
     ],
     [
       "fractional retention",
       "archive-after: 1.5\n",
-      /yrd-archive-after-invalid: \.yrd\.yml archive-after: expected never or a positive integer/u,
+      /yrd-archive-after-invalid: \.yrd\.yml archive-after: the only accepted value is never/u,
     ],
     [
       "string retention",
       "archive-after: soon\n",
-      /yrd-archive-after-invalid: \.yrd\.yml archive-after: expected never or a positive integer/u,
+      /yrd-archive-after-invalid: \.yrd\.yml archive-after: the only accepted value is never/u,
     ],
     ["scalar ignore", "ignore: draft/*\n", /yrd-ignore-pattern-invalid: \.yrd\.yml ignore: must be a list/u],
     ["empty pattern", "ignore: ['']\n", /yrd-ignore-pattern-invalid: \.yrd\.yml ignore entry 0: pattern is empty/u],

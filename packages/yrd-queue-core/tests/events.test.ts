@@ -766,6 +766,35 @@ describe("the queue-format boundary", () => {
     expect((await readStatus(location, "lab", "task/race")).status).toBe("verifying")
   })
 
+  it.each([true, false])("refuses ignored=%s while the change is landing", async (ignored) => {
+    const { store, location } = remoteMemStore(`yrd-event-ignore-landing-${ignored}`)
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await openEvents({ ...store, ref: changesRef("lab", "task/landing") })
+    const opened = await branch.append(
+      [changeInput("opened", { queueTip, at: new Date(), commit: base, by: "@dev/2" })],
+      { expect: null },
+    )
+    const request = { queue: "lab", branch: "task/landing", by: "@dev/2" } as const
+    if (!ignored) await setBranchIgnored(location, { ...request, ignored: true, reason: "hold" })
+    let selected = ignored ? opened.head : await branch.head()
+    if (selected === null) throw new Error("fixture opened event has no tip")
+    for (const type of ["verifying", "checking", "merging"] as const) {
+      selected = await appendChangeEvent(location, "lab", "task/landing", selected, {
+        type,
+        at: new Date(),
+        ...(type === "verifying" ? { commit: base } : {}),
+      })
+    }
+    await expect(
+      ignored
+        ? setBranchIgnored(location, { ...request, ignored: true, reason: "hold" })
+        : setBranchIgnored(location, { ...request, ignored: false }),
+    ).rejects.toThrow(/yrd-ignore-change-landing:.*retry after it settles as merged, failed or stuck/u)
+    expect(await branch.head()).toBe(selected)
+  })
+
   it("refuses a present but malformed queue chain instead of showing empty changes", async () => {
     const { store, location } = remoteMemStore("yrd-event-malformed")
     const queue = await openEvents({ ...store, ref: queueRef("lab") })

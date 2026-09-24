@@ -623,6 +623,11 @@ export async function setBranchIgnored(store: QueueLocation, request: SetBranchI
       `yrd-ignore-change-ended: ${branch}: change ended ${state.status} at ${state.ending?.id ?? selectedTip}; only an open change can be ignored`,
     )
   }
+  if (state.status === "merging") {
+    throw new Error(
+      `yrd-ignore-change-landing: ${branch}: the change is landing; retry after it settles as merged, failed or stuck`,
+    )
+  }
   if ((state.ignored !== undefined) === request.ignored) {
     throw new Error(
       `yrd-ignore-state-unchanged: ${branch}: change is already ${request.ignored ? "ignored" : "not ignored"} at ${selectedTip}`,
