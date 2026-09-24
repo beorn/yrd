@@ -342,6 +342,49 @@ export function relaunchStalledHealthDocument(
   }
 }
 
+/**
+ * Who stopped or started the service and why, as the supervisor's intent file
+ * said at that moment (25430). `by` and `reason` are absent when no intent for
+ * that verb was recorded: the document then says so, and never invents one.
+ */
+export type ServiceIntentFact = Readonly<{ since: string; by?: string; reason?: string }>
+
+/** The operator-facing sentence for a graceful stop, from its own fact. */
+export function serviceStoppedLine(stopped: ServiceIntentFact): string {
+  return stopped.by !== undefined && stopped.reason !== undefined
+    ? `service stopped by ${stopped.by}: ${stopped.reason}`
+    : `service stopped by a signal with no stop intent recorded, at ${stopped.since}`
+}
+
+/**
+ * The LAST document a gracefully stopping service writes (25430).
+ *
+ * `absent` + `stopped`, like {@link absentHealthDocument} and for the same
+ * contract reason: nothing is running, which pages nobody and is what the
+ * supervisor's start gate expects before a start. NO deadline either, because
+ * nothing will restate it: a stopped service's document must never age into an
+ * overdue page. `serviceStopped` (not `stopped`, which is the LINE's stop) is
+ * who stopped the service and why, read from the supervisor's intent file.
+ */
+export function gracefulStopHealthDocument(
+  service: string,
+  serviceStopped: ServiceIntentFact,
+  stop?: PauseRecord,
+): QueueHealthDocument {
+  return {
+    schema: QUEUE_HEALTH_SCHEMA,
+    service,
+    state: "absent",
+    verdict: { kind: "stopped" },
+    facts: {
+      why: serviceStoppedLine(serviceStopped),
+      serviceStopped,
+      stopped: stopFact(stop),
+      resolution: ["Start the service when the reason above no longer holds; its first document replaces this one."],
+    },
+  }
+}
+
 export function absentHealthDocument(service: string, why: string): QueueHealthDocument {
   return {
     schema: QUEUE_HEALTH_SCHEMA,

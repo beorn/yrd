@@ -97,6 +97,7 @@ import {
   ROUND_LOCK,
   relaunchStalledHealthDocument,
   roundHealthDocument,
+  gracefulStopHealthDocument,
   writtenHealthDocument,
   runtimeGitlinkPath,
   readStop,
@@ -121,6 +122,7 @@ import {
   type LogRecord,
   type QueueConfig,
   type QueueHealthDocument,
+  type ServiceIntentFact,
   type QueueRunOutcome,
   type PauseRecord,
   type RuntimeGitlinkOff,
@@ -134,6 +136,7 @@ import {
   tipOf,
   trailer,
 } from "@yrd/queue-core"
+import { readUnitIntent } from "./unit-intent.ts"
 import { noticeLine } from "./watch-notice.ts"
 import { FILTER_FIELDS, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
@@ -229,6 +232,28 @@ const sourceAtLoad = await (async () => {
   }
 })()
 
+/** The termination signal a running service answers with its last document (25430). */
+export type TerminatePort = Readonly<{
+  /** Call `handler` on termination; answers the unsubscribe. */
+  on: (handler: () => void) => () => void
+  /** End the process as the signal would have, after the handler ran. */
+  reraise: () => void
+}>
+
+const processTerminate: TerminatePort = {
+  on: (handler) => {
+    process.on("SIGTERM", handler)
+    return () => {
+      process.off("SIGTERM", handler)
+    }
+  },
+  // Re-raised with no listener left, so the process dies OF the signal exactly
+  // as before: the service's `restart: "on-codes"` keeps a signal terminal.
+  reraise: () => {
+    process.kill(process.pid, "SIGTERM")
+  },
+}
+
 export type CoreQueueCommand =
   | Readonly<{
       command: "submit"
@@ -317,6 +342,12 @@ export type CoreQueueCommand =
        * behaviour and an untestable one.
        */
       afterHealth?: (document: QueueHealthDocument) => void | Promise<void>
+      /**
+       * The process's termination signal, as a port (25430). Defaults to this
+       * process's SIGTERM and a re-raise of it; a test supplies its own, since
+       * a real SIGTERM would end the test runner.
+       */
+      terminate?: TerminatePort
     }>
   | Readonly<{
       command: "list"
@@ -1156,6 +1187,11 @@ export async function coreQueueCommand(
       const writeHealth = (document: QueueHealthDocument): QueueHealthDocument => {
         const written = writtenHealthDocument(document, writer, heartbeat, new Date())
         stated = written
+        persistHealth(written)
+        return written
+      }
+      /** The one atomic write, shared by the heartbeat's documents and the graceful stop's last one. */
+      const persistHealth = (written: QueueHealthDocument): void => {
         try {
           // ATOMIC, and the reason is a page nobody should ever have got:
           // `writeFileSync` truncates before it writes, so a probe landing in
@@ -1176,8 +1212,13 @@ export async function coreQueueCommand(
             }; the declared health probe reads the last document written until its deadline, then reads it overdue`,
           )
         }
-        return written
       }
+      // WHO STARTED IT AND WHY (25430): the supervisor's start intent when it
+      // gave one, else the plain default, as resume's is "pause lifted". Keyed
+      // on the verb, so a previous stop's record is never read as this start's.
+      const startIntent = readUnitIntent("start", options.env ?? process.env, new Date())
+      const serviceStarted: ServiceIntentFact =
+        startIntent.kind === "intent" ? startIntent.fact : { reason: "started", since: writer.startedAt }
       // THE RELAUNCH EXIT, and whether it is armed (@i/10-yrd/24515). An
       // injected gitlink is a test's, and arms it by construction; otherwise
       // the runtime asks what path IT occupies in ITS OWN superproject.
@@ -1207,7 +1248,7 @@ export async function coreQueueCommand(
        */
       const lineDocument = (stop: PauseRecord | undefined, sleepMs: number): QueueHealthDocument => {
         const base = roundHealthDocument(SERVICE, stop, sleepMs, new Date())
-        return identified.kind === "off" ? { ...base, facts: { ...base.facts, ...relaunchOff } } : base
+        return { ...base, facts: { ...base.facts, ...relaunchOff, serviceStarted } }
       }
       /**
        * The last stop the loop knows: read at start, then derived by every round.
@@ -1421,6 +1462,28 @@ export async function coreQueueCommand(
       const beat = setInterval(() => {
         if (stated !== undefined) writeHealth(stated)
       }, heartbeat.intervalMs)
+      // THE GRACEFUL STOP (25430). A signal carries no reason, so the supervisor
+      // wrote its stop intent before sending it; this reads it and leaves ONE
+      // last document saying who stopped the service and why, then dies of the
+      // signal as it always did. Synchronous from start to re-raise, and the
+      // heartbeat is cleared first, so nothing writes over the last document.
+      // A SIGKILL runs none of this: its last document ages into the overdue
+      // reading, which says the service stopped outside a graceful stop.
+      const terminate = request.terminate ?? processTerminate
+      const offTerminate = terminate.on(() => {
+        clearInterval(beat)
+        const intent = readUnitIntent("stop", options.env ?? process.env, new Date())
+        if (intent.kind === "none") log?.warn?.(`stopping without a recorded reason: ${intent.why}`)
+        persistHealth(
+          gracefulStopHealthDocument(
+            SERVICE,
+            intent.kind === "intent" ? intent.fact : { since: new Date().toISOString() },
+            lastStop,
+          ),
+        )
+        offTerminate()
+        terminate.reraise()
+      })
       /**
        * A round the service waits for — a `yrd merge` or `yrd queue run` in the
        * same workdir — is stated where the service is read: the holder as a
@@ -1487,6 +1550,7 @@ export async function coreQueueCommand(
         }
       } finally {
         clearInterval(beat)
+        offTerminate()
       }
     }
     case "list": {

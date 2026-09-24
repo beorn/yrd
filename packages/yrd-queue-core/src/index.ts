@@ -184,10 +184,12 @@ export {
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
   queueHealthExitCode,
+  gracefulStopHealthDocument,
   relaunchStalledHealthDocument,
   ROUND_BUDGET_MS,
   ROUND_LOCK,
   roundHealthDocument,
+  serviceStoppedLine,
   STUCK_RECORD_CODE,
   unreadableHealthDocument,
   writtenHealthDocument,
@@ -199,6 +201,7 @@ export type {
   QueueHealthFailure,
   QueueHealthState,
   QueueHealthVerdict,
+  ServiceIntentFact,
 } from "./service-health.ts"
 
 export {
