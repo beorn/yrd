@@ -542,11 +542,12 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     // line above and is said exactly once.
     // Boxed RUNNER puts `╭─ RUNNER` on its own title line; the status row
     // inside still names the WORD and the cure (24196).
-    const runnerRow = page.find((line) => line.includes("RUNNER") && line.includes("paused"))
-    expect(runnerRow, listed.stdout()).toBeDefined()
-    expect(runnerRow, listed.stdout()).toContain("paused")
-    expect(runnerRow, listed.stdout()).toContain("resume: yrd queue resume")
-    expect(runnerRow, listed.stdout()).not.toContain("refs/yrd/main/runner")
+    const runnerBoxStart = page.findIndex((line) => line.includes("RUNNER"))
+    const runnerBoxEnd = page.findIndex((line, i) => i > runnerBoxStart && line.includes("╰"))
+    const runnerBox = page.slice(runnerBoxStart, runnerBoxEnd + 1).join("\n")
+    expect(runnerBox, listed.stdout()).toContain("paused")
+    expect(runnerBox, listed.stdout()).toContain("resume: yrd queue resume")
+    expect(runnerBox, listed.stdout()).not.toContain("refs/yrd/main/runner")
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
       0,
