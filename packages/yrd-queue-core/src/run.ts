@@ -531,9 +531,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const readStep = (at: string) => ({ base: at, name: "read", phase: "run", target: options.target.branch })
   const read = async (at = targetSha) => {
     try {
-      return await timedStep(log, readStep(at), () =>
-        readQueue(git, options.target.remote, options.target.branch, at),
-      )
+      return await timedStep(log, readStep(at), () => readQueue(git, options.target.remote, options.target.branch, at))
     } catch (error) {
       if (retried !== undefined) throw failedAgain(retried, error)
       if (!(error instanceof CapturedQueueObjectsUnavailable)) throw error
@@ -783,6 +781,20 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     })
     return true
   }
+  // The change as the line holds it NOW, or undefined (logged once) when it has
+  // left the line since the walk read it: withdrawn, merged, failed or replaced.
+  const stillInLine = async (entry: QueueEntry): Promise<QueueEntry | undefined> => {
+    const now = (await read()).changes.find((candidate) => sameChange(candidate, entry))
+    const state = now?.reading.state
+    if (now !== undefined && (state === "queued" || state === "stuck" || state === "checked")) return now
+    log.write({
+      kind: "observation",
+      why:
+        `${entry.change.branch}@${entry.change.head.slice(0, 12)} left the line (${state ?? "gone"}) after this ` +
+        "round read it; it is not composed or judged",
+    })
+    return undefined
+  }
   const andon = async (entry: QueueEntry): Promise<QueueRunOutcome> => {
     stuck.push(entry.change.branch)
     return finish(
@@ -799,11 +811,20 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // selects it before anything else, so it walks that change alone.
   let acted: QueueEntry | undefined
   let stoppedByTime = false
-  for (const entry of ordered(entries, options.only, "queued", "stuck", "checked")) {
+  let walked = false
+  for (const walkedTo of ordered(entries, options.only, "queued", "stuck", "checked")) {
     if (pastStopTime()) {
       stoppedByTime = true
       break
     }
+    // 25301 row 3: the walk reads the line once, at the round's start, and an
+    // earlier change's judge can take minutes; a change withdrawn (or otherwise
+    // ended) meanwhile is never composed or judged. So every change after the
+    // first is re-read before it is judged, and one that has left the line is
+    // skipped with one journal line naming it and the state it left in.
+    const entry = walked ? await stillInLine(walkedTo) : walkedTo
+    walked = true
+    if (entry === undefined) continue
     let head = entry
     if (needsJudge(entry)) {
       const judgedAs = await judged(run, entry, () => run.steps.judge(run, entry))
@@ -838,25 +859,29 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     break
   }
 
-  // Phase B: the prefetch. Once the head has been acted on, judge the rest of
-  // the line against the target as it now stands, in line order, from a fresh
-  // read (the merge moved the target and wrote records). Judging on the round's
-  // starting target instead would weigh a moved gitlink against the component
-  // main the head's merge already advanced, and refuse a pin that merge turn
-  // composes. Each judge starts only inside the stop window, and a judge writes
-  // its verdict whole or not at all, so stopping here leaves no partial
-  // verdict. A scoped round has no tail.
+  // Phase B: the next head, and only it (@cto 20a360d8, cure (a)). Once the
+  // head has been acted on, the change now first in line is judged against the
+  // target as it now stands, from a fresh read (the merge moved the target and
+  // wrote records), so the next round can merge it without judging first.
+  // Judging on the round's starting target instead would weigh a moved gitlink
+  // against the component main the head's merge already advanced, and refuse a
+  // pin that merge turn composes. The rest of the line is NOT judged here: each
+  // change is judged when a later round's walk reaches it, because every merge
+  // moves the target and would make a whole-line prefetch stale again. That
+  // prefetch cost one git-super worktree per waiting change per merge, which
+  // is what drained 29 changes in hours. The judge starts only inside the stop
+  // window and writes its verdict whole or not at all. A scoped round has no
+  // next head.
   if (acted !== undefined && !stoppedByTime && options.only === undefined && !(await declarationMoved(run))) {
     run.targetSha = run.targetAfter.sha
-    const tail = ordered((await read(run.targetSha)).changes, undefined, "queued", "stuck", "checked").filter(
-      (entry) => !sameChange(entry, acted) && needsJudge(entry),
+    const next = ordered((await read(run.targetSha)).changes, undefined, "queued", "stuck", "checked").find(
+      (entry) => !sameChange(entry, acted),
     )
-    for (const entry of tail) {
-      if (pastStopTime()) break
-      const judgedAs = await judged(run, entry, () => run.steps.judge(run, entry))
-      if (judgedAs === "stuck") return await andon(entry)
-      if (judgedAs === "failed") failed.push(entry.change.branch)
-      else if (judgedAs === "deferred") deferred.push(entry.change.branch)
+    if (next !== undefined && needsJudge(next) && !pastStopTime()) {
+      const judgedAs = await judged(run, next, () => run.steps.judge(run, next))
+      if (judgedAs === "stuck") return await andon(next)
+      if (judgedAs === "failed") failed.push(next.change.branch)
+      else if (judgedAs === "deferred") deferred.push(next.change.branch)
     }
   }
 
