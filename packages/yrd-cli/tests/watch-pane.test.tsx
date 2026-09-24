@@ -1870,7 +1870,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(line).toContain(`lint override expired ${clock(ended)}`)
   })
 
-  it("says an operator's pause that names no change as stopped, since when and by whom, in the stop's slot, and never drops the word (A2-set-v3 Q3, 25367)", async () => {
+  it("says an operator's pause that names no change as paused, since when and by whom, in the stop's slot, and never drops the word (A2-set-v3 Q3)", async () => {
     const W = await words()
     const since = ago(25 * MINUTE)
     const rows: WatchRow[] = [
@@ -1888,14 +1888,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
           columns: cols,
         })
       ).split("\n")
-      return (page.find((l) => l.includes("stopped")) ?? "").trim()
+      return (page.find((l) => l.includes("paused")) ?? "").trim()
     }
     const waiting = `5 ${W.waiting.word}`
 
     expect({ 70: await at(70), 50: await at(50), 40: await at(40) }).toEqual({
-      70: `${waiting}: 2 ${W.pending.word}, 3 ${W.submitted.word} · stopped since ${clock(since)} by @chief`,
-      50: `${waiting} · stopped since ${clock(since)} by @chief`,
-      40: `${waiting} · stopped by @chief`,
+      70: `${waiting}: 2 ${W.pending.word}, 3 ${W.submitted.word} · paused since ${clock(since)} by @chief`,
+      50: `${waiting} · paused since ${clock(since)} by @chief`,
+      40: `${waiting} · paused by @chief`,
     })
   })
 
@@ -3271,7 +3271,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(stuckApp)
     const stuckTop = stuckApp.lines.find((l) => l.includes("YRD"))!
-    expect(stuckTop.trimStart().startsWith("■ YRD STOPPED")).toBe(true)
+    expect(stuckTop.trimStart().startsWith("■ YRD PAUSED")).toBe(true)
     stuckApp.unmount()
   })
 
