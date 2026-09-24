@@ -629,7 +629,7 @@ export async function eventQueueRun(
   }
   for (const selectedChange of line) {
     const { branch, commit: head } = selectedChange
-    if (unconfirmed.has(branch)) {
+    if (unconfirmed.has(branch) && selectedChange.status !== "merging") {
       log.write({ kind: "observation", subject: "branch-confirmation-pending", branch, head })
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch])
     }
