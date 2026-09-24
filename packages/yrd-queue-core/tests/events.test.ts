@@ -927,6 +927,69 @@ describe("the queue-format boundary", () => {
     ).rejects.toThrow(/resumes a running queue/)
   })
 
+  it("retains one direct landing and its settled notice on the queue chain", async () => {
+    const { store, location } = remoteMemStore("yrd-event-direct-notice")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const observed = await writeQueueEvent(location, "lab", {
+      type: "observed",
+      commit,
+      branch: "task/direct",
+      by: "yrd-run",
+      at: new Date("2026-09-22T14:01:00.000Z"),
+    })
+    expect((await readEventQueue(location, "lab")).observed[commit]).toEqual({ id: observed, branch: "task/direct" })
+    expect(
+      await writeQueueEvent(location, "lab", {
+        type: "observed",
+        commit,
+        branch: "task/direct",
+        by: "yrd-run",
+        at: new Date("2026-09-22T14:02:00.000Z"),
+      }),
+    ).toBe(observed)
+    const key = `${observed}:operator`
+    const notified = await writeQueueEvent(location, "lab", {
+      type: "notified",
+      by: "yrd-run",
+      at: new Date("2026-09-22T14:03:00.000Z"),
+      notice: { for: observed, to: "operator", key, result: "delivered" },
+    })
+    expect((await readEventQueue(location, "lab")).notices[key]).toMatchObject({
+      id: notified,
+      for: observed,
+      result: "delivered",
+    })
+    expect(
+      await writeQueueEvent(location, "lab", {
+        type: "notified",
+        by: "yrd-run",
+        at: new Date("2026-09-22T14:04:00.000Z"),
+        notice: { for: observed, to: "operator", key, result: "delivered" },
+      }),
+    ).toBe(notified)
+    await expect(
+      writeQueueEvent(location, "lab", {
+        type: "notified",
+        by: "yrd-run",
+        at: new Date("2026-09-22T14:05:00.000Z"),
+        notice: { for: "f".repeat(40), to: "other", key: "bad", result: "delivered" },
+      }),
+    ).rejects.toThrow(/observed/)
+    await expect(
+      writeQueueEvent(location, "lab", {
+        type: "observed",
+        commit: B,
+        by: "intruder",
+        at: new Date("2026-09-22T14:06:00.000Z"),
+      }),
+    ).rejects.toThrow(/writer yrd-run/)
+    const events = await (await openEvents({ ...location, ref: queueRef("lab") })).events()
+    expect(events.map((event) => event.type)).toEqual(["created", "observed", "notified"])
+    expect(events[1]?.links).toEqual([commit])
+  })
+
   it("selects one event queue by its queue ref and reads an empty change set without legacy fallback", async () => {
     const { store, location } = remoteMemStore("yrd-event-selector")
     expect(await queueFormat(location, "lab")).toBe("legacy")

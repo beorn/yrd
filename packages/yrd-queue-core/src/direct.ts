@@ -48,7 +48,7 @@ import {
   type ChangeRecord,
 } from "./legacy-records.ts"
 import { gitlinkRows, type Git } from "./git.ts"
-import { changeName } from "./refs.ts"
+import { changeName, parseChangeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
 import { tipOf } from "./state.ts"
 import { mergedHistoryCommits } from "./events.ts"
@@ -65,6 +65,8 @@ export type DirectMerge = Readonly<{
   gitlinks: readonly string[]
   /** Why it is not the queue's, in plain words. */
   why: string
+  /** A Change: trailer names the submitted branch when the direct landing has one. */
+  branch?: string
 }>
 
 type FirstParentCommit = Readonly<{
@@ -119,9 +121,8 @@ async function firstParentLine(git: Git, targetSha: string, boundary: string): P
 /**
  * Event queue E5: declaration is the exact first-parent boundary; merged
  * events account for queue publications and target merges the runner observed.
- * A direct-only commit is deliberately returned again on every run until such
- * an event stands above it, always under the commit sha as its identity. This
- * keeps legacy `run.ts`'s `reportDirectMerges` at-least-once contract.
+ * The queue chain's observed events account for direct-only landings, so a
+ * settled direct merge is returned only once across process restarts.
  */
 export async function eventDirectMergeCommits(
   git: Git,
@@ -129,6 +130,7 @@ export async function eventDirectMergeCommits(
   targetSha: string,
   declaration: string,
   histories: Parameters<typeof mergedHistoryCommits>[0],
+  observed: ReadonlySet<string> = new Set(),
 ): Promise<readonly DirectMerge[]> {
   const accounted = mergedHistoryCommits(histories)
   const line = await firstParentLine(git, targetSha, `${declaration}..${targetSha}`)
@@ -137,14 +139,23 @@ export async function eventDirectMergeCommits(
   }
   const found: DirectMerge[] = []
   for (const row of line) {
-    if (accounted.has(row.commit)) break
+    if (accounted.has(row.commit) || observed.has(row.commit)) break
     const first = row.parents[0]
     if (first === undefined) {
       throw new Error(`${target} at ${row.commit}: first-parent line ended after declaration ${declaration}`)
     }
+    const named = row.changes.length === 1 ? parseChangeName(row.changes[0] ?? "") : undefined
+    const fromTrailer =
+      named !== undefined && (named.head === row.commit || row.parents.includes(named.head)) ? named.branch : undefined
+    const matching = [...histories].filter(([, history]) => {
+      const head = history.state.commit
+      return head !== undefined && (head === row.commit || row.parents.includes(head))
+    })
+    const branch = fromTrailer ?? (matching.length === 1 ? matching[0]?.[0] : undefined)
     found.push({
       ...row,
       target,
+      ...(branch === undefined ? {} : { branch }),
       gitlinks: (await gitlinkRows(git, first, row.commit)).map((link) => link.path),
       why: "its commit has no merged event in this queue",
     })
