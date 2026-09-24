@@ -87,7 +87,7 @@ export type EventChange = Readonly<{
   deferred?: Readonly<{
     id: string
     check: string
-    phase: "submit" | "merge" | "long"
+    phase: "submit" | "merge"
     reason: string
     projectedMs: number
     boundMs: number
@@ -100,10 +100,10 @@ export type EventChange = Readonly<{
 
 export const initial: EventChange = Object.freeze({ status: "draft" })
 
-export type EventCheck = Readonly<{ run: CheckResult; attempt: number; phase: "submit" | "merge" | "long" }>
+export type EventCheck = Readonly<{ run: CheckResult; attempt: number; phase: "submit" | "merge"; tier?: "long" }>
 export type DeferredWrite = Readonly<{
   check: string
-  phase: "submit" | "merge" | "long"
+  phase: "submit" | "merge"
   reason: string
   projectedMs: number
   boundMs: number
@@ -154,7 +154,7 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
   if (details.deferred !== undefined) {
     if (type !== "deferred" || details.commit === undefined) throw new TypeError("deferred needs kept Commit:")
     if (details.reason !== details.deferred.reason) throw new TypeError("deferred Reason: must match its detail")
-    if (details.deferred.check.trim() === "" || !["submit", "merge", "long"].includes(details.deferred.phase)) {
+    if (details.deferred.check.trim() === "" || !["submit", "merge"].includes(details.deferred.phase)) {
       throw new TypeError("deferred needs a check name and phase")
     }
     if (![details.deferred.projectedMs, details.deferred.boundMs].every((ms) => Number.isSafeInteger(ms) && ms >= 0)) {
@@ -298,7 +298,14 @@ function positiveMs(event: EventShape, key: string): number {
 }
 
 function checkedRows(event: EventShape): void {
-  const rows = event.props.filter(([key]) => key === EVENT_TRAILERS.check).map(([, value]) => readCheckTrailer(value))
+  const rows = event.props
+    .filter(([key]) => key === EVENT_TRAILERS.check)
+    .map(([, value]) => {
+      const header = value.split(" log=", 1)[0] ?? ""
+      const tier = /(?:^| )tier=([^ ]*)(?: |$)/u.exec(header)?.[1]
+      if (tier !== undefined && tier !== "long") throw new Error(`event ${event.id} Check: has invalid tier=${tier}`)
+      return readCheckTrailer(value)
+    })
   if (rows.length > 0 && !["merging", "failed", "stuck", "deferred"].includes(event.type)) {
     throw new Error(`event ${event.id} (${event.type}) cannot carry Check: rows`)
   }
@@ -324,9 +331,14 @@ function checkedRows(event: EventShape): void {
   }
   if (
     event.type === "deferred" &&
-    !rows.some((row) => row.result === "deferred" && row.name === prop(event, EVENT_TRAILERS.checkName))
+    !rows.some(
+      (row) =>
+        row.result === "deferred" &&
+        row.name === prop(event, EVENT_TRAILERS.checkName) &&
+        row.phase === prop(event, EVENT_TRAILERS.phase),
+    )
   ) {
-    throw new Error(`event ${event.id} deferred needs its Check: verdict`)
+    throw new Error(`event ${event.id} deferred needs its matching Check: name, phase and verdict`)
   }
   const retried = prop(event, EVENT_TRAILERS.retried)
   if (retried !== undefined) {
@@ -408,8 +420,9 @@ function deferChange(state: EventChange, event: EventShape, next: EventChange, a
     throw new Error(`event ${event.id} deferred must keep verified candidate ${state.candidate ?? "absent"}`)
   }
   const phase = requiredProp(event, EVENT_TRAILERS.phase)
-  if (phase !== "submit" && phase !== "merge" && phase !== "long")
-    {throw new Error(`event ${event.id} has invalid Phase:`)}
+  if (phase !== "submit" && phase !== "merge") {
+    throw new Error(`event ${event.id} has invalid Phase:`)
+  }
   const reason = requiredProp(event, EVENT_TRAILERS.reason)
   return {
     ...next,
@@ -444,8 +457,9 @@ function settleNotice(state: EventChange, event: EventShape): EventChange {
   if (result !== "delivered" && (reason === undefined || reason.trim() === "")) {
     throw new Error(`event ${event.id} ${result} notice needs Reason:`)
   }
-  if (result === "delivered" && reason !== undefined)
-    {throw new Error(`event ${event.id} delivered notice cannot carry Reason:`)}
+  if (result === "delivered" && reason !== undefined) {
+    throw new Error(`event ${event.id} delivered notice cannot carry Reason:`)
+  }
   return {
     ...state,
     tip: event.id,

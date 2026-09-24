@@ -109,7 +109,7 @@ describe("event changes use the shared table row", () => {
       deferred: {
         id: "c".repeat(40),
         check: "affected-tests",
-        phase: "long" as const,
+        phase: "merge" as const,
         reason: "outside short window",
         projectedMs: 60000,
         boundMs: 10000,

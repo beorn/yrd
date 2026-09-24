@@ -225,6 +225,28 @@ describe("ADR-0016 event fold", () => {
     expect(retry.props).toContainEqual(["Retry-Reason", "remote read refused"])
   })
 
+  it("refuses a deciding row with an unrecognized execution tier", () => {
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const verified = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
+    const checking = evolve(verified, event("checking", "c".repeat(40)))
+    expect(() =>
+      evolve(
+        checking,
+        event(
+          "merging",
+          "d".repeat(40),
+          [
+            ["Commit", B],
+            ["Base", A],
+            ["Config", B],
+            ["Check", "unit exit=0 ms=42 result=pass attempt=1 phase=merge tier=fast log=/tmp/removed.log"],
+          ],
+          [B],
+        ),
+      ),
+    ).toThrow(/Check:.*tier/u)
+  })
+
   it("derives phases and endings without a Status trailer", () => {
     const opened = event("opened", A, [["Commit", A]], [A])
     const verifying = event("verifying", B, [["Commit", B]], [B])
@@ -265,6 +287,27 @@ describe("ADR-0016 event fold", () => {
     const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
     const verifying = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
     const checking = evolve(verifying, event("checking", "c".repeat(40)))
+    expect(() =>
+      evolve(
+        checking,
+        event(
+          "deferred",
+          "3".repeat(40),
+          [
+            ["Commit", B],
+            ["Reason", "outside short window"],
+            ["Check-Name", "affected-tests"],
+            ["Phase", "submit"],
+            ["ProjectedMs", "60000"],
+            ["BoundMs", "10000"],
+            ["Base", A],
+            ["Config", B],
+            ["Check", "affected-tests exit=unsettled ms=0 result=deferred attempt=1 phase=merge log=/tmp/removed.log"],
+          ],
+          [B],
+        ),
+      ),
+    ).toThrow(/deferred.*Check:.*phase/u)
     const deferred = evolve(
       checking,
       event(
@@ -274,12 +317,12 @@ describe("ADR-0016 event fold", () => {
           ["Commit", B],
           ["Reason", "outside short window"],
           ["Check-Name", "affected-tests"],
-          ["Phase", "long"],
+          ["Phase", "merge"],
           ["ProjectedMs", "60000"],
           ["BoundMs", "10000"],
           [
             "Check",
-            "affected-tests exit=unsettled ms=0 result=deferred attempt=1 phase=long log=/tmp/removed/affected-tests.log",
+            "affected-tests exit=unsettled ms=0 result=deferred attempt=1 phase=merge log=/tmp/removed/affected-tests.log",
           ],
           ["Base", A],
           ["Config", B],
@@ -292,7 +335,7 @@ describe("ADR-0016 event fold", () => {
       candidate: B,
       deferred: {
         check: "affected-tests",
-        phase: "long",
+        phase: "merge",
         reason: "outside short window",
         projectedMs: 60000,
         boundMs: 10000,

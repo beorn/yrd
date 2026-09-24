@@ -520,6 +520,15 @@ describe("the table is the queue read rendered", () => {
 })
 
 describe("a packed Check: trailer", () => {
+  it("does not promote words in a log path into retained verdict evidence", () => {
+    expect(readCheckTrailer("unit exit=0 ms=42 log=/tmp/check result=pass attempt=1 phase=merge tier=long")).toEqual({
+      name: "unit",
+      exit: "0",
+      ms: 42,
+      log: "/tmp/check result=pass attempt=1 phase=merge tier=long",
+    })
+  })
+
   it("retains an event check verdict, attempt and phase after its temporary log disappears", () => {
     const packed = checkTrailer(
       {
@@ -529,11 +538,11 @@ describe("a packed Check: trailer", () => {
         name: "affected-tests",
         result: "stuck",
       },
-      { attempt: 2, phase: "long" },
+      { attempt: 2, phase: "merge", tier: "long" },
     )
 
     expect(packed).toBe(
-      "affected-tests exit=timeout ms=42 result=stuck attempt=2 phase=long log=/tmp/removed/check.log",
+      "affected-tests exit=timeout ms=42 result=stuck attempt=2 phase=merge tier=long log=/tmp/removed/check.log",
     )
     expect(readCheckTrailer(packed)).toEqual({
       name: "affected-tests",
@@ -541,7 +550,8 @@ describe("a packed Check: trailer", () => {
       ms: 42,
       result: "stuck",
       attempt: 2,
-      phase: "long",
+      phase: "merge",
+      tier: "long",
       log: "/tmp/removed/check.log",
     })
   })
