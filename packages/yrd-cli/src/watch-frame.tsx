@@ -184,7 +184,7 @@ export type Band = (typeof BANDS)[number]
 export function bandOf(row: Pick<Row, "state" | "position" | "live">, holding = true): Band {
   if (row.live !== undefined && holding) return "runner"
   if (row.state === "draft") return "drafts"
-  if (row.position !== undefined) return "waiting"
+  if (row.position !== undefined || row.state === "queued" || row.state === "checked" || row.state === "stuck") return "waiting"
   return "done"
 }
 
@@ -208,16 +208,23 @@ export function bandedRows(rows: readonly WatchRow[], holding = true): readonly 
   return [...of("drafts"), ...waiting, ...of("runner"), ...of("done")]
 }
 
-/** A band's rule: the legend that opens it, drawn to the table's width. */
-export function bandRule(band: Band, count: number, width: number, draftWindow = "7d"): string {
-  const said =
-    band === "drafts"
-      ? `${STATE_WORDS.draft.word}s (${draftWindow}): ${STATE_WORDS.draft.means ?? ""} · TIME = pushed`
-      : band === "waiting"
-        ? `${String(count)} ${STATE_WORDS.waiting.word}, newest first; the bottom row goes next · TIME = opened`
-        : "done, newest first · TIME = ended"
-  const rule = `── ${said} `
-  return rule.padEnd(Math.max(rule.length, width), "─")
+/** A band's rule: the divider that opens it, drawn to the table's width. */
+export function bandRule(
+  band: Band,
+  count: number,
+  width: number,
+  draftWindow = "7d",
+  unread = 0,
+): string {
+  if (band === "drafts") {
+    const draftWord = STATE_WORDS.draft.word
+    const plural = count === 1 ? "" : "s"
+    const unreadPart = unread > 0 ? ` · ${String(unread)} not yet read` : ""
+    const said = `${String(count)} ${draftWord}${plural} (${draftWindow})${unreadPart}`
+    const rule = `── ${said} `
+    return rule.padEnd(Math.max(rule.length, width), "─")
+  }
+  return "─".repeat(Math.max(1, width))
 }
 
 /** What is drawn at one point in the table that is not a change's row. */
@@ -244,7 +251,14 @@ export type BandPlan = Readonly<{
   holding: number | undefined
 }>
 
-export function bandPlan(rows: readonly WatchRow[], width: number, draftWindow = "7d", holds = true): BandPlan {
+export function bandPlan(
+  rows: readonly WatchRow[],
+  width: number,
+  draftWindow = "7d",
+  holds = true,
+  unread = 0,
+  bareDrafts = false,
+): BandPlan {
   const before = new Map<number, BandBreak>()
   const opening = new Map<number, string[]>()
   let after: BandBreak | undefined
@@ -252,18 +266,28 @@ export function bandPlan(rows: readonly WatchRow[], width: number, draftWindow =
   let cursor = 0
   let runnerAt: number | undefined
   for (const band of BANDS) {
-    const count = rows.filter((item) => bandOf(item.row, holds) === band).length
+    const total = rows.filter((item) => bandOf(item.row, holds) === band).length
     if (band === "runner") {
-      if (count === 0) runnerAt = cursor
+      if (total === 0) runnerAt = cursor
       else holding = cursor
-      cursor += count
+      cursor += total
       continue
     }
-    if (count === 0) continue
+    if (band === "drafts") {
+      if (total > 0 || unread > 0) {
+        const datedCount = rows.filter((item) => bandOf(item.row, holds) === band && item.row.at !== undefined).length
+        const rules = opening.get(cursor) ?? []
+        rules.push(bareDrafts ? "─".repeat(Math.max(1, width)) : bandRule(band, datedCount, width, draftWindow, unread))
+        opening.set(cursor, rules)
+      }
+      cursor += total
+      continue
+    }
+    if (total === 0) continue
     const rules = opening.get(cursor) ?? []
-    rules.push(bandRule(band, count, width, draftWindow))
+    rules.push(bandRule(band, total, width, draftWindow, unread))
     opening.set(cursor, rules)
-    cursor += count
+    cursor += total
   }
   for (const [index, rules] of opening) {
     before.set(index, { rules, runner: index === runnerAt })
@@ -302,6 +326,44 @@ export function runnerOf(snapshot: WatchSnapshot, now: Date) {
 }
 
 /**
+ * The RUNNER box, drawn in rounded border chrome with its title and border
+ * wearing the runner state's color (items 7, 27). The one component for the
+ * RUNNER box across both the list view item (watch-pane.tsx) and the empty
+ * pane/print break rows (BandBreakRows).
+ */
+export function RunnerTitledBox({
+  line,
+  snapshot,
+  layout,
+  cursor = false,
+  queueDigit = 1,
+  queueLabel = "main",
+}: {
+  line: ReturnType<typeof runnerOf>
+  snapshot: WatchSnapshot
+  layout: ListLayout
+  cursor?: boolean
+  queueDigit?: number
+  queueLabel?: string
+}) {
+  const color = STATE_WORDS[line.state].color
+  return (
+    <Box flexDirection="column" marginTop={1} marginBottom={1}>
+      <TitledBox title={STATE_WORDS.runner.word} flushTop borderColor={color}>
+        <RunnerRow
+          line={line}
+          layout={layout}
+          cursor={cursor}
+          queueDigit={queueDigit}
+          queueLabel={queueLabel}
+        />
+        <RunnerDetail snapshot={snapshot} />
+      </TitledBox>
+    </Box>
+  )
+}
+
+/**
  * One break, drawn: the runner's own row when this is its place, THEN the band
  * rules that open here. The runner comes first because the only rule that can
  * share its index is `done`'s — drafts and waiting have already advanced past
@@ -311,23 +373,23 @@ export function BandBreakRows({
   brk,
   snapshot,
   layout,
+  includeRunner = true,
 }: {
   brk: BandBreak | undefined
   snapshot: WatchSnapshot
   layout: ListLayout
+  includeRunner?: boolean
 }) {
   const now = useNow()
   if (brk === undefined) return null
+  const runner = runnerOf(snapshot, now)
   return (
     <Box flexDirection="column" flexShrink={0} minWidth={0}>
-      {brk.runner ? (
-        <TitledBox title={STATE_WORDS.runner.word} flushTop>
-          <RunnerRow line={runnerOf(snapshot, now)} layout={layout} />
-          <RunnerDetail snapshot={snapshot} />
-        </TitledBox>
+      {brk.runner && includeRunner ? (
+        <RunnerTitledBox line={runner} snapshot={snapshot} layout={layout} />
       ) : null}
-      {brk.rules.map((rule) => (
-        <Text key={rule} color="$fg-muted" wrap="truncate">
+      {brk.rules.map((rule, idx) => (
+        <Text key={`${rule}-${idx}`} color="$fg-muted" wrap="truncate">
           {rule}
         </Text>
       ))}

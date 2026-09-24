@@ -135,6 +135,26 @@ describe("HISTORY and METADATA (watch-change)", () => {
     ])
   })
 
+  it("a notice re-send is never drawn as another run of the change (24196)", () => {
+    const entries = historyEntries([
+      record("opened", 0, [["Submitter", "@chief"]]),
+      record("checked", 1_000, [["Base", "3c285a41af46".padEnd(40, "0")]]),
+      record("sent", 2_000, [
+        ["Delivery", "sent"],
+        ["To", "@chief"],
+      ]),
+      record("sent", 3_000, [
+        ["Delivery", "sent"],
+        ["To", "@chief"],
+      ]),
+    ])
+    // Successful notice re-sends write sent records, but are never drawn as runs in the change history
+    expect(entries.map((entry) => entry.text)).toEqual([
+      "pending at 3c285a41af46",
+      "submitted by @chief",
+    ])
+  })
+
   /**
    * @failure  `historyEntry` enumerated six of the seven record kinds and let
    *           `withdrawn` fall through its `default: return undefined`, so the
