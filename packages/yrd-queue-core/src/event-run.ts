@@ -29,11 +29,12 @@ import { queueRefPrefix } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { publishCheckedChildren } from "./publication.ts"
 import { prepareWorktree, SETUP, SetupFailed } from "./worktree.ts"
-import { restoreScripts, type QueueRunOptions, type QueueRunOutcome } from "./run.ts"
+import { restoreScripts, short, type QueueRunOptions, type QueueRunOutcome } from "./run.ts"
 import { dispatchNotifications, messageFor } from "./with-notify.ts"
 import { changeName } from "./refs.ts"
 import { transportFaultIn } from "./setup-transport.ts"
 import { readRootChanges } from "./legacy-records.ts"
+import { mergedBy } from "./legacy-records.ts"
 import { settledBaseCommit } from "./settled-base.ts"
 import { repairMissingBranchHeads } from "./remote.ts"
 
@@ -456,7 +457,16 @@ export async function eventQueueRun(
       if (current.status === "merged") observedMerged.push(branch)
     }
   }
-  const open: { branch: string; status: string; since: Date; commit: string; tip: string; reason?: string }[] = []
+  const open: {
+    branch: string
+    status: string
+    since: Date
+    commit: string
+    tip: string
+    reason?: string
+    issue?: string
+    submitter?: string
+  }[] = []
   for (const row of eventRows(changes)) {
     if (row.position === undefined) continue
     const branch = row.branch
@@ -474,6 +484,8 @@ export async function eventQueueRun(
       commit: change.commit,
       tip: change.tip,
       reason: change.reason,
+      issue: change.issue,
+      submitter: change.submitter,
     })
   }
   const endDeletedChange = async (selected: (typeof open)[number]): Promise<void> => {
@@ -692,7 +704,14 @@ export async function eventQueueRun(
       targetHead: target,
       head,
       path,
-      message: `Merge ${branch}`,
+      message: [
+        `merge ${short(branch, head)} into ${queue}`,
+        "",
+        `Change: ${changeName({ branch, head })}`,
+        `Merged-By: ${mergedBy(queue, log.id)}`,
+        ...(selectedChange.issue === undefined ? [] : [`Issue: ${selectedChange.issue}`]),
+        ...(selectedChange.submitter === undefined ? [] : [`Submitter: ${selectedChange.submitter}`]),
+      ].join("\n"),
       process: options.process,
       env: options.env,
       hooksPath,
