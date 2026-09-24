@@ -57,9 +57,13 @@ export default {
         // 12:58 PDT with restart:"never" — a cap below the working set is an
         // outage generator, not a guard. The host has 121 GB; the growth itself
         // is tracked as its own defect. This number is a ceiling for runaway.
-        // The service's tribe name is its own key, never `@yrd`: that seat is
-        // retired (2026-08-31) and a service must not resurrect it.
-        env: { TRIBE_NAME: "yrd", YRD_HABITANT_RSS_CAP_MB: "24576" },
+        // No TRIBE_NAME: hab scrubs every caller identity name at launch, a
+        // declared one included (SERVICE_LAUNCH_PROOF_SCRUB), so a declaration
+        // here never reaches the process. The queue's notices speak as this
+        // service's name, which the root's tools/yrd-notify.ts reads from
+        // HAB_SERVICE_NAME and registers as its own service launch. That name is
+        // `yrd`, never `@yrd`: that seat is retired (2026-08-31).
+        env: { YRD_HABITANT_RSS_CAP_MB: "24576" },
         // The declared health probe (2026-09-11). M7 rejected a probe on
         // 2026-09-03 as noise with a SECOND OPINION, and that objection is
         // answered rather than overruled: `queue health` re-derives nothing.
