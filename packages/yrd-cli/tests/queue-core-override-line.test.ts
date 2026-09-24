@@ -33,8 +33,12 @@ describe("the rendered log names a merge-check override (25296 C5)", () => {
     ).toBe(
       `task/one at ${"b".repeat(12)}: merge check verify skipped: override ${"c".repeat(12)} by @dev/3 (claimed) until 2026-09-23T23:00:00.000Z`,
     )
-    expect(summarize("override", { check: "verify", reason: "verify until 2026-09-23T23:00:00.000Z passed", record: "expired" })).toBe(
-      "merge check verify override expired: verify until 2026-09-23T23:00:00.000Z passed",
-    )
+    expect(
+      summarize("override", {
+        check: "verify",
+        reason: "verify until 2026-09-23T23:00:00.000Z passed",
+        record: "expired",
+      }),
+    ).toBe("merge check verify override expired: verify until 2026-09-23T23:00:00.000Z passed")
   })
 })
