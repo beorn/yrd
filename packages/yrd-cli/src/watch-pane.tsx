@@ -171,7 +171,7 @@ export type WatchSnapshot = Readonly<{
   /** The merge-check override table (25296): a check held off shows in the queue line while it is. */
   overrides?: readonly OverrideFact[]
   /** Which drafts the rows list, and how many drafts have a head this repository has not read. */
-  drafts?: Readonly<{ window: DraftWindow; unread: number }>
+  drafts?: Readonly<{ window: DraftWindow; unread: number; older?: number }>
 }>
 
 // The natural sizes the monitor used, and the ratio it settled on: 0.65 is the
@@ -863,6 +863,8 @@ function Table({
     snapshot.drafts?.window ?? "7d",
     false,
     snapshot.drafts?.unread ?? 0,
+    false,
+    snapshot.drafts?.older ?? 0,
   )
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>

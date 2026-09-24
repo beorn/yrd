@@ -1998,7 +1998,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         waitingAboveZ: after[zIdx - 1]?.replace(/\s/g, "").startsWith("─") ?? false,
       },
       before: {
-        top: counted(before).includes(`2 ${W.draft.word}s (7d) · 2 not yet read`),
+        top: counted(before).includes(`2 ${W.draft.word}s (1d) · 2 not yet read`),
         unreadRow: tableRow(before, " task/unread "),
       },
       requested: load.mock.calls.map(([request]) => request),
@@ -2009,7 +2009,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     })
   })
 
-  it("draws drafts band rule with '0 drafts (7d) · N not yet read' when unread heads exist without dated drafts", async () => {
+  it("draws drafts band rule with '0 drafts (1d) · N not yet read' when unread heads exist without dated drafts", async () => {
     const W = await words()
     const snap = snapshot({
       drafts: { unread: 2, window: "7d" },
@@ -2029,7 +2029,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const painted = await lines(snap, 140, 40)
     const draftsLine = painted.find((l) => l.includes(`${W.draft.word}`))
     expect(draftsLine).toBeDefined()
-    expect(draftsLine).toContain(`0 ${W.draft.word}s (7d) · 2 not yet read`)
+    expect(draftsLine).toContain(`0 ${W.draft.word}s (1d) · 2 not yet read`)
   })
 
   it("draws draft rows and a draft's detail from the snapshot alone: redrawing, moving over drafts and opening one reads nothing (A2-set-v3)", async () => {
@@ -2219,7 +2219,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const line = tableRow(painted, " task/d")
     expect({
       by: / —/.test(line) && !/ ada\b/u.test(line),
-      counted: painted.some((l) => l.includes(`1 ${W.draft.word} (7d)`)),
+      counted: painted.some((l) => l.includes(`1 ${W.draft.word} (1d)`)),
       noRun: line.includes("/ —"),
       waiting: painted.some((l) => l.includes("1 in line")),
       word: line.includes(` ${W.draft.word} `),
