@@ -3023,6 +3023,38 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     expect(lastMissingAt.facts?.serviceStopped).not.toHaveProperty("reason")
   }, 30_000)
 
+  // 25466. `hab up yrd --reason` writes the start intent before the spawn; the
+  // first document this start writes names who started it and why.
+  it("the first document after a start with a reason carries that start's by and reason", async () => {
+    const w = await world()
+    const intentFile = join(mkdtempSync(join(tmpdir(), "yrd-intent-")), "intent.json")
+    const at = new Date().toISOString()
+    writeFileSync(intentFile, `${JSON.stringify({ verb: "start", by: "@chief", reason: "cutover restart", at })}\n`)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          ...HEARTBEAT,
+          afterHealth: (document) => {
+            seen.push(document)
+            stop.abort()
+          },
+        },
+        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+      ),
+      run.stderr(),
+    ).toBe(0)
+
+    expect(seen[0]?.facts).toMatchObject({ serviceStarted: { by: "@chief", reason: "cutover restart", since: at } })
+  }, 30_000)
+
   // T5, the stop half (F1). A line already stopped at start says so from the
   // first document: `stopped: null` for the length of round 1 would be the lie
   // the always-present stop fact exists to prevent.
