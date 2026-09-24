@@ -443,8 +443,10 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       const warning = rows.find((row) => row.level === "warn" && row.message.startsWith(`${ref}:`))
       expect(warning?.message).toMatch(/remote [0-9a-f]{40}, intended [0-9a-f]{40} \(diverged\); inspect: git -C /u)
     }
-    // Three rounds launch the real selected executable for every Git call.
-  }, 15_000)
+    // Three rounds launch the real selected executable for every Git call,
+    // plus a spawned notifier per merge: 25 s measured at load average 51
+    // (2026-09-24), so 15 s failed on a busy host while the service was fine.
+  }, 60_000)
 
   // 24472: legacy branch-name inference must be visible in both submit modes;
   // the domain reader tests cannot prove the CLI tells its caller.
@@ -1054,7 +1056,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     )
     try {
       if (ending !== "already projected") {
-        await vi.waitFor(() => expect(run.stdout()).toContain("waiting for checkout"))
+        await vi.waitFor(() => expect(run.stdout()).toContain("waiting for checkout"), { timeout: 20_000 })
         expect(rounds).toBe(0)
         if (ending === "stop") stop.abort()
         else await project()
