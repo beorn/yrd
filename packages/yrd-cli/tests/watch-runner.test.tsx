@@ -40,7 +40,7 @@ const BEATING: RunnerService = { kind: "beating", state: "healthy" }
 function healthDocument(options: Readonly<{ staleAfterMs: number; pid?: number }>): string {
   return JSON.stringify({
     schema: QUEUE_HEALTH_SCHEMA,
-    service: "yrd-service",
+    service: "yrd",
     state: "healthy",
     verdict: { kind: "running" },
     facts: {
@@ -314,7 +314,7 @@ describe("runnerWord, the one word", () => {
     since: new Date(NOW.getTime() - 60_000),
   }
   const STUCK = {
-    by: "yrd-service",
+    by: "yrd",
     cause: "stuck" as const,
     change: `task/s@${"4".repeat(40)}`,
     since: NOW.toISOString(),
@@ -578,7 +578,7 @@ describe("the runner's row", () => {
   it("names the change the line stopped at and what lifts it, and an operator's pause by who", () => {
     const since = new Date(NOW.getTime() - 6 * 60_000)
     const stopped = runnerLine(latest({}), NOW, {
-      stopped: { by: "yrd-service", cause: "stuck", change: `task/s@${"4".repeat(40)}`, since: since.toISOString() },
+      stopped: { by: "yrd", cause: "stuck", change: `task/s@${"4".repeat(40)}`, since: since.toISOString() },
     })
     expect(stopped.state).toBe("stuck")
     expect(stopped.duration).toBe("stuck 6:00")

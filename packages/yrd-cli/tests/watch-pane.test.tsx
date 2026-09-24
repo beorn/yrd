@@ -1530,7 +1530,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   ]
   /** The line stop a stuck change makes, as the queue read derives it (`stopFact`, the page's `stopped`). */
   const STOP = {
-    by: "yrd-service",
+    by: "yrd",
     cause: "stuck" as const,
     change: `task/s@${"4".repeat(40)}`,
     since: ago(6 * MINUTE).toISOString(),
