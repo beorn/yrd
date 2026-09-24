@@ -300,6 +300,8 @@ export type CoreQueueCommand =
       command: "up"
       intervalSeconds?: number
       stop?: AbortSignal
+      /** Process start time override for test witnesses (25502). Defaults to performance.timeOrigin. */
+      startedAt?: string | Date
       /**
        * The gitlink carrying this yrd. Absent, its physical path and the
        * checkout observed at module load are used, even if the target moved
@@ -1211,7 +1213,12 @@ export async function coreQueueCommand(
         pid: process.pid,
         // The runtime's own start, so nothing here reads /proc: the supervisor
         // owns that reader and checks this against it.
-        startedAt: new Date(performance.timeOrigin).toISOString(),
+        startedAt:
+          request.startedAt !== undefined
+            ? typeof request.startedAt === "string"
+              ? request.startedAt
+              : request.startedAt.toISOString()
+            : new Date(performance.timeOrigin).toISOString(),
       }
       const heartbeat = {
         graceMs: request.heartbeatGraceMs ?? HEARTBEAT_GRACE_MS,

@@ -171,4 +171,83 @@ describe("readUnitIntent (25430, @cto 16ab7d00)", () => {
       },
     })
   })
+
+  // 25502: Start intent freshness bound
+  it("returns none when start intent has no startedAt to verify freshness (25502)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "unit-intent-test-"))
+    const file = join(dir, "intent.json")
+    writeFileSync(
+      file,
+      `${JSON.stringify({ verb: "start", by: "@chief", reason: "cutover", at: "2026-09-24T07:00:00.000Z" })}\n`,
+    )
+    const result = readUnitIntent("start", { [UNIT_INTENT_FILE_ENV]: file })
+    expect(result).toMatchObject({
+      kind: "none",
+      why: expect.stringContaining("cannot be verified without the process start time"),
+    })
+  })
+
+  it("returns none when start intent was written before process started beyond default freshness bound (25502)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "unit-intent-test-"))
+    const file = join(dir, "intent.json")
+    const at = "2026-09-24T07:00:00.000Z"
+    const startedAt = "2026-09-24T07:01:05.000Z" // 65s later > 60s default
+    writeFileSync(file, `${JSON.stringify({ verb: "start", by: "@chief", reason: "morning launch", at })}\n`)
+    const result = readUnitIntent("start", { [UNIT_INTENT_FILE_ENV]: file }, startedAt)
+    expect(result).toMatchObject({
+      kind: "none",
+      why: expect.stringContaining("exceeding freshness bound of 60s"),
+    })
+  })
+
+  it("returns none when start intent states explicit freshness bound and process started after that bound (25502)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "unit-intent-test-"))
+    const file = join(dir, "intent.json")
+    const at = "2026-09-24T07:00:00.000Z"
+    const startedAt = "2026-09-24T07:00:15.000Z" // 15s later > 10s bound
+    writeFileSync(
+      file,
+      `${JSON.stringify({ verb: "start", by: "@chief", reason: "morning launch", at, freshnessSeconds: 10 })}\n`,
+    )
+    const result = readUnitIntent("start", { [UNIT_INTENT_FILE_ENV]: file }, startedAt)
+    expect(result).toMatchObject({
+      kind: "none",
+      why: expect.stringContaining("exceeding freshness bound of 10s"),
+    })
+  })
+
+  it("returns none when start intent states invalid freshness bound (25502)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "unit-intent-test-"))
+    const file = join(dir, "intent.json")
+    const at = "2026-09-24T07:00:00.000Z"
+    writeFileSync(
+      file,
+      `${JSON.stringify({ verb: "start", by: "@chief", reason: "morning launch", at, freshnessSeconds: -5 })}\n`,
+    )
+    const result = readUnitIntent("start", { [UNIT_INTENT_FILE_ENV]: file }, at)
+    expect(result).toMatchObject({
+      kind: "none",
+      why: expect.stringContaining("invalid freshness bound"),
+    })
+  })
+
+  it("returns intent fact when start intent states explicit freshness bound and process started within bound (25502)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "unit-intent-test-"))
+    const file = join(dir, "intent.json")
+    const at = "2026-09-24T07:00:00.000Z"
+    const startedAt = "2026-09-24T07:00:05.000Z" // 5s later <= 10s bound
+    writeFileSync(
+      file,
+      `${JSON.stringify({ verb: "start", by: "@chief", reason: "morning launch", at, freshnessSeconds: 10 })}\n`,
+    )
+    const result = readUnitIntent("start", { [UNIT_INTENT_FILE_ENV]: file }, startedAt)
+    expect(result).toEqual({
+      kind: "intent",
+      fact: {
+        by: "@chief",
+        reason: "morning launch",
+        since: at,
+      },
+    })
+  })
 })

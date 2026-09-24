@@ -3060,6 +3060,44 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     expect(seen[0]?.facts).toMatchObject({ serviceStarted: { by: "@chief", reason: "cutover restart", since: at } })
   }, 30_000)
 
+  // 25502. A start intent states its own freshness bound; a respawn without a
+  // fresh intent reads as no intent, attributing the runner to plain "started".
+  it("a respawn without a fresh intent reads as no intent (25502)", async () => {
+    const w = await world()
+    const intentFile = join(mkdtempSync(join(tmpdir(), "yrd-intent-")), "intent.json")
+    const at = "2026-09-24T07:00:00.000Z"
+    writeFileSync(
+      intentFile,
+      `${JSON.stringify({ verb: "start", by: "@chief", reason: "cutover restart", at, freshnessSeconds: 60 })}\n`,
+    )
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    const respawnStartedAt = "2026-09-24T07:01:10.000Z" // 70s later > 60s bound
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          startedAt: respawnStartedAt,
+          stop: stop.signal,
+          ...HEARTBEAT,
+          afterHealth: (document) => {
+            seen.push(document)
+            stop.abort()
+          },
+        },
+        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+      ),
+      run.stderr(),
+    ).toBe(0)
+
+    expect(seen[0]?.facts?.serviceStarted).toEqual({ reason: "started", since: respawnStartedAt })
+    expect(seen[0]?.facts?.serviceStarted).not.toHaveProperty("by")
+  }, 30_000)
+
   // T5, the stop half (F1). A line already stopped at start says so from the
   // first document: `stopped: null` for the length of round 1 would be the lie
   // the always-present stop fact exists to prevent.
