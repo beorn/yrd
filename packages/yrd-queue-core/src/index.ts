@@ -200,20 +200,28 @@ export {
   relaunchStalledHealthDocument,
   ROUND_BUDGET_MS,
   ROUND_LOCK,
+  DEFAULT_STALL_AFTER_MS,
+  lineStall,
   roundHealthDocument,
   serviceStoppedLine,
+  STALL_AFTER_FLOOR_MS,
+  STALLED_LINE_CODE,
   STUCK_RECORD_CODE,
   unreadableHealthDocument,
   writtenHealthDocument,
 } from "./service-health.ts"
 export type {
+  FlowReading,
   HealthHeartbeat,
   HealthWriter,
+  LineFlow,
+  LineStall,
   QueueHealthDocument,
   QueueHealthFailure,
   QueueHealthState,
   QueueHealthVerdict,
   ServiceIntentFact,
+  StallThreshold,
 } from "./service-health.ts"
 
 export {

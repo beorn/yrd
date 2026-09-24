@@ -8,7 +8,10 @@ import {
   parseQueueHealthDocument,
   QUEUE_HEALTH_SCHEMA,
   queueHealthExitCode,
+  DEFAULT_STALL_AFTER_MS,
+  lineStall,
   roundHealthDocument,
+  STALLED_LINE_CODE,
   STUCK_RECORD_CODE,
   unreadableHealthDocument,
 } from "../src/service-health.ts"
@@ -246,3 +249,87 @@ describe("a document expires", () => {
 // neither. If you change `roundHealthDocument`, `absentHealthDocument`,
 // `unreadableHealthDocument`, `believableHealthDocument` or
 // `queueHealthExitCode`, that root test is the one that will catch you.
+
+// 25669: a line holding waiting changes that judges none reads STALLED. This is
+// the port of the flow instrument the old core carried (08-10
+// queueProgressAuditFindings, 08-30 queue-liveness-wedged) and lost on 09-03 in
+// b5b468037c; on 09-24 a line stood still for over an hour while health read
+// healthy. Clock and wording per @cto fa6f3457 and d3af5793.
+describe("a waiting line that judges nothing reads stalled (25669)", () => {
+  const at = (iso: string) => new Date(`2026-09-24T${iso}Z`)
+  const minutes = (n: number) => n * 60_000
+  const threshold = { declared: false, ms: DEFAULT_STALL_AFTER_MS }
+  const oldest = { branch: "task/oldest", openedAt: "2026-09-24T19:00:00.000Z" }
+
+  test("waiting changes and no judgement past the threshold: a stopped line, naming the round, the waiting and the threshold", () => {
+    const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", lastRoundEndedAt: "2026-09-24T20:20:00.000Z", oldestWaiting: oldest, waiting: 16 }
+    const stall = lineStall(flow, threshold, at("20:27:00"))
+    expect(stall?.shape).toBe("stopped-line")
+    expect(stall?.forMs).toBe(minutes(47))
+    expect(stall?.cause).toBe(
+      "no round running; last completed round at 20:20Z judged nothing while 16 waited; " +
+        "no change judged for 47m (oldest waiting task/oldest, opened 1h27m ago); " +
+        "threshold 45m (.yrd.yml health.stallAfter, default)",
+    )
+  })
+
+  test("a round still open past the threshold is the slow-round shape, naming its branch and how long it has run", () => {
+    const flow = {
+      lastJudgedAt: "2026-09-24T19:40:00.000Z",
+      oldestWaiting: oldest,
+      roundOpen: { branch: "task/slow", startedAt: "2026-09-24T19:35:00.000Z" },
+      waiting: 3,
+    }
+    const stall = lineStall(flow, { declared: true, ms: minutes(45) }, at("20:30:00"))
+    expect(stall?.shape).toBe("slow-round")
+    expect(stall?.cause).toBe(
+      "a round has been running its checks for 55m on task/slow; " +
+        "no change judged for 50m (oldest waiting task/oldest, opened 1h30m ago); " +
+        "threshold 45m (.yrd.yml health.stallAfter)",
+    )
+  })
+
+  test("idle is not stalled: nothing waiting never reads stalled, however long since the last judgement", () => {
+    const flow = { lastJudgedAt: "2026-09-24T09:00:00.000Z", waiting: 0 }
+    expect(lineStall(flow, threshold, at("20:00:00"))).toBeUndefined()
+  })
+
+  test("the clock starts at the later of the last judgement and the oldest change's opening, so a submit after idle hours does not page at once", () => {
+    const flow = {
+      lastJudgedAt: "2026-09-24T09:00:00.000Z",
+      oldestWaiting: { branch: "task/new", openedAt: "2026-09-24T20:00:00.000Z" },
+      waiting: 1,
+    }
+    expect(lineStall(flow, threshold, at("20:44:59"))).toBeUndefined()
+    expect(lineStall(flow, threshold, at("20:45:00"))?.forMs).toBe(minutes(45))
+  })
+
+  test("one minute short of the threshold is not stalled, and a judgement resets the clock", () => {
+    const flow = { lastJudgedAt: "2026-09-24T20:00:00.000Z", oldestWaiting: oldest, waiting: 4 }
+    expect(lineStall(flow, threshold, at("20:44:00"))).toBeUndefined()
+    expect(lineStall(flow, threshold, at("20:45:00"))).toBeDefined()
+    expect(lineStall({ ...flow, lastJudgedAt: "2026-09-24T20:44:30.000Z" }, threshold, at("20:45:00"))).toBeUndefined()
+  })
+
+  test("the round document pages a stalled line as unhealthy with its own code, and carries the flow either way", () => {
+    const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", lastRoundEndedAt: "2026-09-24T20:20:00.000Z", oldestWaiting: oldest, waiting: 16 }
+    const stalled = roundHealthDocument("yrd", undefined, INTERVAL, at("20:27:00"), { flow, threshold })
+    expect(stalled.state).toBe("unhealthy")
+    expect(stalled.verdict).toEqual({ kind: "running" })
+    expect(stalled.error?.code).toBe(STALLED_LINE_CODE)
+    expect(stalled.error?.cause).toContain("judged nothing while 16 waited")
+    expect(stalled.error?.resolution.join("\n")).toContain("yrd queue show task/oldest")
+    expect(stalled.facts?.flow).toMatchObject({ stallAfterMs: DEFAULT_STALL_AFTER_MS, stalledForMs: minutes(47), waiting: 16 })
+
+    const flowing = roundHealthDocument("yrd", undefined, INTERVAL, at("19:50:00"), { flow, threshold })
+    expect(flowing.state).toBe("healthy")
+    expect(flowing.facts?.flow).toMatchObject({ waiting: 16 })
+    expect((flowing.facts?.flow as Record<string, unknown>).stalledForMs).toBeUndefined()
+  })
+
+  test("a stuck stop outranks stalled: the stuck page stands and names the stuck change", () => {
+    const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", oldestWaiting: oldest, waiting: 16 }
+    const doc = roundHealthDocument("yrd", stuckStop, INTERVAL, at("21:00:00"), { flow, threshold })
+    expect(doc.error?.code).toBe("queue-round-stuck")
+  })
+})

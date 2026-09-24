@@ -209,14 +209,21 @@ export function roundHealthDocument(
   stop: PauseRecord | undefined,
   sleepMs: number,
   now: Date,
+  flow?: FlowReading,
 ): QueueHealthDocument {
   const base = { schema: QUEUE_HEALTH_SCHEMA, service, verdict: { kind: "running" } as const }
+  const stall = flow === undefined ? undefined : lineStall(flow.flow, flow.threshold, now)
   const facts = {
     ...freshness(SERVICE_HEARTBEAT, now),
     nextRoundInMs: sleepMs,
     stopped: stopFact(stop),
+    ...(flow === undefined ? {} : { flow: flowFact(flow, stall) }),
   }
-  if (stop?.cause !== "stuck" || stop.change === undefined) return { ...base, state: "healthy", facts }
+  if (stop?.cause !== "stuck" || stop.change === undefined) {
+    // A stuck stop outranks a stall: it already pages, naming the change that stopped the line.
+    if (stall === undefined || flow === undefined) return { ...base, state: "healthy", facts }
+    return { ...base, state: "unhealthy", error: stalledFailure(stall, flow.flow), facts }
+  }
   const change = changeName(stop.change)
   return {
     ...base,
@@ -236,6 +243,111 @@ export function roundHealthDocument(
     },
     facts,
   }
+}
+
+/**
+ * THE LINE'S FLOW, as the service loop last knew it (25669): how many changes
+ * wait, the oldest of them, when a change was last judged, and whether a round
+ * is open now. The loop keeps it and every health write carries it, so `queue
+ * list`, the watch and its runner line read one fact instead of each recounting.
+ */
+export type LineFlow = Readonly<{
+  /** Changes in line: submitted and not yet ended. */
+  waiting: number
+  /** The longest-waiting of them, by when its change opened. */
+  oldestWaiting?: Readonly<{ branch: string; openedAt: string }>
+  /** When the queue last JUDGED a change: merged, failed or recorded stuck. */
+  lastJudgedAt?: string
+  /** When the last round completed. */
+  lastRoundEndedAt?: string
+  /** The round running now, when one is, and the change it works when the loop knows it. */
+  roundOpen?: Readonly<{ startedAt: string; branch?: string }>
+}>
+
+/** The declared stall threshold and whether the declaration named it or the default applies. */
+export type StallThreshold = Readonly<{ ms: number; declared: boolean }>
+
+/** A flow reading and the threshold it is judged against, as the loop hands both to a health write. */
+export type FlowReading = Readonly<{ flow: LineFlow; threshold: StallThreshold }>
+
+/** A stalled line: how long no change has been judged, which of the two shapes it is, and the sentence that says so. */
+export type LineStall = Readonly<{ forMs: number; shape: "slow-round" | "stopped-line"; cause: string }>
+
+/** The code a stalled line pages with, beside `queue-round-stuck`. */
+export const STALLED_LINE_CODE = "queue-line-stalled"
+
+/**
+ * WHETHER THE LINE IS STALLED (25669, @cto d3af5793): changes wait, and none has
+ * been judged for the threshold. The clock starts at the LATER of the last
+ * judgement and the oldest waiting change's opening, so a change submitted into
+ * a line idle for hours starts its own clock rather than paging at once. Idle is
+ * not stalled: with nothing waiting this is always undefined.
+ *
+ * Judged, not "a round completed": on 09-24 rounds completed every few minutes
+ * from 20:45Z, five records each, and judged nothing while 11 to 22 waited.
+ *
+ * The sentence names which of two shapes it sees, so a legitimately slow round
+ * costs little triage and a stopped or blind line — the one this exists for —
+ * reads as itself.
+ */
+export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date): LineStall | undefined {
+  if (flow.waiting <= 0 || flow.oldestWaiting === undefined) return undefined
+  const opened = Date.parse(flow.oldestWaiting.openedAt)
+  const judged = flow.lastJudgedAt === undefined ? Number.NEGATIVE_INFINITY : Date.parse(flow.lastJudgedAt)
+  const forMs = now.getTime() - Math.max(opened, judged)
+  if (forMs < threshold.ms) return undefined
+  const source = threshold.declared ? ".yrd.yml health.stallAfter" : ".yrd.yml health.stallAfter, default"
+  const observation =
+    `no change judged for ${span(forMs)} (oldest waiting ${flow.oldestWaiting.branch}, opened ${span(now.getTime() - opened)} ago); ` +
+    `threshold ${span(threshold.ms)} (${source})`
+  if (flow.roundOpen !== undefined) {
+    const running = span(now.getTime() - Date.parse(flow.roundOpen.startedAt))
+    const on = flow.roundOpen.branch === undefined ? "" : ` on ${flow.roundOpen.branch}`
+    return { cause: `a round has been running its checks for ${running}${on}; ${observation}`, forMs, shape: "slow-round" }
+  }
+  const last =
+    flow.lastRoundEndedAt === undefined
+      ? "no round has completed since the service started"
+      : `last completed round at ${flow.lastRoundEndedAt.slice(11, 16)}Z judged nothing`
+  return {
+    cause: `no round running; ${last} while ${String(flow.waiting)} waited; ${observation}`,
+    forMs,
+    shape: "stopped-line",
+  }
+}
+
+/** The flow as the document states it: the reading, the threshold it was judged against, and the stall when there is one. */
+function flowFact(reading: FlowReading, stall: LineStall | undefined): Readonly<Record<string, unknown>> {
+  return {
+    ...reading.flow,
+    stallAfterMs: reading.threshold.ms,
+    stallAfterDeclared: reading.threshold.declared,
+    ...(stall === undefined ? {} : { stalledForMs: stall.forMs, stalledShape: stall.shape }),
+  }
+}
+
+/** The page a stalled line raises: its sentence, and what a reader does about it. */
+function stalledFailure(stall: LineStall, flow: LineFlow): QueueHealthFailure {
+  const oldest = flow.oldestWaiting?.branch
+  return {
+    code: STALLED_LINE_CODE,
+    cause: stall.cause,
+    resolution: [
+      stall.shape === "slow-round"
+        ? "A round is running: read its journal (yrd queue list shows the RUNNER line and the round's log) to see which check it is in and whether that check is making progress."
+        : "No round is judging anything: read the last round's journal and the service's own log for why rounds complete without taking a change.",
+      ...(oldest === undefined ? [] : [`The oldest waiting change, its records and its log: yrd queue show ${oldest}.`]),
+      "The service is alive and heartbeating: no restart is needed to read this, and a restart alone does not cure a line that judges nothing.",
+      "This page clears on the next judgement — a change merged, failed or recorded stuck — and never by itself.",
+    ],
+  }
+}
+
+/** A duration as a page says it: `47m`, `1h27m`. */
+function span(ms: number): string {
+  const minutes = Math.max(0, Math.floor(ms / 60_000))
+  if (minutes < 60) return `${String(minutes)}m`
+  return `${String(Math.floor(minutes / 60))}h${String(minutes % 60).padStart(2, "0")}m`
 }
 
 /** The stuck record's own code, as `queue list` and `queue show` render it. */
