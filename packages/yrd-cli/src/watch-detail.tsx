@@ -38,7 +38,7 @@
 
 import { hyperlink } from "@silvery/ansi"
 import { Box, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
-import type { ChangeRecord, CheckView, JournalRun, Row } from "@yrd/queue-core"
+import type { ChangeRecord, CheckView, JournalCommand, JournalRun, JournalStep, Row } from "@yrd/queue-core"
 import type { Event } from "@yrd/queue-core"
 import {
   diffSummary,
@@ -62,7 +62,7 @@ import {
   withoutGitConflictsBlock,
 } from "./watch-format.ts"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
-import { runTitle, statusLineOf, timingRows, type WatchRun, type WatchStep } from "./watch-run.ts"
+import { runTitle, statusLineOf, timingRows, type WatchRun } from "./watch-run.ts"
 
 /**
  * A check with what its log actually held. The output is read by whatever
@@ -128,16 +128,19 @@ export function WatchDetail({
   diffOpen = false,
   diff,
   onToggleDiff,
+  outputs = new Map(),
 }: {
   detail: ChangeDetail | undefined
   /** True when the row is one run's view of the change, not the change's current state. */
   joinedRun?: boolean
-  /** The open tab: `CHANGES_TAB` or a check's index as a string. */
+  /** The open tab: `CHANGES_TAB`, a check's index as a string, a step's `step:<n>`, or `round`. */
   selected?: string
   onSelect?: (value: string) => void
   diffOpen?: boolean
   diff?: DiffText
   onToggleDiff?: () => void
+  /** The git commands' output read so far, keyed by {@link commandKey}; the pane asks for a stage's when its tab opens. */
+  outputs?: ReadonlyMap<string, DiffText>
 }) {
   if (detail === undefined) {
     return (
@@ -175,18 +178,18 @@ export function WatchDetail({
             {"\n"}
             <Text color="$fg-muted">{cutCounter(detail)}</Text>
           </Tab>
-          {detail.checks.map((check, at) => (
-            <Tab key={String(at)} value={String(at)}>
-              <StageLabel
-                name={
-                  check.phase !== undefined && detail.checks.filter((other) => other.name === check.name).length > 1
-                    ? `${check.name} (${check.phase})`
-                    : check.name
-                }
-                step={detail.run.steps[at]}
-                state={check.state}
-                {...(check.state === "running" && row.live?.check === check.name ? { since: row.live.since } : {})}
-              />
+          {stagesOf(detail).map((stage) => (
+            <Tab key={stage.value} value={stage.value}>
+              {stage.kind === "check" ? (
+                <CheckLabel detail={detail} at={stage.at} />
+              ) : stage.kind === "round" ? (
+                <>
+                  round{"\n"}
+                  <Text color="$fg-muted">{String(stage.commands.length)} git</Text>
+                </>
+              ) : (
+                <StageLabel name={stage.step.name} state={stepState(stage.step)} {...stepSaid(stage.step)} />
+              )}
             </Tab>
           ))}
         </TabList>
@@ -200,19 +203,185 @@ export function WatchDetail({
             <ChangeBox detail={detail} diffOpen={diffOpen} diff={diff} onToggleDiff={onToggleDiff} />
           </ScrollArea>
         </TabPanel>
-        {detail.checks.map((check, at) => (
-          <TabPanel key={String(at)} value={String(at)}>
-            {/* A failed check's remedy, which rode its step line in the status box before 25441. */}
-            {detail.run.steps[at]?.remedy === undefined ? null : (
-              <Text color={CHECK_COLOR[check.state]} wrap="wrap">
-                {detail.run.steps[at]?.remedy}
-              </Text>
+        {stagesOf(detail).map((stage) => (
+          <TabPanel key={stage.value} value={stage.value}>
+            {stage.kind === "check" ? (
+              <CheckTab detail={detail} at={stage.at} />
+            ) : (
+              <CommandsBody
+                commands={stage.kind === "round" ? stage.commands : stage.step.commands}
+                {...(stage.kind === "step" ? { step: stage.step } : {})}
+                outputs={outputs}
+              />
             )}
-            <CheckBody check={check} />
           </TabPanel>
         ))}
       </Tabs>
     </Box>
+  )
+}
+
+/** One tab of the detail after the Timeline: a check, a step of the round, or the round's own commands. */
+export type StageTab =
+  | Readonly<{ kind: "check"; value: string; at: number }>
+  | Readonly<{ kind: "step"; value: string; step: JournalStep }>
+  | Readonly<{ kind: "round"; value: typeof ROUND_TAB; commands: readonly JournalCommand[] }>
+
+/** The tab of the git commands the round ran outside any step: shown only when there are some. */
+export const ROUND_TAB = "round"
+
+/**
+ * The stage tabs in the order the round ran them (25441): the round's own
+ * commands first when there are any, then its steps and the change's checks
+ * by when each started. A check that never ran has no start and keeps its
+ * declared place after the ones that did.
+ */
+export function stagesOf(detail: ChangeDetail): readonly StageTab[] {
+  const journal = detail.journal
+  const started = (name: string, phase: string | undefined): number | undefined =>
+    journal?.checks
+      .find((check) => check.name === name && (phase === undefined || check.phase === phase))
+      ?.startedAt.getTime()
+  const timed: { at: number; tab: StageTab }[] = [
+    ...detail.checks.map((check, at) => ({
+      at: started(check.name, check.phase) ?? Number.POSITIVE_INFINITY,
+      tab: { at, kind: "check" as const, value: String(at) },
+    })),
+    ...(journal?.steps ?? []).map((step, index) => ({
+      at: step.startedAt.getTime(),
+      tab: { kind: "step" as const, step, value: `step:${String(index)}` },
+    })),
+  ]
+  const round: StageTab[] =
+    (journal?.commands?.length ?? 0) === 0
+      ? []
+      : [{ commands: journal?.commands ?? [], kind: "round", value: ROUND_TAB }]
+  return [...round, ...timed.sort((left, right) => left.at - right.at).map(({ tab }) => tab)]
+}
+
+/** The git commands a tab shows, for the pane to read their output when it opens. */
+export function commandsOfTab(detail: ChangeDetail, tab: string | undefined): readonly JournalCommand[] {
+  const stage = stagesOf(detail).find((candidate) => candidate.value === tab)
+  return stage === undefined || stage.kind === "check"
+    ? []
+    : stage.kind === "round"
+      ? stage.commands
+      : stage.step.commands
+}
+
+/** A command's key in the outputs map: its own stdout file, which no other command shares. */
+export function commandKey(command: JournalCommand): string {
+  return command.stdout ?? `${command.cwd}\u0000${command.args.join("\u0000")}`
+}
+
+/** A step's state in the check vocabulary, for its glyph: running while open, failed when it threw. */
+function stepState(step: JournalStep): CheckView["state"] {
+  if (step.unended === true) return "unmeasured"
+  if (step.endedAt === undefined) return "running"
+  return step.threw === true ? "failed" : "passed"
+}
+
+/** What a step's second line says after its glyph: its duration, or why there is none. */
+function stepSaid(step: JournalStep): Readonly<{ said?: string; since?: Date }> {
+  if (step.unended === true) return { said: " unended" }
+  if (step.endedAt === undefined) return { since: step.startedAt }
+  return step.ms === undefined ? {} : { said: ` ${mediaDuration(step.ms)}` }
+}
+
+/** A check's tab: its remedy when it failed (it rode the status box's step line before 25441), then its log. */
+function CheckTab({ detail, at }: { detail: ChangeDetail; at: number }) {
+  const check = detail.checks[at]
+  if (check === undefined) return null
+  const remedy = detail.run.steps[at]?.remedy
+  return (
+    <>
+      {remedy === undefined ? null : (
+        <Text color={CHECK_COLOR[check.state]} wrap="wrap">
+          {remedy}
+        </Text>
+      )}
+      <CheckBody check={check} />
+    </>
+  )
+}
+
+/** A check's tab label, named by its phase when the change ran it in more than one. */
+function CheckLabel({ detail, at }: { detail: ChangeDetail; at: number }) {
+  const check = detail.checks[at]
+  if (check === undefined) return null
+  const { row } = detail
+  const twice = check.phase !== undefined && detail.checks.filter((other) => other.name === check.name).length > 1
+  const step = detail.run.steps[at]
+  const said =
+    check.state === "off"
+      ? " off"
+      : check.state === "not-run"
+        ? " not run"
+        : step?.ms === undefined
+          ? ""
+          : ` ${mediaDuration(step.ms)}`
+  return (
+    <StageLabel
+      name={twice ? `${check.name} (${String(check.phase)})` : check.name}
+      state={check.state}
+      said={said}
+      {...(check.state === "running" && row.live?.check === check.name ? { since: row.live.since } : {})}
+    />
+  )
+}
+
+/**
+ * A step's or the round's commands (25441): each as `$ git <args>` above what
+ * it printed, read by the pane when the tab opened. A step still open says it
+ * is still writing; a compose lists git-super's own timed parts under it.
+ */
+function CommandsBody({
+  commands,
+  step,
+  outputs,
+}: {
+  commands: readonly JournalCommand[]
+  step?: JournalStep
+  outputs: ReadonlyMap<string, DiffText>
+}) {
+  return (
+    <ScrollArea>
+      {commands.length === 0 ? <Text color="$fg-muted">this step ran no git command</Text> : null}
+      {commands.map((command, index) => {
+        const output = outputs.get(commandKey(command))
+        return (
+          <Box key={`${String(index)}:${commandKey(command)}`} flexDirection="column" minWidth={0}>
+            <Text wrap="wrap">
+              <Text bold>$ git {command.args.join(" ")}</Text>
+              {command.exit === undefined || command.exit === 0 ? null : (
+                <Text color="$fg-error"> exit {String(command.exit)}</Text>
+              )}
+            </Text>
+            {command.failure !== undefined ? (
+              <Text color="$fg-muted" wrap="wrap">
+                it failed before writing output: {command.failure}
+              </Text>
+            ) : output === undefined ? (
+              <Text color="$fg-muted">reading its output…</Text>
+            ) : output.text === undefined ? (
+              <Text color="$fg-muted" wrap="wrap">
+                {output.why ?? "no output was read"}
+              </Text>
+            ) : output.text === "" ? null : (
+              <Text wrap="wrap">{output.text}</Text>
+            )}
+          </Box>
+        )
+      })}
+      {(step?.parts ?? []).map((part) => (
+        <Text key={part.name} color="$fg-muted">
+          {part.name} {mediaDuration(part.ms)}
+        </Text>
+      ))}
+      {step !== undefined && step.endedAt === undefined && step.unended !== true ? (
+        <Text color="$fg-info">still writing</Text>
+      ) : null}
+    </ScrollArea>
   )
 }
 
@@ -224,23 +393,15 @@ export function WatchDetail({
  */
 function StageLabel({
   name,
-  step,
   state,
+  said = "",
   since,
 }: {
   name: string
-  step: WatchStep | undefined
   state: CheckView["state"]
+  said?: string
   since?: Date
 }) {
-  const said =
-    state === "off"
-      ? " off"
-      : state === "not-run"
-        ? " not run"
-        : since === undefined && step?.ms !== undefined
-          ? ` ${mediaDuration(step.ms)}`
-          : ""
   return (
     <>
       {name}

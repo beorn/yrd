@@ -112,7 +112,7 @@ export {
   runId,
   runStartedAt,
 } from "./log.ts"
-export type { JournalCheck, JournalRun, Journals, LogRecord } from "./log.ts"
+export type { JournalCheck, JournalCommand, JournalRun, JournalStep, Journals, LogRecord } from "./log.ts"
 export {
   checkedTree,
   claimWorktrees,

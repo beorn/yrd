@@ -18,6 +18,7 @@ import { render } from "silvery/test"
 import { journalKey, watchRows, type Journals, type JournalRun, type Row } from "@yrd/queue-core"
 import { ListingPage, printListing } from "../src/watch-print.tsx"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
+import { journalRun } from "../../../tests/support/journal-run.ts"
 
 /** The service's own health document, believable by the deadline its writer declared: the runner is up. */
 const BEATING = { kind: "beating", state: "healthy" } as const
@@ -214,7 +215,7 @@ function change(over: Partial<Row>): Row {
 }
 
 function runOfChange(branch: string, head: string, id: string, at: Date): JournalRun {
-  return { at, branch, checks: [], head, id, startedAt: at }
+  return journalRun({ at, branch, head, id, startedAt: at })
 }
 
 /** The core rows in `list()`'s own order: in line by position, then the ended newest first, then the drafts. */
