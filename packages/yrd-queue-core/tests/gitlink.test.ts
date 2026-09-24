@@ -2631,8 +2631,14 @@ describe("a diverged component the merge composes", () => {
         phase: "merge",
       },
     ])
-    // Never an amend: the change's branch at the remote still names the submitted head.
-    expect(await remoteTip(w.git, "refs/heads/task/second-side")).toBe(head)
+    // Never an amend: the merged branch's delete was leased on the submitted
+    // head, so the branch still named that head when it left (@i/10-yrd/25568).
+    expect(
+      readFileSync(outcome.log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line)),
+    ).toContainEqual(expect.objectContaining({ kind: "branch-deleted", branch: "task/second-side", head }))
     const merged = (
       await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/second-side", head })))
     ).find((record) => record.kind === "merged")
