@@ -45,6 +45,7 @@ export const EVENT_TRAILERS = {
   projectedMs: "ProjectedMs",
   boundMs: "BoundMs",
   for: "For",
+  branch: "Branch",
   to: "To",
   result: "Result",
   key: "Key",
@@ -698,6 +699,10 @@ type EventQueueProjection = Readonly<{
   declaration: Oid
   tip: string
   pause?: Readonly<{ id: string; at: Date; reason: string; by: string }>
+  observed: Readonly<Record<string, Readonly<{ id: string; branch?: string }>>>
+  notices: Readonly<
+    Record<string, Readonly<{ id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }>>
+  >
 }>
 
 const validatedQueue = Symbol("validated event queue")
@@ -802,28 +807,51 @@ export async function queueResumedAfter(
   return events.slice(index + 1).some((event) => event.type === "resumed")
 }
 
-export type WriteQueueEvent = Readonly<{ type: "paused" | "resumed"; reason: string; by: string; at: Date }>
+export type WriteQueueEvent =
+  | Readonly<{ type: "paused" | "resumed"; reason: string; by: string; at: Date }>
+  | Readonly<{ type: "observed"; commit: string; branch?: string; by: string; at: Date }>
+  | Readonly<{ type: "notified"; notice: NoticeWrite; by: string; at: Date }>
 
 /** Append a queue stop under Gitomic's CAS; retries fold the current chain again. */
 export async function writeQueueEvent(store: QueueLocation, queue: string, write: WriteQueueEvent): Promise<string> {
   const ref = queueRef(queue)
-  if (write.reason.trim() === "") throw new TypeError(`${write.type} needs Reason:`)
+  if ((write.type === "paused" || write.type === "resumed") && write.reason.trim() === "") {
+    throw new TypeError(`${write.type} needs Reason:`)
+  }
   if (Number.isNaN(write.at.getTime())) throw new TypeError("Time: needs a valid instant")
   const chain = await openEvents({ ...store, ref, writer: write.by })
+  let existing: string | undefined
   const result = await chain.transact((events) => {
     const current = projectEventQueue(events, ref, store.repo)
+    if (write.type === "observed") existing = current.observed[write.commit]?.id
+    if (write.type === "notified") existing = current.notices[write.notice.key]?.id
+    if (existing !== undefined) return []
+    const details: [string, string][] = []
+    let keeps: string[] | undefined
+    if (write.type === "observed") {
+      details.push([EVENT_TRAILERS.commit, write.commit], [EVENT_TRAILERS.reason, "direct"])
+      if (write.branch !== undefined) details.push([EVENT_TRAILERS.branch, write.branch])
+      keeps = [write.commit]
+    } else if (write.type === "notified") {
+      details.push(
+        [EVENT_TRAILERS.for, write.notice.for],
+        [EVENT_TRAILERS.to, write.notice.to],
+        [EVENT_TRAILERS.result, write.notice.result],
+        [EVENT_TRAILERS.key, write.notice.key],
+      )
+      if (write.notice.reason !== undefined) details.push([EVENT_TRAILERS.reason, write.notice.reason])
+    } else {
+      details.push([EVENT_TRAILERS.reason, write.reason])
+    }
     const input: EventInput = {
       type: write.type,
-      props: [
-        [EVENT_TRAILERS.queue, current.tip],
-        [EVENT_TRAILERS.time, write.at.toISOString()],
-        [EVENT_TRAILERS.reason, write.reason],
-      ],
+      props: [[EVENT_TRAILERS.queue, current.tip], [EVENT_TRAILERS.time, write.at.toISOString()], ...details],
+      ...(keeps === undefined ? {} : { keeps }),
     }
     const pending: QueueEventShape = {
       id: "pending",
       parent: current.tip,
-      links: [],
+      links: input.keeps ?? [],
       type: input.type,
       props: input.props ?? [],
       writer: write.by,
@@ -831,7 +859,7 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
     projectEventQueue([...events, pending], ref, store.repo)
     return [input]
   }, `${write.type} ${queue}`)
-  const written = result.events[0]?.id
+  const written = existing ?? result.events[0]?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: ${write.type} event was not written`)
   return written
 }
@@ -845,6 +873,11 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   let previous: string | undefined
   let declaration: string | undefined
   let pause: EventQueueProjection["pause"]
+  const observed: Record<string, { id: string; branch?: string }> = {}
+  const notices: Record<
+    string,
+    { id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }
+  > = {}
   for (const [index, event] of events.entries()) {
     if (index === 0) {
       if (event.type !== "created") throw new Error(`${ref}: first event ${event.id} must be created`)
@@ -887,6 +920,44 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
       case "started":
       case "stopped":
         break
+      case "observed": {
+        if (event.writer !== QUEUE_RUN_WRITER) {
+          throw new Error(`${ref}: observed event ${event.id} needs writer ${QUEUE_RUN_WRITER}`)
+        }
+        const commit = keptCommit(event)
+        if (!COMMIT_OID.test(commit)) throw new Error(`${ref}: observed event ${event.id} has invalid Commit:`)
+        if (prop(event, EVENT_TRAILERS.reason) !== "direct") {
+          throw new Error(`${ref}: observed event ${event.id} needs Reason: direct`)
+        }
+        if (observed[commit] !== undefined) throw new Error(`${ref}: duplicate observed Commit: ${commit}`)
+        const branch = prop(event, EVENT_TRAILERS.branch)
+        if (branch !== undefined) assertBranch(branch)
+        observed[commit] = { id: event.id, ...(branch === undefined ? {} : { branch }) }
+        break
+      }
+      case "notified": {
+        if (event.writer !== QUEUE_RUN_WRITER) {
+          throw new Error(`${ref}: notified event ${event.id} needs writer ${QUEUE_RUN_WRITER}`)
+        }
+        const forEvent = requiredProp(event, EVENT_TRAILERS.for)
+        const to = requiredProp(event, EVENT_TRAILERS.to)
+        const key = requiredProp(event, EVENT_TRAILERS.key)
+        const result = requiredProp(event, EVENT_TRAILERS.result)
+        if (!Object.values(observed).some(({ id }) => id === forEvent)) {
+          throw new Error(`${ref}: notified event ${event.id} has no observed For: ${forEvent}`)
+        }
+        if (key !== `${forEvent}:${to}`) throw new Error(`${ref}: notified event ${event.id} has invalid Key:`)
+        if (result !== "delivered" && result !== "refused" && result !== "failed") {
+          throw new Error(`${ref}: notified event ${event.id} has invalid Result:`)
+        }
+        if (notices[key] !== undefined) throw new Error(`${ref}: duplicate notified Key: ${key}`)
+        const reason = prop(event, EVENT_TRAILERS.reason)
+        if (result !== "delivered" && (reason === undefined || reason.trim() === "")) {
+          throw new Error(`${ref}: notified event ${event.id} needs Reason:`)
+        }
+        notices[key] = { id: event.id, for: forEvent, to, result, ...(reason === undefined ? {} : { reason }) }
+        break
+      }
       default:
         throw new Error(`${ref}: unknown queue event ${event.type} at ${event.id}`)
     }
@@ -894,7 +965,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   }
   if (previous === undefined) throw new Error(`missing event queue tip ${ref} in ${repo}`)
   if (declaration === undefined) throw new Error(`${ref}: missing declaration commit`)
-  return { created: first.id, declaration, tip: previous, ...(pause === undefined ? {} : { pause }) }
+  return { created: first.id, declaration, tip: previous, observed, notices, ...(pause === undefined ? {} : { pause }) }
 }
 
 /** One advertisement selects the format. An event queue with no changes is empty. */

@@ -12,6 +12,7 @@ import {
   queueResumedAfter,
   readEventQueue,
   readStatus,
+  writeQueueEvent,
   type EventCheck,
   type EventChange,
 } from "./events.ts"
@@ -40,6 +41,75 @@ function discardedJudgementReason(current: EventChange, error: unknown): string 
   return current.ending === undefined
     ? `change advanced to ${current.status} at ${current.tip ?? "no tip"} while this round judged it: ${failed}`
     : `change ended ${current.ending.kind} at ${current.ending.id} while this round judged it: ${failed}`
+}
+
+/** Keep every diagnostic character while meeting Gitomic's single-line trailer contract. */
+function noticeReason(reason: string): string {
+  const written = reason.trim().replace(/[\x00-\x1f\x7f]/gu, (char) => JSON.stringify(char).slice(1, -1))
+  if (written === "") throw new Error("notification failure has no reason to retain")
+  return written
+}
+
+type SettledNotice = Readonly<{ result: "delivered" | "refused" | "failed"; reason?: string }>
+
+/** One retry budget and one journal shape for branch and direct event notices. */
+async function settleEventNotice(
+  context: Readonly<{
+    options: QueueRunOptions
+    git: Git
+    target: string
+    log: QueueRunLog
+    url: string
+    queue: string
+  }>,
+  entry: NonNullable<QueueRunOptions["notify"]>[number],
+  kind: Parameters<typeof dispatchNotifications>[1],
+  record: Parameters<typeof dispatchNotifications>[2],
+  message: Readonly<{ about: string; branch: string; head: string; id: string; text: string }>,
+): Promise<SettledNotice> {
+  const { options, git, target, log, url, queue } = context
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const delivered = (
+      await dispatchNotifications(
+        {
+          git,
+          repo: options.repo,
+          targetSha: target,
+          workdir: options.workdir,
+          notify: [entry],
+          setup: options.setup,
+          env: options.env,
+          populateReference: options.populateReference,
+          process: options.process,
+        },
+        kind,
+        record,
+      )
+    )[0]
+    if (delivered === undefined || delivered.delivery === "none") {
+      throw new Error(
+        `event queue ${url}#${queue}: ${message.branch} expected notify recipient ${entry.name}, got none`,
+      )
+    }
+    log.write({
+      kind: "message",
+      ...message,
+      says: kind,
+      to: entry.name,
+      delivered: delivered.delivery === "sent",
+      ...(delivered.failure === undefined ? {} : { error: delivered.failure }),
+      ...(delivered.refused === undefined ? {} : { refused: delivered.refused }),
+    })
+    if (delivered.delivery === "sent") return { result: "delivered" }
+    if (delivered.refused !== undefined) return { result: "refused", reason: noticeReason(delivered.refused) }
+    if (attempt === 2) {
+      return {
+        result: "failed",
+        reason: noticeReason(delivered.failure ?? `notify ${entry.name} gave no delivery receipt`),
+      }
+    }
+  }
+  throw new Error(`event queue ${url}#${queue}: ${message.branch} notice ${entry.name} has no final result`)
 }
 
 export async function eventQueueRun(
@@ -170,62 +240,22 @@ export async function eventQueueRun(
       if (!entry.on.includes(kind)) continue
       const key = `${eventId}:${entry.name}`
       if (change.notices?.[key] !== undefined) continue
-      let final: { result: "delivered" | "refused" | "failed"; reason?: string } | undefined
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        const delivered = (
-          await dispatchNotifications(
-            {
-              git,
-              repo: options.repo,
-              targetSha: target,
-              workdir: options.workdir,
-              notify: [entry],
-              setup: options.setup,
-              env: options.env,
-              populateReference: options.populateReference,
-              process: options.process,
-            },
-            kind,
-            {
-              record: kind,
-              change: changeName({ branch, head }),
-              ...(change.issue === undefined ? {} : { issue: change.issue }),
-              ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
-              ...(kind === "merged"
-                ? { merge: change.candidate ?? "" }
-                : { reason: change.reason ?? kind, log: log.path }),
-              ...(kind === "deferred"
-                ? { projectedMs: change.deferred?.projectedMs, boundMs: change.deferred?.boundMs }
-                : {}),
-            },
-          )
-        )[0]
-        if (delivered === undefined || delivered.delivery === "none") {
-          throw new Error(`event queue ${url}#${queue}: ${branch} expected notify recipient ${entry.name}, got none`)
-        }
-        log.write({
-          kind: "message",
-          about: branch,
-          branch,
-          head,
-          id: eventId,
-          says: kind,
-          text,
-          to: entry.name,
-          delivered: delivered.delivery === "sent",
-          ...(delivered.failure === undefined ? {} : { error: delivered.failure }),
-          ...(delivered.refused === undefined ? {} : { refused: delivered.refused }),
-        })
-        if (delivered.delivery === "sent") final = { result: "delivered" }
-        else if (delivered.refused !== undefined) final = { result: "refused", reason: delivered.refused }
-        else if (attempt === 2) {
-          final = { result: "failed", reason: delivered.failure ?? `notify ${entry.name} gave no delivery receipt` }
-        }
-        if (final !== undefined) break
-      }
-      if (final === undefined) {
-        throw new Error(`event queue ${url}#${queue}: ${branch} notice ${entry.name} gave no final result`)
-      }
+      const final = await settleEventNotice(
+        { options, git, target, log, url, queue },
+        entry,
+        kind,
+        {
+          record: kind,
+          change: changeName({ branch, head }),
+          ...(change.issue === undefined ? {} : { issue: change.issue }),
+          ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
+          ...(kind === "merged" ? { merge: change.candidate ?? "" } : { reason: change.reason ?? kind, log: log.path }),
+          ...(kind === "deferred"
+            ? { projectedMs: change.deferred?.projectedMs, boundMs: change.deferred?.boundMs }
+            : {}),
+        },
+        { about: branch, branch, head, id: eventId, text },
+      )
       tip = await appendOwnedChange(store, queue, branch, tip, {
         type: "notified",
         at: new Date(),
@@ -240,11 +270,43 @@ export async function eventQueueRun(
       })
     }
   }
+  const tellDirect = async (commit: string, eventId: string): Promise<void> => {
+    if ((options.notify?.length ?? 0) === 0) return
+    for (const entry of options.notify ?? []) {
+      if (!entry.on.includes("merged-direct")) continue
+      const state = await readEventQueue(store, queue)
+      if (state.observed[commit]?.id !== eventId) {
+        throw new Error(`event queue ${url}#${queue}: direct notice lost observed ${commit} at ${eventId}`)
+      }
+      const key = `${eventId}:${entry.name}`
+      if (state.notices[key] !== undefined) continue
+      const final = await settleEventNotice(
+        { options, git, target, log, url, queue },
+        entry,
+        "merged-direct",
+        { record: "merged-direct", change: commit },
+        { about: queue, branch: queue, head: commit, id: eventId, text: `direct merge ${commit} observed on ${queue}` },
+      )
+      await writeQueueEvent(store, queue, {
+        type: "notified",
+        by: "yrd-run",
+        at: new Date(),
+        notice: {
+          for: eventId,
+          to: entry.name,
+          key,
+          result: final.result,
+          ...(final.reason === undefined ? {} : { reason: final.reason }),
+        },
+      })
+    }
+  }
   if (observation.contract === "root-v1" && observation.outcome !== "observed") {
     return result(observation.outcome === "invalid" ? 2 : 0)
   }
 
-  const queueState = await readEventQueue(store, queue)
+  let queueState = await readEventQueue(store, queue)
+  for (const [commit, observed] of Object.entries(queueState.observed)) await tellDirect(commit, observed.id)
   const histories = await listChangeHistories(store, queue)
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
   for (const [branch, change] of changes) {
@@ -254,9 +316,23 @@ export async function eventQueueRun(
       changes.set(branch, await readStatus(store, queue, branch))
     }
   }
-  const direct = await eventDirectMergeCommits(git, queue, target, queueState.declaration, histories)
+  const direct = await eventDirectMergeCommits(
+    git,
+    queue,
+    target,
+    queueState.declaration,
+    histories,
+    new Set(Object.keys(queueState.observed)),
+  )
   directMerges = direct.map((commit) => commit.commit)
   for (const commit of direct) {
+    const observed = await writeQueueEvent(store, queue, {
+      type: "observed",
+      commit: commit.commit,
+      ...(commit.branch === undefined ? {} : { branch: commit.branch }),
+      by: "yrd-run",
+      at: new Date(),
+    })
     log.write({
       kind: "merged-direct",
       branch: queue,
@@ -266,7 +342,9 @@ export async function eventQueueRun(
       subject: commit.subject,
       why: commit.why,
     })
+    await tellDirect(commit.commit, observed)
   }
+  if (direct.length > 0) queueState = await readEventQueue(store, queue)
   if (queueState.pause !== undefined && options.foreground !== true) {
     log.write({ kind: "pause", reason: queueState.pause.reason, by: queueState.pause.by, sha: queueState.pause.id })
     return result(0, [], [], [], [], { ring: "pause", says: queueState.pause.reason, what: queueState.pause })

@@ -44,6 +44,7 @@ import {
   list,
   mergedByRun,
   pauseRef,
+  queueRef,
   queueRefPrefix,
   queueRun,
   readEventQueue,
@@ -1316,11 +1317,12 @@ it("reports a direct merge after the declaration and still merges the queued cha
   expect(later.directMerges).toEqual([])
 })
 
-/** @failure A direct-only target move was reported under a different identity, or silently disappeared before a queue merge accounted for it.
+/** @failure A direct-only target move was reported again after its durable observation.
  * @level l3 @consumer queue operator and notification consumer
  */
-it("reports a direct-only commit again under the same sha until a queue merge lands above it", async () => {
+it("observes a direct-only commit once on the queue chain", async () => {
   const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   const direct = await pushAroundQueue(w, "direct-only.txt")
   const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
@@ -1329,10 +1331,74 @@ it("reports a direct-only commit again under the same sha until a queue merge la
   const second = await queueRun(options)
 
   expect(first.directMerges).toEqual([direct])
-  expect(second.directMerges).toEqual([direct])
-  for (const outcome of [first, second]) {
-    expect(logRecords(outcome).filter((row) => row.kind === "merged-direct")).toMatchObject([{ commit: direct }])
-  }
+  expect(second.directMerges).toEqual([])
+  expect(logRecords(second).filter((row) => row.kind === "merged-direct")).toEqual([])
+  const observed = (await readEventQueue(store, "main")).observed[direct]
+  expect(observed?.id).toMatch(/^[0-9a-f]{40}$/)
+  const chain = await (await openEvents({ ...store, ref: queueRef("main") })).events()
+  expect(chain.find((event) => event.id === observed?.id)).toMatchObject({
+    type: "observed",
+    links: [direct],
+    props: expect.arrayContaining([
+      ["Commit", direct],
+      ["Reason", "direct"],
+    ]),
+  })
+})
+
+/** @failure A direct notice was kept only in the local journal and sent again after a restart.
+ * @level l3 @consumer merge queue notification recipient
+ */
+it("settles a direct-merge notice on the queue chain across an empty journal", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const direct = await pushAroundQueue(w, "direct-notice.txt")
+  const options = {
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+  } satisfies QueueRunOptions
+
+  expect((await queueRun(options)).directMerges).toEqual([direct])
+  const observed = (await readEventQueue(store, "main")).observed[direct]
+  expect(observed).toBeDefined()
+  expect((await readEventQueue(store, "main")).notices[`${observed?.id}:recorder`]).toMatchObject({
+    for: observed?.id,
+    to: "recorder",
+    result: "delivered",
+  })
+  expect(messages(w)).toEqual([{ change: direct, record: "merged-direct" }])
+
+  const restarted = await queueRun({ ...options, workdir: join(w.workdir, "fresh-journal") })
+  expect(restarted.directMerges).toEqual([])
+  expect(messages(w)).toEqual([{ change: direct, record: "merged-direct" }])
+})
+
+it("retains a failed direct-merge delivery with a reason and does not retry it next round", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const direct = await pushAroundQueue(w, "direct-failed-notice.txt")
+  const options = {
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "rejecting", on: ["merged-direct"], run: "exit 7" }],
+  } satisfies QueueRunOptions
+
+  expect((await queueRun(options)).directMerges).toEqual([direct])
+  const state = await readEventQueue(store, "main")
+  const observed = state.observed[direct]
+  expect(state.notices[`${observed?.id}:rejecting`]).toMatchObject({
+    for: observed?.id,
+    result: "failed",
+    reason: expect.stringMatching(/exit|7/),
+  })
+  const retry = await queueRun({ ...options, workdir: join(w.workdir, "fresh-failure-journal") })
+  expect(retry.directMerges).toEqual([])
+  expect((await readEventQueue(store, "main")).notices[`${observed?.id}:rejecting`]).toEqual(
+    state.notices[`${observed?.id}:rejecting`],
+  )
 })
 
 /** @failure A later event round mistook the queue's own merge for a direct merge.
@@ -1419,6 +1485,7 @@ it("observes a submitted head on the target, then uses its merged event as the d
     status: "merged",
     commit: head,
   })
+  expect((await readEventQueue(store, "main")).observed[head]?.branch).toBe("task/observed-by-run")
   expect((await queueRun(options)).directMerges).toEqual([])
 })
 
@@ -1441,6 +1508,7 @@ it("keeps the direct merge commit when an observed submitted head landed by no-f
     (event) => event.id === state.ending?.id,
   )
   expect(ending).toMatchObject({ type: "merged", links: [merge] })
+  expect((await readEventQueue(store, "main")).observed[merge]?.branch).toBe("task/observed-no-ff")
   expect((await queueRun(options)).directMerges).toEqual([])
 })
 
