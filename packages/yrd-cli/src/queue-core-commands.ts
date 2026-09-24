@@ -1290,9 +1290,11 @@ export async function coreQueueCommand(
        * core on 09-03 in b5b468037c; on 09-24 a line stood still for over an hour
        * while this document read healthy.
        */
-      let flow: LineFlow = { waiting: 0 }
+      // Undefined until a round has READ the line: a count nobody took is not
+      // zero waiting, and a legacy-format round reads none, so it states none.
+      let flow: LineFlow | undefined
       let threshold = { declared: config.health.declared, ms: config.health.stallAfterMs }
-      const flowReading = (): FlowReading => ({ flow, threshold })
+      const flowReading = (): FlowReading | undefined => (flow === undefined ? undefined : { flow, threshold })
       /**
        * Leave the document where the declared health probe reads it, stamped
        * with this write's instant, its deadline and its writer, and answer with
@@ -1585,7 +1587,10 @@ export async function coreQueueCommand(
         // Re-judged, not merely restated (25669): a stall that develops inside one
         // long round — the 09-24 specimen was a single 50-minute round — pages on
         // the heartbeat's clock instead of waiting for the round to end.
-        if (stated !== undefined) writeHealth(withLineFlow(stated, lastStop, flowReading(), new Date()))
+        const reading = flowReading()
+        if (stated !== undefined) {
+          writeHealth(reading === undefined ? stated : withLineFlow(stated, lastStop, reading, new Date()))
+        }
       }, heartbeat.intervalMs)
       // THE GRACEFUL STOP (25430). A signal carries no reason, so the supervisor
       // wrote its stop intent before sending it; this reads it and leaves ONE
@@ -1644,7 +1649,7 @@ export async function coreQueueCommand(
               // declaration carries, so an edit to health.stallAfter is the next
               // round's, like every other key.
               threshold = { declared: declared.config.health.declared, ms: declared.config.health.stallAfterMs }
-              flow = { ...flow, roundOpen: { startedAt: new Date().toISOString() } }
+              if (flow !== undefined) flow = { ...flow, roundOpen: { startedAt: new Date().toISOString() } }
               if (lockWaitStated) {
                 lockWaitStated = false
                 writeHealth(lineDocument(lastStop, 0))
@@ -2897,15 +2902,28 @@ export const READY_SLEEP_MS = 1000
  * cannot yet show. A round that ended before reading its line (a paused line)
  * keeps the last reading. No round is open any more.
  */
-export function flowAfterRound(previous: LineFlow, outcome: QueueRunOutcome, now: Date): LineFlow {
+export function flowAfterRound(
+  previous: LineFlow | undefined,
+  outcome: QueueRunOutcome,
+  now: Date,
+): LineFlow | undefined {
+  // The line as this round read it, or as the last round that read it did; a
+  // round that read nothing (a paused line, a legacy-format round) moves no count.
+  const read =
+    outcome.line === undefined
+      ? previous === undefined
+        ? undefined
+        : { oldest: previous.oldestWaiting, waiting: previous.waiting }
+      : { oldest: outcome.line.oldest, waiting: outcome.line.waiting }
+  if (read === undefined) return undefined
   const ended = now.toISOString()
   const judgedNow = outcome.merged.length + outcome.failed.length + outcome.stuck.length > 0
-  const lastJudgedAt = [outcome.line?.lastJudgedAt, judgedNow ? ended : undefined, previous.lastJudgedAt]
+  const lastJudgedAt = [outcome.line?.lastJudgedAt, judgedNow ? ended : undefined, previous?.lastJudgedAt]
     .filter((at): at is string => at !== undefined)
     .reduce<string | undefined>((latest, at) => (latest === undefined || at > latest ? at : latest), undefined)
-  const oldestWaiting = outcome.line === undefined ? previous.oldestWaiting : outcome.line.oldest
+  const oldestWaiting = read.oldest
   return {
-    waiting: outcome.line?.waiting ?? previous.waiting,
+    waiting: read.waiting,
     lastRoundEndedAt: ended,
     ...(oldestWaiting === undefined ? {} : { oldestWaiting }),
     ...(lastJudgedAt === undefined ? {} : { lastJudgedAt }),

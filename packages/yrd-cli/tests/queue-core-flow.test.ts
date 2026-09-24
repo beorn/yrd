@@ -49,14 +49,14 @@ describe("the line's flow after one service round", () => {
       round({}, { waiting: 12, oldest }),
       now,
     )
-    expect(flow.lastJudgedAt).toBe("2026-09-24T20:20:00.000Z")
-    expect(flow.lastRoundEndedAt).toBe(now.toISOString())
+    expect(flow?.lastJudgedAt).toBe("2026-09-24T20:20:00.000Z")
+    expect(flow?.lastRoundEndedAt).toBe(now.toISOString())
   })
 
   it("moves the judgement clock to the round's end for a merge, a failure or a stuck record", () => {
     for (const judged of [{ merged: ["task/a"] }, { failed: ["task/a"] }, { stuck: ["task/a"] }]) {
       const flow = flowAfterRound({ waiting: 11, lastJudgedAt: "2026-09-24T20:20:00.000Z" }, round(judged), now)
-      expect(flow.lastJudgedAt).toBe(now.toISOString())
+      expect(flow?.lastJudgedAt).toBe(now.toISOString())
     }
   })
 
@@ -66,18 +66,27 @@ describe("the line's flow after one service round", () => {
       round({}, { waiting: 2, oldest, lastJudgedAt: "2026-09-24T20:50:00.000Z" }),
       now,
     )
-    expect(chains.lastJudgedAt).toBe("2026-09-24T20:50:00.000Z")
+    expect(chains?.lastJudgedAt).toBe("2026-09-24T20:50:00.000Z")
     const own = flowAfterRound(
       { waiting: 2, lastJudgedAt: "2026-09-24T20:55:00.000Z" },
       round({}, { waiting: 2, oldest, lastJudgedAt: "2026-09-24T20:50:00.000Z" }),
       now,
     )
-    expect(own.lastJudgedAt).toBe("2026-09-24T20:55:00.000Z")
+    expect(own?.lastJudgedAt).toBe("2026-09-24T20:55:00.000Z")
   })
 
   it("keeps the previous reading when the round ended before it could read the line", () => {
     const flow = flowAfterRound({ waiting: 11, oldestWaiting: oldest }, round({}), now)
     expect(flow).toEqual({ waiting: 11, oldestWaiting: oldest, lastRoundEndedAt: now.toISOString() })
+  })
+
+  it("states no flow at all until a round has read the line, never a count of zero nobody took", () => {
+    expect(flowAfterRound(undefined, round({ merged: ["task/a"] }), now)).toBeUndefined()
+    expect(flowAfterRound(undefined, round({}, { waiting: 4, oldest }), now)).toEqual({
+      lastRoundEndedAt: now.toISOString(),
+      oldestWaiting: oldest,
+      waiting: 4,
+    })
   })
 
   it("drops the oldest waiting change once the round reads an empty line", () => {
@@ -86,7 +95,7 @@ describe("the line's flow after one service round", () => {
       round({ merged: ["task/a"] }, { waiting: 0 }),
       now,
     )
-    expect(flow.waiting).toBe(0)
-    expect(flow.oldestWaiting).toBeUndefined()
+    expect(flow?.waiting).toBe(0)
+    expect(flow?.oldestWaiting).toBeUndefined()
   })
 })
