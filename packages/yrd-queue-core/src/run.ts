@@ -2110,7 +2110,12 @@ async function publishChildren(
     return { kind: "kept", ended: "checked" }
   }
   const execution = await gitSuperExecution(
-    { process: run.options.process, env: run.options.env, hooksPath: run.hooksPath },
+    {
+      process: run.options.process,
+      env: { ...(run.options.env ?? globalThis.process.env), GIT_SUPER_PROGRESS: "1" },
+      hooksPath: run.hooksPath,
+      gitOptions: gitInvocationOptions(run.options, run.log),
+    },
     cwd,
     ["push", "--recurse-submodules=only", target.remote, `${mergeCommit}:refs/heads/${target.branch}`],
   )

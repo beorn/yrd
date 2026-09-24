@@ -541,6 +541,71 @@ describe("settling gitlinks", () => {
     expect(trailer(merged!, "Published")).toBe(`submodule ${w.main} -> ${pin}`)
   })
 
+  /**
+   * @i/10-yrd/25475
+   * yrd's push execution must set GIT_SUPER_PROGRESS=1 so git-super's push
+   * progress and heartbeat are activated, and the CLI's stderr from that push,
+   * heartbeat rows included, must be preserved in the round's evidence.
+   */
+  it("sets GIT_SUPER_PROGRESS=1 on push execution and preserves push stderr heartbeat rows in round evidence (25475)", async () => {
+    const w = await world()
+    const pin = await bayOnlySubmoduleCommit(w, "five")
+    const head = await submitGitlink(w, "task/push-heartbeat", pin)
+
+    await using real = createProcess({ cwd: w.work })
+    let pushEnvProgress: string | undefined
+    let publishingCount = 0
+    const tracking: Process = {
+      ...real,
+      async run(request) {
+        const publishing =
+          request.argv.includes("super") &&
+          request.argv.includes("push") &&
+          request.argv.includes("--recurse-submodules=only")
+        if (publishing) {
+          publishingCount++
+          pushEnvProgress = request.env?.GIT_SUPER_PROGRESS
+        }
+        return real.run(request)
+      },
+    }
+
+    const outcome = await queueRun({ ...(await w.options()), process: tracking })
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/push-heartbeat"])
+    expect(publishingCount).toBe(1)
+
+    // Acceptance 1: yrd sets GIT_SUPER_PROGRESS=1 on its push execution, and a test asserts the variable reaches the push.
+    expect(pushEnvProgress).toBe("1")
+
+    // Acceptance 2: The CLI's stderr from that push, heartbeat lines included, is kept in the round's evidence, with a test.
+    const runRecords = readFileSync(outcome.log, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+
+    const pushInvocations = runRecords.filter(
+      (record) =>
+        record.kind === "git" &&
+        Array.isArray(record.args) &&
+        record.args.includes("super") &&
+        record.args.includes("push") &&
+        record.args.includes("--recurse-submodules=only"),
+    )
+    expect(pushInvocations.length).toBe(1)
+    const pushRecord = pushInvocations[0]!
+    expect(typeof pushRecord.evidence).toBe("string")
+    expect(existsSync(String(pushRecord.evidence))).toBe(true)
+
+    const evidence = JSON.parse(readFileSync(String(pushRecord.evidence), "utf8")) as {
+      artifacts: { stdout: string; stderr: string }
+    }
+    expect(existsSync(evidence.artifacts.stderr)).toBe(true)
+    const pushStderr = readFileSync(evidence.artifacts.stderr, "utf8")
+    expect(pushStderr).toContain("git-super push:")
+    expect(pushStderr).toMatch(/^git-super push: select-root \d+\/\d+/mu)
+  })
+
   /** @failure A linked author's private module store is absent from git-super's durable scratch borrow. */
   it("previews an unpublished pin from a linked worktree without publishing it", async () => {
     const w = await world()
