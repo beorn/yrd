@@ -636,7 +636,11 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
 
       if (valid) {
         await expect(attempt).resolves.toBe(0)
-        expect(run.stderr()).toBe("")
+        // The one stderr line a clean submit writes is its remote-call count (25570 row 3): the queue read, the
+        // record push and every fetch, from git's own trace2 log, with no torn line.
+        expect(run.stderr()).toMatch(
+          /^yrd: submit remote calls: processes=\d+ ssh=0 unreadable=0 (?=.*\bpush=1\b)[^\n]*\n$/u,
+        )
         expect(records(run)[0]).toMatchObject({ head })
         const history = await readRecords(w.git, (records(run)[0] as { opened: string }).opened)
         expect(history.map((record) => record.kind)).toEqual(["opened"])

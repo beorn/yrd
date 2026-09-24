@@ -226,3 +226,6 @@ export { runtimeGitlinkPath } from "./runtime-gitlink.ts"
 export type { RuntimeGitlinkDecision, RuntimeGitlinkOff, RuntimeGitlinkPath } from "./runtime-gitlink.ts"
 
 export { programRootCheck } from "./program-root.ts"
+
+export { readRemoteCalls, remoteCallsLine, traceRemoteCalls } from "./remote-calls.ts"
+export type { RemoteCalls } from "./remote-calls.ts"

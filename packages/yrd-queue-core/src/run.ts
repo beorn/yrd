@@ -100,6 +100,7 @@ import { type SuperMergeStep, verifyCandidate, type SuperMergeDetail, type Settl
 import { publishCheckedChildren } from "./publication.ts"
 export { readSuperMergeResult } from "./verifying.ts"
 import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } from "./log.ts"
+import { remoteCallsRow, traceRemoteCalls } from "./remote-calls.ts"
 import { narrowingOf } from "./narrowing.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
@@ -528,6 +529,24 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     overrides: (options.overrides?.entries ?? []).map((entry) => overrideLine(entry, nowMs(options))),
     pid: process.pid,
     target: options.target.branch,
+  })
+  // THE ROUND'S REMOTE CALLS (25570 row 3). Every git process the round starts, yrd's own, Gitomic's and
+  // git-super's children, writes git's trace2 event log under the run's own directory, and one `remote-calls`
+  // row counts them when the round ends, however it ends. Set in both environments a round's Git reads from; a
+  // check's environment is built, never inherited, so a check's own git is not counted here.
+  const traced = traceRemoteCalls(join(options.workdir, "logs", log.id, "trace2"))
+  if (options.env !== undefined) options = { ...options, env: { ...options.env, ...traced.env } }
+  resources.defer(() => {
+    try {
+      log.write({ kind: "remote-calls", ...remoteCallsRow(traced.end()) })
+    } catch (error) {
+      // The count is evidence about the round, never its outcome: an unreadable trace is a named warning row.
+      log.write({
+        kind: "warning",
+        subject: "remote-calls",
+        reason: error instanceof Error ? error.message : String(error),
+      })
+    }
   })
   const gitOptions = gitInvocationOptions(options, log)
   const selected = gitIn(options.repo, options.process, options.selection, gitOptions)
