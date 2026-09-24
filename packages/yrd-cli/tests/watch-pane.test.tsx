@@ -439,15 +439,9 @@ describe("the table (items 3, 28, 38)", () => {
 
     const header = text.split("\n").find((line) => line.includes("ISSUE / BRANCH"))
     expect(header).toBeDefined()
-    for (const column of [
-      "TIME",
-      "RUN",
-      "ISSUE / BRANCH",
-      "STATUS",
-      "WHO",
-      "AGE / RUN",
-    ])
+    for (const column of ["TIME", "RUN", "ISSUE / BRANCH", "STATUS", "WHO", "AGE / RUN"]) {
       expect(header).toContain(column)
+    }
     expect(header).not.toContain("QUEUE / RUN")
     expect(header?.split(/\s+/)).not.toContain("Q")
     expect(header!.trimEnd().endsWith("AGE / RUN")).toBe(true)
@@ -1755,10 +1749,12 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     ]
     const stopped = { ...STOP, since: stuckAt.toISOString() }
     const at = async (cols: number, runner = RUNNER) => {
-      const page = (await printListing(snapshot({ rows, runner, stopped } as Partial<WatchSnapshot>), {
-        color: false,
-        columns: cols,
-      })).split("\n")
+      const page = (
+        await printListing(snapshot({ rows, runner, stopped } as Partial<WatchSnapshot>), {
+          color: false,
+          columns: cols,
+        })
+      ).split("\n")
       return (page.find((l) => l.includes("waiting")) ?? "").trim()
     }
 
@@ -1797,7 +1793,12 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   it("at 100x31 the top line drops the last merge's branch past the breakdown and keeps the last merge's time (A2-set-v3 Q4)", async () => {
     const W = await words()
 
-    const snap = snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER, stopped: STOP } as Partial<WatchSnapshot>)
+    const snap = snapshot({
+      decisions: DECISIONS,
+      rows: EVERY_STATE,
+      runner: RUNNER,
+      stopped: STOP,
+    } as Partial<WatchSnapshot>)
 
     const page = (await printListing(snap, { color: false, columns: 100 })).split("\n")
     const line = (page.find((l) => l.includes(W.waiting.word)) ?? "").trim()
@@ -1839,10 +1840,12 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     ]
     const stopped = { by: "@chief", cause: "operator", change: null, since: since.toISOString() }
     const at = async (cols: number) => {
-      const page = (await printListing(
-        snapshot({ rows, runner: RUNNER, stopped } as Partial<WatchSnapshot>),
-        { color: false, columns: cols },
-      )).split("\n")
+      const page = (
+        await printListing(snapshot({ rows, runner: RUNNER, stopped } as Partial<WatchSnapshot>), {
+          color: false,
+          columns: cols,
+        })
+      ).split("\n")
       return (page.find((l) => l.includes("paused")) ?? "").trim()
     }
     const waiting = `5 ${W.waiting.word}`
@@ -2065,13 +2068,13 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       state: "checked",
     })
     const listing = await lines(snapshot({ rows: [{ row: held }], runner: RUNNER }), 120, 40)
-    const header = listing.find((line) => line.includes("TASK") && line.includes("AGE / RUN")) ?? ""
+    const header =
+      listing.find((line) => (line.includes("ISSUE") || line.includes("TASK")) && line.includes("AGE / RUN")) ?? ""
     const change = tableRow(listing, " task/long-wait ")
     const detail = await paint(at(<WatchDetail detail={detailOf({ row: held }, [])} selected={CHANGES_TAB} />), [], 100)
 
     expect(header).toContain("AGE / RUN")
-    expect(change).toContain("— / 4:00")
-    expect(change).not.toContain("5h37m")
+    expect(change).toContain("5h37m / 4:00")
     expect(detail).toMatch(/CREATED\s+\d\d:\d\d:\d\d · 5h37m ago/u)
   })
 
@@ -2246,9 +2249,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       app.press("s")
       await settle(app)
       const painted = app.text.split("\n")
-      const compact = painted.findIndex(
-        (line) => line.includes("STATS") && (line.includes("▸") || line.includes("▾")),
-      )
+      const compact = painted.findIndex((line) => line.includes("STATS") && (line.includes("▸") || line.includes("▾")))
       const box = painted.findIndex((line) => line.includes("╭─ STATS"))
       seen.push({
         size: `${String(cols)}x${String(rows)}`,
@@ -2256,10 +2257,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         box,
         stacked: compact >= 0 && box > compact,
         beside: painted.some(
-          (line) =>
-            line.includes("STATS") &&
-            (line.includes("▸") || line.includes("▾")) &&
-            line.includes("╭─ STATS"),
+          (line) => line.includes("STATS") && (line.includes("▸") || line.includes("▾")) && line.includes("╭─ STATS"),
         ),
       })
       app.unmount()
@@ -2579,7 +2577,12 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   it("marks the change the runner holds now, and only it: its row in the working colour with a pulsing marker, and nothing else on screen pulses", async () => {
     // The cursor is on the top row, which is a draft: the held row shows the
     // colour it has on its own.
-    expect(await onePulse(100, 31, 0)).toEqual({ heldIsBlue: true, heldTextStandsOut: true, markers: 1, onlyTheHeldRow: true })
+    expect(await onePulse(100, 31, 0)).toEqual({
+      heldIsBlue: true,
+      heldTextStandsOut: true,
+      markers: 1,
+      onlyTheHeldRow: true,
+    })
   }, 10_000)
 
   // The held row still carries the one pulse when the cursor sits ON it, in the selection's own colours, and
