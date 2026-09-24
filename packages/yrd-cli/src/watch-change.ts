@@ -27,6 +27,8 @@ export type HistoryEntry = Readonly<{
   text: string
   /** Something more the record said, rendered after ` — `. */
   detail?: string
+  /** This entry opened a cut: a submit, or a resubmit of the branch (25441's cut counter). */
+  opens?: true
 }>
 
 /** Every selected event as a history line; the event fold has already validated Time:. */
@@ -46,8 +48,43 @@ export function eventHistoryEntries(events: readonly Event[]): readonly HistoryE
       at,
       text: `${event.type}${event.writer === null ? "" : ` by ${event.writer}`}`,
       ...(detail === "" ? {} : { detail }),
+      ...(event.type === "opened" ? { opens: true as const } : {}),
     }
   })
+}
+
+/** One line of the timeline tab: a history entry, oldest first, with how long until the next. */
+export type TimelineEntry = HistoryEntry & Readonly<{ toNextMs?: number }>
+
+/**
+ * The timeline tab (25441): the change's own history for the cut this detail
+ * is about, oldest first, with each entry's time to the next, led by
+ * `drafted` (the head commit's date) when it is known. `cut` is that cut's
+ * place among the branch's cuts (every submit and resubmit), so an earlier
+ * cut is its own timeline, never folded into this one. The ending (merged,
+ * failed, stuck, cancelled) is last and has no time to a next.
+ */
+export function timelineOf(
+  history: readonly HistoryEntry[],
+  drafted: Date | undefined,
+): Readonly<{ entries: readonly TimelineEntry[]; cut: number; cuts: number }> {
+  const oldestFirst = [...history].sort((left, right) => left.at.getTime() - right.at.getTime())
+  const cuts = oldestFirst.filter((entry) => entry.opens === true).length
+  const lastOpening = oldestFirst.findLastIndex((entry) => entry.opens === true)
+  const thisCut = lastOpening < 0 ? oldestFirst : oldestFirst.slice(lastOpening)
+  const lead: HistoryEntry[] =
+    drafted === undefined || (thisCut[0] !== undefined && drafted.getTime() > thisCut[0].at.getTime())
+      ? []
+      : [{ at: drafted, text: "drafted" }]
+  const timeline = [...lead, ...thisCut]
+  return {
+    cut: Math.max(cuts, 1),
+    cuts: Math.max(cuts, 1),
+    entries: timeline.map((entry, index) => {
+      const next = timeline[index + 1]
+      return next === undefined ? entry : { ...entry, toNextMs: next.at.getTime() - entry.at.getTime() }
+    }),
+  }
 }
 
 /** The records of one change as history rows, newest first. */
@@ -70,7 +107,7 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
       // head appends an opened record): the human acted twice, and says so.
       const verb = earlierOpenings === 0 ? STATE_WORDS.submitted.word : "resubmitted"
       const by = trailer(record, "Submitter")
-      return { at: record.at, text: by === undefined ? verb : `${verb} by ${by}` }
+      return { at: record.at, text: by === undefined ? verb : `${verb} by ${by}`, opens: true }
     }
     case "checked": {
       const base = trailer(record, "Base")

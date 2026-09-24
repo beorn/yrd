@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest"
 import type { ChangeRecord, Row } from "@yrd/queue-core"
-import { historyEntries, metadataGroups, metadataKeyWidth } from "../src/watch-change.ts"
+import { historyEntries, metadataGroups, metadataKeyWidth, timelineOf } from "../src/watch-change.ts"
 import { explanationLine, headlineOf, runOf, runTitle, stepsOf, timingRows } from "../src/watch-run.ts"
 
 const NOW_MS = Date.UTC(2026, 8, 3, 12, 0, 0)
@@ -133,6 +133,39 @@ describe("HISTORY and METADATA (watch-change)", () => {
       "pending at 3c285a41af46",
       "submitted by @chief",
     ])
+  })
+
+  it("draws the timeline of the cut a detail is about, oldest first, each entry with its time to the next (25441)", () => {
+    const history = historyEntries([
+      record("opened", 0, [["Submitter", "@chief"]]),
+      record("checked", 1_000, [["Base", "3c285a41af46".padEnd(40, "0")]]),
+      record("opened", 2_000, [["Submitter", "@chief"]]),
+      record("checked", 62_000, [["Base", "3c285a41af46".padEnd(40, "0")]]),
+      record("merged", 92_000, [["Merge", "b234234abcde".padEnd(40, "0")]]),
+    ])
+    const drafted = new Date(NOW_MS - 3_600_000 - 60_000)
+    const timeline = timelineOf(history, drafted)
+
+    // Two cuts, a submit and a resubmit: the timeline is the second one's, led by the head's date.
+    expect({ cut: timeline.cut, cuts: timeline.cuts }).toEqual({ cut: 2, cuts: 2 })
+    expect(timeline.entries.map((entry) => [entry.text, entry.toNextMs])).toEqual([
+      ["drafted", 62_000],
+      ["resubmitted by @chief", 60_000],
+      ["pending at 3c285a41af46", 30_000],
+      ["merged as b234234abcde", undefined],
+    ])
+  })
+
+  it("leads with no drafted entry when the head's date is unknown, and counts a change never submitted as one cut", () => {
+    const history = historyEntries([
+      record("opened", 0, [["Submitter", "@chief"]]),
+      record("failed", 5_000, [["Reason", "test"]]),
+    ])
+    expect(timelineOf(history, undefined).entries.map((entry) => entry.text)).toEqual([
+      "submitted by @chief",
+      "failed test",
+    ])
+    expect(timelineOf([], undefined)).toEqual({ cut: 1, cuts: 1, entries: [] })
   })
 
   it("a notice re-send is never drawn as another run of the change (24196)", () => {
