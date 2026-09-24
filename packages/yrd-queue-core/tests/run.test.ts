@@ -133,6 +133,8 @@ type World = Readonly<{
     check: Readonly<{
       exit?: number
       sleep?: number
+      /** A file the check waits for (bounded) after it starts: the case releases it once it has acted mid-check. */
+      hold?: string
       timeoutMs?: number
       everywhere?: boolean
       setup?: string
@@ -188,6 +190,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     [
       "#!/bin/sh",
       `echo "started" >> "${startedLog}"`,
+      'i=0; while [ -n "${FAKE_HOLD:-}" ] && [ ! -f "$FAKE_HOLD" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done',
       'sleep "${FAKE_SLEEP:-0}"',
       `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
       'if [ -f one.txt ] || [ "${FAKE_EVERYWHERE:-0}" = 1 ]; then exit "${FAKE_EXIT:-0}"; fi',
@@ -236,6 +239,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
         FAKE_EVERYWHERE: check.everywhere === true ? "1" : "0",
         FAKE_EXIT: String(check.exit ?? 0),
         FAKE_SLEEP: String(check.sleep ?? 0),
+        FAKE_HOLD: check.hold ?? "",
         PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
       },
       notify: [{ name: "recorder", on: ["merged", "failed", "stuck", "merged-direct"], run: notifier }],
@@ -594,9 +598,12 @@ it("discards a dropped event check once and continues with the next change", asy
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
 
-  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25 })), notify: [] })
+  // The check holds until the drop has landed, then runs its 0.25s: the drop is always mid-check.
+  const hold = `${w.startedLog}.release`
+  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25, hold })), notify: [] })
   await checkRunning(w)
   await drop(store, { queue: "main", branch: "task/a", by: "operator" })
+  writeFileSync(hold, "")
 
   const outcome = await running
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/b"], failed: [], stuck: [] })
@@ -614,7 +621,9 @@ it("discards a resubmitted event check once and continues with the next change",
   const first = await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
 
-  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25 })), notify: [] })
+  // The check holds until the resubmit has landed, then runs its 0.25s: always mid-check.
+  const hold = `${w.startedLog}.release`
+  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25, hold })), notify: [] })
   await checkRunning(w)
   await w.git(["checkout", "--quiet", "task/a"])
   writeFileSync(join(w.work, "resubmitted.txt"), "new head\n")
@@ -628,6 +637,7 @@ it("discards a resubmitted event check once and continues with the next change",
     submitter: "@dev/2",
   })
   expect(resubmitted).toMatchObject({ head: next, retry: false })
+  writeFileSync(hold, "")
 
   const outcome = await running
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/b"], failed: [], stuck: [] })
