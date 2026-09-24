@@ -227,7 +227,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
       "#!/bin/sh",
       `echo "started" >> "${startedLog}"`,
       'i=0; while [ -n "${FAKE_HOLD:-}" ] && [ ! -f "$FAKE_HOLD" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done',
-      `if [ -n "\${FAKE_HOLD:-}" ]; then echo "held" >> "${startedLog}"; fi`,
+      `if [ "$i" -gt 0 ]; then echo "held" >> "${startedLog}"; fi`,
       'sleep "${FAKE_SLEEP:-0}"',
       `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
       'if [ -f one.txt ] || [ "${FAKE_EVERYWHERE:-0}" = 1 ]; then exit "${FAKE_EXIT:-0}"; fi',
