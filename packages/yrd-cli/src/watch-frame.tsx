@@ -24,7 +24,7 @@ import type { ReactNode } from "react"
 import { Box, Text } from "silvery"
 import type { Row } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
-import { RUNNER_GLYPH, STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.ts"
+import { STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.ts"
 import type { RunnerState } from "./watch-words.ts"
 import { RunnerRow, clockOf, type ListLayout } from "./watch-list.tsx"
 import { TitledBox } from "./watch-primitives.tsx"
@@ -184,7 +184,8 @@ export type Band = (typeof BANDS)[number]
 export function bandOf(row: Pick<Row, "state" | "position" | "live">, holding = true): Band {
   if (row.live !== undefined && holding) return "runner"
   if (row.state === "draft") return "drafts"
-  if (row.position !== undefined || row.state === "queued" || row.state === "checked" || row.state === "stuck") return "waiting"
+  if (row.position !== undefined || row.state === "queued" || row.state === "checked" || row.state === "stuck")
+    return "waiting"
   return "done"
 }
 
@@ -209,13 +210,7 @@ export function bandedRows(rows: readonly WatchRow[], holding = true): readonly 
 }
 
 /** A band's rule: the divider that opens it, drawn to the table's width. */
-export function bandRule(
-  band: Band,
-  count: number,
-  width: number,
-  draftWindow = "7d",
-  unread = 0,
-): string {
+export function bandRule(band: Band, count: number, width: number, draftWindow = "7d", unread = 0): string {
   if (band === "drafts") {
     const draftWord = STATE_WORDS.draft.word
     const plural = count === 1 ? "" : "s"
@@ -247,35 +242,30 @@ export type BandBreak = Readonly<{
 export type BandPlan = Readonly<{
   before: ReadonlyMap<number, BandBreak>
   after: BandBreak | undefined
-  /** The index of the row the runner holds, when this table has it. */
-  holding: number | undefined
 }>
 
 export function bandPlan(
   rows: readonly WatchRow[],
   width: number,
   draftWindow = "7d",
-  holds = true,
+  _holds = false,
   unread = 0,
   bareDrafts = false,
 ): BandPlan {
   const before = new Map<number, BandBreak>()
   const opening = new Map<number, string[]>()
   let after: BandBreak | undefined
-  let holding: number | undefined
   let cursor = 0
   let runnerAt: number | undefined
   for (const band of BANDS) {
-    const total = rows.filter((item) => bandOf(item.row, holds) === band).length
+    const total = rows.filter((item) => bandOf(item.row, false) === band).length
     if (band === "runner") {
-      if (total === 0) runnerAt = cursor
-      else holding = cursor
-      cursor += total
+      runnerAt = cursor
       continue
     }
     if (band === "drafts") {
       if (total > 0 || unread > 0) {
-        const datedCount = rows.filter((item) => bandOf(item.row, holds) === band && item.row.at !== undefined).length
+        const datedCount = rows.filter((item) => bandOf(item.row, false) === band && item.row.at !== undefined).length
         const rules = opening.get(cursor) ?? []
         rules.push(bareDrafts ? "─".repeat(Math.max(1, width)) : bandRule(band, datedCount, width, draftWindow, unread))
         opening.set(cursor, rules)
@@ -293,7 +283,7 @@ export function bandPlan(
     if (runnerAt < rows.length) before.set(runnerAt, { rules: [], runner: true })
     else after = { rules: [], runner: true }
   }
-  return { after, before, holding }
+  return { after, before }
 }
 
 /** How many terminal rows a break costs, so a virtualized list can budget for it. */
@@ -330,14 +320,15 @@ export function runnerOf(snapshot: WatchSnapshot, now: Date) {
  */
 export function RunnerTitledBox({
   line,
-  snapshot,
+  _snapshot,
   layout,
   cursor = false,
   queueDigit = 1,
   queueLabel = "main",
 }: {
   line: ReturnType<typeof runnerOf>
-  snapshot: WatchSnapshot
+  _snapshot?: WatchSnapshot
+  snapshot?: WatchSnapshot
   layout: ListLayout
   cursor?: boolean
   queueDigit?: number
@@ -347,13 +338,7 @@ export function RunnerTitledBox({
   return (
     <Box flexDirection="column" marginTop={1} marginBottom={1}>
       <TitledBox title={STATE_WORDS.runner.word} flushTop borderColor={color}>
-        <RunnerRow
-          line={line}
-          layout={layout}
-          cursor={cursor}
-          queueDigit={queueDigit}
-          queueLabel={queueLabel}
-        />
+        <RunnerRow line={line} layout={layout} cursor={cursor} queueDigit={queueDigit} queueLabel={queueLabel} />
       </TitledBox>
     </Box>
   )
@@ -381,9 +366,7 @@ export function BandBreakRows({
   const runner = runnerOf(snapshot, now)
   return (
     <Box flexDirection="column" flexShrink={0} minWidth={0}>
-      {brk.runner && includeRunner ? (
-        <RunnerTitledBox line={runner} snapshot={snapshot} layout={layout} />
-      ) : null}
+      {brk.runner && includeRunner ? <RunnerTitledBox line={runner} snapshot={snapshot} layout={layout} /> : null}
       {brk.rules.map((rule, idx) => (
         <Text key={`${rule}-${idx}`} color="$fg-muted" wrap="truncate">
           {rule}
@@ -391,13 +374,6 @@ export function BandBreakRows({
       ))}
     </Box>
   )
-}
-
-/**
- * The runner's second line: dropped per operator item 3 ("yes, perhaps don't even say anything?").
- */
-export function RunnerDetail(_props: { snapshot: WatchSnapshot; named?: boolean }) {
-  return null
 }
 
 /**
