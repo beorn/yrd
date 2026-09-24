@@ -14,6 +14,13 @@ import { appendRecord, gitIn, writePause } from "../src/index.ts"
 import { gitEnvironment } from "../src/git.ts"
 import { legacyTrailers } from "../src/legacy-records.ts"
 
+// Every id below hashes a committer (yrd@hostname) and an author (the ambient GIT_AUTHOR_*),
+// so both are pinned here: an id must not depend on which host or which identity runs the test.
+vi.mock("node:os", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:os")>()),
+  hostname: () => "legacy-bytes-host",
+}))
+
 const roots: string[] = []
 
 afterAll(() => {
@@ -38,6 +45,8 @@ it("keeps the exact legacy record and pause object ids under a fixed clock", asy
   await seed(["clone", "--quiet", remote, work])
 
   const at = new Date("2026-09-22T12:34:56.000Z")
+  vi.stubEnv("GIT_AUTHOR_NAME", "legacy bytes")
+  vi.stubEnv("GIT_AUTHOR_EMAIL", "legacy-bytes@yrd.test")
   const git = gitIn(
     work,
     createProcess({
@@ -98,17 +107,20 @@ it("keeps the exact legacy record and pause object ids under a fixed clock", asy
       resumed: resumed.sha,
       retainedHead,
     }).toEqual({
-      // #25429 intentionally renamed the queue committer from yrd-service to yrd.
-      candidate: "bf9428028fafaed8b945da0834b48e32eb9da4bb",
-      checked: "420f6626740fd641c67b286ba6f1ebec129e04a9",
+      // #25429 intentionally renamed the queue committer from yrd-service to yrd. Re-pinned when the
+      // author and host became fixed: the previous pins reproduce exactly under the pinning author's ambient
+      // identity on its host, so the record bytes did not change.
+      candidate: "081d24c2bcdb61e5412c4baff5fde2ed38ea0a2f",
+      checked: "639945bac3a0f38bec8329e3e3822b0569ffb27a",
       genesis: "538f8f98bbb84332337777f997139c8464b80cd9",
-      head: "16dd428a661213c8ec0ece125ccffc88718e4977",
-      opened: "55247712357de02a897df4fed3a0b40f0a716756",
-      paused: "d1c7695c38ebfbca6c11da6f2fd77e16f98772cb",
-      resumed: "91d4b7331cebd2dbd733f13b71beb0573a7d503c",
-      retainedHead: "16dd428a661213c8ec0ece125ccffc88718e4977",
+      head: "0ffe80543cd9aa3049e5406b7398475a87108645",
+      opened: "fa97e96140d3942685a3e46ddc69a3d2539f4c2a",
+      paused: "4afcea1ffa49ab213107241c82347048f4815c85",
+      resumed: "ce0037ab1c8989ddee16f4c25bd5b20b3ad00e75",
+      retainedHead: "0ffe80543cd9aa3049e5406b7398475a87108645",
     })
   } finally {
     vi.useRealTimers()
+    vi.unstubAllEnvs()
   }
 })
