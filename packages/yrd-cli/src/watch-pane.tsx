@@ -57,6 +57,7 @@ import {
   Box,
   ListView,
   ModalDialog,
+  FOLD_MARKERS,
   ModalOverlay,
   SplitPane,
   Text,
@@ -99,20 +100,20 @@ import { StatsBox } from "./watch-boxes.tsx"
 import {
   BandBreakRows,
   ListStack,
-  LoudPause,
   RunnerTitledBox,
   bandHeight,
   bandOf,
   bandPlan,
   bandedRows,
   draftsSaid,
+  lineOf,
   runnerOf,
   type Band,
   type BandPlan,
 } from "./watch-frame.tsx"
 import { TimeText } from "./watch-primitives.tsx"
 import type { RunnerFacts, RunnerLine } from "./watch-runner.ts"
-import type { RunDecision } from "./watch-stats.ts"
+import { lastDayBucket, statsSummary, type RunDecision } from "./watch-stats.ts"
 
 export type WatchPaneItem =
   | { kind: "row"; item: WatchRow; key: string }
@@ -329,7 +330,11 @@ export function WatchPane({
   // bands are applied HERE, before the cursor and the detail read an index, so
   // every one of them addresses the sequence the reader is looking at.
   const runner = runnerOf(shown, shown.at)
-  const draftsLine = draftsSaid(shown.rows, shown.drafts)
+  // The STATS line (25416): what is in hand now, then the last 24 hours, from the one bucket derivation.
+  const statsLine = statsSummary(
+    { drafts: draftsSaid(shown.rows, shown.drafts), waiting: lineOf(shown.unfiltered).waiting.length },
+    shown.decisions === undefined ? undefined : lastDayBucket(shown.decisions, shown.at),
+  )
   const visible = bandedRows(
     shown.rows.filter(
       (item) =>
@@ -496,6 +501,14 @@ export function WatchPane({
     setCursorRow(item?.kind === "row" && index === 0 ? undefined : item?.kind === "row" ? item.item : undefined)
   }
 
+  // The RUNNER box, centred: where `g` goes first and what a click on the top line's status area opens (25416).
+  const runnerAt = visibleItems.findIndex((item) => item.kind === "runner")
+  const pointAtRunner = (): void => {
+    if (runnerAt < 0) return
+    pointAt(runnerAt)
+    listRef.current?.scrollToItem(runnerAt, "center")
+  }
+
   useInput((input, key) => {
     const character = key.text ?? input
     if (character === "?") {
@@ -538,10 +551,10 @@ export function WatchPane({
     if (character === "s") setStatsOpen((was) => !was)
     // g: the RUNNER box, and from the box the top; G (the list's own key) goes to the bottom (25419).
     if (character === "g") {
-      const runnerAt = visibleItems.findIndex((item) => item.kind === "runner")
-      const target = runnerAt < 0 || at === runnerAt ? 0 : runnerAt
-      pointAt(target)
-      listRef.current?.scrollToItem(target, target === runnerAt ? "center" : "start")
+      if (runnerAt < 0 || at === runnerAt) {
+        pointAt(0)
+        listRef.current?.scrollToItem(0, "start")
+      } else pointAtRunner()
     }
     if (character === "w" && load !== undefined) {
       // The other window, read now rather than at the next round, outside any redraw.
@@ -648,20 +661,20 @@ export function WatchPane({
   return (
     <NowProvider readAt={shown.at} live={live}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {/* RUNNER owns the pause rail; without a run journal there is no rail,
-            so the queue's loudest state is said up here (watch-frame.tsx). */}
-        <LoudPause snapshot={shown} />
-        {/* The top line is title and queue pills left, status marker and status pills right (24196). */}
+        {/* The top line: the status and its reason left, the queue tabs and filter group right (24196, 25416).
+            It carries the pause sentence, so the pane draws no LoudPause line of its own. */}
         <TopLine
           queues={shown.queues}
           visible={visibleQueues}
           onToggle={toggleQueue}
           status={queueLineStatus(shown, shown.at)}
+          live={live}
+          onStatusClick={pointAtRunner}
           statusPills={
             terminalRows < PILLS_MIN_ROWS ? null : <StatusPills buckets={buckets} onSelectOnly={selectOnly} />
           }
         />
-        {/* The line under the top line: fold marker + STATS without repeating waiting/stopped/merge counts (24196). */}
+        {/* The line under the top line: the fold marker, then what is in hand now and the last 24 hours (24196, 25416). */}
         <Box
           flexDirection="column"
           flexShrink={0}
@@ -673,8 +686,7 @@ export function WatchPane({
           }}
         >
           <Text wrap="truncate">
-            {statsOpen ? "▾" : "▸"} STATS
-            {draftsLine === undefined ? "" : ` · ${draftsLine}`}
+            {statsOpen ? FOLD_MARKERS.unfolded : FOLD_MARKERS.folded} STATS · {statsLine}
             {shown.decisions === undefined
               ? ""
               : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
@@ -761,21 +773,30 @@ function draftsIn(rows: readonly WatchRow[]): number {
   return rows.filter((item) => item.row.state === "draft").length
 }
 
-/** Derive status marker, word, and color for the top line (only RUNNING or STOPPED, 25367). */
+/**
+ * Derive status marker, word, colour and reason for the top line (only RUNNING
+ * or STOPPED, 25367). The reason is the pause record's own sentence when the
+ * line was stopped, else what the runner's row says it holds; the marker
+ * pulses while the line runs or is stopped with a reason (25416).
+ */
 export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
   const runner = runnerOf(snapshot, now)
-  if (snapshot.stopped !== undefined && snapshot.stopped !== null) {
-    return { marker: "■", word: "STOPPED", color: "$fg-error" }
-  }
-  if (
+  const stopped =
+    snapshot.pause !== undefined ||
+    (snapshot.stopped !== undefined && snapshot.stopped !== null) ||
     runner.state === "stopped" ||
     runner.state === "silent" ||
     runner.state === "stuck" ||
     runner.state === "paused"
-  ) {
-    return { marker: "■", word: "STOPPED", color: "$fg-error" }
+  if (!stopped) return { marker: RUNNING_GLYPH, word: "RUNNING", color: "$fg-info", pulse: true }
+  const reason = snapshot.pause ?? (runner.holds === "" ? undefined : runner.holds)
+  return {
+    marker: "■",
+    word: "STOPPED",
+    color: "$fg-error",
+    pulse: reason !== undefined,
+    ...(reason === undefined ? {} : { reason }),
   }
-  return { marker: RUNNING_GLYPH, word: "RUNNING", color: "$fg-info" }
 }
 
 /** One read that failed: when, and the first line of why. */
