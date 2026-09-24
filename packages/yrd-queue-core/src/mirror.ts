@@ -23,6 +23,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { setTimeout as sleep } from "node:timers/promises"
 import { type FlockHandle, tryAcquireFlock } from "@bearly/flock"
 import type { Git } from "./git.ts"
@@ -31,6 +32,12 @@ import { transportFaultIn } from "./setup-transport.ts"
 
 /** The file inside a mirror holding the ISO instant its last refresh completed. */
 export const MIRROR_REFRESHED_AT = "yrd-refreshed-at"
+
+/** The git setting naming the host's store root; host configuration, like `yrd.workdir`, with no default. */
+export const MIRROR_STORE_SETTING = "yrd.mirror"
+
+/** A compose outside a round refreshes a mirror older than this first (@cto 59d6b6e3). */
+export const MIRROR_WINDOW_MS = 10 * 60_000
 
 /** How long a refresh waits for another writer of the same mirror before refusing. */
 export const MIRROR_LOCK_WAIT_MS = 5 * 60_000
@@ -132,13 +139,16 @@ export async function refreshMirror(options: RefreshMirrorOptions): Promise<Mirr
   })
   const before = mirrorRefreshedAt(path)
   if (options.maxAgeMs !== undefined && before !== undefined && asked.getTime() - before.getTime() < options.maxAgeMs) {
-    return  result("fresh", before)
+    return result("fresh", before)
   }
   using _lock = await lockMirror(options.url, path, options.lockWaitMs ?? MIRROR_LOCK_WAIT_MS)
   const meanwhile = mirrorRefreshedAt(path)
   if (meanwhile !== undefined && meanwhile.getTime() >= asked.getTime()) return await result("coalesced", meanwhile)
-  const outcome = existsSync(path) ? await fetchMirror(options, path) : await createMirror(options, path)
+  // Taken BEFORE the remote is contacted, so the stamp promises only what it can: every ref the remote held
+  // at this instant is here. Stamped after the fetch, a coalescing caller could accept a refresh whose
+  // advertisement predates its own ask and miss a push that landed in between (review-adhoc5, P3 on 2d36b8bbde).
   const refreshedAt = new Date()
+  const outcome = existsSync(path) ? await fetchMirror(options, path) : await createMirror(options, path)
   const stamp = join(path, MIRROR_REFRESHED_AT)
   writeFileSync(`${stamp}.tmp`, `${refreshedAt.toISOString()}\n`)
   renameSync(`${stamp}.tmp`, stamp)
@@ -223,8 +233,13 @@ export type RefreshDeclaredOptions = Omit<RefreshMirrorOptions, "url"> &
   Readonly<{
     /** The repository whose declarations are read. */
     repo: string
-    /** The commit whose `.gitmodules` is read; nested levels are read at their gitlinks, inside their mirrors. */
-    commit?: string
+    /**
+     * The commits whose `.gitmodules` are read; nested levels are read at their
+     * gitlinks, inside their mirrors. A round passes its target and every
+     * candidate head, because a candidate that adds a submodule declares it at
+     * its own commit and nowhere else.
+     */
+    commits: readonly string[]
   }>
 
 /**
@@ -241,9 +256,12 @@ export async function refreshDeclaredMirrors(
 ): Promise<Readonly<{ refreshed: readonly MirrorRefresh[]; skipped: readonly MirrorSkip[] }>> {
   const refreshed = new Map<string, MirrorRefresh>()
   const skipped: MirrorSkip[] = []
-  const levels: Array<Readonly<{ git: Git; commit: string; prefix: string }>> = [
-    { git: options.gitIn(options.repo), commit: options.commit ?? "HEAD", prefix: "" },
-  ]
+  const root = options.gitIn(options.repo)
+  const levels: Array<Readonly<{ git: Git; commit: string; prefix: string }>> = options.commits.map((commit) => ({
+    git: root,
+    commit,
+    prefix: "",
+  }))
   while (levels.length > 0) {
     const level = levels.shift()
     if (level === undefined) break
@@ -258,7 +276,18 @@ export async function refreshDeclaredMirrors(
         skipped.push({ path: named, url, reason: `${url} names no hosted repository` })
         continue
       }
-      if (!refreshed.has(location.path)) refreshed.set(location.path, await refreshMirror({ ...options, url }))
+      if (!refreshed.has(location.path)) {
+        refreshed.set(
+          location.path,
+          await refreshMirror({
+            root: options.root,
+            url,
+            gitIn: options.gitIn,
+            ...(options.maxAgeMs === undefined ? {} : { maxAgeMs: options.maxAgeMs }),
+            ...(options.lockWaitMs === undefined ? {} : { lockWaitMs: options.lockWaitMs }),
+          }),
+        )
+      }
       const mirror = options.gitIn(location.path)
       if (!(await holdsCommit(mirror, sha))) {
         skipped.push({
@@ -272,4 +301,47 @@ export async function refreshDeclaredMirrors(
     }
   }
   return { refreshed: [...refreshed.values()], skipped }
+}
+
+/**
+ * `env` with the compose's reads routed to the store: for each owner prefix a
+ * mirrored URL was declared under (`git@github.com:beorn/`), one `insteadOf`
+ * to that owner's directory in the store and one identity `pushInsteadOf`, so
+ * a push from inside a compose (git-super's retention push) still goes to the
+ * hosted URL (W1). Only COMPOSE environments get this; the queue's own Git, and
+ * with it every decisive read and lease, never does (W2).
+ *
+ * The prefixes come from the URLs the repository actually declares, so the
+ * rule matches exactly the spellings a compose will fetch. git-super's own
+ * per-command borrow rules name whole URLs and are longer, so they still win.
+ * With nothing mirrored the environment is returned unchanged.
+ */
+export function composeEnvironment(
+  env: NodeJS.ProcessEnv,
+  root: string,
+  mirrors: readonly MirrorRefresh[],
+): NodeJS.ProcessEnv {
+  const routes = new Map<string, string>()
+  for (const mirror of mirrors) {
+    const location = mirrorLocation(root, mirror.url)
+    if (location === undefined) throw new Error(`${mirror.url} was mirrored but names no hosted repository`)
+    const repo = /[^/:]+?(?:\.git)?\/?$/u.exec(mirror.url)
+    if (repo === null) throw new Error(`${mirror.url} has no repository segment to route`)
+    routes.set(mirror.url.slice(0, repo.index), `${pathToFileURL(dirname(location.path)).href}/`)
+  }
+  if (routes.size === 0) return env
+  const declared = Number(env.GIT_CONFIG_COUNT ?? "0")
+  let count = Number.isInteger(declared) && declared >= 0 ? declared : 0
+  const next: Record<string, string> = {}
+  const add = (key: string, value: string): void => {
+    next[`GIT_CONFIG_KEY_${String(count)}`] = key
+    next[`GIT_CONFIG_VALUE_${String(count)}`] = value
+    count += 1
+  }
+  add("protocol.file.allow", "always")
+  for (const [prefix, store] of routes) {
+    add(`url.${store}.insteadOf`, prefix)
+    add(`url.${prefix}.pushInsteadOf`, prefix)
+  }
+  return { ...env, ...next, GIT_CONFIG_COUNT: String(count) }
 }

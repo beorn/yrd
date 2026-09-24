@@ -10,13 +10,13 @@
  * repository's git dir would be a second store nobody else reads.
  */
 
-import { configValue, gitIn, refreshDeclaredMirrors } from "@yrd/queue-core"
+import { configValue, gitIn, MIRROR_STORE_SETTING, refreshDeclaredMirrors } from "@yrd/queue-core"
 import { relative } from "node:path"
 import { repositoryHere } from "./declaration.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
-/** The git setting naming the host's store root. */
-export const MIRROR_STORE_SETTING = "yrd.mirror"
+
+export { MIRROR_STORE_SETTING }
 
 export type MirrorRefreshOptions = Readonly<{ commit?: string; json?: boolean }>
 
@@ -42,7 +42,7 @@ export async function refreshMirrors(options: MirrorRefreshOptions, io: YrdCliIO
     result = await refreshDeclaredMirrors({
       root: store,
       repo,
-      commit: options.commit ?? "HEAD",
+      commits: [options.commit ?? "HEAD"],
       gitIn: (directory) => gitIn(directory),
     })
   } catch (error) {

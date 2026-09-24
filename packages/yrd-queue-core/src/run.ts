@@ -100,6 +100,7 @@ import { publishCheckedChildren } from "./publication.ts"
 export { readSuperMergeResult } from "./verifying.ts"
 import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { remoteCallsRow, traceRemoteCalls } from "./remote-calls.ts"
+import { composeEnvironment, refreshDeclaredMirrors } from "./mirror.ts"
 import { narrowingOf } from "./narrowing.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
@@ -193,6 +194,13 @@ export type QueueRunOptions = Readonly<{
   overridesReminded?: readonly OverrideEntry[]
   /** Skip every check declared in .yrd.yml and merge with git machinery only: `yrd merge --no-check`. */
   noCheck?: boolean
+  /**
+   * The host's mirror store (`git config yrd.mirror`, 25570 row 1). When set, a round with candidates
+   * refreshes the mirror of every hosted repository the target and each candidate declare, after its queue
+   * read, and its composes read those mirrors; the round's own Git never does. Absent: composes read the
+   * hosted remotes as before.
+   */
+  mirror?: string
 }> &
   RingOptions
 
@@ -288,6 +296,8 @@ export type Run = Readonly<{
   steps: Steps
   /** Say a ring stopped this round before it could merge; the outcome carries what it said. */
   stop: (stopped: Stopped) => void
+  /** The environment every compose runs in: the run's, plus the mirror routes when the round refreshed any. */
+  composeEnv: NodeJS.ProcessEnv | undefined
 }> & {
   /**
    * The target every judgement stands on: the caller's declaration-captured
@@ -476,6 +486,12 @@ function gitInvocationOptions(options: QueueRunOptions, log: QueueRunLog): GitIn
   }
 }
 
+/** The compose half of a round's Git: the run's invocation logging, in the compose environment (25570 row 1). */
+function composeGitOptions(run: Run): GitInvocationOptions {
+  const options = gitInvocationOptions(run.options, run.log)
+  return run.composeEnv === undefined ? options : { ...options, env: run.composeEnv }
+}
+
 function nowMs(options: QueueRunOptions): number {
   return options.now !== undefined ? options.now() : Date.now()
 }
@@ -630,6 +646,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   log.write({ kind: "queue", queue: name })
   queueNamed = true
   if (pendingOmissions !== undefined) writeOmissions(pendingOmissions)
+  const composeEnv = await refreshRoundMirrors(options, log, gitOptions, changes)
   for (const entry of options.overridesExpired ?? []) {
     log.write({
       by: entry.by,
@@ -670,6 +687,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       stopped = said
     },
     tmpdir: join(options.workdir, "tmp"),
+    composeEnv,
     targetSha,
     targetAfter: { sha: targetSha },
     worktrees: join(options.workdir, "worktrees", log.id),
@@ -1309,10 +1327,10 @@ async function prepare(
     phase,
   }
   return prepareWorktree(run.git, run.options.repo, commit, path, {
-    env: run.options.env,
+    env: run.composeEnv,
     populateReference: run.options.populateReference,
     selection: run.options.selection,
-    gitOptions: gitInvocationOptions(run.options, run.log),
+    gitOptions: composeGitOptions(run),
     plumbing: run.plumbing,
     process: run.options.process,
     record: ({ result, start, end: ended }) => {
@@ -1522,6 +1540,45 @@ function writeComposeSteps(
   for (const step of steps ?? []) log.write({ ...about, kind: "step", ms: step.ms, name: step.name, within: "compose" })
 }
 
+/**
+ * THE ROUND'S ONE READ OF EACH COMPONENT (25570 row 1, @cto 59d6b6e3 as amended in dcfbe637).
+ *
+ * After the queue read, so every pin a candidate names was pushed before its
+ * submit opened it and is in the mirror by construction; and only when the
+ * round has candidates, so an idle round still makes no remote call. The walk
+ * covers the target and every candidate head, because a candidate that adds a
+ * submodule declares it at its own commit and nowhere else. A refresh that
+ * fails ends the round by name: composing from the hosted remote instead is the
+ * silent fallback the store exists to remove.
+ */
+async function refreshRoundMirrors(
+  options: QueueRunOptions,
+  log: Pick<QueueRunLog, "write">,
+  gitOptions: GitInvocationOptions,
+  changes: QueueRead,
+): Promise<NodeJS.ProcessEnv | undefined> {
+  if (options.mirror === undefined || changes.length === 0) return options.env
+  const { refreshed, skipped } = await refreshDeclaredMirrors({
+    root: options.mirror,
+    repo: options.repo,
+    commits: [options.targetSha, ...changes.map((entry) => entry.change.head)],
+    gitIn: (cwd) => gitIn(cwd, options.process, options.selection, gitOptions),
+  })
+  for (const mirror of refreshed) {
+    log.write({
+      kind: "mirror",
+      url: mirror.url,
+      path: mirror.path,
+      outcome: mirror.outcome,
+      ms: mirror.ms,
+      bytes: mirror.bytes,
+      refreshedAt: mirror.refreshedAt.toISOString(),
+    })
+  }
+  for (const skip of skipped) log.write({ kind: "mirror", outcome: "skipped", ...skip })
+  return composeEnvironment(options.env ?? process.env, options.mirror, refreshed)
+}
+
 /** Compose and settle the exact tree a phase will judge, then materialize that final commit before setup or checks run. */
 async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePhase): Promise<ComposedCandidate> {
   const { head } = entry.change
@@ -1534,13 +1591,13 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
       head,
       path: join(run.worktrees, "compose", phase, head.slice(0, 12)),
       message: mergeMessage(run, entry),
-      env: run.options.env,
+      env: run.composeEnv,
       process: run.options.process,
       hooksPath: run.hooksPath,
       timed: (name, work) => timedStep(run.log, { ...step, name }, work),
       worktree: {
-        env: run.options.env,
-        gitOptions: gitInvocationOptions(run.options, run.log),
+        env: run.composeEnv,
+        gitOptions: composeGitOptions(run),
         plumbing: run.plumbing,
         populateReference: run.options.populateReference,
         process: run.options.process,
@@ -2028,8 +2085,8 @@ async function prepareSettledBase(
     raises,
     path: join(run.worktrees, "compose", "base", entry.change.head.slice(0, 12)),
     branch: entry.change.branch,
-    env: run.options.env,
-    gitOptions: gitInvocationOptions(run.options, run.log),
+    env: run.composeEnv,
+    gitOptions: composeGitOptions(run),
     plumbing: run.plumbing,
     populateReference: run.options.populateReference,
     process: run.options.process,

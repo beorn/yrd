@@ -9,12 +9,15 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { setTimeout as sleep } from "node:timers/promises"
 import { tryAcquireFlock } from "@bearly/flock"
 import { afterAll, describe, expect, it } from "vitest"
 import { type Git, gitIn } from "../src/git.ts"
 import {
+  composeEnvironment,
   MIRROR_REFRESHED_AT,
   mirrorLocation,
+  type MirrorRefresh,
   MirrorUnavailable,
   refreshDeclaredMirrors,
   refreshMirror,
@@ -247,7 +250,7 @@ describe("refreshDeclaredMirrors", () => {
       { path: "vendor/local", url: join(root, "elsewhere", "local.git"), sha: await head(local, env) },
     ])
 
-    const result = await refreshDeclaredMirrors({ root: store, repo: product, commit, gitIn: through(env) })
+    const result = await refreshDeclaredMirrors({ root: store, repo: product, commits: [commit], gitIn: through(env) })
     expect(result.refreshed.map(({ path }) => path.slice(store.length + 1)).sort()).toEqual([
       "github.com/beorn/leaf.git",
       "github.com/beorn/middle.git",
@@ -277,7 +280,7 @@ describe("refreshDeclaredMirrors", () => {
       { path: "vendor/middle", url: `${HOSTED}middle.git`, sha: neverPushed },
     ])
 
-    const result = await refreshDeclaredMirrors({ root: store, repo: product, commit, gitIn: through(env) })
+    const result = await refreshDeclaredMirrors({ root: store, repo: product, commits: [commit], gitIn: through(env) })
     expect(result.refreshed.map(({ url }) => url)).toEqual([`${HOSTED}middle.git`])
     expect(result.skipped).toEqual([
       {
@@ -286,5 +289,89 @@ describe("refreshDeclaredMirrors", () => {
         reason: `the mirror holds no ${neverPushed}, so the submodules it declares were not read`,
       },
     ])
+  })
+})
+
+describe("composeEnvironment", () => {
+  it("W1: routes a mirrored owner's fetches to the store and keeps its pushes on the hosted URL", async () => {
+    const { root, store, upstream, env } = host()
+    const leaf = await upstreamRepository(upstream, "leaf", env)
+    const product = await upstreamRepository(upstream, "product", env)
+    const commit = await declare(product, env, [
+      { path: "vendor/leaf", url: `${HOSTED}leaf.git`, sha: await head(leaf, env) },
+    ])
+    const { refreshed } = await refreshDeclaredMirrors({ root: store, repo: product, commits: [commit], gitIn: through(env) })
+    // The compose env is layered over a caller env that has NO test rewrite, as on the host.
+    const plain = { ...process.env, GIT_SSH_COMMAND: "false", GIT_CONFIG_COUNT: "0" }
+    const composing = composeEnvironment(plain, store, refreshed)
+    const clone = join(root, "composed")
+    await gitIn(root, undefined, undefined, { env: composing })(["clone", "--quiet", `${HOSTED}leaf.git`, clone])
+    const child = gitIn(clone, undefined, undefined, { env: composing })
+    expect((await child(["config", "--get", "remote.origin.url"])).trim()).toBe(`${HOSTED}leaf.git`)
+    expect((await child(["remote", "get-url", "origin"])).trim()).toBe(
+      `file://${join(store, "github.com", "beorn")}/leaf.git`,
+    )
+    expect((await child(["remote", "get-url", "--push", "origin"])).trim()).toBe(`${HOSTED}leaf.git`)
+    // Without the compose env the same clone names GitHub again: nothing was written into its config.
+    const outside = gitIn(clone, undefined, undefined, { env: plain })
+    expect((await outside(["remote", "get-url", "origin"])).trim()).toBe(`${HOSTED}leaf.git`)
+  })
+
+  it("adds nothing when nothing was mirrored, so a compose without a store reads exactly as before", () => {
+    const env = { PATH: "/bin", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "a.b", GIT_CONFIG_VALUE_0: "c" }
+    expect(composeEnvironment(env, "/store", [])).toEqual(env)
+  })
+})
+
+// Both rows are review-adhoc5's, from the review of slice 1 (2d36b8bbde): P1 found that the stamp promised more than
+// the fetch had read; P2 pins the once-per-repository guard, which no row reddened before.
+describe("what a refresh promises", () => {
+  it("a refresh asked after a push, while another is mid-fetch, returns holding that push", async () => {
+    const { store, upstream, env } = host()
+    const work = await upstreamRepository(upstream, "child", env)
+    const url = `${HOSTED}child.git`
+    await refreshMirror({ root: store, url, gitIn: through(env) })
+    const git = gitIn(work, undefined, undefined, { env })
+    let pushed = ""
+    let late: Promise<MirrorRefresh> | undefined
+    // The first refresh's fetch takes its advertisement, THEN the remote moves and the second caller asks,
+    // while the first still holds the lock (a slow pack transfer, modelled as a wait after the fetch).
+    const slow = (cwd: string): Git => {
+      const inner = gitIn(cwd, undefined, undefined, { env })
+      return async (args, input) => {
+        const out = await inner(args, input)
+        if (args[0] === "fetch" && late === undefined) {
+          writeFileSync(join(work, "late.txt"), "late\n")
+          await git(["add", "--all"])
+          await git([...author, "commit", "--quiet", "--message", "late"])
+          await git(["push", "--quiet", "origin", "main"])
+          pushed = (await git(["rev-parse", "HEAD"])).trim()
+          late = refreshMirror({ root: store, url, gitIn: through(env) })
+          await sleep(400)
+        }
+        return out
+      }
+    }
+    const first = await refreshMirror({ root: store, url, gitIn: slow })
+    expect(late).toBeDefined()
+    const second = await (late as Promise<MirrorRefresh>)
+    expect(second.outcome).toBe("fetched")
+    const mirror = gitIn(first.path, undefined, undefined, { env })
+    expect((await mirror(["rev-parse", "refs/heads/main"])).trim()).toBe(pushed)
+  })
+
+  it("one repository declared at two paths is contacted once", async () => {
+    const { root, store, upstream, env } = host()
+    const sibling = await upstreamRepository(upstream, "sibling", env)
+    const product = await upstreamRepository(upstream, "product", env)
+    const sha = await head(sibling, env)
+    const commit = await declare(product, env, [
+      { path: "vendor/sibling", url: `${HOSTED}sibling.git`, sha },
+      { path: "vendor/again", url: "ssh://git@github.com/beorn/sibling.git", sha },
+    ])
+    const counted = traced(env, root)
+    await refreshDeclaredMirrors({ root: store, repo: product, commits: [commit], gitIn: through(counted.env) })
+    const verbs = readRemoteCalls(counted.dir).verbs
+    expect({ clone: verbs.clone ?? 0, fetch: verbs.fetch ?? 0 }).toEqual({ clone: 1, fetch: 0 })
   })
 })

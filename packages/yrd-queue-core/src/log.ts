@@ -167,6 +167,10 @@ export const LOG_KINDS = [
   // ssh_children (an upper bound on logins), remote_ms, unreadable lines and one field per remote verb. Readers match kinds by equality, so this
   // closing row breaks none of them.
   "remote-calls",
+  // One host mirror the round refreshed after its queue read, before any compose read it (25570 row 1): url,
+  // path, outcome, ms, bytes and refreshedAt; or `skipped` with the declared path and the reason. The size is
+  // the store's growth alarm while gc is off.
+  "mirror",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]

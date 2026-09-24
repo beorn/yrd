@@ -230,8 +230,11 @@ export { programRootCheck } from "./program-root.ts"
 export { readRemoteCalls, remoteCallsLine, traceRemoteCalls } from "./remote-calls.ts"
 export type { RemoteCalls } from "./remote-calls.ts"
 export {
+  composeEnvironment,
   MIRROR_LOCK_WAIT_MS,
   MIRROR_REFRESHED_AT,
+  MIRROR_STORE_SETTING,
+  MIRROR_WINDOW_MS,
   mirrorLocation,
   mirrorRefreshedAt,
   MirrorUnavailable,
