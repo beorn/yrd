@@ -44,7 +44,11 @@ export function eventRows(
       ...(change.since === undefined ? {} : { since: change.since }),
       ...(change.at === undefined ? {} : { at: change.at }),
       ...(change.endedAt === undefined ? {} : { endedAt: change.endedAt }),
-      ...(change.reason === undefined ? {} : { reason: change.reason }),
+      ...(change.deferred === undefined
+        ? change.reason === undefined
+          ? {}
+          : { reason: change.reason }
+        : { reason: `deferred ${change.deferred.check}: ${change.deferred.reason}` }),
       ...(change.ignored === undefined ? {} : { ignored: change.ignored }),
     })
   }
