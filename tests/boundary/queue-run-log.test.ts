@@ -405,21 +405,32 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       // An honest zero: one run record, saying the queue run ran and what it read
       // the queue from. "I found nothing" and "I never looked" must not be the
       // same bytes. The queue record between them names the queue and marks
-      // the Git preamble complete (24470).
+      // the Git preamble complete (24470). The read's own timing rows (`step`,
+      // 25303) and the closing count of remote calls (`remote-calls`, 25282)
+      // are accounting around that account, like the Git rows; the omission
+      // summary (25541) is an honest zero of its own.
+      const accounting = new Set(["git", "step", "remote-calls"])
       expect(
-        records.filter((record) => record.kind !== "git"),
+        records.filter((record) => !accounting.has(String(record.kind))),
         run.report,
-      ).toEqual([theOne(records, "run"), theOne(records, "queue"), theOne(records, "observation")])
+      ).toEqual([
+        theOne(records, "run"),
+        theOne(records, "queue"),
+        expect.objectContaining({ kind: "observation", subject: "branch-list-omissions", count: 0, branches: [] }),
+        expect.objectContaining({
+          kind: "observation",
+          contract: "native",
+          message: expect.stringContaining("native Git observes the root queue only"),
+        }),
+      ])
       expect(theOne(records, "queue"), run.report).toMatchObject({ queue: `${origin}#main` })
-      expect(theOne(records, "observation"), run.report).toMatchObject({
-        contract: "native",
-        message: expect.stringContaining("native Git observes the root queue only"),
-      })
       const invocations = ofKind(records, "git")
       expect(invocations.length, run.report).toBeGreaterThan(0)
       for (const record of invocations) {
         expect(record, run.report).toMatchObject({
-          executable: Bun.which("git"),
+          // The PATH the queue run resolves from, passed explicitly: Bun.which
+          // alone reads the PATH the process started with, not a later assignment.
+          executable: Bun.which("git", { PATH: process.env.PATH ?? "" }),
           contract: "native",
           scope: "default",
           origin: "yrd.git absent",
