@@ -213,19 +213,23 @@ export function bandedRows(rows: readonly WatchRow[], holding = true): readonly 
   return [...of("drafts"), ...waiting, ...of("runner"), ...of("done")]
 }
 
-/** A band's rule: the divider that opens it, drawn to the table's width. */
-export function bandRule(band: Band, count: number, width: number, draftWindow = "7d", unread = 0, older = 0): string {
-  if (band === "drafts") {
-    const draftWord = STATE_WORDS.draft.word
-    const plural = count === 1 ? "" : "s"
-    const unreadPart = unread > 0 ? ` · ${String(unread)} not yet read` : ""
-    // Seven days lists the last day's drafts; the rest of the week folds into a count (25424).
-    const olderPart = older > 0 ? ` · ${String(older)} older` : ""
-    const said = `${String(count)} ${draftWord}${plural} (${draftWindow === "7d" ? "1d" : draftWindow})${olderPart}${unreadPart}`
-    const rule = `── ${said} `
-    return rule.padEnd(Math.max(rule.length, width), "─")
-  }
-  return "─".repeat(Math.max(1, width))
+/**
+ * The drafts a reading holds, in words, for the STATS line: the dated rows
+ * listed, the older ones of the week folded into a count (25424), and the
+ * heads not yet read. The table itself draws no drafts line (25417).
+ */
+export function draftsSaid(rows: readonly WatchRow[], drafts: WatchSnapshot["drafts"]): string | undefined {
+  const count = rows.filter((item) => item.row.state === "draft" && item.row.at !== undefined).length
+  const unread = drafts?.unread ?? 0
+  const older = drafts?.older ?? 0
+  if (count === 0 && unread === 0 && older === 0) return undefined
+  const window = drafts?.window ?? "7d"
+  const plural = count === 1 ? "" : "s"
+  return (
+    `${String(count)} ${STATE_WORDS.draft.word}${plural} (${window === "7d" ? "1d" : window})` +
+    (older > 0 ? ` · ${String(older)} older` : "") +
+    (unread > 0 ? ` · ${String(unread)} not yet read` : "")
+  )
 }
 
 /** What is drawn at one point in the table that is not a change's row. */
@@ -253,11 +257,8 @@ export type BandPlan = Readonly<{
 export function bandPlan(
   rows: readonly WatchRow[],
   width: number,
-  draftWindow = "7d",
-  _holds = false,
-  unread = 0,
-  bareDrafts = false,
-  older = 0,
+  /** The page's static list opens the drafts with a bare rule; the watch draws none (25417). */
+  draftsRule: "bare" | "none" = "none",
 ): BandPlan {
   const before = new Map<number, BandBreak>()
   const opening = new Map<number, string[]>()
@@ -271,14 +272,7 @@ export function bandPlan(
       continue
     }
     if (band === "drafts") {
-      if (total > 0 || unread > 0 || older > 0) {
-        const datedCount = rows.filter((item) => bandOf(item.row, false) === band && item.row.at !== undefined).length
-        const rules = opening.get(cursor) ?? []
-        rules.push(
-          bareDrafts ? "─".repeat(Math.max(1, width)) : bandRule(band, datedCount, width, draftWindow, unread, older),
-        )
-        opening.set(cursor, rules)
-      }
+      if (total > 0 && draftsRule === "bare") opening.set(cursor, ["─".repeat(Math.max(1, width))])
       cursor += total
       continue
     }

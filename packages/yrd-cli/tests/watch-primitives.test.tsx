@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest"
 import { Text } from "silvery"
 import { render } from "silvery/test"
-import { MarkerRow, TitledBox } from "../src/watch-primitives.tsx"
+import { MarkerRow, TimeText, TitledBox } from "../src/watch-primitives.tsx"
 
 async function paint(element: Parameters<typeof render>[0], cols = 40): Promise<string> {
   const app = render(element, { cols, rows: 8 })
@@ -66,5 +66,27 @@ describe("MarkerRow (item 29a)", () => {
       </MarkerRow>,
     )
     expect(text.split("\n")[0]?.startsWith("  aligned")).toBe(true)
+  })
+})
+
+describe("a time or date says its numbers and mutes its separators (25420)", () => {
+  it("draws h, d, m, colon, slash and dash in the muted colour and every digit in the text's own", async () => {
+    const app = render(
+      <>
+        <TimeText text="2026-09-23 20:41 1h05m / 3d02h" />
+        <Text color="$fg-muted">x</Text>
+      </>,
+      { cols: 40, rows: 3 },
+    )
+    await app.waitForLayoutStable()
+    const line = app.lines[0] ?? ""
+    const muted = app.cell(0, 1).fg
+    const fgAt = (needle: string, offset = 0) => app.cell(line.indexOf(needle) + offset, 0).fg
+    const separators = ["-", ":", "h", "m", "/", "d"].map((mark) => fgAt(mark))
+    const digits = [fgAt("2026"), fgAt("41"), fgAt("05"), fgAt("3d", 0)]
+
+    expect(separators.every((fg) => JSON.stringify(fg) === JSON.stringify(muted))).toBe(true)
+    expect(digits.some((fg) => JSON.stringify(fg) === JSON.stringify(muted))).toBe(false)
+    app.unmount()
   })
 })
