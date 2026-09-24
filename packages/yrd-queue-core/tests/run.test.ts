@@ -227,6 +227,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
       "#!/bin/sh",
       `echo "started" >> "${startedLog}"`,
       'i=0; while [ -n "${FAKE_HOLD:-}" ] && [ ! -f "$FAKE_HOLD" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done',
+      `if [ -n "\${FAKE_HOLD:-}" ]; then echo "held" >> "${startedLog}"; fi`,
       'sleep "${FAKE_SLEEP:-0}"',
       `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
       'if [ -f one.txt ] || [ "${FAKE_EVERYWHERE:-0}" = 1 ]; then exit "${FAKE_EXIT:-0}"; fi',
@@ -262,7 +263,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     options: async (check) => ({
       checks: [
         {
-          environmentPassthrough: ["FAKE_EXIT", "FAKE_SLEEP", "FAKE_EVERYWHERE"],
+          environmentPassthrough: ["FAKE_EXIT", "FAKE_SLEEP", "FAKE_EVERYWHERE", "FAKE_HOLD"],
           name: "verify",
           on: check.on,
           run: fakeCheck,
@@ -643,6 +644,7 @@ it("discards a dropped event check once and continues with the next change", asy
 
   const outcome = await running
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/b"], failed: [], stuck: [] })
+  expect(readFileSync(w.startedLog, "utf8"), "the check waited on its hold").toContain("held")
   expect((await readStatus(store, "main", "task/a")).status).toBe("cancelled")
   expect(logRecords(outcome).filter((row) => row.kind === "discarded" && row.branch === "task/a")).toHaveLength(1)
 })
@@ -677,6 +679,7 @@ it("discards a resubmitted event check once and continues with the next change",
 
   const outcome = await running
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/b"], failed: [], stuck: [] })
+  expect(readFileSync(w.startedLog, "utf8"), "the check waited on its hold").toContain("held")
   expect(await readStatus(store, "main", "task/a")).toMatchObject({ status: "queued", commit: next })
   expect((await readStatus(store, "main", "task/b")).status).toBe("merged")
   expect(logRecords(outcome).filter((row) => row.kind === "discarded" && row.branch === "task/a")).toHaveLength(1)

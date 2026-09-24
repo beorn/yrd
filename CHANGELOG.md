@@ -12,3 +12,7 @@
   document left by a SIGKILL or a crash reads "stopped outside a graceful stop since T; hab ps <unit> has the
   supervisor's record". Every running document carries `facts.serviceStarted`, from a `start` intent or the
   default reason "started" (25430).
+- `readUnitIntent("stop")` accepts a stop intent only when its `at` is at or after the reader's own process start
+  (`writer.startedAt`), protecting against reading a previous stop's record left by a reasonless start. A missing,
+  unparseable, or stale `at` records "no stop reason was recorded" without falling back to `now` (@cto 16ab7d00,
+  25430 fix-forward).

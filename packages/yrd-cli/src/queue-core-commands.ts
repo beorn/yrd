@@ -1263,7 +1263,7 @@ export async function coreQueueCommand(
       // WHO STARTED IT AND WHY (25430): the supervisor's start intent when it
       // gave one, else the plain default, as resume's is "pause lifted". Keyed
       // on the verb, so a previous stop's record is never read as this start's.
-      const startIntent = readUnitIntent("start", options.env ?? process.env, new Date())
+      const startIntent = readUnitIntent("start", options.env ?? process.env, writer.startedAt)
       const serviceStarted: ServiceIntentFact =
         startIntent.kind === "intent" ? startIntent.fact : { reason: "started", since: writer.startedAt }
       // THE RELAUNCH EXIT, and whether it is armed (@i/10-yrd/24515). An
@@ -1514,12 +1514,14 @@ export async function coreQueueCommand(
       // last document saying who stopped the service and why, then dies of the
       // signal as it always did. Synchronous from start to re-raise, and the
       // heartbeat is cleared first, so nothing writes over the last document.
+      // Under @cto 16ab7d00, readUnitIntent verifies the intent's `at` is at or
+      // after writer.startedAt so a previous stop's intent is never read.
       // A SIGKILL runs none of this: its last document ages into the overdue
       // reading, which says the service stopped outside a graceful stop.
       const terminate = request.terminate ?? processTerminate
       const offTerminate = terminate.on(() => {
         clearInterval(beat)
-        const intent = readUnitIntent("stop", options.env ?? process.env, new Date())
+        const intent = readUnitIntent("stop", options.env ?? process.env, writer.startedAt)
         if (intent.kind === "none") log?.warn?.(`stopping without a recorded reason: ${intent.why}`)
         persistHealth(
           gracefulStopHealthDocument(
