@@ -34,7 +34,8 @@ export type GitSelection = Readonly<{
 // Uniform invocation bounds. The 15-component measurement owns any revision;
 // expiry reports uncertainty and never establishes that a mutation had no effect.
 const GIT_READINESS_MS = 5_000
-const GIT_ROOT_INVOCATION_MS = 5 * 60_000
+/** One root-v1 git call's bound. A callee's own wait must stay strictly under it minus its work (git-super's writer lock, 25274). */
+export const GIT_ROOT_INVOCATION_MS = 5 * 60_000
 const GIT_CONTROL_BYTES = 64 * 1024
 
 export type GitObservationInput = QueueObservation &
