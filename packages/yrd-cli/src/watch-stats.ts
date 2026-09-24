@@ -15,6 +15,7 @@
  */
 
 import type { JournalRun, Row, WatchRow } from "@yrd/queue-core"
+import { STATE_WORDS, runTime } from "./watch-format.ts"
 
 /** One decision a run recorded about a change: the smallest fact STATS counts. */
 export type RunDecision = Readonly<{
@@ -223,7 +224,10 @@ function median(values: readonly number[]): number | undefined {
   if (values.length === 0) return undefined
   const sorted = [...values].sort((left, right) => left - right)
   const middle = Math.floor(sorted.length / 2)
-  return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1]! + sorted[middle]!) / 2
+  const upper = sorted[middle]
+  const lower = sorted[middle - 1]
+  if (sorted.length % 2 === 1 || lower === undefined || upper === undefined) return upper
+  return (lower + upper) / 2
 }
 
 function startOfLocalWeek(today: Date): Date {
@@ -303,30 +307,72 @@ export function statsBuckets(decisions: readonly RunDecision[], now: Date, hours
     })
     previousDay = day
   }
-  return windows.map((window) => {
-    const inside = decisions.filter(
-      (decision) => decision.at.getTime() >= window.startMs && decision.at.getTime() < window.endMs,
-    )
-    const spans = (key: "totalMs" | "queuedMs" | "runMs" | "retries"): readonly number[] =>
-      inside.flatMap((decision) => (decision[key] === undefined ? [] : [decision[key]]))
-    const retries = spans("retries")
-    const medians = {
-      ...(spans("totalMs").length === 0 ? {} : { totalMs: median(spans("totalMs")) }),
-      ...(spans("queuedMs").length === 0 ? {} : { queuedMs: median(spans("queuedMs")) }),
-      ...(spans("runMs").length === 0 ? {} : { runMs: median(spans("runMs")) }),
-      ...(retries.length === 0 ? {} : { retries: retries.reduce((sum, value) => sum + value, 0) / retries.length }),
-    }
-    return {
-      ...window,
-      duplicates: inside.filter((decision) => decision.duplicate).length,
-      fails: inside.filter((decision) => decision.decision === "failed").length,
-      merges: inside.filter((decision) => decision.decision === "merged" && !decision.duplicate).length,
-      passes: inside.filter((decision) => decision.decision === "checked").length,
-      runs: new Set(inside.map((decision) => decision.run)).size,
-      stuck: inside.filter((decision) => decision.decision === "stuck").length,
-      ...medians,
-    }
-  })
+  return windows.map((window) => bucketOf(window, decisions))
+}
+
+/** One window's counts and medians over the decisions inside it: the one derivation every STATS number reads. */
+function bucketOf(window: StatsWindow, decisions: readonly RunDecision[]): StatsBucket {
+  const inside = decisions.filter(
+    (decision) => decision.at.getTime() >= window.startMs && decision.at.getTime() < window.endMs,
+  )
+  const spans = (key: "totalMs" | "queuedMs" | "runMs" | "retries"): readonly number[] =>
+    inside.flatMap((decision) => (decision[key] === undefined ? [] : [decision[key]]))
+  const retries = spans("retries")
+  const medians = {
+    ...(spans("totalMs").length === 0 ? {} : { totalMs: median(spans("totalMs")) }),
+    ...(spans("queuedMs").length === 0 ? {} : { queuedMs: median(spans("queuedMs")) }),
+    ...(spans("runMs").length === 0 ? {} : { runMs: median(spans("runMs")) }),
+    ...(retries.length === 0 ? {} : { retries: retries.reduce((sum, value) => sum + value, 0) / retries.length }),
+  }
+  return {
+    ...window,
+    duplicates: inside.filter((decision) => decision.duplicate).length,
+    fails: inside.filter((decision) => decision.decision === "failed").length,
+    merges: inside.filter((decision) => decision.decision === "merged" && !decision.duplicate).length,
+    passes: inside.filter((decision) => decision.decision === "checked").length,
+    runs: new Set(inside.map((decision) => decision.run)).size,
+    stuck: inside.filter((decision) => decision.decision === "stuck").length,
+    ...medians,
+  }
+}
+
+/** The last 24 hours back from `now`, as one period bucket: what the STATS line summarises (25416). */
+export function lastDayBucket(decisions: readonly RunDecision[], now: Date): StatsBucket {
+  const window: StatsWindow = {
+    dayBoundary: false,
+    endMs: now.getTime() + 1,
+    key: "24h",
+    kind: "period",
+    label: "24H",
+    startMs: now.getTime() - 86_400_000,
+  }
+  return bucketOf(window, decisions)
+}
+
+/**
+ * The STATS line's summary (25416): what is in hand now, then the last 24
+ * hours' median wait and run and its verdicts —
+ * `current: 8 drafts (1d), 98 older, 7 waiting · 24h: 03:12 wait, 11:40 run, 7 merges, 3 failed, 2 stuck`.
+ * `current.drafts` is the drafts phrase (`draftsSaid`), absent when there are none; the
+ * changes in line are said in the watch's own word for them, never the core's `queued`.
+ * `day` is absent when no run journal was read, and the line says so rather
+ * than print zeros that were never measured.
+ */
+export function statsSummary(
+  current: Readonly<{ drafts: string | undefined; waiting: number }>,
+  day: StatsBucket | undefined,
+): string {
+  const now = `current: ${current.drafts ?? `0 ${STATE_WORDS.draft.word}s`}, ${String(current.waiting)} ${STATE_WORDS.waiting.word}`
+  if (day === undefined) return `${now} · 24h: no run journal read on this machine`
+  const span = (ms: number | undefined): string => (ms === undefined ? "—" : runTime(ms))
+  return (
+    `${now} · 24h: ${span(day.queuedMs)} wait, ${span(day.runMs)} run, ` +
+    `${counted(day.merges, "merge")}, ${String(day.fails)} failed, ${String(day.stuck)} stuck`
+  )
+}
+
+function counted(count: number, noun: string): string {
+  return `${String(count)} ${noun}${count === 1 ? "" : "s"}`
 }
 
 /** A count as the box prints it: right-aligned by the caller, and never `0` where a blank reads better in a strip of hours. */
