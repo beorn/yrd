@@ -57,7 +57,8 @@ describe("remote calls are counted from git's trace2 event log", () => {
 
     const calls = readRemoteCalls(trace)
     expect(calls.verbs).toEqual({ fetch: 2, "ls-remote": 1 })
-    expect(calls.ssh).toBe(2)
+    expect(calls.sshChildren).toBe(2)
+    expect(calls.remoteMs).toBeGreaterThan(0)
     expect(calls.unreadable).toBe(0)
     expect(calls.processes).toBeGreaterThanOrEqual(4)
   }, 60_000)

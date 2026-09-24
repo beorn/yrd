@@ -18,8 +18,13 @@ export type RemoteCalls = Readonly<{
   processes: number
   /** Remote verbs by name, one per process that ran it. */
   verbs: Readonly<Record<string, number>>
-  /** ssh transport children started: the logins GitHub counts (ControlMaster shares a connection, not the count). */
-  ssh: number
+  /**
+   * ssh transport CHILDREN started. Under ControlMaster a child that reuses the master is not a new login, so this
+   * bounds the logins GitHub counts from above; the same measure before and after is what a comparison needs.
+   */
+  sshChildren: number
+  /** Wall time of the remote-verb processes, summed from each one's own exit event. */
+  remoteMs: number
   /** Event lines that did not parse: a process killed mid-write. Counted, never skipped silently. */
   unreadable: number
 }>
@@ -38,13 +43,15 @@ export function readRemoteCalls(directory: string): RemoteCalls {
   }
   const verbs: Record<string, number> = {}
   let processes = 0
-  let ssh = 0
+  let sshChildren = 0
+  let remoteSeconds = 0
   let unreadable = 0
   for (const name of names) {
     let started = false
+    let remote = false
     for (const line of readFileSync(join(directory, name), "utf8").split("\n")) {
       if (line === "") continue
-      let event: { event?: unknown; name?: unknown; child_class?: unknown }
+      let event: { event?: unknown; name?: unknown; child_class?: unknown; t_abs?: unknown }
       try {
         event = JSON.parse(line) as typeof event
       } catch {
@@ -55,12 +62,14 @@ export function readRemoteCalls(directory: string): RemoteCalls {
       if (event.event === "start") started = true
       if (event.event === "cmd_name" && typeof event.name === "string" && REMOTE_VERBS.has(event.name)) {
         verbs[event.name] = (verbs[event.name] ?? 0) + 1
+        remote = true
       }
-      if (event.event === "child_start" && event.child_class === "transport/ssh") ssh++
+      if (event.event === "child_start" && event.child_class === "transport/ssh") sshChildren++
+      if (event.event === "exit" && remote && typeof event.t_abs === "number") remoteSeconds += event.t_abs
     }
     if (started) processes++
   }
-  return { processes, verbs, ssh, unreadable }
+  return { processes, verbs, sshChildren, remoteMs: Math.round(remoteSeconds * 1000), unreadable }
 }
 
 /**
@@ -84,18 +93,19 @@ export function traceRemoteCalls(
   }
 }
 
-/** One line for a person: `processes=… ssh=… fetch=… ls-remote=… push=… unreadable=…`. */
+/** One line for a person: `processes=… ssh_children=… remote_ms=… unreadable=… fetch=… ls-remote=… push=…`. */
 export function remoteCallsLine(calls: RemoteCalls): string {
   return Object.entries(remoteCallsRow(calls))
     .map(([name, count]) => `${name}=${String(count)}`)
     .join(" ")
 }
 
-/** The journal row's fields: flat, so a reader greps `ssh=` without decoding an object. */
+/** The journal row's fields: flat, so a reader greps `ssh_children=` without decoding an object. */
 export function remoteCallsRow(calls: RemoteCalls): Readonly<Record<string, number>> {
   return {
     processes: calls.processes,
-    ssh: calls.ssh,
+    ssh_children: calls.sshChildren,
+    remote_ms: calls.remoteMs,
     unreadable: calls.unreadable,
     ...Object.fromEntries(Object.entries(calls.verbs).map(([verb, count]) => [verb, count])),
   }
