@@ -14,7 +14,7 @@
  * asking "where does this branch stand" rather than "what has the queue done".
  */
 
-import type { Row, WatchRow } from "@yrd/queue-core"
+import type { EventChange, Row, WatchRow } from "@yrd/queue-core"
 import { stateGlyph, stateWord } from "./watch-format.ts"
 export { watchRows, watchRowKey, type WatchRow, type WatchRowOptions } from "@yrd/queue-core"
 
@@ -25,6 +25,13 @@ export { watchRows, watchRowKey, type WatchRow, type WatchRowOptions } from "@yr
  * never drift apart (a-state-name-filters-to-zero-rows-and-exit-zero, AC1).
  */
 export const FILTER_FIELDS = "branch, subject, run, failure and state" as const
+
+/** Human receipt lines from the already-folded event chain. */
+export function eventNoticeLines(change: EventChange): readonly string[] {
+  return Object.values(change.notices ?? {}).map(
+    (notice) => `  notice to ${notice.to}: ${notice.result}${notice.reason === undefined ? "" : ` — ${notice.reason}`}`,
+  )
+}
 
 /**
  * Whether a row answers to a filter term: case-insensitive, and an OR across

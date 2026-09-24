@@ -143,7 +143,7 @@ import {
 } from "@yrd/queue-core"
 import { readUnitIntent } from "./unit-intent.ts"
 import { noticeLine } from "./watch-notice.ts"
-import { FILTER_FIELDS, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
+import { FILTER_FIELDS, eventNoticeLines, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
 
 import type { DraftWindow, WatchQueue } from "./watch-list.tsx"
@@ -2240,7 +2240,10 @@ export async function coreQueueCommand(
           options.json,
           {
             queue: name,
-            changes: row === undefined ? [] : [{ ...row, queue: config.target.branch, events }],
+            changes:
+              row === undefined
+                ? []
+                : [{ ...row, queue: config.target.branch, events, notices: selected?.notices ?? {} }],
             journal: journalFact(reading.journals),
             observation: reading.observation,
             scope,
@@ -2256,6 +2259,7 @@ export async function coreQueueCommand(
                   const reason = event.props.find(([key]) => key === "Reason")?.[1]
                   return `  ${at} ${event.type}${event.writer === null ? "" : ` by ${event.writer}`}${reason === undefined ? "" : ` — ${reason}`}`
                 }),
+                ...(selected === undefined ? [] : eventNoticeLines(selected)),
               ].join("\n"),
         )
         return 0

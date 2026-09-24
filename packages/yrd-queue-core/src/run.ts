@@ -104,6 +104,7 @@ import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
 import { queueFormat } from "./events.ts"
 import { eventQueueRun } from "./event-run.ts"
+import { settledBaseCommit } from "./settled-base.ts"
 import { composed, type RingOptions } from "./rings.ts"
 import { RECUT_CHECK } from "./with-notify.ts"
 import {
@@ -120,7 +121,6 @@ import { inLine, openedAt, tipOf } from "./state.ts"
 import {
   checkedTree,
   claimWorktrees,
-  freshWorktree,
   prepareWorktree,
   reapWorktrees,
   SETUP,
@@ -1971,54 +1971,20 @@ async function prepareSettledBase(
   entry: QueueEntry,
   raises: RootChanges["changes"],
 ): Promise<PreparedWorktree> {
-  const composing = await freshWorktree(
-    run.git,
-    run.options.repo,
-    run.targetSha,
-    join(run.worktrees, "compose", "base", entry.change.head.slice(0, 12)),
-    {
-      env: run.options.env,
-      gitOptions: gitInvocationOptions(run.options, run.log),
-      plumbing: run.plumbing,
-      populateReference: run.options.populateReference,
-      process: run.options.process,
-      selection: run.options.selection,
-    },
-  )
-  let commit = run.targetSha
-  try {
-    const wt = gitIn(
-      composing.path,
-      run.options.process,
-      run.options.selection,
-      gitInvocationOptions(run.options, run.log),
-    )
-    for (const raise of raises) {
-      const row = await wt([
-        "--literal-pathspecs",
-        "ls-tree",
-        "-r",
-        "-z",
-        "--full-tree",
-        run.targetSha,
-        "--",
-        raise.path,
-      ])
-      const target = /^160000 commit ([0-9a-f]{40,64})\t/u.exec(row)?.[1]
-      if (target === undefined || row !== `160000 commit ${target}\t${raise.path}\0` || target === raise.to) continue
-      await wt(["update-index", "-z", "--index-info"], `${raise.mode} ${raise.to}\t${raise.path}\0`)
-    }
-    const tree = (await wt(["write-tree"])).trim()
-    const targetTree = (await wt(["rev-parse", `${run.targetSha}^{tree}`])).trim()
-    if (tree !== targetTree) {
-      commit = (
-        await wt(["commit-tree", tree, "-p", run.targetSha, "-m", `settle the base for ${entry.change.branch}`])
-      ).trim()
-      await run.git(["fetch", "--quiet", composing.path, commit])
-    }
-  } finally {
-    await composing.remove()
-  }
+  const commit = await settledBaseCommit({
+    git: run.git,
+    repo: run.options.repo,
+    targetSha: run.targetSha,
+    raises,
+    path: join(run.worktrees, "compose", "base", entry.change.head.slice(0, 12)),
+    branch: entry.change.branch,
+    env: run.options.env,
+    gitOptions: gitInvocationOptions(run.options, run.log),
+    plumbing: run.plumbing,
+    populateReference: run.options.populateReference,
+    process: run.options.process,
+    selection: run.options.selection,
+  })
   return run.steps.prepare(run, entry, commit, join(run.worktrees, "base", entry.change.head.slice(0, 12)), "base")
 }
 
@@ -2748,11 +2714,21 @@ export function short(branch: string, head: string): string {
  * judges the next change. A declared path the base does not carry is loud,
  * because a check that silently ran the branch's copy would be the hole itself.
  */
-async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<void> {
+export async function restoreScripts(
+  run: Readonly<{
+    git: Git
+    targetSha: string
+    process?: Process
+    selection?: GitSelection
+    gitOptions?: GitInvocationOptions
+  }>,
+  spec: CheckSpec,
+  cwd: string,
+): Promise<void> {
   await validateScripts(run, spec)
   const scripts = spec.scripts ?? []
   if (scripts.length === 0) return
-  const wt = gitIn(cwd, run.options.process, run.options.selection, gitInvocationOptions(run.options, run.log))
+  const wt = gitIn(cwd, run.process, run.selection, run.gitOptions)
   for (const path of scripts) {
     await wt(["checkout", "--quiet", run.targetSha, "--", path])
   }
@@ -2866,7 +2842,17 @@ async function check(
       throw new CandidateSetupFailed(error.setup, phase, rootChanges?.changes ?? [])
     }
   }
-  await restoreScripts(run, spec, cwd)
+  await restoreScripts(
+    {
+      git: run.git,
+      targetSha: run.targetSha,
+      process: run.options.process,
+      selection: run.options.selection,
+      gitOptions: gitInvocationOptions(run.options, run.log),
+    },
+    spec,
+    cwd,
+  )
   return runDeclaredCheck(run, entry, spec, cwd, tree, phase, extraEnv)
 }
 

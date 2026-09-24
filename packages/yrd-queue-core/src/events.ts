@@ -1,4 +1,5 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
+import { Conflict } from "gitomic"
 import { chainsUnder, listRefs, openEvents } from "./git.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
@@ -8,6 +9,8 @@ import { assertPlainEventQueueConfig } from "./event-config.ts"
 import { gitIn, refAt } from "./git.ts"
 import type { GitSelection } from "./git.ts"
 import type { QueueConfig } from "./config.ts"
+import { checkTrailer, readCheckTrailer } from "./check.ts"
+import type { CheckResult } from "./check.ts"
 
 export const CHANGE_STATUSES = [
   "draft",
@@ -32,6 +35,19 @@ export const EVENT_TRAILERS = {
   queue: "Queue",
   reason: "Reason",
   time: "Time",
+  check: "Check",
+  base: "Base",
+  config: "Config",
+  retried: "Retried",
+  retryReason: "Retry-Reason",
+  checkName: "Check-Name",
+  phase: "Phase",
+  projectedMs: "ProjectedMs",
+  boundMs: "BoundMs",
+  for: "For",
+  to: "To",
+  result: "Result",
+  key: "Key",
 } as const
 const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 /** Only the run path that atomically publishes the target may write merged with this producer. */
@@ -45,9 +61,11 @@ export const CHANGE_EVENT_TYPES = [
   "merged",
   "failed",
   "stuck",
+  "deferred",
   "cancelled",
   "ignored",
   "unignored",
+  "notified",
 ] as const
 export type ChangeEventType = (typeof CHANGE_EVENT_TYPES)[number]
 
@@ -65,26 +83,137 @@ export type EventChange = Readonly<{
   tip?: string
   /** This chain's latest ending, including the event that recorded it. */
   ending?: { kind: ChangeEnding; id: string }
+  /** The latest verdict a notification may name; a stuck verdict leaves the change open. */
+  lastNotifiable?: Readonly<{ id: string; kind: ChangeEnding | "deferred" | "stuck" }>
   reason?: string
   ignored?: Readonly<{ reason: string; by: string }>
+  deferred?: Readonly<{
+    id: string
+    check: string
+    phase: "submit" | "merge"
+    reason: string
+    projectedMs: number
+    boundMs: number
+    at: Date
+  }>
+  notices?: Readonly<
+    Record<string, Readonly<{ for: string; to: string; result: "delivered" | "refused" | "failed"; reason?: string }>>
+  >
 }>
 
 export const initial: EventChange = Object.freeze({ status: "draft" })
 
+export type EventCheck = Readonly<{ run: CheckResult; attempt: number; phase: "submit" | "merge"; tier?: "long" }>
+export type DeferredWrite = Readonly<{
+  check: string
+  phase: "submit" | "merge"
+  reason: string
+  projectedMs: number
+  boundMs: number
+}>
+export type NoticeWrite = Readonly<{
+  for: string
+  to: string
+  result: "delivered" | "refused" | "failed"
+  key: string
+  reason?: string
+}>
+
+type ChangeInputDetails = Readonly<{
+  queueTip: string
+  at: Date
+  commit?: string
+  issue?: string
+  by?: string
+  reason?: string
+  title?: string
+  content?: string
+  checks?: readonly EventCheck[]
+  base?: string
+  config?: string
+  retry?: Readonly<{ retried: 1; reason?: string }>
+  deferred?: DeferredWrite
+  notice?: NoticeWrite
+}>
+
+/** The bounded decision evidence; legacy causal trailers stay in changeInput. */
+function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [string, string][] {
+  if (details.checks !== undefined && !["merging", "failed", "stuck", "deferred"].includes(type)) {
+    throw new TypeError(`${type} cannot carry Check: rows`)
+  }
+  if (type === "merging" && details.checks?.some(({ run }) => run.result !== "pass")) {
+    throw new TypeError("merging Check: rows must all pass")
+  }
+  if (
+    details.checks?.length &&
+    (details.base === undefined || details.config === undefined || details.commit === undefined)
+  ) {
+    throw new TypeError(`${type} Check: rows need Base:, Config: and kept Commit:`)
+  }
+  if (type === "deferred" && details.deferred === undefined) {
+    throw new TypeError("deferred needs check and window detail")
+  }
+  if (type === "notified" && details.notice === undefined) throw new TypeError("notified needs notice detail")
+  if (details.deferred !== undefined) {
+    if (type !== "deferred" || details.commit === undefined) throw new TypeError("deferred needs kept Commit:")
+    if (details.reason !== details.deferred.reason) throw new TypeError("deferred Reason: must match its detail")
+    if (details.deferred.check.trim() === "" || !["submit", "merge"].includes(details.deferred.phase)) {
+      throw new TypeError("deferred needs a check name and phase")
+    }
+    if (![details.deferred.projectedMs, details.deferred.boundMs].every((ms) => Number.isSafeInteger(ms) && ms >= 0)) {
+      throw new TypeError("deferred needs nonnegative window milliseconds")
+    }
+  }
+  if (details.notice !== undefined) {
+    if (type !== "notified") throw new TypeError("notice detail belongs on notified")
+    if (details.notice.key !== `${details.notice.for}:${details.notice.to}`) {
+      throw new TypeError("notified has invalid Key:")
+    }
+    if (details.notice.result !== "delivered" && details.reason !== details.notice.reason) {
+      throw new TypeError("refused or failed notice needs matching Reason:")
+    }
+  }
+  if (details.retry !== undefined && type !== "stuck") throw new TypeError("Retried: belongs on stuck")
+  if (
+    details.retry !== undefined &&
+    !details.checks?.some(({ attempt }) => attempt === 2) &&
+    details.retry.reason === undefined
+  ) {
+    throw new TypeError("Retried: 1 needs a second Check: attempt or Retry-Reason:")
+  }
+  if (
+    details.retry !== undefined &&
+    details.retry.reason === undefined &&
+    !details.checks?.some(({ attempt }) => attempt === 1)
+  ) {
+    throw new TypeError("Retried: 1 needs the first Check: attempt or Retry-Reason:")
+  }
+  const props: [string, string][] = []
+  if (details.base !== undefined) props.push([EVENT_TRAILERS.base, details.base])
+  if (details.config !== undefined) props.push([EVENT_TRAILERS.config, details.config])
+  for (const check of details.checks ?? []) props.push([EVENT_TRAILERS.check, checkTrailer(check.run, check)])
+  if (details.retry !== undefined) {
+    props.push([EVENT_TRAILERS.retried, "1"])
+    if (details.retry.reason !== undefined) props.push([EVENT_TRAILERS.retryReason, details.retry.reason])
+  }
+  if (details.deferred !== undefined) {
+    const detail = details.deferred
+    props.push([EVENT_TRAILERS.checkName, detail.check], [EVENT_TRAILERS.phase, detail.phase])
+    props.push(
+      [EVENT_TRAILERS.projectedMs, String(detail.projectedMs)],
+      [EVENT_TRAILERS.boundMs, String(detail.boundMs)],
+    )
+  }
+  if (details.notice !== undefined) {
+    const notice = details.notice
+    props.push([EVENT_TRAILERS.for, notice.for], [EVENT_TRAILERS.to, notice.to])
+    props.push([EVENT_TRAILERS.result, notice.result], [EVENT_TRAILERS.key, notice.key])
+  }
+  return props
+}
+
 /** Construct Yrd's required causal trailers; a recorded commit is always kept. */
-export function changeInput(
-  type: ChangeEventType,
-  details: Readonly<{
-    queueTip: string
-    at: Date
-    commit?: string
-    issue?: string
-    by?: string
-    reason?: string
-    title?: string
-    content?: string
-  }>,
-): EventInput {
+export function changeInput(type: ChangeEventType, details: ChangeInputDetails): EventInput {
   if (!COMMIT_OID.test(details.queueTip)) throw new TypeError(`Queue: must name a commit oid, got ${details.queueTip}`)
   if (Number.isNaN(details.at.getTime())) throw new TypeError("Time: needs a valid instant")
   if ((type === "opened" || type === "verifying" || type === "merging") && details.commit === undefined) {
@@ -115,6 +244,7 @@ export function changeInput(
   if (details.issue !== undefined) props.push([EVENT_TRAILERS.issue, details.issue])
   if (details.by !== undefined) props.push([EVENT_TRAILERS.by, details.by])
   if (details.reason !== undefined) props.push([EVENT_TRAILERS.reason, details.reason])
+  props.push(...evidenceProps(type, details))
   return {
     type,
     props,
@@ -162,6 +292,83 @@ function prop(event: EventShape, key: string): string | undefined {
   return found[0]?.[1]
 }
 
+function requiredProp(event: EventShape, key: string): string {
+  const value = prop(event, key)
+  if (value === undefined || value.trim() === "") throw new Error(`event ${event.id} (${event.type}) needs ${key}:`)
+  return value
+}
+
+function positiveMs(event: EventShape, key: string): number {
+  const written = requiredProp(event, key)
+  const value = Number(written)
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`event ${event.id} needs ${key}: as nonnegative milliseconds`)
+  }
+  return value
+}
+
+function checkedRows(event: EventShape): void {
+  const rows = event.props
+    .filter(([key]) => key === EVENT_TRAILERS.check)
+    .map(([, value]) => {
+      const header = value.split(" log=", 1)[0] ?? ""
+      const seen = new Set<string>()
+      for (const field of header.split(" ").slice(1)) {
+        const key = field.split("=", 1)[0]
+        if (key === undefined || !["exit", "ms", "result", "attempt", "phase", "tier"].includes(key)) continue
+        if (seen.has(key)) throw new Error(`event ${event.id} Check: repeats ${key}`)
+        seen.add(key)
+      }
+      const tier = /(?:^| )tier=([^ ]*)(?: |$)/u.exec(header)?.[1]
+      if (tier !== undefined && tier !== "long") throw new Error(`event ${event.id} Check: has invalid tier=${tier}`)
+      return readCheckTrailer(value)
+    })
+  if (rows.length > 0 && !["merging", "failed", "stuck", "deferred"].includes(event.type)) {
+    throw new Error(`event ${event.id} (${event.type}) cannot carry Check: rows`)
+  }
+  for (const row of rows) {
+    if (
+      row.name === "" ||
+      row.result === undefined ||
+      row.attempt === undefined ||
+      row.phase === undefined ||
+      row.exit === undefined ||
+      row.ms === undefined
+    ) {
+      throw new Error(`event ${event.id} has a malformed Check: row`)
+    }
+    if (event.type === "merging" && row.result !== "pass") {
+      throw new Error(`event ${event.id} merging Check: rows must all pass`)
+    }
+  }
+  if (rows.length > 0) {
+    requiredProp(event, EVENT_TRAILERS.base)
+    requiredProp(event, EVENT_TRAILERS.config)
+    keptCommit(event)
+  }
+  if (
+    event.type === "deferred" &&
+    !rows.some(
+      (row) =>
+        row.result === "deferred" &&
+        row.name === prop(event, EVENT_TRAILERS.checkName) &&
+        row.phase === prop(event, EVENT_TRAILERS.phase),
+    )
+  ) {
+    throw new Error(`event ${event.id} deferred needs its matching Check: name, phase and verdict`)
+  }
+  const retried = prop(event, EVENT_TRAILERS.retried)
+  if (retried !== undefined) {
+    if (event.type !== "stuck" || retried !== "1") throw new Error(`event ${event.id} has invalid Retried:`)
+    if (!rows.some((row) => row.attempt === 2) && prop(event, EVENT_TRAILERS.retryReason) === undefined) {
+      throw new Error(`event ${event.id} Retried: 1 needs second attempt or Retry-Reason:`)
+    }
+    if (!rows.some((row) => row.attempt === 1) && prop(event, EVENT_TRAILERS.retryReason) === undefined) {
+      throw new Error(`event ${event.id} Retried: 1 needs first Check: attempt or Retry-Reason:`)
+    }
+  }
+}
+
 function requireCause(event: EventShape): Date {
   const queue = prop(event, EVENT_TRAILERS.queue)
   if (queue === undefined || !COMMIT_OID.test(queue)) {
@@ -187,9 +394,113 @@ function endingRefusal(state: EventChange, event: EventShape): never {
   throw new Error(`event ${event.id} (${event.type}) follows ${ending.kind} at ${ending.id}; open a new change first`)
 }
 
+function advanceChange(
+  state: EventChange,
+  event: EventShape,
+  type: "verifying" | "checking" | "merging" | "stuck",
+  next: EventChange,
+): EventChange {
+  if (state.status === "stuck" && type !== "verifying") {
+    throw new Error(`event ${event.id} (${type}) cannot advance a stuck change; merge or cancel it`)
+  }
+  if (!isOpen(state.status)) return endingRefusal(state, event)
+  if (type === "checking" && state.status !== "verifying") {
+    throw new Error(`event ${event.id} checking needs verifying, found ${state.status}`)
+  }
+  if (type === "merging" && state.status !== "checking") {
+    throw new Error(`event ${event.id} merging needs checking, found ${state.status}`)
+  }
+  if (type === "merging" && keptCommit(event) !== state.candidate) {
+    throw new Error(`event ${event.id} merging must keep verified candidate ${state.candidate ?? "absent"}`)
+  }
+  if (
+    type === "stuck" &&
+    event.props.some(([key]) => key === EVENT_TRAILERS.check) &&
+    keptCommit(event) !== state.candidate
+  ) {
+    throw new Error(`event ${event.id} stuck must keep checked candidate ${state.candidate ?? "absent"}`)
+  }
+  if (type === "verifying" && !["queued", "verifying", "checking", "merging", "stuck"].includes(state.status)) {
+    throw new Error(
+      `event ${event.id} verifying needs queued, verifying, checking, merging or stuck, found ${state.status}`,
+    )
+  }
+  return {
+    ...next,
+    status: type,
+    candidate: type === "verifying" ? keptCommit(event) : state.candidate,
+    reason: prop(event, EVENT_TRAILERS.reason),
+    ...(type === "verifying" ? { deferred: undefined, lastNotifiable: undefined } : {}),
+    ...(type === "stuck" ? { lastNotifiable: { id: event.id, kind: "stuck" as const } } : {}),
+  }
+}
+
+function deferChange(state: EventChange, event: EventShape, next: EventChange, at: Date): EventChange {
+  if (state.status !== "checking") throw new Error(`event ${event.id} deferred needs checking, found ${state.status}`)
+  if (keptCommit(event) !== state.candidate) {
+    throw new Error(`event ${event.id} deferred must keep verified candidate ${state.candidate ?? "absent"}`)
+  }
+  const phase = requiredProp(event, EVENT_TRAILERS.phase)
+  if (phase !== "submit" && phase !== "merge") {
+    throw new Error(`event ${event.id} has invalid Phase:`)
+  }
+  const reason = requiredProp(event, EVENT_TRAILERS.reason)
+  return {
+    ...next,
+    status: "queued",
+    reason,
+    lastNotifiable: { id: event.id, kind: "deferred" },
+    deferred: {
+      id: event.id,
+      check: requiredProp(event, EVENT_TRAILERS.checkName),
+      phase,
+      reason,
+      projectedMs: positiveMs(event, EVENT_TRAILERS.projectedMs),
+      boundMs: positiveMs(event, EVENT_TRAILERS.boundMs),
+      at,
+    },
+  }
+}
+
+function settleNotice(state: EventChange, event: EventShape): EventChange {
+  const forEvent = requiredProp(event, EVENT_TRAILERS.for)
+  if (state.lastNotifiable?.id !== forEvent) {
+    throw new Error(`event ${event.id} notified needs For: matching the last notifiable event`)
+  }
+  const to = requiredProp(event, EVENT_TRAILERS.to)
+  const key = requiredProp(event, EVENT_TRAILERS.key)
+  if (key !== `${forEvent}:${to}`) throw new Error(`event ${event.id} has invalid notice Key:`)
+  if (state.notices?.[key] !== undefined) throw new Error(`event ${event.id} notice key already settled: ${key}`)
+  const result = requiredProp(event, EVENT_TRAILERS.result)
+  if (result !== "delivered" && result !== "refused" && result !== "failed") {
+    throw new Error(`event ${event.id} has invalid notice Result:`)
+  }
+  const reason = prop(event, EVENT_TRAILERS.reason)
+  if (result !== "delivered" && (reason === undefined || reason.trim() === "")) {
+    throw new Error(`event ${event.id} ${result} notice needs Reason:`)
+  }
+  if (result === "delivered" && reason !== undefined) {
+    throw new Error(`event ${event.id} delivered notice cannot carry Reason:`)
+  }
+  return {
+    ...state,
+    tip: event.id,
+    notices: {
+      ...state.notices,
+      [key]: {
+        for: forEvent,
+        to,
+        result,
+        ...(reason === undefined ? {} : { reason }),
+      },
+    },
+  }
+}
+
 /** Pure fold. Unknown kinds and malformed transitions fail at the selected event chain. */
 export function evolve(state: EventChange, event: EventShape): EventChange {
   const at = requireCause(event)
+  checkedRows(event)
   if (event.props.some(([key]) => key === "Status")) {
     throw new Error(`event ${event.id} stores Status:; status must be a fold`)
   }
@@ -208,7 +519,13 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       if (isOpen(state.status)) throw new Error(`event ${event.id} opens a second change before the first ends`)
       const submitter = prop(event, EVENT_TRAILERS.by)
       if (submitter === undefined || submitter.trim() === "") throw new Error(`event ${event.id} opened needs By:`)
-      const { ignored: _previousIgnore, ...fresh } = next
+      const {
+        ignored: _previousIgnore,
+        deferred: _previousDeferred,
+        notices: _previousNotices,
+        lastNotifiable: _previousNotifiable,
+        ...fresh
+      } = next
       return {
         ...fresh,
         status: "queued",
@@ -225,35 +542,12 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
     case "verifying":
     case "checking":
     case "merging":
-    case "stuck": {
-      if (state.status === "stuck" && event.type !== "verifying") {
-        throw new Error(`event ${event.id} (${event.type}) cannot advance a stuck change; merge or cancel it`)
-      }
-      if (!isOpen(state.status)) return endingRefusal(state, event)
-      if (event.type === "checking" && state.status !== "verifying") {
-        throw new Error(`event ${event.id} checking needs verifying, found ${state.status}`)
-      }
-      if (event.type === "merging" && state.status !== "checking") {
-        throw new Error(`event ${event.id} merging needs checking, found ${state.status}`)
-      }
-      if (event.type === "merging" && keptCommit(event) !== state.candidate) {
-        throw new Error(`event ${event.id} merging must keep verified candidate ${state.candidate ?? "absent"}`)
-      }
-      if (
-        event.type === "verifying" &&
-        state.status !== "queued" &&
-        state.status !== "verifying" &&
-        state.status !== "checking" &&
-        state.status !== "merging" &&
-        state.status !== "stuck"
-      ) {
-        throw new Error(
-          `event ${event.id} verifying needs queued, verifying, checking, merging or stuck, found ${state.status}`,
-        )
-      }
-      const candidate = event.type === "verifying" ? keptCommit(event) : state.candidate
-      return { ...next, status: event.type, candidate, reason: prop(event, "Reason") }
-    }
+    case "stuck":
+      return advanceChange(state, event, event.type, next)
+    case "deferred":
+      return deferChange(state, event, next, at)
+    case "notified":
+      return settleNotice(state, event)
     case "failed":
     case "cancelled": {
       const reason = prop(event, "Reason")
@@ -268,11 +562,19 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
           submitter: undefined,
           since: undefined,
           ending: { kind: "cancelled", id: event.id },
+          lastNotifiable: { kind: "cancelled", id: event.id },
           endedAt: at,
           reason,
         }
       }
       if (!isOpen(state.status)) return endingRefusal(state, event)
+      if (
+        event.type === "failed" &&
+        event.props.some(([key]) => key === EVENT_TRAILERS.check) &&
+        keptCommit(event) !== state.candidate
+      ) {
+        throw new Error(`event ${event.id} failed must keep checked candidate ${state.candidate ?? "absent"}`)
+      }
       if (event.type === "cancelled") {
         if (reason !== "resubmitted" && reason !== "dropped" && reason !== "deleted") {
           throw new Error(`event ${event.id} cancelled needs Reason: resubmitted, dropped or deleted`)
@@ -283,6 +585,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         ...next,
         status: event.type,
         ending: { kind: event.type, id: event.id },
+        lastNotifiable: { kind: event.type, id: event.id },
         endedAt: at,
         reason,
       }
@@ -311,6 +614,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         ...next,
         status: "merged",
         ending: { kind: "merged", id: event.id },
+        lastNotifiable: { kind: "merged", id: event.id },
         endedAt: at,
         reason: prop(event, "Reason"),
       }
@@ -672,7 +976,9 @@ export async function readChangeEvents(
   const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
   const state = project(events, ref, store.repo)
   if (state.tip !== selectedTip) {
-    throw new Error(`${ref} moved after the selected reading: expected ${selectedTip}, read ${state.tip}`)
+    throw new Conflict(`${ref} moved after the selected reading: expected ${selectedTip}, read ${state.tip}`, {
+      refs: [ref],
+    })
   }
   return events
 }
@@ -686,6 +992,12 @@ type ChangeWrite = Readonly<{
   reason?: string
   title?: string
   content?: string
+  checks?: readonly EventCheck[]
+  base?: string
+  config?: string
+  retry?: Readonly<{ retried: 1; reason?: string }>
+  deferred?: DeferredWrite
+  notice?: NoticeWrite
   writer?: string
   /** A target or branch ref moved in the same CAS publish as this event. */
   also?: readonly AlsoRef[]
@@ -745,6 +1057,12 @@ async function appendDecision(
     ...(write.reason === undefined ? {} : { reason: write.reason }),
     ...(write.title === undefined ? {} : { title: write.title }),
     ...(write.content === undefined ? {} : { content: write.content }),
+    ...(write.checks === undefined ? {} : { checks: write.checks }),
+    ...(write.base === undefined ? {} : { base: write.base }),
+    ...(write.config === undefined ? {} : { config: write.config }),
+    ...(write.retry === undefined ? {} : { retry: write.retry }),
+    ...(write.deferred === undefined ? {} : { deferred: write.deferred }),
+    ...(write.notice === undefined ? {} : { notice: write.notice }),
   })
   const planned = decide(history, input)
   if (planned.length !== 1) {

@@ -159,9 +159,11 @@ describe("ADR-0016 event fold", () => {
       "merged",
       "failed",
       "stuck",
+      "deferred",
       "cancelled",
       "ignored",
       "unignored",
+      "notified",
     ])
   })
 
@@ -185,6 +187,127 @@ describe("ADR-0016 event fold", () => {
     const resubmit = decide([event("opened", A, [["Commit", A]], [A])], opened)
     expect(resubmit[0]?.props).toContainEqual(["Queue", A])
     expect(resubmit[0]?.props).toContainEqual(["Time", at.toISOString()])
+  })
+
+  it("keeps typed check evidence on the deciding event and refuses a false passing marker", () => {
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const run = { name: "unit", result: "fail" as const, exit: 1, durationMs: 42, log: "/tmp/removed/unit.log" }
+    const failed = changeInput("failed", {
+      queueTip: A,
+      at,
+      commit: B,
+      checks: [{ run, attempt: 1, phase: "merge" }],
+      base: A,
+      config: B,
+    })
+    expect(failed.keeps).toEqual([B])
+    expect(failed.props).toContainEqual([
+      "Check",
+      "unit exit=1 ms=42 result=fail attempt=1 phase=merge log=/tmp/removed/unit.log",
+    ])
+    expect(failed.props).toContainEqual(["Base", A])
+    expect(failed.props).toContainEqual(["Config", B])
+    expect(() =>
+      changeInput("merging", {
+        queueTip: A,
+        at,
+        commit: B,
+        checks: [{ run, attempt: 1, phase: "merge" }],
+        base: A,
+        config: B,
+      }),
+    ).toThrow(/must all pass/u)
+    expect(() => changeInput("stuck", { queueTip: A, at, retry: { retried: 1 } })).toThrow(
+      /second Check: attempt|Retry-Reason:/u,
+    )
+    const retry = changeInput("stuck", { queueTip: A, at, retry: { retried: 1, reason: "remote read refused" } })
+    expect(retry.props).toContainEqual(["Retried", "1"])
+    expect(retry.props).toContainEqual(["Retry-Reason", "remote read refused"])
+  })
+
+  it("refuses a deciding row with an unrecognized execution tier", () => {
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const verified = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
+    const checking = evolve(verified, event("checking", "c".repeat(40)))
+    expect(() =>
+      evolve(
+        checking,
+        event(
+          "merging",
+          "d".repeat(40),
+          [
+            ["Commit", B],
+            ["Base", A],
+            ["Config", B],
+            ["Check", "unit exit=0 ms=42 result=pass attempt=1 phase=merge tier=fast log=/tmp/removed.log"],
+          ],
+          [B],
+        ),
+      ),
+    ).toThrow(/Check:.*tier/u)
+  })
+
+  it("refuses duplicate result fields in retained check evidence", () => {
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const verified = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
+    const checking = evolve(verified, event("checking", "c".repeat(40)))
+    expect(() =>
+      evolve(
+        checking,
+        event(
+          "merging",
+          "d".repeat(40),
+          [
+            ["Commit", B],
+            ["Base", A],
+            ["Config", B],
+            ["Check", "unit exit=0 ms=42 result=pass result=fail attempt=1 phase=merge log=/tmp/removed.log"],
+          ],
+          [B],
+        ),
+      ),
+    ).toThrow(/Check:.*repeats result/u)
+  })
+
+  it("requires both check attempts when a stuck event says Retried: 1", () => {
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const second = {
+      run: { name: "remote", result: "stuck" as const, exit: 2, durationMs: 42, log: "/tmp/second.log" },
+      attempt: 2,
+      phase: "merge" as const,
+    }
+    expect(() =>
+      changeInput("stuck", {
+        queueTip: A,
+        at,
+        commit: B,
+        checks: [second],
+        base: A,
+        config: B,
+        retry: { retried: 1 },
+      }),
+    ).toThrow(/first Check: attempt/u)
+
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const verified = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
+    const checking = evolve(verified, event("checking", "c".repeat(40)))
+    expect(() =>
+      evolve(
+        checking,
+        event(
+          "stuck",
+          "d".repeat(40),
+          [
+            ["Commit", B],
+            ["Base", A],
+            ["Config", B],
+            ["Retried", "1"],
+            ["Check", "remote exit=2 ms=42 result=stuck attempt=2 phase=merge log=/tmp/second.log"],
+          ],
+          [B],
+        ),
+      ),
+    ).toThrow(/first Check: attempt/u)
   })
 
   it("derives phases and endings without a Status trailer", () => {
@@ -221,6 +344,157 @@ describe("ADR-0016 event fold", () => {
         ],
       }),
     ).toThrow(/Time/)
+  })
+
+  it("holds a deferred check in queued until a fresh verification or resubmission", () => {
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const verifying = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
+    const checking = evolve(verifying, event("checking", "c".repeat(40)))
+    expect(() =>
+      evolve(
+        checking,
+        event(
+          "deferred",
+          "3".repeat(40),
+          [
+            ["Commit", B],
+            ["Reason", "outside short window"],
+            ["Check-Name", "affected-tests"],
+            ["Phase", "submit"],
+            ["ProjectedMs", "60000"],
+            ["BoundMs", "10000"],
+            ["Base", A],
+            ["Config", B],
+            ["Check", "affected-tests exit=unsettled ms=0 result=deferred attempt=1 phase=merge log=/tmp/removed.log"],
+          ],
+          [B],
+        ),
+      ),
+    ).toThrow(/deferred.*Check:.*phase/u)
+    const deferred = evolve(
+      checking,
+      event(
+        "deferred",
+        "d".repeat(40),
+        [
+          ["Commit", B],
+          ["Reason", "outside short window"],
+          ["Check-Name", "affected-tests"],
+          ["Phase", "merge"],
+          ["ProjectedMs", "60000"],
+          ["BoundMs", "10000"],
+          [
+            "Check",
+            "affected-tests exit=unsettled ms=0 result=deferred attempt=1 phase=merge log=/tmp/removed/affected-tests.log",
+          ],
+          ["Base", A],
+          ["Config", B],
+        ],
+        [B],
+      ),
+    )
+    expect(deferred).toMatchObject({
+      status: "queued",
+      candidate: B,
+      deferred: {
+        check: "affected-tests",
+        phase: "merge",
+        reason: "outside short window",
+        projectedMs: 60000,
+        boundMs: 10000,
+      },
+    })
+    expect(deferred.deferred?.at.toISOString()).toBe("2026-09-22T14:00:00.000Z")
+    const notice = evolve(
+      deferred,
+      event("notified", "2".repeat(40), [
+        ["For", deferred.tip as string],
+        ["To", "@dev/2"],
+        ["Result", "refused"],
+        ["Key", `${deferred.tip}:@dev/2`],
+        ["Reason", "recipient unavailable"],
+        ["Time", "2026-09-22T14:01:00.000Z"],
+      ]),
+    )
+    expect(notice.status).toBe("queued")
+    expect(notice.at).toEqual(deferred.at)
+    expect(notice.notices?.[`${deferred.tip}:@dev/2`]?.result).toBe("refused")
+    expect(evolve(deferred, event("verifying", "e".repeat(40), [["Commit", B]], [B])).deferred).toBeUndefined()
+    const cancelled = evolve(deferred, event("cancelled", "f".repeat(40), [["Reason", "resubmitted"]]))
+    expect(evolve(cancelled, event("opened", "1".repeat(40), [["Commit", A]], [A])).deferred).toBeUndefined()
+  })
+
+  it("records one settled notice without changing the verdict clock", () => {
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const failed = evolve(queued, event("failed", B, [["Reason", "check failed"]]))
+    const notice = event("notified", "c".repeat(40), [
+      ["For", B],
+      ["To", "@dev/2"],
+      ["Result", "delivered"],
+      ["Key", `${B}:@dev/2`],
+      ["Time", "2026-09-22T14:01:00.000Z"],
+    ])
+    const notified = evolve(failed, notice)
+    expect(notified).toMatchObject({ status: "failed", ending: { kind: "failed", id: B }, reason: "check failed" })
+    expect(notified.at).toEqual(failed.at)
+    expect(notified.endedAt).toEqual(failed.endedAt)
+    expect(notified.tip).toBe(notice.id)
+    expect(notified.notices?.[`${B}:@dev/2`]).toMatchObject({ for: B, to: "@dev/2", result: "delivered" })
+    expect(() => evolve(notified, notice)).toThrow(/settled|duplicate/u)
+    expect(() => evolve(queued, notice)).toThrow(/last notifiable/u)
+    expect(evolve(notified, event("opened", "d".repeat(40), [["Commit", A]], [A])).notices).toBeUndefined()
+    const merged = evolve(queued, event("merged", B, [["Commit", A]], [A]))
+    expect(evolve(merged, notice)).toMatchObject({
+      status: "merged",
+      lastNotifiable: { id: B, kind: "merged" },
+      notices: { [`${B}:@dev/2`]: { result: "delivered" } },
+    })
+  })
+
+  it("settles multiple recipients for a stuck event while keeping the stop in place", () => {
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const verified = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
+    const checking = evolve(verified, event("checking", "c".repeat(40)))
+    const stuckId = "d".repeat(40)
+    const stuck = evolve(checking, event("stuck", stuckId, [["Reason", "remote unavailable"]]))
+    expect(stuck.lastNotifiable).toEqual({ id: stuckId, kind: "stuck" })
+    const first = evolve(
+      stuck,
+      event("notified", "e".repeat(40), [
+        ["For", stuckId],
+        ["To", "@dev/2"],
+        ["Result", "delivered"],
+        ["Key", `${stuckId}:@dev/2`],
+      ]),
+    )
+    const second = evolve(
+      first,
+      event("notified", "f".repeat(40), [
+        ["For", stuckId],
+        ["To", "@chief"],
+        ["Result", "refused"],
+        ["Key", `${stuckId}:@chief`],
+        ["Reason", "recipient unavailable"],
+      ]),
+    )
+    expect(second.status).toBe("stuck")
+    expect(second.reason).toBe("remote unavailable")
+    expect(second.at).toEqual(stuck.at)
+    expect(second.lastNotifiable).toEqual({ id: stuckId, kind: "stuck" })
+    expect(Object.keys(second.notices ?? {})).toHaveLength(2)
+    const resumed = evolve(second, event("verifying", "1".repeat(40), [["Commit", B]], [B]))
+    expect(resumed.lastNotifiable).toBeUndefined()
+    expect(() =>
+      evolve(
+        resumed,
+        event("notified", "2".repeat(40), [
+          ["For", stuckId],
+          ["To", "@dev/3"],
+          ["Result", "delivered"],
+          ["Key", `${stuckId}:@dev/3`],
+        ]),
+      ),
+    ).toThrow(/last notifiable/u)
   })
 
   it("keeps ignore attribution separate from a change's reason and refuses malformed overlays", () => {
