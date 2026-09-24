@@ -5445,6 +5445,44 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
     expect(messages(w).filter((entry) => entry.record === "stuck")).toHaveLength(1)
   })
 
+  /** @failure An unconfirmed legacy branch hid an orphaned merge intent without a recorded pending reason.
+   * @level l3 @consumer legacy queue operator
+   */
+  it("records a pending legacy merge intent when its branch disappears during confirmation grace", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("main", { branch: "task/one", head })
+    await appendRemoteRecord(w.git, "main", {
+      change: { branch: "task/one", head },
+      kind: "checked",
+      subject: `task/one passed the on-submit checks at main ${w.target.slice(0, 12)}`,
+      trailers: [
+        ["Config", "test-config"],
+        ["Base", w.target],
+      ],
+    })
+    const orphan = await composeMergeCandidate(w, head, `merge task/one@${head.slice(0, 12)} into main`)
+    await deadMergeWorktree(w, "q-dead-merge", head, orphan, exitedPid())
+    await w.git(["push", "--quiet", "origin", ":refs/heads/task/one"])
+
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+
+    expect(outcome).toMatchObject({ exitCode: 0, merged: [], stuck: [], failed: [] })
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    expect((await readRecords(w.git, (await refAt(w.git, ref))!)).map((record) => record.kind)).toEqual([
+      "opened",
+      "checked",
+    ])
+    const journal = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
+    if (journal === undefined) throw new Error("queue run left no journal")
+    const rows = readFileSync(join(w.workdir, "logs", journal), "utf8")
+    expect(rows).toContain('"subject":"branch-list-omissions","count":1,"branches":["task/one"]')
+    expect(rows).toContain('"answer":"absent"')
+    expect(rows).toContain('"protected":true')
+    expect(rows).toContain('"subject":"branch-confirmation-pending","branch":"task/one"')
+  })
+
   it("never claims a worktree at the naming slot as this head's orphaned merge once its registration names a garbage sha, and proceeds through the ordinary path instead", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
