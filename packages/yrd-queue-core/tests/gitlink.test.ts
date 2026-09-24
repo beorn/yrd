@@ -46,6 +46,7 @@ import {
   readQueue,
   readRecords,
   readStatus,
+  setBranchIgnored,
   submit,
   trailer,
   watchRows,
@@ -698,6 +699,11 @@ it("refuses ignore between marker read-back and child push, then admits it after
   await createWorldEventQueue(w)
   const ahead = await aheadOfSubmodule(w, "event-ignore-after-readback")
   await submitGitlink(w, "task/event-ignore-after-readback", ahead)
+  await w.git(["checkout", "--quiet", "task/event-ignore-after-readback"])
+  writeFileSync(join(w.work, "ignored-after-marker.txt"), "new head\n")
+  await w.git(["add", "ignored-after-marker.txt"])
+  await w.git(["commit", "--quiet", "-m", "resubmit after ignore landing"])
+  await w.git(["checkout", "--quiet", "main"])
   await using real = createProcess({ cwd: w.work })
   let refusal: unknown
   let attempted = false
@@ -708,14 +714,16 @@ it("refuses ignore between marker read-back and child push, then admits it after
     async run(request) {
       if (!attempted && request.argv.includes("super") && request.argv.includes("push")) {
         attempted = true
-        const state = await readStatus(eventStore(w), "main", "task/event-ignore-after-readback")
-        expect(state).toMatchObject({ status: "merging" })
-        if (state.tip === undefined) throw new Error("merging marker has no tip")
+        expect(await readStatus(eventStore(w), "main", "task/event-ignore-after-readback")).toMatchObject({
+          status: "merging",
+        })
         childBeforeAttempt = await submoduleMain(w)
         try {
-          await appendChangeEvent(eventStore(w), "main", "task/event-ignore-after-readback", state.tip, {
-            type: "ignored",
-            at: new Date(),
+          await setBranchIgnored(eventStore(w), {
+            queue: "main",
+            branch: "task/event-ignore-after-readback",
+            by: "@dev/2",
+            ignored: true,
             reason: "operator hold",
           })
         } catch (error) {
@@ -730,20 +738,29 @@ it("refuses ignore between marker read-back and child push, then admits it after
   const landed = await queueRun({ ...(await w.options()), checks: [], notify: [], process: interleaved })
 
   expect(attempted).toBe(true)
-  expect(String(refusal)).toMatch(/landing in progress/u)
+  expect(String(refusal)).toMatch(/yrd-ignore-change-landing/u)
   expect(childBeforeAttempt).toBe(w.main)
   expect(childAfterAttempt).toBe(w.main)
   expect(landed).toMatchObject({ exitCode: 0, merged: ["task/event-ignore-after-readback"], stuck: [] })
   expect(await submoduleMain(w)).toBe(ahead)
-  const state = await readStatus(eventStore(w), "main", "task/event-ignore-after-readback")
-  expect(state).toMatchObject({ status: "merged" })
-  if (state.tip === undefined) throw new Error("merged event has no tip")
-  await appendChangeEvent(eventStore(w), "main", "task/event-ignore-after-readback", state.tip, {
-    type: "ignored",
-    at: new Date(),
+  expect((await readStatus(eventStore(w), "main", "task/event-ignore-after-readback")).status).toBe("merged")
+  await submit(w.git, "origin", {
+    branch: "task/event-ignore-after-readback",
+    submitter: "@dev/2",
+    target: { branch: "main", remote: "origin" },
+  })
+  expect((await readStatus(eventStore(w), "main", "task/event-ignore-after-readback")).status).toBe("queued")
+  await setBranchIgnored(eventStore(w), {
+    queue: "main",
+    branch: "task/event-ignore-after-readback",
+    by: "@dev/2",
+    ignored: true,
     reason: "operator hold",
   })
-  expect((await readStatus(eventStore(w), "main", "task/event-ignore-after-readback")).ignored).toBe(true)
+  expect((await readStatus(eventStore(w), "main", "task/event-ignore-after-readback")).ignored).toEqual({
+    reason: "operator hold",
+    by: "@dev/2",
+  })
 })
 
 /** @failure A resumed marked landing could be cancelled by the deleted-branch prepass.
