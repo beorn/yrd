@@ -35,6 +35,7 @@ import { changeName } from "./refs.ts"
 import { transportFaultIn } from "./setup-transport.ts"
 import { readRootChanges } from "./legacy-records.ts"
 import { settledBaseCommit } from "./settled-base.ts"
+import { repairMissingBranchHeads } from "./remote.ts"
 
 function discardedJudgementReason(current: EventChange, error: unknown): string {
   const failed = error instanceof Error ? error.message : String(error)
@@ -448,7 +449,7 @@ export async function eventQueueRun(
         at: new Date(),
         commit: head,
         reason: "deleted",
-        title: `deleted ${branch}`,
+        title: `${branch} absent from remote`,
       })
       const ended = await readStatus(store, queue, branch)
       if (ended.status !== "cancelled" || ended.reason !== "deleted" || ended.commit !== head || ended.tip !== tip) {
@@ -456,7 +457,7 @@ export async function eventQueueRun(
           `event queue ${url}#${queue}: deleted branch ${branch} wrote ${tip} but read back ${ended.status} at ${ended.tip ?? "no tip"}`,
         )
       }
-      log.write({ kind: "change", branch, head, decision: "cancelled", reason: "branch deleted" })
+      log.write({ kind: "change", branch, head, decision: "cancelled", reason: "branch absent from remote" })
     } catch (error) {
       let current
       try {
@@ -476,12 +477,32 @@ export async function eventQueueRun(
       })
     }
   }
-  const branchHeads = await listRefs("refs/heads/", store)
+  const repaired = await repairMissingBranchHeads(
+    await listRefs("refs/heads/", store),
+    open.map(({ branch, since }) => ({ branch, openedAt: since.getTime() })),
+    store.remote,
+    (exact) => listRefs(exact, store),
+    options.now ?? Date.now,
+    options.branchDeletionGraceMs,
+  )
+  log.write({
+    kind: "observation",
+    subject: "branch-list-omissions",
+    count: repaired.omissions.length,
+    branches: repaired.omissions.map((row) => row.branch),
+  })
+  for (const row of repaired.omissions) log.write({ kind: "observation", subject: "branch-list-omission", ...row })
+  const branchHeads = repaired.heads
+  const unconfirmed = new Set(repaired.omissions.filter((row) => row.protected).map((row) => row.branch))
   const remaining: typeof open = []
   for (const selectedChange of open) {
     // A merging marker owns this chain until its frozen landing settles, even
     // when the submitter deleted the branch name during a killed run.
-    if (selectedChange.status === "merging" || branchHeads.has(`refs/heads/${selectedChange.branch}`)) {
+    if (
+      selectedChange.status === "merging" ||
+      unconfirmed.has(selectedChange.branch) ||
+      branchHeads.has(`refs/heads/${selectedChange.branch}`)
+    ) {
       remaining.push(selectedChange)
     } else {
       await endDeletedChange(selectedChange)
@@ -605,6 +626,10 @@ export async function eventQueueRun(
   }
   for (const selectedChange of line) {
     const { branch, commit: head } = selectedChange
+    if (unconfirmed.has(branch)) {
+      log.write({ kind: "observation", subject: "branch-confirmation-pending", branch, head })
+      return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch])
+    }
     let tip = selectedChange.tip
     if (options.stopAtMs !== undefined && (options.now?.() ?? Date.now()) >= options.stopAtMs) {
       return result(0, observedMerged, [], [], [branch])
