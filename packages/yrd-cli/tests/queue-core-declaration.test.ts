@@ -16,6 +16,7 @@ import {
   changeRef,
   changesRef,
   createEventQueue,
+  createEventStore,
   drop,
   eventRows,
   gitIn,
@@ -118,7 +119,7 @@ async function createQueue(repo: string, queue: string, commit: string, at: Date
   const git = gitIn(repo)
   const config = await readConfig(git, commit, { branch: queue, remote: "origin" })
   if (config === undefined) throw new Error(`fixture target ${commit} lost .yrd.yml`)
-  return createEventQueue({ repo, remote: "origin" }, queue, commit, config, at)
+  return createEventQueue(createEventStore(repo, "origin", gitIn(repo).selection), queue, commit, config, at)
 }
 
 describe("a queue is the selected origin branch carrying config", () => {
@@ -128,7 +129,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     // be mistaken for configured features or unknown future keys.
     const repo = await world('checks:\n  - lab-gate: {run: "true"}\n')
     const git = gitIn(repo)
-    const store = { repo, remote: "origin" }
+    const store = createEventStore(repo, "origin", gitIn(repo).selection)
     const target = (await git(["rev-parse", "HEAD"])).trim()
     await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
     await git(["checkout", "--quiet", "-b", "task/plain-check"])
@@ -171,7 +172,13 @@ describe("a queue is the selected origin branch carrying config", () => {
     const before = await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])
 
     await expect(
-      createEventQueue({ repo, remote: "origin" }, "main", target, config, new Date("2026-09-22T14:00:00.000Z")),
+      createEventQueue(
+        createEventStore(repo, "origin", gitIn(repo).selection),
+        "main",
+        target,
+        config,
+        new Date("2026-09-22T14:00:00.000Z"),
+      ),
     ).rejects.toThrow(new RegExp(`${feature}.*#25040.*25065`))
 
     expect(await git(["ls-remote", "--refs", "origin", queueRef("main")])).toBe("")
@@ -187,7 +194,7 @@ describe("a queue is the selected origin branch carrying config", () => {
 
     await expect(
       createEventQueue(
-        { repo, remote: "origin" },
+        createEventStore(repo, "origin", gitIn(repo).selection),
         "main",
         target,
         { ...config, blob: "f".repeat(40) },
@@ -205,7 +212,7 @@ describe("a queue is the selected origin branch carrying config", () => {
 
     await expect(
       createEventQueue(
-        { repo, remote: "origin" },
+        createEventStore(repo, "origin", gitIn(repo).selection),
         "main",
         target,
         undefined as unknown as QueueConfig,
@@ -238,7 +245,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   it("reads event changes from the remote in one selected format", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
-    const store = { repo, remote: "origin" }
+    const store = createEventStore(repo, "origin", gitIn(repo).selection)
     const targetOid = (await git(["rev-parse", "HEAD"])).trim()
     const created = await createQueue(repo, "main", targetOid, new Date("2026-09-22T14:00:00.000Z"))
     const declaration = await readConfig(git, targetOid, { remote: "origin", branch: "main" })
@@ -299,7 +306,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   it("uses every event change status unchanged in JSON, the table, and status filters", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
-    const store = { repo, remote: "origin" }
+    const store = createEventStore(repo, "origin", gitIn(repo).selection)
     const commit = (await git(["rev-parse", "HEAD"])).trim()
     const queueTip = await createQueue(repo, "main", commit, new Date("2026-09-22T14:00:00.000Z"))
     const statuses = CHANGE_STATUSES.filter((status) => status !== "draft")
@@ -383,7 +390,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   it("lists direct commits after the declaration until a merged event accounts for the line", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
-    const store = { repo, remote: "origin" }
+    const store = createEventStore(repo, "origin", gitIn(repo).selection)
     const declaration = (await git(["rev-parse", "HEAD"])).trim()
     const queueTip = await createQueue(repo, "main", declaration, new Date("2026-09-22T14:00:00.000Z"))
 
@@ -441,7 +448,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   it("submits an unpublished branch, then drops its open change and branch atomically", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
-    const store = { repo, remote: "origin" }
+    const store = createEventStore(repo, "origin", gitIn(repo).selection)
     const created = await createQueue(
       repo,
       "main",
@@ -535,10 +542,12 @@ describe("a queue is the selected origin branch carrying config", () => {
     await authorGit(["push", "--quiet", "origin", "task/remote-draft"])
     await expect(git(["cat-file", "-e", `${head}^{commit}`])).rejects.toThrow()
 
-    const store = { repo, remote: "origin" }
+    const store = createEventStore(repo, "origin", gitIn(repo).selection)
     const dropped = await drop(store, { queue: "main", branch: "task/remote-draft", by: "@dev/2" })
     expect(dropped).toMatchObject({ branch: "task/remote-draft", head })
-    expect((await listChanges({ repo, remote: "origin" }, "main")).get("task/remote-draft")).toMatchObject({
+    expect(
+      (await listChanges(createEventStore(repo, "origin", gitIn(repo).selection), "main")).get("task/remote-draft"),
+    ).toMatchObject({
       status: "cancelled",
       commit: head,
       reason: "dropped",
@@ -585,7 +594,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
     const head = (await git(["rev-parse", "HEAD"])).trim()
-    const store = { repo, remote: "origin" }
+    const store = createEventStore(repo, "origin", gitIn(repo).selection)
     await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
     const paused = capture(repo)
     expect(

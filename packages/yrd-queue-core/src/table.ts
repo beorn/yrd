@@ -23,14 +23,14 @@
  *   subject and the records carry only the RECORD's.
  */
 
-import { endedKind, mergedByRun, trailer, trailers, type ChangeRecord } from "./records.ts"
+import { endedKind, mergedByRun, trailer, trailers, type ChangeRecord } from "./legacy-records.ts"
 import { readCheckTrailer } from "./check.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
 import type { Draft } from "./drafts.ts"
 import { journalKey, type Journals, type JournalRun, type LogRecord } from "./log.ts"
 import { incidentFrom, incidentLine, type Incident } from "./incident.ts"
 import type { ChangeStatus } from "./events.ts"
-import type { Git } from "./records.ts"
+import type { Git } from "./git.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
 import {
   holdsPlaceInLine,
@@ -520,7 +520,7 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
   //
   // The gate is the place in line, not a second list of state words. A change
   // that still holds its place can legitimately be running: `stuck` is NOT an
-  // ending (records.ts ENDING_KINDS), it keeps its place and the next run takes
+  // ending (legacy-records.ts ENDING_KINDS), it keeps its place and the next run takes
   // it again, and since no record kind means "checking", this marker is the
   // only signal that re-check has. Suppressing it for `stuck` would render a
   // genuinely running re-check as idle — which is why the gate asks whether the

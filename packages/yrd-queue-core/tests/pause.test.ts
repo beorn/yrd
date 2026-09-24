@@ -15,6 +15,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
+import { Conflict } from "gitomic"
 import {
   gitIn,
   lineStop,
@@ -25,6 +26,7 @@ import {
   type Git,
   type PauseRecord,
 } from "../src/index.ts"
+import { legacyPauseCommit, legacyStore } from "../src/legacy-records.ts"
 import { pauseFence } from "../src/pause.ts"
 import type { ChangeState } from "../src/state.ts"
 
@@ -56,10 +58,15 @@ async function world(): Promise<World> {
 }
 
 describe("the queue pause is one leased record ref at the remote", () => {
-  it("reads captured pause records without changing local refs or FETCH_HEAD", async () => {
+  it("reads the latest pause through Gitomic without changing application refs or FETCH_HEAD", async () => {
     const w = await world()
     const refs = ["for-each-ref", "--format=%(refname) %(objectname)"]
-    const before = await w.other(refs)
+    const applicationRefs = async () =>
+      (await w.other(refs))
+        .split("\n")
+        .filter((line) => line !== "" && !line.startsWith("refs/gitomic/"))
+        .join("\n")
+    const before = await applicationRefs()
     const fetchHead = (await w.other(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
     writeFileSync(fetchHead, "another command's fetch result\n")
 
@@ -70,78 +77,58 @@ describe("the queue pause is one leased record ref at the remote", () => {
       reason: "49 new failures on main",
     })
 
-    // A resume after advertisement must not change this reading's pause.
-    let resumed: PauseRecord | undefined
-    const racing: Git = async (args, input) => {
-      const result = await w.other(args, input)
-      if (args[0] === "ls-remote" && resumed === undefined) {
-        resumed = await writePause(w.git, "origin", "main", {
-          by: "operator",
-          kind: "resumed",
-          reason: "the repair merged",
-        })
-      }
-      return result
-    }
-    expect(await readPause(racing, "origin", "main")).toEqual(paused)
     expect(paused).toMatchObject({ by: "@chief", kind: "paused", reason: "49 new failures on main" })
     expect(paused.at).toBeInstanceOf(Date)
-
+    const resumed = await writePause(w.git, "origin", "main", {
+      by: "operator",
+      kind: "resumed",
+      reason: "the repair merged",
+    })
     expect(await readPause(w.other, "origin", "main")).toEqual(resumed)
     expect(resumed).toMatchObject({ by: "operator", kind: "resumed", reason: "the repair merged" })
     expect((await w.other(["log", "-1", "--format=%(trailers:only,unfold)", resumed!.sha])).trim()).toBe(
       "Record: resumed\nPaused-By: operator",
     )
-    expect(await w.other(refs)).toBe(before)
-    expect(await w.git(refs)).toBe(before)
+    expect(await applicationRefs()).toBe(before)
+    expect(await w.other(["for-each-ref", PAUSE_REF])).toBe("")
     expect(readFileSync(fetchHead, "utf8")).toBe("another command's fetch result\n")
   })
 
-  // Read-only admission must parse the advertised snapshot, even if a new
-  // pause arrives before its object fetch. The writer-race test covers only
-  // the push lease and cannot prove which pause a reader inspected.
-  it("reads the captured advertisement when the pause changes before fetch", async () => {
+  it("refreshes Gitomic's private fetch namespace when the pause changes", async () => {
     const w = await world()
     const paused = await writePause(w.git, "origin", "main", { by: "operator", kind: "paused", reason: "inspecting" })
-    let moved = false
-    const racing: Git = async (args, input) => {
-      const result = await w.other(args, input)
-      if (!moved && args[0] === "ls-remote") {
-        moved = true
-        await writePause(w.git, "origin", "main", { by: "operator", kind: "resumed", reason: "ready now" })
-      }
-      return result
-    }
-    expect(await readPause(racing, "origin", "main")).toEqual(paused)
+    expect(await readPause(w.other, "origin", "main")).toEqual(paused)
+    const resumed = await writePause(w.git, "origin", "main", {
+      by: "operator",
+      kind: "resumed",
+      reason: "ready now",
+    })
+    expect(await readPause(w.other, "origin", "main")).toEqual(resumed)
     expect(await w.other(["for-each-ref", PAUSE_REF])).toBe("")
-    expect(await readPause(w.other, "origin", "main")).toMatchObject({ kind: "resumed" })
   })
 
-  it("names the advertised pause and queue when its object fetch fails", async () => {
+  it("fails loudly when Gitomic cannot fetch the pause authority", async () => {
     const w = await world()
-    const paused = await writePause(w.git, "origin", "main", { by: "operator", kind: "paused", reason: "inspecting" })
-    const broken: Git = (args, input) =>
-      args[0] === "fetch" ? w.other(["fetch", "missing-queue-remote"]) : w.other(args, input)
-    const attempt = readPause(broken, "origin", "main")
-    await expect(attempt).rejects.toThrow(`origin advertised ${PAUSE_REF} at ${paused.sha}`)
-    await expect(attempt).rejects.toThrow("missing-queue-remote")
+    await expect(readPause(w.other, "missing-queue-remote", "main")).rejects.toThrow("missing-queue-remote")
   })
 
-  it("refuses the second writer when two records race from one observed tip", async () => {
+  it("refuses a pause publication whose Gitomic lease moved", async () => {
     const w = await world()
-    await writePause(w.git, "origin", "main", { by: "@chief", kind: "paused", reason: "investigating" })
-    let raced = false
-    const racingGit: Git = async (args, input) => {
-      if (!raced && args[0] === "push" && args.some((argument) => argument.endsWith(`:${PAUSE_REF}`))) {
-        raced = true
-        await writePause(w.other, "origin", "main", { by: "operator", kind: "resumed", reason: "cleared elsewhere" })
-      }
-      return await w.git(args, input)
-    }
-
+    const paused = await writePause(w.git, "origin", "main", {
+      by: "@chief",
+      kind: "paused",
+      reason: "investigating",
+    })
+    const stale = await legacyPauseCommit(w.git, paused, {
+      by: "@chief",
+      kind: "resumed",
+      reason: "my stale clear",
+    })
+    await writePause(w.other, "origin", "main", { by: "operator", kind: "resumed", reason: "cleared elsewhere" })
+    const store = await legacyStore(w.git)
     await expect(
-      writePause(racingGit, "origin", "main", { by: "@chief", kind: "resumed", reason: "my stale clear" }),
-    ).rejects.toThrow()
+      store.backend.publish(store.repo, [{ ref: PAUSE_REF, expect: paused.sha, oid: stale }], "origin"),
+    ).rejects.toBeInstanceOf(Conflict)
     expect(await readPause(w.git, "origin", "main")).toMatchObject({ by: "operator", reason: "cleared elsewhere" })
   })
 

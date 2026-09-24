@@ -29,7 +29,7 @@
 import { transportFaultIn } from "./setup-transport.ts"
 import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
-import type { Git } from "./records.ts"
+import type { Git } from "./git.ts"
 
 /** One store this run created, as the caller records it. */
 export type ReferenceStore = Readonly<{

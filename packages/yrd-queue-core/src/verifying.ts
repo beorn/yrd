@@ -1,7 +1,6 @@
 /** One git-only verification of a submitted head against the observed target. */
 import { createProcess, type Process } from "@yrd/process"
-import { gitEnvironment } from "./git.ts"
-import type { Git } from "./records.ts"
+import { gitEnvironment, type Git } from "./git.ts"
 import { freshWorktree, type FreshWorktree, type Worktree } from "./worktree.ts"
 
 /** `descents` records git-super's two-direction ancestry checks of nested pins (24320). */

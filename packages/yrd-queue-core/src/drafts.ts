@@ -29,8 +29,7 @@
  * undated.
  */
 
-import { offTheTarget } from "./git.ts"
-import type { Git } from "./records.ts"
+import { offTheTarget, type Git } from "./git.ts"
 
 type DraftSource = Readonly<{
   heads: ReadonlyMap<string, string>

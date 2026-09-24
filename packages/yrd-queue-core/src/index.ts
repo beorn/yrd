@@ -53,6 +53,7 @@ export {
   readStatus,
   writeQueueEvent,
 } from "./events.ts"
+export type { Event } from "./git.ts"
 export type {
   CancellationReason,
   ChangeEventType,
@@ -75,21 +76,26 @@ export {
   readRecords,
   trailer,
   trailers,
-} from "./records.ts"
-export type { ChangeRecord, Git } from "./records.ts"
+} from "./legacy-records.ts"
+export type { ChangeRecord } from "./legacy-records.ts"
 export { incidentFrom, incidentLine, incidentLines, incidentTrailers } from "./incident.ts"
 export type { Incident } from "./incident.ts"
 export { holdsPlaceInLine, inLine, nextOwner, readChange, tipOf } from "./state.ts"
 export type { NextOwner } from "./state.ts"
 export {
   configValue,
+  createEventStore,
+  executableFor,
+  selectionFor,
   gitIn,
+  listRefs,
   readRemoteCommit,
   refAt,
   resolveGitSelection,
   type GitSelection,
   type GitRunner,
   type GitObservation,
+  type Git,
 } from "./git.ts"
 export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck } from "./check.ts"
 export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckView } from "./check.ts"

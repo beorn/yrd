@@ -19,10 +19,14 @@ import { randomUUID } from "node:crypto"
 import { accessSync, constants, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
-import { danglingRefs } from "git-super/objects"
-import type { GitProcess } from "git-super/process"
-import type { Git } from "./records.ts"
+import { createShellBackend, type GitomicBackend } from "gitomic"
+export { chainsUnder, listRefs, openEvents } from "gitomic/events"
+export type { AlsoRef, Event, EventInput } from "gitomic/events"
+export type { CommitMeta, GitomicBackend, Oid } from "gitomic"
 import type { QueueObservation } from "./remote.ts"
+
+/** One git invocation, returning its stdout; `input` is its stdin. Throws on a non-zero exit. */
+export type Git = (args: readonly string[], input?: string) => Promise<string>
 
 export type GitSelection = Readonly<{
   executable: string
@@ -85,6 +89,7 @@ export type GitInvocationOptions = Readonly<{
 
 export type GitRunner = Git &
   Readonly<{
+    selection: GitSelection
     /** Bounded evidence for the latest settled call, including successful stderr.
      * Run owners use onInvocation to retain every call in their existing log. */
     lastInvocation: GitInvocation | undefined
@@ -222,6 +227,12 @@ export function gitIn(
   selection?: GitSelection,
   options: GitInvocationOptions = {},
 ): GitRunner {
+  const selected: GitSelection = selection ?? {
+    executable: "git",
+    contract: "native",
+    scope: "default",
+    origin: "native git",
+  }
   const env = options.env === undefined ? undefined : gitEnvironment(options.env)
   const runner = process ?? createProcess({ cwd, env: env ?? gitEnvironment(globalThis.process.env) })
   let lastInvocation: GitInvocation | undefined
@@ -270,6 +281,7 @@ export function gitIn(
     return result.stdout
   }
   return Object.defineProperties(git, {
+    selection: { value: selected },
     lastInvocation: { get: () => lastInvocation },
     observe: {
       value: async (input: GitObservationInput): Promise<GitObservation> => {
@@ -602,6 +614,31 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   }
 }
 
+/** The one configured Gitomic backend for every legacy queue ref operation. */
+export function createLegacyBackend(gitExecutable = "git"): GitomicBackend {
+  return createShellBackend({
+    baseEnv: gitEnvironment(globalThis.process.env),
+    gitExecutable,
+    remoteTimeoutMs: GIT_ROOT_INVOCATION_MS,
+  })
+}
+
+/** The configured event store; every event opener receives this backend. */
+export function createEventStore(repo: string, remote: string, selection: GitSelection) {
+  return { repo, remote, selection, backend: createLegacyBackend(selection.executable) }
+}
+
+/** Use the executable that handled this runner's immediately preceding call. */
+export function selectionFor(git: Git): GitSelection {
+  const selection = (git as Partial<GitRunner>).selection
+  if (selection === undefined) throw new TypeError("Gitomic needs a Yrd Git runner with a resolved selection")
+  return selection
+}
+
+export function executableFor(git: Git): string {
+  return selectionFor(git).executable
+}
+
 export class GitExit extends Error {
   constructor(
     readonly args: readonly string[],
@@ -638,78 +675,13 @@ export async function refAt(
   }
 }
 
-/** Capture one advertised commit without changing refs or FETCH_HEAD. */
+/** Fetch one remote commit through Gitomic's private namespace. */
 export async function readRemoteCommit(git: Git, remote: string, ref: string): Promise<string | undefined> {
-  const rows = (await git(["ls-remote", "--refs", remote, ref]))
-    .split("\n")
-    .map((row) => row.trim())
-    .filter(Boolean)
-  if (rows.length === 0) return undefined
-  if (rows.length !== 1) throw new Error(`${remote} answered with ${String(rows.length)} values for ${ref}`)
-  const [sha, name] = (rows[0] ?? "").split(/\s+/u)
-  if (name !== ref || sha === undefined || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(sha)) {
-    throw new Error(`${remote} returned an unreadable ${ref} advertisement: ${rows[0]}`)
-  }
-  try {
-    await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", remote, sha])
-  } catch (cause) {
-    const named = await nameDanglingRefs(git, remote, cause)
-    throw new Error(
-      `${remote} advertised ${ref} at ${sha}, but fetching that commit failed: ${named ?? String(cause)}`,
-      { cause },
-    )
-  }
-  return sha
-}
-
-/** git's own words when a local ref names an object this store no longer has. */
-const MISSING_REF_OBJECT = /\bbad object refs\/|did not send all necessary objects/u
-
-/**
- * A fetch that failed on a missing object fails every time, and git's text names
- * the first ref it tripped on, which need not be the dangling one (hh 25050,
- * 25051). Name every ref whose object is gone, with its local object, the
- * remote's value and the verified-delete cure. Undefined when the failure is
- * not that one; a scan that cannot run is said so, never read as none found.
- */
-async function nameDanglingRefs(git: Git, remote: string, cause: unknown): Promise<string | undefined> {
-  if (!(cause instanceof GitExit) || !MISSING_REF_OBJECT.test(cause.detail)) return undefined
-  // danglingRefs speaks git-super's process port; this one runs through yrd's own runner.
-  const port: GitProcess = {
-    run: async (request) => {
-      try {
-        return { code: 0, stdout: await git(request.args, request.stdin), stderr: "" }
-      } catch (error) {
-        if (error instanceof GitExit) return { code: error.exitCode, stdout: "", stderr: error.detail }
-        throw error
-      }
-    },
-  }
-  let dangling: readonly Readonly<{ ref: string; oid: string }>[]
-  try {
-    dangling = await danglingRefs(port, cause.cwd)
-  } catch (error) {
-    return `${cause.detail}; the local refs could not be scanned for the missing object: ${String(error)}`
-  }
-  if (dangling.length === 0) return undefined
-  const lines: string[] = []
-  for (const { ref, oid } of dangling) {
-    let there: string
-    try {
-      there =
-        (await git(["ls-remote", remote, ref]))
-          .split("\n")
-          .map((row) => row.split("\t"))
-          .find(([, name]) => name === ref)?.[0] ?? "absent"
-    } catch (error) {
-      there = `unread (${error instanceof GitExit ? error.detail : String(error)})`
-    }
-    lines.push(`${ref} local=${oid} ${remote}=${there} object missing locally`)
-  }
-  return (
-    `a local ref names an object this store no longer has, so every fetch fails: ${lines.join("; ")}. ` +
-    `Cure: ${dangling.map(({ ref, oid }) => `git update-ref -d ${ref} ${oid}`).join("; ")}, then fetch again`
-  )
+  const repo = (await git(["rev-parse", "--absolute-git-dir"])).trim()
+  if (repo === "") throw new Error(`cannot read ${remote} ${ref}: git returned an empty repository store`)
+  const backend = createLegacyBackend(executableFor(git))
+  if (backend.fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs")
+  return (await backend.fetchRefs(repo, ref, remote)).get(ref)
 }
 
 /** Whether `sha` is an ancestor of `of`. */

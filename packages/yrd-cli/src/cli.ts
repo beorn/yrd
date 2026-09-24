@@ -74,7 +74,7 @@ const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_EN
 const SUBMITTER_HELP = `the agent submitting this change, who hears its result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP =
   "the issue, checked against the branch's first Refs/Resolves binding; unbound legacy name fallback is reported"
-const DRY_RUN_HELP = "print the change this would open and push nothing"
+const DRY_RUN_HELP = "preview admission and push nothing; fetches the queue tip into refs/gitomic/fetched/"
 const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to origin/HEAD inside a clone"
 
 const SUBMIT_HELP: [string, string][] = [

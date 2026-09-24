@@ -19,8 +19,7 @@
  * (position, age, wait) are NOT here; they moved to the status box.
  */
 
-import { DIRECT_MERGE, trailer, type ChangeRecord, type Row } from "@yrd/queue-core"
-import type { Event } from "gitomic/events"
+import { DIRECT_MERGE, trailer, type ChangeRecord, type Event, type Row } from "@yrd/queue-core"
 import { STATE_WORDS, clock, mediaDuration } from "./watch-format.ts"
 
 export type HistoryEntry = Readonly<{

@@ -2,8 +2,7 @@
 import { lstatSync, readlinkSync } from "node:fs"
 import { join } from "node:path"
 import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
-import { gitIn, refAt } from "./git.ts"
-import type { Git } from "./records.ts"
+import { gitIn, refAt, type Git } from "./git.ts"
 import type { QueueRunLog } from "./log.ts"
 import {
   checkedTree,

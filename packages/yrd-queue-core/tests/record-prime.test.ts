@@ -8,12 +8,14 @@
  * @consumer every per-change record reader in a round (with-notify's resend and told, endings, withdraw)
  */
 
+import childProcess from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import { appendRecord, gitIn, readQueue, readRecord, readRecords, submit, tipOf, type Git } from "../src/index.ts"
-import { primeRecords } from "../src/records.ts"
+import { primeLegacyHistory } from "../src/legacy-records.ts"
+import type { CommitMeta } from "gitomic"
 
 const roots: string[] = []
 afterAll(() => {
@@ -85,30 +87,29 @@ async function queueWithChains(): Promise<Fixture> {
   return { git, target, branchHeads: chains.map(({ head }) => head), chains }
 }
 
-/** A Git that records every invocation and the stdout of each `log`, over the fixture's own Git. */
-function counting(git: Git): Readonly<{ git: Git; calls: string[][]; logs: string[] }> {
+/** A Git that records every invocation through the queue's existing runner. */
+function counting(git: Git): Readonly<{ git: Git; calls: string[][] }> {
   const calls: string[][] = []
-  const logs: string[] = []
   const counted: Git = async (args, input) => {
     calls.push([...args])
-    const out = await git(args, input)
-    if (args[0] === "log") logs.push(out)
-    return out
+    return git(args, input)
   }
-  return { git: counted, calls, logs }
+  return { git: counted, calls }
 }
 
-describe("the queue read's one record log primes every per-change reader (25303 f1)", () => {
-  it("answers N changes' record reads with no process after the read's single record log", async () => {
+describe("the queue read's Gitomic history primes every per-change reader (25303 f1)", () => {
+  it("answers N changes' record reads with no process after the one history batch", async () => {
     const fixture = await queueWithChains()
     const { git, calls } = counting(fixture.git)
+    const spawn = vi.spyOn(childProcess, "spawn")
 
     const read = await readQueue(git, "origin", "main", fixture.target)
-    const readLogs = calls.filter((args) => args[0] === "log")
-    expect(readLogs).toHaveLength(1)
-    expect(readLogs[0]).toContain("--first-parent")
+    const historyReads = spawn.mock.calls.filter(([, args]) => (args as string[]).includes("rev-list"))
+    expect(historyReads).toHaveLength(1)
+    expect(historyReads[0]?.[1]).toContain("--first-parent")
 
     calls.length = 0
+    spawn.mockClear()
     for (const { failed, sent } of fixture.chains) {
       await readRecord(git, sent)
       await readRecord(git, failed)
@@ -117,6 +118,7 @@ describe("the queue read's one record log primes every per-change reader (25303 
     }
     expect(read.changes).toHaveLength(3)
     expect(calls).toEqual([])
+    expect(spawn).not.toHaveBeenCalled()
   })
 
   it("answers exactly as the unprimed readers do, record for record", async () => {
@@ -146,25 +148,22 @@ describe("the queue read's one record log primes every per-change reader (25303 
     for (const tip of tips) expect(tip).toEqual(await readRecord(unprimed, tip.sha))
   })
 
-  it("never reads into the target's history: no primed commit is on main or is a change's head", async () => {
+  it("batches only captured record tips, never the target or a change head", async () => {
     const fixture = await queueWithChains()
-    const { git, logs } = counting(fixture.git)
+    const { git } = counting(fixture.git)
+    const spawn = vi.spyOn(childProcess, "spawn")
     await readQueue(git, "origin", "main", fixture.target)
 
-    const primedShas = (logs[0] ?? "")
-      .split("\x01")
-      .map((row) => row.replace(/^\n/u, "").split("\x00")[0]?.trim() ?? "")
-      .filter((sha) => sha !== "")
-    const onMain = new Set(
-      (await fixture.git(["rev-list", "--first-parent", "origin/main"])).split("\n").filter(Boolean),
-    )
-    // Three chains of three records, plus the one shared genesis.
-    expect(primedShas).toHaveLength(10)
-    expect(primedShas.filter((sha) => onMain.has(sha))).toEqual([])
-    expect(primedShas.filter((sha) => fixture.branchHeads.includes(sha))).toEqual([])
+    const histories = spawn.mock.calls
+      .filter(([, args]) => (args as string[]).includes("rev-list"))
+      .map(([, args]) => args as string[])
+    expect(histories).toHaveLength(1)
+    expect(histories[0]).toEqual(expect.arrayContaining(fixture.chains.map(({ sent }) => sent)))
+    expect(histories[0]).not.toContain(fixture.target)
+    for (const head of fixture.branchHeads) expect(histories[0]).not.toContain(head)
   })
 
-  it("reads a record written after the prime the way it always did, one process, and names the miss", async () => {
+  it("reads a record written after the prime through Gitomic and names the miss", async () => {
     const fixture = await queueWithChains()
     const { git, calls } = counting(fixture.git)
     await readQueue(git, "origin", "main", fixture.target)
@@ -188,18 +187,18 @@ describe("the queue read's one record log primes every per-change reader (25303 
     const record = await readRecord(git, later)
 
     expect(record.sha).toBe(later)
-    expect(calls).toEqual([["log", "-1", expect.stringContaining("--format="), later]])
+    expect(calls).toEqual([["rev-parse", "--absolute-git-dir"]])
     expect(stderr).toHaveBeenCalledWith(`DEBUG yrd:queue:records record cache miss: readRecord ${later}`)
   })
 
   it("warns with the numbers when one prime passes ten times the garage's measured size", () => {
     const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined)
     const row = (index: number) =>
-      `${index.toString(16).padStart(40, "0")}\x00\x002026-09-23T13:00:00-07:00\x00\x00x\n\x01`
-    const output = Array.from({ length: 75_001 }, (_, index) => row(index + 1)).join("\n")
+      ({ oid: index.toString(16).padStart(40, "0"), message: "x\n" }) as CommitMeta
+    const history = Array.from({ length: 75_001 }, (_, index) => row(index + 1))
     const git: Git = async () => ""
 
-    expect(primeRecords(git, output)).toHaveLength(75_001)
+    primeLegacyHistory(git, history)
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining("read 75001 commits"))
   })
 })

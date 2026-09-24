@@ -28,8 +28,7 @@ import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type 
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
 import { GIT_SUPER_ABSENT_STORE, populateReferenceStores, ReferenceUnpopulated } from "./reference.ts"
-import type { Git } from "./records.ts"
-import { gitIn, mergeBase, refAt, type GitInvocationOptions, type GitSelection } from "./git.ts"
+import { gitIn, mergeBase, refAt, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
 
 /**
  * What the worktree plumbing narrates to.
