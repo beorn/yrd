@@ -199,7 +199,9 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         expect(text).not.toContain("STUCK")
       })
 
-      it("case 3 (absent service document, no run): queue line shows STOPPED with detail", async () => {
+      // The word is 693b0a69's. The detail is 25556's (operator 07:15 PDT, @cto edf63db7): a stopped
+      // queue's top line reads YRD STOPPED and the stop text only if one was given, nothing else.
+      it("case 3 (absent service document, no run): queue line shows STOPPED, with no stop text given none", async () => {
         const snap = snapshot({
           stopped: null,
           runner: {
@@ -214,15 +216,13 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         )
         expect(status.marker).toBe("■")
         expect(status.color).toBe("$fg-error")
-        expect(status.reason).toBeDefined()
-        expect(status.reason).toContain("no runner status published at origin")
+        expect(status.reason).toBeUndefined()
 
         const text = await paint(snap)
         expect(text).toContain("■ YRD STOPPED")
-        expect(text).toContain("no runner status published at origin")
       })
 
-      it("case 4 (dead run): queue line shows STOPPED with detail", async () => {
+      it("case 4 (dead run): queue line shows STOPPED, with no stop text given none", async () => {
         const snap = snapshot({
           stopped: null,
           runner: {
@@ -238,7 +238,7 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         )
         expect(status.marker).toBe("■")
         expect(status.color).toBe("$fg-error")
-        expect(status.reason).toBeDefined()
+        expect(status.reason).toBeUndefined()
 
         const text = await paint(snap)
         expect(text).toContain("■ YRD STOPPED")
