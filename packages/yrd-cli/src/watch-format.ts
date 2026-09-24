@@ -304,10 +304,13 @@ export function durationText(row: Row, now: Date): string {
  */
 export function ageRunText(row: Row, now: Date): string {
   const measured = clocks(row, now)
-  const origin = row.since ?? row.at
-  const age = origin === undefined ? "—" : mediaDuration(Math.max(0, now.getTime() - origin.getTime()))
   const isEnded =
-    row.state === "merged" || row.state === "failed" || row.state === "cancelled" || row.state === "withdrawn"
+    row.state === "merged" ||
+    row.state === "failed" ||
+    row.state === "cancelled" ||
+    row.state === "withdrawn" ||
+    row.state === "direct"
+  const age = measured.ageMs === undefined ? "—" : mediaDuration(measured.ageMs)
   const runtime = measured.runtimeMs ?? measured.checkingMs ?? (isEnded ? measured.tookMs : undefined)
   const run = runtime === undefined ? "—" : runTime(runtime)
   return `${age} / ${run}`

@@ -30,7 +30,7 @@ import {
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
 /** A believable health document, as `writtenHealthDocument` shapes one: its writer declares its own deadline. */
-const BEATING: RunnerService = { kind: "beating", state: "healthy" }
+const BEATING: RunnerService = { kind: "beating", state: "healthy", since: NOW }
 
 /**
  * What the service's own health document says, as the loop writes it.

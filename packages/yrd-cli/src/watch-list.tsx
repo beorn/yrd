@@ -27,7 +27,7 @@
  */
 
 import React, { memo } from "react"
-import { Box, Pulse, Text, useInteractionTreatment } from "silvery"
+import { Box, Pulse, Text } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import { TimeText } from "./watch-primitives.tsx"
@@ -220,7 +220,7 @@ export type LineStatus = Readonly<{
   marker: string
   word: string
   color: string
-  /** How long the queue has been in that status, not bolded (25556). */
+  /** How long the queue has been in that status, or live status timer node (25556, 25630). */
   timer?: React.ReactNode
   /** Why the line is stopped, in the pause record's or the runner's own words; absent while it runs. */
   reason?: string
@@ -228,49 +228,71 @@ export type LineStatus = Readonly<{
   pulse: boolean
 }>
 
-/** Three cells between each queue tab and before the filter group (25416). */
-const TAB_GAP = 3
+/**
+ * Shortens a queue address with `..` when it does not fit (25630).
+ */
+export function shortenAddress(address: string, maxLen: number): string {
+  if (address.length <= maxLen) return address
+  if (maxLen <= 2) return "..".slice(0, maxLen)
+  return `${address.slice(0, maxLen - 2)}..`
+}
 
 /**
- * The top line (ia.md, 24196; 25416): inverse chrome across the whole width.
- * The status area is on the left, a block in the status colour with `$bg`
- * text — marker, bold YRD, the status word and the reason beside it,
- * truncated — and a click on it points the cursor at the RUNNER box. The
- * queue tabs and the filter group are on the right, {@link TAB_GAP} cells
- * apart. Every pair clears 3:1 against its ground (the 25416 ratio rows).
- *
- * `live` is false on a one-shot print: silvery's `Pulse` needs the app root's
- * scope even when inactive, so a print draws the marker still.
+ * The top line (ia.md, 24196; 25416; 25630): inverted chrome across the whole width.
+ * Left: YRD QUEUE and the queue address (shortened with .. when it does not fit).
+ * Right: the status word and its timer (RUNNING 0:17), nothing else.
  */
 export function TopLine({
+  queue,
   queues,
-  visible,
-  onToggle,
+  visible: _visible,
+  onToggle: _onToggle,
   status,
-  statusPills,
+  statusPills: _statusPills,
+  columns,
   live = false,
   onStatusClick,
 }: {
-  queues: readonly WatchQueue[]
-  /** The labels of the queues shown; `undefined` means every one. */
-  visible: ReadonlySet<string> | undefined
-  onToggle: (label: string) => void
+  queue?: string
+  queues?: readonly WatchQueue[]
+  /** @deprecated Preserved for compatibility */
+  visible?: ReadonlySet<string> | undefined
+  /** @deprecated Preserved for compatibility */
+  onToggle?: (label: string) => void
   status: LineStatus
+  /** @deprecated Preserved for compatibility */
   statusPills?: React.ReactNode
+  columns?: number
   live?: boolean
   onStatusClick?: () => void
 }) {
-  // Semantic foreground tokens are tuned for the dark canvas. Blend them
-  // toward inverse ink so each status remains legible on the pale top line.
   const statusInk = `mix($fg-on-inverse, ${status.color}, ${status.color === "$fg-warning" ? "30%" : "50%"})`
+  const queueAddress = queue ?? (queues && queues[0]?.label) ?? ""
+
+  // Right side width: marker + YRD + word + timer + reason + gaps + paddingRight
+  const timerLen = typeof status.timer === "string" ? status.timer.length : status.timer !== undefined ? 10 : 0
+  const statusParts = [
+    status.marker ? 1 : 0,
+    3, // YRD
+    status.word.length,
+    timerLen,
+    status.reason ? status.reason.length : 0,
+  ].filter((n) => n > 0)
+  const statusGaps = Math.max(0, statusParts.length - 1)
+  const statusRightLen = statusParts.reduce((a, b) => a + b, 0) + statusGaps + 1
+  const availableForAddress =
+    columns !== undefined ? Math.max(0, columns - 1 - 10 - 1 - statusRightLen) : undefined
+  const displayAddress =
+    availableForAddress !== undefined ? shortenAddress(queueAddress, availableForAddress) : queueAddress
+
   return (
     <Box
       height={1}
       flexDirection="row"
-      columnGap={TAB_GAP}
       flexShrink={0}
       minWidth={0}
       overflow="hidden"
+      paddingLeft={1}
       paddingRight={1}
       justifyContent="space-between"
       backgroundColor="$bg-inverse"
@@ -280,8 +302,20 @@ export function TopLine({
         flexShrink={1}
         minWidth={0}
         overflow="hidden"
+      >
+        <Text bold color="$fg-on-inverse" flexShrink={0}>
+          YRD QUEUE{" "}
+        </Text>
+        <Text color="$fg-on-inverse" wrap="truncate">
+          {displayAddress}
+        </Text>
+      </Box>
+      <Box
+        flexDirection="row"
+        flexShrink={status.reason !== undefined ? 1 : 0}
+        minWidth={0}
+        overflow="hidden"
         gap={1}
-        paddingX={1}
         onClick={onStatusClick}
       >
         {live && status.pulse ? (
@@ -304,64 +338,53 @@ export function TopLine({
             {status.timer}
           </Text>
         )}
-        {status.reason === undefined ? null : (
+        {status.word === "STOPPED" && status.reason !== undefined ? (
           <Text color={statusInk} wrap="truncate">
             {status.reason}
           </Text>
-        )}
-      </Box>
-      <Box flexDirection="row" flexShrink={0} columnGap={TAB_GAP}>
-        {queues.map((queue, index) => (
-          <TopPill
-            key={`${queue.path}@${queue.branch}`}
-            label={pillLabel(queue, index + 1, true)}
-            active={visible === undefined || visible.has(queue.label)}
-            activeTreatment="accentText"
-            onToggle={() => {
-              onToggle(queue.label)
-            }}
-          />
-        ))}
-        {statusPills}
+        ) : null}
       </Box>
     </Box>
   )
 }
 
 /**
- * The top line stays on the inverse surface. Silvery's text recipes show
- * selection and hover through foreground colour alone.
+ * Filter pills on the plain surface (25630). Active uses warning tint and bold,
+ * unselected stays muted. First letter is bolded as the keyboard shortcut.
  */
 function TopPill({
   label,
   active,
   onToggle,
-  activeTreatment = "warningText",
+  boldFirstLetter = false,
+  activeTreatment: _activeTreatment = "warningText",
 }: {
   label: string
   active: boolean
   onToggle: () => void
+  boldFirstLetter?: boolean
   activeTreatment?: "accentText" | "warningText"
 }) {
-  const text = useInteractionTreatment("control", active ? activeTreatment : "inverseText", true, {
-    selected: active,
-  })
-  const activeToken = activeTreatment === "accentText" ? "$fg-accent" : "$fg-warning"
-  const color = active ? `mix($fg-on-inverse, ${activeToken}, 30%)` : text.treatment.color
+  const color = active ? "$fg-warning" : "$fg-muted"
   return (
     <Box
       flexShrink={0}
       onClick={onToggle}
-      onMouseEnter={(event) => {
-        text.onMouseEnter(event)
-      }}
-      onMouseLeave={(event) => {
-        text.onMouseLeave(event)
-      }}
     >
-      <Text color={color} bold={active}>
-        {label}
-      </Text>
+      {boldFirstLetter && label.length > 0 ? (
+        <>
+          <Text color={color} bold>
+            {label.slice(0, 1)}
+          </Text>
+          <Text color={color} bold={active}>
+            {label.slice(1)}
+          </Text>
+        </>
+      ) : (
+        <Text color={color} bold={active}>
+          {label}
+        </Text>
+      )}
     </Box>
   )
 }

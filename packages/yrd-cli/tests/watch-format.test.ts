@@ -237,3 +237,60 @@ describe("the RUN time in the AGE / RUN cell (25421)", () => {
     expect(layout.ageRunWidth).toBeGreaterThanOrEqual("00:00 / 00:00".length)
   })
 })
+
+describe("done changes freeze their clocks (25630)", () => {
+  const T0 = new Date("2026-09-24T12:00:00Z") // opened
+  const T1 = new Date("2026-09-24T12:01:00Z") // started
+  const T2 = new Date("2026-09-24T12:03:00Z") // ended
+  const T3 = new Date("2026-09-24T13:03:00Z") // 1 hour later
+
+  it("three clocks per change: opened, started and ended with done row clocks frozen", () => {
+    const merged: Row = {
+      branch: "task/done",
+      head: "a".repeat(40),
+      state: "merged",
+      since: T0,
+      startedAt: T1,
+      endedAt: T2,
+    }
+    // At T2 (ended instant): age is T2 - T0 = 3m, run is T2 - T1 = 2m
+    expect(ageRunText(merged, T2)).toBe("3:00 / 02:00")
+    // At T3 (1 hour later): age and run are frozen at T2!
+    expect(ageRunText(merged, T3)).toBe("3:00 / 02:00")
+  })
+
+  it("queued and running tick while done stays frozen", () => {
+    const queued: Row = {
+      branch: "task/q",
+      head: "b".repeat(40),
+      state: "queued",
+      since: T0,
+    }
+    const running: Row = {
+      branch: "task/r",
+      head: "c".repeat(40),
+      state: "queued",
+      since: T0,
+      startedAt: T1,
+      live: { check: "test", phase: "submit", run: "r1", since: T1 },
+    }
+    const merged: Row = {
+      branch: "task/m",
+      head: "d".repeat(40),
+      state: "merged",
+      since: T0,
+      startedAt: T1,
+      endedAt: T2,
+    }
+
+    // At T2:
+    expect(ageRunText(queued, T2)).toBe("3:00 / —")
+    expect(ageRunText(running, T2)).toBe("3:00 / 02:00")
+    expect(ageRunText(merged, T2)).toBe("3:00 / 02:00")
+
+    // At T3 (1 hour later):
+    expect(ageRunText(queued, T3)).toBe("1h03m / —")
+    expect(ageRunText(running, T3)).toBe("1h03m / 01h02m")
+    expect(ageRunText(merged, T3)).toBe("3:00 / 02:00")
+  })
+})
