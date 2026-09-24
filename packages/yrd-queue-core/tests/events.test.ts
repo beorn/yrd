@@ -10,6 +10,7 @@ import { createMemBackend } from "gitomic/mem"
 import { Conflict, open } from "gitomic"
 import type { GitomicBackend } from "gitomic"
 import { gitIn } from "../src/git.ts"
+import { eventListRows } from "../src/event-table.ts"
 import { pauseRef } from "../src/refs.ts"
 import {
   CHANGE_EVENT_TYPES,
@@ -778,7 +779,8 @@ describe("the queue-format boundary", () => {
     expect(await drop(location, { queue: "lab", branch: "task/drop", by: "@dev/2" })).toEqual(dropped)
   })
 
-  it("drops a never-submitted branch by creating its chain, then reports the ending on retry", async () => {
+  // @failure dropping a draft creates a chain with no opened segment and blinds the whole queue listing (25658).
+  it("drops a never-submitted branch with a readable opened segment, then reports the ending on retry", async () => {
     const { store, location } = remoteMemStore("yrd-event-drop-draft")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
@@ -793,8 +795,13 @@ describe("the queue-format boundary", () => {
     })
     expect((await listRefs("refs/heads/task/draft", store)).size).toBe(0)
     const events = await (await openEvents({ ...store, ref: changesRef("lab", "task/draft") })).events()
-    expect(events).toHaveLength(1)
-    expect(events[0]).toMatchObject({ id: dropped.event, type: "cancelled", links: [head] })
+    expect(events.map((event) => event.type)).toEqual(["opened", "cancelled"])
+    expect(events[0]).toMatchObject({ type: "opened", links: [head] })
+    expect(events[1]).toMatchObject({ id: dropped.event, type: "cancelled", links: [head] })
+    const segments = enumerateChangeSegments(events, changesRef("lab", "task/draft"), store.repo)
+    expect(eventListRows(new Map([["task/draft", segments.map((segment) => segment.state)]]), []).table).toMatchObject([
+      { branch: "task/draft", state: "cancelled", head, reason: "dropped" },
+    ])
     expect(await drop(location, { queue: "lab", branch: "task/draft", by: "@dev/2" })).toEqual(dropped)
   })
 
