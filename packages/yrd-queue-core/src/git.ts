@@ -254,17 +254,8 @@ export function gitIn(
         evidence = { ...evidence, failure: `Git observation: ${String(error)}` }
       }
     }
+    evidence = publishGitInvocation(options, evidence, false)
     lastInvocation = evidence
-    try {
-      options.onInvocation?.(evidence)
-    } catch (error) {
-      // Publication is not allowed to replace the settled invocation with an
-      // unrelated filesystem error. Do not retry a possibly partial record.
-      const artifacts = evidence.artifacts
-      const publicationFailure = `Git evidence publication failed: ${String(error)}${artifacts === undefined ? "" : `; raw stdout: ${artifacts.stdout}; raw stderr: ${artifacts.stderr}`}`
-      evidence = { ...evidence, failure: [evidence.failure, publicationFailure].filter(Boolean).join("; ") }
-      lastInvocation = evidence
-    }
     return evidence
   }
   const git: Git = async (originalArgs, input) => {
@@ -309,7 +300,33 @@ export function gitIn(
   }) as GitRunner
 }
 
-async function invokeGit(
+export function publishGitInvocation(
+  options: GitInvocationOptions | undefined,
+  evidence: GitInvocation,
+  loudOnSuccess = false,
+): GitInvocation {
+  try {
+    options?.onInvocation?.(evidence)
+    return evidence
+  } catch (error) {
+    // Publication is not allowed to replace the settled invocation with an
+    // unrelated filesystem error. Do not retry a possibly partial record.
+    const artifacts = evidence.artifacts
+    const publicationFailure = `Git evidence publication failed: ${String(error)}${artifacts === undefined ? "" : `; raw stdout: ${artifacts.stdout}; raw stderr: ${artifacts.stderr}`}`
+    if (loudOnSuccess) {
+      console.error(publicationFailure)
+      if (evidence.failure === undefined && evidence.result !== undefined && evidence.result.exitCode === 0) {
+        return evidence
+      }
+    }
+    return {
+      ...evidence,
+      failure: [evidence.failure, publicationFailure].filter(Boolean).join("; "),
+    }
+  }
+}
+
+export async function invokeGit(
   runner: Pick<Process, "run">,
   invocation: Pick<GitInvocation, "args" | "cwd" | "selection">,
   options: GitInvocationOptions,
