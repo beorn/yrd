@@ -2878,6 +2878,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
         {
           command: "up",
           intervalSeconds: 0,
+          startedAt: at,
           stop: stop.signal,
           ...HEARTBEAT,
           terminate: {
@@ -2930,6 +2931,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     const intentFile = join(mkdtempSync(join(tmpdir(), "yrd-intent-stale-")), "intent.json")
     // Stale: written yesterday before this process started.
     const staleAt = "2026-09-23T20:00:00.000Z"
+    const startedAt = new Date().toISOString()
     writeFileSync(
       intentFile,
       `${JSON.stringify({ verb: "stop", by: "@chief", reason: "yesterday maintenance", at: staleAt })}\n`,
@@ -2945,6 +2947,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
         {
           command: "up",
           intervalSeconds: 0,
+          startedAt,
           stop: stop.signal,
           ...HEARTBEAT,
           terminate: {
@@ -2991,6 +2994,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
         {
           command: "up",
           intervalSeconds: 0,
+          startedAt,
           stop: stop2.signal,
           ...HEARTBEAT,
           terminate: {
@@ -3045,6 +3049,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
         {
           command: "up",
           intervalSeconds: 0,
+          startedAt: at,
           stop: stop.signal,
           ...HEARTBEAT,
           afterHealth: (document) => {
