@@ -20,6 +20,7 @@ import { describe, expect, it, vi } from "vitest"
 import { bufferToText, render } from "silvery/test"
 import { Box, FOLD_MARKERS, Text } from "silvery"
 import type { ChangeRecord, GitObservation, JournalCommand, JournalRun, Row } from "@yrd/queue-core"
+import { checksOf, journalKey, watchRows as perRunRows } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { DETAIL_BG, WatchPane, watchTier, type WatchSnapshot } from "../src/watch-pane.tsx"
@@ -3897,5 +3898,56 @@ describe("one tab per stage of the round, from its journal (25441 slice 2)", () 
     } finally {
       rmSync(dir, { force: true, recursive: true })
     }
+  })
+})
+
+// 25521: the specimen was a withdrawn change (run main#192003) whose run's
+// `affected-tests (base)` started and never ended. Its detail read
+// "Cancelled, checking affected-tests" with that tab at `◉ 6d06h`. Driven
+// through the real chain — the per-run row join, then the check views from
+// the same inputs the loader passes — so neither the gate nor the tab's word
+// can regress alone.
+describe("an ended change's check that never ended (25521)", () => {
+  it("reads unended, with no running glyph, no live age, and a headline naming only the ending", async () => {
+    const started = new Date(NOW.getTime() - (6 * 24 + 6) * 60 * 60 * 1000)
+    const running = { log: "/w/checks/affected-tests.log", name: "affected-tests", phase: "base", startedAt: started }
+    const journal = journalRun({
+      at: started,
+      branch: "task/one",
+      checks: [{ log: running.log, name: "affected-tests", phase: "base", startedAt: started }],
+      head: row().head,
+      id: RUN_ID,
+      running,
+      startedAt: started,
+    })
+    const withdrawn = row({ endedAt: NOW, reason: "replaced", run: RUN_ID, state: "withdrawn" })
+    const [item] = perRunRows([withdrawn], {
+      journals: {
+        dir: "/w/logs",
+        malformed: [],
+        runs: new Map([[journalKey(withdrawn.branch, withdrawn.head), [journal]]]),
+      },
+      perRun: true,
+    })
+    const live = item?.row.live
+    const checks = checksOf(
+      [],
+      "open",
+      [{ name: "affected-tests", run: "bun tools/affected-tests.ts" }],
+      live === undefined ? undefined : { name: live.check, ...(live.log === undefined ? {} : { log: live.log }) },
+      journal.checks,
+    )
+    const detail = detailOf(item!, checks, { journal })
+    const text = await paint(at(<WatchDetail detail={detail} />), [], 160)
+
+    const status = text.split("\n").find((line) => line.includes("Cancelled"))
+    expect(status).toBeDefined()
+    expect(status).not.toMatch(/checking/u)
+    const strip = text.split("\n")
+    const tab = strip.findIndex((line) => line.includes("affected-tests"))
+    expect(strip[tab + 1]).toContain("unended")
+    // No live age on the tab: the metadata's own "UPDATED … ago" clock is not the check's.
+    expect(strip[tab + 1]).not.toMatch(/\d+d\d+h|\d+:\d\d/u)
+    expect(text).not.toContain("◉")
   })
 })
