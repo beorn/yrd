@@ -2373,22 +2373,17 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     ])
   })
 
-  it("? opens the help as an overlay centred over the pane, which keeps its footer, with the legend unclipped at 160x48 and 100x31: every state's word, what it means and what happens next, and direct apart as not a change", async () => {
+  it("? opens the help as an overlay centred over the pane, with the legend unclipped at 160x48 and 100x31: every state's word, what it means and what happens next, and direct apart as not a change", async () => {
     const W = await words()
     const full = snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER })
     const closed = await lines(full, 160, 48)
     const open = await lines(full, 160, 48, ["?"])
-    // An overlay repaints one band between the top row and the footer and moves nothing else; a dialog in
-    // the pane's flow reflows every row (measured: all 48) and lands under the footer. The band is every
-    // row the open help changed. Trailing blanks are not a change: an overlay pads the rows it spans.
+    // An overlay repaints one band under the top row and moves nothing else; a dialog in the pane's flow
+    // reflows every row (measured: all 48) and lands under the frame. The band is every row the open help
+    // changed. Trailing blanks are not a change: an overlay pads the rows it spans.
     const changed = open.flatMap((line, index) => (line.trimEnd() === closed[index]?.trimEnd() ? [] : [index]))
     const first = changed[0] ?? -1
     const last = changed.at(-1) ?? -1
-    const footer = (painted: readonly string[]): string =>
-      painted
-        .filter((line) => line.trim() !== "")
-        .at(-1)
-        ?.trimEnd() ?? ""
     // The legend, read over a pane with nothing else on it, so no table text beside the dialog can answer
     // for it, at the widest and the narrowest size of the tier ladder: the help must not clip at either.
     // Wrapped legend lines are joined back: this reads what the legend says, the overlay's shape is read
@@ -2426,9 +2421,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect({
       centred: first > 0 && last < 48 - 1 && Math.abs((first + last) / 2 - (48 - 1) / 2) <= 2,
       directApart: apart >= 0 && band.indexOf(`${W.direct.word} `, apart) > apart,
-      footerKept: footer(open) === footer(closed),
       legendMissing: { "100x31": missing(narrowBand), "160x48": missing(band) },
-    }).toEqual({ centred: true, directApart: true, footerKept: true, legendMissing: { "100x31": [], "160x48": [] } })
+    }).toEqual({ centred: true, directApart: true, legendMissing: { "100x31": [], "160x48": [] } })
   })
 
   it("one change to the word table changes every surface that draws a state word, both helps included", async () => {
@@ -2808,35 +2802,37 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     await settle(app)
     const text = current(app)
     const lines = text.split("\n")
+    ;(await import("node:fs")).writeFileSync("/tmp/claude-3001/-hh-dev-wt1/0a19dc62-cd91-4583-a229-61fac5385e09/scratchpad/probe-center.txt", lines.map((l, i) => `${String(i).padStart(2)}|${l.trimEnd()}`).join("\n"))
 
-    // Terminal is 25 rows tall (0..24). In the 20-row ListView viewport (lines 4..23):
-    // Runner item has height 5 (1 row marginTop + 3 rows TitledBox + 1 row marginBottom).
+    // Terminal is 25 rows tall (0..24), with no help line under the frame (25417). In the 21-row ListView
+    // viewport (lines 4..24): Runner item has height 5 (1 row marginTop + 3 rows TitledBox + 1 row marginBottom).
     // Center alignment places the runner item in viewport center, placing
-    // runner box at lines 13..15 with the item's marginTop at line 12 and marginBottom at line 16.
+    // runner box at lines 14..16 with the item's marginTop at line 13 and marginBottom at line 17.
     const runnerStart = lines.findIndex((l) => l.includes("╭─ RUNNER"))
     const runnerEnd = lines.findIndex((l) => l.includes("╰─"))
-    expect(runnerStart).toBe(13)
-    expect(runnerEnd).toBe(15)
+    expect(runnerStart).toBe(14)
+    expect(runnerEnd).toBe(16)
 
     // Above runner item: overflow indicator at line 4 (saying more items above, item 9),
-    // and queued items in viewport (lines 5..11: task/queued-6..0).
+    // and queued items in viewport (lines 5..12: task/queued-7..0).
     expect(lines[4]).toContain("▲")
-    expect(lines[5]).toContain("task/queued-6")
-    expect(lines[11]).toContain("task/queued-0")
+    expect(lines[5]).toContain("task/queued-7")
+    expect(lines[12]).toContain("task/queued-0")
     expect(text).not.toContain("task/queued-19")
-    expect(text).not.toContain("task/queued-7")
+    expect(text).not.toContain("task/queued-8")
 
-    // Below runner box: task/done-0..5 (lines 17..22) and bottom overflow indicator at line 23 (saying more items below, item 9).
-    expect(lines[17]).toContain("task/done-0")
-    expect(lines[22]).toContain("task/done-5")
-    expect(lines[23]).toContain("▼")
+    // Below runner box: task/done-0..5 (lines 18..23) and bottom overflow indicator at line 24 (saying more items below, item 9).
+    expect(lines[18]).toContain("task/done-0")
+    expect(lines[23]).toContain("task/done-5")
+    expect(lines[24]).toContain("▼")
     expect(text).not.toContain("task/done-6")
     expect(text).not.toContain("task/done-19")
 
-    // Proves vertical centering of the runner item in the 20-row viewport (lines 4..23):
-    // 8 rows above the runner item (lines 4..11), 7 rows below the runner item (lines 17..23).
-    expect(runnerStart - 1 - 4).toBe(8)
-    expect(23 - (runnerEnd + 1)).toBe(7)
+    // Proves vertical centering of the runner item in the 21-row viewport (lines 4..24):
+    // 9 rows above the runner item (lines 4..12), 7 rows below the runner item (lines 18..24). The item
+    // sits one row below true center, as it did in the 20-row viewport (8 above, 7 below).
+    expect(runnerStart - 1 - 4).toBe(9)
+    expect(24 - (runnerEnd + 1)).toBe(7)
 
     app.unmount()
   })
@@ -3165,13 +3161,13 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(lines[2]?.trim()).toBe("")
     expect(lines[3]).toContain("ISSUE / BRANCH")
 
-    // 2. marginTop: line before runner box (line 12) is blank
-    expect(lines[12]?.replace(/[█▅]/g, "").trim()).toBe("")
-    expect(lines[13]).toContain("╭─ RUNNER")
+    // 2. marginTop: line before runner box (line 13) is blank; the list has the help line's row too (25417)
+    expect(lines[13]?.replace(/[█▅]/g, "").trim()).toBe("")
+    expect(lines[14]).toContain("╭─ RUNNER")
 
-    // 3. marginBottom: line after runner box (line 16) is blank
-    expect(lines[15]).toContain("╰─")
-    expect(lines[16]?.replace(/[█▅]/g, "").trim()).toBe("")
+    // 3. marginBottom: line after runner box (line 17) is blank
+    expect(lines[16]).toContain("╰─")
+    expect(lines[17]?.replace(/[█▅]/g, "").trim()).toBe("")
 
     app.unmount()
   })
