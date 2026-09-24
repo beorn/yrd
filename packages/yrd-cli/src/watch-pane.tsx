@@ -761,19 +761,17 @@ function draftsIn(rows: readonly WatchRow[]): number {
   return rows.filter((item) => item.row.state === "draft").length
 }
 
-/** Derive status marker, word, and color for the top line (only RUNNING or STOPPED, 25367). */
+/** Derive status marker, word, and color for the top line (RUNNING / PAUSED / STOPPED). */
 export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
   const runner = runnerOf(snapshot, now)
   if (snapshot.stopped !== undefined && snapshot.stopped !== null) {
+    return { marker: "■", word: "PAUSED", color: "$fg-warning" }
+  }
+  if (runner.state === "stopped" || runner.state === "silent") {
     return { marker: "■", word: "STOPPED", color: "$fg-error" }
   }
-  if (
-    runner.state === "stopped" ||
-    runner.state === "silent" ||
-    runner.state === "stuck" ||
-    runner.state === "paused"
-  ) {
-    return { marker: "■", word: "STOPPED", color: "$fg-error" }
+  if (runner.state === "paused" || runner.state === "stuck") {
+    return { marker: "■", word: "PAUSED", color: "$fg-warning" }
   }
   return { marker: RUNNING_GLYPH, word: "RUNNING", color: "$fg-info" }
 }
