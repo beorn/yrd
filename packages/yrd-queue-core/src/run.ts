@@ -48,7 +48,8 @@
 
 import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
-import { type Process } from "@yrd/process"
+import { adaptProcessGit, createProcess, type Process } from "@yrd/process"
+import { readFrozenPushIntent } from "git-super/push-intent"
 import {
   programRootCheck,
   ProgramSubjectSetupFailed,
@@ -1546,7 +1547,19 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
   const step = { branch: entry.change.branch, head, phase }
   const message = mergeMessage(run, entry)
   const key = composeKey(head, run.targetSha, message)
-  const reused = phase === "merge" ? run.composed.get(key) : undefined
+  const stored = phase === "merge" ? run.composed.get(key) : undefined
+  const moved = stored === undefined ? undefined : await movedPublication(run, stored)
+  if (moved !== undefined) {
+    run.log.write({
+      ...step,
+      ...moved,
+      base: run.targetSha,
+      candidate: stored?.verifying.candidate,
+      kind: "observation",
+      subject: "compose-reuse-refused",
+    })
+  }
+  const reused = moved === undefined ? stored : undefined
   if (reused !== undefined) {
     run.log.write({
       ...step,
@@ -1568,11 +1581,39 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
 
 /**
  * What makes two composes the same compose: the head, the target it merges onto, and the merge message, which is
- * all git-super's merge is given. A child main can still move between a round's two phases; a kept-ahead pin then
- * meets the publication's lease, which refuses rather than landing over it.
+ * all git-super's merge is given. A child main can still move between a round's two phases, which the key cannot
+ * see; {@link movedPublication} checks that before a merge reuses a compose.
  */
 function composeKey(head: string, target: string, message: string): string {
   return `${head} ${target} ${message}`
+}
+
+/**
+ * The first child a stored compose publishes whose destination no longer holds the oid its frozen lease expects, or
+ * undefined when every one still does. A child main that moved after the submit phase composed makes that lease
+ * stale: publishing the stored compose is refused and the change sticks, where composing fresh merges the moved main
+ * in (@cto c3facf63, 298075b8 on 25570). One exact read per published child; the intent is git-super's own decoder.
+ */
+async function movedPublication(
+  run: Run,
+  composed: Extract<VerifiedCandidate, { state: "verified" }>,
+): Promise<Readonly<{ path: string; destination: string; expected: string; saw: string }> | undefined> {
+  const owned = run.options.process === undefined
+  const runner = run.options.process ?? createProcess({ cwd: run.options.repo, env: run.options.env })
+  try {
+    const git = adaptProcessGit(runner, run.options.env === undefined ? {} : { env: run.options.env })
+    const intent = await readFrozenPushIntent(git, run.options.repo, composed.verifying.candidate)
+    for (const child of intent?.children ?? []) {
+      if (child.publication === undefined) continue
+      const lease = child.publication.expectedDestination
+      const expected = lease.state === "oid" ? lease.oid : "missing"
+      const saw = (await readRemoteCommit(run.git, child.remote, child.publication.destination)) ?? "missing"
+      if (saw !== expected) return { path: child.path, destination: child.publication.destination, expected, saw }
+    }
+    return undefined
+  } finally {
+    if (owned) await runner.close()
+  }
 }
 
 async function composeFresh(
