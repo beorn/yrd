@@ -3504,18 +3504,43 @@ describe("the top line (25416)", () => {
     const x = (app.lines[y] ?? "").indexOf(needle)
     return x < 0 ? undefined : JSON.stringify(app.cell(x + offset, y).fg)
   }
+  const bgAt = (app: ReturnType<typeof render>, y: number, needle: string): string | undefined => {
+    const x = (app.lines[y] ?? "").indexOf(needle)
+    return x < 0 ? undefined : JSON.stringify(app.cell(x, y).bg)
+  }
+  /** WCAG contrast of the painted cell's own foreground against its own background. */
+  const ratioAt = (app: ReturnType<typeof render>, y: number, needle: string): number => {
+    const x = (app.lines[y] ?? "").indexOf(needle)
+    const cell = app.cell(x, y)
+    const luminance = (color: { r: number; g: number; b: number } | null | undefined): number => {
+      if (color == null) throw new Error(`no colour painted at "${needle}"`)
+      const channel = (value: number): number => {
+        const s = value / 255
+        return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
+      }
+      return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+    }
+    const [light, dark] = [luminance(cell.fg), luminance(cell.bg)].sort((a, b) => b - a)
+    return Math.round(((light! + 0.05) / (dark! + 0.05)) * 100) / 100
+  }
 
-  it("row 1: the whole top line is inverse chrome, and the line under it is not", async () => {
+  it("row 1: the top line is inverse chrome past the status block, and the line under it is not", async () => {
     const app = render(<WatchPane snapshot={snapshot({ runner: RUNNER_READ })} live={false} />, { cols: 120, rows: 30 })
     await settle(app)
-    const lineBg = new Set(Array.from({ length: 120 }, (_, x) => JSON.stringify(app.cell(x, 0).bg)))
+    // The chrome is every cell that is neither the status block nor a pill: the gap between them and the edge.
+    const blockEnd = (app.lines[0] ?? "").indexOf("RUNNING") + "RUNNING".length + 1
+    const firstTab = (app.lines[0] ?? "").indexOf("[1]")
+    const lineBg = new Set(
+      [...Array.from({ length: firstTab - blockEnd }, (_, x) => blockEnd + x), 119].map((x) =>
+        JSON.stringify(app.cell(x, 0).bg),
+      ),
+    )
     const seen = {
       lineBg: [...lineBg],
-      yrd: fgAt(app, 0, "YRD"),
       underIsInverse: JSON.stringify(app.cell(2, 1).bg) === bgOf("$bg-inverse"),
     }
     app.unmount()
-    expect(seen).toEqual({ lineBg: [bgOf("$bg-inverse")], yrd: fgOf("$fg-on-inverse"), underIsInverse: false })
+    expect(seen).toEqual({ lineBg: [bgOf("$bg-inverse")], underIsInverse: false })
   })
 
   it("row 2: the state word wears its status colour with the stop reason beside it, truncated before the tabs", async () => {
@@ -3531,13 +3556,18 @@ describe("the top line (25416)", () => {
     await settle(narrow)
     const seen = {
       wide: wide.lines[0]?.includes(`■ YRD STOPPED ${PAUSE}`),
-      stoppedFg: fgAt(wide, 0, "STOPPED"),
+      stopped: [fgAt(wide, 0, "STOPPED"), bgAt(wide, 0, "STOPPED")],
       narrowTruncated: /STOPPED stopped by @chief: .*…\s+\[1\]/u.test(narrow.lines[0] ?? ""),
       narrowKeepsFilters: narrow.lines[0]?.trimEnd().endsWith("failed"),
     }
     wide.unmount()
     narrow.unmount()
-    expect(seen).toEqual({ wide: true, stoppedFg: fgOf("$fg-error"), narrowTruncated: true, narrowKeepsFilters: true })
+    expect(seen).toEqual({
+      wide: true,
+      stopped: [fgOf("$bg"), bgOf("$fg-error")],
+      narrowTruncated: true,
+      narrowKeepsFilters: true,
+    })
   })
 
   it("row 2: the marker pulses while the line is stopped with a reason", async () => {
@@ -3591,7 +3621,7 @@ describe("the top line (25416)", () => {
     expect(seen).toEqual({ on: "runner", centred: true })
   })
 
-  it("row 4: a selected tab or filter reads $warning and an unselected one the toggle recipe's idle tone", async () => {
+  it("row 4: a selected tab or filter is the warning chip and an unselected one inverseText's muted tone", async () => {
     const app = render(
       <WatchPane
         snapshot={snapshot({ queues: QUEUES, rows: [{ row: failedRow() }], runner: RUNNER_READ })}
@@ -3603,16 +3633,47 @@ describe("the top line (25416)", () => {
     app.press("2")
     app.press("f")
     await settle(app)
+    const pair = (needle: string): readonly (string | undefined)[] => [fgAt(app, 0, needle), bgAt(app, 0, needle)]
     const seen = {
-      selectedTab: fgAt(app, 0, "[1]"),
-      unselectedTab: fgAt(app, 0, "[2]"),
-      selectedFilter: fgAt(app, 0, "failed"),
-      unselectedFilter: fgAt(app, 0, "open"),
+      selectedTab: pair("[1]"),
+      unselectedTab: pair("[2]"),
+      selectedFilter: pair("failed"),
+      unselectedFilter: pair("open"),
     }
     app.unmount()
-    const warning = fgOf("$warning")
-    const idle = fgOf("$border-default")
-    expect(seen).toEqual({ selectedTab: warning, unselectedTab: idle, selectedFilter: warning, unselectedFilter: idle })
-    expect(warning).not.toEqual(idle)
+    const chip = [fgOf("$bg"), bgOf("$warning")]
+    const muted = [fgOf("$fg-on-inverse-muted"), bgOf("$bg-inverse")]
+    expect(seen).toEqual({ selectedTab: chip, unselectedTab: muted, selectedFilter: chip, unselectedFilter: muted })
+  })
+
+  it("every pair on the top line reads at 3:1 or better against the ground it is painted on", async () => {
+    const running = render(
+      <WatchPane
+        snapshot={snapshot({ queues: QUEUES, rows: [{ row: failedRow() }], runner: RUNNER_READ })}
+        live={false}
+      />,
+      { cols: 160, rows: 30 },
+    )
+    await settle(running)
+    running.press("2")
+    running.press("f")
+    await settle(running)
+    const stopped = render(<WatchPane snapshot={snapshot({ ...STOPPED, runner: RUNNER_READ })} live={false} />, {
+      cols: 160,
+      rows: 30,
+    })
+    await settle(stopped)
+    const ratios = {
+      running: ratioAt(running, 0, "RUNNING"),
+      stopped: ratioAt(stopped, 0, "STOPPED"),
+      reason: ratioAt(stopped, 0, "maintenance"),
+      selectedTab: ratioAt(running, 0, "[1]"),
+      unselectedTab: ratioAt(running, 0, "[2]"),
+      selectedFilter: ratioAt(running, 0, "failed"),
+      unselectedFilter: ratioAt(running, 0, "open"),
+    }
+    running.unmount()
+    stopped.unmount()
+    expect(Object.entries(ratios).filter(([, ratio]) => !(ratio >= 3))).toEqual([])
   })
 })

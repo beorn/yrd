@@ -27,7 +27,7 @@
  */
 
 import React, { memo } from "react"
-import { Box, Pulse, Text, togglePillColor, useInteractionTreatment } from "silvery"
+import { Box, Pulse, Text, actionFill, useInteractionTreatment } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import { TimeText } from "./watch-primitives.tsx"
@@ -231,10 +231,11 @@ const TAB_GAP = 3
 
 /**
  * The top line (ia.md, 24196; 25416): inverse chrome across the whole width.
- * The status area is on the left — marker, bold YRD, the status word in its
- * colour and the reason beside it, truncated — and a click on it points the
- * cursor at the RUNNER box. The queue tabs and the filter group are on the
- * right, {@link TAB_GAP} cells apart.
+ * The status area is on the left, a block in the status colour with `$bg`
+ * text — marker, bold YRD, the status word and the reason beside it,
+ * truncated — and a click on it points the cursor at the RUNNER box. The
+ * queue tabs and the filter group are on the right, {@link TAB_GAP} cells
+ * apart. Every pair clears 3:1 against its ground (the 25416 ratio rows).
  *
  * `live` is false on a one-shot print: silvery's `Pulse` needs the app root's
  * scope even when inactive, so a print draws the marker still.
@@ -265,29 +266,37 @@ export function TopLine({
       flexShrink={0}
       minWidth={0}
       overflow="hidden"
-      paddingLeft={1}
       paddingRight={1}
       justifyContent="space-between"
       backgroundColor="$bg-inverse"
     >
-      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" gap={1} onClick={onStatusClick}>
+      <Box
+        flexDirection="row"
+        flexShrink={1}
+        minWidth={0}
+        overflow="hidden"
+        gap={1}
+        paddingX={1}
+        backgroundColor={status.color}
+        onClick={onStatusClick}
+      >
         {live && status.pulse ? (
-          <Pulse synchronized colors={[status.color, "$bg-inverse"]} intervalMs={900} flexShrink={0}>
+          <Pulse synchronized colors={["$bg", status.color]} intervalMs={900} flexShrink={0}>
             {status.marker}
           </Pulse>
         ) : (
-          <Text color={status.color} flexShrink={0}>
+          <Text color="$bg" flexShrink={0}>
             {status.marker}
           </Text>
         )}
-        <Text bold color="$fg-on-inverse" flexShrink={0}>
+        <Text bold color="$bg" flexShrink={0}>
           YRD
         </Text>
-        <Text bold color={status.color} flexShrink={0}>
+        <Text bold color="$bg" flexShrink={0}>
           {status.word}
         </Text>
         {status.reason === undefined ? null : (
-          <Text color="$fg-on-inverse" wrap="truncate">
+          <Text color="$bg" wrap="truncate">
             {status.reason}
           </Text>
         )}
@@ -309,11 +318,14 @@ export function TopLine({
   )
 }
 
+/** A selected tab or filter: the warning chip, `$bg` on `$warning` (25416). */
+const SELECTED_PILL = actionFill("warning", "filled")
+
 /**
- * A queue tab or a filter option on the top line: ag code's bottom-bar toggle
- * (`togglePillColor` over the hover treatment), with the group always in its
- * revealed tone because the top line is chrome that is always lit — so a
- * selected pill reads `$warning` and an unselected one the recipe's idle tone.
+ * A queue tab or a filter option on the top line, drawn by silvery's recipes
+ * so the chrome's palette decides every pair: a selected one is the warning
+ * chip; an unselected one is `inverseText`'s muted tone, lifted by
+ * `inverseWash` under the pointer (25416, @cto fa39eb84).
  */
 function TopPill({
   label,
@@ -326,21 +338,22 @@ function TopPill({
   onToggle: () => void
   boldFirstLetter?: boolean
 }) {
-  const interaction = useInteractionTreatment("control", "surfaceHover")
-  const color = togglePillColor({
-    active,
-    groupHovered: true,
-    itemHovered: interaction.isHovered,
-    activeColor: "$warning",
-    activeHoverColor: "$warning",
-  })
+  const text = useInteractionTreatment("control", active ? SELECTED_PILL : "inverseText")
+  const wash = useInteractionTreatment("control", "inverseWash", !active)
+  const color = text.treatment.color
   return (
     <Box
       flexShrink={0}
       onClick={onToggle}
-      onMouseEnter={interaction.onMouseEnter}
-      onMouseLeave={interaction.onMouseLeave}
-      backgroundColor={interaction.treatment.backgroundColor}
+      onMouseEnter={(event) => {
+        text.onMouseEnter(event)
+        wash.onMouseEnter(event)
+      }}
+      onMouseLeave={(event) => {
+        text.onMouseLeave(event)
+        wash.onMouseLeave(event)
+      }}
+      backgroundColor={active ? text.treatment.backgroundColor : wash.treatment.backgroundColor}
     >
       {boldFirstLetter && label.length > 0 ? (
         <>
