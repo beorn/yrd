@@ -163,6 +163,12 @@ export const LOG_KINDS = [
   // A write to the override ref this run made itself: the `expired` record for
   // a window that passed, written before the round took its snapshot (25296).
   "override",
+  // A merged change's task branch, deleted on origin after its merged record
+  // landed, leased on the merged head so origin's advertisement stops growing
+  // (@i/10-yrd/25568, @cto 50480459). `branch-kept` is the refused lease: the
+  // branch moved or was already gone, and `saw` says which, a sha or "absent".
+  "branch-deleted",
+  "branch-kept",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]

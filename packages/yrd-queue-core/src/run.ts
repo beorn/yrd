@@ -88,6 +88,7 @@ import {
   type GitObservation,
   type ObservationNotice,
   mergeBase,
+  readRemoteCommit,
   refAt,
   type GitInvocationOptions,
   type GitSelection,
@@ -211,6 +212,8 @@ export type QueueRunOutcome = Readonly<{
   /** What a ring stopped this round for, before any merge could be made, when one did. */
   stopped?: Stopped
   merged: readonly string[]
+  /** What became of each merged change's task branch on origin, deleted or kept and why (25568). */
+  branches?: readonly string[]
   failed: readonly string[]
   stuck: readonly string[]
   deferred: readonly string[]
@@ -264,6 +267,8 @@ export type Run = Readonly<{
   recutting: Map<string, string>
   /** The target OID this run successfully pushed, or its captured starting OID. */
   targetAfter: { sha: string }
+  /** What became of each merged change's task branch, one line each, printed with the outcome (25568). */
+  branches: string[]
   /**
    * Worktrees this run's own reap took down at its start, with what each stood
    * at when git's registration still said so: empty until reaping runs, fixed
@@ -653,6 +658,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     tmpdir: join(options.workdir, "tmp"),
     targetSha,
     targetAfter: { sha: targetSha },
+    branches: [],
     worktrees: join(options.workdir, "worktrees", log.id),
   }
   mkdirSync(run.worktrees, { recursive: true })
@@ -2424,6 +2430,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     run.log.write({ branch, decision: "merged", head, kind: "change" })
     if (rootChanges !== undefined) await cleanupRootChanges(run.git, rootChanges, mergedRecord)
     await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
+    await deleteMergedBranch(run, entry)
     return "merged"
   } finally {
     if (retained === undefined) {
@@ -2605,6 +2612,46 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
   if (mergedRecord === undefined) return
   run.log.write({ branch, decision: "merged", head, kind: "change", reason: "already on the target" })
   await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
+  await deleteMergedBranch(run, entry)
+}
+
+/**
+ * A merged change's task branch leaves origin, so origin's ref advertisement
+ * stops growing (@i/10-yrd/25568, @cto 50480459). One delete leased on the
+ * merged head, after the merged record lands and never inside the merge's
+ * atomic push. A branch its submitter moved or already deleted is kept, and
+ * the row says what the lease saw; a delete that fails with the branch still
+ * at the head is kept with its error. The change stays merged either way: its
+ * head is on the target, and the merge has already landed.
+ */
+async function deleteMergedBranch(run: Run, entry: QueueEntry): Promise<void> {
+  const { branch, head } = entry.change
+  const ref = `refs/heads/${branch}`
+  try {
+    const store = await legacyStore(run.git)
+    await store.backend.publish(store.repo, [{ ref, expect: head, oid: null }], run.options.target.remote)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    let saw: string
+    try {
+      saw = (await readRemoteCommit(run.git, run.options.target.remote, ref)) ?? "absent"
+    } catch (readError) {
+      saw = `unread (${readError instanceof Error ? readError.message : String(readError)})`
+    }
+    const why =
+      saw === "absent"
+        ? "already gone"
+        : saw === head
+          ? `the delete failed: ${message}`
+          : saw.startsWith("unread")
+            ? `the delete failed and its branch is ${saw}: ${message}`
+            : `moved to ${saw.slice(0, 12)}`
+    run.log.write({ branch, head, kind: "branch-kept", saw, ...(saw === "absent" ? {} : { error: message }) })
+    run.branches.push(`kept ${branch} (merged at ${head.slice(0, 12)}): ${why}`)
+    return
+  }
+  run.log.write({ branch, head, kind: "branch-deleted" })
+  run.branches.push(`deleted ${branch} at ${head.slice(0, 12)}, merged`)
 }
 
 /**
@@ -3233,6 +3280,7 @@ function finish(
     run: run.log.id,
     target: targetNow,
     ...(run.options.noCheck === true ? { noCheck: true } : {}),
+    ...(run.branches.length === 0 ? {} : { branches: [...run.branches] }),
     ...lists,
   }
 }
