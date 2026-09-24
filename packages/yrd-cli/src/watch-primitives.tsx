@@ -25,6 +25,7 @@ import { Box, Text } from "silvery"
  */
 export function TitledBox({
   title = "",
+  titleSuffix,
   titleRight,
   borderColor,
   padding,
@@ -35,6 +36,8 @@ export function TitledBox({
 }: Readonly<{
   /** Left-anchored border title. Omit or pass "" for a box whose border carries no left text. */
   title?: string
+  /** Text that follows the bold title, rendered un-bolded on the border (25556). */
+  titleSuffix?: string
   /** Right-anchored border label, the identity the operator's item 1 puts on the border. */
   titleRight?: string
   borderColor?: string
@@ -76,6 +79,11 @@ export function TitledBox({
             <Text color={border} bold flexShrink={0}>
               {title}
             </Text>
+            {titleSuffix !== undefined && titleSuffix !== "" ? (
+              <Text color={border} flexShrink={0}>
+                {` ${titleSuffix}`}
+              </Text>
+            ) : null}
             <Text color={border} flexShrink={0}>
               {" "}
             </Text>
