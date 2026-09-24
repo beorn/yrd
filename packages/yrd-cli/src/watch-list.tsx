@@ -27,13 +27,12 @@
  */
 
 import React, { memo } from "react"
-import { Box, Pulse, Text } from "silvery"
+import { Box, Pulse, Text, actionFill, useInteractionTreatment } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import { TimeText } from "./watch-primitives.tsx"
 import {
   RUNNER_GLYPH,
-  RUNNING_GLYPH,
   STATE_WORDS,
   AGE_RUN_MIN_WIDTH,
   ageRunText,
@@ -221,12 +220,25 @@ export type LineStatus = Readonly<{
   marker: string
   word: string
   color: string
+  /** Why the line is stopped, in the pause record's or the runner's own words; absent while it runs. */
+  reason?: string
+  /** The marker pulses while the line runs, or while it is stopped with a reason (25416). */
+  pulse: boolean
 }>
 
+/** Three cells between each queue tab and before the filter group (25416). */
+const TAB_GAP = 3
+
 /**
- * The top line (ia.md, 24196): `yrd watch` and queue filter pills on the left,
- * status marker + bold YRD + actual RUNNING/STOPPED/STUCK on the right.
- * Active pills use `$bg-inverse` / `$fg-on-inverse`; idle pills are muted with no fill.
+ * The top line (ia.md, 24196; 25416): inverse chrome across the whole width.
+ * The status area is on the left, a block in the status colour with `$bg`
+ * text — marker, bold YRD, the status word and the reason beside it,
+ * truncated — and a click on it points the cursor at the RUNNER box. The
+ * queue tabs and the filter group are on the right, {@link TAB_GAP} cells
+ * apart. Every pair clears 3:1 against its ground (the 25416 ratio rows).
+ *
+ * `live` is false on a one-shot print: silvery's `Pulse` needs the app root's
+ * scope even when inactive, so a print draws the marker still.
  */
 export function TopLine({
   queues,
@@ -234,55 +246,88 @@ export function TopLine({
   onToggle,
   status,
   statusPills,
+  live = false,
+  onStatusClick,
 }: {
   queues: readonly WatchQueue[]
   /** The labels of the queues shown; `undefined` means every one. */
   visible: ReadonlySet<string> | undefined
   onToggle: (label: string) => void
-  status?: LineStatus
+  status: LineStatus
   statusPills?: React.ReactNode
+  live?: boolean
+  onStatusClick?: () => void
 }) {
   return (
     <Box
       height={1}
       flexDirection="row"
-      columnGap={2}
+      columnGap={TAB_GAP}
       flexShrink={0}
       minWidth={0}
       overflow="hidden"
-      paddingLeft={1}
       paddingRight={1}
       justifyContent="space-between"
+      backgroundColor="$bg-inverse"
     >
-      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" gap={1} alignItems="center">
-        <Box flexDirection="row" flexShrink={0} gap={1}>
-          <Text color={status?.color ?? "$fg-info"}>{status?.marker ?? RUNNING_GLYPH}</Text>
-          <Text bold>YRD</Text>
-          <Text bold color={status?.color ?? "$fg-info"}>
-            {status?.word ?? "RUNNING"}
+      <Box
+        flexDirection="row"
+        flexShrink={1}
+        minWidth={0}
+        overflow="hidden"
+        gap={1}
+        paddingX={1}
+        backgroundColor={status.color}
+        onClick={onStatusClick}
+      >
+        {live && status.pulse ? (
+          <Pulse synchronized colors={["$bg", status.color]} intervalMs={900} flexShrink={0}>
+            {status.marker}
+          </Pulse>
+        ) : (
+          <Text color="$bg" flexShrink={0}>
+            {status.marker}
           </Text>
-        </Box>
+        )}
+        <Text bold color="$bg" flexShrink={0}>
+          YRD
+        </Text>
+        <Text bold color="$bg" flexShrink={0}>
+          {status.word}
+        </Text>
+        {status.reason === undefined ? null : (
+          <Text color="$bg" wrap="truncate">
+            {status.reason}
+          </Text>
+        )}
+      </Box>
+      <Box flexDirection="row" flexShrink={0} columnGap={TAB_GAP}>
         {queues.map((queue, index) => (
-          <InversePill
+          <TopPill
             key={`${queue.path}@${queue.branch}`}
             label={pillLabel(queue, index + 1, true)}
-            boldFirstLetter
             active={visible === undefined || visible.has(queue.label)}
             onToggle={() => {
               onToggle(queue.label)
             }}
           />
         ))}
-      </Box>
-      <Box flexDirection="row" flexShrink={0} gap={2} alignItems="center">
         {statusPills}
       </Box>
     </Box>
   )
 }
 
-/** Active filter/queue pills: inverse fill so on/off is not foreground-only. */
-function InversePill({
+/** A selected tab or filter: the warning chip, `$bg` on `$warning` (25416). */
+const SELECTED_PILL = actionFill("warning", "filled")
+
+/**
+ * A queue tab or a filter option on the top line, drawn by silvery's recipes
+ * so the chrome's palette decides every pair: a selected one is the warning
+ * chip; an unselected one is `inverseText`'s muted tone, lifted by
+ * `inverseWash` under the pointer (25416, @cto fa39eb84).
+ */
+function TopPill({
   label,
   active,
   onToggle,
@@ -293,9 +338,23 @@ function InversePill({
   onToggle: () => void
   boldFirstLetter?: boolean
 }) {
-  const color = active ? "$fg-on-inverse" : "$fg-muted"
+  const text = useInteractionTreatment("control", active ? SELECTED_PILL : "inverseText")
+  const wash = useInteractionTreatment("control", "inverseWash", !active)
+  const color = text.treatment.color
   return (
-    <Box flexShrink={0} backgroundColor={active ? "$bg-inverse" : undefined} onClick={onToggle}>
+    <Box
+      flexShrink={0}
+      onClick={onToggle}
+      onMouseEnter={(event) => {
+        text.onMouseEnter(event)
+        wash.onMouseEnter(event)
+      }}
+      onMouseLeave={(event) => {
+        text.onMouseLeave(event)
+        wash.onMouseLeave(event)
+      }}
+      backgroundColor={active ? text.treatment.backgroundColor : wash.treatment.backgroundColor}
+    >
       {boldFirstLetter && label.length > 0 ? (
         <>
           <Text color={color} bold>
@@ -735,7 +794,7 @@ export function StatusPills({
   return (
     <Box height={1} flexDirection="row" justifyContent="flex-end" minWidth={0} overflow="hidden" gap={1}>
       {BUCKETS.map((bucket) => (
-        <InversePill
+        <TopPill
           key={bucket}
           label={bucket}
           boldFirstLetter

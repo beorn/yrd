@@ -214,9 +214,10 @@ export function bandedRows(rows: readonly WatchRow[], holding = true): readonly 
 }
 
 /**
- * The drafts a reading holds, in words, for the STATS line: the dated rows
- * listed, the older ones of the week folded into a count (25424), and the
- * heads not yet read. The table itself draws no drafts line (25417).
+ * The drafts a reading holds, in words, for the STATS line's `current:` part
+ * (25416): the dated rows listed, the older ones of the week folded into a
+ * count (25424), and the heads not yet read, each said apart (A2-set-v3 Q1).
+ * The table itself draws no drafts line (25417).
  */
 export function draftsSaid(rows: readonly WatchRow[], drafts: WatchSnapshot["drafts"]): string | undefined {
   const count = rows.filter((item) => item.row.state === "draft" && item.row.at !== undefined).length
@@ -227,8 +228,8 @@ export function draftsSaid(rows: readonly WatchRow[], drafts: WatchSnapshot["dra
   const plural = count === 1 ? "" : "s"
   return (
     `${String(count)} ${STATE_WORDS.draft.word}${plural} (${window === "7d" ? "1d" : window})` +
-    (older > 0 ? ` · ${String(older)} older` : "") +
-    (unread > 0 ? ` · ${String(unread)} not yet read` : "")
+    (older > 0 ? `, ${String(older)} older` : "") +
+    (unread > 0 ? `, ${String(unread)} not yet read` : "")
   )
 }
 

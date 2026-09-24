@@ -19,7 +19,7 @@ import { Box, Text, renderString } from "silvery"
 import { BandBreakRows, ListStack, LoudPause, QueueLine, bandPlan, bandedRows, runnerOf } from "./watch-frame.tsx"
 import { TimeText } from "./watch-primitives.tsx"
 import { NowProvider } from "./watch-clock.ts"
-import { ListHeader, ListRow, TopLine, listLayout, separatorBefore } from "./watch-list.tsx"
+import { ListHeader, ListRow, TopLine, listLayout, separatorBefore, type LineStatus } from "./watch-list.tsx"
 import { queueLineStatus, type WatchSnapshot } from "./watch-pane.tsx"
 
 export type ListingPrintOptions = Readonly<{
@@ -55,12 +55,7 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
         <LoudPause snapshot={snapshot} />
         {/* The queue's own name, as a stranger spells it — the line a logged round's `updated` stamp sits under. */}
         <Text wrap="truncate">{snapshot.queue}</Text>
-        <TopLine
-          queues={queues}
-          visible={undefined}
-          onToggle={() => undefined}
-          status={queueLineStatus(snapshot, snapshot.at)}
-        />
+        <TopLine queues={queues} visible={undefined} onToggle={() => undefined} status={printedStatus(snapshot)} />
         <QueueLine snapshot={snapshot} columns={columns} />
         {snapshot.journalAbsent === undefined ? null : (
           <Text color="$fg-muted" wrap="truncate">
@@ -133,4 +128,10 @@ export async function printListing(snapshot: WatchSnapshot, options: ListingPrin
     width: Math.max(40, options.columns),
   })
   return text.replace(/\s+$/u, "")
+}
+
+/** The top line's status on a print: no reason beside the word, because the LoudPause line above says it in full. */
+function printedStatus(snapshot: WatchSnapshot): LineStatus {
+  const { reason: _saidAbove, ...status } = queueLineStatus(snapshot, snapshot.at)
+  return status
 }

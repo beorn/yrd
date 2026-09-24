@@ -209,7 +209,7 @@ describe("the drafts the home list folds into a count (25424)", () => {
     const rows: readonly WatchRow[] = ["task/a", "task/b"].map((branch) => ({
       row: { at: now, branch, head: branch.padEnd(40, "0"), state: "draft" } as Row,
     }))
-    expect(draftsSaid(rows, { older: 98, unread: 2, window: "7d" })).toBe("2 drafts (1d) · 98 older · 2 not yet read")
+    expect(draftsSaid(rows, { older: 98, unread: 2, window: "7d" })).toBe("2 drafts (1d), 98 older, 2 not yet read")
     expect(draftsSaid(rows, { older: 0, unread: 0, window: "all" })).toBe("2 drafts (all)")
     expect(draftsSaid([], { older: 0, unread: 0, window: "7d" })).toBeUndefined()
   })

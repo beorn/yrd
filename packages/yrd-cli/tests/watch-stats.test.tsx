@@ -21,7 +21,9 @@ import {
   decisionsOfRows,
   isDuplicateMerge,
   rowDecision,
+  lastDayBucket,
   statsBuckets,
+  statsSummary,
   unclassifiedRows,
   type RunDecision,
 } from "../src/watch-stats.ts"
@@ -128,6 +130,33 @@ describe("statsBuckets", () => {
       runMs: 1_200_000,
       totalMs: 3_000_000,
     })
+  })
+})
+
+describe("the STATS line's summary (25416)", () => {
+  const minutes = (count: number): number => count * 60_000
+
+  it("says what is in hand now, then the last 24 hours' median wait and run and its verdicts", () => {
+    const decisions: readonly RunDecision[] = [
+      { ...decision(1, "merged"), queuedMs: minutes(3), runMs: minutes(10) },
+      { ...decision(2, "failed"), queuedMs: minutes(5), runMs: minutes(4) },
+      decision(3, "stuck"),
+      decision(5, "merged", "run-dup", true),
+      // A day and an hour ago: outside the window, so neither its merge nor its long wait is counted.
+      { ...decision(25, "merged"), queuedMs: minutes(100), runMs: minutes(100) },
+    ]
+    expect(statsSummary({ drafts: "8 drafts (1d), 98 older", waiting: 7 }, lastDayBucket(decisions, NOW))).toBe(
+      "current: 8 drafts (1d), 98 older, 7 waiting · 24h: 04:00 wait, 07:00 run, 1 merge, 1 failed, 1 stuck",
+    )
+  })
+
+  it("says a span no decision carried as a dash, and a missing journal in words rather than zeros", () => {
+    expect(statsSummary({ drafts: undefined, waiting: 0 }, lastDayBucket([decision(1, "stuck")], NOW))).toBe(
+      "current: 0 drafts, 0 waiting · 24h: — wait, — run, 0 merges, 0 failed, 1 stuck",
+    )
+    expect(statsSummary({ drafts: undefined, waiting: 0 }, undefined)).toBe(
+      "current: 0 drafts, 0 waiting · 24h: no run journal read on this machine",
+    )
   })
 })
 
