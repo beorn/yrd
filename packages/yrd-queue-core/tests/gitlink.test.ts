@@ -613,6 +613,45 @@ it("discards a rival event tip after the marker without a child write", async ()
   expect(readFileSync(outcome.log, "utf8")).toContain('"kind":"discarded"')
 })
 
+/** @failure Marker read-back can become stale before Git-super starts its child write.
+ * @level l3 @consumer queue operator
+ * A cancellation after read-back must prevent child publication for the lost row.
+ */
+it("does not publish a child after a rival cancels between marker read-back and child push", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "event-rival-after-readback")
+  await submitGitlink(w, "task/event-rival-after-readback", ahead)
+  const rootBefore = await remoteTip(w.git, "refs/heads/main")
+  await using real = createProcess({ cwd: w.work })
+  let rival = false
+  const interleaved: Process = {
+    ...real,
+    async run(request) {
+      if (!rival && request.argv.includes("super") && request.argv.includes("push")) {
+        const state = await readStatus(eventStore(w), "main", "task/event-rival-after-readback")
+        expect(state).toMatchObject({ status: "merging" })
+        if (state.tip === undefined) throw new Error("merging marker has no tip")
+        await appendChangeEvent(eventStore(w), "main", "task/event-rival-after-readback", state.tip, {
+          type: "cancelled",
+          at: new Date(),
+          reason: "resubmitted",
+        })
+        rival = true
+      }
+      return real.run(request)
+    },
+  }
+
+  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [], process: interleaved })
+
+  expect(rival).toBe(true)
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [], stuck: [] })
+  expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+  expect((await readStatus(eventStore(w), "main", "task/event-rival-after-readback")).status).toBe("cancelled")
+  expect(await submoduleMain(w)).toBe(w.main)
+})
+
 /** @failure A nested pin behind its own main could be treated as a publication target.
  * @level l3 @consumer queue operator
  * A file-only event merge must leave both component branches at their observed mains.
