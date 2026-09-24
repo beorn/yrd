@@ -288,11 +288,9 @@ export const STALLED_LINE_CODE = "queue-line-stalled"
  * reads as itself.
  */
 export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date): LineStall | undefined {
-  if (flow.waiting <= 0 || flow.oldestWaiting === undefined) return undefined
+  const forMs = unjudgedFor(flow, now)
+  if (forMs === undefined || flow.oldestWaiting === undefined || forMs < threshold.ms) return undefined
   const opened = Date.parse(flow.oldestWaiting.openedAt)
-  const judged = flow.lastJudgedAt === undefined ? Number.NEGATIVE_INFINITY : Date.parse(flow.lastJudgedAt)
-  const forMs = now.getTime() - Math.max(opened, judged)
-  if (forMs < threshold.ms) return undefined
   const source = threshold.declared ? ".yrd.yml health.stallAfter" : ".yrd.yml health.stallAfter, default"
   const observation =
     `no change judged for ${span(forMs)} (oldest waiting ${flow.oldestWaiting.branch}, opened ${span(now.getTime() - opened)} ago); ` +
@@ -311,6 +309,18 @@ export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date):
     forMs,
     shape: "stopped-line",
   }
+}
+
+/**
+ * How long changes have waited with none judged: the stall clock itself, from
+ * the LATER of the last judgement and the oldest waiting change's opening.
+ * Undefined when nothing waits, because idle is not waiting on anything.
+ */
+function unjudgedFor(flow: LineFlow, now: Date): number | undefined {
+  if (flow.waiting <= 0 || flow.oldestWaiting === undefined) return undefined
+  const opened = Date.parse(flow.oldestWaiting.openedAt)
+  const judged = flow.lastJudgedAt === undefined ? Number.NEGATIVE_INFINITY : Date.parse(flow.lastJudgedAt)
+  return now.getTime() - Math.max(opened, judged)
 }
 
 /**
@@ -333,19 +343,31 @@ export function withLineFlow(
 ): QueueHealthDocument {
   const foreign = document.error !== undefined && document.error.code !== STALLED_LINE_CODE
   const stall = stop === undefined && !foreign ? lineStall(reading.flow, reading.threshold, now) : undefined
-  const facts = { ...document.facts, flow: flowFact(reading, stall) }
+  const facts = { ...document.facts, flow: flowFact(reading, unjudgedFor(reading.flow, now), stall) }
   if (foreign) return { ...document, facts }
   const { error: _cleared, ...rest } = document
   if (stall === undefined) return { ...rest, state: "healthy", facts }
   return { ...rest, state: "unhealthy", error: stalledFailure(stall, reading.flow), facts }
 }
 
-/** The flow as the document states it: the reading, the threshold it was judged against, and the stall when there is one. */
-function flowFact(reading: FlowReading, stall: LineStall | undefined): Readonly<Record<string, unknown>> {
+/**
+ * The flow as the document states it: the reading, the threshold it was judged
+ * against, how long waiting changes have gone unjudged, and the stall when
+ * there is one. `slow` is the early word, before any page (25669 row 2): past
+ * {@link ROUND_BUDGET_MS} no round has judged anything, the time a round that
+ * judges normally was measured to take at most. The watch's runner line and
+ * `yrd queue health` read these fields; neither recomputes them.
+ */
+function flowFact(
+  reading: FlowReading,
+  unjudgedForMs: number | undefined,
+  stall: LineStall | undefined,
+): Readonly<Record<string, unknown>> {
   return {
     ...reading.flow,
     stallAfterMs: reading.threshold.ms,
     stallAfterDeclared: reading.threshold.declared,
+    ...(unjudgedForMs === undefined ? {} : { slow: unjudgedForMs > ROUND_BUDGET_MS, unjudgedForMs }),
     ...(stall === undefined ? {} : { stalledForMs: stall.forMs, stalledShape: stall.shape }),
   }
 }

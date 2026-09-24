@@ -39,7 +39,9 @@ const BEATING: RunnerService = { kind: "beating", state: "healthy", since: NOW }
  * write), never a threshold this test picks: these fixtures move that instant
  * around the reading instant, which is the only thing freshness turns on.
  */
-function healthDocument(options: Readonly<{ staleAfterMs: number; pid?: number }>): string {
+function healthDocument(
+  options: Readonly<{ staleAfterMs: number; pid?: number; flow?: Readonly<Record<string, unknown>> }>,
+): string {
   return JSON.stringify({
     schema: QUEUE_HEALTH_SCHEMA,
     service: "yrd",
@@ -49,6 +51,7 @@ function healthDocument(options: Readonly<{ staleAfterMs: number; pid?: number }
       writtenAt: new Date(NOW.getTime() - 60_000).toISOString(),
       staleAfter: new Date(NOW.getTime() + options.staleAfterMs).toISOString(),
       runner: { pid: options.pid ?? process.pid, startedAt: NOW.toISOString(), command: "yrd queue up" },
+      ...(options.flow === undefined ? {} : { flow: options.flow }),
     },
   })
 }
@@ -808,5 +811,39 @@ describe("the runner's row", () => {
       expect(line.state).toBe("idle")
       expect(line.holds).toBe("round lock held by pid 99999 (bun yrd queue up)")
     })
+  })
+})
+
+// 25669 row 2: past the round budget with no change judged, the runner's line
+// says so, from the service's own flow fact; and the stall once it pages.
+describe("the line's flow on the runner's row (25669)", () => {
+  const minutes = (n: number) => n * 60_000
+  const flow = { slow: true, stallAfterMs: minutes(45), unjudgedForMs: minutes(12), waiting: 11 }
+
+  it("reads the flow the service's document states, and nothing when an older writer states none", async () => {
+    const stated = workdirWith({ ageMs: 1_000, health: healthDocument({ flow, staleAfterMs: 5 * 60_000 }) })
+    expect(await readRunnerService(stated, NOW)).toEqual({ ...BEATING, flow })
+    const older = workdirWith({ ageMs: 1_000, health: healthDocument({ staleAfterMs: 5 * 60_000 }) })
+    expect(await readRunnerService(older, NOW)).toEqual(BEATING)
+  })
+
+  const facts = (service: RunnerService): RunnerFacts => ({ journalDir: "/w/logs", service })
+
+  it("says no change judged, and how many waited, once the round budget has passed", () => {
+    const line = runnerLine(facts({ ...BEATING, flow }), NOW, { waiting: 11 })
+    expect(line.holds).toBe("nothing under a check, and 11 in line · no change judged for 12:00 while 11 waited")
+  })
+
+  it("says nothing extra inside the round budget", () => {
+    const line = runnerLine(facts({ ...BEATING, flow: { ...flow, slow: false, unjudgedForMs: minutes(8) } }), NOW, {
+      waiting: 11,
+    })
+    expect(line.holds).toBe("nothing under a check, and 11 in line")
+  })
+
+  it("says stalled, with the threshold, once the service pages the line", () => {
+    const stalled = { ...flow, stalledForMs: minutes(47), unjudgedForMs: minutes(47) }
+    const line = runnerLine(facts({ ...BEATING, flow: stalled, state: "unhealthy" }), NOW, { waiting: 11 })
+    expect(line.holds).toContain("stalled 47:00: no change judged while 11 waited (threshold 45:00)")
   })
 })

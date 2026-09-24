@@ -107,9 +107,23 @@ export type RoundLockHolder = Readonly<{
  */
 export type RunnerService =
   | Readonly<{ kind: "absent"; why: string }>
-  | Readonly<{ kind: "beating"; state: string; since?: Date }>
+  | Readonly<{ kind: "beating"; state: string; since?: Date; flow?: RunnerFlow }>
   | Readonly<{ kind: "stopped"; why: string; cause: string; since?: Date; stopReason?: string }>
   | Readonly<{ kind: "unreadable"; why: string }>
+
+/**
+ * The line's flow as the service's own document states it (25669): how long
+ * waiting changes have gone unjudged, whether that is past the round budget,
+ * and the stall when the service judged one. Read, never recomputed: the `up`
+ * loop is the one home for the stall clock, and this is its last statement.
+ */
+export type RunnerFlow = Readonly<{
+  waiting: number
+  unjudgedForMs: number
+  slow: boolean
+  stallAfterMs: number
+  stalledForMs?: number
+}>
 
 export type RunnerFacts = Readonly<{
   /** The directory the journals were looked for in. */
@@ -123,6 +137,16 @@ export type RunnerFacts = Readonly<{
   /** Round lock holder if currently held by an active process. */
   roundLockHolder?: RoundLockHolder
 }>
+
+/** The document's flow fact, when it states one with waiting changes; an older writer states none. */
+function runnerFlow(document: QueueHealthDocument): RunnerFlow | undefined {
+  const flow = document.facts?.flow
+  if (typeof flow !== "object" || flow === null) return undefined
+  const { waiting, unjudgedForMs, slow, stallAfterMs, stalledForMs } = flow as Readonly<Record<string, unknown>>
+  if (typeof waiting !== "number" || typeof unjudgedForMs !== "number" || typeof slow !== "boolean") return undefined
+  if (typeof stallAfterMs !== "number") return undefined
+  return { slow, stallAfterMs, unjudgedForMs, waiting, ...(typeof stalledForMs === "number" ? { stalledForMs } : {}) }
+}
 
 /** The pid the health document names as its writer, when it names one. */
 function writerPid(document: QueueHealthDocument): number | undefined {
@@ -193,7 +217,13 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
   const runner = document.facts?.runner as Readonly<Record<string, unknown>> | undefined
   const startedAt = typeof runner?.startedAt === "string" ? new Date(Date.parse(runner.startedAt)) : undefined
   const since = startedAt !== undefined && !Number.isNaN(startedAt.getTime()) ? startedAt : undefined
-  return { kind: "beating", state: document.state, ...(since === undefined ? {} : { since }) }
+  const flow = runnerFlow(document)
+  return {
+    kind: "beating",
+    state: document.state,
+    ...(since === undefined ? {} : { since }),
+    ...(flow === undefined ? {} : { flow }),
+  }
 }
 
 /** The graceful stop's own fact, when this is the document a stopping service left (25430). */
@@ -634,6 +664,32 @@ export function runnerLine(
   facts: RunnerFacts | undefined,
   now: Date,
   options: Readonly<{ held?: HeldChange; waiting?: number; stopped?: StopFact | null; queue?: string }> = {},
+): RunnerLine {
+  const line = runnerLineOf(facts, now, options)
+  const note = flowNote(facts?.service)
+  return note === undefined ? line : { ...line, holds: `${line.holds} · ${note}` }
+}
+
+/**
+ * What the line holds gains the flow's word once no change has been judged for
+ * the round budget (25669 row 2): the early warning a person watching sees,
+ * and the stall itself once the service pages it. Both come from the service's
+ * own document, as of its last beat.
+ */
+function flowNote(service: RunnerService | undefined): string | undefined {
+  if (service?.kind !== "beating" || service.flow === undefined) return undefined
+  const { slow, stallAfterMs, stalledForMs, unjudgedForMs, waiting } = service.flow
+  if (stalledForMs !== undefined) {
+    return `stalled ${mediaDuration(stalledForMs)}: no change judged while ${String(waiting)} waited (threshold ${mediaDuration(stallAfterMs)})`
+  }
+  if (!slow) return undefined
+  return `no change judged for ${mediaDuration(unjudgedForMs)} while ${String(waiting)} waited`
+}
+
+function runnerLineOf(
+  facts: RunnerFacts | undefined,
+  now: Date,
+  options: Readonly<{ held?: HeldChange; waiting?: number; stopped?: StopFact | null; queue?: string }>,
 ): RunnerLine {
   const { held, waiting = 0, stopped, queue = "main" } = options
   const state = runnerWord(facts, held !== undefined, stopped)

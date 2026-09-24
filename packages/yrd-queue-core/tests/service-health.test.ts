@@ -328,6 +328,18 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
     expect((flowing.facts?.flow as Record<string, unknown>).stalledForMs).toBeUndefined()
   })
 
+  test("past the round budget with no judgement the document says slow, before any page (row 2)", () => {
+    const flow = { lastJudgedAt: "2026-09-24T20:00:00.000Z", oldestWaiting: oldest, waiting: 5 }
+    const early = roundHealthDocument("yrd", undefined, INTERVAL, at("20:10:00"), { flow, threshold })
+    expect(early.facts?.flow).toMatchObject({ slow: false, unjudgedForMs: minutes(10) })
+    const slow = roundHealthDocument("yrd", undefined, INTERVAL, at("20:12:00"), { flow, threshold })
+    expect(slow.state).toBe("healthy")
+    expect(slow.facts?.flow).toMatchObject({ slow: true, unjudgedForMs: minutes(12) })
+    const idle = roundHealthDocument("yrd", undefined, INTERVAL, at("23:00:00"), { flow: { waiting: 0 }, threshold })
+    expect(idle.facts?.flow).not.toHaveProperty("slow")
+    expect(idle.facts?.flow).not.toHaveProperty("unjudgedForMs")
+  })
+
   test("a stuck stop outranks stalled: the stuck page stands and names the stuck change", () => {
     const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", oldestWaiting: oldest, waiting: 16 }
     const doc = roundHealthDocument("yrd", stuckStop, INTERVAL, at("21:00:00"), { flow, threshold })
