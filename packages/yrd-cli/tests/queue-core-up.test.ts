@@ -2930,7 +2930,10 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     const intentFile = join(mkdtempSync(join(tmpdir(), "yrd-intent-stale-")), "intent.json")
     // Stale: written yesterday before this process started.
     const staleAt = "2026-09-23T20:00:00.000Z"
-    writeFileSync(intentFile, `${JSON.stringify({ verb: "stop", by: "@chief", reason: "yesterday maintenance", at: staleAt })}\n`)
+    writeFileSync(
+      intentFile,
+      `${JSON.stringify({ verb: "stop", by: "@chief", reason: "yesterday maintenance", at: staleAt })}\n`,
+    )
     let terminate: (() => void) | undefined
     let reraised = 0
     const run = capture(w.work)
@@ -3011,7 +3014,9 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       run2.stderr(),
     ).toBe(0)
 
-    const lastMissingAt = JSON.parse(readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8")) as QueueHealthDocument
+    const lastMissingAt = JSON.parse(
+      readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8"),
+    ) as QueueHealthDocument
     expect(lastMissingAt).toMatchObject({
       state: "absent",
       verdict: { kind: "stopped" },
