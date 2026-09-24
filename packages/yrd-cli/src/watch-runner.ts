@@ -36,8 +36,10 @@ import { join } from "node:path"
 import {
   runDiedInPreamble,
   runStartedAt,
+  serviceStoppedLine,
   type LogRecord,
   type QueueHealthDocument,
+  type ServiceIntentFact,
   type StopFact,
 } from "@yrd/queue-core"
 import { readQueueHealth, SERVICE } from "./queue-health.ts"
@@ -143,6 +145,18 @@ function writerPid(document: QueueHealthDocument): number | undefined {
  */
 export async function readRunnerService(workdir: string, now: Date = new Date()): Promise<RunnerService> {
   const document = await readQueueHealth(workdir, SERVICE, now)
+  // A graceful stop's last document (25430): who stopped the service and why,
+  // as the supervisor's intent file said, beside the line's own "stopped by".
+  const serviceStopped = serviceStoppedFact(document)
+  if (serviceStopped !== undefined) {
+    const since = new Date(Date.parse(serviceStopped.since))
+    return {
+      cause: "the service wrote this as its last document when it was stopped",
+      kind: "stopped",
+      why: serviceStoppedLine(serviceStopped, Number.isNaN(since.getTime()) ? serviceStopped.since : clock(since)),
+      ...(Number.isNaN(since.getTime()) ? {} : { since }),
+    }
+  }
   if (document.state === "absent") {
     // The reader carries the sentence on `facts.why`, never on `error`: an
     // `absent` document with a typed error is refused by the supervisor's own
@@ -159,7 +173,7 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
     return {
       cause: document.error.cause,
       kind: "stopped",
-      why: "the service stopped restating its health document",
+      why: outsideGracefulStop(document),
       ...(since === undefined || Number.isNaN(since.getTime()) ? {} : { since }),
     }
   }
@@ -172,10 +186,35 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
     return {
       cause: `the health document names process ${String(pid)} as its writer, and that process does not answer`,
       kind: "stopped",
-      why: `the service's process is gone (pid ${String(pid)})`,
+      why: outsideGracefulStop(document),
     }
   }
   return { kind: "beating", state: document.state }
+}
+
+/** The graceful stop's own fact, when this is the document a stopping service left (25430). */
+function serviceStoppedFact(document: QueueHealthDocument): ServiceIntentFact | undefined {
+  const fact = document.facts?.serviceStopped
+  if (typeof fact !== "object" || fact === null) return undefined
+  const { by, reason, since } = fact as Readonly<Record<string, unknown>>
+  if (typeof since !== "string") return undefined
+  return {
+    since,
+    ...(typeof by === "string" ? { by } : {}),
+    ...(typeof reason === "string" ? { reason } : {}),
+  }
+}
+
+/**
+ * A document with no graceful stop in it whose writer is gone or silent: the
+ * service stopped without leaving its reason — a SIGKILL, a crash, a held
+ * event loop. Never an invented reason: the supervisor's record is the place
+ * to read what happened (25430).
+ */
+function outsideGracefulStop(document: QueueHealthDocument): string {
+  const writtenAt = document.facts?.writtenAt
+  const since = typeof writtenAt === "string" ? writtenAt : "an unrecorded instant"
+  return `stopped outside a graceful stop since ${since}; hab ps ${SERVICE} has the supervisor's record`
 }
 
 /** Read what the runner's row shows. Nothing here writes; one readdir, one stat, two file reads, two pid probes. */
@@ -635,7 +674,7 @@ export function runnerLine(
       const activeStep = facts?.latest?.activeStep
 
       let holdsText: string
-      let byText: string | undefined = holding?.submitter
+      const byText: string | undefined = holding?.submitter
       let durationText: string
 
       if (activeStep !== undefined) {

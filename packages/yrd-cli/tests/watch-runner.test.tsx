@@ -15,7 +15,9 @@ import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, runId } from "@yrd/queue-core"
+import { gracefulStopHealthDocument, QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, runId } from "@yrd/queue-core"
+import { SERVICE } from "../src/queue-health.ts"
+import { clock } from "../src/watch-format.ts"
 import {
   readRunnerFacts,
   readRunnerService,
@@ -264,7 +266,12 @@ describe("readRunnerService, the loop's own liveness", () => {
 
     expect(service.kind).toBe("stopped")
     if (service.kind !== "stopped") throw new Error("not stopped")
-    expect(service.why).toContain("stopped restating")
+    // 25430 witness: a SIGKILL leaves the last heartbeat document, with no
+    // graceful stop in it, and it ages into this — never an invented reason.
+    expect(service.why).toBe(
+      `stopped outside a graceful stop since ${new Date(NOW.getTime() - 60_000).toISOString()}; ` +
+        `hab ps ${SERVICE} has the supervisor's record`,
+    )
     expect(service.cause).toContain("no longer a measurement of anything")
     expect(service.since?.getTime()).toBe(NOW.getTime() - 60_000)
   })
@@ -284,8 +291,32 @@ describe("readRunnerService, the loop's own liveness", () => {
 
     expect(service.kind).toBe("stopped")
     if (service.kind !== "stopped") throw new Error("not stopped")
-    expect(service.why).toContain("pid 2147483647")
+    expect(service.cause).toContain("process 2147483647")
+    expect(service.why).toContain("stopped outside a graceful stop")
     expect(service.since).toBeUndefined()
+  })
+
+  it("reads a graceful stop's last document as who stopped the service and why (25430)", async () => {
+    const since = new Date(NOW.getTime() - 30_000).toISOString()
+    const stopped = gracefulStopHealthDocument(SERVICE, { by: "@chief", reason: "cutover", since })
+    const service = await readRunnerService(
+      workdirWith({ ageMs: 1_000, health: JSON.stringify(stopped) }),
+      new Date(NOW.getTime() + 24 * 60 * 60_000),
+    )
+
+    // No deadline on the last document, so a day later it still says why.
+    const at = clock(new Date(since))
+    expect(service).toMatchObject({ kind: "stopped", why: `stopped by @chief since ${at}: cutover` })
+    if (service.kind !== "stopped") throw new Error("not stopped")
+    expect(service.since?.toISOString()).toBe(since)
+
+    const unexplained = gracefulStopHealthDocument(SERVICE, { since })
+    expect(
+      await readRunnerService(workdirWith({ ageMs: 1_000, health: JSON.stringify(unexplained) }), NOW),
+    ).toMatchObject({
+      kind: "stopped",
+      why: `stopped since ${at}: no stop reason was recorded`,
+    })
   })
 
   it("keeps no document and an unreadable one apart: two facts with two cures", async () => {
