@@ -745,26 +745,19 @@ function draftsIn(rows: readonly WatchRow[]): number {
   return rows.filter((item) => item.row.state === "draft").length
 }
 
-/** Derive status marker, word, and color for the top line (RUNNING / STOPPED / STUCK). */
+/** Derive status marker, word, and color for the top line (only RUNNING or STOPPED, 25367). */
 export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
   const runner = runnerOf(snapshot, now)
   if (snapshot.stopped !== undefined && snapshot.stopped !== null) {
-    if (snapshot.stopped.change === null) {
-      return { marker: "■", word: "STOPPED", color: "$fg-error" }
-    }
-    return { marker: "◌", word: "STUCK", color: "$fg-warning" }
-  }
-  if (runner.state === "stopped" || runner.state === "silent") {
     return { marker: "■", word: "STOPPED", color: "$fg-error" }
   }
-  if (runner.state === "stuck") {
-    return { marker: "◌", word: "STUCK", color: "$fg-warning" }
-  }
-  if (runner.state === "paused") {
-    return { marker: "■", word: "STOPPED", color: "$fg-warning" }
-  }
-  if (runner.state === "idle" || runner.state === "unpublished") {
-    return { marker: "○", word: "IDLE", color: "$fg-muted" }
+  if (
+    runner.state === "stopped" ||
+    runner.state === "silent" ||
+    runner.state === "stuck" ||
+    runner.state === "paused"
+  ) {
+    return { marker: "■", word: "STOPPED", color: "$fg-error" }
   }
   return { marker: RUNNING_GLYPH, word: "RUNNING", color: "$fg-info" }
 }

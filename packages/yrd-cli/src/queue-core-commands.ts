@@ -262,6 +262,7 @@ export type CoreQueueCommand =
        * only a change already in line.
        */
       author?: Readonly<{ repo: string; selection: GitSelection; remote?: string }>
+      noCheck?: boolean
     }>
   | Readonly<{
       command: "up"
@@ -474,6 +475,7 @@ export async function coreQueueCommand(
     only?: Change,
     tier?: "normal" | "long",
     stopAtMs?: number,
+    noCheck?: boolean,
   ): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
@@ -496,6 +498,7 @@ export async function coreQueueCommand(
         ...(only === undefined ? {} : { only }),
         ...(tier === undefined ? {} : { tier }),
         ...(stopAtMs === undefined ? {} : { stopAtMs }),
+        ...(noCheck === undefined ? {} : { noCheck }),
       })
     } catch (error) {
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
@@ -577,6 +580,7 @@ export async function coreQueueCommand(
       stopAtMs?: number
       stallMs?: number
       stop?: AbortSignal
+      noCheck?: boolean
       waiting?: Readonly<{
         onWait: (wait: RoundLockWait) => void
         onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>) => void
@@ -646,7 +650,7 @@ export async function coreQueueCommand(
       if (declared === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
       const before = await round.before?.(declared)
       if (before !== undefined) return before
-      const outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs)
+      const outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck)
       return outcome === undefined ? 2 : { declared, outcome }
     } finally {
       lock.release()
@@ -1057,7 +1061,7 @@ export async function coreQueueCommand(
         change = { branch, head: submitted.head }
       }
 
-      const merging = await lockedRound({ only: change })
+      const merging = await lockedRound({ only: change, noCheck: request.noCheck })
       if (typeof merging === "number") return merging
       let after = await readChangeNow(change)
       // A stopped line waits on a stuck change, and a change merged past it may
@@ -1085,8 +1089,15 @@ export async function coreQueueCommand(
       emit(
         io,
         options.json,
-        { branch, change: changeName(change), exitCode: ending ?? 2, state, stopped: stopFact(after.stop) },
-        `${changeName(change)} ${state}`,
+        {
+          branch,
+          change: changeName(change),
+          exitCode: ending ?? 2,
+          state,
+          stopped: stopFact(after.stop),
+          ...(request.noCheck === true ? { noCheck: true } : {}),
+        },
+        `${changeName(change)} ${state}${request.noCheck === true ? " (checks skipped: --no-check)" : ""}`,
       )
       if (ending !== undefined) return ending
       // Still in line: checked and not merged, or never reached. Exit 2 and no
@@ -2548,11 +2559,14 @@ function describeRun(
     log: string
     stopped?: Readonly<{ says: string }>
     observation: GitObservation
+    noCheck?: boolean
   }>,
 ): string {
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
   const parts = [
-    outcome.merged.length > 0 ? `${STATE_WORDS.merged.word} ${outcome.merged.join(", ")}` : undefined,
+    outcome.merged.length > 0
+      ? `${STATE_WORDS.merged.word} ${outcome.merged.join(", ")}${outcome.noCheck === true ? " (checks skipped: --no-check)" : ""}`
+      : undefined,
     outcome.failed.length > 0 ? `${STATE_WORDS.failed.word} ${outcome.failed.join(", ")}` : undefined,
     outcome.stuck.length > 0 ? `${STATE_WORDS.stuck.word} ${outcome.stuck.join(", ")}` : undefined,
     outcome.directMerges.length > 0

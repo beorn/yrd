@@ -8,6 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest"
+import { readFile } from "node:fs/promises"
 import { render } from "silvery/test"
 import type { PauseRecord, Row } from "@yrd/queue-core"
 import { pauseLine } from "@yrd/queue-core"
@@ -125,6 +126,7 @@ describe("25367: yrd has two states, RUNNING and STOPPED, and a stop always says
         by: "yrd",
         cause: "stuck",
         change: { branch: "task/bad", head: "b".repeat(40) },
+        kind: "paused",
         reason: "tests failed to compile",
         sha: "c".repeat(40),
       }
@@ -167,10 +169,10 @@ describe("25367: yrd has two states, RUNNING and STOPPED, and a stop always says
 
       const status = queueLineStatus(snap, NOW)
       expect(status.word).toBe("RUNNING")
-      expect(status.marker).toBe("●")
+      expect(status.marker).toBe("◉")
 
       const text = await paint(snap)
-      expect(text).toContain("● YRD RUNNING")
+      expect(text).toContain("◉ YRD RUNNING")
       expect(text).not.toContain("IDLE")
       expect(text).not.toContain("STUCK")
     })
@@ -240,7 +242,16 @@ describe("25367: yrd has two states, RUNNING and STOPPED, and a stop always says
         expect(output).toMatch(/--no-check|checks skipped/i)
 
         // Journal row records noCheck: true and effectiveChecks: off
-        const { records } = await logOfQueueRun(mergeResult)
+        const logMatch = mergeResult.stdout.match(/\(log\s+([^\s)]+)\)/)
+        expect(logMatch).not.toBeNull()
+        const logPath = logMatch?.[1]
+        expect(logPath).toBeDefined()
+        const logContent = await readFile(logPath!, "utf8")
+        const records = logContent
+          .trim()
+          .split("\n")
+          .filter((line) => line.trim() !== "")
+          .map((line) => JSON.parse(line) as Record<string, unknown>)
         const runRecord = records.find((r) => r.kind === "run")
         expect(runRecord).toBeDefined()
         expect(runRecord).toMatchObject({
