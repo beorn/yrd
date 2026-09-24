@@ -19,6 +19,7 @@ import {
   runShortName,
   stateGlyph,
   stateWord,
+  withoutGitConflictsBlock,
 } from "../src/watch-format.ts"
 
 describe("ref-write diagnostic lines", () => {
@@ -190,5 +191,22 @@ describe("mediaDuration (item 1's `34:23`)", () => {
     expect(mediaDuration(12 * 3_600_000 + 5 * 60_000)).toBe("12h05m")
     expect(mediaDuration(5 * 86_400_000 + 3 * 3_600_000)).toBe("5d03h")
     expect(mediaDuration(-5)).toBe("0:00")
+  })
+})
+
+describe("the conflicts block git appends to a conflicted merge's message (25423)", () => {
+  it("drops the block and the blank line before it, and leaves the text above unchanged", () => {
+    const body = "Change-Id: I4fdda57e4395107dcc6187508411dc6aa0f39e11\n\n# Conflicts:\n#\tvendor/yrd\n"
+    expect(withoutGitConflictsBlock(body)).toBe("Change-Id: I4fdda57e4395107dcc6187508411dc6aa0f39e11\n")
+  })
+
+  it("keeps an author's own `#` line: only the conflicts block is git's", () => {
+    const body = "#123 keep me\n\nRefs: @i/10-yrd/25423"
+    expect(withoutGitConflictsBlock(body)).toBe(body)
+  })
+
+  it("stops at the first line after the block that is not `#<TAB><path>`", () => {
+    const body = "above\n\n# Conflicts:\n#\ta\n#\tb\nnot a path"
+    expect(withoutGitConflictsBlock(body)).toBe("above\nnot a path")
   })
 })

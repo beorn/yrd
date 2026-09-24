@@ -690,6 +690,30 @@ describe("the status box (items 1, 23, 29a, 39)", () => {
     expect(text).toContain("runtime 3:45")
   })
 
+  it("reads a check that is switched off as off, in the step line and on the tab strip, never a tick (25422)", async () => {
+    const off: readonly CheckPanel[] = [
+      {
+        log: "/w/checks/typecheck.log",
+        name: "typecheck",
+        result: { exit: "0", log: "/w/checks/typecheck.log", ms: 0, result: "pass" },
+        spec: { name: "typecheck", run: "true" },
+        state: "off",
+      },
+    ]
+    const merged = row({ at: NOW, endedAt: NOW, merge: "b234234abcde0123456789abcdef0123456789ab", state: "merged" })
+    const box = await paint(at(<RunStatusBox run={runOf(merged, "main", off)} />))
+    expect(box).toMatch(/○ typecheck\s+off/u)
+    expect(box).not.toContain("✓ typecheck")
+
+    const pane = await paint(<WatchPane snapshot={snapshot()} live={false} open={opener(off)} />, [
+      "ArrowDown",
+      "Enter",
+    ])
+    const strip = pane.split("\n").find((line) => line.includes("Changes") && line.includes("typecheck"))
+    expect(strip).toContain("○ typecheck off")
+    expect(strip).not.toContain("✓")
+  })
+
   it("renders a run of another kind through the same box, with no display code touched (item 37m)", async () => {
     const mock: WatchRun = {
       kind: "deployment",
@@ -769,6 +793,22 @@ describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () =
     expect(text).toContain("▶︎ Diff +214 −38")
     // Live facts are NOT in the metadata: no POSITION, WAIT or AGE row.
     expect(text).not.toMatch(/^\s*(POSITION|WAIT|AGE)\s/mu)
+  })
+
+  it("never renders git's comment lines from a commit body: a hand-resolved merge's `# Conflicts:` is not the queue's (25423)", async () => {
+    const item: WatchRow = { row: row({ state: "merged", merge: "3".repeat(40) }) }
+    const body =
+      "Change-Id: I4fdda57e4395107dcc6187508411dc6aa0f39e11\n\n# Conflicts:\n#\tvendor/yrd\n\nThe rest stays."
+    const text = await paint(
+      at(<WatchDetail detail={detailOf(item, CHECKS, { body })} selected={CHANGES_TAB} />),
+      [],
+      100,
+    )
+
+    expect(text).toContain("Change-Id: I4fdda57e4395107dcc6187508411dc6aa0f39e11")
+    expect(text).toContain("The rest stays.")
+    expect(text).not.toContain("Conflicts")
+    expect(text).not.toContain("vendor/yrd")
   })
 
   it("opens the diff through the loader when the fold is toggled, and only then", async () => {

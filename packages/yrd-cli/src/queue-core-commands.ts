@@ -3157,11 +3157,13 @@ function checkLines(check: CheckView): readonly string[] {
   const state =
     check.state === "not-run"
       ? " NOT RUN"
-      : check.state === "running"
-        ? " running"
-        : check.state === "unmeasured"
-          ? " unmeasured — no result recorded"
-          : ""
+      : check.state === "off"
+        ? " off"
+        : check.state === "running"
+          ? " running"
+          : check.state === "unmeasured"
+            ? " unmeasured — no result recorded"
+            : ""
   return [
     `  ${CHECK_GLYPH[check.state]} ${check.name}${state}${exit}${ms}`,
     // The command above its output, which here is the path the output went to
