@@ -228,7 +228,7 @@ describe("ADR-0016 event fold", () => {
     const checking = evolve(first, event("checking", "c".repeat(40)))
     const second = evolve(checking, event("verifying", "d".repeat(40), [["Commit", A]], [A]))
     expect(second).toMatchObject({ status: "verifying", candidate: A, commit: A })
-    const merging = evolve(checking, event("merging", "e".repeat(40)))
+    const merging = evolve(checking, event("merging", "e".repeat(40), [["Commit", B]], [B]))
     const third = evolve(merging, event("verifying", "f".repeat(40), [["Commit", B]], [B]))
     expect(third).toMatchObject({ status: "verifying", candidate: B, commit: A })
   })
@@ -506,7 +506,9 @@ describe("the queue-format boundary", () => {
     const merging = await appendChangeEvent(location, "lab", "task/42", checking, {
       type: "merging",
       at: new Date("2026-09-22T14:04:00.000Z"),
+      commit: composed,
     })
+    expect((await chain.events()).at(-1)).toMatchObject({ id: merging, type: "merging", links: [composed] })
     const merged = {
       type: "merged" as const,
       at: new Date("2026-09-22T14:05:00.000Z"),

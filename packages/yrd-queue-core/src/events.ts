@@ -86,7 +86,7 @@ export function changeInput(
 ): EventInput {
   if (!COMMIT_OID.test(details.queueTip)) throw new TypeError(`Queue: must name a commit oid, got ${details.queueTip}`)
   if (Number.isNaN(details.at.getTime())) throw new TypeError("Time: needs a valid instant")
-  if ((type === "opened" || type === "verifying") && details.commit === undefined) {
+  if ((type === "opened" || type === "verifying" || type === "merging") && details.commit === undefined) {
     throw new TypeError(`${type} needs Commit:`)
   }
   if (type === "opened" && (details.by === undefined || details.by.trim() === "")) {
@@ -215,6 +215,9 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       }
       if (event.type === "merging" && state.status !== "checking") {
         throw new Error(`event ${event.id} merging needs checking, found ${state.status}`)
+      }
+      if (event.type === "merging" && keptCommit(event) !== state.candidate) {
+        throw new Error(`event ${event.id} merging must keep verified candidate ${state.candidate ?? "absent"}`)
       }
       if (
         event.type === "verifying" &&

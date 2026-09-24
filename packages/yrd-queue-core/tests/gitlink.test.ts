@@ -31,20 +31,26 @@ import type { RefUpdate } from "gitomic"
 import {
   appendRecord,
   changeRef,
+  changesRef,
   checksOf,
+  createEventQueue,
+  createEventStore,
   gitIn,
   inspectSubmit,
   journalKey,
   list,
   queueRun,
+  readConfig,
   readJournals,
   readQueue,
   readRecords,
+  readStatus,
   submit,
   trailer,
   watchRows,
 } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
+import { appendChangeEvent } from "../src/events.ts"
 
 const gitSuperBin = resolve(import.meta.dirname, "../../../../git-super/bin")
 if (!existsSync(gitSuperBin)) {
@@ -264,6 +270,372 @@ async function remoteTip(git: Git, ref: string): Promise<string> {
   return tip
 }
 
+/** Declare an event queue over this fixture's gitlink-bearing main. */
+async function createWorldEventQueue(w: World): Promise<void> {
+  const target = await remoteTip(w.git, "refs/heads/main")
+  const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error(`fixture target ${target} lost .yrd.yml`)
+  await createEventQueue(eventStore(w), "main", target, config, new Date())
+}
+
+function eventStore(w: World): ReturnType<typeof createEventStore> {
+  return createEventStore(w.work, "origin", gitIn(w.work).selection)
+}
+
+/** @failure An event queue rejected a gitlink-bearing target before verifying its candidate.
+ * @level l3 @consumer queue operator and submitter
+ * The flat event-run tests cannot expose the component publication refusal.
+ */
+it("runs a gitlink-bearing event change through the checked candidate", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const head = await submitFile(w, "task/event-gitlink")
+
+  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-gitlink"] })
+  const state = await readStatus(eventStore(w), "main", "task/event-gitlink")
+  expect(state).toMatchObject({ status: "merged", commit: head })
+  expect(state.candidate).toBe(await remoteTip(w.git, "refs/heads/main"))
+})
+
+/** @failure A green root could become visible before its component main carried the checked pin.
+ * @level l3 @consumer queue operator and anyone cloning root main
+ * The legacy child-first cases do not exercise the event marker and root CAS.
+ */
+it("publishes the exact checked event component before root main and merged status", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "event-ahead")
+  const head = await submitGitlink(w, "task/event-ahead", ahead)
+  const before = await remoteTip(w.git, "refs/heads/main")
+  expect(await submoduleMain(w)).toBe(w.main)
+
+  const outcome = await queueRun({
+    ...(await w.options({ run: `test "$(git -C submodule rev-parse HEAD)" = '${ahead}'`, on: ["merge"] })),
+    notify: [],
+  })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-ahead"] })
+  const target = await remoteTip(w.git, "refs/heads/main")
+  expect(target).not.toBe(before)
+  expect(await gitlinkAt(w, target)).toBe(ahead)
+  expect(await submoduleMain(w)).toBe(ahead)
+  const state = await readStatus(eventStore(w), "main", "task/event-ahead")
+  expect(state).toMatchObject({ status: "merged", commit: head, candidate: target })
+  expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
+})
+
+/** @failure A failed merge check could leave a component main ahead of the root target.
+ * @level l3 @consumer queue operator and submitter
+ * This uses a real child pin, which flat event-check tests do not have.
+ */
+it("keeps both event root and child mains still when the candidate check fails", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "event-rejected")
+  await submitGitlink(w, "task/event-rejected", ahead)
+  const before = await remoteTip(w.git, "refs/heads/main")
+
+  const outcome = await queueRun({ ...(await w.options({ run: "exit 1", on: ["merge"] })), notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/event-rejected"], merged: [] })
+  expect(await remoteTip(w.git, "refs/heads/main")).toBe(before)
+  expect(await submoduleMain(w)).toBe(w.main)
+  const state = await readStatus(eventStore(w), "main", "task/event-rejected")
+  expect(state).toMatchObject({ status: "failed" })
+  expect(state.candidate).toBeDefined()
+})
+
+/** @failure A third component value could be silently recomposed after a durable marker.
+ * @level l3 @consumer queue operator
+ * The frozen source must remain visible for repair when Git-super refuses its lease.
+ */
+it("keeps the event candidate and stops on a third component main value", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "event-third")
+  await submitGitlink(w, "task/event-third", ahead)
+  const rootBefore = await remoteTip(w.git, "refs/heads/main")
+  await using real = createProcess({ cwd: w.work })
+  let sawMarker = false
+  const racing: Process = {
+    ...real,
+    async run(request) {
+      if (request.argv.includes("super") && request.argv.includes("push") && !sawMarker) {
+        const marker = await readStatus(eventStore(w), "main", "task/event-third")
+        expect(marker).toMatchObject({ status: "merging" })
+        expect(marker.candidate).toBeDefined()
+        sawMarker = true
+        await advanceSubmodule(w, "a third main value")
+      }
+      return real.run(request)
+    },
+  }
+
+  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [], process: racing })
+
+  expect(sawMarker).toBe(true)
+  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/event-third"], merged: [] })
+  expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+  const state = await readStatus(eventStore(w), "main", "task/event-third")
+  expect(state).toMatchObject({ status: "stuck" })
+  expect(state.candidate).toBeDefined()
+  expect(state.reason).toMatch(/refs\/heads\/main|component|submodule/u)
+})
+
+/** @failure A root lease loss after child publication could strand the event as merging.
+ * @level l3 @consumer queue operator
+ * The next candidate must be checked against the new root while child main stays at its frozen source.
+ */
+it("re-verifies an event after a root race and finishes without another child update", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "event-root-race")
+  await submitGitlink(w, "task/event-root-race", ahead)
+  let movedAround = ""
+  let rootPushesSeen = 0
+  using _publication = beforeGitomicPublish(async (_repo, updates, remote) => {
+    if (remote === undefined || !updates.some((update) => update.ref === "refs/heads/main")) return
+    if (rootPushesSeen++ > 0) return
+    expect(await submoduleMain(w)).toBe(ahead)
+    await w.git(["checkout", "--quiet", "main"])
+    writeFileSync(join(w.work, "around-event.txt"), "around the queue\n")
+    await w.git(["add", "around-event.txt"])
+    await w.git(["commit", "--quiet", "-m", "root raced after event child publication"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    movedAround = (await w.git(["rev-parse", "HEAD"])).trim()
+  })
+
+  const first = await queueRun({ ...(await w.options()), checks: [], notify: [] })
+  expect(first).toMatchObject({ exitCode: 0, deferred: ["task/event-root-race"], merged: [], stuck: [] })
+  expect(await remoteTip(w.git, "refs/heads/main")).toBe(movedAround)
+  expect(await submoduleMain(w)).toBe(ahead)
+  expect((await readStatus(eventStore(w), "main", "task/event-root-race")).status).toBe("verifying")
+
+  await using real = createProcess({ cwd: w.work })
+  const childUpdates: string[] = []
+  const observed: Process = {
+    ...real,
+    async run(request) {
+      const execution = await real.run(request)
+      if (request.argv.includes("super") && request.argv.includes("push")) {
+        const parsed = JSON.parse(execution.stdout) as { repositories?: { refs?: { state: string }[] }[] }
+        for (const repository of parsed.repositories ?? []) {
+          for (const ref of repository.refs ?? []) if (ref.state === "updated") childUpdates.push(ref.state)
+        }
+      }
+      return execution
+    },
+  }
+  const second = await queueRun({ ...(await w.options()), checks: [], notify: [], process: observed })
+  expect(second).toMatchObject({ exitCode: 0, merged: ["task/event-root-race"], stuck: [] })
+  expect(childUpdates).toEqual([])
+  expect(await submoduleMain(w)).toBe(ahead)
+})
+
+/** @failure A killed runner after child one could lose its exact checked plan.
+ * @level l3 @consumer queue operator
+ * A fresh clone must replay the marker's frozen candidate, treating child one's source as identical.
+ */
+it("finishes a two-child event from a cold clone after the runner dies between child pushes", async () => {
+  const w = await world()
+  const other = await addSecondChild(w)
+  await createWorldEventQueue(w)
+  const subAhead = await aheadOfSubmodule(w, "event-two-child")
+  await submitTwoChildren(w, "task/event-two-child", other.ahead, subAhead)
+  const rootBefore = await remoteTip(w.git, "refs/heads/main")
+  const root = dirname(w.work)
+  const gate = join(root, "first-child-finished")
+  const hooks = [join(root, "submodule.git/hooks/pre-receive"), join(other.remote, "hooks/pre-receive")]
+  for (const hook of hooks) {
+    writeFileSync(
+      hook,
+      `#!/bin/sh\nwhile read old new ref; do\n  if test "$ref" = refs/heads/main; then\n    if test -e '${gate}'; then sleep 30; else : > '${gate}'; fi\n  fi\ndone\nexit 0\n`,
+    )
+    chmodSync(hook, 0o755)
+  }
+  const otherMain = async (): Promise<string> => {
+    const row = (await gitIn(w.work)(["ls-remote", "--refs", other.remote, "refs/heads/main"])).trim().split(/\s+/u)[0]
+    if (row === undefined || row === "") throw new Error("other main disappeared")
+    return row
+  }
+  await using real = createProcess({ cwd: w.work })
+  let killed = false
+  const interrupting: Process = {
+    ...real,
+    async run(request) {
+      if (!(request.argv.includes("super") && request.argv.includes("push"))) return real.run(request)
+      const controller = new AbortController()
+      let finished = false
+      const pending = real.run({ ...request, signal: controller.signal }).finally(() => {
+        finished = true
+      })
+      while (!finished) {
+        const first = await submoduleMain(w)
+        const second = await otherMain()
+        if ((first === subAhead) !== (second === other.ahead)) {
+          killed = true
+          controller.abort()
+          break
+        }
+        await new Promise((done) => setTimeout(done, 25))
+      }
+      return pending
+    },
+  }
+
+  await expect(queueRun({ ...(await w.options()), checks: [], notify: [], process: interrupting })).rejects.toThrow()
+  expect(killed).toBe(true)
+  expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+  const marker = await readStatus(eventStore(w), "main", "task/event-two-child")
+  expect(marker).toMatchObject({ status: "merging" })
+  expect(marker.candidate).toBeDefined()
+  expect(
+    [await submoduleMain(w), await otherMain()].filter((tip) => tip === subAhead || tip === other.ahead),
+  ).toHaveLength(1)
+
+  for (const hook of hooks) writeFileSync(hook, "#!/bin/sh\nexit 0\n")
+  const cold = join(root, "cold-queue")
+  await w.git(["clone", "--quiet", join(root, "remote.git"), cold])
+  const coldGit = gitIn(cold)
+  await coldGit(["remote", "set-url", "origin", "https://git-super.test/owned/root.git"])
+  await coldGit(["config", "user.email", "queue@yrd.test"])
+  await coldGit(["config", "user.name", "yrd"])
+  const resumed = await queueRun({
+    ...(await w.options()),
+    repo: cold,
+    workdir: join(root, "cold-workdir"),
+    checks: [],
+    notify: [],
+  })
+  expect(resumed).toMatchObject({ exitCode: 0, merged: ["task/event-two-child"], stuck: [] })
+  expect(await submoduleMain(w)).toBe(subAhead)
+  expect(await otherMain()).toBe(other.ahead)
+  expect(await remoteTip(w.git, "refs/heads/main")).not.toBe(rootBefore)
+})
+
+/** @failure A warm queue store could hide that no remote can supply the frozen source.
+ * @level l3 @consumer queue operator
+ * Restarting from a cold clone must stop before moving any child branch and name the missing object.
+ */
+it("sticks a cold event replay when the marker's child source has vanished", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "event-vanished")
+  await submitGitlink(w, "task/event-vanished", ahead)
+  const rootBefore = await remoteTip(w.git, "refs/heads/main")
+  await using real = createProcess({ cwd: w.work })
+  const interrupted: Process = {
+    ...real,
+    run(request) {
+      if (request.argv.includes("super") && request.argv.includes("push")) {
+        throw new Error("fixture killed the runner after its durable marker")
+      }
+      return real.run(request)
+    },
+  }
+  await expect(queueRun({ ...(await w.options()), checks: [], notify: [], process: interrupted })).rejects.toThrow(
+    /fixture killed/u,
+  )
+  const marker = await readStatus(eventStore(w), "main", "task/event-vanished")
+  expect(marker).toMatchObject({ status: "merging" })
+  expect(await submoduleMain(w)).toBe(w.main)
+
+  const root = dirname(w.work)
+  const bare = gitIn(join(root, "submodule.git"))
+  await bare(["update-ref", "-d", `refs/git-super/pins/${ahead}`])
+  await bare(["update-ref", "-d", "refs/heads/ahead-event-vanished"])
+  await bare(["gc", "--prune=now"])
+  const cold = join(root, "cold-unfetchable")
+  await w.git(["clone", "--quiet", join(root, "remote.git"), cold])
+  const coldGit = gitIn(cold)
+  await coldGit(["remote", "set-url", "origin", "https://git-super.test/owned/root.git"])
+  await coldGit(["config", "user.email", "queue@yrd.test"])
+  await coldGit(["config", "user.name", "yrd"])
+
+  const outcome = await queueRun({
+    ...(await w.options()),
+    repo: cold,
+    workdir: join(root, "cold-unfetchable-workdir"),
+    checks: [],
+    notify: [],
+  })
+  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/event-vanished"], merged: [] })
+  expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+  expect(await submoduleMain(w)).toBe(w.main)
+  const state = await readStatus(eventStore(w), "main", "task/event-vanished")
+  expect(state).toMatchObject({ status: "stuck" })
+  expect(state.reason).toContain(ahead)
+})
+
+/** @failure A rival change tip after the marker could cause this run to write a child for a lost row.
+ * @level l3 @consumer queue operator
+ * A marker read-back must discard the row before any child-only push begins.
+ */
+it("discards a rival event tip after the marker without a child write", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "event-rival")
+  await submitGitlink(w, "task/event-rival", ahead)
+  const rootBefore = await remoteTip(w.git, "refs/heads/main")
+  const ref = changesRef("main", "task/event-rival")
+  await using real = createProcess({ cwd: w.work })
+  let rival = false
+  let childPushes = 0
+  const interleaved: Process = {
+    ...real,
+    async run(request) {
+      if (request.argv.includes("super") && request.argv.includes("push")) childPushes += 1
+      if (!rival && request.argv.includes("ls-remote") && request.argv.includes(ref)) {
+        const state = await readStatus(eventStore(w), "main", "task/event-rival")
+        if (state.status === "merging" && state.tip !== undefined) {
+          await appendChangeEvent(eventStore(w), "main", "task/event-rival", state.tip, {
+            type: "cancelled",
+            at: new Date(),
+            reason: "resubmitted",
+          })
+          rival = true
+        }
+      }
+      return real.run(request)
+    },
+  }
+
+  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [], process: interleaved })
+
+  expect(rival).toBe(true)
+  expect(childPushes).toBe(0)
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [], stuck: [] })
+  expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+  expect(await submoduleMain(w)).toBe(w.main)
+  expect((await readStatus(eventStore(w), "main", "task/event-rival")).status).toBe("cancelled")
+  expect(readFileSync(outcome.log, "utf8")).toContain('"kind":"discarded"')
+})
+
+/** @failure A nested pin behind its own main could be treated as a publication target.
+ * @level l3 @consumer queue operator
+ * A file-only event merge must leave both component branches at their observed mains.
+ */
+it("keeps a nested behind-main event pin without publishing either child", async () => {
+  const w = await world()
+  const nested = await addNestedSubmodule(w)
+  await createWorldEventQueue(w)
+  await submitFile(w, "task/event-nested-behind")
+
+  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-nested-behind"], stuck: [] })
+  expect(await submoduleMain(w)).toBe(nested.submoduleMain)
+  const leaf = (
+    await gitIn(w.work)(["ls-remote", "--refs", "https://git-super.test/owned/leaf.git", "refs/heads/main"])
+  )
+    .trim()
+    .split(/\s+/u)[0]
+  expect(leaf).toBe(nested.leafMain)
+  expect(nested.leafRecorded).not.toBe(nested.leafMain)
+})
+
 async function gitlinkAt(w: World, commit: string): Promise<string> {
   const row = (await w.git(["ls-tree", commit, "--", "submodule"])).trim().split(/\s+/u)
   return row[2] ?? ""
@@ -324,6 +696,58 @@ async function submoduleMain(w: World): Promise<string> {
     .split(/\s+/u)[0]
   if (tip === undefined || tip === "") throw new Error("the submodule remote has no main")
   return tip
+}
+
+/** A second owned child remote, with an unpublished commit ahead of its main. */
+async function addSecondChild(w: World): Promise<Readonly<{ main: string; ahead: string; remote: string }>> {
+  const root = dirname(w.work)
+  const remote = join(root, "other.git")
+  const work = join(root, "other-work")
+  process.env.GIT_CONFIG_COUNT = "4"
+  process.env.GIT_CONFIG_KEY_3 = `url.${remote}.insteadOf`
+  process.env.GIT_CONFIG_VALUE_3 = "https://git-super.test/owned/other.git"
+  const rootGit = gitIn(w.work)
+  await rootGit(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await rootGit(["clone", "--quiet", remote, work])
+  const other = gitIn(work)
+  await other(["config", "user.email", "queue@yrd.test"])
+  await other(["config", "user.name", "yrd"])
+  await other(["remote", "set-url", "origin", "https://git-super.test/owned/other.git"])
+  await other(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(work, "other.txt"), "base\n")
+  await other(["add", "other.txt"])
+  await other(["commit", "--quiet", "-m", "other base"])
+  const main = (await other(["rev-parse", "HEAD"])).trim()
+  await other(["push", "--quiet", "origin", "main"])
+  await other(["checkout", "--quiet", "-b", "ahead", "main"])
+  writeFileSync(join(work, "other.txt"), "ahead\n")
+  await other(["commit", "--quiet", "-am", "other ahead"])
+  const ahead = (await other(["rev-parse", "HEAD"])).trim()
+  await other(["push", "--quiet", "origin", "ahead"])
+  await other(["checkout", "--quiet", "main"])
+  await rootGit(["checkout", "--quiet", "main"])
+  await rootGit(["submodule", "add", "--quiet", "https://git-super.test/owned/other.git", "other"])
+  await rootGit(["add", ".gitmodules", "other"])
+  await rootGit(["commit", "--quiet", "-m", "add second owned component"])
+  await rootGit(["push", "--quiet", "origin", "main"])
+  return { main, ahead, remote }
+}
+
+async function submitTwoChildren(w: World, branch: string, otherAhead: string, subAhead: string): Promise<void> {
+  const rootGit = gitIn(w.work)
+  await rootGit(["checkout", "--quiet", "-b", branch, "main"])
+  for (const [path, sha] of [
+    ["other", otherAhead],
+    ["submodule", subAhead],
+  ] as const) {
+    const child = gitIn(join(w.work, path))
+    await child(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    await child(["checkout", "--quiet", sha])
+  }
+  await rootGit(["add", "other", "submodule"])
+  await rootGit(["commit", "--quiet", "-m", `${branch}: advance both components`])
+  await rootGit(["checkout", "--quiet", "main"])
+  await submit(rootGit, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
 }
 
 /**
