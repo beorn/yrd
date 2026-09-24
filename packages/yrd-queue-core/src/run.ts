@@ -207,6 +207,13 @@ export type QueueRunOptions = Readonly<{
 /** A completed queue round with a failed change; reported by the long runner. */
 export const QUEUE_RUN_FAILED_EXIT = 1
 
+/** What a round read of its line, for the service's stall judgement (25669). */
+export type RoundLine = Readonly<{
+  waiting: number
+  oldest?: Readonly<{ branch: string; openedAt: string }>
+  lastJudgedAt?: string
+}>
+
 export type QueueRunOutcome = Readonly<{
   observation: GitObservation
   exitCode: 0 | 1 | 2
@@ -235,6 +242,14 @@ export type QueueRunOutcome = Readonly<{
    * ended before it could read the line.
    */
   checkedWaiting: number
+  /**
+   * The line as this round read it (25669): how many changes wait, the oldest of
+   * them by opening, and when the queue last judged a change (the latest merged
+   * or failed ending on any chain, read from the chains so a relaunched service
+   * knows it too). The service loop judges a stall from it. Absent when the round
+   * ended before it read the line (a paused line), and on the legacy format.
+   */
+  line?: RoundLine
   /** Present and true when this round ran with --no-check. */
   noCheck?: boolean
 }>

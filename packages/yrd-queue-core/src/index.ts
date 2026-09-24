@@ -134,7 +134,7 @@ export {
 } from "./reference.ts"
 export type { PopulateReference, ReferenceStore } from "./reference.ts"
 export { queueRun, QUEUE_RUN_FAILED_EXIT } from "./run.ts"
-export type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
+export type { QueueRunOptions, QueueRunOutcome, RoundLine } from "./run.ts"
 export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from "./config.ts"
 export { parseDuration } from "./duration.ts"
 export type { Ending, Notifier, QueueConfig, QueueHealthConfig, Target } from "./config.ts"
@@ -208,6 +208,7 @@ export {
   STALLED_LINE_CODE,
   STUCK_RECORD_CODE,
   unreadableHealthDocument,
+  withLineFlow,
   writtenHealthDocument,
 } from "./service-health.ts"
 export type {

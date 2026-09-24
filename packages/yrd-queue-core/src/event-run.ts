@@ -29,7 +29,7 @@ import { queueRefPrefix } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { publishCheckedChildren } from "./publication.ts"
 import { prepareWorktree, SETUP, SetupFailed } from "./worktree.ts"
-import { restoreScripts, short, type QueueRunOptions, type QueueRunOutcome } from "./run.ts"
+import { restoreScripts, short, type QueueRunOptions, type QueueRunOutcome, type RoundLine } from "./run.ts"
 import { dispatchNotifications, messageFor } from "./with-notify.ts"
 import { changeName } from "./refs.ts"
 import { transportFaultIn } from "./setup-transport.ts"
@@ -200,6 +200,8 @@ export async function eventQueueRun(
     ...(observation.contract === "native" ? {} : { outcome: observation.outcome }),
   })
   let directMerges: readonly string[] = []
+  /** The line as this round read it (25669), stated on every outcome once the line is read. */
+  let roundLine: RoundLine | undefined
   const result = (
     exitCode: 0 | 1 | 2,
     merged: string[] = [],
@@ -222,6 +224,7 @@ export async function eventQueueRun(
     deferred,
     directMerges,
     checkedWaiting: 0,
+    ...(roundLine === undefined ? {} : { line: roundLine }),
     ...(stopped === undefined ? {} : { stopped }),
   })
   const tell = async (
@@ -336,6 +339,17 @@ export async function eventQueueRun(
     })
   }
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
+  // WHEN THE QUEUE LAST JUDGED A CHANGE (25669): the latest merged or failed
+  // ending on any chain, read from the chains themselves so a relaunched service
+  // knows it without having watched it happen. A cancel is a person's act, not the
+  // line flowing, and does not count.
+  let lastJudgedMs: number | undefined
+  for (const change of changes.values()) {
+    const kind = change.ending?.kind
+    if ((kind === "merged" || kind === "failed") && change.endedAt !== undefined) {
+      lastJudgedMs = Math.max(lastJudgedMs ?? 0, change.endedAt.getTime())
+    }
+  }
   for (const [branch, change] of changes) {
     const latest = change.lastNotifiable
     if (latest !== undefined && (latest.kind !== "cancelled" || change.reason === "deleted")) {
@@ -557,6 +571,25 @@ export async function eventQueueRun(
       await endDeletedChange(selectedChange)
     }
   }
+  // THE LINE, journaled on every round (25669, @cto d3af5793): the waiting count
+  // is the number the stall threshold is tuned from, and the service reads the
+  // same reading off the outcome.
+  const oldest = remaining.reduce<(typeof remaining)[number] | undefined>(
+    (earliest, change) => (earliest === undefined || change.since < earliest.since ? change : earliest),
+    undefined,
+  )
+  roundLine = {
+    waiting: remaining.length,
+    ...(oldest === undefined ? {} : { oldest: { branch: oldest.branch, openedAt: oldest.since.toISOString() } }),
+    ...(lastJudgedMs === undefined ? {} : { lastJudgedAt: new Date(lastJudgedMs).toISOString() }),
+  }
+  log.write({
+    kind: "observation",
+    subject: "line",
+    waiting: roundLine.waiting,
+    ...(roundLine.oldest === undefined ? {} : { oldestBranch: roundLine.oldest.branch, oldestOpenedAt: roundLine.oldest.openedAt }),
+    ...(roundLine.lastJudgedAt === undefined ? {} : { lastJudgedAt: roundLine.lastJudgedAt }),
+  })
   const standing = remaining.find((change) => change.status === "stuck")
   if (standing !== undefined) {
     if (!(await queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)))) {

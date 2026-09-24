@@ -14,6 +14,7 @@ import {
   STALLED_LINE_CODE,
   STUCK_RECORD_CODE,
   unreadableHealthDocument,
+  withLineFlow,
 } from "../src/service-health.ts"
 import type { PauseRecord } from "../src/pause.ts"
 
@@ -331,5 +332,34 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
     const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", oldestWaiting: oldest, waiting: 16 }
     const doc = roundHealthDocument("yrd", stuckStop, INTERVAL, at("21:00:00"), { flow, threshold })
     expect(doc.error?.code).toBe("queue-round-stuck")
+  })
+
+  test("an operator's pause is deliberate: a paused line never reads stalled", () => {
+    const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", oldestWaiting: oldest, waiting: 16 }
+    const doc = roundHealthDocument("yrd", operatorStop, INTERVAL, at("21:00:00"), { flow, threshold })
+    expect(doc.state).toBe("healthy")
+    expect(doc.facts?.flow).toMatchObject({ waiting: 16 })
+  })
+
+  test("the heartbeat re-judges the flow on its own clock: healthy at round end becomes stalled mid-round, then clears on a judgement", () => {
+    const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", oldestWaiting: oldest, roundOpen: { startedAt: "2026-09-24T19:41:00.000Z" }, waiting: 5 }
+    const reading = { flow, threshold }
+    const atRoundStart = roundHealthDocument("yrd", undefined, INTERVAL, at("19:41:00"), reading)
+    expect(atRoundStart.state).toBe("healthy")
+    const midRound = withLineFlow(atRoundStart, undefined, reading, at("20:26:00"))
+    expect(midRound.state).toBe("unhealthy")
+    expect(midRound.error?.code).toBe(STALLED_LINE_CODE)
+    expect(midRound.error?.cause).toMatch(/^a round has been running its checks for 45m; no change judged for 46m/u)
+    const judged = withLineFlow(midRound, undefined, { flow: { ...flow, lastJudgedAt: "2026-09-24T20:26:30.000Z" }, threshold }, at("20:27:00"))
+    expect(judged.state).toBe("healthy")
+    expect(judged.error).toBeUndefined()
+  })
+
+  test("another page stands: a stall never overwrites the page a document already carries", () => {
+    const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", oldestWaiting: oldest, waiting: 16 }
+    const relaunch = { ...roundHealthDocument("yrd", undefined, INTERVAL, at("21:00:00")), state: "unhealthy" as const, error: { code: "queue-relaunch-stalled", cause: "waiting on a checkout", resolution: [] } }
+    const restated = withLineFlow(relaunch, undefined, { flow, threshold }, at("21:00:00"))
+    expect(restated.error?.code).toBe("queue-relaunch-stalled")
+    expect(restated.facts?.flow).toMatchObject({ waiting: 16 })
   })
 })

@@ -212,17 +212,14 @@ export function roundHealthDocument(
   flow?: FlowReading,
 ): QueueHealthDocument {
   const base = { schema: QUEUE_HEALTH_SCHEMA, service, verdict: { kind: "running" } as const }
-  const stall = flow === undefined ? undefined : lineStall(flow.flow, flow.threshold, now)
   const facts = {
     ...freshness(SERVICE_HEARTBEAT, now),
     nextRoundInMs: sleepMs,
     stopped: stopFact(stop),
-    ...(flow === undefined ? {} : { flow: flowFact(flow, stall) }),
   }
   if (stop?.cause !== "stuck" || stop.change === undefined) {
-    // A stuck stop outranks a stall: it already pages, naming the change that stopped the line.
-    if (stall === undefined || flow === undefined) return { ...base, state: "healthy", facts }
-    return { ...base, state: "unhealthy", error: stalledFailure(stall, flow.flow), facts }
+    const healthy: QueueHealthDocument = { ...base, state: "healthy", facts }
+    return flow === undefined ? healthy : withLineFlow(healthy, stop, flow, now)
   }
   const change = changeName(stop.change)
   return {
@@ -314,6 +311,33 @@ export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date):
     forMs,
     shape: "stopped-line",
   }
+}
+
+/**
+ * The document with the line's flow judged at `now` (25669): the flow stated as
+ * a fact, and a stalled line paged. What the service loop writes at a round's
+ * end AND what its heartbeat restates between rounds, so a stall that develops
+ * during a long round — the 09-24 specimen was one 50-minute round — is judged
+ * on the heartbeat's clock rather than waiting for the round to end.
+ *
+ * Only a line with no stop can read stalled. A stuck stop already pages, naming
+ * its change, and outranks this; an operator's pause is deliberate and pages
+ * nobody, so a paused line is not a stalled one. Any other page the document
+ * carries (the relaunch wait's, say) stands, with the flow stated beside it.
+ */
+export function withLineFlow(
+  document: QueueHealthDocument,
+  stop: PauseRecord | undefined,
+  reading: FlowReading,
+  now: Date,
+): QueueHealthDocument {
+  const foreign = document.error !== undefined && document.error.code !== STALLED_LINE_CODE
+  const stall = stop === undefined && !foreign ? lineStall(reading.flow, reading.threshold, now) : undefined
+  const facts = { ...document.facts, flow: flowFact(reading, stall) }
+  if (foreign) return { ...document, facts }
+  const { error: _cleared, ...rest } = document
+  if (stall === undefined) return { ...rest, state: "healthy", facts }
+  return { ...rest, state: "unhealthy", error: stalledFailure(stall, reading.flow), facts }
 }
 
 /** The flow as the document states it: the reading, the threshold it was judged against, and the stall when there is one. */

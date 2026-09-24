@@ -111,6 +111,9 @@ import {
   ROUND_LOCK,
   relaunchStalledHealthDocument,
   roundHealthDocument,
+  withLineFlow,
+  type FlowReading,
+  type LineFlow,
   gracefulStopHealthDocument,
   writtenHealthDocument,
   runtimeGitlinkPath,
@@ -1274,8 +1277,22 @@ export async function coreQueueCommand(
         graceMs: request.heartbeatGraceMs ?? HEARTBEAT_GRACE_MS,
         intervalMs: request.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS,
       }
-      /** The last document written, which every heartbeat restates unchanged but for its clocks. */
+      /** The last document written, which every heartbeat restates with its clocks and the line's flow re-judged. */
       let stated: QueueHealthDocument | undefined
+      /**
+       * THE LINE'S FLOW (25669), as the loop last knew it: read off each round's
+       * outcome, marked open while a round runs, and judged against the declared
+       * threshold on every write, the heartbeat's included. One home for the fact:
+       * `queue list`, the watch and its runner line read it from the document.
+       *
+       * The port of the old core's flow instrument (08-10
+       * queueProgressAuditFindings, 08-30 queue-liveness-wedged), deleted with that
+       * core on 09-03 in b5b468037c; on 09-24 a line stood still for over an hour
+       * while this document read healthy.
+       */
+      let flow: LineFlow = { waiting: 0 }
+      let threshold = { declared: config.health.declared, ms: config.health.stallAfterMs }
+      const flowReading = (): FlowReading => ({ flow, threshold })
       /**
        * Leave the document where the declared health probe reads it, stamped
        * with this write's instant, its deadline and its writer, and answer with
@@ -1352,7 +1369,7 @@ export async function coreQueueCommand(
        * document is read every time anyone asks how this service is.
        */
       const lineDocument = (stop: PauseRecord | undefined, sleepMs: number): QueueHealthDocument => {
-        const base = roundHealthDocument(SERVICE, stop, sleepMs, new Date())
+        const base = roundHealthDocument(SERVICE, stop, sleepMs, new Date(), flowReading())
         return { ...base, facts: { ...base.facts, ...relaunchOff, serviceStarted } }
       }
       /**
@@ -1565,7 +1582,10 @@ export async function coreQueueCommand(
       // the event loop is free to write, and the document is fresh exactly while
       // its writer lives. The `finally` clears it on every way out of the loop.
       const beat = setInterval(() => {
-        if (stated !== undefined) writeHealth(stated)
+        // Re-judged, not merely restated (25669): a stall that develops inside one
+        // long round — the 09-24 specimen was a single 50-minute round — pages on
+        // the heartbeat's clock instead of waiting for the round to end.
+        if (stated !== undefined) writeHealth(withLineFlow(stated, lastStop, flowReading(), new Date()))
       }, heartbeat.intervalMs)
       // THE GRACEFUL STOP (25430). A signal carries no reason, so the supervisor
       // wrote its stop intent before sending it; this reads it and leaves ONE
@@ -1620,6 +1640,11 @@ export async function coreQueueCommand(
           // correct edit at the target is the next round's, never a restart's.
           const ran = await lockedRound({
             before: async (declared) => {
+              // The round opens now, judged against the threshold THIS round's
+              // declaration carries, so an edit to health.stallAfter is the next
+              // round's, like every other key.
+              threshold = { declared: declared.config.health.declared, ms: declared.config.health.stallAfterMs }
+              flow = { ...flow, roundOpen: { startedAt: new Date().toISOString() } }
               if (lockWaitStated) {
                 lockWaitStated = false
                 writeHealth(lineDocument(lastStop, 0))
@@ -1640,6 +1665,7 @@ export async function coreQueueCommand(
           // nothing awaited between the write and the call.
           const sleepMs = sleepAfter(outcome, interval)
           lastStop = pauseStop(outcome.stopped)
+          flow = flowAfterRound(flow, outcome, new Date())
           const document = writeHealth(lineDocument(lastStop, sleepMs))
           await request.afterHealth?.(document)
           if (stopped()) return 0
@@ -2863,6 +2889,29 @@ export const READY_SLEEP_MS = 1000
  * short interval stays a short interval. A round that held a stopped line did
  * neither, and waits the interval.
  */
+/**
+ * The line's flow once a round has ended (25669). The round's own reading of the
+ * line wins: how many wait, the oldest of them, and the last judgement it read
+ * off the chains. A change this round merged, failed or recorded stuck is a
+ * judgement at the round's end, which the chains the round read before acting
+ * cannot yet show. A round that ended before reading its line (a paused line)
+ * keeps the last reading. No round is open any more.
+ */
+export function flowAfterRound(previous: LineFlow, outcome: QueueRunOutcome, now: Date): LineFlow {
+  const ended = now.toISOString()
+  const judgedNow = outcome.merged.length + outcome.failed.length + outcome.stuck.length > 0
+  const lastJudgedAt = [outcome.line?.lastJudgedAt, judgedNow ? ended : undefined, previous.lastJudgedAt]
+    .filter((at): at is string => at !== undefined)
+    .reduce<string | undefined>((latest, at) => (latest === undefined || at > latest ? at : latest), undefined)
+  const oldestWaiting = outcome.line === undefined ? previous.oldestWaiting : outcome.line.oldest
+  return {
+    waiting: outcome.line?.waiting ?? previous.waiting,
+    lastRoundEndedAt: ended,
+    ...(oldestWaiting === undefined ? {} : { oldestWaiting }),
+    ...(lastJudgedAt === undefined ? {} : { lastJudgedAt }),
+  }
+}
+
 export function sleepAfter(outcome: QueueRunOutcome, intervalMs: number): number {
   const ready = outcome.merged.length > 0 || outcome.checkedWaiting > 0
   return ready ? Math.min(intervalMs, READY_SLEEP_MS) : intervalMs
