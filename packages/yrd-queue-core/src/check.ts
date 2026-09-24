@@ -187,8 +187,24 @@ function checkedProgramRoot(run: RunCheck): string | undefined {
  * the name off with a `split(" ")` and the log path off with a regex of its
  * own, neither of them anywhere near the line that wrote them.
  */
-export function checkTrailer(result: CheckResult): string {
-  return `${result.name} exit=${String(result.exit)} ms=${String(result.durationMs)} log=${result.log}`
+export function checkTrailer(
+  result: CheckResult,
+  occurrence?: Readonly<{ attempt: number; phase: "submit" | "merge"; tier?: "long" }>,
+): string {
+  if (occurrence !== undefined && (!Number.isSafeInteger(occurrence.attempt) || occurrence.attempt < 1)) {
+    throw new TypeError(`check ${result.name}: attempt must be a positive integer`)
+  }
+  if (occurrence !== undefined && occurrence.phase !== "submit" && occurrence.phase !== "merge") {
+    throw new TypeError(`check ${result.name}: phase must be submit or merge`)
+  }
+  if (occurrence?.tier !== undefined && occurrence.tier !== "long") {
+    throw new TypeError(`check ${result.name}: tier must be long when present`)
+  }
+  const evidence =
+    occurrence === undefined
+      ? ""
+      : ` result=${result.result} attempt=${String(occurrence.attempt)} phase=${occurrence.phase}${occurrence.tier === undefined ? "" : ` tier=${occurrence.tier}`}`
+  return `${result.name} exit=${String(result.exit)} ms=${String(result.durationMs)}${evidence} log=${result.log}`
 }
 
 /**
@@ -198,18 +214,40 @@ export function checkTrailer(result: CheckResult): string {
  * wanted the exit went to the trailer text itself with a regex of its own; the
  * format has one reader and this is it.
  */
-export function readCheckTrailer(packed: string): Readonly<{ name: string; exit?: string; ms?: number; log?: string }> {
-  const name = packed.split(" ")[0] ?? ""
-  const exit = /(?:^| )exit=([^ ]*)/u.exec(packed)?.[1]
-  const written = /(?:^| )ms=(\d+)/u.exec(packed)?.[1]
+export function readCheckTrailer(packed: string): Readonly<{
+  name: string
+  exit?: string
+  ms?: number
+  result?: CheckResult["result"]
+  attempt?: number
+  phase?: "submit" | "merge"
+  tier?: "long"
+  log?: string
+}> {
+  // `log=` is last and may contain words that look like evidence fields.
+  // Parse only the header before that delimiter.
+  const logAt = packed.indexOf(" log=")
+  const header = logAt < 0 ? packed : packed.slice(0, logAt)
+  const log = logAt < 0 ? undefined : packed.slice(logAt + " log=".length)
+  const name = header.split(" ")[0] ?? ""
+  const exit = /(?:^| )exit=([^ ]*)/u.exec(header)?.[1]
+  const written = /(?:^| )ms=(\d+)/u.exec(header)?.[1]
   const ms = written === undefined ? undefined : Number(written)
-  // `log=` is written last, so its value runs to the end and a path with an
-  // `=` in it survives the reading.
-  const log = /(?:^| )log=(.+)$/u.exec(packed)?.[1]
+  const result = /(?:^| )result=(pass|fail|stuck|deferred)(?: |$)/u.exec(header)?.[1] as
+    | CheckResult["result"]
+    | undefined
+  const attemptWritten = /(?:^| )attempt=(\d+)(?: |$)/u.exec(header)?.[1]
+  const attempt = attemptWritten === undefined ? undefined : Number(attemptWritten)
+  const phase = /(?:^| )phase=(submit|merge)(?: |$)/u.exec(header)?.[1] as "submit" | "merge" | undefined
+  const tier = /(?:^| )tier=(long)(?: |$)/u.exec(header)?.[1] as "long" | undefined
   return {
     name,
     ...(exit === undefined ? {} : { exit }),
     ...(ms === undefined || Number.isNaN(ms) ? {} : { ms }),
+    ...(result === undefined ? {} : { result }),
+    ...(attempt === undefined || !Number.isSafeInteger(attempt) || attempt < 1 ? {} : { attempt }),
+    ...(phase === undefined ? {} : { phase }),
+    ...(tier === undefined ? {} : { tier }),
     ...(log === undefined ? {} : { log }),
   }
 }

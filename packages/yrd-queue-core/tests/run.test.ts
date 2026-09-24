@@ -82,6 +82,8 @@ import { resolveGitSelection } from "../src/git.ts"
 import { ABSENT, legacyStore, recordCommit, type WriteRecord } from "../src/legacy-records.ts"
 import * as verifying from "../src/verifying.ts"
 import { appendChangeEvent, appendPublishedMerge } from "../src/events.ts"
+import { settledBaseCommit } from "../src/settled-base.ts"
+import { prepareWorktree, SetupFailed } from "../src/worktree.ts"
 
 const roots: string[] = []
 // The real queue child needs GitSuper even when the worker's PATH is sealed.
@@ -512,61 +514,380 @@ it("runs a configured event change's default merge check before merging", async 
       expect.objectContaining({ kind: "result", name: "verify", phase: "merge", result: "pass", exit: "0" }),
     ]),
   )
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/configured-event") })).events()
+  const deciding = events.find((event) => event.type === "merging")
+  expect(deciding?.props).toEqual(
+    expect.arrayContaining([
+      ["Base", w.target],
+      ["Config", "test-config"],
+      ["Check", expect.stringMatching(/^verify exit=0 ms=\d+ result=pass attempt=1 phase=merge log=/u)],
+    ]),
+  )
+  expect(deciding?.links).toEqual([await remoteTarget(w)])
 })
 
-/** @failure An event queue could accept a declaration feature whose evidence it cannot preserve yet.
+/** @failure Event admission accepted on-submit and setup declarations without running either before landing.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("runs submit and merge checks with setup before each phase and retains both verdicts", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/two-phases", "one.txt")
+  const options = await w.options({ exit: 0, on: ["submit", "merge"], setup: w.setupCommand(0) })
+
+  const outcome = await queueRun({ ...options, notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/two-phases"] })
+  expect(readFileSync(w.checkLog, "utf8").match(/setup cwd=/gu)).toHaveLength(2)
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ kind: "result", name: "verify", phase: "submit", result: "pass" }),
+      expect.objectContaining({ kind: "result", name: "verify", phase: "merge", result: "pass" }),
+    ]),
+  )
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/two-phases") })).events()
+  const checks = events.find((event) => event.type === "merging")?.props.filter(([key]) => key === "Check")
+  expect(checks).toEqual([
+    ["Check", expect.stringMatching(/result=pass attempt=1 phase=submit/u)],
+    ["Check", expect.stringMatching(/result=pass attempt=1 phase=merge/u)],
+  ])
+})
+
+/** @failure Event setup failures escaped without attributing the candidate against its settled base.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("bills a candidate-only setup failure to the change and retains its result", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/setup-event", "one.txt")
+  const base = await w.options({ exit: 0 })
+
+  const outcome = await queueRun({ ...base, notify: [], checks: [], setup: "test ! -f one.txt" })
+
+  expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/setup-event"], stuck: [] })
+  expect((await readStatus(store, "main", "task/setup-event")).status).toBe("failed")
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/setup-event") })).events()
+  expect(events.find((event) => event.type === "failed")?.props).toContainEqual([
+    "Check",
+    expect.stringMatching(/^setup exit=1 .*result=fail attempt=1 phase=submit /u),
+  ])
+})
+
+/** @failure A setup defect on the target base was billed to the submitted change.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("stops the event line when setup fails on the settled base too", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/base-setup-event", "one.txt")
+  const base = await w.options({ exit: 0 })
+
+  const outcome = await queueRun({ ...base, notify: [], checks: [], setup: "false" })
+
+  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/base-setup-event"], failed: [] })
+  expect((await readStatus(store, "main", "task/base-setup-event")).status).toBe("stuck")
+})
+
+/** @failure Bare target setup passed while a candidate-raised gitlink broke the queue-owned settled base.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("judges setup on the target with raised gitlinks rather than its bare pin", async () => {
+  const w = await world()
+  const child = join(w.workdir, "raised-child")
+  await w.git(["init", "--quiet", "--initial-branch=main", child])
+  const childGit = gitIn(child)
+  await childGit(["config", "user.email", "queue@yrd.test"])
+  await childGit(["config", "user.name", "yrd"])
+  writeFileSync(join(child, "healthy"), "ready\n")
+  await childGit(["add", "healthy"])
+  await childGit(["commit", "--quiet", "-m", "healthy child"])
+  const healthy = (await childGit(["rev-parse", "HEAD"])).trim()
+  await w.git(["config", "protocol.file.allow", "always"])
+  for (const [key, value] of [
+    ["path", "child"],
+    ["url", child],
+    ["branch", "main"],
+  ] as const) {
+    await w.git(["config", "-f", ".gitmodules", `submodule.child.${key}`, value])
+  }
+  await w.git(["add", ".gitmodules"])
+  await w.git(["update-index", "--add", "--cacheinfo", `160000,${healthy},child`])
+  await w.git(["commit", "--quiet", "-m", "target with healthy child"])
+  const target = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--", "child"])
+  await childGit(["rm", "healthy"])
+  await childGit(["commit", "--quiet", "-m", "break child setup"])
+  const raised = (await childGit(["rev-parse", "HEAD"])).trim()
+  const git = gitIn(w.work)
+  const settled = await settledBaseCommit({
+    git,
+    repo: w.work,
+    targetSha: target,
+    raises: [{ path: "child", mode: "160000", from: healthy, to: raised }],
+    path: join(w.workdir, "settled-compose"),
+    branch: "task/raise",
+    populateReference: true,
+  })
+  expect(settled).not.toBe(target)
+  expect(await git(["ls-tree", "--object-only", target, "child"])).toContain(healthy)
+  expect(await git(["ls-tree", "--object-only", settled, "child"])).toContain(raised)
+  const setup = {
+    run: "test -f child/healthy",
+    logDir: join(w.workdir, "settled-logs"),
+    tmpdir: join(w.workdir, "tmp"),
+  }
+  const bare = await prepareWorktree(git, w.work, target, join(w.workdir, "bare-base"), {
+    targetSha: target,
+    populateReference: true,
+    setup,
+  })
+  await bare.remove()
+  await expect(
+    prepareWorktree(git, w.work, settled, join(w.workdir, "raised-base"), {
+      targetSha: target,
+      populateReference: true,
+      setup: { ...setup, logDir: join(w.workdir, "raised-logs") },
+    }),
+  ).rejects.toBeInstanceOf(SetupFailed)
+})
+
+/** @failure A temporary remote setup outage stopped the event line before its one in-round retry.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("retries a remote-class event setup failure after base attribution", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/setup-retry-event", "one.txt")
+  const fault = faultySetup(w, UNREACHABLE_SETUP, { once: true })
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0, setup: fault.command })), notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/setup-retry-event"], stuck: [] })
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ kind: "warning", branch: "task/setup-retry-event", reason: "retried" }),
+    ]),
+  )
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/setup-retry-event") })).events()
+  expect(events.find((event) => event.type === "merging")?.props).toContainEqual([
+    "Check",
+    expect.stringMatching(/result=pass attempt=2 phase=merge/u),
+  ])
+})
+
+/** @failure A repeated remote setup outage could stop without both attempt rows or a retry marker.
+ * @level l3 @consumer queue operator and Gate E
+ */
+it("retains both setup attempts when a remote-class outage stops the event line", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/setup-stuck-retry", "one.txt")
+  const fault = faultySetup(w, UNREACHABLE_SETUP)
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0, setup: fault.command })), notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/setup-stuck-retry"] })
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/setup-stuck-retry") })).events()
+  const stuck = events.find((event) => event.type === "stuck")
+  expect(stuck?.props).toContainEqual(["Retried", "1"])
+  expect(stuck?.props.filter(([key]) => key === "Check")).toEqual([
+    ["Check", expect.stringMatching(/^setup exit=128 .*result=stuck attempt=1 phase=submit /u)],
+    ["Check", expect.stringMatching(/^setup exit=128 .*result=stuck attempt=2 phase=submit /u)],
+  ])
+})
+
+/** @failure A program-root check was accepted without its protected program root and still landed.
+ * @level l3 @consumer queue operator and declaration author
+ */
+it("runs an event program-root check through the shared protected executor", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/program-root", "one.txt")
+  const base = await w.options({ exit: 0 })
+  const options = {
+    ...base,
+    notify: [],
+    checks: [
+      {
+        ...base.checks[0]!,
+        programRoot: true as const,
+        run: 'test -d "$YRD_PROGRAM_ROOT" && test "$YRD_PROGRAM_ROOT" != "$(pwd)"',
+      },
+    ],
+  }
+
+  const outcome = await queueRun(options)
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/program-root"] })
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/program-root") })).events()
+  expect(events.find((event) => event.type === "merging")?.props).toContainEqual([
+    "Check",
+    expect.stringMatching(/^verify exit=0 .*result=pass attempt=1 phase=merge /u),
+  ])
+})
+
+/** @failure A change could replace a target-owned check script before its own event check ran.
+ * @level l3 @consumer queue operator and declaration author
+ */
+it("restores target-owned scripts before an event check runs", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await w.git(["checkout", "--quiet", "-b", "task/script-overlay", "main"])
+  writeFileSync(join(w.work, ".yrd.yml"), "changed by branch\n")
+  writeFileSync(join(w.work, "one.txt"), "one\n")
+  await w.git(["add", ".yrd.yml", "one.txt"])
+  await w.git(["commit", "--quiet", "-m", "rewrite protected script"])
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", {
+    branch: "task/script-overlay",
+    submitter: "@dev/2",
+    target: { branch: "main", remote: "origin" },
+    issue: "@i/10-yrd/1",
+  })
+  const base = await w.options({ exit: 0 })
+  const outcome = await queueRun({
+    ...base,
+    notify: [],
+    checks: [{ ...base.checks[0]!, run: "grep -qx '{}' .yrd.yml", scripts: [".yrd.yml"] }],
+  })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/script-overlay"] })
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/script-overlay") })).events()
+  expect(events.find((event) => event.type === "merging")?.props).toContainEqual([
+    "Check",
+    expect.stringMatching(/^verify exit=0 .*result=pass attempt=1 phase=merge /u),
+  ])
+})
+
+/** @failure An event ending gave the notifier no message or repeatable receipt after the journal vanished.
+ * @level l3 @consumer queue operator and notified recipient
+ */
+it("delivers an event ending and settles its recipient on the branch chain", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/notified-event", "one.txt")
+
+  const outcome = await queueRun(await w.options({ exit: 0 }))
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/notified-event"] })
+  expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"merged"')
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/notified-event") })).events()
+  const merged = events.find((event) => event.type === "merged")
+  expect(merged).toBeDefined()
+  expect(events.find((event) => event.type === "notified")?.props).toEqual(
+    expect.arrayContaining([
+      ["For", merged?.id],
+      ["To", "recorder"],
+      ["Result", "delivered"],
+    ]),
+  )
+  expect(await readStatus(store, "main", "task/notified-event")).toMatchObject({
+    status: "merged",
+    notices: {
+      [`${merged?.id}:recorder`]: { for: merged?.id, to: "recorder", result: "delivered" },
+    },
+  })
+})
+
+/** @failure A queue-owned stuck event could not retain a notice although the notifier received it.
+ * @level l3 @consumer queue operator and notified recipient
+ */
+it("records a final notice for a stuck event while leaving the line stopped", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/stuck-notice", "one.txt")
+
+  const outcome = await queueRun(await w.options({ exit: 2 }))
+
+  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/stuck-notice"] })
+  expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"stuck"')
+  const change = await readStatus(store, "main", "task/stuck-notice")
+  expect(change.status).toBe("stuck")
+  expect(Object.values(change.notices ?? {})).toContainEqual(
+    expect.objectContaining({ to: "recorder", result: "delivered" }),
+  )
+})
+
+/** @failure A refused or exhausted notifier was retried forever because no final receipt settled its key.
+ * @level l3 @consumer queue operator and notified recipient
+ */
+it("settles refused and finally failed event recipients once", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/notice-final", "one.txt")
+  const base = await w.options({ exit: 0 })
+  const notify = [
+    { name: "refuser", on: ["merged" as const], run: "printf 'recipient refused\\n'; exit 4" },
+    { name: "unreachable", on: ["merged" as const], run: "echo 'temporary outage' >&2; exit 1" },
+  ]
+
+  const first = await queueRun({ ...base, checks: [], notify })
+
+  expect(first).toMatchObject({ exitCode: 0, merged: ["task/notice-final"] })
+  const receipts = Object.values((await readStatus(store, "main", "task/notice-final")).notices ?? {})
+  expect(receipts).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ to: "refuser", result: "refused", reason: "recipient refused" }),
+      expect.objectContaining({
+        to: "unreachable",
+        result: "failed",
+        reason: expect.stringContaining("temporary outage"),
+      }),
+    ]),
+  )
+  expect(logRecords(first).filter((row) => row.kind === "message" && row.to === "unreachable")).toHaveLength(2)
+  const second = await queueRun({ ...base, targetSha: await remoteTarget(w), checks: [], notify })
+  expect(logRecords(second).filter((row) => row.kind === "message")).toHaveLength(0)
+})
+
+/** @failure A crash between an event ending and its notice left the recipient silent forever.
+ * @level l3 @consumer notified recipient
+ */
+it("repairs an ending whose event notice was not yet recorded", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/notice-repair", "one.txt")
+  const opened = await readStatus(store, "main", "task/notice-repair")
+  if (opened.tip === undefined) throw new Error("submitted event has no tip")
+  const ending = await appendChangeEvent(store, "main", "task/notice-repair", opened.tip, {
+    type: "failed",
+    at: new Date(),
+    reason: "check failed before notice",
+  })
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [] })
+
+  expect(outcome.merged).toEqual([])
+  expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"failed"')
+  const change = await readStatus(store, "main", "task/notice-repair")
+  expect(change.notices?.[`${ending}:recorder`]).toMatchObject({ for: ending, result: "delivered" })
+  await queueRun({ ...(await w.options({ exit: 0 })), checks: [] })
+  expect(readFileSync(w.notifyLog, "utf8").split("\n").filter(Boolean)).toHaveLength(1)
+})
+
+/** @failure An event queue could accept teardown while no executor exists for it.
  * @level l2 @consumer queue operator and declaration author
  */
-it.each([
-  ["setup:", (w: World, base: QueueRunOptions) => ({ ...base, notify: [], setup: w.setupCommand(0) })],
-  ["teardown:", (_w: World, base: QueueRunOptions) => ({ ...base, notify: [], teardown: "true" })],
-  ["notify:", (_w: World, base: QueueRunOptions) => ({ ...base, checks: [] })],
-  [
-    "submit-phase",
-    (_w: World, base: QueueRunOptions) => ({
-      ...base,
-      notify: [],
-      checks: [{ ...base.checks[0]!, on: ["submit" as const] }],
-    }),
-  ],
-  [
-    "programRoot",
-    (_w: World, base: QueueRunOptions) => ({
-      ...base,
-      notify: [],
-      checks: [{ ...base.checks[0]!, programRoot: true as const }],
-    }),
-  ],
-  [
-    "scripts",
-    (_w: World, base: QueueRunOptions) => ({
-      ...base,
-      notify: [],
-      checks: [{ ...base.checks[0]!, scripts: ["checks/verify.sh"] }],
-    }),
-  ],
-  [
-    "deferred-capable",
-    (_w: World, base: QueueRunOptions) => ({
-      ...base,
-      notify: [],
-      checks: [{ ...base.checks[0]!, long: { timeoutMs: 60_000 } }],
-    }),
-  ],
-  ["long check tier", (_w: World, base: QueueRunOptions) => ({ ...base, notify: [], tier: "long" as const })],
-  [
-    "deferred-capable stop window",
-    (_w: World, base: QueueRunOptions) => ({ ...base, notify: [], stopAtMs: Date.now() + 60_000 }),
-  ],
-])("refuses event run feature %s until 25065", async (feature, configured) => {
+it("refuses event teardown until an executor exists", async () => {
   const w = await world()
   await createWorldEventQueue(w)
-  const options = configured(w, await w.options({ exit: 0 }))
-
-  await expect(queueRun(options)).rejects.toThrow(new RegExp(`${feature}.*#25040.*25065`))
+  await expect(queueRun({ ...(await w.options({ exit: 0 })), notify: [], teardown: "true" })).rejects.toThrow(
+    /teardown:.*25065/u,
+  )
 })
 
-it("refuses an undeclared deferred event result instead of leaving a successful outcome", async () => {
+it("retains a deferred check and leaves it for the long tier", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
@@ -583,11 +904,174 @@ it("refuses an undeclared deferred event result instead of leaving a successful 
     ],
   }
 
-  await expect(queueRun(deferred)).rejects.toThrow(/verify returned deferred .*#25040.*25065/u)
+  const outcome = await queueRun(deferred)
+  expect(outcome).toMatchObject({ exitCode: 0, deferred: ["task/deferred-event"], merged: [] })
   expect(await readStatus(store, "main", "task/deferred-event")).toMatchObject({
-    status: "checking",
-    reason: expect.stringMatching(/verify\.log/u),
+    status: "queued",
+    deferred: { check: "verify", phase: "merge", projectedMs: 3_600_000, boundMs: 1_800_000 },
   })
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/deferred-event") })).events()
+  const decision = events.find((event) => event.type === "deferred")
+  expect(decision?.props).toEqual(
+    expect.arrayContaining([
+      ["Base", w.target],
+      ["Config", "test-config"],
+      ["Check", expect.stringMatching(/^verify exit=3 ms=\d+ result=deferred attempt=1 phase=merge log=/u)],
+    ]),
+  )
+  const tip = (await readStatus(store, "main", "task/deferred-event")).tip
+  const normal = await queueRun(deferred)
+  expect(normal).toMatchObject({ exitCode: 0, merged: [], failed: [], stuck: [] })
+  expect((await readStatus(store, "main", "task/deferred-event")).tip).toBe(tip)
+})
+
+/** @failure A deferred change could be ignored by the long tier or lose the declared check phase.
+ * @level l3 @consumer queue operator and Gate E
+ */
+it("resumes a deferred event in the long tier with its declared phase retained", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/long-event", "one.txt")
+  const base = await w.options({ exit: 0 })
+  const checks = [
+    {
+      ...base.checks[0]!,
+      long: { timeoutMs: 60_000 },
+      run: 'if [ "$YRD_CHECK_TIER" = long ]; then exit 0; fi; echo \'YRD-CHECK-RESULT {"result":"deferred","reason":"outside normal window","projectedMs":60000,"boundMs":1000}\'; exit 3',
+    },
+  ]
+  const first = await queueRun({ ...base, notify: [], checks })
+  expect(first).toMatchObject({ exitCode: 0, deferred: ["task/long-event"] })
+
+  const resumed = await queueRun({ ...base, notify: [], checks, tier: "long" })
+
+  expect(resumed).toMatchObject({ exitCode: 0, merged: ["task/long-event"] })
+  expect((await readStatus(store, "main", "task/long-event")).deferred).toBeUndefined()
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/long-event") })).events()
+  expect(events.find((event) => event.type === "merging")?.props).toContainEqual([
+    "Check",
+    expect.stringMatching(/result=pass attempt=1 phase=merge tier=long/u),
+  ])
+})
+
+/** @failure A stop window that closed after selection still started a new event check.
+ * @level l3 @consumer queue service and submitter
+ */
+it("records a queued deferral when the stop window closes before a check", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/window-event", "one.txt")
+  const base = await w.options({ exit: 0 })
+  let tick = 0
+
+  const outcome = await queueRun({ ...base, notify: [], stopAtMs: 1, now: () => (tick++ === 0 ? 0 : 2) })
+
+  expect(outcome).toMatchObject({ exitCode: 0, deferred: ["task/window-event"], merged: [] })
+  expect((await readStatus(store, "main", "task/window-event")).deferred).toMatchObject({
+    check: "verify",
+    phase: "merge",
+    reason: expect.stringContaining("stop-time"),
+    boundMs: 0,
+  })
+  expect(existsSync(w.startedLog)).toBe(false)
+})
+
+/** @failure A temporary remote error stopped an event line without its one in-round retry.
+ * @level l3 @consumer queue operator
+ */
+it("retries one remote-class event check failure before merging", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/retry-event", "one.txt")
+  const marker = join(w.workdir, "remote-attempted")
+  const base = await w.options({ exit: 0 })
+  const run = `if [ ! -f '${marker}' ]; then : > '${marker}'; echo 'fatal: unable to access https://example.test/: The requested URL returned error: 502' >&2; exit 3; fi; exit 0`
+
+  const outcome = await queueRun({ ...base, notify: [], checks: [{ ...base.checks[0]!, run }] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/retry-event"] })
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ kind: "warning", reason: "retried", branch: "task/retry-event" }),
+    ]),
+  )
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/retry-event") })).events()
+  expect(events.find((event) => event.type === "merging")?.props).toContainEqual([
+    "Check",
+    expect.stringMatching(/result=pass attempt=2 phase=merge/u),
+  ])
+})
+
+/** @failure A second remote failure erased the first attempt and gave no durable retry evidence.
+ * @level l3 @consumer queue operator and Gate E
+ */
+it("stops after two remote-class event check failures with both attempts retained", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/retry-stuck-event", "one.txt")
+  const base = await w.options({ exit: 0 })
+  const run = "echo 'fatal: unable to access https://example.test/: The requested URL returned error: 502' >&2; exit 3"
+
+  const outcome = await queueRun({ ...base, notify: [], checks: [{ ...base.checks[0]!, run }] })
+
+  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/retry-stuck-event"] })
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/retry-stuck-event") })).events()
+  const stuck = events.find((event) => event.type === "stuck")
+  expect(stuck?.props).toContainEqual(["Retried", "1"])
+  expect(stuck?.props.filter(([key]) => key === "Check")).toEqual([
+    ["Check", expect.stringMatching(/result=stuck attempt=1 phase=merge/u)],
+    ["Check", expect.stringMatching(/result=stuck attempt=2 phase=merge/u)],
+  ])
+})
+
+/** @failure A local render failure after a successful own event append was misreported as a rival discard.
+ * @level l3 @consumer queue operator
+ */
+it("keeps a local post-append error loud after an event ending lands", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/own-append", "one.txt")
+  const options = await w.options({ exit: 1 })
+
+  await expect(
+    queueRun({
+      ...options,
+      notify: [],
+      render: (record) => {
+        if (record.kind === "change" && record.decision === "failed") throw new Error("local post-append witness")
+      },
+    }),
+  ).rejects.toThrow(/local post-append witness/u)
+  expect((await readStatus(store, "main", "task/own-append")).status).toBe("failed")
+})
+
+/** @failure A local failure after the merged event and its notice was mistaken for a rival tip move.
+ * @level l3 @consumer queue operator and notified recipient
+ */
+it("keeps a local post-notice error loud after the receipt lands", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/own-notice", "one.txt")
+  const options = await w.options({ exit: 0 })
+
+  await expect(
+    queueRun({
+      ...options,
+      checks: [],
+      render: (record) => {
+        if (record.kind === "merge") throw new Error("local post-notice witness")
+      },
+    }),
+  ).rejects.toThrow(/local post-notice witness/u)
+  const change = await readStatus(store, "main", "task/own-notice")
+  expect(change.status).toBe("merged")
+  expect(Object.values(change.notices ?? {})).toContainEqual(expect.objectContaining({ result: "delivered" }))
 })
 
 /** @failure A failed configured event check could stop the event line or lose its failed ending.

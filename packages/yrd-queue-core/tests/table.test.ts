@@ -533,6 +533,42 @@ describe("the table is the queue read rendered", () => {
 })
 
 describe("a packed Check: trailer", () => {
+  it("does not promote words in a log path into retained verdict evidence", () => {
+    expect(readCheckTrailer("unit exit=0 ms=42 log=/tmp/check result=pass attempt=1 phase=merge tier=long")).toEqual({
+      name: "unit",
+      exit: "0",
+      ms: 42,
+      log: "/tmp/check result=pass attempt=1 phase=merge tier=long",
+    })
+  })
+
+  it("retains an event check verdict, attempt and phase after its temporary log disappears", () => {
+    const packed = checkTrailer(
+      {
+        durationMs: 42,
+        exit: "timeout",
+        log: "/tmp/removed/check.log",
+        name: "affected-tests",
+        result: "stuck",
+      },
+      { attempt: 2, phase: "merge", tier: "long" },
+    )
+
+    expect(packed).toBe(
+      "affected-tests exit=timeout ms=42 result=stuck attempt=2 phase=merge tier=long log=/tmp/removed/check.log",
+    )
+    expect(readCheckTrailer(packed)).toEqual({
+      name: "affected-tests",
+      exit: "timeout",
+      ms: 42,
+      result: "stuck",
+      attempt: 2,
+      phase: "merge",
+      tier: "long",
+      log: "/tmp/removed/check.log",
+    })
+  })
+
   it("reads back every field the writer put in it, log path and all", () => {
     // The table renders a row off this trailer, so the pair is the contract:
     // whatever the run writes, the reader has to give back. It gave back two

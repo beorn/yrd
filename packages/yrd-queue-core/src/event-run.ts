@@ -1,31 +1,39 @@
 /** Run a change from the event projection, leasing its merge with the queue. */
-import { mkdirSync } from "node:fs"
+import { mkdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
+import { Conflict } from "gitomic"
 
 import {
   appendChangeEvent,
   appendPublishedMerge,
   changesRef,
   listChangeHistories,
+  readChangeEvents,
   queueResumedAfter,
   readEventQueue,
   readStatus,
+  type EventCheck,
   type EventChange,
 } from "./events.ts"
 import { eventRows } from "./event-table.ts"
 import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
 import { createEventStore, selectionFor, listRefs } from "./git.ts"
-import { checkLogPath, runCheck, type CheckResult } from "./check.ts"
+import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
 import { queueName } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
 import type { QueueRunLog } from "./log.ts"
-import { recordProgramResult, recordProgramStart } from "./program-root.ts"
+import { programRootCheck, recordProgramResult, recordProgramStart } from "./program-root.ts"
 import { queueRefPrefix } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { publishCheckedChildren } from "./publication.ts"
-import { prepareWorktree } from "./worktree.ts"
-import type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
+import { prepareWorktree, SETUP, SetupFailed } from "./worktree.ts"
+import { restoreScripts, type QueueRunOptions, type QueueRunOutcome } from "./run.ts"
+import { dispatchNotifications, messageFor } from "./with-notify.ts"
+import { changeName } from "./refs.ts"
+import { transportFaultIn } from "./setup-transport.ts"
+import { readRootChanges } from "./legacy-records.ts"
+import { settledBaseCommit } from "./settled-base.ts"
 
 function discardedJudgementReason(current: EventChange, error: unknown): string {
   const failed = error instanceof Error ? error.message : String(error)
@@ -53,6 +61,39 @@ export async function eventQueueRun(
   )
   const queue = options.target.branch
   const { git, gitOptions, hooksPath, log, selected, url } = prepared
+  const owned = new Set<string>()
+  const appendOwnedChange = async (...args: Parameters<typeof appendChangeEvent>): Promise<string> => {
+    const oid = await appendChangeEvent(...args)
+    owned.add(oid)
+    return oid
+  }
+  const appendOwnedMerge = async (...args: Parameters<typeof appendPublishedMerge>): Promise<string> => {
+    const oid = await appendPublishedMerge(...args)
+    owned.add(oid)
+    return oid
+  }
+  const rivalOrThrow = async (
+    branch: string,
+    selectedTip: string,
+    current: EventChange,
+    error: unknown,
+  ): Promise<void> => {
+    if (current.tip === selectedTip) throw error
+    if (current.tip === undefined) {
+      throw new Error(`event queue ${url}#${queue}: publication-unknown for ${branch}: current chain has no tip`, {
+        cause: error,
+      })
+    }
+    const history = await readChangeEvents(store, queue, branch, current.tip)
+    const at = history.findIndex((event) => event.id === selectedTip)
+    const successor = at < 0 ? undefined : history[at + 1]?.id
+    if (successor !== undefined && owned.has(successor)) throw error
+    if (successor !== undefined && error instanceof Conflict) return
+    throw new Error(
+      `event queue ${url}#${queue}: publication-unknown for ${branch} after ${selectedTip}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
+  }
 
   log.write({ kind: "queue", queue: queueName(options.target, url) })
   const prefix = queueRefPrefix(queue)
@@ -102,6 +143,103 @@ export async function eventQueueRun(
     checkedWaiting: 0,
     ...(stopped === undefined ? {} : { stopped }),
   })
+  const tell = async (
+    branch: string,
+    kind: "merged" | "failed" | "stuck" | "deferred",
+    eventId: string,
+  ): Promise<void> => {
+    if ((options.notify?.length ?? 0) === 0) return
+    const change = await readStatus(store, queue, branch)
+    if (change.commit === undefined) {
+      throw new Error(`event queue ${url}#${queue}: ${branch} notice has no submitted commit`)
+    }
+    if (change.lastNotifiable?.id !== eventId || change.lastNotifiable.kind !== kind) {
+      throw new Error(`event queue ${url}#${queue}: ${branch} notice lost its ${kind} event ${eventId}`)
+    }
+    const head = change.commit
+    const text = messageFor(kind, {
+      branch,
+      head,
+      subject: change.reason ?? kind,
+      ...(kind === "merged" ? { merge: change.candidate ?? "" } : {}),
+      ...(kind === "deferred" ? { projectedMs: change.deferred?.projectedMs, boundMs: change.deferred?.boundMs } : {}),
+    })
+    let tip = change.tip
+    if (tip === undefined) throw new Error(`event queue ${url}#${queue}: ${branch} notice has no chain tip`)
+    for (const entry of options.notify ?? []) {
+      if (!entry.on.includes(kind)) continue
+      const key = `${eventId}:${entry.name}`
+      if (change.notices?.[key] !== undefined) continue
+      let final: { result: "delivered" | "refused" | "failed"; reason?: string } | undefined
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const delivered = (
+          await dispatchNotifications(
+            {
+              git,
+              repo: options.repo,
+              targetSha: target,
+              workdir: options.workdir,
+              notify: [entry],
+              setup: options.setup,
+              env: options.env,
+              populateReference: options.populateReference,
+              process: options.process,
+            },
+            kind,
+            {
+              record: kind,
+              change: changeName({ branch, head }),
+              ...(change.issue === undefined ? {} : { issue: change.issue }),
+              ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
+              ...(kind === "merged"
+                ? { merge: change.candidate ?? "" }
+                : { reason: change.reason ?? kind, log: log.path }),
+              ...(kind === "deferred"
+                ? { projectedMs: change.deferred?.projectedMs, boundMs: change.deferred?.boundMs }
+                : {}),
+            },
+          )
+        )[0]
+        if (delivered === undefined || delivered.delivery === "none") {
+          throw new Error(`event queue ${url}#${queue}: ${branch} expected notify recipient ${entry.name}, got none`)
+        }
+        log.write({
+          kind: "message",
+          about: branch,
+          branch,
+          head,
+          id: eventId,
+          says: kind,
+          text,
+          to: entry.name,
+          delivered: delivered.delivery === "sent",
+          ...(delivered.failure === undefined ? {} : { error: delivered.failure }),
+          ...(delivered.refused === undefined ? {} : { refused: delivered.refused }),
+        })
+        if (delivered.delivery === "sent") final = { result: "delivered" }
+        else if (delivered.refused !== undefined) final = { result: "refused", reason: delivered.refused }
+        else if (attempt === 2) {
+          final = { result: "failed", reason: delivered.failure ?? `notify ${entry.name} gave no delivery receipt` }
+        }
+        if (final !== undefined) break
+      }
+      if (final === undefined) {
+        throw new Error(`event queue ${url}#${queue}: ${branch} notice ${entry.name} gave no final result`)
+      }
+      tip = await appendOwnedChange(store, queue, branch, tip, {
+        type: "notified",
+        at: new Date(),
+        ...(final.reason === undefined ? {} : { reason: final.reason }),
+        notice: {
+          for: eventId,
+          to: entry.name,
+          key,
+          result: final.result,
+          ...(final.reason === undefined ? {} : { reason: final.reason }),
+        },
+      })
+    }
+  }
   if (observation.contract === "root-v1" && observation.outcome !== "observed") {
     return result(observation.outcome === "invalid" ? 2 : 0)
   }
@@ -109,6 +247,13 @@ export async function eventQueueRun(
   const queueState = await readEventQueue(store, queue)
   const histories = await listChangeHistories(store, queue)
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
+  for (const [branch, change] of changes) {
+    const latest = change.lastNotifiable
+    if (latest !== undefined && latest.kind !== "cancelled") {
+      await tell(branch, latest.kind, latest.id)
+      changes.set(branch, await readStatus(store, queue, branch))
+    }
+  }
   const direct = await eventDirectMergeCommits(git, queue, target, queueState.declaration, histories)
   directMerges = direct.map((commit) => commit.commit)
   for (const commit of direct) {
@@ -152,7 +297,7 @@ export async function eventQueueRun(
     const merge = row?.[0] ?? change.commit
     const selectedTip = change.tip
     try {
-      const written = await appendChangeEvent(store, queue, branch, selectedTip, {
+      const written = await appendOwnedChange(store, queue, branch, selectedTip, {
         type: "merged",
         at: new Date(),
         commit: merge,
@@ -167,6 +312,7 @@ export async function eventQueueRun(
       }
       changes.set(branch, ended)
       observedMerged.push(branch)
+      await tell(branch, "merged", written)
       log.write({
         kind: "change",
         branch,
@@ -184,7 +330,7 @@ export async function eventQueueRun(
           `event queue ${url}#${queue}: ${branch} observed-merge decision failed and its current chain could not be read`,
         )
       }
-      if (current.tip === selectedTip) throw error
+      await rivalOrThrow(branch, selectedTip, current, error)
       changes.set(branch, current)
       log.write({
         kind: "discarded",
@@ -202,6 +348,7 @@ export async function eventQueueRun(
     if (options.only !== undefined && (options.only.branch !== branch || options.only.head !== row.head)) continue
     const change = changes.get(branch)
     if (change === undefined) throw new Error(`event queue ${url}#${queue}: missing projected change ${branch}`)
+    if (options.tier === "long" ? change.deferred === undefined : change.deferred !== undefined) continue
     if (change.since === undefined || change.commit === undefined || change.tip === undefined) {
       throw new Error(`event queue ${url}#${queue}: open change ${branch} lacks its opening time, commit or tip`)
     }
@@ -218,7 +365,7 @@ export async function eventQueueRun(
     const { branch, commit: head } = selected
     let tip = selected.tip
     try {
-      tip = await appendChangeEvent(store, queue, branch, tip, {
+      tip = await appendOwnedChange(store, queue, branch, tip, {
         type: "cancelled",
         at: new Date(),
         commit: head,
@@ -242,7 +389,7 @@ export async function eventQueueRun(
           `event queue ${url}#${queue}: ${branch} deletion decision failed and its current chain could not be read`,
         )
       }
-      if (current.tip === tip) throw error
+      await rivalOrThrow(branch, tip, current, error)
       log.write({
         kind: "discarded",
         branch,
@@ -320,7 +467,7 @@ export async function eventQueueRun(
       })
     } catch (error) {
       const after = await readStatus(store, queue, branch)
-      if (after.tip === marker) throw error
+      await rivalOrThrow(branch, marker, after, error)
       log.write({ kind: "discarded", branch, head, reason: discardedJudgementReason(after, error) })
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
     }
@@ -329,21 +476,28 @@ export async function eventQueueRun(
         `${branch}: frozen component publication for ${candidate} refused: ${child.evidence}; ` +
         "repair the named component remote/ref, then resume the queue"
       const oneLine = description.replace(/\s+/gu, " ").trim()
-      await appendChangeEvent(store, queue, branch, marker, { type: "stuck", at: new Date(), reason: oneLine })
+      const ended = await appendOwnedChange(store, queue, branch, marker, {
+        type: "stuck",
+        at: new Date(),
+        reason: oneLine,
+      })
+      await tell(branch, "stuck", ended)
       log.write({ kind: "change", branch, head, decision: "stuck", reason: oneLine, saw: child.evidence })
       return result(2, observedMerged, failed, [branch])
     }
     try {
-      await appendPublishedMerge(store, queue, branch, marker, {
+      const ended = await appendOwnedMerge(store, queue, branch, marker, {
         at: new Date(),
         commit: candidate,
         targetExpect: parent,
         queueTip: queueState.tip,
         ...(reason === undefined ? {} : { reason }),
       })
+      await tell(branch, "merged", ended)
     } catch (error) {
       const after = await readStatus(store, queue, branch)
       if (after.tip !== marker) {
+        await rivalOrThrow(branch, marker, after, error)
         log.write({ kind: "discarded", branch, head, reason: discardedJudgementReason(after, error) })
         return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
       }
@@ -352,7 +506,7 @@ export async function eventQueueRun(
         throw new Error(`event queue ${url}#${queue}: target disappeared after component publication`, { cause: error })
       }
       if (movedTarget === parent) throw error
-      await appendChangeEvent(store, queue, branch, marker, {
+      await appendOwnedChange(store, queue, branch, marker, {
         type: "verifying",
         at: new Date(),
         commit: candidate,
@@ -413,73 +567,318 @@ export async function eventQueueRun(
     try {
       if (verified.state === "failed") {
         await verified.failedWorktree.remove()
-        await appendChangeEvent(store, queue, branch, tip, {
+        const ended = await appendOwnedChange(store, queue, branch, tip, {
           type: "failed",
           at: new Date(),
           reason: verified.verifying.detail.message,
         })
+        await tell(branch, "failed", ended)
         log.write({ kind: "change", branch, head, decision: "failed" })
         failed.push(branch)
         continue
       }
       const candidate = verified.verifying.candidate
-      tip = await appendChangeEvent(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })
-      const checks =
-        options.noCheck === true ? [] : options.checks.filter((check) => (check.on ?? ["merge"]).includes("merge"))
-      const logDir = join(options.workdir, "checks", `${branch}@${head}`, log.id, "attempt-1", "merge")
-      const checkLogs = checks.map((check) => checkLogPath(logDir, check.name))
-      tip = await appendChangeEvent(store, queue, branch, tip, {
+      const raises = (await readRootChanges(git, candidate))?.changes ?? []
+      tip = await appendOwnedChange(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })
+      const checkLogs = (["submit", "merge"] as const).flatMap((phase) =>
+        (options.noCheck === true ? [] : options.checks.filter((check) => (check.on ?? ["merge"]).includes(phase))).map(
+          (check) =>
+            checkLogPath(join(options.workdir, "checks", `${branch}@${head}`, log.id, "attempt-1", phase), check.name),
+        ),
+      )
+      tip = await appendOwnedChange(store, queue, branch, tip, {
         type: "checking",
         at: new Date(),
-        ...(checkLogs.length === 0 ? {} : { reason: `merge check logs: ${checkLogs.join(", ")}` }),
+        ...(checkLogs.length === 0 ? {} : { reason: `check logs: ${checkLogs.join(", ")}` }),
       })
-      const results: CheckResult[] = []
-      if (checks.length > 0) {
-        const worktree = await prepareWorktree(
-          git,
-          options.repo,
-          candidate,
-          join(options.workdir, "worktrees", log.id, `${branch.replaceAll("/", "_")}-checking`),
-          {
-            targetSha: target,
-            populateReference: options.populateReference,
-            selection: options.selection,
-            gitOptions,
-            process: options.process,
-            env: options.env,
-          },
-        )
-        try {
+      const results: EventCheck[] = []
+      let attemptedRetry = false
+      let decisionResults: EventCheck[] = []
+      let setupDecision:
+        | { kind: "failed" | "stuck"; reason: string; fault?: ReturnType<typeof transportFaultIn> }
+        | undefined
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const startOfAttempt = results.length
+        for (const phase of ["submit", "merge"] as const) {
+          const checks =
+            options.noCheck === true ? [] : options.checks.filter((check) => (check.on ?? ["merge"]).includes(phase))
+          if (checks.length === 0 && options.setup === undefined) continue
+          const logDir = join(
+            options.workdir,
+            "checks",
+            `${branch}@${head}`,
+            log.id,
+            `attempt-${String(attempt)}`,
+            phase,
+          )
           const tmpdir = join(options.workdir, "tmp")
-          for (const check of checks) {
-            const start = new Date().toISOString()
-            const about = { branch, head, name: check.name, phase: "merge", start }
-            recordProgramStart({ log }, { ...about, log: checkLogPath(logDir, check.name) })
-            const checked = await runCheck({
-              cwd: worktree.path,
-              tree: worktree.tree,
-              logDir,
-              tmpdir,
-              spec: check,
-              process: options.process,
-              env: options.env,
-              tier: options.tier,
+          const setupAbout = { branch, head, name: SETUP, phase }
+          let worktree
+          try {
+            worktree = await prepareWorktree(
+              git,
+              options.repo,
+              candidate,
+              join(options.workdir, "worktrees", log.id, `${branch.replaceAll("/", "_")}-${phase}-${String(attempt)}`),
+              {
+                targetSha: target,
+                populateReference: options.populateReference,
+                selection: options.selection,
+                gitOptions,
+                process: options.process,
+                env: options.env,
+                ...(options.setup === undefined ? {} : { setup: { run: options.setup, logDir, tmpdir } }),
+                starting: ({ log: path, start }) => recordProgramStart({ log }, { ...setupAbout, start, log: path }),
+                record: ({ result: setupResult, start, end }) =>
+                  recordProgramResult({ log }, { ...setupAbout, start, end }, setupResult),
+              },
+            )
+          } catch (error) {
+            if (!(error instanceof SetupFailed)) throw error
+            if (options.setup === undefined) {
+              throw new Error(`event queue ${url}#${queue}: ${branch} setup failed without a setup declaration`, {
+                cause: error,
+              })
+            }
+            let ground: "passed" | "failed" = "failed"
+            let baseFailure: SetupFailed | undefined
+            try {
+              const baseCommit = await settledBaseCommit({
+                git,
+                repo: options.repo,
+                targetSha: target,
+                raises,
+                path: join(
+                  options.workdir,
+                  "worktrees",
+                  log.id,
+                  "compose",
+                  "base",
+                  `${branch.replaceAll("/", "_")}-${String(attempt)}`,
+                ),
+                branch,
+                env: options.env,
+                gitOptions,
+                populateReference: options.populateReference,
+                process: options.process,
+                selection: options.selection,
+              })
+              const baseTree = await prepareWorktree(
+                git,
+                options.repo,
+                baseCommit,
+                join(options.workdir, "worktrees", log.id, `${branch.replaceAll("/", "_")}-base-${String(attempt)}`),
+                {
+                  targetSha: target,
+                  populateReference: options.populateReference,
+                  selection: options.selection,
+                  gitOptions,
+                  process: options.process,
+                  env: options.env,
+                  setup: {
+                    run: options.setup,
+                    logDir: join(
+                      options.workdir,
+                      "checks",
+                      `${branch}@${head}`,
+                      log.id,
+                      `attempt-${String(attempt)}`,
+                      "base",
+                    ),
+                    tmpdir,
+                  },
+                },
+              )
+              await baseTree.remove()
+              ground = "passed"
+            } catch (baseError) {
+              if (!(baseError instanceof SetupFailed)) {
+                throw new AggregateError(
+                  [error, baseError],
+                  `event queue ${url}#${queue}: ${branch} setup failed and its base could not be judged`,
+                )
+              }
+              baseFailure = baseError
+            }
+            results.push({
+              run: error.ran.result,
+              attempt,
+              phase,
+              ...(options.tier === "long" ? { tier: "long" as const } : {}),
             })
-            recordProgramResult({ log }, { ...about, end: new Date().toISOString() }, checked)
-            results.push(checked)
-            if (checked.result !== "pass") break
+            let fault: ReturnType<typeof transportFaultIn>
+            let logProblem: string | undefined
+            if (ground === "failed") {
+              try {
+                fault = transportFaultIn(
+                  [
+                    readFileSync(error.ran.result.log, "utf8"),
+                    baseFailure === undefined ? "" : readFileSync(baseFailure.ran.result.log, "utf8"),
+                  ].join("\n"),
+                )
+              } catch (readError) {
+                logProblem = `setup log unavailable for transport attribution: ${readError instanceof Error ? readError.message : String(readError)}`
+              }
+            }
+            setupDecision = {
+              kind: ground === "passed" ? "failed" : "stuck",
+              reason: `setup ${error.ran.result.result} on candidate; settled base setup ${ground}; ${error.message.replace(/\s+/gu, " ")}${logProblem === undefined ? "" : `; ${logProblem}`}`,
+              ...(fault === undefined ? {} : { fault }),
+            }
+            break
           }
-        } finally {
-          await worktree.remove()
+          try {
+            for (const check of checks) {
+              const evidencePhase = phase
+              if (options.stopAtMs !== undefined && (options.now?.() ?? Date.now()) >= options.stopAtMs) {
+                results.push({
+                  run: {
+                    name: check.name,
+                    result: "deferred",
+                    exit: 0,
+                    durationMs: 0,
+                    log: "",
+                    why: "stop-time",
+                    projectedMs:
+                      (options.tier === "long" ? check.long?.timeoutMs : undefined) ??
+                      check.timeoutMs ??
+                      DEFAULT_CHECK_BOUND_MS,
+                    boundMs: 0,
+                  },
+                  attempt,
+                  phase: evidencePhase,
+                  ...(options.tier === "long" ? { tier: "long" as const } : {}),
+                })
+                break
+              }
+              let checked: CheckResult
+              if (check.programRoot === true) {
+                checked = await programRootCheck({
+                  git,
+                  repo: options.repo,
+                  targetSha: target,
+                  tree: worktree.tree,
+                  spec: check,
+                  branch,
+                  head,
+                  phase: evidencePhase,
+                  root: join(options.workdir, "worktrees", log.id, "program", phase, String(attempt), check.name),
+                  logDir,
+                  tmpdir,
+                  log,
+                  setup: options.setup,
+                  env: options.env,
+                  process: options.process,
+                  selection: options.selection,
+                  gitOptions,
+                  populateReference: options.populateReference,
+                  tier: options.tier,
+                })
+              } else {
+                await restoreScripts(
+                  { git, targetSha: target, process: options.process, selection: options.selection, gitOptions },
+                  check,
+                  worktree.path,
+                )
+                const start = new Date().toISOString()
+                const about = { branch, head, name: check.name, phase: evidencePhase, start }
+                recordProgramStart({ log }, { ...about, log: checkLogPath(logDir, check.name) })
+                checked = await runCheck({
+                  cwd: worktree.path,
+                  tree: worktree.tree,
+                  logDir,
+                  tmpdir,
+                  spec: check,
+                  process: options.process,
+                  env: options.env,
+                  tier: options.tier,
+                })
+                recordProgramResult({ log }, { ...about, end: new Date().toISOString() }, checked)
+              }
+              results.push({
+                run: checked,
+                attempt,
+                phase: evidencePhase,
+                ...(options.tier === "long" ? { tier: "long" as const } : {}),
+              })
+              if (checked.result !== "pass") break
+            }
+          } finally {
+            await worktree.remove()
+          }
+          if (setupDecision !== undefined || results.slice(startOfAttempt).some(({ run }) => run.result !== "pass")) {
+            break
+          }
         }
+        decisionResults = results.slice(startOfAttempt)
+        if (setupDecision !== undefined) {
+          if (attempt === 1 && setupDecision.kind === "stuck" && setupDecision.fault !== undefined) {
+            attemptedRetry = true
+            log.write({
+              kind: "warning",
+              branch,
+              head,
+              reason: "retried",
+              remote: setupDecision.fault.signature,
+              subject: setupDecision.fault.line,
+            })
+            setupDecision = undefined
+            continue
+          }
+          break
+        }
+        const stoppedThisAttempt = decisionResults.find(({ run }) => run.result !== "pass")
+        if (attempt === 1 && stoppedThisAttempt?.run.result === "stuck") {
+          const check = stoppedThisAttempt.run
+          const fault = transportFaultIn(`${readFileSync(check.log, "utf8")}\n${check.why ?? ""}`)
+          if (fault !== undefined) {
+            attemptedRetry = true
+            log.write({
+              kind: "warning",
+              branch,
+              head,
+              reason: "retried",
+              remote: fault.signature,
+              subject: fault.line,
+            })
+            continue
+          }
+        }
+        break
       }
-      const stoppedCheck = results.find((check) => check.result !== "pass")
+      const stopped = decisionResults.find(({ run }) => run.result !== "pass")
+      const stoppedCheck = stopped?.run
+      if (setupDecision !== undefined) {
+        const ended = await appendOwnedChange(store, queue, branch, tip, {
+          type: setupDecision.kind,
+          at: new Date(),
+          commit: candidate,
+          base: target,
+          config: options.configBlob,
+          checks: attemptedRetry && setupDecision.kind === "stuck" ? results : decisionResults,
+          reason: setupDecision.reason,
+          ...(attemptedRetry && setupDecision.kind === "stuck" ? { retry: { retried: 1 as const } } : {}),
+        })
+        await tell(branch, setupDecision.kind, ended)
+        log.write({ kind: "change", branch, head, decision: setupDecision.kind, reason: setupDecision.reason })
+        if (setupDecision.kind === "stuck") return result(2, observedMerged, failed, [branch])
+        failed.push(branch)
+        continue
+      }
+      const evidence: { checks: EventCheck[]; base: string; config: string; commit: string } = {
+        checks: attemptedRetry && stoppedCheck?.result === "stuck" ? results : decisionResults,
+        base: target,
+        config: options.configBlob,
+        commit: candidate,
+      }
       if (stoppedCheck?.result === "fail") {
-        await appendChangeEvent(store, queue, branch, tip, {
+        const ended = await appendOwnedChange(store, queue, branch, tip, {
           type: "failed",
           at: new Date(),
+          ...evidence,
           reason: `${stoppedCheck.name} failed (exit ${String(stoppedCheck.exit)}; log ${stoppedCheck.log})`,
         })
+        await tell(branch, "failed", ended)
         log.write({
           kind: "change",
           branch,
@@ -491,24 +890,41 @@ export async function eventQueueRun(
         continue
       }
       if (stoppedCheck?.result === "stuck") {
-        await appendChangeEvent(store, queue, branch, tip, {
+        const ended = await appendOwnedChange(store, queue, branch, tip, {
           type: "stuck",
           at: new Date(),
+          ...evidence,
+          ...(attemptedRetry ? { retry: { retried: 1 as const } } : {}),
           reason: `${stoppedCheck.name} could not judge (${stoppedCheck.why ?? `exit ${String(stoppedCheck.exit)}`}; log ${stoppedCheck.log})`,
         })
+        await tell(branch, "stuck", ended)
         log.write({ kind: "change", branch, head, decision: "stuck", reason: stoppedCheck.name })
         return result(2, observedMerged, failed, [branch])
       }
       if (stoppedCheck?.result === "deferred") {
-        throw new Error(
-          `event queue ${url}#${queue}: check ${stoppedCheck.name} returned deferred (log ${stoppedCheck.log}); #25040 has no deferred event status and @i/10-yrd/25065-event-queues-run-every-check-kind-beyond-plain-merge-checks owns that representation before #25041`,
-        )
+        const reason = `${stoppedCheck.name} deferred (${stoppedCheck.why ?? "outside normal window"}; log ${stoppedCheck.log})`
+        const ended = await appendOwnedChange(store, queue, branch, tip, {
+          type: "deferred",
+          at: new Date(),
+          ...evidence,
+          reason,
+          deferred: {
+            check: stoppedCheck.name,
+            phase: stopped?.phase ?? "merge",
+            reason,
+            projectedMs: stoppedCheck.projectedMs ?? 0,
+            boundMs: stoppedCheck.boundMs ?? 0,
+          },
+        })
+        await tell(branch, "deferred", ended)
+        log.write({ kind: "change", branch, head, decision: "deferred", reason })
+        return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch])
       }
       const checkReason = checkLogs.length === 0 ? undefined : `merge checks passed; logs: ${checkLogs.join(", ")}`
-      tip = await appendChangeEvent(store, queue, branch, tip, {
+      tip = await appendOwnedChange(store, queue, branch, tip, {
         type: "merging",
         at: new Date(),
-        commit: candidate,
+        ...evidence,
         ...(checkReason === undefined ? {} : { reason: checkReason }),
       })
       return await publish(branch, head, candidate, tip, checkReason)
@@ -522,7 +938,7 @@ export async function eventQueueRun(
           `event queue ${url}#${queue}: ${branch} decision failed and its current chain could not be read`,
         )
       }
-      if (current.tip === tip) throw error
+      await rivalOrThrow(branch, tip, current, error)
       changes.set(branch, current)
       log.write({
         kind: "discarded",
