@@ -34,6 +34,7 @@ import type { QueueEntry } from "../src/remote.ts"
 // `openLog` is the writer, and index.ts lists only what a consumer outside the
 // package imports. A test that writes a journal is inside it.
 import { openLog } from "../src/log.ts"
+import { journalRun } from "../../../tests/support/journal-run.ts"
 
 const roots: string[] = []
 
@@ -117,6 +118,158 @@ describe("a run's journal, read back", () => {
       "unmeasured",
       "running",
     ])
+  })
+
+  it("reads each step of the round with the git commands it ran, in journal order (25441)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const change = { branch: "task/one", head: "abc123" }
+    const git = (n: number, args: readonly string[], exit = 0) => ({
+      args,
+      cwd: "/w",
+      evidence: `/w/logs/run/git/${String(n)}.stdout.bin.json`,
+      exit,
+      kind: "git",
+    })
+    const { dir } = journalDir(
+      [
+        { base: "aaa", checks: ["test"], kind: "run", queue: "q", target: "main" },
+        // Before any step: the round's own command, shown only on the round tab.
+        git(1, ["fetch", "origin"]),
+        { kind: "step", name: "read", phase: "run", start: "2026-09-03T19:50:00.000Z", target: "main", base: "aaa" },
+        git(2, ["for-each-ref", "refs/yrd"]),
+        {
+          base: "aaa",
+          end: "2026-09-03T19:50:02.000Z",
+          kind: "step",
+          ms: 2_000,
+          name: "read",
+          phase: "run",
+          start: "2026-09-03T19:50:00.000Z",
+          target: "main",
+        },
+        { ...change, kind: "step", name: "compose", phase: "merge", start: "2026-09-03T19:51:00.000Z" },
+        git(3, ["merge", "--no-edit", "task/one"], 1),
+        {
+          ...change,
+          end: "2026-09-03T19:51:05.000Z",
+          kind: "step",
+          ms: 5_000,
+          name: "compose",
+          phase: "merge",
+          start: "2026-09-03T19:51:00.000Z",
+          threw: true,
+        },
+        { ...change, kind: "step", ms: 1_200, name: "settle", phase: "merge", within: "compose" },
+        { ...change, kind: "change", decision: "failed", reason: "compose" },
+      ],
+      at,
+    )
+
+    const run = readJournals(dir, { now: at }).runs.get(journalKey("task/one", "abc123"))?.[0]
+    expect(
+      run?.steps?.map((step) => ({
+        name: step.name,
+        ms: step.ms,
+        threw: step.threw,
+        commands: step.commands.map((command) => `${command.args.join(" ")} → ${String(command.exit)}`),
+        parts: step.parts,
+      })),
+    ).toEqual([
+      { name: "read", ms: 2_000, threw: undefined, commands: ["for-each-ref refs/yrd → 0"], parts: undefined },
+      {
+        name: "compose",
+        ms: 5_000,
+        threw: true,
+        commands: ["merge --no-edit task/one → 1"],
+        parts: [{ name: "settle", ms: 1_200 }],
+      },
+    ])
+    expect(run?.commands?.map((command) => command.args.join(" "))).toEqual(["fetch origin"])
+    // Output stays on disk: the command carries its raw files' paths, never their bytes.
+    expect(run?.steps?.[1]?.commands[0]).toMatchObject({
+      stdout: "/w/logs/run/git/3.stdout.bin",
+      stderr: "/w/logs/run/git/3.stderr.bin",
+    })
+  })
+
+  it("reads nested steps as the live journal writes them: a command belongs to the innermost step open (25441)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const change = { branch: "task/one", head: "abc123" }
+    const git = (n: number, args: readonly string[]) => ({
+      args,
+      cwd: "/w",
+      evidence: `/w/logs/run/git/${String(n)}.stdout.bin.json`,
+      exit: 0,
+      kind: "git",
+    })
+    const step = (name: string, start: string, end?: string) => ({
+      ...change,
+      kind: "step",
+      name,
+      phase: "merge",
+      start,
+      ...(end === undefined ? {} : { end, ms: new Date(end).getTime() - new Date(start).getTime() }),
+    })
+    const { dir } = journalDir(
+      [
+        step("compose", "2026-09-03T19:51:00.000Z"),
+        step("worktree", "2026-09-03T19:51:01.000Z"),
+        git(1, ["worktree", "add"]),
+        step("worktree", "2026-09-03T19:51:01.000Z", "2026-09-03T19:51:02.000Z"),
+        git(2, ["merge", "task/one"]),
+        step("compose", "2026-09-03T19:51:00.000Z", "2026-09-03T19:51:21.000Z"),
+      ],
+      at,
+    )
+
+    const steps = readJournals(dir, { now: at }).runs.get(journalKey("task/one", "abc123"))?.[0]?.steps
+    expect(
+      steps?.map((entry) => [entry.name, entry.ms, entry.unended, entry.commands.map((command) => command.args[0])]),
+    ).toEqual([
+      ["compose", 21_000, undefined, ["merge"]],
+      ["worktree", 1_000, undefined, ["worktree"]],
+    ])
+  })
+
+  it("marks a step a killed call left open inside its parent unended, and keeps a step the journal was cut after open (25441)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const change = { branch: "task/one", head: "abc123" }
+    const { dir } = journalDir(
+      [
+        { ...change, kind: "step", name: "compose", phase: "merge", start: "2026-09-03T19:51:00.000Z" },
+        { ...change, kind: "step", name: "worktree", phase: "merge", start: "2026-09-03T19:51:01.000Z" },
+        {
+          ...change,
+          end: "2026-09-03T19:51:09.000Z",
+          kind: "step",
+          ms: 9_000,
+          name: "compose",
+          phase: "merge",
+          start: "2026-09-03T19:51:00.000Z",
+          threw: true,
+        },
+        { ...change, kind: "step", name: "merge", phase: "merge", start: "2026-09-03T19:52:00.000Z" },
+        {
+          args: ["push", "origin"],
+          cwd: "/w",
+          evidence: "/w/logs/run/git/1.failed.json",
+          failure: "spawn",
+          kind: "git",
+        },
+      ],
+      at,
+    )
+
+    const steps = readJournals(dir, { now: at }).runs.get(journalKey("task/one", "abc123"))?.[0]?.steps
+    expect(
+      steps?.map((step) => ({ name: step.name, unended: step.unended, ended: step.endedAt !== undefined })),
+    ).toEqual([
+      { name: "compose", unended: undefined, ended: true },
+      { name: "worktree", unended: true, ended: false },
+      { name: "merge", unended: undefined, ended: false },
+    ])
+    // A command that failed before it could write output names no files, and says why.
+    expect(steps?.[2]?.commands).toEqual([{ args: ["push", "origin"], cwd: "/w", failure: "spawn" }])
   })
 
   it("rereads a journal when the file's mtime or size changes", () => {
@@ -740,7 +893,7 @@ describe("the table's one order (24196)", () => {
         [
           journalKey(held.change.branch, held.change.head),
           [
-            {
+            journalRun({
               at: ago(4),
               branch: held.change.branch,
               checks: [check],
@@ -748,7 +901,7 @@ describe("the table's one order (24196)", () => {
               id: run,
               running: check,
               startedAt: ago(5),
-            },
+            }),
           ],
         ],
       ]),
@@ -827,7 +980,7 @@ describe("the declared checks, joined to what ran", () => {
         runs: new Map([
           [
             journalKey(current.branch, current.head),
-            [{ ...current, id: "q", startedAt, at: startedAt, checks: measured, decision: "failed" }],
+            [journalRun({ ...current, id: "q", startedAt, at: startedAt, checks: measured, decision: "failed" })],
           ],
         ]),
       },

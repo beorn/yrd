@@ -27,13 +27,14 @@ import {
   unclassifiedRows,
   type RunDecision,
 } from "../src/watch-stats.ts"
+import { journalRun as journalRunOf } from "../../../tests/support/journal-run.ts"
 
 // A local instant: 14:30 on a Thursday, so yesterday and a midnight both fall inside 24 hours.
 const NOW = new Date(2026, 8, 3, 14, 30, 0)
 
 /** The journal's run a row was split by: its id and what it decided are what the reader takes. */
 function journalRun(id: string, decided?: Pick<JournalRun, "decision" | "reason" | "merge">): JournalRun {
-  return { at: NOW, branch: "task/x", checks: [], head: "x".repeat(40), id, startedAt: NOW, ...decided }
+  return journalRunOf({ at: NOW, branch: "task/x", head: "x".repeat(40), id, startedAt: NOW, ...decided })
 }
 
 function decision(
