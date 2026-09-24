@@ -2714,6 +2714,10 @@ export function summarize(kind: string, rest: Readonly<Record<string, unknown>>)
       }
     case "merge":
       return `${where} merged as ${String(rest.commit).slice(0, 12)}`
+    case "branch-deleted":
+      return `${where}: deleted the merged task branch on origin`
+    case "branch-kept":
+      return `${where}: kept the merged task branch on origin; the lease saw ${String(rest.saw)}`
     case "message":
       return `told ${String(rest.to)} about ${where}`
     case "reap":
@@ -2738,6 +2742,7 @@ function describeRun(
   outcome: Readonly<{
     exitCode: number
     merged: readonly string[]
+    branches?: readonly string[]
     failed: readonly string[]
     stuck: readonly string[]
     directMerges: readonly string[]
@@ -2752,6 +2757,7 @@ function describeRun(
     outcome.merged.length > 0
       ? `${STATE_WORDS.merged.word} ${outcome.merged.join(", ")}${outcome.noCheck === true ? " (checks skipped: --no-check)" : ""}`
       : undefined,
+    ...(outcome.branches ?? []),
     outcome.failed.length > 0 ? `${STATE_WORDS.failed.word} ${outcome.failed.join(", ")}` : undefined,
     outcome.stuck.length > 0 ? `${STATE_WORDS.stuck.word} ${outcome.stuck.join(", ")}` : undefined,
     outcome.directMerges.length > 0
