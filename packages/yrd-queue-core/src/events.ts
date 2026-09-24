@@ -25,7 +25,7 @@ export const CHANGE_STATUSES = [
 ] as const
 export type ChangeStatus = (typeof CHANGE_STATUSES)[number]
 export type ChangeEnding = "merged" | "failed" | "cancelled"
-export type CancellationReason = "resubmitted" | "dropped" | "deleted"
+export type CancellationReason = "resubmitted" | "dropped" | "deleted" | "unrecorded"
 const LANDING_IN_PROGRESS = "landing in progress; resubmit after merged/failed/stuck, resume if runner gone"
 
 export const EVENT_TRAILERS = {
@@ -577,8 +577,21 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         throw new Error(`event ${event.id} failed must keep checked candidate ${state.candidate ?? "absent"}`)
       }
       if (event.type === "cancelled") {
-        if (reason !== "resubmitted" && reason !== "dropped" && reason !== "deleted") {
-          throw new Error(`event ${event.id} cancelled needs Reason: resubmitted, dropped or deleted`)
+        const migrated = event.props
+          .filter(([key]) => key === "Migrated-From")
+          .some(([, value]) => {
+            const source = /@([0-9a-f]{40}(?:[0-9a-f]{24})?)$/u.exec(value)?.[1]
+            return source !== undefined && event.links.includes(source)
+          })
+        if (
+          reason !== "resubmitted" &&
+          reason !== "dropped" &&
+          reason !== "deleted" &&
+          (reason !== "unrecorded" || !migrated)
+        ) {
+          throw new Error(
+            `event ${event.id} cancelled needs Reason: resubmitted, dropped, deleted or evidenced unrecorded`,
+          )
         }
         if (reason === "dropped" || reason === "deleted") keptCommit(event)
       }
@@ -1295,10 +1308,57 @@ export function mergedHistoryCommits(histories: ReadonlyMap<string, ChangeHistor
   return commits
 }
 
-function project(events: readonly Event[], ref: string, repo: string): EventChange {
+function assertCompleteChangeChain(events: readonly Event[], ref: string, repo: string): void {
   if (events.length === 0) throw new Error(`empty event chain ${ref} in ${repo}`)
   if (events[0]?.parent !== null) {
     throw new Error(`event chain ${ref} in ${repo} exceeds 1024 events; refusing a partial status`)
   }
+}
+
+/** One opened head and its resting fold, including older heads on the same branch. */
+export type ChangeSegment = Readonly<{
+  opened: Oid
+  head: Oid
+  state: EventChange
+  /** Original record commits, in the order their migration events absorbed them. */
+  sources: readonly Readonly<{ ref: string; oid: Oid }>[]
+}>
+
+/** Read every opened segment while leaving the normal list's current fold unchanged. */
+export function enumerateChangeSegments(events: readonly Event[], ref: string, repo: string): readonly ChangeSegment[] {
+  assertCompleteChangeChain(events, ref, repo)
+  const segments: ChangeSegment[] = []
+  let state = initial
+  let opened: Oid | undefined
+  let sources: Array<{ ref: string; oid: Oid }> = []
+  const retain = () => {
+    if (opened === undefined) return
+    if (state.commit === undefined) throw new Error(`${ref}: opened segment ${opened} has no Commit:`)
+    segments.push({ opened, head: state.commit, state, sources })
+  }
+  for (const event of events) {
+    if (event.type === "opened") {
+      retain()
+      sources = []
+    }
+    state = evolve(state, event)
+    if (event.type === "opened") opened = event.id
+    for (const [key, value] of event.props) {
+      if (key !== "Migrated-From") continue
+      const split = value.lastIndexOf("@")
+      const sourceRef = value.slice(0, split)
+      const oid = value.slice(split + 1)
+      if (split <= 0 || !sourceRef.startsWith("refs/yrd/") || !COMMIT_OID.test(oid) || !event.links.includes(oid)) {
+        throw new Error(`${ref}: event ${event.id} has unkept or malformed Migrated-From: ${value}`)
+      }
+      sources.push({ ref: sourceRef, oid })
+    }
+  }
+  retain()
+  return segments
+}
+
+function project(events: readonly Event[], ref: string, repo: string): EventChange {
+  assertCompleteChangeChain(events, ref, repo)
   return events.reduce(evolve, initial)
 }
