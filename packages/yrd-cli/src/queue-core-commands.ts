@@ -13,8 +13,17 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { hostname } from "node:os"
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
+import { hostname, tmpdir } from "node:os"
 import { dirname, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
@@ -140,6 +149,8 @@ import {
   type StopFact,
   tipOf,
   trailer,
+  remoteCallsLine,
+  traceRemoteCalls,
 } from "@yrd/queue-core"
 import { readUnitIntent } from "./unit-intent.ts"
 import { noticeLine } from "./watch-notice.ts"
@@ -413,6 +424,32 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
 }
 
 /**
+ * The environment a command's Git reads, and, for a submit that pushes, its remote-call count said on stderr
+ * when disposed (25570 row 3); the trace directory goes with it. Any other command gets `env` back untouched.
+ */
+function submitCalls(
+  request: CoreQueueCommand,
+  env: NodeJS.ProcessEnv | undefined,
+  io: YrdCliIO,
+): Readonly<{ env: NodeJS.ProcessEnv | undefined }> & Disposable {
+  if (request.command !== "submit" || request.dryRun === true) return { env, [Symbol.dispose]: () => undefined }
+  const directory = mkdtempSync(join(tmpdir(), "yrd-submit-trace2-"))
+  const traced = traceRemoteCalls(directory)
+  return {
+    env: env === undefined ? undefined : { ...env, ...traced.env },
+    [Symbol.dispose]() {
+      try {
+        io.stderr(`yrd: submit remote calls: ${remoteCallsLine(traced.end())}\n`)
+      } catch (error) {
+        io.stderr(`yrd: submit remote calls unknown: ${error instanceof Error ? error.message : String(error)}\n`)
+      } finally {
+        rmSync(directory, { recursive: true, force: true })
+      }
+    },
+  }
+}
+
+/**
  * Run one queue command on the new core.
  *
  * A repository whose declaration does not select this core is refused HERE,
@@ -466,8 +503,14 @@ export async function coreQueueCommand(
     )
     return 2
   }
-  const selection = options.selection ?? (await resolveGitSelection(repo, { env: options.env }))
-  const git = gitIn(repo, undefined, selection, { env: options.env })
+  // A SUBMIT SAYS WHAT IT COST (25570 row 3): every git process from here on, this command's own, Gitomic's and
+  // each moved submodule's, writes git's trace2 log, and one stderr line counts the remote calls and ssh logins
+  // when the command ends, however it ends. Traced before the first Git below is built, which is when it reads
+  // its environment. A dry run pushes nothing and is not counted.
+  using traced = submitCalls(request, options.env, io)
+  const env = traced.env
+  const selection = options.selection ?? (await resolveGitSelection(repo, { env }))
+  const git = gitIn(repo, undefined, selection, { env })
   const log = options.log?.child("queue")
   const remote = options.remote ?? "origin"
   const queue = options.queue ?? (await originHead(git))

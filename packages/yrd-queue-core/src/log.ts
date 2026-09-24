@@ -163,6 +163,10 @@ export const LOG_KINDS = [
   // A write to the override ref this run made itself: the `expired` record for
   // a window that passed, written before the round took its snapshot (25296).
   "override",
+  // The round's remote calls, counted from git's trace2 log when the round ends (25570 row 3): processes,
+  // ssh logins, unreadable lines and one field per remote verb. Readers match kinds by equality, so this
+  // closing row breaks none of them.
+  "remote-calls",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]

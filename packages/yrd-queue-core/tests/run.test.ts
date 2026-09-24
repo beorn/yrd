@@ -379,6 +379,36 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
 })
 
+/**
+ * @failure A round's remote calls were unknown: the journal named only yrd's own Git, never Gitomic's reads or
+ *          git-super's children, and no row counted them (25570 row 3).
+ * @level    l3 — a real round through every runner, counted from git's own trace2 log
+ * @consumer the operator reading a round's GitHub login cost
+ */
+it("closes the round's journal with every remote call it made, counted from git's trace2 log", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/event-counted", "counted.txt")
+  const before = process.env.GIT_TRACE2_EVENT
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-counted"] })
+  expect(process.env.GIT_TRACE2_EVENT).toBe(before)
+  const journal = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
+  if (journal === undefined) throw new Error("queue run left no journal")
+  const rows = readFileSync(join(w.workdir, "logs", journal), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+  const counted = rows.at(-1)
+  expect(counted).toMatchObject({ kind: "remote-calls", unreadable: 0 })
+  // The merge fetched and published: both are real remote calls, and every git process wrote its log.
+  expect(counted?.fetch).toEqual(expect.any(Number))
+  expect(counted?.push).toEqual(expect.any(Number))
+  expect(Number(counted?.processes)).toBeGreaterThan(Number(counted?.fetch) + Number(counted?.push))
+})
+
 /** @failure A deleted event branch stayed queued forever and blocked every change behind it.
  * @level l3 @consumer queue operator and submitter
  */
@@ -2284,10 +2314,12 @@ describe("a queue run", () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>)
 
     expect(records[0]).toMatchObject({ kind: "run", target: "main" })
-    expect(records.slice(1).every((record) => record.kind === "git")).toBe(true)
+    // Between the header and the closing remote-calls count (25570 row 3), only the preamble's Git rows.
+    expect(records.slice(1, -1).every((record) => record.kind === "git")).toBe(true)
+    expect(records.at(-1)).toMatchObject({ kind: "remote-calls", unreadable: 0 })
     expect(records.some((record) => record.kind === "queue")).toBe(false)
     // The Git rows ARE the diagnosis, which is why journaling the preamble was
-    // worth keeping: the run got far enough to try, and the last row says what
+    // worth keeping: the run got far enough to try, and the last Git row says what
     // it tried.
     expect(records.length).toBeGreaterThan(1)
     expect(runDiedInPreamble(records as never)).toBe(true)
