@@ -256,6 +256,26 @@ describe("the top line (items 30, 32d, 33)", () => {
 
     expect(text).toContain("/w/logs")
   })
+
+  // 25520: the live snapshot always sets `decisions`, and with no journal it is
+  // the empty list, so a STATS line keyed on `decisions` alone printed
+  // "0 merges, 0 failed" — zeros nobody measured. The fixture shape above
+  // (decisions absent) never reached that branch.
+  it("says no run journal was read in STATS when the live snapshot has an empty decisions list and no journal (25520)", async () => {
+    const text = await paint(
+      <WatchPane
+        snapshot={snapshot({
+          decisions: [],
+          journalAbsent: "no run journal was read: /w/logs — there is no such directory",
+        })}
+        live={false}
+      />,
+    )
+
+    const stats = text.split("\n").find((line) => line.includes("STATS"))
+    expect(stats).toContain("24h: no run journal read on this machine")
+    expect(stats).not.toMatch(/\d+ merges?|\d+ failed|decisions/u)
+  })
 })
 
 describe("ia.md first viewport and inverse pills (24196)", () => {

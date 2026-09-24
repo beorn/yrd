@@ -357,7 +357,8 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
   }
 }
 
-function isOpen(status: ChangeStatus): boolean {
+/** Whether a change with this status is still open: in line, or somewhere between verifying and merged. */
+export function isOpen(status: ChangeStatus): boolean {
   return (
     status === "queued" || status === "verifying" || status === "checking" || status === "merging" || status === "stuck"
   )

@@ -336,9 +336,12 @@ export function WatchPane({
   // every one of them addresses the sequence the reader is looking at.
   const runner = runnerOf(shown, shown.at)
   // The STATS line (25416): what is in hand now, then the last 24 hours, from the one bucket derivation.
+  // With no journal read, the snapshot's decisions are an empty list nobody
+  // measured (25520): they read as unmeasured, never as zero merges.
+  const decisions = shown.journalAbsent === undefined ? shown.decisions : undefined
   const statsLine = statsSummary(
     { drafts: draftsSaid(shown.rows, shown.drafts), waiting: lineOf(shown.unfiltered).waiting.length },
-    shown.decisions === undefined ? undefined : lastDayBucket(shown.decisions, shown.at),
+    decisions === undefined ? undefined : lastDayBucket(decisions, shown.at),
   )
   const visible = bandedRows(
     shown.rows.filter(
@@ -723,16 +726,12 @@ export function WatchPane({
         >
           <Text wrap="truncate">
             {statsOpen ? FOLD_MARKERS.unfolded : FOLD_MARKERS.folded} STATS · {statsLine}
-            {shown.decisions === undefined
+            {decisions === undefined
               ? ""
-              : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
+              : ` (${String(decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
           </Text>
-          {statsOpen && shown.decisions !== undefined ? (
-            <StatsBox
-              decisions={shown.decisions}
-              columns={columns - 2}
-              timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
-            />
+          {statsOpen && decisions !== undefined ? (
+            <StatsBox decisions={decisions} columns={columns - 2} timeRows={terminalRows >= STATS_TIME_MIN_ROWS} />
           ) : null}
         </Box>
         {/* Where the journal was looked for, when there was none. A watch that
