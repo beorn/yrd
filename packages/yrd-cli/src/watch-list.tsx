@@ -247,10 +247,14 @@ export function TopLine({
       paddingRight={1}
       justifyContent="space-between"
     >
-      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" gap={1}>
-        <Text bold flexShrink={0}>
-          yrd watch
-        </Text>
+      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" gap={1} alignItems="center">
+        <Box flexDirection="row" flexShrink={0} gap={1}>
+          <Text color={status?.color ?? "$fg-info"}>{status?.marker ?? RUNNING_GLYPH}</Text>
+          <Text bold>YRD</Text>
+          <Text bold color={status?.color ?? "$fg-info"}>
+            {status?.word ?? "RUNNING"}
+          </Text>
+        </Box>
         {queues.map((queue, index) => (
           <InversePill
             key={`${queue.path}@${queue.branch}`}
@@ -264,13 +268,6 @@ export function TopLine({
         ))}
       </Box>
       <Box flexDirection="row" flexShrink={0} gap={2} alignItems="center">
-        <Box flexDirection="row" flexShrink={0} gap={1}>
-          <Text color={status?.color ?? "$fg-info"}>{status?.marker ?? RUNNING_GLYPH}</Text>
-          <Text bold>YRD</Text>
-          <Text bold color={status?.color ?? "$fg-info"}>
-            {status?.word ?? "RUNNING"}
-          </Text>
-        </Box>
         {statusPills}
       </Box>
     </Box>
@@ -323,13 +320,13 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
   return (
     <Cells layout={layout}>
       {{
-        time: label("HH:MM"),
+        time: label("TIME"),
         q: (layout.qWidth ?? 0) === 0 ? null : label(layout.isFullQueue ? "QUEUE" : "Q"),
         run: label("RUN"),
         queueRun: label("QUEUE / RUN"),
-        task: label("TASK"),
-        status: label("STATE"),
-        agent: label("AGENT"),
+        task: label("ISSUE / BRANCH"),
+        status: label("STATUS"),
+        agent: label("WHO"),
         ageRun: label("AGE / RUN"),
       }}
     </Cells>
@@ -603,32 +600,35 @@ export function RunnerRow({
   const { color, word } = STATE_WORDS[line.state]
   const forced = cursor ? "$fg-on-selected" : undefined
   const timeText = line.at !== undefined ? clock(line.at) : "—"
-  const isNarrow = (layout.columns ?? 120) < 100
-  const parsed = isNarrow ? splitRunnerCure(line.holds) : { text: line.holds }
+  const parsed = splitRunnerCure(line.holds)
+  const isStoppedOrPaused = line.state === "stopped" || line.state === "paused"
+  const displayText =
+    isStoppedOrPaused && !parsed.text.startsWith("STOPPED:")
+      ? `STOPPED: ${parsed.text}`
+      : parsed.text
+  const cureText =
+    parsed.cure === undefined
+      ? undefined
+      : parsed.cure.startsWith("resume:")
+        ? `to resume: ${parsed.cure.slice(7).trim()}`
+        : parsed.cure.startsWith("start:")
+          ? `to start: ${parsed.cure.slice(6).trim()}`
+          : parsed.cure.startsWith("to ")
+            ? parsed.cure
+            : `to ${parsed.cure}`
   return (
     <Box flexDirection="column" minWidth={0} width="100%" backgroundColor={cursor ? "$bg-selected" : undefined}>
       <Cells layout={layout}>
         {{
-          time: <Text color={forced ?? "$fg-muted"}>{timeText}</Text>,
+          time: <Text color={forced ?? color}>{timeText}</Text>,
           q: null,
           run: null,
           queueRun: null,
           task: (
             <Box flexDirection="row" minWidth={0} overflow="hidden">
-              <Text bold color={forced ?? color} flexShrink={0}>
-                {STATE_WORDS.runner.word}
+              <Text color={forced ?? color} wrap="truncate" minWidth={0}>
+                {displayText}
               </Text>
-              <Box paddingLeft={1} minWidth={0} overflow="hidden">
-                {/* ITEM 27: the affected text takes the state's OWN colour, and
-                    muting never dims an error. Reading the colour off the same
-                    entry the word came from is what makes that automatic: an
-                    idle runner's text is muted because `idle` is muted, and a
-                    stopped one's is loud because `stopped` is. Item 14's muted
-                    rail is the detail line below, which is metadata. */}
-                <Text color={forced ?? color} wrap="truncate" minWidth={0}>
-                  {parsed.text}
-                </Text>
-              </Box>
             </Box>
           ),
           status: (
@@ -643,7 +643,7 @@ export function RunnerRow({
             </Box>
           ),
           agent: (
-            <Text color={forced ?? "$fg-muted"} wrap="truncate">
+            <Text color={forced ?? color} wrap="truncate">
               {line.by ?? "—"}
             </Text>
           ),
@@ -654,18 +654,23 @@ export function RunnerRow({
           ),
         }}
       </Cells>
-      {parsed.cure === undefined ? null : (
-        <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-          <Box width={2} flexShrink={0} />
-          <Box flexGrow={1} flexBasis={0} minWidth={0} overflow="hidden" flexDirection="row">
-            <Text color={forced ?? color} flexShrink={0}>
-              {RUNNER_GLYPH}{" "}
-            </Text>
-            <Text color={forced ?? color} wrap="truncate" minWidth={0}>
-              {parsed.cure}
-            </Text>
-          </Box>
-        </Box>
+      {cureText === undefined ? null : (
+        <Cells layout={layout}>
+          {{
+            time: null,
+            q: null,
+            run: null,
+            queueRun: null,
+            task: (
+              <Text color={forced ?? color} wrap="truncate" minWidth={0}>
+                {cureText}
+              </Text>
+            ),
+            status: null,
+            agent: null,
+            ageRun: null,
+          }}
+        </Cells>
       )}
     </Box>
   )
