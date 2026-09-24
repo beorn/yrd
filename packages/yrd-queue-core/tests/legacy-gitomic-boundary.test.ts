@@ -13,6 +13,22 @@ function refCommands(text: string): string[] {
 
 describe("the legacy Gitomic boundary", () => {
   it("owns every legacy queue ref read and write", () => {
+    // Source-text checks are invisible to import-based test selection. Enumerate
+    // every ref-command site so a new site requires an explicit boundary review.
+    const sites = Object.fromEntries(
+      readdirSync(new URL("../src/", import.meta.url))
+        .filter((name) => name.endsWith(".ts"))
+        .map((name) => [name, refCommands(source(name))] as const)
+        .filter(([, commands]) => commands.length > 0),
+    )
+    expect(sites).toEqual({
+      "override.ts": ["push", "push"],
+      "publication.ts": ["ls-remote", "fetch", "push"],
+      "reference.ts": ["update-ref", "fetch", "ls-remote"],
+      "run.ts": ["fetch"],
+      "submit.ts": ["fetch", "ls-remote", "push"],
+    })
+
     for (const name of ["git.ts", "legacy-records.ts", "pause.ts", "remote.ts", "withdraw.ts"]) {
       expect(refCommands(source(name)), name).toEqual([])
     }
@@ -32,6 +48,8 @@ describe("the legacy Gitomic boundary", () => {
     expect(run).toContain("publishCheckedChildren(")
 
     const publication = source("publication.ts")
+    // This marker read-back is a format-agnostic ref-level check shared by both
+    // adapters per 25040 §3; 25041 removes the legacy call, not this module.
     expect(refCommands(publication), "shared child publication").toEqual(["ls-remote", "fetch", "push"])
     expect(publication).toContain('["push", "--recurse-submodules=only", options.remote')
   })
