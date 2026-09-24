@@ -31,7 +31,6 @@ import type { RefUpdate } from "gitomic"
 import {
   appendRecord,
   changeRef,
-  changesRef,
   checksOf,
   createEventQueue,
   createEventStore,
@@ -608,7 +607,9 @@ it("sticks a cold event replay when the marker's child source has vanished", asy
 
 /** @failure A cancellation after the marker could cause this run to write a child for a lost row.
  * @level l3 @consumer queue operator
- * A marked landing must refuse cancellation even before marker read-back.
+ * A marked landing must refuse cancellation from the marker append on: the hook fires on the
+ * first `rev-parse --absolute-git-dir` once the row is merging: the marker read-back
+ * itself (its readRemoteCommit resolves the store through this git) or earlier, never a child write.
  */
 it("refuses cancellation after the marker before child publication", async () => {
   const w = await world()
@@ -616,13 +617,12 @@ it("refuses cancellation after the marker before child publication", async () =>
   const ahead = await aheadOfSubmodule(w, "event-rival")
   await submitGitlink(w, "task/event-rival", ahead)
   const rootBefore = await remoteTip(w.git, "refs/heads/main")
-  const ref = changesRef("main", "task/event-rival")
   await using real = createProcess({ cwd: w.work })
   let refused = false
   const interleaved: Process = {
     ...real,
     async run(request) {
-      if (!refused && request.argv.includes("ls-remote") && request.argv.includes(ref)) {
+      if (!refused && request.argv.includes("rev-parse") && request.argv.includes("--absolute-git-dir")) {
         const state = await readStatus(eventStore(w), "main", "task/event-rival")
         if (state.status === "merging" && state.tip !== undefined) {
           await expect(

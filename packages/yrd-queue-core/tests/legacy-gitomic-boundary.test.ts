@@ -23,10 +23,10 @@ describe("the legacy Gitomic boundary", () => {
     )
     expect(sites).toEqual({
       "override.ts": ["push", "push"],
-      "publication.ts": ["ls-remote", "fetch", "push"],
+      "publication.ts": ["push"],
       "reference.ts": ["update-ref", "fetch", "ls-remote"],
       "settled-base.ts": ["fetch"],
-      "submit.ts": ["fetch", "ls-remote", "push"],
+      "submit.ts": ["fetch", "push"],
     })
 
     for (const name of ["git.ts", "legacy-records.ts", "pause.ts", "remote.ts", "withdraw.ts"]) {
@@ -35,11 +35,8 @@ describe("the legacy Gitomic boundary", () => {
 
     const submit = source("submit.ts")
     const [gitlinkPublication, queueSubmission] = submit.split("export type SubmitInspection")
-    expect(refCommands(gitlinkPublication ?? ""), "gitlink retention publication").toEqual([
-      "fetch",
-      "ls-remote",
-      "push",
-    ])
+    // The retention ref is read by name through readRemoteCommit (25570), never an ls-remote.
+    expect(refCommands(gitlinkPublication ?? ""), "gitlink retention publication").toEqual(["fetch", "push"])
     expect(refCommands(queueSubmission ?? ""), "legacy queue submission").toEqual([])
 
     // The run's one fetch (the composing checkout's commit) lives in settled-base.ts.
@@ -52,8 +49,10 @@ describe("the legacy Gitomic boundary", () => {
 
     const publication = source("publication.ts")
     // This marker read-back is a format-agnostic ref-level check shared by both
-    // adapters per 25040 §3; 25041 removes the legacy call, not this module.
-    expect(refCommands(publication), "shared child publication").toEqual(["ls-remote", "fetch", "push"])
+    // adapters per 25040 §3; 25041 removes the legacy call, not this module. It
+    // reads the marker by name through the seam's readRemoteCommit (25570).
+    expect(refCommands(publication), "shared child publication").toEqual(["push"])
+    expect(publication).toContain("readRemoteCommit(options.git, options.remote, options.marker.ref)")
     expect(publication).toContain('["push", "--recurse-submodules=only", options.remote')
   })
 

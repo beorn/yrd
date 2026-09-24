@@ -156,7 +156,8 @@ export async function publishMovedGitlinks(
       }
     }
     const ref = retentionRef(row.sha)
-    const listed = (await child(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
+    // By name: `ls-remote origin <ref>` carries the whole advertisement to filter it here (25570).
+    const listed = (await readRemoteCommit(child, "origin", ref)) ?? ""
     if (listed === row.sha) {
       published.push({ path, sha: row.sha, remote, ref, state: "retained" })
     } else if (listed !== "") {

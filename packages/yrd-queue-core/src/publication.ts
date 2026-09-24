@@ -1,6 +1,6 @@
 /** Child-first publication of a checked merge, shared by legacy and event markers. */
 import type { Process } from "@yrd/process"
-import type { Git, GitInvocationOptions } from "./git.ts"
+import { readRemoteCommit, type Git, type GitInvocationOptions } from "./git.ts"
 import { gitSuperExecution, readSuperMergeDetail, type SuperMergeDetail } from "./verifying.ts"
 
 export type ChildPublication = Readonly<{
@@ -25,17 +25,16 @@ export async function publishCheckedChildren(
     gitOptions?: GitInvocationOptions
   }>,
 ): Promise<ChildPublication> {
-  const observed = (await options.git(["ls-remote", "--refs", options.remote, options.marker.ref]))
-    .trim()
-    .split(/\s+/u)[0]
+  // One fetch of the marker by name reads its tip AND brings the parent graph a
+  // cold runner needs before Git-super can replay the exact frozen merge; it
+  // changes no remote branch. `ls-remote <remote> <ref>` would carry the whole
+  // advertisement to filter it here (25570).
+  const observed = await readRemoteCommit(options.git, options.remote, options.marker.ref)
   if (observed !== options.marker.tip) {
     throw new Error(
       `publication marker ${options.remote} ${options.marker.ref}: expected ${options.marker.tip}, found ${observed ?? "absent"}`,
     )
   }
-  // A cold runner needs the marker's parent graph locally before Git-super can
-  // replay the exact frozen merge. This fetch changes no remote branch.
-  await options.git(["fetch", "--quiet", "--no-tags", options.remote, options.marker.ref])
   await options.git(["cat-file", "-e", `${options.candidate}^{commit}`])
   const parents = (await options.git(["show", "-s", "--format=%P", options.marker.tip])).trim().split(/\s+/u)
   if (!parents.includes(options.candidate)) {
