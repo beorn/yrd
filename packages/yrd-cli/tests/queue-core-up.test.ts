@@ -3103,11 +3103,12 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     await submitted(w, "task/first", "first.txt")
     const olderHead = await submitted(w, "task/older", "older.txt")
     const namedHead = await submitted(w, "task/named", "named.txt")
-    // One round judges all three and merges only the first in line, so two checked changes wait.
+    // One round merges the first in line and prepares only the next head (25301 cure (a)):
+    // task/older waits checked, and task/named waits unjudged until something reaches it.
     const round = await yrd(w, "queue", "run", "--json")
     expect(round.exitCode, round.report).toBe(0)
     expect(await kindsOf(w, "task/older", olderHead)).toEqual(["opened", "checked"])
-    expect(await kindsOf(w, "task/named", namedHead)).toEqual(["opened", "checked"])
+    expect(await kindsOf(w, "task/named", namedHead)).toEqual(["opened"])
 
     const merged = await yrd(w, "merge", "task/named")
 
