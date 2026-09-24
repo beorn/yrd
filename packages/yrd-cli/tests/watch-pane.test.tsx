@@ -191,10 +191,10 @@ describe("the top line (items 30, 32d, 33)", () => {
 
     app.press("f")
     await app.waitForLayoutStable()
-    expect(app.text).toContain("1 of 2 change(s)")
+    expect(app.text).not.toContain("task/queued")
     app.press("a")
     await app.waitForLayoutStable()
-    expect(app.text).toContain("2 of 2 change(s)")
+    expect(app.text).toContain("task/queued")
     app.unmount()
   })
 
@@ -627,7 +627,6 @@ describe("the table (items 3, 28, 38)", () => {
     ]
     const app = render(<WatchPane snapshot={snapshot({ rows })} live={false} />, { cols: 120, rows: 40 })
     await app.waitForLayoutStable()
-    expect(app.text).toContain("3 of 3 change(s)")
     const ageRunOf = (painted: readonly string[], branch: string): string | undefined =>
       /\S+ \/ \S+/u.exec(painted.find((line) => line.includes(branch))?.trimEnd() ?? "")?.[0]
     const lines = app.text.split("\n")
@@ -636,7 +635,6 @@ describe("the table (items 3, 28, 38)", () => {
 
     app.press("f")
     await app.waitForLayoutStable()
-    expect(app.text).toContain("1 of 3 change(s)")
     expect(app.text).toContain("task/one")
     expect(app.text).not.toContain("task/queued")
     expect(app.text).not.toContain("task/merged")
@@ -648,7 +646,7 @@ describe("the table (items 3, 28, 38)", () => {
 
     app.press("a")
     await app.waitForLayoutStable()
-    expect(app.text).toContain("3 of 3 change(s)")
+    expect(app.text).toContain("task/merged")
     const restored = app.text.split("\n")
     expect(ageRunOf(restored, "task/queued")).toBe("1h00m / —")
     expect(ageRunOf(restored, "task/merged")).toBe("1h00m / —")
@@ -1183,7 +1181,6 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
     expect(text).not.toContain("git fetch --quiet")
     // The table still shows the last reading.
     expect(text).toContain("task/one")
-    expect(text).toContain("1 of 1 change(s)")
 
     const later = new Date(NOW.getTime() + 60_000)
     rounds[1]?.resolve(
@@ -1195,10 +1192,9 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
         ],
       }),
     )
-    // The new reading is on screen (the list's virtual window grows on the
-    // next paint, so the count is the fact to read here) and the warning is gone.
+    // The new reading is on screen and the warning is gone.
     await waitFor(() => {
-      expect(current(app)).toContain("2 of 2 change(s)")
+      expect(current(app)).toContain("task/fresh")
     })
     expect(current(app)).not.toContain("⚠︎ the queue read failed")
     app.unmount()
@@ -1267,7 +1263,6 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
     await waitFor(() => {
       expect(current(app)).toContain("· task/b@bbbbbbbbbbbb the second")
     })
-    expect(current(app)).toContain("Home follows the newest again")
     await waitFor(() => {
       expect(rounds.length).toBeGreaterThan(0)
     })
@@ -1277,7 +1272,7 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
         snapshot({ at: new Date(NOW.getTime() + 60_000), rows: [{ row: fresh }, { row: a }, { row: b }, { row: c }] }),
       )
     await waitFor(() => {
-      expect(current(app)).toContain("4 of 4 change(s)")
+      expect(current(app)).toContain("task/fresh")
     })
     // Still task/b, not whatever the table moved into row 1.
     expect(current(app)).toContain("· task/b@bbbbbbbbbbbb the second")
@@ -1345,7 +1340,7 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
       .at(-1)
       ?.resolve(snapshot({ at: new Date(NOW.getTime() + 60_000), rows: [{ row: fresh }, { row: a }, { row: b }] }))
     await waitFor(() => {
-      expect(current(app)).toContain("3 of 3 change(s)")
+      expect(current(app)).toContain("task/fresh")
     })
     app.press("Enter")
     await waitFor(() => {
@@ -1372,7 +1367,7 @@ describe("the RUNNER box's wrapped rails and the height budget", () => {
   }
   const decisions = [{ at: NOW, decision: "merged" as const, duplicate: false, run: RUN_ID }]
 
-  it("keeps the footer on the last row and the pills on screen at 120x30 with a three-row pause", async () => {
+  it("keeps the frame inside the terminal and the pills on screen at 120x30 with a three-row pause", async () => {
     const app = render(<WatchPane snapshot={snapshot({ pause, runner, decisions })} live={false} />, {
       cols: 120,
       rows: 30,
@@ -1380,10 +1375,9 @@ describe("the RUNNER box's wrapped rails and the height budget", () => {
     await app.waitForLayoutStable()
     await settle(app)
     const lines = app.text.split("\n")
-    const last = lines.filter((line) => line.trim() !== "").at(-1) ?? ""
-    expect(last).toContain("change(s)")
-    // The footer shares its row with nothing: no box border, no STATS cell.
-    expect(last).not.toMatch(/[╭╰│─╮╯]/u)
+    // No help line under the frame (25417), and nothing painted past the terminal's last row.
+    expect(app.text).not.toContain("? for help")
+    expect(lines.length).toBeLessThanOrEqual(30)
     // The pills are on screen, on the top line (25416).
     expect(lines.findIndex((line) => /\[o\]pen.*\[r\]unning.*\[d\]one.*\[f\]ailed/u.test(line))).toBe(0)
     // The pause is on the RUNNER rail, wrapped onto rows under its marker, once.
