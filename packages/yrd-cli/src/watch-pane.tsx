@@ -227,6 +227,7 @@ const HELP = [
   "v            fold the diff open or shut        1-9      toggle a queue",
   "o r d f      show one status; O R D F toggle   a        show everything",
   "s            expand or fold STATS              w        drafts of 7d, or every draft",
+  "g            the RUNNER box, then the top      G        the bottom",
   "The watch writes nothing. Stop a change by moving its ref or pausing the queue.",
 ]
 
@@ -486,6 +487,15 @@ export function WatchPane({
     })
   }
 
+  // The cursor on one item: the row the reader moved to stays under it, except
+  // at the top, where the cursor follows the newest row.
+  const pointAt = (index: number): void => {
+    setCursor(index)
+    const item = visibleItems[index]
+    setCursorItemKey(item?.kind === "row" && index === 0 ? undefined : item?.key)
+    setCursorRow(item?.kind === "row" && index === 0 ? undefined : item?.kind === "row" ? item.item : undefined)
+  }
+
   useInput((input, key) => {
     const character = key.text ?? input
     if (character === "?") {
@@ -526,6 +536,13 @@ export function WatchPane({
     if (character === "F") toggleBucket("failed")
     if (character === "a") showAll()
     if (character === "s") setStatsOpen((was) => !was)
+    // g: the RUNNER box, and from the box the top; G (the list's own key) goes to the bottom (25419).
+    if (character === "g") {
+      const runnerAt = visibleItems.findIndex((item) => item.kind === "runner")
+      const target = runnerAt < 0 || at === runnerAt ? 0 : runnerAt
+      pointAt(target)
+      listRef.current?.scrollToItem(target, target === runnerAt ? "center" : "start")
+    }
     if (character === "w" && load !== undefined) {
       // The other window, read now rather than at the next round, outside any redraw.
       const asked: DraftWindow = draftWindow.current === "7d" ? "all" : "7d"
@@ -604,12 +621,7 @@ export function WatchPane({
         listRef={listRef}
         active={!opened || tier !== "full"}
         live={live}
-        onCursor={(index) => {
-          setCursor(index)
-          const item = visibleItems[index]
-          setCursorItemKey(item?.kind === "row" && index === 0 ? undefined : item?.key)
-          setCursorRow(item?.kind === "row" && index === 0 ? undefined : item?.kind === "row" ? item.item : undefined)
-        }}
+        onCursor={pointAt}
       />
     </ListStack>
   )
