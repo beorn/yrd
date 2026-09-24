@@ -69,13 +69,21 @@ import {
 } from "silvery"
 import type { GitObservation, OverrideFact, Row, StopFact } from "@yrd/queue-core"
 import { NowProvider, useMinute, useNow } from "./watch-clock.ts"
-import { RUNNER_GLYPH, RUNNING_GLYPH, STATE_WORDS, clock, firstLine, legendLines, runShortName, stateGlyph } from "./watch-format.ts"
+import {
+  RUNNER_GLYPH,
+  RUNNING_GLYPH,
+  STATE_WORDS,
+  clock,
+  firstLine,
+  legendLines,
+  runShortName,
+  stateGlyph,
+} from "./watch-format.ts"
 import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
 import {
   BUCKETS,
   ListHeader,
   ListRow,
-  RunnerRow,
   StatusPills,
   TopLine,
   bucketOf,
@@ -88,19 +96,15 @@ import {
 } from "./watch-list.tsx"
 import { watchRowKey, type WatchRow } from "./watch-rows.ts"
 import { StatsBox } from "./watch-boxes.tsx"
-import { TitledBox } from "./watch-primitives.tsx"
 import {
   BandBreakRows,
   ListStack,
   LoudPause,
-  RunnerDetail,
   RunnerTitledBox,
   bandHeight,
   bandOf,
   bandPlan,
   bandedRows,
-  holdsChange,
-  queueLine,
   runnerOf,
   type Band,
   type BandPlan,
@@ -125,14 +129,14 @@ export function RunnerDetailPane({ snapshot }: { snapshot: WatchSnapshot }) {
         {runner.duration ? <Text color="$fg-muted">({runner.duration})</Text> : null}
       </Box>
       <Box flexDirection="column">
-        <Text color="$fg-muted">Queue: <Text color="$fg">{snapshot.queue}</Text></Text>
-        <Text color="$fg-muted">Detail: <Text color="$fg">{runner.detail}</Text></Text>
-        {snapshot.stopped ? (
-          <Text color="$fg-error">Stopped: {snapshot.stopped.cause}</Text>
-        ) : null}
-        {snapshot.runner?.absent ? (
-          <Text color="$fg-muted">Journal: {snapshot.runner.absent}</Text>
-        ) : null}
+        <Text color="$fg-muted">
+          Queue: <Text color="$fg">{snapshot.queue}</Text>
+        </Text>
+        <Text color="$fg-muted">
+          Detail: <Text color="$fg">{runner.detail}</Text>
+        </Text>
+        {snapshot.stopped ? <Text color="$fg-error">Stopped: {snapshot.stopped.cause}</Text> : null}
+        {snapshot.runner?.absent ? <Text color="$fg-muted">Journal: {snapshot.runner.absent}</Text> : null}
       </Box>
     </Box>
   )
@@ -179,7 +183,7 @@ const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
 const DIVIDER_SIZE = 0
 const DEFAULT_SPLIT_RATIO = 0.65
-const DETAIL_BG = "$bg-surface-default"
+export const DETAIL_BG = "$bg-surface-raised"
 /** Below this many terminal rows the STATS box would push the table off the screen, so it yields (the retired pane's own rule). */
 /** The TIME rows under the counts cost five more; below this height the list keeps them. */
 
@@ -322,23 +326,16 @@ export function WatchPane({
   // bands are applied HERE, before the cursor and the detail read an index, so
   // every one of them addresses the sequence the reader is looking at.
   const runner = runnerOf(shown, shown.at)
-  const holding = holdsChange(runner.state)
   const visible = bandedRows(
     shown.rows.filter(
       (item) =>
         buckets.has(bucketOf(item.row)) &&
-        (visibleQueues === undefined ||
-          shown.queues.length === 0 ||
-          visibleQueues.has(shown.queues[0]?.label ?? "")),
+        (visibleQueues === undefined || shown.queues.length === 0 || visibleQueues.has(shown.queues[0]?.label ?? "")),
     ),
-    holding,
+    false,
   )
-  const holdsVisibleChange = holding && visible.some((item) => item.row.live !== undefined)
 
   const visibleItems: readonly WatchPaneItem[] = useMemo(() => {
-    if (holdsVisibleChange) {
-      return visible.map((item) => ({ kind: "row" as const, item, key: watchRowKey(item) }))
-    }
     const ofBand = (band: Band) => visible.filter((item) => bandOf(item.row, false) === band)
     const drafts = ofBand("drafts").map((item) => ({ kind: "row" as const, item, key: watchRowKey(item) }))
     const waiting = ofBand("waiting").map((item) => ({ kind: "row" as const, item, key: watchRowKey(item) }))
@@ -349,7 +346,7 @@ export function WatchPane({
       key: "__idle_runner__",
     }
     return [...drafts, ...waiting, runnerItem, ...done]
-  }, [visible, holdsVisibleChange, runner])
+  }, [visible, runner])
 
   // Where the cursor's item is NOW; when it left the table, the cursor stays
   // where it was (its neighbour) and the row that left is named below.
@@ -366,8 +363,6 @@ export function WatchPane({
     if (centeredRunner.current || visibleItems.length === 0) return
     const heldAt = visibleItems.findIndex((item) => item.kind === "row" && item.item.row.live !== undefined)
     const runnerAt = visibleItems.findIndex((item) => item.kind === "runner")
-
-    const hasDone = visibleItems.some((item) => item.kind === "row" && bandOf(item.item.row, false) === "done")
 
     let i = -1
     if (heldAt >= 0) {
@@ -387,7 +382,9 @@ export function WatchPane({
     setCursor(i)
     const targetItem = visibleItems[i]
     setCursorItemKey(targetItem?.kind === "row" && i === 0 ? undefined : targetItem?.key)
-    setCursorRow(targetItem?.kind === "row" && i === 0 ? undefined : targetItem?.kind === "row" ? targetItem.item : undefined)
+    setCursorRow(
+      targetItem?.kind === "row" && i === 0 ? undefined : targetItem?.kind === "row" ? targetItem.item : undefined,
+    )
     listRef.current?.scrollToItem(i, "center")
   }, [visibleItems])
 
@@ -461,12 +458,6 @@ export function WatchPane({
     }
   }, [diffOpen, draft, loadDiff, selected, selectedKey, diffs])
 
-  const toTop = (): void => {
-    setCursor(0)
-    setCursorItemKey(visibleItems[0]?.key)
-    setCursorRow(visibleItems[0]?.kind === "row" ? visibleItems[0].item : undefined)
-    listRef.current?.scrollToItem(0)
-  }
   const selectOnly = (bucket: StatusBucket): void => {
     setBuckets(new Set([bucket]))
   }
@@ -560,44 +551,37 @@ export function WatchPane({
   if (failure !== undefined) throw failure
 
   const detail = heldDetail?.detail
-  const detailContent =
-    isRunnerSelected ? (
-      <RunnerDetailPane snapshot={shown} />
-    ) : draft !== undefined ? (
-      <DraftDetail row={draft} />
-    ) : (
-      <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
-          <Text bold color="$fg-warning" wrap="truncate">
-            {readFailureLine(
-              "this change's read",
-              detailFailure,
-              heldDetail === undefined ? "" : "; the detail shown is the last good read",
-            )}
-          </Text>
-        )}
-        <WatchDetail
-          detail={detail}
-          joinedRun={selected?.run !== undefined}
-          {...(tab === undefined ? {} : { selected: tab })}
-          onSelect={setTab}
-          diffOpen={diffOpen}
-          {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
-          onToggleDiff={() => {
-            setDiffOpen((was) => !was)
-          }}
-        />
-      </Box>
-    )
+  const detailContent = isRunnerSelected ? (
+    <RunnerDetailPane snapshot={shown} />
+  ) : draft !== undefined ? (
+    <DraftDetail row={draft} />
+  ) : (
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+      {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
+        <Text bold color="$fg-warning" wrap="truncate">
+          {readFailureLine(
+            "this change's read",
+            detailFailure,
+            heldDetail === undefined ? "" : "; the detail shown is the last good read",
+          )}
+        </Text>
+      )}
+      <WatchDetail
+        detail={detail}
+        joinedRun={selected?.run !== undefined}
+        {...(tab === undefined ? {} : { selected: tab })}
+        onSelect={setTab}
+        diffOpen={diffOpen}
+        {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
+        onToggleDiff={() => {
+          setDiffOpen((was) => !was)
+        }}
+      />
+    </Box>
+  )
 
   const detailPane = (
-    <Box
-      flexDirection="column"
-      flexGrow={1}
-      minHeight={0}
-      minWidth={0}
-      backgroundColor={DETAIL_BG}
-    >
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} backgroundColor={DETAIL_BG}>
       <Box height={1} flexShrink={0} />
       {detailContent}
     </Box>
@@ -659,9 +643,7 @@ export function WatchPane({
           onToggle={toggleQueue}
           status={queueLineStatus(shown, shown.at)}
           statusPills={
-            terminalRows < PILLS_MIN_ROWS ? null : (
-              <StatusPills buckets={buckets} onSelectOnly={selectOnly} />
-            )
+            terminalRows < PILLS_MIN_ROWS ? null : <StatusPills buckets={buckets} onSelectOnly={selectOnly} />
           }
         />
         {/* The line under the top line: fold marker + STATS without repeating waiting/stopped/merge counts (24196). */}
@@ -676,7 +658,10 @@ export function WatchPane({
           }}
         >
           <Text wrap="truncate">
-            {statsOpen ? "▾" : "▸"} STATS{shown.decisions === undefined ? "" : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
+            {statsOpen ? "▾" : "▸"} STATS
+            {shown.decisions === undefined
+              ? ""
+              : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
           </Text>
           {statsOpen && shown.decisions !== undefined ? (
             <StatsBox
@@ -778,6 +763,9 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
   if (runner.state === "paused") {
     return { marker: "■", word: "STOPPED", color: "$fg-warning" }
   }
+  if (runner.state === "idle" || runner.state === "unpublished") {
+    return { marker: "○", word: "IDLE", color: "$fg-muted" }
+  }
   return { marker: RUNNING_GLYPH, word: "RUNNING", color: "$fg-info" }
 }
 
@@ -873,7 +861,7 @@ function Table({
     rows,
     columns - 4,
     snapshot.drafts?.window ?? "7d",
-    holdsChange(runner.state),
+    false,
     snapshot.drafts?.unread ?? 0,
   )
   return (
@@ -882,84 +870,89 @@ function Table({
       <ListHeader layout={layout} />
       {items.length === 0 ? (
         <>
-          <BandBreakRows brk={plan.before.get(0) ?? plan.after} snapshot={snapshot} layout={layout} includeRunner={true} />
+          <BandBreakRows
+            brk={plan.before.get(0) ?? plan.after}
+            snapshot={snapshot}
+            layout={layout}
+            includeRunner={true}
+          />
           <Text color="$fg-muted">{empty}</Text>
         </>
       ) : (
         <>
           <ListView
-          ref={listRef}
-          items={[...items]}
-          getKey={(item) => item.key}
-          cursorKey={cursor}
-          nav
-          active={active}
-          virtualization="index"
-          estimateHeight={(index: number) => {
-            const item = items[index]
-            if (item === undefined) return 1
-            if (item.kind === "runner") return 5
-            const rowIndex = rows.indexOf(item.item)
-            return (
-              (separatorBefore(rows, rowIndex) === undefined ? 1 : 2) +
-              bandHeight(plan.before.get(rowIndex)) +
-              (plan.holding === rowIndex ? 1 : 0)
-            )
-          }}
-          // Hover is an affordance, not a selection: the row under the pointer
-          // is tinted (`meta.isHovered` below) and the cursor stays put, so a
-          // detail open on one change is not switched by a passing mouse. A
-          // click selects, as ListView does by default.
-          onItemHover={() => undefined}
-          onCursor={onCursor}
-          renderItem={(item: WatchPaneItem, index: number, meta: { isHovered: boolean }) => {
-            if (item.kind === "runner") {
-              return (
-                <RunnerTitledBox
-                  line={item.line}
-                  snapshot={snapshot}
+            ref={listRef}
+            items={[...items]}
+            getKey={(item) => item.key}
+            cursorKey={cursor}
+            nav
+            active={active}
+            overflowIndicator
+            virtualization="index"
+            estimateHeight={(index: number) => {
+              const item = items[index]
+              if (item === undefined) return 1
+              if (item.kind === "runner") return 5
+              const rowIndex = rows.indexOf(item.item)
+              return (separatorBefore(rows, rowIndex) === undefined ? 1 : 2) + bandHeight(plan.before.get(rowIndex))
+            }}
+            // Hover is an affordance, not a selection: the row under the pointer
+            // is tinted (`meta.isHovered` below) and the cursor stays put, so a
+            // detail open on one change is not switched by a passing mouse. A
+            // click selects, as ListView does by default.
+            onItemHover={() => undefined}
+            onCursor={onCursor}
+            renderItem={(item: WatchPaneItem, index: number, meta: { isHovered: boolean }) => {
+              if (item.kind === "runner") {
+                return (
+                  <RunnerTitledBox
+                    line={item.line}
+                    snapshot={snapshot}
+                    layout={layout}
+                    cursor={index === cursor}
+                    queueDigit={queue.digit}
+                    queueLabel={queue.label}
+                  />
+                )
+              }
+              const rowIndex = rows.indexOf(item.item)
+              const separator = rowIndex >= 0 ? separatorBefore(rows, rowIndex) : undefined
+              const brk = rowIndex >= 0 ? plan.before.get(rowIndex) : undefined
+              const row = (
+                <ListRow
+                  item={item.item}
                   layout={layout}
                   cursor={index === cursor}
+                  hovered={meta.isHovered}
+                  live={live}
                   queueDigit={queue.digit}
                   queueLabel={queue.label}
                 />
               )
-            }
-            const rowIndex = rows.indexOf(item.item)
-            const separator = rowIndex >= 0 ? separatorBefore(rows, rowIndex) : undefined
-            const brk = rowIndex >= 0 ? plan.before.get(rowIndex) : undefined
-            const row = (
-              <ListRow
-                item={item.item}
-                layout={layout}
-                cursor={index === cursor}
-                hovered={meta.isHovered}
-                live={live}
-                queueDigit={queue.digit}
-                queueLabel={queue.label}
-              />
-            )
-            if (separator === undefined && brk === undefined && plan.holding !== rowIndex) return row
-            return (
-              <Box flexDirection="column">
-                <BandBreakRows brk={brk} snapshot={snapshot} layout={layout} includeRunner={false} />
-                {separator === undefined ? null : (
-                  <Text bold color="$fg-muted">
-                    {separator}
-                  </Text>
-                )}
-                {row}
-                {/* The runner's second line hangs under the row that IS the runner. */}
-                {plan.holding === rowIndex ? <RunnerDetail snapshot={snapshot} named /> : null}
-              </Box>
-            )
-          }}
-        />
-        {rows.length === 0 ? <Text color="$fg-muted">{empty}</Text> : null}
-      </>
-    )}
-    {/* Nothing is done yet, so the runner's row follows the last one. */}
-    <BandBreakRows brk={rows.length === 0 ? undefined : plan.after} snapshot={snapshot} layout={layout} includeRunner={false} />
+              if (separator === undefined && brk === undefined) return row
+              return (
+                <Box flexDirection="column">
+                  <BandBreakRows brk={brk} snapshot={snapshot} layout={layout} includeRunner={false} />
+                  {separator === undefined ? null : (
+                    <Text bold color="$fg-muted">
+                      {separator}
+                    </Text>
+                  )}
+                  {row}
+                </Box>
+              )
+            }}
+          />
+          {rows.length === 0 ? <Text color="$fg-muted">{empty}</Text> : null}
+        </>
+      )}
+      {/* Nothing is done yet, so the runner's row follows the last one. */}
+      <BandBreakRows
+        brk={rows.length === 0 ? undefined : plan.after}
+        snapshot={snapshot}
+        layout={layout}
+        includeRunner={false}
+      />
     </Box>
   )
 }

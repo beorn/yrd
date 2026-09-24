@@ -16,17 +16,7 @@
 
 import React from "react"
 import { Box, Text, renderString } from "silvery"
-import {
-  BandBreakRows,
-  ListStack,
-  LoudPause,
-  QueueLine,
-  RunnerDetail,
-  bandPlan,
-  bandedRows,
-  holdsChange,
-  runnerOf,
-} from "./watch-frame.tsx"
+import { BandBreakRows, ListStack, LoudPause, QueueLine, bandPlan, bandedRows, runnerOf } from "./watch-frame.tsx"
 import { NowProvider } from "./watch-clock.ts"
 import { ListHeader, ListRow, TopLine, listLayout, separatorBefore } from "./watch-list.tsx"
 import { queueLineStatus, type WatchSnapshot } from "./watch-pane.tsx"
@@ -49,22 +39,14 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
   // The bands, their order and their rules all come from watch-frame.tsx: a
   // page that spelled them here is how the pane drifted last time.
   const runner = runnerOf(snapshot, snapshot.at)
-  const holding = holdsChange(runner.state)
-  const rows = bandedRows(snapshot.rows, holding)
+  const rows = bandedRows(snapshot.rows, false)
   const queue = { digit: 1, label: snapshot.queue }
   const layout = listLayout(rows, columns, snapshot.at, runner, queue, {
     singleQueue: false,
     separateColumns: true,
     fullQueueRefs: true,
   })
-  const plan = bandPlan(
-    rows,
-    columns - 2,
-    snapshot.drafts?.window ?? "7d",
-    holding,
-    snapshot.drafts?.unread ?? 0,
-    true,
-  )
+  const plan = bandPlan(rows, columns - 2, snapshot.drafts?.window ?? "7d", false, snapshot.drafts?.unread ?? 0, true)
   return (
     <NowProvider readAt={snapshot.at} live={false}>
       <Box flexDirection="column" width={columns} minWidth={0}>
@@ -111,8 +93,6 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
                   queueDigit={queue.digit}
                   queueLabel={queue.label}
                 />
-                {/* The runner's second line hangs under the row that IS the runner. */}
-                {plan.holding === index ? <RunnerDetail snapshot={snapshot} named /> : null}
               </Box>
             )
           })}
