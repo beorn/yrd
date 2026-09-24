@@ -179,7 +179,7 @@ export async function gitSuperExecution(
           writeFileSync(output.stderr, execution.stderr)
         }
       } catch {
-        // best effort write if onOutput was not used by a custom runner
+        // silent-fallback-allow: best effort write if onOutput was not used by a custom runner
       }
     }
     try {
@@ -198,7 +198,7 @@ export async function gitSuperExecution(
             }),
       })
     } catch {
-      // publication errors shouldn't mask original behavior
+      // silent-fallback-allow: publication errors shouldn't mask original behavior
     }
     if (owned) await process.close()
   }
