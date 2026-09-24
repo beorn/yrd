@@ -5097,6 +5097,49 @@ describe("a queue run", () => {
     expect(aMessages[0]?.record).toBe("failed")
   })
 
+  it("a failed head stays failed once its branch is gone after a later head of it merged (@i/10-yrd/25568)", async () => {
+    const w = await world()
+    const headA = await submitCommit(w, "task/one", "one.txt")
+    const refA = changeRef("main", { branch: "task/one", head: headA })
+    expect((await queueRun(await w.options({ exit: 1 }))).exitCode).toBe(1)
+    await w.git(["checkout", "--quiet", "task/one"])
+    writeFileSync(join(w.work, "two.txt"), "two.txt\n")
+    await w.git(["add", "two.txt"])
+    await w.git(["commit", "--quiet", "-m", "two.txt"])
+    const headB = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/one",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    expect((await queueRun(await w.options({ exit: 0 }))).merged).toEqual(["task/one"])
+    // The branch was the only thing naming headB as what carried headA onto the target.
+    await w.git(["push", "--quiet", "origin", ":refs/heads/task/one"])
+
+    const settled = await queueRun(await w.options({ exit: 0 }))
+    expect(settled.exitCode).toBe(0)
+
+    const rows = list((await readQueue(w.git, "origin", "main", await remoteTarget(w))).changes)
+    const rowA = rows.find((row) => row.head === headA)
+    expect(rows.find((row) => row.head === headB)?.state).toBe("merged")
+    expect(rowA).toMatchObject({ state: "failed", reason: "superseded" })
+    expect(rowA?.supersededBy).toBeUndefined()
+    await fetchChanges(w)
+    expect((await readRecords(w.git, (await refAt(w.git, refA))!)).map((record) => record.kind)).toEqual([
+      "opened",
+      "checked",
+      "failed",
+      "sent",
+    ])
+    expect(
+      messages(w)
+        .filter((message) => message.change === changeName({ branch: "task/one", head: headA }))
+        .map((message) => message.record),
+    ).toEqual(["failed"])
+  })
+
   it("the target is not a change: a ref named after it is judged by nothing and messages nobody (2026-09-03 main@0a9db9daf7eb)", async () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
