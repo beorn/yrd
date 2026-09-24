@@ -999,6 +999,32 @@ describe("the pane's keys and the detail's identity", () => {
     }
   })
 
+  it("refreshes an ended detail when an unknown change event arrives", async () => {
+    const initial = row({ state: "merged", run: RUN_ID, at: NOW, endedAt: NOW, result: "pass" })
+    const open = opener([])
+    const { load, rounds } = gatedLoader()
+    const app = render(
+      <WatchPane snapshot={snapshot({ rows: [{ row: initial }] })} load={load} open={open} intervalMs={10} live />,
+      { cols: 200, rows: 50 },
+    )
+    try {
+      app.press("ArrowDown")
+      await waitFor(() => expect(open).toHaveBeenCalledTimes(1))
+      await settle(app)
+      const diagnostic = "unknown Yrd change event adopted at abc123"
+      await waitFor(() => expect(rounds.length).toBeGreaterThan(0))
+      rounds
+        .at(-1)
+        ?.resolve(snapshot({ at: new Date(NOW.getTime() + 2000), rows: [{ row: { ...initial, diagnostic } }] }))
+      await waitFor(() => expect(open).toHaveBeenCalledTimes(2))
+      await settle(app)
+      expect(current(app)).toContain(diagnostic)
+      expect(current(app)).toContain("✓ Merged")
+    } finally {
+      app.unmount()
+    }
+  })
+
   it.each([120, 220])(
     "opens the selected historical run's own detail when two rows have the same head at %i columns",
     async (cols) => {

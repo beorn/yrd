@@ -302,7 +302,7 @@ export function WatchPane({
   const draftWindow = useRef<DraftWindow>(snapshot.drafts?.window ?? "7d")
 
   const terminalFocused = useTerminalFocused()
-  const focused = focusedProp ?? (terminalFocused !== false)
+  const focused = focusedProp ?? terminalFocused !== false
 
   const refresh = useCallback(async () => {
     if (load === undefined) return
@@ -457,6 +457,7 @@ export function WatchPane({
     (heldDetail === undefined ||
       moving ||
       heldDetail.tipAt !== selected.row.at?.getTime() ||
+      heldDetail.detail.row.diagnostic !== selected.row.diagnostic ||
       // Journal reads allocate fresh objects; compare records, not their allocation identity.
       JSON.stringify(heldDetail.detail.row.diagnostics) !== JSON.stringify(selected.row.diagnostics))
   useEffect(() => {
@@ -745,18 +746,13 @@ export function WatchPane({
         <TopLine
           queue={shown.queue}
           queues={shown.queues}
-          visible={visibleQueues}
-          onToggle={toggleQueue}
           status={
             statusTimer(shown, nowProp ?? shown.at) !== undefined ||
             Math.max(0, (nowProp ?? shown.at).getTime() - shown.at.getTime()) > 120_000
               ? {
                   ...queueLineStatus(shown, nowProp ?? shown.at),
                   timer: (
-                    <LiveStatusTimer
-                      snapshot={shown}
-                      fallback={queueLineStatus(shown, nowProp ?? shown.at).timer}
-                    />
+                    <LiveStatusTimer snapshot={shown} fallback={queueLineStatus(shown, nowProp ?? shown.at).timer} />
                   ),
                 }
               : queueLineStatus(shown, nowProp ?? shown.at)
@@ -789,9 +785,7 @@ export function WatchPane({
                 {statsOpen ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} STATS · {statsLine}
               </Text>
             </Box>
-            {terminalRows < PILLS_MIN_ROWS ? null : (
-              <StatusPills buckets={buckets} onSelectOnly={selectOnly} />
-            )}
+            {terminalRows < PILLS_MIN_ROWS ? null : <StatusPills buckets={buckets} onSelectOnly={selectOnly} />}
           </Box>
           {statsOpen && decisions !== undefined ? (
             <StatsBox decisions={decisions} columns={columns - 2} timeRows={terminalRows >= STATS_TIME_MIN_ROWS} />
@@ -948,12 +942,7 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
   const timer = statusTimer(snapshot, now)
   const ageMs = Math.max(0, now.getTime() - snapshot.at.getTime())
   const ageText = ageMs > 120_000 ? `(data ${mediaDuration(ageMs)} old)` : undefined
-  const displayTimer =
-    timer === undefined
-      ? ageText
-      : ageText === undefined
-        ? timer
-        : `${timer} ${ageText}`
+  const displayTimer = timer === undefined ? ageText : ageText === undefined ? timer : `${timer} ${ageText}`
 
   if (word === "RUNNING") {
     return {
