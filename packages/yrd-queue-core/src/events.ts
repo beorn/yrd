@@ -23,6 +23,7 @@ export const CHANGE_STATUSES = [
 export type ChangeStatus = (typeof CHANGE_STATUSES)[number]
 export type ChangeEnding = "merged" | "failed" | "cancelled"
 export type CancellationReason = "resubmitted" | "dropped" | "deleted"
+const LANDING_IN_PROGRESS = "landing in progress; resubmit after merged/failed/stuck, resume if runner gone"
 
 export const EVENT_TRAILERS = {
   by: "By",
@@ -86,7 +87,7 @@ export function changeInput(
 ): EventInput {
   if (!COMMIT_OID.test(details.queueTip)) throw new TypeError(`Queue: must name a commit oid, got ${details.queueTip}`)
   if (Number.isNaN(details.at.getTime())) throw new TypeError("Time: needs a valid instant")
-  if ((type === "opened" || type === "verifying") && details.commit === undefined) {
+  if ((type === "opened" || type === "verifying" || type === "merging") && details.commit === undefined) {
     throw new TypeError(`${type} needs Commit:`)
   }
   if (type === "opened" && (details.by === undefined || details.by.trim() === "")) {
@@ -192,6 +193,15 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
   if (event.props.some(([key]) => key === "Status")) {
     throw new Error(`event ${event.id} stores Status:; status must be a fold`)
   }
+  if (
+    state.status === "merging" &&
+    event.type !== "merged" &&
+    event.type !== "failed" &&
+    event.type !== "stuck" &&
+    event.type !== "verifying"
+  ) {
+    throw new Error(`event ${event.id}: ${LANDING_IN_PROGRESS}`)
+  }
   const next = { ...state, at, tip: event.id }
   switch (event.type) {
     case "opened": {
@@ -225,6 +235,9 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       }
       if (event.type === "merging" && state.status !== "checking") {
         throw new Error(`event ${event.id} merging needs checking, found ${state.status}`)
+      }
+      if (event.type === "merging" && keptCommit(event) !== state.candidate) {
+        throw new Error(`event ${event.id} merging must keep verified candidate ${state.candidate ?? "absent"}`)
       }
       if (
         event.type === "verifying" &&

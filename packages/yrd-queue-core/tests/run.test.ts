@@ -757,10 +757,10 @@ it("discards a dropped event judgement and continues the round", async () => {
   expect(logRecords(outcome).some((row) => row.kind === "discarded" && row.branch === "task/a")).toBe(true)
 })
 
-/** @failure A partial event merge could land a root candidate before its component pin is published.
+/** @failure A local-only component could be treated as a publishable hosted child.
  * @level l3 @consumer queue operator and repository readers
  */
-it("refuses a component-bearing event change until pin publication is implemented", async () => {
+it("fails a local-only component event without moving root main", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   const child = join(w.workdir, "child")
@@ -795,17 +795,16 @@ it("refuses a component-bearing event change until pin publication is implemente
   await w.git(["push", "--quiet", "origin", "task/component"])
   await w.git(["checkout", "--quiet", "main"])
   // A local-file component URL cannot pass submit's hosted-identity check;
-  // record the same opened event so this test can probe the runner's gate.
+  // record the same opened event to prove the runner still refuses its publication.
   const chain = await openEvents({ ...store, ref: changesRef("main", "task/component") })
   await chain.append([changeInput("opened", { queueTip, at: new Date(), commit: head, by: "@dev/2" })], {
     expect: null,
   })
 
-  await expect(queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })).rejects.toThrow(
-    /component pins.*#25040/,
-  )
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/component"], merged: [] })
   expect(await remoteTarget(w)).toBe(target)
-  expect((await readStatus(store, "main", "task/component")).status).toBe("queued")
+  expect((await readStatus(store, "main", "task/component")).status).toBe("failed")
 })
 
 /** @failure An event round reported no direct merges after the target moved around the queue.
