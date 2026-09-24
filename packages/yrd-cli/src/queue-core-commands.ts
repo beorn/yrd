@@ -42,7 +42,8 @@ import {
   pauseLine,
   eventDirectMergeCommits,
   eventPause,
-  eventRows,
+  eventListRows,
+  enumerateChangeSegments,
   createEventStore,
   selectionFor,
   listRefs,
@@ -391,6 +392,10 @@ export type CoreQueueCommand =
        * (exit 2) when a selector matches nothing, which this does not change.
        */
       requireMatch?: boolean
+      /** Show ended event segments beyond the default seven-day window. */
+      all?: boolean
+      /** Include unsubmitted branch heads on event queues. */
+      drafts?: boolean
     }>
   | Readonly<{ command: "show"; branch: string }>
   | Readonly<{
@@ -1705,13 +1710,15 @@ export async function coreQueueCommand(
           drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
         }>
       > => {
-        // Legacy JSON retains its historical change-only document. An event
-        // queue has one status vocabulary beginning at `draft`, so its JSON
-        // and table both project the same one row per branch.
+        // JSON keeps one row per opened segment and per local run. The human
+        // table keeps each branch's current segment only.
         const format = await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)
         const reading =
           format === "event"
-            ? await readEventListing(git, declared.config, repo, workdir, declared.oid, selection)
+            ? await readEventListing(git, declared.config, repo, workdir, declared.oid, selection, {
+                all: request.all,
+                drafts: request.drafts,
+              })
             : {
                 format: "legacy" as const,
                 ...(await readListing(
@@ -1736,10 +1743,11 @@ export async function coreQueueCommand(
         // The operator read their own queue on 2026-09-17 and saw one branch
         // on two rows, which is what the old default did wherever a run
         // journal could be read.
-        const unfiltered = watchRows(all, { journals, perRun: true })
+        const unfiltered = watchRows(reading.format === "event" ? reading.document : all, { journals, perRun: true })
         const changes = filterRows(unfiltered, request.terms ?? []).filter((item) => item.row.state !== "draft")
         const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
-        const documentRows = reading.format === "event" ? rows : changes
+        const documentRows =
+          reading.format === "event" && request.drafts === true ? filterRows(unfiltered, request.terms ?? []) : changes
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = reading.format === "event" ? reading.pause : reading.queue.stop
@@ -1758,7 +1766,7 @@ export async function coreQueueCommand(
         const filteredScope =
           request.terms === undefined || request.terms.length === 0
             ? undefined
-            : `${String(documentRows.length)} of ${String(reading.format === "event" ? all.length : all.filter((row) => row.state !== "draft").length)} ${reading.format === "event" ? "branch(es)" : "change(s)"} match ${request.terms.join(" or ")}` +
+            : `${String(documentRows.length)} of ${String(reading.format === "event" ? reading.document.length : all.filter((row) => row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
               (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
         const baseScope =
           reading.format === "event"
@@ -3429,10 +3437,12 @@ async function readEventListing(
   workdir: string,
   targetOid: string,
   selection: GitSelection,
+  options: Readonly<{ all?: boolean; drafts?: boolean }> = {},
 ): Promise<
   Readonly<{
     format: "event"
     all: readonly Row[]
+    document: readonly Row[]
     journals: Journals
     drafts: DraftReading
     pause: PauseRecord | undefined
@@ -3461,19 +3471,32 @@ async function readEventListing(
     ),
     { targetSha: targetOid },
   )
-  const projected = [
-    ...eventRows(changes),
-    ...list([], { directMerges }),
-    ...eventRows(new Map(), [...drafts.dated, ...drafts.undated]),
-  ]
+  const segmentStates = new Map(
+    [...histories].map(
+      ([branch, history]) =>
+        [
+          branch,
+          enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), repo).map(
+            (segment) => segment.state,
+          ),
+        ] as const,
+    ),
+  )
+  const selected = eventListRows(segmentStates, [...drafts.dated, ...drafts.undated], options)
+  const now = new Date()
+  const directRows = list([], { directMerges, now, ...(options.all ? { sinceMs: Number.POSITIVE_INFINITY } : {}) })
+  const projected = [...selected.table, ...selected.document, ...directRows]
   const titles = await subjects(
     git,
     projected.map((row) => row.head),
   )
-  const all = projected.map((row) => ({
-    ...row,
-    ...(titles.get(row.head) === undefined ? {} : { subject: titles.get(row.head) }),
-  }))
+  const titled = (rows: readonly Row[]) =>
+    rows.map((row) => ({
+      ...row,
+      ...(titles.get(row.head) === undefined ? {} : { subject: titles.get(row.head) }),
+    }))
+  const all = titled([...selected.table, ...directRows])
+  const document = titled([...selected.document, ...directRows])
   const observation = await git.observe({
     version: 1,
     root: {
@@ -3490,6 +3513,7 @@ async function readEventListing(
   return {
     format: "event",
     all,
+    document,
     journals: readJournals(join(workdir, "logs")),
     drafts,
     pause: eventPause(queue),

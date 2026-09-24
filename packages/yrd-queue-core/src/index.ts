@@ -44,6 +44,7 @@ export {
   drop,
   eventPause,
   evolve,
+  enumerateChangeSegments,
   initial,
   listChangeHistories,
   listChanges,
@@ -68,7 +69,7 @@ export type {
   DropRequest,
   Dropped,
 } from "./events.ts"
-export { eventRows } from "./event-table.ts"
+export { eventListRows, eventRows } from "./event-table.ts"
 export { assertPlainEventQueueConfig } from "./event-config.ts"
 export {
   appendRecord,

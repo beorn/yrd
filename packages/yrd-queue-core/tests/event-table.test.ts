@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest"
 import type { Event } from "gitomic/events"
 import { evolve, initial } from "../src/events.ts"
-import { eventRows } from "../src/event-table.ts"
+import { eventListRows, eventRows } from "../src/event-table.ts"
 import { clocks } from "../src/table.ts"
 
 const QUEUE = "a".repeat(40)
@@ -22,6 +22,24 @@ function event(
 }
 
 describe("event changes use the shared table row", () => {
+  it("keeps the default seven-day table current and JSON historical, with drafts and older endings opt-in", () => {
+    const recent = new Date("2026-09-23T14:00:00.000Z")
+    const old = new Date("2026-09-01T14:00:00.000Z")
+    const now = new Date("2026-09-24T14:00:00.000Z")
+    const current = { status: "queued" as const, commit: HEAD, since: recent, at: recent }
+    const prior = { status: "merged" as const, commit: "c".repeat(40), since: old, at: recent, endedAt: recent }
+    const ancient = { status: "failed" as const, commit: "d".repeat(40), since: old, at: old, endedAt: old }
+    const histories = new Map([["task/change", [ancient, prior, current]]])
+    const drafts = [
+      { branch: "task/draft", head: "e".repeat(40), committedAt: recent, author: "dev", movedSinceSubmit: false },
+    ]
+    const normal = eventListRows(histories, drafts, { now })
+    expect(normal.table.map((row) => row.head)).toEqual([HEAD])
+    expect(normal.document.map((row) => row.head)).toEqual([HEAD, prior.commit])
+    const expanded = eventListRows(histories, drafts, { now, all: true, drafts: true })
+    expect(expanded.table.map((row) => row.head)).toEqual([HEAD, drafts[0]!.head])
+    expect(expanded.document.map((row) => row.head)).toEqual([HEAD, prior.commit, ancient.commit, drafts[0]!.head])
+  })
   it("projects one row per branch with the fold's current status, submitted head and ending reason", () => {
     const opened = evolve(
       initial,

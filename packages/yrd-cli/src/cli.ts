@@ -603,6 +603,8 @@ function buildProgram(
       interval?: number
       status?: string
       requireMatch?: boolean
+      all?: boolean
+      drafts?: boolean
     }>,
   ): CoreQueueCommand => {
     // `--status` is a SPELLING of a filter term, never a second filter path.
@@ -621,6 +623,8 @@ function buildProgram(
       ...(options.watch === true ? { watch: true } : {}),
       ...(options.interval === undefined ? {} : { intervalSeconds: options.interval }),
       ...(options.requireMatch === true ? { requireMatch: true } : {}),
+      ...(options.all === true ? { all: true } : {}),
+      ...(options.drafts === true ? { drafts: true } : {}),
     }
   }
   const listOptions = <T extends { option: (flags: string, description: string, parser?: unknown) => T }>(
@@ -628,6 +632,8 @@ function buildProgram(
   ): T =>
     command
       .option("--latest", "one row per change; the default keeps every run that touched it")
+      .option("--all", "include ended changes older than seven days on event queues")
+      .option("--drafts", "include unsubmitted branch heads on event queues")
       .option("--status <state>", "select by state: exactly the same as giving <state> as a filter term")
       .option("--json", "emit stable JSON: result belongs to the run named by run; state is the current change state")
       .option("--queue <value>", QUEUE_HELP)
@@ -642,7 +648,7 @@ function buildProgram(
   const STATES_HELP = legendLines().join("\n")
   const WATCH_FLAG_HELP = "refresh until the selected change ends, exiting with its code as yrd check does"
   const queueList = async (filters: readonly string[] | undefined, options: unknown): Promise<void> => {
-    const { interval, json, latest, status, watch, queue, requireMatch } = options as {
+    const { interval, json, latest, status, watch, queue, requireMatch, all, drafts } = options as {
       interval?: number
       json?: boolean
       latest?: boolean
@@ -650,12 +656,14 @@ function buildProgram(
       watch?: boolean
       queue?: string
       requireMatch?: boolean
+      all?: boolean
+      drafts?: boolean
     }
     const location = await resolveQueueLocation(cwd(), queue, env, "reader")
     const taken = await coreQueueCommand(
       location.repo,
       io,
-      listRequest(filters ?? [], { interval, latest, status, watch, requireMatch }),
+      listRequest(filters ?? [], { interval, latest, status, watch, requireMatch, all, drafts }),
       {
         selection: location.selection,
         populateReference: location.owned,
