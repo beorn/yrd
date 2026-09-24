@@ -687,7 +687,7 @@ describe("the status box (items 1, 23, 29a, 39)", () => {
 
     expect(text).toContain("✓ passed, merged")
     expect(text).toContain("Merged as b234234abcde at")
-    expect(text).toContain("runtime 3:45")
+    expect(text).toContain("runtime 03:45")
   })
 
   it("reads a check that is switched off as off, in the step line and on the tab strip, never a tick (25422)", async () => {
@@ -1409,7 +1409,7 @@ describe("the RUNNER marker is wired to the ROWS, not to the process (items 1, 5
 
     // `processing` retired in S1: the runner's row shares the STATUS column with
     // every change's, so it says the same word a checking change says.
-    expect(app.text).toContain("1h00m / 2:31")
+    expect(app.text).toContain("1h00m / 02:31")
     expect(app.text, "the queue is not idle while it is checking something").not.toMatch(/\bidle \d/u)
     app.unmount()
   })
@@ -1870,7 +1870,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(line).toContain(`lint override expired ${clock(ended)}`)
   })
 
-  it("says an operator's pause that names no change as paused, since when and by whom, in the stop's slot, and never drops the word (A2-set-v3 Q3)", async () => {
+  it("says an operator's pause that names no change as stopped, since when and by whom, in the stop's slot, and never drops the word (A2-set-v3 Q3, 25367)", async () => {
     const W = await words()
     const since = ago(25 * MINUTE)
     const rows: WatchRow[] = [
@@ -1888,14 +1888,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
           columns: cols,
         })
       ).split("\n")
-      return (page.find((l) => l.includes("paused")) ?? "").trim()
+      return (page.find((l) => l.includes("stopped")) ?? "").trim()
     }
     const waiting = `5 ${W.waiting.word}`
 
     expect({ 70: await at(70), 50: await at(50), 40: await at(40) }).toEqual({
-      70: `${waiting}: 2 ${W.pending.word}, 3 ${W.submitted.word} · paused since ${clock(since)} by @chief`,
-      50: `${waiting} · paused since ${clock(since)} by @chief`,
-      40: `${waiting} · paused by @chief`,
+      70: `${waiting}: 2 ${W.pending.word}, 3 ${W.submitted.word} · stopped since ${clock(since)} by @chief`,
+      50: `${waiting} · stopped since ${clock(since)} by @chief`,
+      40: `${waiting} · stopped by @chief`,
     })
   })
 
@@ -1998,7 +1998,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         waitingAboveZ: after[zIdx - 1]?.replace(/\s/g, "").startsWith("─") ?? false,
       },
       before: {
-        top: counted(before).includes(`2 ${W.draft.word}s (7d) · 2 not yet read`),
+        top: counted(before).includes(`2 ${W.draft.word}s (1d) · 2 not yet read`),
         unreadRow: tableRow(before, " task/unread "),
       },
       requested: load.mock.calls.map(([request]) => request),
@@ -2009,7 +2009,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     })
   })
 
-  it("draws drafts band rule with '0 drafts (7d) · N not yet read' when unread heads exist without dated drafts", async () => {
+  it("says '0 drafts (1d) · N not yet read' on the STATS line when unread heads exist without dated drafts", async () => {
     const W = await words()
     const snap = snapshot({
       drafts: { unread: 2, window: "7d" },
@@ -2029,7 +2029,21 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const painted = await lines(snap, 140, 40)
     const draftsLine = painted.find((l) => l.includes(`${W.draft.word}`))
     expect(draftsLine).toBeDefined()
-    expect(draftsLine).toContain(`0 ${W.draft.word}s (7d) · 2 not yet read`)
+    expect(draftsLine).toContain(`0 ${W.draft.word}s (1d) · 2 not yet read`)
+    expect(draftsLine).toContain("STATS")
+  })
+
+  it("draws no drafts line in the table, and says the drafts on the STATS line (25417)", async () => {
+    const W = await words()
+    const snap = snapshot({
+      drafts: { older: 98, unread: 0, window: "7d" },
+      rows: [draft("task/d1", "a".repeat(40), ago(2 * 60 * MINUTE), "ada")],
+      runner: RUNNER,
+    } as Partial<WatchSnapshot>)
+    const painted = await lines(snap, 140, 40)
+
+    expect(painted.filter((line) => line.includes(`${W.draft.word}`) && line.includes("──"))).toEqual([])
+    expect(painted.find((line) => line.includes("STATS"))).toContain(`1 ${W.draft.word} (1d) · 98 older`)
   })
 
   it("draws draft rows and a draft's detail from the snapshot alone: redrawing, moving over drafts and opening one reads nothing (A2-set-v3)", async () => {
@@ -2087,9 +2101,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         time: /\bTIME\b/u.test(header),
         runtime: /\bRUNTIME\b/u.test(header),
       },
-      held: held.includes("40:00 / 3:21"),
+      held: held.includes("40:00 / 03:21"),
       waiting: waiting.includes("12:03 / —"),
-      merged: merged.includes("12:00 / 4:10"),
+      merged: merged.includes("12:00 / 04:10"),
     }).toEqual({
       header: { age: true, time: true, runtime: false },
       held: true,
@@ -2115,7 +2129,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const detail = await paint(at(<WatchDetail detail={detailOf({ row: held }, [])} selected={CHANGES_TAB} />), [], 100)
 
     expect(header).toContain("AGE / RUN")
-    expect(change).toContain("5h37m / 4:00")
+    expect(change).toContain("5h37m / 04:00")
     expect(detail).toMatch(/CREATED\s+\d\d:\d\d:\d\d · 5h37m ago/u)
   })
 
@@ -2179,8 +2193,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     }).toEqual({
       detail: "50:00",
       oldClocks: false,
-      runtime: "3:00",
-      table: expect.stringContaining("50:00 / 3:00"),
+      runtime: "03:00",
+      table: expect.stringContaining("50:00 / 03:00"),
     })
   })
 
@@ -2219,7 +2233,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const line = tableRow(painted, " task/d")
     expect({
       by: / —/.test(line) && !/ ada\b/u.test(line),
-      counted: painted.some((l) => l.includes(`1 ${W.draft.word} (7d)`)),
+      counted: painted.some((l) => l.includes(`1 ${W.draft.word} (1d)`)),
       noRun: line.includes("/ —"),
       waiting: painted.some((l) => l.includes("1 in line")),
       word: line.includes(` ${W.draft.word} `),
@@ -3136,7 +3150,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     pausedApp.unmount()
   })
 
-  it("item 7: bandPlan produces a rule only for drafts, and no rules between drafts/waiting or waiting/done or below RUNNER box", () => {
+  it("item 7: bandPlan opens the drafts with a bare rule only when asked, and no rules between drafts/waiting or waiting/done or below RUNNER box", () => {
     const draftRows: WatchRow[] = [
       { row: row({ state: "draft", branch: "task/d1", at: NOW }) },
       { row: row({ state: "draft", branch: "task/d2", at: NOW }) },
@@ -3147,12 +3161,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     ]
     const doneRows: WatchRow[] = [{ row: row({ state: "merged", branch: "task/m1" }) }]
     const rows = [...draftRows, ...waitingRows, ...doneRows]
-    const plan = bandPlan(rows, 120)
+    // The watch draws no drafts line (25417); the page's static list opens them with a bare rule.
+    expect(bandPlan(rows, 120).before.get(0)).toBeUndefined()
+    const plan = bandPlan(rows, 120, "bare")
 
-    // Rule opens drafts at index 0
+    // A bare rule opens drafts at index 0
     const draftsBreak = plan.before.get(0)
     expect(draftsBreak?.rules).toHaveLength(1)
-    expect(draftsBreak?.rules[0]).toContain("drafts")
+    expect(draftsBreak?.rules[0]).toMatch(/^─+$/u)
 
     // No rule between drafts and waiting (index 2)
     const waitingBreak = plan.before.get(2)
@@ -3219,7 +3235,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(idleApp)
     const idleTop = idleApp.lines.find((l) => l.includes("YRD"))!
-    expect(idleTop.trimStart().startsWith("○ YRD IDLE")).toBe(true)
+    expect(idleTop.trimStart().startsWith("◉ YRD RUNNING")).toBe(true)
     idleApp.unmount()
 
     // 2. Stopped runner
@@ -3255,7 +3271,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(stuckApp)
     const stuckTop = stuckApp.lines.find((l) => l.includes("YRD"))!
-    expect(stuckTop.trimStart().startsWith("◌ YRD STUCK")).toBe(true)
+    expect(stuckTop.trimStart().startsWith("■ YRD STOPPED")).toBe(true)
     stuckApp.unmount()
   })
 

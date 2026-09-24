@@ -190,6 +190,8 @@ export type QueueRunOptions = Readonly<{
   overridesExpired?: readonly OverrideEntry[]
   /** The entries whose half-window reminder the caller recorded for this round; notified once (25296). */
   overridesReminded?: readonly OverrideEntry[]
+  /** Skip every check declared in .yrd.yml and merge with git machinery only: `yrd merge --no-check`. */
+  noCheck?: boolean
 }> &
   RingOptions
 
@@ -219,6 +221,8 @@ export type QueueRunOutcome = Readonly<{
    * ended before it could read the line.
    */
   checkedWaiting: number
+  /** Present and true when this round ran with --no-check. */
+  noCheck?: boolean
 }>
 
 /** Everything one run's steps share. */
@@ -503,10 +507,14 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   log.write({
     base: options.targetSha,
     checks: options.checks.map((check) => check.name),
-    effectiveChecks: options.checks.map((check) => (check.run === "true" ? "off" : check.name)),
+    effectiveChecks:
+      options.noCheck === true
+        ? options.checks.map(() => "off")
+        : options.checks.map((check) => (check.run === "true" ? "off" : check.name)),
     config: options.configBlob,
     kind: "run",
     gitlink: options.targetSha,
+    ...(options.noCheck === true ? { noCheck: true } : {}),
     // Every override entry this round reads, active or expired, one line each
     // (25296 C5): the journal says a check was off before any change says so.
     overrides: (options.overrides?.entries ?? []).map((entry) => overrideLine(entry, nowMs(options))),
@@ -3097,6 +3105,7 @@ function checkTrailers(results: readonly CheckResult[]): readonly (readonly [str
  * the same list; submit never consults the override.
  */
 function phaseChecks(run: Run, declaredPhase: CandidatePhase): readonly CheckSpec[] {
+  if (run.options.noCheck === true) return []
   const declared = run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes(declaredPhase))
   if (declaredPhase !== "merge") return declared
   const off = new Set(overriddenAtMerge(run).map((entry) => entry.check))
@@ -3275,6 +3284,7 @@ function finish(
     log: run.log.path,
     run: run.log.id,
     target: targetNow,
+    ...(run.options.noCheck === true ? { noCheck: true } : {}),
     ...lists,
   }
 }

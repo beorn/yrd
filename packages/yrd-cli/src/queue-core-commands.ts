@@ -71,6 +71,7 @@ import {
   refAt,
   readDrafts,
   DRAFT_WINDOW_MS,
+  foldDrafts,
   endingInstants,
   submit,
   withdraw,
@@ -262,6 +263,7 @@ export type CoreQueueCommand =
        * only a change already in line.
        */
       author?: Readonly<{ repo: string; selection: GitSelection; remote?: string }>
+      noCheck?: boolean
     }>
   | Readonly<{
       command: "up"
@@ -474,6 +476,7 @@ export async function coreQueueCommand(
     only?: Change,
     tier?: "normal" | "long",
     stopAtMs?: number,
+    noCheck?: boolean,
   ): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
@@ -496,6 +499,7 @@ export async function coreQueueCommand(
         ...(only === undefined ? {} : { only }),
         ...(tier === undefined ? {} : { tier }),
         ...(stopAtMs === undefined ? {} : { stopAtMs }),
+        ...(noCheck === undefined ? {} : { noCheck }),
       })
     } catch (error) {
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
@@ -577,6 +581,7 @@ export async function coreQueueCommand(
       stopAtMs?: number
       stallMs?: number
       stop?: AbortSignal
+      noCheck?: boolean
       waiting?: Readonly<{
         onWait: (wait: RoundLockWait) => void
         onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>) => void
@@ -646,7 +651,7 @@ export async function coreQueueCommand(
       if (declared === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
       const before = await round.before?.(declared)
       if (before !== undefined) return before
-      const outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs)
+      const outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck)
       return outcome === undefined ? 2 : { declared, outcome }
     } finally {
       lock.release()
@@ -1057,7 +1062,7 @@ export async function coreQueueCommand(
         change = { branch, head: submitted.head }
       }
 
-      const merging = await lockedRound({ only: change })
+      const merging = await lockedRound({ only: change, noCheck: request.noCheck })
       if (typeof merging === "number") return merging
       let after = await readChangeNow(change)
       // A stopped line waits on a stuck change, and a change merged past it may
@@ -1085,8 +1090,15 @@ export async function coreQueueCommand(
       emit(
         io,
         options.json,
-        { branch, change: changeName(change), exitCode: ending ?? 2, state, stopped: stopFact(after.stop) },
-        `${changeName(change)} ${state}`,
+        {
+          branch,
+          change: changeName(change),
+          exitCode: ending ?? 2,
+          state,
+          stopped: stopFact(after.stop),
+          ...(request.noCheck === true ? { noCheck: true } : {}),
+        },
+        `${changeName(change)} ${state}${request.noCheck === true ? " (checks skipped: --no-check)" : ""}`,
       )
       if (ending !== undefined) return ending
       // Still in line: checked and not merged, or never reached. Exit 2 and no
@@ -1524,8 +1536,8 @@ export async function coreQueueCommand(
           stopped: StopFact | null
           /** The merge-check override table, active and expired entries alike (25296); empty on an event queue. */
           overrides: readonly OverrideFact[]
-          /** Which drafts the rows list, and the heads of the drafts this repository has not read. */
-          drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
+          /** Which drafts the rows list, the heads of the drafts this repository has not read, and how many older ones fold into a count. */
+          drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
         }>
       > => {
         // Legacy JSON retains its historical change-only document. An event
@@ -1622,7 +1634,13 @@ export async function coreQueueCommand(
           overrides,
           ...(drafts === undefined
             ? {}
-            : { drafts: { unread: drafts.undated.map((draft) => draft.head), window: draftWindow } }),
+            : {
+                drafts: {
+                  unread: drafts.undated.map((draft) => draft.head),
+                  window: draftWindow,
+                  older: "olderDrafts" in reading ? (reading.olderDrafts ?? 0) : 0,
+                },
+              }),
         }
       }
       /**
@@ -2548,11 +2566,14 @@ function describeRun(
     log: string
     stopped?: Readonly<{ says: string }>
     observation: GitObservation
+    noCheck?: boolean
   }>,
 ): string {
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
   const parts = [
-    outcome.merged.length > 0 ? `${STATE_WORDS.merged.word} ${outcome.merged.join(", ")}` : undefined,
+    outcome.merged.length > 0
+      ? `${STATE_WORDS.merged.word} ${outcome.merged.join(", ")}${outcome.noCheck === true ? " (checks skipped: --no-check)" : ""}`
+      : undefined,
     outcome.failed.length > 0 ? `${STATE_WORDS.failed.word} ${outcome.failed.join(", ")}` : undefined,
     outcome.stuck.length > 0 ? `${STATE_WORDS.stuck.word} ${outcome.stuck.join(", ")}` : undefined,
     outcome.directMerges.length > 0
@@ -2872,7 +2893,7 @@ function snapshotOf(
     decisions: readonly RunDecision[]
     stopped: StopFact | null
     overrides?: readonly OverrideFact[]
-    drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
+    drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
   }>,
 ): WatchSnapshot {
   return {
@@ -2888,7 +2909,7 @@ function snapshotOf(
     ...(round.overrides === undefined ? {} : { overrides: round.overrides }),
     ...(round.drafts === undefined
       ? {}
-      : { drafts: { unread: round.drafts.unread.length, window: round.drafts.window } }),
+      : { drafts: { unread: round.drafts.unread.length, window: round.drafts.window, older: round.drafts.older } }),
     ...(round.pause === undefined ? {} : { pause: round.pause }),
     ...(round.journalAbsent === undefined ? {} : { journalAbsent: round.journalAbsent }),
   }
@@ -3291,6 +3312,8 @@ export async function readListing(
     all: readonly Row[]
     /** The drafts of the window asked for; absent when none was. */
     drafts?: DraftReading
+    /** The seven-day drafts older than a day, folded into a count rather than listed (25424). */
+    olderDrafts?: number
     observation: GitObservation
   }>
 > {
@@ -3318,6 +3341,7 @@ export async function readListing(
           targetSha: targetOid,
           ...(window === "7d" ? { since: new Date(Date.now() - DRAFT_WINDOW_MS) } : {}),
         })
+  const folded = foldDrafts(drafts?.dated ?? [], new Date())
   const all = list(queue.changes, {
     directMerges: await directMergeCommits(git, config.target.branch, targetOid, queue.changes),
     journals,
@@ -3326,8 +3350,9 @@ export async function readListing(
       queue.changes.map((entry) => entry.change.head),
     ),
     ...(options.shown === undefined ? {} : { endings: await endingInstants(git, queue.changes) }),
-    // Seven days lists the drafts it can date and counts the rest; every draft lists them all, marked.
-    ...(drafts === undefined ? {} : { drafts: window === "all" ? [...drafts.dated, ...drafts.undated] : drafts.dated }),
+    // Seven days lists the drafts of the last day and counts the older ones
+    // and the undated apart; every draft lists them all, marked.
+    ...(drafts === undefined ? {} : { drafts: window === "all" ? [...drafts.dated, ...drafts.undated] : folded.rows }),
   })
   return {
     all: markStaleVerdicts(all, queue.changes, config.blob),
@@ -3335,6 +3360,7 @@ export async function readListing(
     queue,
     observation,
     ...(drafts === undefined ? {} : { drafts }),
+    ...(drafts === undefined || window === "all" ? {} : { olderDrafts: folded.older }),
   }
 }
 

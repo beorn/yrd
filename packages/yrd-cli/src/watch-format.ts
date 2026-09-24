@@ -309,9 +309,17 @@ export function ageRunText(row: Row, now: Date): string {
   const isEnded =
     row.state === "merged" || row.state === "failed" || row.state === "cancelled" || row.state === "withdrawn"
   const runtime = measured.runtimeMs ?? measured.checkingMs ?? (isEnded ? measured.tookMs : undefined)
-  const run = runtime === undefined ? "—" : mediaDuration(runtime)
+  const run = runtime === undefined ? "—" : runTime(runtime)
   return `${age} / ${run}`
 }
+
+/** A run time as the table and the detail both say it: every number zero-padded, so it reads 03:02 (25421). */
+export function runTime(milliseconds: number): string {
+  return mediaDuration(milliseconds).replace(/^\d(?=\D)/u, (digit) => `0${digit}`)
+}
+
+/** The AGE / RUN cell's least width: an mm:ss age and an mm:ss run time, so a run time appearing never widens the column (25421). */
+export const AGE_RUN_MIN_WIDTH = "00:00 / 00:00".length
 
 /** Bare numeric attempt / timestamp identifier without label prefix: `085315` or `—`. */
 export function runIdentifier(id: string | undefined): string {
@@ -336,7 +344,7 @@ export function queueRunText(digit: number, label: string, runId: string | undef
  */
 export function timingLine(row: Row, now: Date): string {
   const { runtimeMs } = clocks(row, now)
-  return [durationText(row, now), runtimeMs === undefined ? "" : `runtime ${mediaDuration(runtimeMs)}`]
+  return [durationText(row, now), runtimeMs === undefined ? "" : `runtime ${runTime(runtimeMs)}`]
     .filter((part) => part !== "")
     .join(" · ")
 }

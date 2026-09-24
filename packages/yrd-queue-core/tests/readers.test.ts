@@ -998,6 +998,36 @@ describe("the head subjects", () => {
     expect(found.has(absent)).toBe(false)
   })
 
+  it("titles a merge-only re-cut by the change's own newest commit, never the merge's subject (25425)", async () => {
+    const root = scratch("subjects-recut")
+    const git = gitIn(root)
+    await git(["init", "--quiet", "--initial-branch=main", root])
+    await git(["config", "user.email", "queue@yrd.test"])
+    await git(["config", "user.name", "yrd"])
+    const commit = async (file: string, message: string): Promise<void> => {
+      writeFileSync(join(root, file), `${file}\n`)
+      await git(["add", "."])
+      await git(["commit", "--quiet", "-m", message])
+    }
+    await commit("base.txt", "main's base")
+    await git(["checkout", "--quiet", "-b", "task/one"])
+    await commit("one.txt", "fix(parser): keep the last token")
+    const own = (await git(["rev-parse", "HEAD"])).trim()
+    // Two re-cuts in a row: main moved twice, and each time only main was merged in.
+    for (const step of ["first", "second"]) {
+      await git(["checkout", "--quiet", "main"])
+      await commit(`${step}.txt`, `main moved: ${step}`)
+      await git(["checkout", "--quiet", "task/one"])
+      await git(["merge", "--quiet", "--no-edit", "main"])
+    }
+    const recut = (await git(["rev-parse", "HEAD"])).trim()
+
+    const found = await subjects(git, [own, recut])
+
+    expect(found.get(own)).toBe("fix(parser): keep the last token")
+    expect(found.get(recut)).toBe("fix(parser): keep the last token")
+  })
+
   it("asks git nothing at all for an empty table, because git with no revision walks HEAD", async () => {
     let asked = 0
     const git: Git = async () => {
