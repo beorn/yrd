@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it, vi } from "vitest"
@@ -37,6 +37,279 @@ function declareGit(root: string, value: string, file?: string): void {
 }
 
 describe("the git runner", () => {
+  // 25282: a settled SSH refusal used to end the read immediately. This test
+  // proves the retry traverses the real supervised runner and retains BOTH
+  // invocations, which a predicate-only unit test would miss.
+  it.each([1, 2])(
+    "retries one exact publickey refusal, preserving both invocations (failures=%i)",
+    async (failures) => {
+      const root = temporaryRoot("publickey-read")
+      const executable = publickeyExecutable(root, failures)
+      const log = openLog(join(root, "logs"))
+      const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+      const git = gitIn(
+        root,
+        undefined,
+        { executable, contract: "native", scope: "local", origin: "fixture" },
+        {
+          env: { ...process.env, GIT_SSH_COMMAND: "ssh -i /tmp/fleet-key -o IdentitiesOnly=yes" },
+          openOutput: log.openGitOutput,
+          onInvocation: log.writeGitInvocation,
+        },
+      )
+      try {
+        const read = git(["ls-remote", "origin", "refs/heads/main"])
+        if (failures === 1) expect(await read).toContain("refs/heads/main")
+        else {
+          const error = await read.catch((error: unknown) => error)
+          expect(error).toBeInstanceOf(gitRunner.GitExit)
+          if (!(error instanceof gitRunner.GitExit)) throw new Error("Expected the second refusal to fail")
+          expect(error.message).toContain("git ls-remote origin refs/heads/main")
+          expect(error.message).toContain("Permission denied (publickey).")
+        }
+        expect(readFileSync(join(root, "calls"), "utf8").trim().split("\n")).toHaveLength(2)
+        const rows = readRunLog(join(root, "logs"), log.id)
+        expect(rows).toHaveLength(2)
+        const first = rows[0]
+        const second = rows[1]
+        expect(first).toMatchObject({ kind: "git", complete: true })
+        expect(second).toMatchObject({ kind: "git", complete: true })
+        const firstEvidence = JSON.parse(readFileSync(String(first?.evidence), "utf8")) as {
+          artifacts: { stderr: string }
+        }
+        const secondEvidence = JSON.parse(readFileSync(String(second?.evidence), "utf8")) as {
+          artifacts: { stderr: string }
+        }
+        expect(readFileSync(firstEvidence.artifacts.stderr, "utf8")).toContain("Permission denied (publickey).")
+        expect(readFileSync(secondEvidence.artifacts.stderr, "utf8")).toContain("Offering public key: fleet-key")
+        expect(announced).toHaveBeenCalledOnce()
+      } finally {
+        announced.mockRestore()
+      }
+    },
+  )
+
+  it.each([
+    ["push", "git@github.com: Permission denied (publickey)."],
+    ["ls-remote", "fatal: repository not found"],
+  ] as const)("never retries %s after %s", async (verb, refusal) => {
+    const root = temporaryRoot("nonretry")
+    const executable = publickeyExecutable(root, 1, refusal)
+    const git = gitIn(root, undefined, { executable, contract: "native", scope: "local", origin: "fixture" })
+    await expect(git([verb, "origin"])).rejects.toThrow(refusal)
+    expect(readFileSync(join(root, "calls"), "utf8").trim().split("\n")).toHaveLength(1)
+  })
+
+  it.each(["exit 128", "timeout"] as const)(
+    "keeps the first refusal and names a failed SSH config lookup (%s)",
+    async (failure) => {
+      const root = temporaryRoot("config-read-failure")
+      const executable = publickeyExecutable(root, 1)
+      const bin = join(root, "bin")
+      mkdirSync(bin)
+      writeFileSync(
+        join(bin, "git"),
+        failure === "exit 128"
+          ? "#!/bin/sh\nprintf 'fatal: broken config\\n' >&2\nexit 128\n"
+          : "#!/usr/bin/env bun\nawait Bun.sleep(6000)\n",
+        { mode: 0o700 },
+      )
+      const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        const git = gitIn(
+          root,
+          undefined,
+          { executable, contract: "native", scope: "local", origin: "fixture" },
+          { env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } },
+        )
+        await expect(git(["ls-remote", "origin"])).rejects.toThrow("Permission denied (publickey).")
+        expect(readFileSync(join(root, "calls"), "utf8").trim().split("\n")).toHaveLength(1)
+        expect(announced.mock.calls[0]?.[0]).toContain("SSH retry skipped")
+        expect(announced.mock.calls[0]?.[0]).toContain("cannot read core.sshCommand")
+      } finally {
+        announced.mockRestore()
+      }
+    },
+  )
+
+  it("aborts during publickey backoff without running a second Git read", async () => {
+    const root = temporaryRoot("publickey-abort")
+    const executable = publickeyExecutable(root, 1)
+    const controller = new AbortController()
+    const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const git = gitIn(
+        root,
+        undefined,
+        { executable, contract: "native", scope: "local", origin: "fixture" },
+        {
+          env: { ...process.env, GIT_SSH_COMMAND: "ssh -i /tmp/fleet-key" },
+          signal: controller.signal,
+          onInvocation: () => setTimeout(() => controller.abort(), 50),
+        },
+      )
+      await expect(git(["fetch", "origin"])).rejects.toThrow("Permission denied (publickey).")
+      expect(readFileSync(join(root, "calls"), "utf8").trim().split("\n")).toHaveLength(1)
+      expect(announced).toHaveBeenCalledOnce()
+    } finally {
+      announced.mockRestore()
+    }
+  })
+
+  // 25282: legacy event-ref reads spawn Gitomic's shell backend directly.
+  // The gitIn case above cannot catch a retry omitted from this seam.
+  it.each([
+    ["ls-remote", 1],
+    ["ls-remote", 2],
+    ["fetch", 1],
+    ["fetch", 2],
+  ] as const)("retries a Gitomic %s publickey refusal once (failures=%i)", async (verb, failures) => {
+    const { repo, ssh, calls } = legacyPublickeyRepo(failures)
+    const previous = process.env.GIT_SSH_COMMAND
+    const previousVariant = process.env.GIT_SSH_VARIANT
+    process.env.GIT_SSH_COMMAND = ssh
+    process.env.GIT_SSH_VARIANT = "ssh"
+    const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const backend = gitRunner.createLegacyBackend()
+      const read =
+        verb === "fetch"
+          ? backend.fetchRefs!(repo, ["refs/heads/main"], "git@github.com:fixture")
+          : backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")
+      if (failures === 1) expect((await read).get("refs/heads/main")).toMatch(/^[a-f0-9]{40}$/u)
+      else {
+        const error = await read.catch((error: unknown) => error)
+        expect(error).toBeInstanceOf(Error)
+        if (!(error instanceof Error)) throw new Error("Expected a second refusal")
+        expect(error.message).toContain(`git ${verb}`)
+        expect(error.message).toContain("Permission denied (publickey).")
+        expect(error.message).toContain("Offering public key: fleet-key")
+      }
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(2)
+      expect(announced).toHaveBeenCalledOnce()
+      expect(announced.mock.calls[0]?.[0]).toContain("Permission denied (publickey).")
+    } finally {
+      announced.mockRestore()
+      if (previous === undefined) delete process.env.GIT_SSH_COMMAND
+      else process.env.GIT_SSH_COMMAND = previous
+      if (previousVariant === undefined) delete process.env.GIT_SSH_VARIANT
+      else process.env.GIT_SSH_VARIANT = previousVariant
+    }
+  })
+
+  it("does not retry a different Gitomic SSH failure", async () => {
+    const refusal = "fatal: repository not found"
+    const { repo, ssh, calls } = legacyPublickeyRepo(1, refusal)
+    const previous = process.env.GIT_SSH_COMMAND
+    const previousVariant = process.env.GIT_SSH_VARIANT
+    process.env.GIT_SSH_COMMAND = ssh
+    process.env.GIT_SSH_VARIANT = "ssh"
+    try {
+      const backend = gitRunner.createLegacyBackend()
+      await expect(backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")).rejects.toThrow(refusal)
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1)
+    } finally {
+      if (previous === undefined) delete process.env.GIT_SSH_COMMAND
+      else process.env.GIT_SSH_COMMAND = previous
+      if (previousVariant === undefined) delete process.env.GIT_SSH_VARIANT
+      else process.env.GIT_SSH_VARIANT = previousVariant
+    }
+  })
+
+  it("keeps Gitomic's first refusal when SSH config cannot be read", async () => {
+    const { repo, ssh, calls } = legacyPublickeyRepo(1)
+    const bin = join(resolve(repo, ".."), "bin")
+    mkdirSync(bin)
+    const nativeGit = Bun.which("git")
+    if (nativeGit === null) throw new Error("Fixture needs native git")
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh
+if [ "$1" = "config" ] && [ "$2" = "--get" ]; then
+  printf 'fatal: broken config\\n' >&2
+  exit 128
+fi
+exec ${JSON.stringify(nativeGit)} "$@"
+`,
+      { mode: 0o700 },
+    )
+    const previousCommand = process.env.GIT_SSH_COMMAND
+    const previousProgram = process.env.GIT_SSH
+    const previousVariant = process.env.GIT_SSH_VARIANT
+    const previousPath = process.env.PATH
+    delete process.env.GIT_SSH_COMMAND
+    process.env.GIT_SSH = ssh
+    process.env.GIT_SSH_VARIANT = "ssh"
+    process.env.PATH = `${bin}:${previousPath ?? ""}`
+    const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const backend = gitRunner.createLegacyBackend()
+      await expect(backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")).rejects.toThrow(
+        "Permission denied (publickey).",
+      )
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1)
+      expect(announced.mock.calls[0]?.[0]).toContain("SSH retry skipped")
+      expect(announced.mock.calls[0]?.[0]).toContain("cannot read core.sshCommand")
+    } finally {
+      announced.mockRestore()
+      if (previousCommand === undefined) delete process.env.GIT_SSH_COMMAND
+      else process.env.GIT_SSH_COMMAND = previousCommand
+      if (previousProgram === undefined) delete process.env.GIT_SSH
+      else process.env.GIT_SSH = previousProgram
+      if (previousVariant === undefined) delete process.env.GIT_SSH_VARIANT
+      else process.env.GIT_SSH_VARIANT = previousVariant
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+  })
+
+  it.each(["core.sshCommand", "GIT_SSH"] as const)(
+    "keeps %s and records the same SSH program on retry",
+    async (source) => {
+      const { repo, ssh, calls } = legacyPublickeyRepo(
+        1,
+        undefined,
+        source === "GIT_SSH" ? "fixture ssh" : "fixture-ssh",
+      )
+      const previousCommand = process.env.GIT_SSH_COMMAND
+      const previousProgram = process.env.GIT_SSH
+      const previousVariant = process.env.GIT_SSH_VARIANT
+      delete process.env.GIT_SSH_COMMAND
+      if (source === "core.sshCommand") {
+        const config = spawnSync("git", ["config", "core.sshCommand", `${ssh} --identity-marker`], {
+          cwd: repo,
+          encoding: "utf8",
+        })
+        if (config.status !== 0) throw new Error(`fixture core.sshCommand: ${config.stderr}`)
+        delete process.env.GIT_SSH
+      } else process.env.GIT_SSH = ssh
+      process.env.GIT_SSH_VARIANT = "ssh"
+      const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        const backend = gitRunner.createLegacyBackend()
+        expect((await backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")).get("refs/heads/main")).toMatch(
+          /^[a-f0-9]{40}$/u,
+        )
+        const attempts = readFileSync(calls, "utf8").trim().split("\n")
+        expect(attempts).toHaveLength(2)
+        expect(attempts[1]).toContain("-v")
+        if (source === "core.sshCommand") {
+          expect(attempts[0]).toContain("--identity-marker")
+          expect(attempts[1]).toContain("--identity-marker")
+        }
+        expect(announced.mock.calls[0]?.[0]).toContain(ssh)
+      } finally {
+        announced.mockRestore()
+        if (previousCommand === undefined) delete process.env.GIT_SSH_COMMAND
+        else process.env.GIT_SSH_COMMAND = previousCommand
+        if (previousProgram === undefined) delete process.env.GIT_SSH
+        else process.env.GIT_SSH = previousProgram
+        if (previousVariant === undefined) delete process.env.GIT_SSH_VARIANT
+        else process.env.GIT_SSH_VARIANT = previousVariant
+      }
+    },
+  )
+
   // D2/T1: the old runner always launches Git and has no declaration or
   // provenance. Native recursion tests cannot distinguish absent from invalid.
   it("resolves one file-scoped executable declaration, preserving absence and successful provenance", async () => {
@@ -576,6 +849,71 @@ describe("the git runner", () => {
     }
   })
 })
+
+function publickeyExecutable(
+  root: string,
+  failures: number,
+  refusal = "git@github.com: Permission denied (publickey).",
+): string {
+  const executable = join(root, "publickey-producer")
+  const calls = join(root, "calls")
+  writeFileSync(
+    executable,
+    `#!/usr/bin/env bun
+import { appendFileSync, existsSync, readFileSync } from "node:fs"
+const calls = ${JSON.stringify(calls)}
+const attempt = existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\\n").length + 1 : 1
+appendFileSync(calls, String(attempt) + "\\n")
+if (process.env.GIT_SSH_COMMAND?.includes(" -v")) process.stderr.write("debug1: Offering public key: fleet-key\\n")
+if (attempt <= ${String(failures)}) {
+  process.stderr.write(${JSON.stringify(refusal + "\n")})
+  process.exit(128)
+}
+process.stdout.write("abc123\\trefs/heads/main\\n")
+`,
+    { mode: 0o700 },
+  )
+  return executable
+}
+
+function legacyPublickeyRepo(
+  failures: number,
+  refusal = "git@github.com: Permission denied (publickey).",
+  sshName = "fixture-ssh",
+): { repo: string; ssh: string; calls: string } {
+  const root = temporaryRoot("gitomic-publickey")
+  const repo = join(root, "client")
+  const remote = join(root, "remote.git")
+  const git = (cwd: string, args: string[]) => {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" })
+    if (result.status !== 0) throw new Error(`fixture git ${args.join(" ")} in ${cwd}: ${result.stderr}`)
+    return result.stdout.trim()
+  }
+  git(root, ["init", "-q", "--bare", remote])
+  git(root, ["init", "-q", "-b", "main", repo])
+  git(repo, ["config", "user.name", "test"])
+  git(repo, ["config", "user.email", "test@example.invalid"])
+  writeFileSync(join(repo, "file"), "fixture\n")
+  git(repo, ["add", "file"])
+  git(repo, ["commit", "-q", "-m", "fixture"])
+  git(repo, ["push", "-q", remote, "main"])
+  const ssh = join(root, sshName)
+  const calls = join(root, "ssh-calls")
+  writeFileSync(
+    ssh,
+    `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(calls)}
+case " $* " in *" -v "*) printf 'debug1: Offering public key: fleet-key\\n' >&2 ;; esac
+if [ "$(wc -l < ${JSON.stringify(calls)})" -le ${String(failures)} ]; then
+  printf '%s\\n' ${JSON.stringify(refusal)} >&2
+  exit 255
+fi
+exec git-upload-pack ${JSON.stringify(remote)}
+`,
+    { mode: 0o700 },
+  )
+  return { repo, ssh, calls }
+}
 
 /** A selected executable testing the transport, not a substitute Git store. */
 function protocolExecutable(root: string, body: string, observation = false): string {

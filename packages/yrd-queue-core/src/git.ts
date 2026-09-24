@@ -18,11 +18,18 @@ import { hostname } from "node:os"
 import { randomUUID } from "node:crypto"
 import { accessSync, constants, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createShellBackend, type GitomicBackend } from "gitomic"
 export { chainsUnder, listRefs, openEvents } from "gitomic/events"
 export type { AlsoRef, Event, EventInput } from "gitomic/events"
 export type { CommitMeta, GitomicBackend, Oid } from "gitomic"
+import {
+  coreSshCommandFromConfig,
+  isExactPublickeyRefusal,
+  isRetryableRead,
+  verboseSshRetryEnvironment,
+} from "git-super/process"
 import type { QueueObservation } from "./remote.ts"
 
 /** One git invocation, returning its stdout; `input` is its stdin. Throws on a non-zero exit. */
@@ -41,6 +48,7 @@ const GIT_READINESS_MS = 5_000
 /** One root-v1 git call's bound. A callee's own wait must stay strictly under it minus its work (git-super's writer lock, 25274). */
 export const GIT_ROOT_INVOCATION_MS = 5 * 60_000
 const GIT_CONTROL_BYTES = 64 * 1024
+const PUBLICKEY_BACKOFF_MS = 3_000
 
 export type GitObservationInput = QueueObservation &
   Readonly<{
@@ -239,24 +247,47 @@ export function gitIn(
   let lastInvocation: GitInvocation | undefined
   const invoke = async (originalArgs: readonly string[], input?: string, observation = false) => {
     const args = Object.freeze([...originalArgs])
-    let evidence = await invokeGit(
-      runner,
-      { args, cwd, ...(selection === undefined ? {} : { selection }) },
-      options,
-      env,
-      input,
-      observation,
-    )
-    if (observation && evidence.failure === undefined) {
-      try {
-        evidence = { ...evidence, observation: readObservation(evidence) }
-      } catch (error) {
-        evidence = { ...evidence, failure: `Git observation: ${String(error)}` }
+    const attempt = async (attemptEnv: NodeJS.ProcessEnv | undefined) => {
+      let evidence = await invokeGit(
+        runner,
+        { args, cwd, ...(selection === undefined ? {} : { selection }) },
+        options,
+        attemptEnv,
+        input,
+        observation,
+      )
+      if (observation && evidence.failure === undefined) {
+        try {
+          evidence = { ...evidence, observation: readObservation(evidence) }
+        } catch (error) {
+          evidence = { ...evidence, failure: `Git observation: ${String(error)}` }
+        }
       }
+      evidence = publishGitInvocation(options, evidence, false)
+      lastInvocation = evidence
+      return evidence
     }
-    evidence = publishGitInvocation(options, evidence, false)
-    lastInvocation = evidence
-    return evidence
+    const first = await attempt(env)
+    if (observation || !isRetryableRead(args) || !isSettledPublickeyRefusal(first)) return first
+    if (options.signal?.aborted) return first
+    const effectiveEnv = env ?? gitEnvironment(globalThis.process.env)
+    let verbose: ReturnType<typeof verboseSshRetryEnvironment>
+    try {
+      const config =
+        effectiveEnv.GIT_SSH_COMMAND === undefined ? await readCoreSshCommand(cwd, effectiveEnv) : undefined
+      verbose = verboseSshRetryEnvironment(effectiveEnv, config)
+    } catch (error) {
+      console.error(
+        `yrd: git ${args.join(" ")} in ${cwd}: Permission denied (publickey).; SSH retry skipped: ${String(error)}`,
+      )
+      return first
+    }
+    console.error(
+      `yrd: git ${args.join(" ")} in ${cwd}: Permission denied (publickey).; ` +
+        `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms with ${verbose.command}`,
+    )
+    if (!(await waitForPublickeyRetry(options.signal))) return first
+    return attempt(verbose.env)
   }
   const git: Git = async (originalArgs, input) => {
     const evidence = await invoke(originalArgs, input)
@@ -324,6 +355,49 @@ export function publishGitInvocation(
       failure: [evidence.failure, publicationFailure].filter(Boolean).join("; "),
     }
   }
+}
+
+function isSettledPublickeyRefusal(evidence: GitInvocation): boolean {
+  const result = evidence.result
+  return (
+    evidence.failure === undefined &&
+    evidence.protocol?.refusal === undefined &&
+    result !== undefined &&
+    isExactPublickeyRefusal({ code: result.exitCode, stderr: result.stderr })
+  )
+}
+
+async function waitForPublickeyRetry(signal: AbortSignal | undefined): Promise<boolean> {
+  if (signal?.aborted) return false
+  try {
+    await delay(PUBLICKEY_BACKOFF_MS, undefined, { signal })
+    return true
+  } catch (error) {
+    if (signal?.aborted) return false
+    throw error
+  }
+}
+
+async function readCoreSshCommand(repo: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
+  await using process = createProcess({ cwd: repo, env })
+  const result = await process.run({
+    argv: ["git", "config", "--get", "core.sshCommand"],
+    cwd: repo,
+    env,
+    timeoutMs: GIT_READINESS_MS,
+  })
+  return coreSshCommandFromConfig(
+    {
+      code: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      signal: result.signal,
+      timedOut: result.timedOut,
+      stalled: result.stalled,
+      ...(result.sweepFailure === undefined ? {} : { failure: result.sweepFailure }),
+    },
+    repo,
+  )
 }
 
 export async function invokeGit(
@@ -634,11 +708,87 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 /** The one configured Gitomic backend for every legacy queue ref operation. */
 export function createLegacyBackend(gitExecutable = "git"): GitomicBackend {
-  return createShellBackend({
-    baseEnv: gitEnvironment(globalThis.process.env),
-    gitExecutable,
-    remoteTimeoutMs: GIT_ROOT_INVOCATION_MS,
-  })
+  const baseEnv = gitEnvironment(globalThis.process.env)
+  const makeReader = (env: NodeJS.ProcessEnv) => {
+    const backend = createShellBackend({
+      baseEnv: env,
+      gitExecutable,
+      remoteTimeoutMs: GIT_ROOT_INVOCATION_MS,
+    })
+    const { fetchRefs, listRefs } = backend
+    if (fetchRefs === undefined || listRefs === undefined) {
+      throw new Error("yrd: the selected Gitomic shell backend lacks fetchRefs or listRefs")
+    }
+    return { backend, fetchRefs: fetchRefs.bind(backend), listRefs: listRefs.bind(backend) }
+  }
+  const first = makeReader(baseEnv)
+  return {
+    ...first.backend,
+    fetchRefs: (repo, refs, remote) =>
+      retryLegacyPublickeyRead(
+        "fetch",
+        repo,
+        remote,
+        refs,
+        baseEnv,
+        () => first.fetchRefs(repo, refs, remote),
+        (env) => makeReader(env).fetchRefs(repo, refs, remote),
+      ),
+    listRefs: (repo, prefix, remote) =>
+      remote === undefined
+        ? first.listRefs(repo, prefix)
+        : retryLegacyPublickeyRead(
+            "ls-remote",
+            repo,
+            remote,
+            prefix,
+            baseEnv,
+            () => first.listRefs(repo, prefix, remote),
+            (env) => makeReader(env).listRefs(repo, prefix, remote),
+          ),
+  }
+}
+
+async function retryLegacyPublickeyRead<T>(
+  verb: "fetch" | "ls-remote",
+  repo: string,
+  remote: string,
+  refs: string | readonly string[],
+  baseEnv: NodeJS.ProcessEnv,
+  read: () => Promise<T>,
+  retry: (env: NodeJS.ProcessEnv) => Promise<T>,
+): Promise<T> {
+  try {
+    return await read()
+  } catch (error) {
+    if (!isLegacyPublickeyRefusal(error, verb)) throw error
+    let verbose: ReturnType<typeof verboseSshRetryEnvironment>
+    try {
+      const config = baseEnv.GIT_SSH_COMMAND === undefined ? await readCoreSshCommand(repo, baseEnv) : undefined
+      verbose = verboseSshRetryEnvironment(baseEnv, config)
+    } catch (configError) {
+      console.error(
+        `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: ${error.message}; ` +
+          `SSH retry skipped: ${String(configError)}`,
+      )
+      throw error
+    }
+    console.error(
+      `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: ${error.message}; ` +
+        `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms with ${verbose.command}`,
+    )
+    await delay(PUBLICKEY_BACKOFF_MS)
+    return retry(verbose.env)
+  }
+}
+
+function isLegacyPublickeyRefusal(error: unknown, verb: "fetch" | "ls-remote"): error is Error {
+  if (!(error instanceof Error)) return false
+  const prefix = `git ${verb} failed (128): `
+  return (
+    error.message.startsWith(prefix) &&
+    isExactPublickeyRefusal({ code: 128, stderr: error.message.slice(prefix.length) })
+  )
 }
 
 /** The configured event store; every event opener receives this backend. */
