@@ -27,9 +27,13 @@ describe("the legacy Gitomic boundary", () => {
     expect(refCommands(queueSubmission ?? ""), "legacy queue submission").toEqual([])
 
     const run = source("run.ts")
-    expect(refCommands(run), "queue run").toEqual(["fetch", "push"])
+    expect(refCommands(run), "queue run").toEqual(["fetch"])
     expect(run).toContain('await run.git(["fetch", "--quiet", composing.path, commit])')
-    expect(run).toContain('["push", "--recurse-submodules=only", target.remote')
+    expect(run).toContain("publishCheckedChildren(")
+
+    const publication = source("publication.ts")
+    expect(refCommands(publication), "shared child publication").toEqual(["ls-remote", "fetch", "push"])
+    expect(publication).toContain('["push", "--recurse-submodules=only", options.remote')
   })
 
   it("imports Gitomic only through the configured git seam", () => {
