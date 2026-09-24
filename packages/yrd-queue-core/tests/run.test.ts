@@ -400,7 +400,7 @@ it("ends a deleted event branch with its last commit kept, then continues the li
   const outcome = await queueRun({
     ...(await w.options({ exit: 0 })),
     checks: [],
-    notify: [],
+    notify: [{ name: "recorder", on: ["cancelled"], run: w.notifier }],
     now: () => Date.now() + 75_001,
   })
 
@@ -411,7 +411,58 @@ it("ends a deleted event branch with its last commit kept, then continues the li
     (event) => event.id === state.ending?.id,
   )
   expect(ending).toMatchObject({ type: "cancelled", links: [deleted] })
+  expect(state.notices?.[`${state.ending?.id}:recorder`]).toMatchObject({ result: "delivered" })
+  expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"cancelled"')
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/heads/task/deleted-event"])).toBe("")
+})
+
+/** @failure The legacy queue recorded its own deletion without telling the submitter.
+ * @level l3 @consumer legacy queue submitter
+ */
+it("tells the submitter when the legacy queue withdraws a confirmed absent branch", async () => {
+  const w = await world()
+  const head = await submitCommit(w, "task/legacy-deleted", "legacy-deleted.txt")
+  await w.git(["push", "--quiet", "origin", ":refs/heads/task/legacy-deleted"])
+
+  const options = {
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["cancelled" as const], run: w.notifier }],
+    now: () => Date.now() + 75_001,
+  }
+  const outcome = await queueRun(options)
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [] })
+  expect(
+    (await readQueue(w.git, "origin", "main", w.target, { now: Date.now() + 75_001 })).changes.find(
+      (entry) => entry.change.head === head,
+    )?.reading,
+  ).toMatchObject({ state: "withdrawn", reason: "deleted" })
+  expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"cancelled"')
+  expect(readFileSync(w.notifyLog, "utf8")).toContain('"reason":"branch absent from remote"')
+  await queueRun(options)
+  expect(readFileSync(w.notifyLog, "utf8").split("\n").filter(Boolean)).toHaveLength(1)
+})
+
+/** @failure An explicit drop was mistaken for a queue-authored cancellation notice.
+ * @level l3 @consumer submitter
+ */
+it("keeps an explicit event drop silent even when a cancelled notifier is declared", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/dropped-event", "dropped.txt")
+  await drop(store, { queue: "main", branch: "task/dropped-event", by: "operator" })
+
+  await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["cancelled"], run: w.notifier }],
+  })
+  expect(await readStatus(store, "main", "task/dropped-event")).toMatchObject({
+    status: "cancelled",
+    reason: "dropped",
+  })
+  expect(existsSync(w.notifyLog)).toBe(false)
 })
 
 /** @failure A just-opened branch could be absent from remote reads during propagation.

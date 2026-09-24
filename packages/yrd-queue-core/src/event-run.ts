@@ -216,7 +216,7 @@ export async function eventQueueRun(
   })
   const tell = async (
     branch: string,
-    kind: "merged" | "failed" | "stuck" | "deferred",
+    kind: "merged" | "failed" | "stuck" | "deferred" | "cancelled",
     eventId: string,
   ): Promise<void> => {
     if ((options.notify?.length ?? 0) === 0) return
@@ -250,7 +250,9 @@ export async function eventQueueRun(
           change: changeName({ branch, head }),
           ...(change.issue === undefined ? {} : { issue: change.issue }),
           ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
-          ...(kind === "merged" ? { merge: change.candidate ?? "" } : { reason: change.reason ?? kind, log: log.path }),
+          ...(kind === "merged"
+            ? { merge: change.candidate ?? "" }
+            : { reason: kind === "cancelled" ? "branch absent from remote" : (change.reason ?? kind), log: log.path }),
           ...(kind === "deferred"
             ? { projectedMs: change.deferred?.projectedMs, boundMs: change.deferred?.boundMs }
             : {}),
@@ -312,7 +314,7 @@ export async function eventQueueRun(
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
   for (const [branch, change] of changes) {
     const latest = change.lastNotifiable
-    if (latest !== undefined && latest.kind !== "cancelled") {
+    if (latest !== undefined && (latest.kind !== "cancelled" || change.reason === "deleted")) {
       await tell(branch, latest.kind, latest.id)
       changes.set(branch, await readStatus(store, queue, branch))
     }
@@ -458,6 +460,7 @@ export async function eventQueueRun(
         )
       }
       log.write({ kind: "change", branch, head, decision: "cancelled", reason: "branch absent from remote" })
+      await tell(branch, "cancelled", tip)
     } catch (error) {
       let current
       try {

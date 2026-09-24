@@ -388,7 +388,7 @@ export type Steps = Readonly<{
   ended: (
     run: Run,
     entry: QueueEntry,
-    kind: "merged" | "failed" | "stuck" | "deferred",
+    kind: "merged" | "failed" | "stuck" | "deferred" | "cancelled",
     endedRecord: string,
     appendTip: string,
   ) => Promise<void>
@@ -2504,10 +2504,10 @@ async function endFailing(
 
 /**
  * A change whose branch is gone, or whose branch moved off its head, ends
- * withdrawn with the reason `deleted` or `replaced` and no message: the
- * submitter did it (§ The change), and it is the one word the reader already
- * derived for it (@i/10-yrd/24492). Written once; a change that already ended
- * is left as it ended.
+ * withdrawn with reason `deleted` or `replaced`. A confirmed remote absence
+ * is queue-authored and tells the submitter as `cancelled`; a branch that moved
+ * off this head stays silent. Written once; an already-ended change is left as
+ * it ended.
  */
 async function retire(run: Run, entry: QueueEntry): Promise<void> {
   const reason = entry.reading.reason
@@ -2530,6 +2530,7 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
   )
   if (retiredRecord === undefined) return
   run.log.write({ branch, decision: "withdrawn", head, kind: "change", reason })
+  if (reason === "deleted") await run.steps.ended(run, entry, "cancelled", retiredRecord, retiredRecord)
 }
 
 /**

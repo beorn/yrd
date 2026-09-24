@@ -133,12 +133,14 @@ checks:
       programRoot: true # opt in to the queue-selected program root at $YRD_PROGRAM_ROOT
 notify: # the same shape as checks: a name, when it runs, what runs
   - submitter:
-      on: [merged, failed] # default: all four endings
+      on: [merged, failed, cancelled] # default: merged, failed, stuck, merged-direct, cancelled
       run: bun tools/yrd-notify.ts # gets the record as one JSON object on stdin
   - supervisor:
       on: [stuck, merged-direct]
       run: bun tools/yrd-notify.ts --to @cto
 ```
+
+A queue-authored cancellation after a confirmed missing remote branch sends `cancelled` through this ring. An explicit `yrd drop` or `yrd queue withdraw` sends no cancellation notice.
 
 A key the queue does not read is refused, never ignored. Queue identity is not configuration: `target:` and `remote:` are refused; the branch carrying this file is the queue selected by `--queue`. The machine's storage path is Git configuration, described below. A check's environment is built, not inherited. `YRD_CANDIDATE_SHA` names the queue candidate, the exact commit the check judges: the change's head on submit, its prospective merge commit on merge, or the queue branch for a target check. `YRD_BASE_SHA` names that candidate's merge base with the queue branch, and `YRD_REPO` names its fresh checkout C. The environment also carries `PATH`, `HOME`, `SHELL`, `LANG`, `USER`, `LOGNAME`, `LC_*`, a `TMPDIR` under the queue workdir, and the variables listed under `environmentPassthrough`.
 

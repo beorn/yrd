@@ -89,8 +89,17 @@ const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]
 // `override` is a merge-check override's own event (25296, @cto ccd8dfa8): the
 // verb's set, clear and replace, and a round's expiry and half-window reminder.
 // Not a default: only an entry that names it hears it.
-export const ENDINGS = ["merged", "failed", "stuck", "merged-direct", "observed", "deferred", "override"] as const
-const DEFAULT_ENDINGS = ["merged", "failed", "stuck", "merged-direct"] as const
+export const ENDINGS = [
+  "merged",
+  "failed",
+  "stuck",
+  "merged-direct",
+  "observed",
+  "deferred",
+  "override",
+  "cancelled",
+] as const
+const DEFAULT_ENDINGS = ["merged", "failed", "stuck", "merged-direct", "cancelled"] as const
 
 export type Ending = (typeof ENDINGS)[number]
 

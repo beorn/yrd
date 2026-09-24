@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Queue-authored missing-branch cancellations now send a `cancelled` notice with a durable receipt. `cancelled` is a supported notify ending and joins the defaults; explicit drop and withdraw stay silent (25541).
 - Queue runs confirm an apparently deleted submitted branch with an exact remote ref read after fetching the queue. An incomplete broad listing no longer withdraws a live legacy change or cancels a live event change. Failed confirmation and a just-opened absent branch leave the change open, skip its work, and appear in the round journal (25541).
 - `yrd-queue-core` reads a validated event queue and its change histories concurrently for listings, retaining the separate ref scopes and complete chain folds (25203).
 - `yrd-cli` uses the combined queue/change read for `yrd list`, while keeping its fresh ref fence before rendering (25203).

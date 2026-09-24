@@ -32,7 +32,7 @@ describe("the queue declaration grammar", () => {
         "      run: bun run integration",
         "notify:",
         "  - submitter:",
-        "      on: [merged, failed]",
+        "      on: [merged, failed, cancelled]",
         "      run: bun tools/notify.ts --to submitter",
         "  - supervisor:",
         "      on: stuck",
@@ -71,12 +71,12 @@ describe("the queue declaration grammar", () => {
       ],
       ignore: ["draft/*", "scratch/**"],
       notify: [
-        { name: "submitter", on: ["merged", "failed"], run: "bun tools/notify.ts --to submitter" },
+        { name: "submitter", on: ["merged", "failed", "cancelled"], run: "bun tools/notify.ts --to submitter" },
         { name: "supervisor", on: ["stuck"], run: "bun tools/notify.ts --to supervisor" },
         { name: "observer", on: ["observed"], run: "bun tools/observe.ts" },
         {
           name: "everyone",
-          on: ["merged", "failed", "stuck", "merged-direct"],
+          on: ["merged", "failed", "stuck", "merged-direct", "cancelled"],
           run: "bun tools/notify.ts --to everyone",
         },
       ],

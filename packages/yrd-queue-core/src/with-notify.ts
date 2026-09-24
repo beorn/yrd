@@ -194,16 +194,23 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
   // it would put `sent State: failed` on top of a merged change and tell its
   // submitter to fix what has already merged (ruling A2).
   if (entry.change.headOnTarget && endedKind(tip) !== "merged") return
-  const unsent = tip.kind === "failed" || tip.kind === "stuck" || tip.kind === "merged" || tip.kind === "deferred"
+  const unsent =
+    tip.kind === "failed" ||
+    tip.kind === "stuck" ||
+    tip.kind === "merged" ||
+    tip.kind === "deferred" ||
+    (tip.kind === "withdrawn" && trailer(tip, "Reason") === "deleted")
   if (tip.kind !== "sent" && !unsent) return
-  // A retired change sends nothing (ruling B3).
-  const reason = trailer(tip, "Reason")
-  if (reason === "replaced" || reason === "deleted") return
   const endedSha = tip.kind === "sent" ? trailer(tip, "For") : tip.sha
   if (endedSha === undefined) {
     throw new Error(`${entry.change.branch}: sent record ${tip.sha.slice(0, 12)} names no ended record to send again`)
   }
   const written = tip.kind === "sent" ? await readRecord(run.git, endedSha) : tip
+  const queueCancelled = written.kind === "withdrawn" && trailer(written, "Reason") === "deleted"
+  if (queueCancelled) {
+    await run.steps.ended(run, entry, "cancelled", written.sha, tip.sha)
+    return
+  }
   if (
     written.kind !== "failed" &&
     written.kind !== "stuck" &&
@@ -217,7 +224,7 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
 
 /** The one message an ended change sends, in the plan's three shapes (§ Commands). */
 export function messageFor(
-  kind: "merged" | "failed" | "stuck" | "deferred",
+  kind: "merged" | "failed" | "stuck" | "deferred" | "cancelled",
   about: Readonly<{
     branch: string
     head: string
@@ -240,6 +247,8 @@ export function messageFor(
       return `send it back: ${about.subject}; ${about.remedy ?? ""}`.trim()
     case "stuck":
       return `yrd broken: ${about.subject}; the queue stays down until a person fixes it`
+    case "cancelled":
+      return `cancelled: ${short(about.branch, about.head)} is absent from the remote; push the branch and submit again if still wanted`
     case "deferred": {
       const projMin = about.projectedMs !== undefined ? Math.round(about.projectedMs / 60_000) : undefined
       const boundMin = about.boundMs !== undefined ? Math.round(about.boundMs / 60_000) : undefined
@@ -268,7 +277,7 @@ export function messageFor(
 async function told(
   run: Run,
   entry: QueueEntry,
-  kind: "merged" | "failed" | "stuck" | "deferred",
+  kind: "merged" | "failed" | "stuck" | "deferred" | "cancelled",
   endedRecord: string,
   initialAppendTip: string,
 ): Promise<void> {
@@ -376,7 +385,7 @@ async function told(
       trailers: [
         ["Message-Id", endedRecord],
         ["To", name],
-        ["State", kind],
+        ["State", kind === "cancelled" ? "withdrawn" : kind],
         ["For", endedRecord],
         ["Delivery", delivery],
         ...(failure === undefined ? [] : [["Delivery-Error", oneLine(failure)] as const]),
@@ -494,7 +503,8 @@ export function overrideNotice(
 }
 
 /** Why a change ended, as its record says it: the check for a fail, the sentence for a stuck, the projection reason for deferred. */
-function reasonFor(kind: "failed" | "stuck" | "deferred", ended: ChangeRecord): string {
+function reasonFor(kind: "failed" | "stuck" | "deferred" | "cancelled", ended: ChangeRecord): string {
+  if (kind === "cancelled") return "branch absent from remote"
   return kind === "failed" || kind === "deferred"
     ? (trailer(ended, "Reason") ?? (kind === "failed" ? "check" : "projection-exceeded"))
     : ended.subject
