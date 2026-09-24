@@ -2904,7 +2904,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       verdict: { kind: "stopped" },
       facts: {
         serviceStopped: { by: "@chief", reason: "cutover", since: at },
-        why: "service stopped by @chief: cutover",
+        why: `stopped by @chief since ${at}: cutover`,
       },
     })
     expect(last.facts).not.toHaveProperty("staleAfter")

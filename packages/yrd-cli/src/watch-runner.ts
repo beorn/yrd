@@ -153,7 +153,7 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
     return {
       cause: "the service wrote this as its last document when it was stopped",
       kind: "stopped",
-      why: serviceStoppedLine(serviceStopped),
+      why: serviceStoppedLine(serviceStopped, Number.isNaN(since.getTime()) ? serviceStopped.since : clock(since)),
       ...(Number.isNaN(since.getTime()) ? {} : { since }),
     }
   }

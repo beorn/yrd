@@ -17,6 +17,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { gracefulStopHealthDocument, QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, runId } from "@yrd/queue-core"
 import { SERVICE } from "../src/queue-health.ts"
+import { clock } from "../src/watch-format.ts"
 import {
   readRunnerFacts,
   readRunnerService,
@@ -304,7 +305,8 @@ describe("readRunnerService, the loop's own liveness", () => {
     )
 
     // No deadline on the last document, so a day later it still says why.
-    expect(service).toMatchObject({ kind: "stopped", why: "service stopped by @chief: cutover" })
+    const at = clock(new Date(since))
+    expect(service).toMatchObject({ kind: "stopped", why: `stopped by @chief since ${at}: cutover` })
     if (service.kind !== "stopped") throw new Error("not stopped")
     expect(service.since?.toISOString()).toBe(since)
 
@@ -313,7 +315,7 @@ describe("readRunnerService, the loop's own liveness", () => {
       await readRunnerService(workdirWith({ ageMs: 1_000, health: JSON.stringify(unexplained) }), NOW),
     ).toMatchObject({
       kind: "stopped",
-      why: `service stopped by a signal with no stop intent recorded, at ${since}`,
+      why: `stopped since ${at}: no stop reason was recorded`,
     })
   })
 

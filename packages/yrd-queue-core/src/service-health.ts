@@ -349,11 +349,16 @@ export function relaunchStalledHealthDocument(
  */
 export type ServiceIntentFact = Readonly<{ since: string; by?: string; reason?: string }>
 
-/** The operator-facing sentence for a graceful stop, from its own fact. */
-export function serviceStoppedLine(stopped: ServiceIntentFact): string {
+/**
+ * The operator-facing line for a graceful stop, from its own fact, in the
+ * watch's two words (@cto 3ced1b26): "stopped by <seat> since <time>: <reason>"
+ * beside the line's "paused by <seat> since <time>: <reason>". "Stopped" alone
+ * says the process is off; `at` is the time as the caller renders it.
+ */
+export function serviceStoppedLine(stopped: ServiceIntentFact, at: string = stopped.since): string {
   return stopped.by !== undefined && stopped.reason !== undefined
-    ? `service stopped by ${stopped.by}: ${stopped.reason}`
-    : `service stopped by a signal with no stop intent recorded, at ${stopped.since}`
+    ? `stopped by ${stopped.by} since ${at}: ${stopped.reason}`
+    : `stopped since ${at}: no stop reason was recorded`
 }
 
 /**
