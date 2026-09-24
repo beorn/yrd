@@ -376,6 +376,12 @@ it("runs a check-free event change through one atomic merge", async () => {
   const outcome = await queueRun(options)
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-run"] })
+  // The line as the round read it, before its merge (25669): what the service
+  // judges a stall from. Nothing was judged before this round.
+  expect(outcome.line).toEqual({
+    oldest: { branch: "task/event-run", openedAt: expect.any(String) },
+    waiting: 1,
+  })
   const state = await readStatus(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", "task/event-run")
   expect(state).toMatchObject({ status: "merged", commit: head })
   expect(state.candidate).toBe(await remoteTarget(w))
@@ -413,6 +419,10 @@ it("closes the round's journal with every remote call it made, counted from git'
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line) as Record<string, unknown>)
+  // Every round journals its waiting count (25669): the number the stall threshold is tuned from.
+  expect(rows.filter((row) => row.kind === "observation" && row.subject === "line")).toEqual([
+    expect.objectContaining({ oldestBranch: "task/event-counted", waiting: 1 }),
+  ])
   const counted = rows.at(-1)
   expect(counted).toMatchObject({ kind: "remote-calls", unreadable: 0 })
   // The merge fetched and published: both are real remote calls, and every git process wrote its log.
@@ -2406,6 +2416,9 @@ describe("a queue run", () => {
     // cannot read that spends its idle cadence between two ready merges, which
     // at `--interval 120` was two minutes per change for nothing.
     expect(outcome.checkedWaiting).toBe(1)
+    // A legacy-format round reads no line for the service (25669): it states
+    // none rather than a count of zero nobody took.
+    expect(outcome.line).toBeUndefined()
     // Two changes in this SAME run and phase must not share an artifact.
     // This preserves the class witness removed with the old attribution suite.
     const oneLog = checkLogFor(outcome, "task/one", "submit", "verify")

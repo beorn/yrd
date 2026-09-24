@@ -6,6 +6,7 @@
  *           22 changes waited (09-24 20:45 to 21:09Z), and no reading said so
  * @level    l1 (the fold alone; the page it feeds is service-health's `withLineFlow`)
  * @consumer the `up` loop, which re-judges this reading on every health write
+ * @testonly none
  *
  * The stall clock runs from the last JUDGEMENT (merged, failed, stuck), never
  * from the last completed round, so a round that judged nothing must not move

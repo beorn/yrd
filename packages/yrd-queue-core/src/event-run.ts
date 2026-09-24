@@ -201,7 +201,7 @@ export async function eventQueueRun(
   })
   let directMerges: readonly string[] = []
   /** The line as this round read it (25669), stated on every outcome once the line is read. */
-  let roundLine: RoundLine | undefined
+  const read: { line?: RoundLine } = {}
   const result = (
     exitCode: 0 | 1 | 2,
     merged: string[] = [],
@@ -224,7 +224,7 @@ export async function eventQueueRun(
     deferred,
     directMerges,
     checkedWaiting: 0,
-    ...(roundLine === undefined ? {} : { line: roundLine }),
+    ...(read.line === undefined ? {} : { line: read.line }),
     ...(stopped === undefined ? {} : { stopped }),
   })
   const tell = async (
@@ -578,7 +578,7 @@ export async function eventQueueRun(
     (earliest, change) => (earliest === undefined || change.since < earliest.since ? change : earliest),
     undefined,
   )
-  roundLine = {
+  const roundLine: RoundLine = {
     waiting: remaining.length,
     ...(oldest === undefined ? {} : { oldest: { branch: oldest.branch, openedAt: oldest.since.toISOString() } }),
     ...(lastJudgedMs === undefined ? {} : { lastJudgedAt: new Date(lastJudgedMs).toISOString() }),
@@ -592,6 +592,7 @@ export async function eventQueueRun(
       : { oldestBranch: roundLine.oldest.branch, oldestOpenedAt: roundLine.oldest.openedAt }),
     ...(roundLine.lastJudgedAt === undefined ? {} : { lastJudgedAt: roundLine.lastJudgedAt }),
   })
+  read.line = roundLine
   const standing = remaining.find((change) => change.status === "stuck")
   if (standing !== undefined) {
     if (!(await queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)))) {
