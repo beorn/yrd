@@ -704,6 +704,9 @@ async function apply(options: Options, plan: Plan, git: Git, selection: GitSelec
     )
   }
   const remote = await readEventQueueWithChanges(store, options.queue)
+  for (const [branch, defect] of remote.invalid) {
+    failure("postflight", branch, `${defect.ref}@${defect.tip}: ${defect.error}`)
+  }
   if (remote.queue.pause === undefined || remote.histories.size !== groups.length) {
     failure(
       "postflight",

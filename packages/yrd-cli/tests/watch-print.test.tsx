@@ -64,6 +64,24 @@ async function paint(snapshot: WatchSnapshot, columns = 120): Promise<string> {
 }
 
 describe("the printed page's frame", () => {
+  // @failure one invalid event chain crashed the watch state word and hid every other row (25658).
+  it("renders an invalid event row beside a healthy row", async () => {
+    const invalid = row({
+      branch: "task/broken",
+      state: "invalid",
+      format: "event",
+      subject: "failed needs an open change",
+      diagnostic: "refs/yrd/main/changes/task/broken: failed needs an open change",
+    })
+    const text = await printListing(snapshot({ rows: [{ row: invalid }, { row: row({ branch: "task/healthy" }) }] }), {
+      color: false,
+      columns: 160,
+    })
+    expect(text).toContain("task/broken")
+    expect(text).toContain("invalid")
+    expect(text).toContain("task/healthy")
+  })
+
   it("shows a newly arrived ref-write warning without changing the successful row", async () => {
     // 24202: unchanged terminal fields used to make ListRow's memo hide this arrival.
     const initial = row({ run: RUN_ID, result: "pass", endedAt: NOW })

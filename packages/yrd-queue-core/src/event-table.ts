@@ -50,6 +50,7 @@ export function eventRows(
           : { reason: change.reason }
         : { reason: `deferred ${change.deferred.check}: ${change.deferred.reason}` }),
       ...(change.ignored === undefined ? {} : { ignored: change.ignored }),
+      ...(change.diagnostic === undefined ? {} : { diagnostic: change.diagnostic }),
     })
   }
   const changeRows = rows.sort((left, right) => {

@@ -334,6 +334,7 @@ describe("the notice", () => {
       direct: "direct",
       draft: "draft",
       failed: "failed",
+      invalid: "invalid",
       merged: "merged",
       merging: "merging",
       queued: "queued",

@@ -158,6 +158,11 @@ export function WatchDetail({
       {/* The change list under it (items 2, 24): one row per change in the run. */}
       <ChangeList members={[row]} />
       <Box height={1} flexShrink={0} />
+      {row.diagnostic === undefined ? null : (
+        <Text color="$fg-error" wrap="wrap">
+          {row.diagnostic}
+        </Text>
+      )}
       {detail.note === undefined ? null : (
         <Text color="$fg-warning" wrap="wrap">
           {detail.note}
@@ -174,7 +179,7 @@ export function WatchDetail({
       >
         <TabList flexWrap="wrap">
           <Tab key={CHANGES_TAB} value={CHANGES_TAB}>
-            Timeline{(row.diagnostics?.length ?? 0) === 0 ? "" : " ⚠"}
+            Timeline{(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? "" : " ⚠"}
             {"\n"}
             <Text color="$fg-muted">{cutCounter(detail)}</Text>
           </Tab>
@@ -195,7 +200,7 @@ export function WatchDetail({
         </TabList>
         <TabPanel key={CHANGES_TAB} value={CHANGES_TAB}>
           <ScrollArea>
-            {(row.diagnostics?.length ?? 0) === 0 ? null : (
+            {(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? null : (
               <Text color="$fg-warning" wrap="wrap">
                 {diagnosticLines(row, detail.journal).join("\n")}
               </Text>

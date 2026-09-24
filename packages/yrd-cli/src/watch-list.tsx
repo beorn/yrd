@@ -60,6 +60,7 @@ export function bucketOf(row: Pick<Row, "state" | "live">): StatusBucket {
     case "cancelled":
       return "done"
     case "failed":
+    case "invalid":
       return "failed"
     case "queued":
     case "checked":

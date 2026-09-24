@@ -106,12 +106,24 @@ export const RUNNER_SIGNALS = ["silent", "stopped", "unpublished"] as const
 export const RUNNER_STATES_SAID = ["idle", "checking", "stopped", "stuck", "paused", "unpublished"] as const
 
 /** A word a change's row can show: one of the nine, or `direct`, which is no change. */
-export type DisplayState = (typeof LEGEND_STATES)[number] | "direct" | "queued" | "verifying" | "event-verifying"
+export type DisplayState =
+  | (typeof LEGEND_STATES)[number]
+  | "direct"
+  | "queued"
+  | "verifying"
+  | "event-verifying"
+  | "invalid"
 
 /** A word the runner's row can show: one of the eight, a signal, or the unpublished `?`. */
 export type RunnerState = (typeof RUNNER_STATES)[number] | (typeof RUNNER_SIGNALS)[number]
 
 export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took" | "runner", WordEntry> = {
+  invalid: {
+    color: "$fg-error",
+    means: "this event chain cannot be folded; read its diagnostic",
+    next: "repair the named chain",
+    word: "invalid",
+  },
   draft: { color: "$fg-muted", means: "pushed to the remote, not submitted", next: "yrd submit", word: "draft" },
   queued: { color: "$fg-warning", means: "submitted and waiting for the runner", next: "verifying", word: "queued" },
   submitted: {

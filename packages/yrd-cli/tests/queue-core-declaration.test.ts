@@ -318,6 +318,88 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
   }, 15_000)
 
+  // @failure a malformed event ref took down list/show/watch and hid healthy changes (25658).
+  it("lists an invalid chain by name beside healthy and no-opened chains, with show and fence parity", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    const at = new Date("2026-09-22T14:01:00.000Z")
+    for (const [branch, input] of [
+      ["task/healthy", changeInput("opened", { queueTip, at, commit: head, by: "yrd" })],
+      ["task/old-drop", changeInput("cancelled", { queueTip, at, commit: head, reason: "dropped", by: "yrd" })],
+      ["task/broken", changeInput("failed", { queueTip, at, reason: "no opened event" })],
+    ] as const) {
+      await (
+        await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+      ).append([input], { expect: null })
+    }
+    const listed = capture(repo)
+    expect(
+      await coreQueueCommand(repo, listed.io, { command: "list" }, { json: true, queue: "main" }),
+      listed.stderr(),
+    ).toBe(0)
+    const rows = (
+      JSON.parse(listed.stdout()) as { changes: readonly { branch: string; state: string; diagnostic?: string }[] }
+    ).changes
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ branch: "task/healthy", state: "queued" }),
+        expect.objectContaining({
+          branch: "task/old-drop",
+          state: "cancelled",
+          diagnostic: expect.stringContaining("no opened event"),
+        }),
+        expect.objectContaining({
+          branch: "task/broken",
+          state: "invalid",
+          ref: changesRef("main", "task/broken"),
+          tip: expect.stringMatching(/^[0-9a-f]{40}$/u),
+          error: expect.stringContaining("needs an open change"),
+          diagnostic: expect.stringContaining("needs an open change"),
+        }),
+      ]),
+    )
+    const bad = capture(repo)
+    expect(
+      await coreQueueCommand(repo, bad.io, { command: "show", branch: "task/broken" }, { queue: "main" }),
+      bad.stderr(),
+    ).toBe(0)
+    expect(bad.stdout()).toContain("diagnostic:")
+    expect(bad.stdout()).toContain("needs an open change")
+    const good = capture(repo)
+    expect(
+      await coreQueueCommand(repo, good.io, { command: "show", branch: "task/healthy" }, { queue: "main" }),
+      good.stderr(),
+    ).toBe(0)
+    expect(good.stdout()).toContain("task/healthy")
+    await git(["checkout", "--quiet", "-b", "task/broken"])
+    writeFileSync(join(repo, "broken.txt"), "cannot submit over unreadable chain\n")
+    await git(["add", "broken.txt"])
+    await git(["commit", "--quiet", "-m", "broken branch head"])
+    const submitted = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], submitted.io)).toBe(2)
+    expect(submitted.stderr()).toContain("task/broken")
+    expect(submitted.stderr()).toContain("needs an open change")
+    const run = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], run.io), run.stderr()).toBe(
+      0,
+    )
+    const journal = (JSON.parse(run.stdout()) as { log: string }).log
+    const records = readFileSync(journal, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(records.filter((row) => row.subject === "invalid-change-chain")).toEqual([
+      expect.objectContaining({
+        branch: "task/broken",
+        ref: changesRef("main", "task/broken"),
+        error: expect.stringContaining("needs an open change"),
+      }),
+    ])
+  }, 20_000)
+
   it("uses every event change status unchanged in JSON, the table, and status filters", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
@@ -361,13 +443,15 @@ describe("a queue is the selected origin branch carrying config", () => {
     }
 
     const json = capture(repo)
-    expect(await coreQueueCommand(repo, json.io, { command: "list" }, { json: true, queue: "main" })).toBe(0)
+    expect(
+      await coreQueueCommand(repo, json.io, { command: "list", drafts: true }, { json: true, queue: "main" }),
+    ).toBe(0)
     expect(
       (JSON.parse(json.stdout()) as { changes: readonly { state: string }[] }).changes.map((row) => row.state).sort(),
     ).toEqual([...CHANGE_STATUSES].sort())
 
     const table = capture(repo)
-    expect(await coreQueueCommand(repo, table.io, { command: "list" }, { queue: "main" })).toBe(0)
+    expect(await coreQueueCommand(repo, table.io, { command: "list", drafts: true }, { queue: "main" })).toBe(0)
     for (const [index, status] of CHANGE_STATUSES.entries()) {
       const branch = status === "draft" ? "task/draft" : `task/status-${String(index - 1)}`
       const rowLabel = status === "draft" ? `draft ${branch}` : `queue ${branch}`
@@ -382,7 +466,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         await coreQueueCommand(
           repo,
           filteredJson.io,
-          { command: "list", terms: [status] },
+          { command: "list", terms: [status], drafts: status === "draft" },
           { json: true, queue: "main" },
         ),
       ).toBe(0)
@@ -391,7 +475,12 @@ describe("a queue is the selected origin branch carrying config", () => {
       ).toEqual([expect.objectContaining({ branch, state: status })])
       const filteredTable = capture(repo)
       expect(
-        await coreQueueCommand(repo, filteredTable.io, { command: "list", terms: [status] }, { queue: "main" }),
+        await coreQueueCommand(
+          repo,
+          filteredTable.io,
+          { command: "list", terms: [status], drafts: status === "draft" },
+          { queue: "main" },
+        ),
       ).toBe(0)
       expect(
         filteredTable
@@ -561,7 +650,12 @@ describe("a queue is the selected origin branch carrying config", () => {
       }
       const run = capture(repo)
       expect(
-        await coreQueueCommand(repo, run.io, { command: "list" }, { json: format === "event", queue: "main" }),
+        await coreQueueCommand(
+          repo,
+          run.io,
+          { command: "list", drafts: format === "event" },
+          { json: format === "event", queue: "main" },
+        ),
         run.stderr(),
       ).toBe(0)
       const shown =
@@ -663,8 +757,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     const events = await (
       await openEvents({ repo, remote: "origin", ref: changesRef("main", "task/remote-draft") })
     ).events()
-    expect(events).toHaveLength(1)
-    expect(events[0]).toMatchObject({ type: "cancelled", links: [head] })
+    expect(events).toHaveLength(2)
+    expect(events.map((event) => event.type)).toEqual(["opened", "cancelled"])
+    expect(events[1]).toMatchObject({ type: "cancelled", links: [head] })
 
     expect(await drop(store, { queue: "main", branch: "task/remote-draft", by: "@dev/2" })).toEqual(dropped)
   }, 15_000)
