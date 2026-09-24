@@ -18,6 +18,7 @@ import {
   resolveGitSelection,
   type Event,
   type Git,
+  type GitomicBackend,
   type GitSelection,
 } from "../src/git.ts"
 import { readHistories, readQueue } from "../src/remote.ts"
@@ -490,11 +491,12 @@ function assertStagedBranch(
         `old ${source.change.head}/${source.reading.state} maps to ${expectedStatus}, staged ${segment.head}/${segment.state.status}`,
       )
     }
-    if (segment.state.at?.getTime() !== tipOf(source.change).at.getTime()) {
+    const expectedAt = expectedStatus === "queued" ? legacyOpened(source) : tipOf(source.change).at.getTime()
+    if (segment.state.at?.getTime() !== expectedAt) {
       failure(
         "segment-parity",
         source.ref,
-        `old tip at ${tipOf(source.change).at.toISOString()}, staged at ${segment.state.at?.toISOString() ?? "absent"}`,
+        `old ${expectedStatus === "queued" ? "Opened" : "tip at"} ${new Date(expectedAt).toISOString()}, staged at ${segment.state.at?.toISOString() ?? "absent"}`,
       )
     }
     const submitter = trailer(tipOf(source.change), "Submitter")
@@ -813,7 +815,7 @@ async function rollback(options: Options, plan: Plan, git: Git, selection: GitSe
       "new ref OIDs or branch heads differ from staged apply receipt; rollback lease is unsafe",
     )
   }
-  const backend = createEventStore(options.repo, options.remote, selection).backend
+  const backend = createEventStore(options.repo, options.remote, selection).backend as GitomicBackend
   if (typeof backend.publish !== "function") {
     failure("backend", options.repo, "Gitomic backend lacks atomic publish for rollback")
   }
