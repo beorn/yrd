@@ -254,8 +254,13 @@ export async function eventQueueRun(
   const branchHeads = await listRefs("refs/heads/", store)
   const remaining: typeof open = []
   for (const selectedChange of open) {
-    if (branchHeads.has(`refs/heads/${selectedChange.branch}`)) remaining.push(selectedChange)
-    else await endDeletedChange(selectedChange)
+    // A merging marker owns this chain until its frozen landing settles, even
+    // when the submitter deleted the branch name during a killed run.
+    if (selectedChange.status === "merging" || branchHeads.has(`refs/heads/${selectedChange.branch}`)) {
+      remaining.push(selectedChange)
+    } else {
+      await endDeletedChange(selectedChange)
+    }
   }
   const standing = remaining.find((change) => change.status === "stuck")
   if (standing !== undefined) {
@@ -372,7 +377,7 @@ export async function eventQueueRun(
       return result(0, observedMerged, [], [], [branch])
     }
     const branchRef = `refs/heads/${branch}`
-    if (!(await listRefs(branchRef, store)).has(branchRef)) {
+    if (selectedChange.status !== "merging" && !(await listRefs(branchRef, store)).has(branchRef)) {
       await endDeletedChange({ ...selectedChange, tip })
       continue
     }

@@ -23,6 +23,7 @@ export const CHANGE_STATUSES = [
 export type ChangeStatus = (typeof CHANGE_STATUSES)[number]
 export type ChangeEnding = "merged" | "failed" | "cancelled"
 export type CancellationReason = "resubmitted" | "dropped" | "deleted"
+const LANDING_IN_PROGRESS = "landing in progress; resubmit after merged/failed/stuck, resume if runner gone"
 
 export const EVENT_TRAILERS = {
   by: "By",
@@ -182,6 +183,15 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
   const at = requireCause(event)
   if (event.props.some(([key]) => key === "Status")) {
     throw new Error(`event ${event.id} stores Status:; status must be a fold`)
+  }
+  if (
+    state.status === "merging" &&
+    event.type !== "merged" &&
+    event.type !== "failed" &&
+    event.type !== "stuck" &&
+    event.type !== "verifying"
+  ) {
+    throw new Error(`event ${event.id}: ${LANDING_IN_PROGRESS}`)
   }
   const next = { ...state, at, tip: event.id }
   switch (event.type) {

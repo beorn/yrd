@@ -35,6 +35,7 @@ import {
   checksOf,
   createEventQueue,
   createEventStore,
+  drop,
   gitIn,
   inspectSubmit,
   journalKey,
@@ -451,9 +452,15 @@ it("finishes a two-child event from a cold clone after the runner dies between c
   for (const hook of hooks) {
     writeFileSync(
       hook,
-      `#!/bin/sh\nwhile read old new ref; do\n  if test "$ref" = refs/heads/main; then\n    if mkdir '${gate}' 2>/dev/null; then :; else sleep 30; fi\n  fi\ndone\nexit 0\n`,
+      `#!/bin/sh\nwhile read old new ref; do\n  if test "$ref" = refs/heads/main; then\n    if mkdir '${gate}' 2>/dev/null; then :; else\n      i=0\n      while test ! -e '${gate}/first-written' && test "$i" -lt 1200; do sleep 0.05; i=$((i+1)); done\n      sleep 30\n    fi\n  fi\ndone\nexit 0\n`,
     )
     chmodSync(hook, 0o755)
+    const after = hook.replace("pre-receive", "post-receive")
+    writeFileSync(
+      after,
+      `#!/bin/sh\nwhile read old new ref; do\n  if test "$ref" = refs/heads/main; then : > '${gate}/first-written'; fi\ndone\nexit 0\n`,
+    )
+    chmodSync(after, 0o755)
   }
   const otherMain = async (): Promise<string> => {
     const row = (await gitIn(w.work)(["ls-remote", "--refs", other.remote, "refs/heads/main"])).trim().split(/\s+/u)[0]
@@ -472,9 +479,9 @@ it("finishes a two-child event from a cold clone after the runner dies between c
         finished = true
       })
       while (!finished) {
-        const first = await submoduleMain(w)
-        const second = await otherMain()
-        if ((first === subAhead) !== (second === other.ahead)) {
+        // post-receive runs after the first ref is visible. The other child's
+        // pre-receive hook waits, so this is the exact one-child crash window.
+        if (existsSync(join(gate, "first-written"))) {
           killed = true
           controller.abort()
           break
@@ -495,7 +502,10 @@ it("finishes a two-child event from a cold clone after the runner dies between c
     [await submoduleMain(w), await otherMain()].filter((tip) => tip === subAhead || tip === other.ahead),
   ).toHaveLength(1)
 
-  for (const hook of hooks) writeFileSync(hook, "#!/bin/sh\nexit 0\n")
+  for (const hook of hooks) {
+    writeFileSync(hook, "#!/bin/sh\nexit 0\n")
+    writeFileSync(hook.replace("pre-receive", "post-receive"), "#!/bin/sh\nexit 0\n")
+  }
   const cold = join(root, "cold-queue")
   await w.git(["clone", "--quiet", join(root, "remote.git"), cold])
   const coldGit = gitIn(cold)
@@ -569,11 +579,11 @@ it("sticks a cold event replay when the marker's child source has vanished", asy
   expect(state.reason).toContain(ahead)
 })
 
-/** @failure A rival change tip after the marker could cause this run to write a child for a lost row.
+/** @failure A cancellation after the marker could cause this run to write a child for a lost row.
  * @level l3 @consumer queue operator
- * A marker read-back must discard the row before any child-only push begins.
+ * A marked landing must refuse cancellation even before marker read-back.
  */
-it("discards a rival event tip after the marker without a child write", async () => {
+it("refuses cancellation after the marker before child publication", async () => {
   const w = await world()
   await createWorldEventQueue(w)
   const ahead = await aheadOfSubmodule(w, "event-rival")
@@ -581,21 +591,24 @@ it("discards a rival event tip after the marker without a child write", async ()
   const rootBefore = await remoteTip(w.git, "refs/heads/main")
   const ref = changesRef("main", "task/event-rival")
   await using real = createProcess({ cwd: w.work })
-  let rival = false
-  let childPushes = 0
+  let refused = false
   const interleaved: Process = {
     ...real,
     async run(request) {
-      if (request.argv.includes("super") && request.argv.includes("push")) childPushes += 1
-      if (!rival && request.argv.includes("ls-remote") && request.argv.includes(ref)) {
+      if (!refused && request.argv.includes("ls-remote") && request.argv.includes(ref)) {
         const state = await readStatus(eventStore(w), "main", "task/event-rival")
         if (state.status === "merging" && state.tip !== undefined) {
-          await appendChangeEvent(eventStore(w), "main", "task/event-rival", state.tip, {
-            type: "cancelled",
-            at: new Date(),
-            reason: "resubmitted",
-          })
-          rival = true
+          await expect(
+            appendChangeEvent(eventStore(w), "main", "task/event-rival", state.tip, {
+              type: "cancelled",
+              at: new Date(),
+              reason: "resubmitted",
+            }),
+          ).rejects.toThrow(/landing in progress/u)
+          await expect(
+            drop(eventStore(w), { queue: "main", branch: "task/event-rival", by: "@dev/2" }),
+          ).rejects.toThrow(/landing in progress/u)
+          refused = true
         }
       }
       return real.run(request)
@@ -604,52 +617,167 @@ it("discards a rival event tip after the marker without a child write", async ()
 
   const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [], process: interleaved })
 
-  expect(rival).toBe(true)
-  expect(childPushes).toBe(0)
-  expect(outcome).toMatchObject({ exitCode: 0, merged: [], stuck: [] })
-  expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
-  expect(await submoduleMain(w)).toBe(w.main)
-  expect((await readStatus(eventStore(w), "main", "task/event-rival")).status).toBe("cancelled")
-  expect(readFileSync(outcome.log, "utf8")).toContain('"kind":"discarded"')
+  expect(refused).toBe(true)
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-rival"], stuck: [] })
+  expect(await remoteTip(w.git, "refs/heads/main")).not.toBe(rootBefore)
+  expect(await submoduleMain(w)).toBe(ahead)
+  expect((await readStatus(eventStore(w), "main", "task/event-rival")).status).toBe("merged")
+  await drop(eventStore(w), { queue: "main", branch: "task/event-rival", by: "@dev/2" })
+  expect((await readStatus(eventStore(w), "main", "task/event-rival")).reason).toBe("dropped")
 })
 
 /** @failure Marker read-back can become stale before Git-super starts its child write.
  * @level l3 @consumer queue operator
- * A cancellation after read-back must prevent child publication for the lost row.
+ * A resubmit after read-back must wait for the marked landing to settle.
  */
-it("does not publish a child after a rival cancels between marker read-back and child push", async () => {
+it("refuses resubmit between marker read-back and child push, then admits it after landing", async () => {
   const w = await world()
   await createWorldEventQueue(w)
   const ahead = await aheadOfSubmodule(w, "event-rival-after-readback")
   await submitGitlink(w, "task/event-rival-after-readback", ahead)
   const rootBefore = await remoteTip(w.git, "refs/heads/main")
+  await w.git(["checkout", "--quiet", "task/event-rival-after-readback"])
+  writeFileSync(join(w.work, "resubmitted-after-marker.txt"), "new head\n")
+  await w.git(["add", "resubmitted-after-marker.txt"])
+  await w.git(["commit", "--quiet", "-m", "resubmit after marker"])
+  const newHead = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["checkout", "--quiet", "main"])
   await using real = createProcess({ cwd: w.work })
-  let rival = false
+  let refusal: unknown
+  let attempted = false
+  let childBeforeAttempt = ""
+  let childAfterAttempt = ""
   const interleaved: Process = {
     ...real,
     async run(request) {
-      if (!rival && request.argv.includes("super") && request.argv.includes("push")) {
+      if (!attempted && request.argv.includes("super") && request.argv.includes("push")) {
+        attempted = true
         const state = await readStatus(eventStore(w), "main", "task/event-rival-after-readback")
         expect(state).toMatchObject({ status: "merging" })
-        if (state.tip === undefined) throw new Error("merging marker has no tip")
-        await appendChangeEvent(eventStore(w), "main", "task/event-rival-after-readback", state.tip, {
-          type: "cancelled",
-          at: new Date(),
-          reason: "resubmitted",
-        })
-        rival = true
+        childBeforeAttempt = await submoduleMain(w)
+        try {
+          await submit(w.git, "origin", {
+            branch: "task/event-rival-after-readback",
+            submitter: "@dev/2",
+            target: { branch: "main", remote: "origin" },
+          })
+        } catch (error) {
+          refusal = error
+        }
+        childAfterAttempt = await submoduleMain(w)
       }
       return real.run(request)
     },
   }
 
-  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [], process: interleaved })
+  const landed = await queueRun({ ...(await w.options()), checks: [], notify: [], process: interleaved })
 
-  expect(rival).toBe(true)
-  expect(outcome).toMatchObject({ exitCode: 0, merged: [], stuck: [] })
-  expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
-  expect((await readStatus(eventStore(w), "main", "task/event-rival-after-readback")).status).toBe("cancelled")
-  expect(await submoduleMain(w)).toBe(w.main)
+  expect(attempted).toBe(true)
+  expect(String(refusal)).toMatch(/landing in progress.*resubmit after.*merged.*failed.*stuck.*resume/u)
+  expect(childBeforeAttempt).toBe(w.main)
+  expect(childAfterAttempt).toBe(w.main)
+  expect(landed).toMatchObject({ exitCode: 0, merged: ["task/event-rival-after-readback"] })
+  expect(await remoteTip(w.git, "refs/heads/main")).not.toBe(rootBefore)
+  expect(await submoduleMain(w)).toBe(ahead)
+  expect((await readStatus(eventStore(w), "main", "task/event-rival-after-readback")).status).toBe("merged")
+  const resubmitted = await submit(w.git, "origin", {
+    branch: "task/event-rival-after-readback",
+    submitter: "@dev/2",
+    target: { branch: "main", remote: "origin" },
+  })
+  expect(resubmitted).toMatchObject({ head: newHead, retry: false })
+  expect((await readStatus(eventStore(w), "main", "task/event-rival-after-readback")).status).toBe("queued")
+})
+
+/** @failure Ignoring a merging row could move its tip after marker read-back and strand a child write.
+ * @level l3 @consumer queue operator
+ * Ignore must wait for settlement just like a resubmit, then be admitted.
+ */
+it("refuses ignore between marker read-back and child push, then admits it after landing", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "event-ignore-after-readback")
+  await submitGitlink(w, "task/event-ignore-after-readback", ahead)
+  await using real = createProcess({ cwd: w.work })
+  let refusal: unknown
+  let attempted = false
+  let childBeforeAttempt = ""
+  let childAfterAttempt = ""
+  const interleaved: Process = {
+    ...real,
+    async run(request) {
+      if (!attempted && request.argv.includes("super") && request.argv.includes("push")) {
+        attempted = true
+        const state = await readStatus(eventStore(w), "main", "task/event-ignore-after-readback")
+        expect(state).toMatchObject({ status: "merging" })
+        if (state.tip === undefined) throw new Error("merging marker has no tip")
+        childBeforeAttempt = await submoduleMain(w)
+        try {
+          await appendChangeEvent(eventStore(w), "main", "task/event-ignore-after-readback", state.tip, {
+            type: "ignored",
+            at: new Date(),
+            reason: "operator hold",
+          })
+        } catch (error) {
+          refusal = error
+        }
+        childAfterAttempt = await submoduleMain(w)
+      }
+      return real.run(request)
+    },
+  }
+
+  const landed = await queueRun({ ...(await w.options()), checks: [], notify: [], process: interleaved })
+
+  expect(attempted).toBe(true)
+  expect(String(refusal)).toMatch(/landing in progress/u)
+  expect(childBeforeAttempt).toBe(w.main)
+  expect(childAfterAttempt).toBe(w.main)
+  expect(landed).toMatchObject({ exitCode: 0, merged: ["task/event-ignore-after-readback"], stuck: [] })
+  expect(await submoduleMain(w)).toBe(ahead)
+  const state = await readStatus(eventStore(w), "main", "task/event-ignore-after-readback")
+  expect(state).toMatchObject({ status: "merged" })
+  if (state.tip === undefined) throw new Error("merged event has no tip")
+  await appendChangeEvent(eventStore(w), "main", "task/event-ignore-after-readback", state.tip, {
+    type: "ignored",
+    at: new Date(),
+    reason: "operator hold",
+  })
+  expect((await readStatus(eventStore(w), "main", "task/event-ignore-after-readback")).ignored).toBe(true)
+})
+
+/** @failure A resumed marked landing could be cancelled by the deleted-branch prepass.
+ * @level l3 @consumer queue operator
+ * A missing branch name must wait while the frozen candidate settles.
+ */
+it("finishes a marked event after its branch is deleted before resume", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "event-deleted-during-landing")
+  await submitGitlink(w, "task/event-deleted-during-landing", ahead)
+  const rootBefore = await remoteTip(w.git, "refs/heads/main")
+  await using real = createProcess({ cwd: w.work })
+  const interrupted: Process = {
+    ...real,
+    run(request) {
+      if (request.argv.includes("super") && request.argv.includes("push")) {
+        throw new Error("fixture stops after merging marker")
+      }
+      return real.run(request)
+    },
+  }
+  await expect(queueRun({ ...(await w.options()), checks: [], notify: [], process: interrupted })).rejects.toThrow(
+    /fixture stops after merging marker/u,
+  )
+  expect((await readStatus(eventStore(w), "main", "task/event-deleted-during-landing")).status).toBe("merging")
+  await w.git(["push", "--quiet", "origin", ":refs/heads/task/event-deleted-during-landing"])
+
+  const resumed = await queueRun({ ...(await w.options()), checks: [], notify: [] })
+
+  expect(resumed).toMatchObject({ exitCode: 0, merged: ["task/event-deleted-during-landing"], stuck: [] })
+  expect(await remoteTip(w.git, "refs/heads/main")).not.toBe(rootBefore)
+  expect(await submoduleMain(w)).toBe(ahead)
+  expect((await readStatus(eventStore(w), "main", "task/event-deleted-during-landing")).status).toBe("merged")
 })
 
 /** @failure A nested pin behind its own main could be treated as a publication target.

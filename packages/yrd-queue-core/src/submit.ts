@@ -313,7 +313,6 @@ async function submitEvent(
         (current.status === "queued" ||
           current.status === "verifying" ||
           current.status === "checking" ||
-          current.status === "merging" ||
           current.status === "stuck")
       if (retry) {
         retryOpened = events.findLast((event) => event.type === "opened")?.id
