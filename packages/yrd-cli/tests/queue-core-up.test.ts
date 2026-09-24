@@ -37,6 +37,7 @@ import {
   changeRef,
   gitIn,
   parseQueueHealthDocument,
+  QUEUE_HEALTH_DOCUMENT,
   readConfig,
   readRecords,
   readRemoteCommit,
@@ -2854,6 +2855,70 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       stop.abort()
       await service.catch(() => undefined)
     }
+  }, 30_000)
+
+  // 25430 witness. The supervisor writes its stop intent BEFORE the signal; the
+  // service's termination handler reads it and leaves one last document naming
+  // who stopped it and why, then re-raises. The port stands in for SIGTERM: a
+  // real one would end the test runner.
+  it("a graceful stop writes its supervisor's stop reason into the last document, then re-raises", async () => {
+    const w = await world()
+    const intentFile = join(mkdtempSync(join(tmpdir(), "yrd-intent-")), "intent.json")
+    const at = "2026-09-23T23:45:00.000Z"
+    writeFileSync(intentFile, `${JSON.stringify({ verb: "stop", by: "@chief", reason: "cutover", at })}\n`)
+    let terminate: (() => void) | undefined
+    let reraised = 0
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          ...HEARTBEAT,
+          terminate: {
+            on: (handler) => {
+              terminate = handler
+              return () => {
+                terminate = undefined
+              }
+            },
+            reraise: () => {
+              reraised += 1
+            },
+          },
+          afterHealth: (document) => {
+            seen.push(document)
+            terminate?.()
+            stop.abort()
+          },
+        },
+        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+      ),
+      run.stderr(),
+    ).toBe(0)
+
+    expect(reraised).toBe(1)
+    expect(terminate, "the handler unsubscribed itself before re-raising").toBeUndefined()
+    // The start read the same file and found a STOP record: keyed on the verb,
+    // it is not this start's reason, so the default stands.
+    expect(seen[0]?.facts).toMatchObject({ serviceStarted: { reason: "started" } })
+    expect(seen[0]?.facts?.serviceStarted).not.toHaveProperty("by")
+    const last = JSON.parse(readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8")) as QueueHealthDocument
+    expect(last).toMatchObject({
+      state: "absent",
+      verdict: { kind: "stopped" },
+      facts: {
+        serviceStopped: { by: "@chief", reason: "cutover", since: at },
+        why: `stopped by @chief since ${at}: cutover`,
+      },
+    })
+    expect(last.facts).not.toHaveProperty("staleAfter")
+    expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({ state: "absent" })
   }, 30_000)
 
   // T5, the stop half (F1). A line already stopped at start says so from the
