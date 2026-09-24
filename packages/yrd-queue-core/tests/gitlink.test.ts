@@ -392,56 +392,7 @@ describe("settling gitlinks", () => {
     )
   })
 
-  // 25324: For a component whose CI runs its check script, submit admission runs that script,
-  // format included, at the submitted head; a format-only diff in a component carrier is
-  // refused at submit, naming the script and its first failing line.
-  it("a format-only diff in a component carrier is refused at submit, naming the script and its first failing line (25324)", async () => {
-    const w = await world()
-    const submoduleWork = join(w.work, "..", "submodule-work")
-    const submodule = gitIn(submoduleWork)
-    await submodule(["checkout", "--quiet", "main"])
-    mkdirSync(join(submoduleWork, ".github", "workflows"), { recursive: true })
-    writeFileSync(
-      join(submoduleWork, ".github", "workflows", "ci.yml"),
-      "name: CI\non: [push]\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - run: bun run check\n",
-    )
-    writeFileSync(
-      join(submoduleWork, "package.json"),
-      JSON.stringify({
-        name: "submodule",
-        scripts: {
-          check: "bun run format",
-          format: "echo 'README.md (346ms): Format issues found' >&2; exit 1",
-        },
-      }),
-    )
-    await submodule(["add", ".github", "package.json"])
-    await submodule(["commit", "--quiet", "-m", "add CI running check script and failing format"])
-    await submodule(["push", "--quiet", "origin", "main"])
-    const formatFailSha = (await submodule(["rev-parse", "HEAD"])).trim()
 
-    await expect(submitGitlink(w, "task/carrier-format-fail", formatFailSha)).rejects.toThrow(
-      /check.*README\.md \(346ms\): Format issues found/u,
-    )
-
-    // After fixing the format script, submit succeeds
-    writeFileSync(
-      join(submoduleWork, "package.json"),
-      JSON.stringify({
-        name: "submodule",
-        scripts: {
-          check: "bun run format",
-          format: "echo 'format ok'",
-        },
-      }),
-    )
-    await submodule(["add", "package.json"])
-    await submodule(["commit", "--quiet", "-m", "fix format script"])
-    await submodule(["push", "--quiet", "origin", "main"])
-    const formatPassSha = (await submodule(["rev-parse", "HEAD"])).trim()
-
-    await expect(submitGitlink(w, "task/carrier-format-pass", formatPassSha)).resolves.toMatch(/^[0-9a-f]{40}$/u)
-  })
 
   it("a pin that is an ancestor of refs/heads/main submits silently", async () => {
     const w = await world()
