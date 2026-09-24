@@ -18,3 +18,6 @@
   (`writer.startedAt`), protecting against reading a previous stop's record left by a reasonless start. A missing,
   unparseable, or stale `at` records "no stop reason was recorded" without falling back to `now` (@cto 16ab7d00,
   25430 fix-forward).
+- `readUnitIntent("start")` checks the start intent against the process start time (`writer.startedAt`) and its
+  stated freshness bound (`record.freshnessSeconds`, default 60s); a respawn without a fresh intent reads as no
+  intent, attributing the runner to plain "started" (@cto 186400e1, 25502).
