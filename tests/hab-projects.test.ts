@@ -15,8 +15,8 @@ import hab, { yrdQueueRunnerDeclarations } from "../hab.projects.ts"
  * change" — which is not a requirement anybody has.
  *
  * It cost three hand-patches in one day (2026-09-11): an owner line, a health
- * probe whose arrival left a stale "no health probe" comment behind, and a
- * `garage` row. Each author found out from a red main they had never run. The
+ * probe whose arrival left a stale "no health probe" comment behind. Each
+ * author found out from a red main they had never run. The
  * answer is not a co-change guard — that would make the double edit MANDATORY
  * instead of removing it — it is to stop keeping the copy.
  *
@@ -31,7 +31,7 @@ describe("Yrd Hab runner declarations", () => {
     // repository it runs against is the drift this file exists to catch.
     expect(yrdQueueRunnerDeclarations).toHaveLength(1)
     expect(yrdQueueRunnerDeclarations[0]).toMatchObject({
-      serviceName: "yrd-service",
+      serviceName: "yrd",
       repository: { name: "code", path: "." },
       queue: { base: "main" },
     })
@@ -41,7 +41,7 @@ describe("Yrd Hab runner declarations", () => {
     // Not the cadence — that is DECLARED here, and re-spelling it made every
     // interval change a two-repository atomic landing (measured 2026-09-10).
     // What must hold is that the argv names the runtime entry and the verb.
-    expect(hab.services["yrd-service"]?.command).toMatch(/^bun tools\/yrd-runtime\.mjs yrd queue up\b/u)
+    expect(hab.services["yrd"]?.command).toMatch(/^bun tools\/yrd-runtime\.mjs yrd queue up\b/u)
   })
 
   it("declares a health probe", () => {
@@ -50,11 +50,11 @@ describe("Yrd Hab runner declarations", () => {
     // re-derives nothing, reads the one document the loop itself wrote, touches
     // no network and captures no declaration. Its COMMAND is the requirement;
     // what it prints belongs to the health contract, not to this file.
-    expect(hab.services["yrd-service"]?.health?.command).toBeDefined()
+    expect(hab.services["yrd"]?.health?.command).toBeDefined()
   })
 
   it("relaunches only on endings the loop chose, and stays down on the rest", () => {
-    const service = hab.services["yrd-service"]
+    const service = hab.services["yrd"]
     expect(service?.restart).toBe("on-codes")
     // 0 is the SELF-RELAUNCH exit (@i/10-yrd/24515): the loop exits 0 when its
     // own gitlink moves and the supervisor respawns it on the new code. That
@@ -74,13 +74,13 @@ describe("Yrd Hab runner declarations", () => {
   it("names an owner who can be woken", () => {
     // The owner decides who is PAGED. An undeclared owner silently resolves to
     // the fleet-wide default, so a service that means to name someone must.
-    expect(hab.services["yrd-service"]?.owner).toBeDefined()
+    expect(hab.services["yrd"]?.owner).toBeDefined()
   })
 
   it("pages the seat that owns the stop-line: a stuck change stops the line and pages @chief", () => {
     // The andon (operator 2026-09-16): a stuck change stops the line and the
     // service stays up with an unhealthy page whose owner is @chief, the seat
     // that decides stop-line matters. The page reaches whoever this names.
-    expect(hab.services["yrd-service"]?.owner).toBe("@chief")
+    expect(hab.services["yrd"]?.owner).toBe("@chief")
   })
 })

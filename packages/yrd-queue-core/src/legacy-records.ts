@@ -125,6 +125,59 @@ const CARRIED = ["Opened", "Submitter", "Issue"] as const
  */
 export const RECORD_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
 
+/** Immutable commits from the last queue-wide Gitomic history batch, per Git runner. */
+const primed = new WeakMap<Git, Map<string, CommitMeta>>()
+const PRIME_WARN_COMMITS = 75_000
+const PRIME_WARN_BYTES = 100 * 1024 * 1024
+
+function debugLine(message: string): void {
+  const enabled = (process.env["DEBUG"] ?? "").split(/[\s,]+/u).some((name) => name === "*" || name.startsWith("yrd"))
+  if (enabled) console.error(`DEBUG yrd:queue:records ${message}`)
+}
+
+/** Keep the batch already read by the queue, so per-change readers spawn no new history process. */
+export function primeLegacyHistory(git: Git, history: readonly CommitMeta[]): void {
+  const cache = primed.get(git) ?? new Map<string, CommitMeta>()
+  primed.set(git, cache)
+  let bytes = 0
+  for (const meta of history) {
+    cache.set(meta.oid, meta)
+    bytes += Buffer.byteLength(meta.message)
+  }
+  debugLine(`record prime: ${history.length} commits, ${bytes} message bytes, ${cache.size} held`)
+  if (history.length > PRIME_WARN_COMMITS || bytes > PRIME_WARN_BYTES) {
+    console.error(
+      `yrd: the queue read's record history read ${history.length} commits and ${bytes} message bytes, past the ${PRIME_WARN_COMMITS} / ${PRIME_WARN_BYTES} it is watched at; the change refs are growing faster than the read was sized for (@i/10-yrd/25303 f1)`,
+    )
+  }
+}
+
+/** A fully held first-parent chain, or undefined when Gitomic must read a cache miss. */
+function primedHistory(git: Git, from: string): readonly CommitMeta[] | undefined {
+  const cache = primed.get(git)
+  if (cache === undefined) return undefined
+  const range = /^([0-9a-f]{40}(?:[0-9a-f]{24})?)\.\.([0-9a-f]{40}(?:[0-9a-f]{24})?)$/u.exec(from)
+  const tip = range?.[2] ?? (/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(from) ? from : undefined)
+  if (tip === undefined) return undefined
+  const stop = range?.[1]
+  const history: CommitMeta[] = []
+  let oid: string | null = tip
+  while (oid !== null && oid !== stop) {
+    const meta = cache.get(oid)
+    if (meta === undefined) {
+      debugLine(`record cache miss: readRecords ${from}: ${oid}`)
+      return undefined
+    }
+    history.push(meta)
+    oid = meta.parent
+  }
+  if (stop !== undefined && oid !== stop) {
+    debugLine(`record cache miss: readRecords ${from}: ${stop} is not on ${tip}'s first-parent chain`)
+    return undefined
+  }
+  return history
+}
+
 /**
  * A `checked` or `withdrawn` write that arrived on a chain which had already
  * ended (@i/10-yrd/24635, @i/10-yrd/24492). The refusal is correct in every
@@ -464,7 +517,9 @@ export async function legacyPauseCommit(
 
 /** The record at `sha`. A commit there that is not a record is loud: a change's ref holds only records. */
 export async function readRecord(git: Git, sha: string): Promise<ChangeRecord> {
-  const record = recordFromMeta(await readLegacyCommit(git, sha))
+  const held = primed.get(git)?.get(sha)
+  if (held === undefined && primed.has(git)) debugLine(`record cache miss: readRecord ${sha}`)
+  const record = recordFromMeta(held ?? (await readLegacyCommit(git, sha)))
   if (record === undefined) throw new Error(`${sha.slice(0, 12)} is not a record; a change's ref holds only records`)
   await recordRootChanges(git, record.trailers, record)
   return record
@@ -481,6 +536,11 @@ async function carriedFrom(git: Git, sha: string): Promise<readonly (readonly [s
  * contract used by notification receipt reads. Never re-read a moving ref.
  */
 export async function readRecords(git: Git, from: string): Promise<readonly ChangeRecord[]> {
+  const held = primedHistory(git, from)
+  if (held !== undefined) {
+    const separator = from.indexOf("..")
+    return recordsFromHistorySelection(git, held, separator < 0 ? from : from.slice(separator + 2), separator < 0)
+  }
   const store = await legacyStore(git)
   return readRecordsFromStore(git, from, store)
 }

@@ -38,7 +38,8 @@ export type GitSelection = Readonly<{
 // Uniform invocation bounds. The 15-component measurement owns any revision;
 // expiry reports uncertainty and never establishes that a mutation had no effect.
 const GIT_READINESS_MS = 5_000
-const GIT_ROOT_INVOCATION_MS = 5 * 60_000
+/** One root-v1 git call's bound. A callee's own wait must stay strictly under it minus its work (git-super's writer lock, 25274). */
+export const GIT_ROOT_INVOCATION_MS = 5 * 60_000
 const GIT_CONTROL_BYTES = 64 * 1024
 
 export type GitObservationInput = QueueObservation &
@@ -590,7 +591,7 @@ const ROUTING_VARIABLES = new Set([
  * The caller's environment without its routing variables, plus the queue's own
  * git configuration and its own committer identity.
  *
- * Every commit the queue makes is committed by `yrd-service@<host>`, so
+ * Every commit the queue makes is committed by `yrd@<host>`, so
  * `git log --format=%cn` tells the queue's merges from a person's without
  * reading a single one of its refs. The AUTHOR is untouched: whoever wrote the
  * change wrote it, and a merge commit's author is the run's git identity as it
@@ -604,8 +605,8 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const count = Number.isInteger(declared) && declared >= 0 ? declared : 0
   return {
     ...env,
-    GIT_COMMITTER_EMAIL: `yrd-service@${hostname()}`,
-    GIT_COMMITTER_NAME: "yrd-service",
+    GIT_COMMITTER_EMAIL: `yrd@${hostname()}`,
+    GIT_COMMITTER_NAME: "yrd",
     GIT_CONFIG_COUNT: String(count + 2),
     [`GIT_CONFIG_KEY_${count}`]: "fetch.recurseSubmodules",
     [`GIT_CONFIG_VALUE_${count}`]: "no",

@@ -37,6 +37,7 @@ import {
   changeRef,
   gitIn,
   parseQueueHealthDocument,
+  QUEUE_HEALTH_DOCUMENT,
   readConfig,
   readRecords,
   readRemoteCommit,
@@ -55,6 +56,7 @@ import {
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand, endingCode, openDetail, readListing } from "../src/queue-core-commands.ts"
+import { changesSuffix } from "../src/watch-list.tsx"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
@@ -541,11 +543,12 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     // line above and is said exactly once.
     // Boxed RUNNER puts `╭─ RUNNER` on its own title line; the status row
     // inside still names the WORD and the cure (24196).
-    const runnerRow = page.find((line) => line.includes("RUNNER") && line.includes("paused"))
-    expect(runnerRow, listed.stdout()).toBeDefined()
-    expect(runnerRow, listed.stdout()).toContain("paused")
-    expect(runnerRow, listed.stdout()).toContain("resume: yrd queue resume")
-    expect(runnerRow, listed.stdout()).not.toContain("refs/yrd/main/runner")
+    const runnerBoxStart = page.findIndex((line) => line.includes("RUNNER"))
+    const runnerBoxEnd = page.findIndex((line, i) => i > runnerBoxStart && line.includes("╰"))
+    const runnerBox = page.slice(runnerBoxStart, runnerBoxEnd + 1).join("\n")
+    expect(runnerBox, listed.stdout()).toContain("paused")
+    expect(runnerBox, listed.stdout()).toContain("resume: yrd queue resume")
+    expect(runnerBox, listed.stdout()).not.toContain("refs/yrd/main/runner")
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
       0,
@@ -1983,6 +1986,60 @@ describe("yrd watch's own detail pane (openDetail), one change's evidence", () =
   })
 })
 
+describe("yrd list marks a stale verdict (@i/10-yrd/25301, @cto c7115f0f (3))", () => {
+  it("a checked change judged under another check config reads 'not yet judged under <blob>'; a current one does not", async () => {
+    const w = await world()
+    await redeclare(w, ["checks:", "  - typecheck:", "      run: bun run typecheck", ""].join("\n"))
+    const base = (await w.git(["rev-parse", "main"])).trim()
+    const target = { branch: "main", remote: "origin" }
+    const oid = await readRemoteCommit(w.git, "origin", "refs/heads/main")
+    if (oid === undefined) throw new Error("test setup: origin/main was not readable")
+    const config = await readConfig(w.git, oid, target)
+    if (config === undefined) throw new Error("test setup: the target carries no .yrd.yml")
+    const checkedUnder = async (branch: string, blob: string) => {
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, `${branch.slice(5)}.txt`), `${branch}\n`)
+      await w.git(["add", "-A"])
+      await w.git(["commit", "--quiet", "-m", branch])
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", { branch, submitter: "@dev/3", target })
+      const ref = changeRef("main", { branch, head })
+      await w.git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `${ref}:${ref}`])
+      await appendRecord(w.git, "main", {
+        change: { branch, head },
+        kind: "checked",
+        subject: "on-submit checks passed",
+        trailers: [
+          ["Config", blob],
+          ["Base", base],
+          ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
+        ],
+      })
+      await w.git([
+        "push",
+        "--quiet",
+        "origin",
+        `${changeRef("main", { branch, head })}:${changeRef("main", { branch, head })}`,
+      ])
+    }
+    await checkedUnder("task/stale", "0".repeat(40))
+    await checkedUnder("task/current", config.blob)
+
+    const { all } = await readListing(w.git as GitRunner, config, w.workdir, oid)
+
+    const stale = all.find((row) => row.branch === "task/stale")
+    expect(stale).toMatchObject({ state: "checked", reason: `not yet judged under ${config.blob.slice(0, 12)}` })
+    expect(changesSuffix(stale!)).toEqual({
+      color: "$fg-muted",
+      text: `not yet judged under ${config.blob.slice(0, 12)}`,
+    })
+    const current = all.find((row) => row.branch === "task/current")
+    expect(current?.state).toBe("checked")
+    expect(current?.reason).toBeUndefined()
+  })
+})
+
 /**
  * @failure  A stuck change is stepped over by the service: the loop re-runs the
  *           fault on a backoff ladder, the page promises to clear itself when a
@@ -2800,6 +2857,70 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     }
   }, 30_000)
 
+  // 25430 witness. The supervisor writes its stop intent BEFORE the signal; the
+  // service's termination handler reads it and leaves one last document naming
+  // who stopped it and why, then re-raises. The port stands in for SIGTERM: a
+  // real one would end the test runner.
+  it("a graceful stop writes its supervisor's stop reason into the last document, then re-raises", async () => {
+    const w = await world()
+    const intentFile = join(mkdtempSync(join(tmpdir(), "yrd-intent-")), "intent.json")
+    const at = "2026-09-23T23:45:00.000Z"
+    writeFileSync(intentFile, `${JSON.stringify({ verb: "stop", by: "@chief", reason: "cutover", at })}\n`)
+    let terminate: (() => void) | undefined
+    let reraised = 0
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          ...HEARTBEAT,
+          terminate: {
+            on: (handler) => {
+              terminate = handler
+              return () => {
+                terminate = undefined
+              }
+            },
+            reraise: () => {
+              reraised += 1
+            },
+          },
+          afterHealth: (document) => {
+            seen.push(document)
+            terminate?.()
+            stop.abort()
+          },
+        },
+        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+      ),
+      run.stderr(),
+    ).toBe(0)
+
+    expect(reraised).toBe(1)
+    expect(terminate, "the handler unsubscribed itself before re-raising").toBeUndefined()
+    // The start read the same file and found a STOP record: keyed on the verb,
+    // it is not this start's reason, so the default stands.
+    expect(seen[0]?.facts).toMatchObject({ serviceStarted: { reason: "started" } })
+    expect(seen[0]?.facts?.serviceStarted).not.toHaveProperty("by")
+    const last = JSON.parse(readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8")) as QueueHealthDocument
+    expect(last).toMatchObject({
+      state: "absent",
+      verdict: { kind: "stopped" },
+      facts: {
+        serviceStopped: { by: "@chief", reason: "cutover", since: at },
+        why: `stopped by @chief since ${at}: cutover`,
+      },
+    })
+    expect(last.facts).not.toHaveProperty("staleAfter")
+    expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({ state: "absent" })
+  }, 30_000)
+
   // T5, the stop half (F1). A line already stopped at start says so from the
   // first document: `stopped: null` for the length of round 1 would be the lie
   // the always-present stop fact exists to prevent.
@@ -3058,11 +3179,12 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     await submitted(w, "task/first", "first.txt")
     const olderHead = await submitted(w, "task/older", "older.txt")
     const namedHead = await submitted(w, "task/named", "named.txt")
-    // One round judges all three and merges only the first in line, so two checked changes wait.
+    // One round merges the first in line and prepares only the next head (25301 cure (a)):
+    // task/older waits checked, and task/named waits unjudged until something reaches it.
     const round = await yrd(w, "queue", "run", "--json")
     expect(round.exitCode, round.report).toBe(0)
     expect(await kindsOf(w, "task/older", olderHead)).toEqual(["opened", "checked"])
-    expect(await kindsOf(w, "task/named", namedHead)).toEqual(["opened", "checked"])
+    expect(await kindsOf(w, "task/named", namedHead)).toEqual(["opened"])
 
     const merged = await yrd(w, "merge", "task/named")
 

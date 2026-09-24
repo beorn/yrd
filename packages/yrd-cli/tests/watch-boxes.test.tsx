@@ -68,7 +68,7 @@ describe("the runner's marker, live (item 13, 24196)", () => {
     await act(async () => {
       await app.waitForLayoutStable()
     })
-    const row = app.lines.findIndex((line) => line.includes("RUNNER"))
+    const row = app.lines.findIndex((line) => line.includes("\u25b8"))
     expect(row).toBeGreaterThan(-1)
     const col = app.lines[row]!.indexOf("\u25b8")
     const phaseA = app.cell(col, row)
@@ -117,7 +117,7 @@ describe("item 27 — an ERROR is never dimmed, and wears the state's own color"
   // stop record. The states that would have been louder — `silent`, `stopped` —
   // are the runner's own published beat, and it publishes none yet.
   const STUCK = {
-    by: "yrd-service",
+    by: "yrd",
     cause: "stuck" as const,
     change: `task/s@${"4".repeat(40)}`,
     since: new Date(NOW.getTime() - 6 * 60_000).toISOString(),
@@ -159,7 +159,7 @@ describe("item 27 — an ERROR is never dimmed, and wears the state's own color"
 
     const idle = render(runnerRow(RUNNING, { waiting: 0 }), { cols: 120, rows: 4, autoRender: true })
     await idle.waitForLayoutStable()
-    const row = idle.lines.findIndex((line) => line.includes("RUNNER"))
+    const row = idle.lines.findIndex((line) => line.includes("nothing in line"))
     const quiet = idle.cell(idle.lines[row]!.indexOf("nothing in line"), row)
     idle.unmount()
 

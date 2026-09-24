@@ -47,7 +47,7 @@ const operatorStop: PauseRecord = {
 
 describe("the health document", () => {
   test("a running line is healthy and running, and says it is not stopped", () => {
-    const doc = roundHealthDocument("yrd-service", undefined, INTERVAL, NOW)
+    const doc = roundHealthDocument("yrd", undefined, INTERVAL, NOW)
     expect(doc).toMatchObject({ schema: QUEUE_HEALTH_SCHEMA, state: "healthy", verdict: { kind: "running" } })
     expect(doc.error).toBeUndefined()
     expect(doc.facts).toMatchObject({ stopped: null })
@@ -58,7 +58,7 @@ describe("the health document", () => {
   // restart — the service is alive and HOLDING the stop. A stuck stop that
   // reported `stopped` would be claiming the loop had died.
   test("a stuck stop is unhealthy and still running, names the change and its cures, and never clears by itself", () => {
-    const doc = roundHealthDocument("yrd-service", stuckStop, INTERVAL, NOW)
+    const doc = roundHealthDocument("yrd", stuckStop, INTERVAL, NOW)
     expect(doc.state).toBe("unhealthy")
     expect(doc.verdict).toEqual({ kind: "running" })
     expect(doc.error?.code).toBe("queue-round-stuck")
@@ -84,7 +84,7 @@ describe("the health document", () => {
   // A person's pause is deliberate: it stops the line and pages nobody, and
   // the document still says who stopped it.
   test("an operator's pause is healthy, and names who stopped the line", () => {
-    const doc = roundHealthDocument("yrd-service", operatorStop, INTERVAL, NOW)
+    const doc = roundHealthDocument("yrd", operatorStop, INTERVAL, NOW)
     expect(doc.state).toBe("healthy")
     expect(doc.error).toBeUndefined()
     expect(doc.facts).toMatchObject({ stopped: { by: "@chief", cause: "operator", change: null } })
@@ -93,14 +93,14 @@ describe("the health document", () => {
   // absent + stopped, never unhealthy: nothing claimed this service. Reporting
   // unhealthy here would page for a service nobody started.
   test("no document at all is absent and stopped, not unhealthy", () => {
-    const doc = absentHealthDocument("yrd-service", "no round has finished")
+    const doc = absentHealthDocument("yrd", "no round has finished")
     expect(doc.state).toBe("absent")
     expect(doc.verdict).toEqual({ kind: "stopped" })
     expect(queueHealthExitCode(doc.state)).toBe(1)
   })
 
   test("a broken document is unknown/unparsed and quotes what it saw", () => {
-    const doc = unreadableHealthDocument("yrd-service", "trailing garbage", '{"schema":')
+    const doc = unreadableHealthDocument("yrd", "trailing garbage", '{"schema":')
     expect(doc.state).toBe("unknown")
     expect(doc.verdict).toEqual({ kind: "unknown", reason: "unparsed", observed: '{"schema":' })
     expect(queueHealthExitCode(doc.state)).toBe(3)
@@ -115,7 +115,7 @@ describe("the health document", () => {
 
 describe("reading a stored document", () => {
   test("round-trips what the loop wrote", () => {
-    const written = roundHealthDocument("yrd-service", stuckStop, INTERVAL, NOW)
+    const written = roundHealthDocument("yrd", stuckStop, INTERVAL, NOW)
     expect(parseQueueHealthDocument(JSON.stringify(written))).toEqual(written)
   })
 
@@ -143,7 +143,7 @@ describe("reading a stored document", () => {
  * @consumer the supervisor, which pages on unhealthy-while-running
  */
 describe("a document expires", () => {
-  const written = (sleepMs: number) => roundHealthDocument("yrd-service", undefined, sleepMs, NOW)
+  const written = (sleepMs: number) => roundHealthDocument("yrd", undefined, sleepMs, NOW)
   const at = (ms: number) => new Date(NOW.getTime() + ms)
   /** One heartbeat plus grace: how long any document is believed after its write (24523 F4). */
   const WINDOW = HEARTBEAT_INTERVAL_MS + HEARTBEAT_GRACE_MS
@@ -184,7 +184,7 @@ describe("a document expires", () => {
   })
 
   test("overdue outranks a stale unhealthy too — the interesting fact is that nothing has been written since", () => {
-    const doc = roundHealthDocument("yrd-service", stuckStop, INTERVAL, NOW)
+    const doc = roundHealthDocument("yrd", stuckStop, INTERVAL, NOW)
     expect(doc.error?.code).toBe("queue-round-stuck")
     const overdue = believableHealthDocument(doc, at(WINDOW + 1))
     expect(overdue.error?.code).toBe("queue-round-overdue")
@@ -196,7 +196,7 @@ describe("a document expires", () => {
   test("a document with no deadline is passed through, never declared overdue", () => {
     const old = {
       schema: QUEUE_HEALTH_SCHEMA,
-      service: "yrd-service",
+      service: "yrd",
       state: "healthy",
       verdict: { kind: "running" },
     } as const
@@ -216,7 +216,7 @@ describe("a document expires", () => {
     // Written out rather than built, so the deadline is this test's and not a builder's formula.
     const doc = {
       schema: QUEUE_HEALTH_SCHEMA,
-      service: "yrd-service",
+      service: "yrd",
       state: "healthy",
       verdict: { kind: "running" },
       facts: { writtenAt: NOW.toISOString(), staleAfter: at(INTERVAL).toISOString(), stopped: null },

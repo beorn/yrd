@@ -25,6 +25,7 @@ import {
   readChange,
   readJournals,
   runStartedAt,
+  skippedChecks,
   subjects,
   watchRows,
 } from "../src/index.ts"
@@ -853,6 +854,20 @@ describe("the declared checks, joined to what ran", () => {
     expect(views[1]?.log).toBe("/w/test.log")
   })
 
+  it('reads a check declared `run: "true"` as off, never passed, whether or not it ran (25422)', () => {
+    const views = checksOf(["typecheck exit=0 ms=0 log=/w/typecheck.log"], "merged", [
+      { name: "typecheck", run: "true" },
+      { name: "affected-tests", run: " true " },
+      { name: "test", run: "bun run test" },
+    ])
+
+    expect(views.map((view) => [view.name, view.state])).toEqual([
+      ["typecheck", "off"],
+      ["affected-tests", "off"],
+      ["test", "not-run"],
+    ])
+  })
+
   it("reads a packed exit=3 as stuck: cannot-judge is never a fail (@cto 7645ec3a)", () => {
     const views = checksOf(["affected-tests exit=3 ms=5 log=/w/affected.log"], "stuck", [
       { name: "affected-tests", run: "bun run affected-tests" },
@@ -983,6 +998,36 @@ describe("the head subjects", () => {
     expect(found.has(absent)).toBe(false)
   })
 
+  it("titles a merge-only re-cut by the change's own newest commit, never the merge's subject (25425)", async () => {
+    const root = scratch("subjects-recut")
+    const git = gitIn(root)
+    await git(["init", "--quiet", "--initial-branch=main", root])
+    await git(["config", "user.email", "queue@yrd.test"])
+    await git(["config", "user.name", "yrd"])
+    const commit = async (file: string, message: string): Promise<void> => {
+      writeFileSync(join(root, file), `${file}\n`)
+      await git(["add", "."])
+      await git(["commit", "--quiet", "-m", message])
+    }
+    await commit("base.txt", "main's base")
+    await git(["checkout", "--quiet", "-b", "task/one"])
+    await commit("one.txt", "fix(parser): keep the last token")
+    const own = (await git(["rev-parse", "HEAD"])).trim()
+    // Two re-cuts in a row: main moved twice, and each time only main was merged in.
+    for (const step of ["first", "second"]) {
+      await git(["checkout", "--quiet", "main"])
+      await commit(`${step}.txt`, `main moved: ${step}`)
+      await git(["checkout", "--quiet", "task/one"])
+      await git(["merge", "--quiet", "--no-edit", "main"])
+    }
+    const recut = (await git(["rev-parse", "HEAD"])).trim()
+
+    const found = await subjects(git, [own, recut])
+
+    expect(found.get(own)).toBe("fix(parser): keep the last token")
+    expect(found.get(recut)).toBe("fix(parser): keep the last token")
+  })
+
   it("asks git nothing at all for an empty table, because git with no revision walks HEAD", async () => {
     let asked = 0
     const git: Git = async () => {
@@ -992,5 +1037,33 @@ describe("the head subjects", () => {
 
     expect((await subjects(git, [])).size).toBe(0)
     expect(asked).toBe(0)
+  })
+})
+
+/**
+ * @failure A merge check an override held off reads as "not run", which is the absence C5 forbids.
+ * @level l1 @consumer `yrd show` and the watch's check tabs
+ */
+describe("a check an override skipped (25296 X3)", () => {
+  it("reads skipped from the merged record's Skipped: trailer, and a check with no trailer stays not-run", () => {
+    const records = [
+      {
+        trailers: [
+          ["Check", "lint exit=0 ms=10 log=/l.log"],
+          ["Skipped", "verify override=aaaa by=@dev/3 (claimed) until=2026-09-23T23:00:00.000Z"],
+        ] as const,
+      },
+    ]
+    const skipped = skippedChecks(records)
+    expect([...skipped]).toEqual(["verify"])
+    const declared = [
+      { name: "verify", run: "verify" },
+      { name: "other", run: "other" },
+    ]
+    const views = checksOf([], "merged", declared, undefined, undefined, skipped)
+    expect(views.map((view) => [view.name, view.state])).toEqual([
+      ["verify", "skipped"],
+      ["other", "not-run"],
+    ])
   })
 })

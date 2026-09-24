@@ -31,7 +31,7 @@ import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
  * in the PROBE rather than the loop so the probe can answer without loading the
  * queue core — the writer imports it from here, not the other way around.
  */
-export const SERVICE = "yrd-service"
+export const SERVICE = "yrd"
 
 /** Bound on the text an `unknown` document quotes back to an operator. */
 const MAX_OBSERVED = 2_000

@@ -258,10 +258,30 @@ export type CheckView = Readonly<{
   spec?: CheckSpec
   /** What the record says this check did; absent also covers a journal with no measured result. */
   result?: CheckRun
-  state: "passed" | "failed" | "stuck" | "running" | "not-run" | "unmeasured" | "deferred"
+  /**
+   * `skipped`: a merge-check override held it off (25296); its record's `Skipped:` trailer says whose and until when.
+   * `off`: the declaration switched it off by making its command `true` (25422), so a pass proves nothing.
+   */
+  state: "passed" | "failed" | "stuck" | "running" | "not-run" | "unmeasured" | "deferred" | "skipped" | "off"
   /** The real log path: the result's when it ran, the journal's while it runs. */
   log?: string
 }>
+
+/** A check whose command is `true` is switched off: it runs, exits 0 and tests nothing (25422). */
+function isSwitchedOff(spec: Pick<CheckSpec, "run">): boolean {
+  return spec.run.trim() === "true"
+}
+
+/** The check names a change's records say an override skipped: the first word of each `Skipped:` trailer. */
+export function skippedChecks(
+  records: readonly Readonly<{ trailers: readonly (readonly [string, string])[] }>[],
+): ReadonlySet<string> {
+  return new Set(
+    records.flatMap((record) =>
+      record.trailers.filter(([name]) => name === "Skipped").map(([, value]) => value.split(" ")[0] ?? ""),
+    ),
+  )
+}
 
 /** The check a run journal says is running right now on this change. */
 export type CheckedNow = Readonly<{ name: string; log?: string }>
@@ -277,6 +297,8 @@ export function checksOf(
   declared: readonly CheckSpec[],
   live?: CheckedNow,
   measured?: readonly JournalCheck[],
+  /** The checks a record's `Skipped:` trailers name: an override held them off at merge, so they read skipped, never not run. */
+  skipped: ReadonlySet<string> = new Set(),
 ): readonly CheckView[] {
   void ending
   // An ending record's own `Check:` trailers are carried forward verbatim
@@ -309,8 +331,15 @@ export function checksOf(
     phase?: string,
   ): CheckView => {
     seen.add(name)
+    const off = spec !== undefined && isSwitchedOff(spec)
     if (found === undefined) {
-      const state = measured === undefined && live?.name === name ? "running" : "not-run"
+      const state = off
+        ? "off"
+        : measured === undefined && live?.name === name
+          ? "running"
+          : skipped.has(name)
+            ? "skipped"
+            : "not-run"
       return {
         name,
         state,
@@ -338,17 +367,19 @@ export function checksOf(
             },
           }),
       state:
-        result === undefined
-          ? measuredCheck?.endedAt === undefined && live?.name === name && live.log === measuredCheck?.log
-            ? "running"
-            : "unmeasured"
-          : result === "pass"
-            ? "passed"
-            : result === "fail"
-              ? "failed"
-              : result === "deferred"
-                ? "deferred"
-                : "stuck",
+        off && result !== "fail" && result !== "stuck"
+          ? "off"
+          : result === undefined
+            ? measuredCheck?.endedAt === undefined && live?.name === name && live.log === measuredCheck?.log
+              ? "running"
+              : "unmeasured"
+            : result === "pass"
+              ? "passed"
+              : result === "fail"
+                ? "failed"
+                : result === "deferred"
+                  ? "deferred"
+                  : "stuck",
       ...(spec === undefined ? {} : { spec }),
       ...(found.result.log === undefined ? {} : { log: found.result.log }),
     }

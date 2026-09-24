@@ -16,20 +16,11 @@
 
 import React from "react"
 import { Box, Text, renderString } from "silvery"
-import {
-  BandBreakRows,
-  ListStack,
-  LoudPause,
-  QueueLine,
-  RunnerDetail,
-  bandPlan,
-  bandedRows,
-  holdsChange,
-  runnerOf,
-} from "./watch-frame.tsx"
+import { BandBreakRows, ListStack, LoudPause, QueueLine, bandPlan, bandedRows, runnerOf } from "./watch-frame.tsx"
+import { TimeText } from "./watch-primitives.tsx"
 import { NowProvider } from "./watch-clock.ts"
 import { ListHeader, ListRow, TopLine, listLayout, separatorBefore } from "./watch-list.tsx"
-import type { WatchSnapshot } from "./watch-pane.tsx"
+import { queueLineStatus, type WatchSnapshot } from "./watch-pane.tsx"
 
 export type ListingPrintOptions = Readonly<{
   /** The terminal's width; the page lays out to it and truncates long cells as the pane does. */
@@ -49,11 +40,14 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
   // The bands, their order and their rules all come from watch-frame.tsx: a
   // page that spelled them here is how the pane drifted last time.
   const runner = runnerOf(snapshot, snapshot.at)
-  const holding = holdsChange(runner.state)
-  const rows = bandedRows(snapshot.rows, holding)
-  const queue = { digit: 1, label: queues[0]?.label ?? snapshot.queue }
-  const layout = listLayout(rows, columns, snapshot.at, runner, queue)
-  const plan = bandPlan(rows, columns - 2, snapshot.drafts?.window ?? "7d", holding)
+  const rows = bandedRows(snapshot.rows, false)
+  const queue = { digit: 1, label: snapshot.queue }
+  const layout = listLayout(rows, columns, snapshot.at, runner, queue, {
+    singleQueue: false,
+    separateColumns: true,
+    fullQueueRefs: true,
+  })
+  const plan = bandPlan(rows, columns - 2, "bare")
   return (
     <NowProvider readAt={snapshot.at} live={false}>
       <Box flexDirection="column" width={columns} minWidth={0}>
@@ -61,7 +55,12 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
         <LoudPause snapshot={snapshot} />
         {/* The queue's own name, as a stranger spells it — the line a logged round's `updated` stamp sits under. */}
         <Text wrap="truncate">{snapshot.queue}</Text>
-        <TopLine queues={queues} visible={undefined} onToggle={() => undefined} />
+        <TopLine
+          queues={queues}
+          visible={undefined}
+          onToggle={() => undefined}
+          status={queueLineStatus(snapshot, snapshot.at)}
+        />
         <QueueLine snapshot={snapshot} columns={columns} />
         {snapshot.journalAbsent === undefined ? null : (
           <Text color="$fg-muted" wrap="truncate">
@@ -83,8 +82,8 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
               <Box key={key} flexDirection="column" minWidth={0}>
                 <BandBreakRows brk={plan.before.get(index)} snapshot={snapshot} layout={layout} />
                 {separator === undefined ? null : (
-                  <Text bold color="$fg-muted">
-                    {separator}
+                  <Text bold>
+                    <TimeText text={separator} />
                   </Text>
                 )}
                 <ListRow
@@ -95,8 +94,6 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
                   queueDigit={queue.digit}
                   queueLabel={queue.label}
                 />
-                {/* The runner's second line hangs under the row that IS the runner. */}
-                {plan.holding === index ? <RunnerDetail snapshot={snapshot} named /> : null}
               </Box>
             )
           })}

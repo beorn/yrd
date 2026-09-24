@@ -22,6 +22,7 @@
  * written again.
  */
 
+import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { prepareWorktree } from "./worktree.ts"
@@ -43,9 +44,11 @@ import {
   type WriteRecord,
 } from "./legacy-records.ts"
 import { changeName } from "./refs.ts"
-import { recordProgramStart, recordProgramResult, short, writeRecord, type Ring, type Run } from "./run.ts"
+import { recordProgramStart, recordProgramResult, short, shortRecut, writeRecord, type Ring, type Run } from "./run.ts"
 import { tipOf } from "./state.ts"
 import type { QueueEntry } from "./remote.ts"
+import type { OverrideEntry } from "./override.ts"
+import type { Git } from "./git.ts"
 
 /** This ring's own option, which the run's options carry for it (rings.ts). */
 export type NotifyOptions = Readonly<{
@@ -55,6 +58,31 @@ export type NotifyOptions = Readonly<{
 
 export const withNotify: Ring = (steps) => ({
   ...steps,
+
+  open: async (run) => {
+    const stopped = await steps.open(run)
+    // The caller wrote this round's expiries and half-window reminders on the
+    // override chain before the round began; the round tells them (25296,
+    // @cto ccd8dfa8), whether or not a stop then holds the line.
+    const target = `${run.options.target.branch}@${run.targetSha}`
+    const notices = [
+      ...(run.options.overridesExpired ?? []).map((entry) => overrideNotice(entry, "expired", target, run.log.id)),
+      ...(run.options.overridesReminded ?? []).map((entry) => overrideNotice(entry, "reminder", target, run.log.id)),
+    ]
+    for (const notice of notices) {
+      for (const { name, delivery, failure } of await notifyAll(run, "override", notice)) {
+        run.log.write({
+          check: notice.check,
+          delivered: delivery === "sent",
+          kind: "message",
+          says: `override ${notice.action}`,
+          text: `${said(delivery)} ${name} that merge check ${notice.check} override ${notice.action}${failure === undefined ? "" : `: ${failure}`}`,
+          to: name,
+        })
+      }
+    }
+    return stopped
+  },
 
   bookkeep: async (run, entry) => {
     const outcome = await steps.bookkeep(run, entry)
@@ -197,11 +225,16 @@ export function messageFor(
     remedy?: string
     projectedMs?: number
     boundMs?: number
+    /** The ending's `Recut` trailers: the queue composed these gitlinks itself (24977). */
+    recuts?: readonly string[]
   }>,
 ): string {
   switch (kind) {
-    case "merged":
-      return `close your bead: ${short(about.branch, about.head)} merged as ${(about.merge ?? "").slice(0, 12)}`
+    case "merged": {
+      const merged = `close your bead: ${short(about.branch, about.head)} merged as ${(about.merge ?? "").slice(0, 12)}`
+      const recuts = about.recuts ?? []
+      return recuts.length === 0 ? merged : `${merged}; the queue re-cut it: ${recuts.map(shortRecut).join("; ")}`
+    }
     case "failed":
       return `send it back: ${about.subject}; ${about.remedy ?? ""}`.trim()
     case "stuck":
@@ -286,6 +319,7 @@ async function told(
     head: entry.change.head,
     merge: trailer(written, "Merge") ?? "",
     remedy: trailer(written, "Remedy"),
+    recuts: trailers(written, "Recut"),
     subject: written.subject,
     projectedMs: trailer(written, "ProjectedMs") !== undefined ? Number(trailer(written, "ProjectedMs")) : undefined,
     boundMs: trailer(written, "BoundMs") !== undefined ? Number(trailer(written, "BoundMs")) : undefined,
@@ -395,8 +429,9 @@ async function told(
  */
 export type NotifyRecord =
   | Readonly<{ record: "observed"; notice: ObservationNotice }>
+  | OverrideNotice
   | Readonly<{
-      record: Exclude<Ending, "observed">
+      record: Exclude<Ending, "observed" | "override">
       change: string
       submitter?: string
       issue?: string
@@ -415,6 +450,47 @@ export type NotifyRecord =
       projectedMs?: number
       boundMs?: number
     }>
+
+/**
+ * A merge-check override event (25296, @cto ccd8dfa8), in the round's notify
+ * shape: a JSON object on the entry's stdin. `target` is the queue target as
+ * `<branch>@<sha>` when it happened, `round` the round that fired it (absent
+ * for the verb's own set, clear and replace), `owner` who set the override,
+ * `until` its expiry, and `override` the record commit it names.
+ */
+export type OverrideNotice = Readonly<{
+  record: "override"
+  action: "set" | "clear" | "replace" | "expired" | "reminder"
+  check: string
+  target: string
+  round?: string
+  owner: string
+  verified: boolean
+  until: string
+  reason: string
+  override: string
+}>
+
+/** The notice for one override entry and action. */
+export function overrideNotice(
+  entry: OverrideEntry,
+  action: OverrideNotice["action"],
+  target: string,
+  round?: string,
+): OverrideNotice {
+  return {
+    action,
+    check: entry.check,
+    override: entry.record,
+    owner: entry.by,
+    reason: entry.reason,
+    record: "override",
+    target,
+    until: entry.until.toISOString(),
+    verified: entry.verified,
+    ...(round === undefined ? {} : { round }),
+  }
+}
 
 /** Why a change ended, as its record says it: the check for a fail, the sentence for a stuck, the projection reason for deferred. */
 function reasonFor(kind: "failed" | "stuck" | "deferred", ended: ChangeRecord): string {
@@ -455,8 +531,24 @@ function said(delivery: Delivery): string {
   return delivery === "sent" ? "told" : delivery === "none" ? "told nobody:" : "could not tell"
 }
 
-/** A change ended by its submitter moving on, which is not a failure of anything. */
-const MOVED_ON = new Set(["replaced", "deleted"])
+/**
+ * The failed ending of a re-cut that fails a submit check the change alone passed:
+ * the submitter's, uncharged. It lives here, not in run.ts, because UNCHARGED reads
+ * it at module init and run.ts -> rings.ts -> with-notify.ts is an import cycle.
+ */
+export const RECUT_CHECK = "recut-check"
+
+/**
+ * Failed endings that are not the branch failing its checks again: a head the
+ * submitter replaced or deleted, and a queue re-cut's check failure (24977
+ * constraint 4 -- the attempt was the queue's, so it is never charged).
+ */
+const UNCHARGED = new Set(["replaced", "deleted", RECUT_CHECK])
+
+/** Whether a failed ending with this Reason counts toward "failed twice with the same error". */
+export function isChargedFailure(reason: string | undefined): boolean {
+  return !UNCHARGED.has(reason ?? "")
+}
 
 /**
  * How many times this branch has been sent back, this ending included — the
@@ -518,13 +610,13 @@ async function priorFailureReasonOf(run: Run, entry: QueueEntry, endedRecord: st
     .filter((candidate) => {
       if (candidate.change.branch !== entry.change.branch || candidate.change.head === entry.change.head) return false
       const tip = tipOf(candidate.change)
-      return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
+      return endedKind(tip) === "failed" && isChargedFailure(trailer(tip, "Reason"))
     })
     .map((candidate) => trailer(tipOf(candidate.change), "Reason"))
   // `own` is append-ordered under one ref and its LAST failed record is the
   // ending being written right now, which is not its own predecessor.
   const own = (await readRecords(run.git, endedRecord))
-    .filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? ""))
+    .filter((record) => record.kind === "failed" && isChargedFailure(trailer(record, "Reason")))
     .map((record) => trailer(record, "Reason"))
   return sameFailureReason([...elsewhere, ...own.slice(0, -1)])
 }
@@ -533,13 +625,12 @@ async function failuresOf(run: Run, entry: QueueEntry, endedRecord: string): Pro
   const elsewhere = run.queue.filter((candidate) => {
     if (candidate.change.branch !== entry.change.branch || candidate.change.head === entry.change.head) return false
     const tip = tipOf(candidate.change)
-    return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
+    return endedKind(tip) === "failed" && isChargedFailure(trailer(tip, "Reason"))
   }).length
   // Count through the written ending, regardless of concurrent local ref changes.
   const own = await readRecords(run.git, endedRecord)
   return (
-    elsewhere +
-    own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
+    elsewhere + own.filter((record) => record.kind === "failed" && isChargedFailure(trailer(record, "Reason"))).length
   )
 }
 
@@ -575,6 +666,76 @@ type Handed = Readonly<{ name: string; delivery: Delivery; failure?: string; ref
  * to say and nobody to say it to, because an ending with no record at all reads
  * exactly like an ending nobody has got to yet.
  */
+/** Everything a notify entry needs to run outside a round: the verb's own set, clear and replace. */
+export type OutsideRound = Readonly<{
+  git: Git
+  repo: string
+  /** The target commit the entry runs at: its tree, and its `setup:` first. */
+  targetSha: string
+  workdir: string
+  notify: readonly Notifier[]
+  setup?: string
+  env?: NodeJS.ProcessEnv
+  populateReference?: boolean
+  process?: Process
+}>
+
+/**
+ * Hand one override notice to every `notify:` entry that wants `override`,
+ * outside any round, in a worktree at the target exactly as a round runs its
+ * entries, and say how each went. Nothing here throws: a failed entry is a
+ * `failed` delivery, never a failed override (@cto ccd8dfa8). No entry wanting
+ * the event is one `none` delivery, named as such.
+ */
+export async function notifyOutsideRound(
+  context: OutsideRound,
+  notice: OverrideNotice,
+): Promise<readonly Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>[]> {
+  const wanted = context.notify.filter((entry) => entry.on.includes("override"))
+  if (wanted.length === 0) return [{ delivery: "none", name: NOBODY }]
+  await using resources = new AsyncDisposableStack()
+  const runner = context.process ?? resources.use(createProcess({ cwd: context.repo }))
+  const stamp = `override-${String(Date.now())}-${String(process.pid)}`
+  let prepared: Promise<Readonly<{ cwd: string; runner: Process }>> | undefined
+  const environment = (): Promise<Readonly<{ cwd: string; runner: Process }>> => {
+    prepared ??= (async () => {
+      mkdirSync(join(context.workdir, "worktrees", stamp), { recursive: true })
+      const tree = await prepareWorktree(
+        context.git,
+        context.repo,
+        context.targetSha,
+        join(context.workdir, "worktrees", stamp, "notify"),
+        {
+          targetSha: context.targetSha,
+          process: runner,
+          ...(context.env === undefined ? {} : { env: context.env }),
+          ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
+          ...(context.setup === undefined
+            ? {}
+            : {
+                setup: {
+                  run: context.setup,
+                  logDir: join(context.workdir, "checks", "notify", stamp),
+                  tmpdir: join(context.workdir, "tmp", "notify", stamp),
+                },
+              }),
+        },
+      )
+      resources.defer(() => tree.remove())
+      return { cwd: tree.path, runner }
+    })()
+    return prepared
+  }
+  const handed: Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>[] = []
+  for (const entry of wanted) {
+    handed.push({
+      ...(await deliverWith(environment, context.targetSha, context.env, entry, notice)),
+      name: entry.name,
+    })
+  }
+  return handed
+}
+
 async function notifyAll(
   run: Run,
   ending: Ending,
@@ -601,12 +762,23 @@ async function deliver(
   entry: Notifier,
   record: NotifyRecord,
 ): Promise<Readonly<{ delivery: Delivery; failure?: string; refused?: string }>> {
+  return deliverWith(() => notificationEnvironment(run), run.targetSha, run.options.env, entry, record)
+}
+
+/** {@link deliver}, with the environment the entry runs in given rather than a round's. */
+async function deliverWith(
+  environment: () => Promise<Readonly<{ cwd: string; runner: Process }>>,
+  targetSha: string,
+  env: NodeJS.ProcessEnv | undefined,
+  entry: Notifier,
+  record: NotifyRecord,
+): Promise<Readonly<{ delivery: Delivery; failure?: string; refused?: string }>> {
   try {
-    const { cwd, runner } = await notificationEnvironment(run)
+    const { cwd, runner } = await environment()
     const result = await runner.run({
       argv: shellCommand(entry.run),
       cwd,
-      env: run.options.env,
+      env,
       stdin: `${JSON.stringify(record)}\n`,
       timeoutMs: NOTIFY_TIMEOUT_MS,
     })
@@ -631,7 +803,7 @@ async function deliver(
   } catch (error) {
     return {
       delivery: "failed",
-      failure: `the notify entry ${entry.name} at queue commit ${run.targetSha} could not run: ${error instanceof Error ? error.message : String(error)}`,
+      failure: `the notify entry ${entry.name} at queue commit ${targetSha} could not run: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
 }

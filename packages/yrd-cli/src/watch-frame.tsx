@@ -24,7 +24,7 @@ import type { ReactNode } from "react"
 import { Box, Text } from "silvery"
 import type { Row } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
-import { RUNNER_GLYPH, STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.ts"
+import { STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.ts"
 import type { RunnerState } from "./watch-words.ts"
 import { RunnerRow, clockOf, type ListLayout } from "./watch-list.tsx"
 import { TitledBox } from "./watch-primitives.tsx"
@@ -96,11 +96,14 @@ export function queueLine(snapshot: WatchSnapshot, now: Date, width: number): st
       return at === undefined ? [] : [{ at, branch: row.branch }]
     })
     .sort((left, right) => right.at.getTime() - left.at.getTime())[0]
-  const drafted = new Set(
-    snapshot.unfiltered
-      .filter(({ row }) => row.state === "draft" && row.at !== undefined)
-      .map(({ row }) => `${row.branch}@${row.head}`),
-  ).size
+  // The rows are the last day's drafts; the week's older ones folded into a
+  // count still count here, so the total says every draft (25424).
+  const drafted =
+    new Set(
+      snapshot.unfiltered
+        .filter(({ row }) => row.state === "draft" && row.at !== undefined)
+        .map(({ row }) => `${row.branch}@${row.head}`),
+    ).size + (snapshot.drafts?.older ?? 0)
   const unread = snapshot.drafts?.unread ?? 0
   const draftWord = STATE_WORDS.draft.word
   const drafts =
@@ -123,11 +126,18 @@ export function queueLine(snapshot: WatchSnapshot, now: Date, width: number): st
     if (stop !== undefined) {
       const since = times ? ` since ${clock(new Date(stop.since))}` : ""
       if (stop.change === null) {
-        parts.push(`paused${since}${names && stop.by !== "" ? ` by ${stop.by}` : ""}`)
+        parts.push(`stopped${since}${names && stop.by !== "" ? ` by ${stop.by}` : ""}`)
       } else {
         const branch = stop.change.slice(0, stop.change.lastIndexOf("@"))
         parts.push(`line stopped${names ? ` at ${branch}` : ""}${since}`)
       }
+    }
+    // A merge check an override holds off, and one whose override expired: as
+    // loud as the stop, at every level, because a check that is not running is
+    // the fact a reader most needs (25296 C5).
+    for (const off of snapshot.overrides ?? []) {
+      const until = times ? ` ${clock(new Date(off.until))}` : ""
+      parts.push(off.state === "active" ? `${off.check} OFF until${until}` : `${off.check} override expired${until}`)
     }
     if (merged !== undefined && level < 4) {
       parts.push(`last merge ${clock(merged.at)}${level < 3 ? ` (${merged.branch})` : ""}`)
@@ -177,7 +187,9 @@ export type Band = (typeof BANDS)[number]
 export function bandOf(row: Pick<Row, "state" | "position" | "live">, holding = true): Band {
   if (row.live !== undefined && holding) return "runner"
   if (row.state === "draft") return "drafts"
-  if (row.position !== undefined) return "waiting"
+  if (row.position !== undefined || row.state === "queued" || row.state === "checked" || row.state === "stuck") {
+    return "waiting"
+  }
   return "done"
 }
 
@@ -201,16 +213,23 @@ export function bandedRows(rows: readonly WatchRow[], holding = true): readonly 
   return [...of("drafts"), ...waiting, ...of("runner"), ...of("done")]
 }
 
-/** A band's rule: the legend that opens it, drawn to the table's width. */
-export function bandRule(band: Band, count: number, width: number, draftWindow = "7d"): string {
-  const said =
-    band === "drafts"
-      ? `${STATE_WORDS.draft.word}s (${draftWindow}): ${STATE_WORDS.draft.means ?? ""} · TIME = pushed`
-      : band === "waiting"
-        ? `${String(count)} ${STATE_WORDS.waiting.word}, newest first; the bottom row goes next · TIME = opened`
-        : "done, newest first · TIME = ended"
-  const rule = `── ${said} `
-  return rule.padEnd(Math.max(rule.length, width), "─")
+/**
+ * The drafts a reading holds, in words, for the STATS line: the dated rows
+ * listed, the older ones of the week folded into a count (25424), and the
+ * heads not yet read. The table itself draws no drafts line (25417).
+ */
+export function draftsSaid(rows: readonly WatchRow[], drafts: WatchSnapshot["drafts"]): string | undefined {
+  const count = rows.filter((item) => item.row.state === "draft" && item.row.at !== undefined).length
+  const unread = drafts?.unread ?? 0
+  const older = drafts?.older ?? 0
+  if (count === 0 && unread === 0 && older === 0) return undefined
+  const window = drafts?.window ?? "7d"
+  const plural = count === 1 ? "" : "s"
+  return (
+    `${String(count)} ${STATE_WORDS.draft.word}${plural} (${window === "7d" ? "1d" : window})` +
+    (older > 0 ? ` · ${String(older)} older` : "") +
+    (unread > 0 ? ` · ${String(unread)} not yet read` : "")
+  )
 }
 
 /** What is drawn at one point in the table that is not a change's row. */
@@ -233,30 +252,32 @@ export type BandBreak = Readonly<{
 export type BandPlan = Readonly<{
   before: ReadonlyMap<number, BandBreak>
   after: BandBreak | undefined
-  /** The index of the row the runner holds, when this table has it. */
-  holding: number | undefined
 }>
 
-export function bandPlan(rows: readonly WatchRow[], width: number, draftWindow = "7d", holds = true): BandPlan {
+export function bandPlan(
+  rows: readonly WatchRow[],
+  width: number,
+  /** The page's static list opens the drafts with a bare rule; the watch draws none (25417). */
+  draftsRule: "bare" | "none" = "none",
+): BandPlan {
   const before = new Map<number, BandBreak>()
   const opening = new Map<number, string[]>()
   let after: BandBreak | undefined
-  let holding: number | undefined
   let cursor = 0
   let runnerAt: number | undefined
   for (const band of BANDS) {
-    const count = rows.filter((item) => bandOf(item.row, holds) === band).length
+    const total = rows.filter((item) => bandOf(item.row, false) === band).length
     if (band === "runner") {
-      if (count === 0) runnerAt = cursor
-      else holding = cursor
-      cursor += count
+      runnerAt = cursor
       continue
     }
-    if (count === 0) continue
-    const rules = opening.get(cursor) ?? []
-    rules.push(bandRule(band, count, width, draftWindow))
-    opening.set(cursor, rules)
-    cursor += count
+    if (band === "drafts") {
+      if (total > 0 && draftsRule === "bare") opening.set(cursor, ["─".repeat(Math.max(1, width))])
+      cursor += total
+      continue
+    }
+    // Operator item 7: remove rule below drafts and rule below RUNNER box
+    cursor += total
   }
   for (const [index, rules] of opening) {
     before.set(index, { rules, runner: index === runnerAt })
@@ -265,7 +286,7 @@ export function bandPlan(rows: readonly WatchRow[], width: number, draftWindow =
     if (runnerAt < rows.length) before.set(runnerAt, { rules: [], runner: true })
     else after = { rules: [], runner: true }
   }
-  return { after, before, holding }
+  return { after, before }
 }
 
 /** How many terminal rows a break costs, so a virtualized list can budget for it. */
@@ -295,6 +316,38 @@ export function runnerOf(snapshot: WatchSnapshot, now: Date) {
 }
 
 /**
+ * The RUNNER box, drawn in rounded border chrome with its title and border
+ * wearing the runner state's color (items 7, 27). The one component for the
+ * RUNNER box across both the list view item (watch-pane.tsx) and the empty
+ * pane/print break rows (BandBreakRows).
+ */
+export function RunnerTitledBox({
+  line,
+  _snapshot,
+  layout,
+  cursor = false,
+  queueDigit = 1,
+  queueLabel = "main",
+}: {
+  line: ReturnType<typeof runnerOf>
+  _snapshot?: WatchSnapshot
+  snapshot?: WatchSnapshot
+  layout: ListLayout
+  cursor?: boolean
+  queueDigit?: number
+  queueLabel?: string
+}) {
+  const color = STATE_WORDS[line.state].color
+  return (
+    <Box flexDirection="column" marginTop={1} marginBottom={1}>
+      <TitledBox title={STATE_WORDS.runner.word} flushTop borderColor={color}>
+        <RunnerRow line={line} layout={layout} cursor={cursor} queueDigit={queueDigit} queueLabel={queueLabel} />
+      </TitledBox>
+    </Box>
+  )
+}
+
+/**
  * One break, drawn: the runner's own row when this is its place, THEN the band
  * rules that open here. The runner comes first because the only rule that can
  * share its index is `done`'s — drafts and waiting have already advanced past
@@ -304,55 +357,24 @@ export function BandBreakRows({
   brk,
   snapshot,
   layout,
+  includeRunner = true,
 }: {
   brk: BandBreak | undefined
   snapshot: WatchSnapshot
   layout: ListLayout
+  includeRunner?: boolean
 }) {
   const now = useNow()
   if (brk === undefined) return null
+  const runner = runnerOf(snapshot, now)
   return (
     <Box flexDirection="column" flexShrink={0} minWidth={0}>
-      {brk.runner ? (
-        <TitledBox title={STATE_WORDS.runner.word} flushTop>
-          <RunnerRow line={runnerOf(snapshot, now)} layout={layout} />
-          <RunnerDetail snapshot={snapshot} />
-        </TitledBox>
-      ) : null}
-      {brk.rules.map((rule) => (
-        <Text key={rule} color="$fg-muted" wrap="truncate">
+      {brk.runner && includeRunner ? <RunnerTitledBox line={runner} snapshot={snapshot} layout={layout} /> : null}
+      {brk.rules.map((rule, idx) => (
+        <Text key={`${rule}-${idx}`} color="$fg-muted" wrap="truncate">
           {rule}
         </Text>
       ))}
-    </Box>
-  )
-}
-
-/**
- * The runner's second line: host-only detail, hung under the row it belongs to,
- * and NEVER blank — off the queue's machine it says where it looked and that
- * nothing is published, because a blank line where a fact belongs reads as a
- * queue with nothing to say.
- *
- * `named` when the row above is a CHANGE's row: the runner holds it, so that
- * row is the runner's row and nothing else on it says so. Under the runner's
- * own row the word is already in the cell above, and saying it twice is noise.
- */
-export function RunnerDetail({ snapshot, named = false }: { snapshot: WatchSnapshot; named?: boolean }) {
-  const now = useNow()
-  const line = runnerOf(snapshot, now)
-  return (
-    <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-      <Box width={2} flexShrink={0} />
-      <Box flexGrow={1} flexBasis={0} minWidth={0} overflow="hidden" flexDirection="row">
-        <Text color={STATE_WORDS[line.state].color} flexShrink={0}>
-          {RUNNER_GLYPH}
-          {named ? ` ${STATE_WORDS.runner.word} ·` : ""}{" "}
-        </Text>
-        <Text color="$fg-muted" wrap="truncate" minWidth={0}>
-          {line.detail}
-        </Text>
-      </Box>
     </Box>
   )
 }

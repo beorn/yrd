@@ -12,6 +12,7 @@ export type Verification =
       candidate: string
       gitlinks: readonly SettledGitlink[]
       descents?: readonly SuperMergeDescent[]
+      steps?: readonly SuperMergeStep[]
     }>
   | Readonly<{
       state: "failed"
@@ -20,6 +21,7 @@ export type Verification =
       detail: SuperMergeDetail
       gitlinks: readonly SettledGitlink[]
       descents?: readonly SuperMergeDescent[]
+      steps?: readonly SuperMergeStep[]
     }>
 
 export type VerifiedCandidate =
@@ -37,11 +39,19 @@ export type VerificationOptions = Readonly<{
   process?: Process
   env?: NodeJS.ProcessEnv
   hooksPath?: string
+  /**
+   * Times a named part of the verification into the caller's journal. Only the
+   * queue round passes it; without it nothing is timed.
+   */
+  timed?: <T>(name: string, work: () => Promise<T>) => Promise<T>
 }>
 
 /** Shared by submit admission and both queue phases; only git-super composes gitlinks. */
 export async function verifyCandidate(options: VerificationOptions): Promise<VerifiedCandidate> {
-  const worktree = await freshWorktree(options.git, options.repo, options.targetHead, options.path, options.worktree)
+  const timed = options.timed ?? ((_name, work) => work())
+  const worktree = await timed("worktree", () =>
+    freshWorktree(options.git, options.repo, options.targetHead, options.path, options.worktree),
+  )
   let result: SuperMergeResult
   try {
     result = await superMerge(options, worktree.path, options.head, options.message)
@@ -54,6 +64,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
     targetHead: options.targetHead,
     gitlinks: result.gitlinks,
     ...(result.descents === undefined ? {} : { descents: result.descents }),
+    ...(result.steps === undefined ? {} : { steps: result.steps }),
   }
   if (result.state !== "updated" || result.partial) {
     if (result.detail === undefined) {
@@ -181,8 +192,9 @@ export type SettledGitlink = Readonly<{
    */
   /**
    * `merged` is a pin the MERGE composed (24951): the change's pin and the
-   * component main the root records had diverged, they changed disjoint files,
-   * and git-super created the two-parent commit carrying both. It publishes
+   * component main the root records had diverged, their own merge was clean
+   * (24977: merge-tree's answer, no longer file disjointness), and git-super
+   * created the two-parent commit carrying both. It publishes
    * exactly as `kept-ahead` does, because the component main tip is that
    * commit's first parent, so advancing main to it is a fast-forward.
    */
@@ -220,7 +232,16 @@ export type SuperMergeResult = Readonly<{
   gitlinks: readonly SettledGitlink[]
   /** Absent when no parent was Ahead. Optional so an older git-super still parses. */
   descents?: readonly SuperMergeDescent[]
+  /** How long each phase of the merge took, in order. Optional so an older git-super still parses. */
+  steps?: readonly SuperMergeStep[]
 }>
+
+/**
+ * One phase of git-super's merge and its duration. `name` is whatever git-super
+ * said: its README lists the names as a closed set, and a name outside it is
+ * written to the journal as given, where the drift is seen, never dropped.
+ */
+export type SuperMergeStep = Readonly<{ name: string; ms: number }>
 
 /**
  * Parse git-super's merge JSON. Exported because it is a pure reader with no
@@ -266,6 +287,9 @@ export function readSuperMergeResult(value: unknown): SuperMergeResult {
   // present-and-wrong row is a producer defect and swallowing it would leave the
   // journal quietly incomplete, which is the exact failure this row exists for.
   const descents = found.descents === undefined ? undefined : readSuperMergeDescents(found.descents)
+  // The same contract as descents: absent is an older git-super, malformed is a
+  // producer defect that would leave the compose silent inside.
+  const steps = found.steps === undefined ? undefined : readSuperMergeSteps(found.steps)
   return {
     state: found.state as SuperMergeResult["state"],
     partial: found.partial,
@@ -273,7 +297,26 @@ export function readSuperMergeResult(value: unknown): SuperMergeResult {
     ...(detail === undefined ? {} : { detail }),
     gitlinks,
     ...(descents === undefined ? {} : { descents }),
+    ...(steps === undefined ? {} : { steps }),
   }
+}
+
+function readSuperMergeSteps(value: unknown): readonly SuperMergeStep[] {
+  if (!Array.isArray(value)) throw new Error("git-super merge steps is not an array")
+  return value.map((row, index): SuperMergeStep => {
+    const entry = typeof row === "object" && row !== null ? (row as Record<string, unknown>) : undefined
+    if (
+      entry === undefined ||
+      typeof entry.name !== "string" ||
+      entry.name === "" ||
+      typeof entry.ms !== "number" ||
+      !Number.isFinite(entry.ms) ||
+      entry.ms < 0
+    ) {
+      throw new Error(`git-super merge step ${String(index)} is not a named, non-negative duration`)
+    }
+    return { name: entry.name, ms: entry.ms }
+  })
 }
 
 function readSuperMergeComposition(value: unknown, index: number): SettledComposition {

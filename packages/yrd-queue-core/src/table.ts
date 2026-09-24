@@ -101,7 +101,7 @@ export type Row<Status extends string = ChangeState | ChangeStatus | "direct" | 
    * off the queue's own machine for anything not yet merged.
    */
   run?: string
-  /** When checking began — the journal's first check-start for this change, or the tip's own instant when the tip IS the checked record. */
+  /** When this run's checks began — its first check-start, or the tip's own instant when no journal exists and the tip IS the checked record. */
   startedAt?: Date
   /** When the actual ending record was written; absent when only its sent notice was read, while queued or checked, or for an ending git read (`replaced`, `deleted`, a direct ancestor). */
   endedAt?: Date
@@ -459,12 +459,20 @@ export async function endingInstants(git: Git, entries: QueueRead): Promise<Read
   return found
 }
 
+/** How many first parents a merge head's title walk steps back before it keeps the merge's own subject. */
+const TITLE_WALK_DEPTH = 8
+
 /**
- * The head commit subject of every change in one reading.
+ * The title of every change in one reading: its head commit's subject, or,
+ * when the head is a merge, the subject of the newest non-merge commit on its
+ * first-parent line. A merge-only re-cut is still the change it re-cut, so it
+ * keeps that change's title rather than "Merge … into …" (25425).
  *
  * ONE git call for the whole table, never one per row: a list of forty changes
  * used to be forty `git show`s, and at a fifth of a second each that is the
- * difference between a watch that refreshes and one that stutters.
+ * difference between a watch that refreshes and one that stutters. A merge
+ * head adds one batched call per first-parent step, for every merge head at
+ * once, at most {@link TITLE_WALK_DEPTH} of them.
  * `--ignore-missing` is what makes it one call — an object this repository has
  * not fetched is simply not in the answer, and the caller sees no entry for
  * that head rather than an empty subject.
@@ -473,14 +481,37 @@ export async function subjects(git: Git, heads: readonly string[]): Promise<Read
   const wanted = [...new Set(heads)].filter((head) => head !== "")
   // Git with no revision walks HEAD, so an empty table must not ask at all.
   if (wanted.length === 0) return new Map()
-  const out = await git(["log", "--ignore-missing", "--no-walk=unsorted", "--format=%H %s", ...wanted])
+  const read = async (shas: readonly string[]) => {
+    const out = await git(["log", "--ignore-missing", "--no-walk=unsorted", "--format=%H%x00%P%x00%s", ...shas])
+    const commits = new Map<string, Readonly<{ parents: readonly string[]; subject: string }>>()
+    for (const line of out.split("\n")) {
+      const [sha, parents, subject] = line.split("\0")
+      if (sha === undefined || parents === undefined || subject === undefined) continue
+      if (!/^[0-9a-f]{40}$/u.test(sha)) continue
+      commits.set(sha, { parents: parents.split(" ").filter((parent) => parent !== ""), subject })
+    }
+    return commits
+  }
   const found = new Map<string, string>()
-  for (const line of out.split("\n")) {
-    const space = line.indexOf(" ")
-    if (space === -1) continue
-    const sha = line.slice(0, space)
-    if (!/^[0-9a-f]{40}$/u.test(sha)) continue
-    found.set(sha, line.slice(space + 1))
+  // Each merge head, and the first parent its walk has reached.
+  let walking = new Map<string, string>()
+  for (const [sha, commit] of await read(wanted)) {
+    found.set(sha, commit.subject)
+    const first = commit.parents[0]
+    if (commit.parents.length > 1 && first !== undefined) walking.set(sha, first)
+  }
+  for (let depth = 0; walking.size > 0 && depth < TITLE_WALK_DEPTH; depth++) {
+    const commits = await read([...new Set(walking.values())])
+    const next = new Map<string, string>()
+    for (const [head, at] of walking) {
+      const commit = commits.get(at)
+      // A first parent this repository has not fetched: the merge's own subject stands.
+      if (commit === undefined) continue
+      const first = commit.parents[0]
+      if (commit.parents.length > 1 && first !== undefined) next.set(head, first)
+      else found.set(head, commit.subject)
+    }
+    walking = next
   }
   return found
 }
@@ -603,14 +634,13 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
 }
 
 /**
- * When checking began: the earliest check-start any run journal recorded for
- * this change, else the checked record's own instant when the tip IS that
- * record. Absent otherwise — and absent is the honest answer off the queue's
- * machine, where there is no journal and the tip has moved past `checked`.
+ * When this run's checks began: the newest journal run's first check-start.
+ * An earlier run cannot lend its start to a new round that has not started a
+ * check. Without a journal, the checked tip's own instant is the only measured
+ * start; otherwise absent is the honest answer.
  */
 function checkingBegan(runs: readonly JournalRun[], tip: ChangeRecord, ended: ChangeRecord["kind"]): Date | undefined {
-  const starts = runs.flatMap((run) => run.checks.map((check) => check.startedAt.getTime()))
-  if (starts.length > 0) return new Date(Math.min(...starts))
+  if (runs.length > 0) return runs[0]?.checks[0]?.startedAt
   return ended === "checked" ? tip.at : undefined
 }
 

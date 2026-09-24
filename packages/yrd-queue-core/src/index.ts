@@ -27,6 +27,7 @@ export {
   encodeQueueComponent,
   parseChangeName,
   parseChangeRef,
+  overrideRef,
   pauseRef,
   queueRefPrefix,
   refOfChange,
@@ -99,7 +100,7 @@ export {
   type GitObservation,
   type Git,
 } from "./git.ts"
-export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck } from "./check.ts"
+export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck, skippedChecks } from "./check.ts"
 export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckView } from "./check.ts"
 export {
   CHANGE_REF_DIAGNOSTICS,
@@ -136,7 +137,7 @@ export type { Ending, Notifier, QueueConfig, Target } from "./config.ts"
 export { clocks, endingInstants, list, show, subjects, watchRows, watchRowKey } from "./table.ts"
 export type { Clocks, ListOptions, Row, WatchRow, WatchRowOptions } from "./table.ts"
 export { readHistories, readQueue, readStop, resolveRemote } from "./remote.ts"
-export { DRAFT_EXCLUDED_PREFIXES, DRAFT_WINDOW_MS, readDrafts } from "./drafts.ts"
+export { DRAFT_EXCLUDED_PREFIXES, DRAFT_ROW_MS, DRAFT_WINDOW_MS, foldDrafts, readDrafts } from "./drafts.ts"
 export type { Draft, DraftReading } from "./drafts.ts"
 export { directMergeCommits, directMergeLine, eventDirectMergeCommits } from "./direct.ts"
 export { refuseTarget, inspectSubmit, freshnessLine, submit, issueOf } from "./submit.ts"
@@ -156,6 +157,29 @@ export {
 } from "./pause.ts"
 export type { PauseCause, PauseRecord, PauseKind, StopFact, WritePause } from "./pause.ts"
 export { pauseStop, STOPPED_BY } from "./with-pause.ts"
+export {
+  NO_OVERRIDES,
+  OVERRIDE_MAX_HOURS,
+  OverrideRefused,
+  expireOverrides,
+  isActive as isOverrideActive,
+  overrideFacts,
+  overrideLine,
+  parseUntil,
+  readOverrides,
+  stateAt as overrideStateAt,
+  writeOverride,
+} from "./override.ts"
+export type {
+  OverrideActor,
+  OverrideEntry,
+  OverrideFact,
+  OverrideState,
+  OverrideTable,
+  OverrideWrite,
+} from "./override.ts"
+export { notifyOutsideRound, overrideNotice } from "./with-notify.ts"
+export type { OutsideRound, OverrideNotice } from "./with-notify.ts"
 
 export { remoteUrl } from "./remote.ts"
 
@@ -168,10 +192,12 @@ export {
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
   queueHealthExitCode,
+  gracefulStopHealthDocument,
   relaunchStalledHealthDocument,
   ROUND_BUDGET_MS,
   ROUND_LOCK,
   roundHealthDocument,
+  serviceStoppedLine,
   STUCK_RECORD_CODE,
   unreadableHealthDocument,
   writtenHealthDocument,
@@ -183,6 +209,7 @@ export type {
   QueueHealthFailure,
   QueueHealthState,
   QueueHealthVerdict,
+  ServiceIntentFact,
 } from "./service-health.ts"
 
 export {

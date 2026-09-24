@@ -3,7 +3,7 @@
  * § The final design, Commands).
  *
  * The command surface is
- * `yrd queue submit|withdraw|run|up|pause|resume|list|stats|show|health`,
+ * `yrd queue submit|withdraw|run|up|stop|start|pause|resume|list|stats|show|health`,
  * `yrd drop`, `yrd merge`, `yrd check`, `yrd env open|list|close`, with `yrd submit` and
  * `yrd list` as the aliases of the two used most, `yrd watch` as
  * `queue list --watch`, and `yrd bay` as `env`'s until flag day's word is
@@ -53,7 +53,15 @@ type SubmitOptions = Readonly<{
   queue?: string
 }>
 type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string }>
-type MergeOptions = Readonly<{ json?: boolean; submitter?: string; notify?: string; issue?: string; queue?: string }>
+type MergeOptions = Readonly<{
+  json?: boolean
+  submitter?: string
+  notify?: string
+  issue?: string
+  queue?: string
+  noCheck?: boolean
+  check?: boolean
+}>
 
 // Only queue actions load the runtime identity fence. Help and --version must
 // not perform its Git reads (version owns its own bounded source diagnostic).
@@ -297,24 +305,112 @@ function buildProgram(
       const location = await resolveQueueLocation(cwd(), declared.queue, env)
       setExit(await queueHealthCommand(location.workdir, io))
     })
+  const queueStopAction = async (options: PauseOptions & { reason: string }, deprecatedAlias = false): Promise<void> => {
+    if (deprecatedAlias) {
+      io.stderr("yrd: `pause` is now `stop`\n")
+    }
+    const location = await resolveQueueLocation(cwd(), options.queue, env)
+    setExit(
+      await coreQueueCommand(
+        location.repo,
+        io,
+        { by: resolveSubmitter(options.notify, env), command: "pause", reason: options.reason },
+        {
+          json: options.json,
+          env,
+          log: log(),
+          selection: location.selection,
+          populateReference: location.owned,
+          queue: location.queue,
+          workdir: location.workdir,
+        },
+      ),
+    )
+  }
+
+  const STOP_DESCRIPTION =
+    "stop checking and merging, while the service keeps the queue visible; the line still accepts new " +
+    "submissions, which wait in line behind the stop and are judged once it is resumed"
+
+  queue
+    .command("stop")
+    .description(STOP_DESCRIPTION)
+    .option("--json", "emit stable JSON")
+    .option("--notify <seat>", "name who stopped the queue")
+    .option("--queue <value>", QUEUE_HELP)
+    .requiredOption("--reason <text>", "why checking and merging are stopped")
+    .action(async (options) => queueStopAction(options as PauseOptions & { reason: string }))
+
   queue
     .command("pause")
-    .description(
-      "stop checking and merging, while the service keeps the queue visible; the line still accepts new " +
-        "submissions, which wait in line behind the stop and are judged once it is resumed",
-    )
+    .description(STOP_DESCRIPTION)
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who paused the queue")
     .option("--queue <value>", QUEUE_HELP)
     .requiredOption("--reason <text>", "why checking and merging are paused")
+    .action(async (options) => queueStopAction(options as PauseOptions & { reason: string }, true))
+  queue
+    .command("override")
+    .description(
+      "hold one declared merge check off for a bounded window, without a commit to the gated repository: " +
+        "--check <name> --off --until <time> --reason <text>; --check <name> --clear --reason <text>; --list",
+    )
+    .option("--check <name>", "the declared merge check to turn off or back on")
+    .option("--off", "turn the check off at merge until --until")
+    .option("--clear", "turn the check back on now")
+    .option("--list", "print the override table, active and expired entries alike")
+    .option("--until <time>", "an ISO instant, or HH:MM on this host's clock; at most 12 h from now")
+    .option("--reason <text>", "why; required for --off and --clear")
+    .option("--json", "emit stable JSON")
+    .option("--notify <seat>", "name who set or cleared the override")
+    .option("--queue <value>", QUEUE_HELP)
+    .addHelpSection(
+      "On override:",
+      "Applies at MERGE judging only; submit verdicts and the declaration are untouched. The first round " +
+        "after a set applies it, and the first round after --clear or --until runs the check again. An " +
+        "expired entry reads as expired, never as absent. The actor is the claimed git actor until the " +
+        "who-acted token lands (25074).",
+    )
     .action(async (options) => {
-      const declared = options as PauseOptions & { reason: string }
+      const declared = options as PauseOptions & {
+        check?: string
+        off?: boolean
+        clear?: boolean
+        list?: boolean
+        until?: string
+        reason?: string
+      }
+      const actions = [declared.off === true, declared.clear === true, declared.list === true].filter(Boolean).length
+      if (actions !== 1) {
+        io.stderr("yrd: queue override takes exactly one of --off, --clear or --list\n")
+        setExit(1)
+        return
+      }
+      const action = declared.off === true ? "off" : declared.clear === true ? "clear" : "list"
+      const missing = [
+        action !== "list" && declared.check === undefined ? "--check <name>" : undefined,
+        action !== "list" && declared.reason === undefined ? "--reason <text>" : undefined,
+        action === "off" && declared.until === undefined ? "--until <time>" : undefined,
+      ].filter((flag): flag is string => flag !== undefined)
+      if (missing.length > 0) {
+        io.stderr(`yrd: queue override --${action} needs ${missing.join(", ")}\n`)
+        setExit(1)
+        return
+      }
       const location = await resolveQueueLocation(cwd(), declared.queue, env)
       setExit(
         await coreQueueCommand(
           location.repo,
           io,
-          { by: resolveSubmitter(declared.notify, env), command: "pause", reason: declared.reason },
+          {
+            action,
+            by: resolveSubmitter(declared.notify, env),
+            command: "override",
+            verified: false,
+            ...(declared.check === undefined ? {} : { check: declared.check }),
+            ...(declared.until === undefined ? {} : { until: declared.until }),
+            ...(declared.reason === undefined ? {} : { reason: declared.reason }),
+          },
           {
             json: declared.json,
             env,
@@ -330,40 +426,54 @@ function buildProgram(
   withdrawOptions(queue.command("withdraw <branch>").description(WITHDRAW_DESCRIPTION))
     .addHelpSection("On withdraw:", WITHDRAW_HELP)
     .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "withdraw"))
+  const queueStartAction = async (options: PauseOptions, deprecatedAlias = false): Promise<void> => {
+    if (deprecatedAlias) {
+      io.stderr("yrd: `resume` is now `start`\n")
+    }
+    const location = await resolveQueueLocation(cwd(), options.queue, env)
+    setExit(
+      await coreQueueCommand(
+        location.repo,
+        io,
+        {
+          by: resolveSubmitter(options.notify, env),
+          command: "resume",
+          ...(options.reason === undefined ? {} : { reason: options.reason }),
+        },
+        {
+          json: options.json,
+          env,
+          log: log(),
+          selection: location.selection,
+          populateReference: location.owned,
+          queue: location.queue,
+          workdir: location.workdir,
+        },
+      ),
+    )
+  }
+
+  const START_DESCRIPTION =
+    "resume checking and merging on the next service interval; a stop the queue put on a stuck change also " +
+    "lifts when that change is withdrawn or merged"
+
+  queue
+    .command("start")
+    .description(START_DESCRIPTION)
+    .option("--json", "emit stable JSON")
+    .option("--notify <seat>", "name who started the queue")
+    .option("--queue <value>", QUEUE_HELP)
+    .option("--reason <text>", "why checking and merging may resume")
+    .action(async (options) => queueStartAction(options as PauseOptions))
+
   queue
     .command("resume")
-    .description(
-      "resume checking and merging on the next service interval; a stop the queue put on a stuck change also " +
-        "lifts when that change is withdrawn or merged",
-    )
+    .description(START_DESCRIPTION)
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who resumed the queue")
     .option("--queue <value>", QUEUE_HELP)
     .option("--reason <text>", "why checking and merging may resume")
-    .action(async (options) => {
-      const declared = options as PauseOptions
-      const location = await resolveQueueLocation(cwd(), declared.queue, env)
-      setExit(
-        await coreQueueCommand(
-          location.repo,
-          io,
-          {
-            by: resolveSubmitter(declared.notify, env),
-            command: "resume",
-            ...(declared.reason === undefined ? {} : { reason: declared.reason }),
-          },
-          {
-            json: declared.json,
-            env,
-            log: log(),
-            selection: location.selection,
-            populateReference: location.owned,
-            queue: location.queue,
-            workdir: location.workdir,
-          },
-        ),
-      )
-    })
+    .action(async (options) => queueStartAction(options as PauseOptions, true))
   function parseDuration(value: string): number | undefined {
     const match = /^(\d+(?:\.\d+)?)\s*(h|m|s|ms)?$/i.exec(value.trim())
     if (!match) return undefined
@@ -704,6 +814,7 @@ function buildProgram(
     const author =
       repositoryHere(cwd()) === undefined ? undefined : await resolveQueueLocation(cwd(), options.queue, env, "submit")
     const location = await resolveQueueLocation(cwd(), options.queue, env)
+    const noCheck = options.noCheck === true || options.check === false
     setExit(
       await coreQueueCommand(
         location.repo,
@@ -713,6 +824,7 @@ function buildProgram(
           command: "merge",
           submitter: submitterOption(options, env, io),
           ...(options.issue === undefined ? {} : { issue: options.issue }),
+          ...(noCheck ? { noCheck: true } : {}),
           ...(author === undefined
             ? {}
             : {
@@ -745,6 +857,7 @@ function buildProgram(
     .option("--submitter <agent>", SUBMITTER_HELP)
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
+    .option("--no-check", "merge with git machinery only (compose, merge, push), skipping all declared checks")
     .option("--queue <value>", QUEUE_HELP)
     .addHelpSection("On merge:", MERGE_HELP)
     .action(async (branch, options) => queueMerge(branch as string, options as MergeOptions))

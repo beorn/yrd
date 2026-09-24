@@ -29,7 +29,7 @@ export const yrdQueueRunnerDeclarations: readonly YrdQueueRunnerDeclaration[] = 
   // the repaired queue. Deciding which is a stop-line call, and @chief owns the
   // stop-line; it was @ci while a stuck round retried itself on a ladder and the
   // page cleared on its own.
-  { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@chief" },
+  { serviceName: "yrd", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@chief" },
 ])
 
 export default {
@@ -59,7 +59,7 @@ export default {
         // is tracked as its own defect. This number is a ceiling for runaway.
         // The service's tribe name is its own key, never `@yrd`: that seat is
         // retired (2026-08-31) and a service must not resurrect it.
-        env: { TRIBE_NAME: "@yrd-service", YRD_HABITANT_RSS_CAP_MB: "24576" },
+        env: { TRIBE_NAME: "yrd", YRD_HABITANT_RSS_CAP_MB: "24576" },
         // The declared health probe (2026-09-11). M7 rejected a probe on
         // 2026-09-03 as noise with a SECOND OPINION, and that objection is
         // answered rather than overruled: `queue health` re-derives nothing.
@@ -85,12 +85,6 @@ export default {
         // unlisted code.
         restart: "on-codes" as const,
         relaunchExitCodes: [0, 1],
-        // 24147: eligibility lives on the service, never the /garage table.
-        garage: {
-          ledgerRoot: "/home/hh/scratch",
-          leaveRule:
-            "ten queue runs in a row that needed no explaining, with at least one merge and one fail among them",
-        },
         // `HabServiceDefinition.owner` is a recognized service key in
         // ag/packages/hab-config. Spreading the registry row's owner here makes
         // every page of this service — the stopped line's and a terminal

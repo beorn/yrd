@@ -674,6 +674,42 @@ describe("a terminal change is never rendered as checking (24972)", () => {
  * renderer and nothing about the reader that fills it.
  */
 describe("only one change can hold the line at a time (24972)", () => {
+  it("uses the current run's first check when an older run checked the same change hours ago (25293)", async () => {
+    const w = await world("{}\n")
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
+    const older = new Date(Date.now() - 5 * 60 * 60 * 1000)
+    const current = new Date(Date.now() - 4 * 60 * 1000)
+    const oldCheck = { name: "typecheck", phase: "submit", startedAt: older, endedAt: older }
+    const currentCheck = { name: "affected-tests", phase: "merge", startedAt: current }
+    const journals = {
+      dir: "/journal-fixture",
+      malformed: [],
+      runs: new Map([
+        [
+          journalKey("task/one", head),
+          [
+            {
+              at: current,
+              branch: "task/one",
+              checks: [currentCheck],
+              head,
+              id: "q-current",
+              running: currentCheck,
+              startedAt: current,
+            },
+            { at: older, branch: "task/one", checks: [oldCheck], head, id: "q-old", startedAt: older },
+          ],
+        ],
+      ]),
+    }
+
+    const row = list(entries, { journals })[0]
+    expect(row?.run).toBe("q-current")
+    expect(row?.startedAt).toEqual(current)
+    expect(row?.live?.since).toEqual(current)
+  })
+
   it("leaves exactly one live row when a merged neighbour still carries a stale marker", async () => {
     const w = await world("{}\n")
     const stale = await submitCommit(w, "task/stale", "stale.txt")

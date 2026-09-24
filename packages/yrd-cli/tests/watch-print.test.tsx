@@ -115,8 +115,8 @@ describe("the printed page's frame", () => {
   it("puts RUNNER in the table, under the header, in a box", async () => {
     const text = await paint(snapshot({ pause, runner }))
     const lines = text.split("\n").filter((line) => line.trim() !== "")
-    const title = lines.findIndex((line) => line.includes("yrd watch"))
-    const header = lines.findIndex((line) => line.includes("TASK"))
+    const title = lines.findIndex((line) => line.includes("YRD"))
+    const header = lines.findIndex((line) => line.includes("ISSUE / BRANCH"))
     const runnerRow = lines.findIndex((line) => line.includes("RUNNER"))
     expect(title).toBeGreaterThanOrEqual(0)
     expect(header).toBeGreaterThan(title)
@@ -143,7 +143,7 @@ describe("the printed page's frame", () => {
     const text = await paint(snapshot({ runner }))
     const lines = text.split("\n").filter((line) => line.trim() !== "")
     const name = lines.findIndex((line) => line.trim() === "example.test/repo#main")
-    const header = lines.findIndex((line) => line.includes("TASK"))
+    const header = lines.findIndex((line) => line.includes("ISSUE / BRANCH"))
     expect(name).toBeGreaterThanOrEqual(0)
     expect(name).toBeLessThan(header)
   })
@@ -273,7 +273,7 @@ function flowJournals(): Journals {
  */
 function table(text: string): readonly string[] {
   const lines = text.split("\n").filter((line) => line.trim() !== "")
-  return lines.slice(lines.findIndex((line) => line.includes("TASK")))
+  return lines.slice(lines.findIndex((line) => line.includes("ISSUE / BRANCH")))
 }
 
 function flowSnapshot(over: Partial<WatchSnapshot> = {}): WatchSnapshot {
@@ -299,10 +299,10 @@ describe("the flow page: four bands, one row per change", () => {
   it("draws drafts, waiting, the runner and done in that order, with each change on one row", async () => {
     const text = await paint(flowSnapshot())
     const lines = table(text)
-    const drafts = lines.findIndex((line) => line.includes("not submitted"))
-    const waiting = lines.findIndex((line) => line.includes("the bottom row goes next"))
+    const drafts = lines.findIndex((line) => line.includes("task/draft"))
+    const waiting = lines.findIndex((line) => line.includes("task/late"))
     const runner = lines.findIndex((line) => line.includes("RUNNER"))
-    const done = lines.findIndex((line) => line.includes("done, newest first"))
+    const done = lines.findIndex((line) => line.includes("task/merged"))
 
     expect(drafts, text).toBeGreaterThanOrEqual(0)
     expect(waiting, text).toBeGreaterThan(drafts)
@@ -334,12 +334,96 @@ describe("the flow page: four bands, one row per change", () => {
   it("draws the runner in the table's own columns and says `?` where no status is published", async () => {
     const text = await paint(flowSnapshot({ runner: undefined }))
     const lines = table(text)
-    const runner = lines.find((line) => line.includes("RUNNER") && line.includes("?"))
+    const runner = lines.find((line) => line.includes("?") && line.includes("no runner status"))
 
     expect(runner, text).toBeDefined()
     expect(runner).toContain("?")
     expect(text).toContain("╭─ RUNNER")
-    // The RUN column is gone from every row.
-    expect(lines.find((line) => line.includes("TASK"))).toContain("QUEUE / RUN")
+    const header = lines.find((line) => line.includes("ISSUE / BRANCH"))
+    expect(header).toContain("QUEUE")
+    expect(header).toContain("RUN")
+    expect(header).not.toContain("QUEUE / RUN")
+  })
+
+  it("ListingPage at 160 columns names the drafts count once (in QueueLine, drafts band rule is bare)", async () => {
+    const text = await paint(
+      flowSnapshot({
+        drafts: { unread: 1, window: "7d" },
+        rows: [
+          ...watchRows(
+            [
+              ...flowRows(),
+              change({
+                at: new Date(READ_AT.getTime() - 60_000),
+                author: "bob",
+                branch: "task/draft2",
+                head: "7".repeat(40),
+                state: "draft",
+              }),
+            ],
+            { journals: flowJournals() },
+          ),
+        ],
+      }),
+      160,
+    )
+    const occurrences = text.split("\n").filter((l) => l.includes("drafts (7d)"))
+    expect(occurrences).toHaveLength(1)
+    expect(occurrences[0]).toContain("waiting")
+  })
+
+  it("the top line says how many changes wait, what runs now and when the last merge landed (24196)", async () => {
+    const ago = (minutes: number): Date => new Date(READ_AT.getTime() - minutes * 60_000)
+    const rows = [
+      change({
+        branch: "task/live",
+        head: "9".repeat(40),
+        live: { check: "test", phase: "merge", run: "q-1", since: ago(2) },
+        position: 1,
+        since: ago(15),
+      }),
+      change({ branch: "task/next", head: "1".repeat(40), position: 2, since: ago(10) }),
+      change({ at: ago(5), branch: "task/merged", endedAt: ago(5), head: "4".repeat(40), state: "merged" }),
+    ]
+    const text = await paint(flowSnapshot({ rows: rows.map((r) => ({ row: r })) }), 160)
+    const queueLine = text.split("\n").find((l) => l.includes("waiting"))
+    expect(queueLine).toBeDefined()
+    expect(queueLine).toContain("1 waiting")
+    expect(queueLine).toContain("checking task/live for 2:00")
+    expect(queueLine).toMatch(/last merge \d\d:\d\d \(task\/merged\)/)
+  })
+
+  it("a paused runner shows its resume command in full, and a stuck row shows its reason in full at 80 and 120 columns (25348)", async () => {
+    const snap = (cols: number) =>
+      flowSnapshot({
+        stopped: {
+          since: READ_AT.toISOString(),
+          by: "@chief",
+          change: null,
+          cause: "operator",
+        },
+        rows: [
+          {
+            row: row({
+              branch: "task/incident",
+              head: "1".repeat(40),
+              state: "stuck",
+              reason: "yrd-check-unresolved",
+              since: READ_AT,
+              at: READ_AT,
+              submitter: "@dev/3",
+              subject: "test incident",
+            }),
+          },
+        ],
+      })
+
+    const text120 = await paint(snap(120), 120)
+    expect(text120).toContain("resume: yrd queue resume")
+    expect(text120).toContain("stuck=yrd-check-unresolved")
+
+    const text80 = await paint(snap(80), 80)
+    expect(text80).toContain("resume: yrd queue resume")
+    expect(text80).toContain("stuck=yrd-check-unresolved")
   })
 })

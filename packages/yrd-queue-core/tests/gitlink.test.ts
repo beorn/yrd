@@ -204,6 +204,13 @@ async function gitlinkAroundQueue(w: World, sha: string): Promise<string> {
   return (await w.git(["rev-parse", "HEAD"])).trim()
 }
 
+/** The work clone's main, fast-forwarded to the remote main a queue round moved. */
+async function mainAfterRound(w: World): Promise<void> {
+  await w.git(["checkout", "--quiet", "main"])
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  await w.git(["merge", "--quiet", "--ff-only", "FETCH_HEAD"])
+}
+
 /** A change that touches a file and no gitlink, submitted. */
 async function submitFile(w: World, branch: string): Promise<string> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
@@ -398,11 +405,13 @@ describe("settling gitlinks", () => {
     expect(options.env?.PATH?.split(":")[0]).toBe(gitSuperBin)
   })
 
-  // The shared verifier applies git-super's pin verdict before opening a change.
-  it("yrd submit refuses a gitlink that diverged from refs/heads/main", async () => {
+  // The shared verifier applies git-super's pin verdict before opening a change. The pin forks
+  // from main and both sides changed lib.txt, so git-super composes it and refuses the conflict
+  // (25389), naming the file and the component merge.
+  it("yrd submit refuses a forked gitlink whose component merge conflicts, naming the file", async () => {
     const w = await world()
     await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(
-      new RegExp(`gitlink-off-main.*${w.offMain}.*${w.main}`, "u"),
+      new RegExp(`gitlink-compose-refused.*lib\\.txt.*${w.offMain} forks from submodule main ${w.main}`, "u"),
     )
   })
 
@@ -415,10 +424,11 @@ describe("settling gitlinks", () => {
   // the submitter's defect and FAILS back to them. It used to wait (H5) for a
   // person to move main under it; the queue now moves main itself, forward only,
   // so nothing could ever clear that wait. 24463 now refuses at submit; the
-  // merge-time failure remains for a change opened by hand.
+  // merge-time failure remains for a change opened by hand. Since 25389 a clean fork is composed
+  // instead; this one conflicts in lib.txt, so it is still the submitter's.
   it("an off-main gitlink fails back to its submitter while the next change proceeds", async () => {
     const w = await world()
-    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/gitlink-off-main/u)
+    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/gitlink-compose-refused/u)
     await submitFile(w, "task/next")
 
     const outcome = await queueRun(await w.options())
@@ -458,7 +468,7 @@ describe("settling gitlinks", () => {
   // is the submitter's, not a queue incident).
   it("an off-main pin never opens a change, so readers see no incident", async () => {
     const w = await world()
-    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/gitlink-off-main/u)
+    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/gitlink-compose-refused/u)
     const head = await submitFile(w, "task/file")
 
     const outcome = await queueRun(await w.options())
@@ -1503,6 +1513,46 @@ describe("a diverged component the merge composes", () => {
   })
 
   /**
+   * THE ONE-SIDED FORK (25389). The carrier's component work began on an older component main, and only the
+   * carrier moves the gitlink, so the ROOT merge is clean and has no conflict to compose from. Submit admits
+   * the carrier as written, and the round composes it.
+   */
+  it("admits a forked pin without rewriting it, and the round composes it to merged (25389)", async () => {
+    const w = await world()
+    const submoduleWork = join(w.work, "..", "submodule-work")
+    const submodule = gitIn(submoduleWork)
+    await submodule(["checkout", "--quiet", "-b", "fork-side", w.onMain])
+    writeFileSync(join(submoduleWork, "fork-side.txt"), "work begun on an older main\n")
+    await submodule(["add", "fork-side.txt"])
+    await submodule(["commit", "--quiet", "-m", "a file only the fork changes"])
+    const fork = (await submodule(["rev-parse", "HEAD"])).trim()
+    await submodule(["checkout", "--quiet", "main"])
+    await submodule(["push", "--quiet", "origin", "fork-side"])
+
+    const head = await submitGitlink(w, "task/fork", fork)
+
+    // Submit opened the carrier at its own head, whose gitlink is still the fork.
+    expect(await gitlinkAt(w, head)).toBe(fork)
+    const changed = changeRef("main", { branch: "task/fork", head })
+    expect((await readRecords(w.git, await remoteTip(w.git, changed))).map((record) => record.kind)).toEqual(["opened"])
+
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/fork"], stuck: [] })
+    const target = await remoteTip(w.git, "refs/heads/main")
+    const composed = await gitlinkAt(w, target)
+    expect(composed).not.toBe(fork)
+    const bare = gitIn(join(w.work, "..", "submodule.git"))
+    expect((await bare(["show", "-s", "--format=%P", composed])).trim()).toBe(`${w.main} ${fork}`)
+    expect(await submoduleRemoteRef(w, `refs/git-super/pins/${composed}`)).toBe(composed)
+    expect(await submoduleMain(w)).toBe(composed)
+    expect(await w.git(["show", "-s", "--format=%B", target])).toContain(
+      `Settled: submodule@${composed} merged submodule-main@${w.main}`,
+    )
+    expect((await readRecords(w.git, await remoteTip(w.git, changed))).map((record) => record.kind)).toContain("merged")
+  })
+
+  /**
    * SPECIMEN 11 (24977 row 5): two carriers of a WALLED seat, which nothing can
    * re-pin. The component's main moved AROUND the queue rather than through it,
    * so no re-pin-on-signal rule reaches this carrier at all.
@@ -1798,5 +1848,198 @@ describe("a diverged component the merge composes", () => {
     expect((await bareSub(["show", "-s", "--format=%P", composed])).trim()).toBe(`${mainSide} ${changeSide}`)
     expect(await queueSub(["cat-file", "-e", `${changeSide}^{commit}`])).toBe("")
     expect(await queueSub(["cat-file", "-e", `${composed}^{commit}`])).toBe("")
+  })
+
+  /**
+   * 24977 (@cto e8368e85 constraint 2; the load-bearing line of the build). The
+   * change was judged while its pin still contained the component's main, so
+   * the submit checks saw no composition; by its merge turn main had moved and
+   * the MERGE phase composed a tree no check had read. The submit-level checks
+   * run again on that composed candidate before it lands.
+   */
+  it("runs the submit checks again on a candidate the merge phase composed (24977)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const ran = join(w.work, "..", "submit-check-runs.txt")
+    const check = { on: ["submit"], run: `echo "$YRD_CANDIDATE_SHA" >> '${ran}'` } as const
+    await submitGitlink(w, "task/first-side", pins.mainSide)
+    await submitGitlink(w, "task/second-side", pins.changeSide)
+    const landing = await queueRun(await w.options(check))
+    expect(landing).toMatchObject({ exitCode: 0, failed: [], merged: ["task/first-side"], stuck: [] })
+    writeFileSync(ran, "")
+
+    const outcome = await queueRun(await w.options(check))
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/second-side"], stuck: [] })
+    const target = await remoteTip(w.git, "refs/heads/main")
+    expect(readFileSync(ran, "utf8").split("\n").filter(Boolean)).toEqual([target])
+  })
+
+  /**
+   * P0 after 24977 landed (merge 447, q-20260923T223516964Z-7c5234c0): a pin
+   * already behind the component main when the change is judged is composed at
+   * JUDGE, passes, and is composed again at MERGE, whose re-run of the submit
+   * checks wrote into the judge's own check-log directory in the same run. A
+   * check log is opened create-only, so the second open crashed the queue and
+   * stopped the line. Each re-run writes beside the judge's logs, never over them.
+   */
+  it("lands a change judged and re-cut in one run, the recheck's logs beside the judge's (24977 P0)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const check = { on: ["submit"], run: "true" } as const
+    const head = await submitGitlink(w, "task/stale-at-judge", pins.changeSide)
+    await gitlinkAroundQueue(w, pins.mainSide)
+
+    const outcome = await queueRun(await w.options(check))
+
+    expect(readFileSync(outcome.log, "utf8")).not.toContain("a check log already exists")
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/stale-at-judge"], stuck: [] })
+    // The judge and the merge phase's re-run each ran the submit check once, both as phase "submit", each
+    // into its own log.
+    const judged = readJournals(dirname(outcome.log)).runs.get(journalKey("task/stale-at-judge", head))?.[0]
+    const checks = (judged?.checks ?? []).map((check) => ({ phase: check.phase, log: check.log }))
+    expect(checks.map((check) => check.phase)).toEqual(["submit", "submit"])
+    expect(new Set(checks.map((check) => check.log)).size).toBe(2)
+    expect(checks[1]?.log).toMatch(/\/recut-[0-9a-f]{12}\/submit\/[^/]+\.log$/u)
+  })
+
+  /** 24977 constraint 1: the re-cut is recorded, naming both heads, and nothing is amended. */
+  it("journals a recut row naming the change head, the component main merged in, and both new commits (24977)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    await submitGitlink(w, "task/first-side", pins.mainSide)
+    const head = await submitGitlink(w, "task/second-side", pins.changeSide)
+    await queueRun(await w.options())
+
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/second-side"] })
+    const target = await remoteTip(w.git, "refs/heads/main")
+    const composed = await gitlinkAt(w, target)
+    const recuts = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.kind === "recut")
+    expect(recuts).toMatchObject([
+      {
+        branch: "task/second-side",
+        candidate: target,
+        composed,
+        head,
+        main: pins.mainSide,
+        path: "submodule",
+        phase: "merge",
+      },
+    ])
+    // Never an amend: the change's branch at the remote still names the submitted head.
+    expect(await remoteTip(w.git, "refs/heads/task/second-side")).toBe(head)
+    const merged = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/second-side", head })))
+    ).find((record) => record.kind === "merged")
+    expect(trailer(merged!, "Recut")).toBe(`submodule ${pins.changeSide} + ${pins.mainSide} -> ${composed}`)
+  })
+
+  /**
+   * The same re-cut met at JUDGE: the component main moved before the change
+   * was ever judged, so its first candidate is already composed. That
+   * candidate is the queue's, not the submitter's head, so its failure is the
+   * re-cut's too, uncharged (@cto c6c014ba), and the line goes on.
+   */
+  it("bounces a change whose first, already-composed candidate fails a submit check as recut-check (24977)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const check = {
+      on: ["submit"],
+      run: "! { test -f submodule/main-side.txt && test -f submodule/change-side.txt; }",
+    } as const
+    const head = await submitGitlink(w, "task/walled-recut", pins.changeSide)
+    await gitlinkAroundQueue(w, pins.mainSide)
+
+    const outcome = await queueRun(await w.options(check))
+
+    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/walled-recut"], merged: [], stuck: [] })
+    const failed = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/walled-recut", head })))
+    ).find((record) => record.kind === "failed")
+    expect(trailer(failed!, "Reason")).toBe("recut-check")
+    // Both heads named: the change's, and the queue's re-cut of it.
+    expect(trailer(failed!, "Detail")).toContain(`task/walled-recut@${head.slice(0, 12)}`)
+    expect(trailer(failed!, "Recut")).toContain(`submodule ${pins.changeSide} + ${pins.mainSide} -> `)
+  })
+
+  /**
+   * 24977 Q3 (@cto 0a3e3838): a check that fails ONLY on the composed tree is a
+   * semantic conflict with main. It is the submitter's bounce, named
+   * `recut-check`, and the line does not stop on it.
+   */
+  it("bounces a recut whose re-run check fails while the head alone passes, without stopping the line (24977)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    // Passes on either side alone; fails only where both files meet.
+    const check = {
+      on: ["submit"],
+      run: "! { test -f submodule/main-side.txt && test -f submodule/change-side.txt; }",
+    } as const
+    // 25301: a round judges the line after its head merges, on the target that
+    // merge left. The head here is a plain file, so second-side is checked on a
+    // tree it alone moves, and passes; main then moves the gitlink around the
+    // queue, so only the next round's merge composes the two sides.
+    await submitFile(w, "task/unrelated-head")
+    const head = await submitGitlink(w, "task/second-side", pins.changeSide)
+    expect(await queueRun(await w.options(check))).toMatchObject({ merged: ["task/unrelated-head"], failed: [] })
+    await mainAfterRound(w)
+    await gitlinkAroundQueue(w, pins.mainSide)
+
+    const outcome = await queueRun(await w.options(check))
+
+    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/second-side"], merged: [], stuck: [] })
+    const failed = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/second-side", head })))
+    ).find((record) => record.kind === "failed")
+    expect(failed).toBeDefined()
+    expect(trailer(failed!, "Reason")).toBe("recut-check")
+    expect(trailer(failed!, "Detail")).toContain("semantic conflict with main")
+    expect(trailer(failed!, "Detail")).toContain("submodule-check")
+  })
+
+  // review2 witness (24977 review): the merge-phase re-run of the submit checks must be COMPLETE before a
+  // composed candidate lands. A stop window that closes after the first submit check passes ends runPhase early;
+  // with no merge-phase checks declared nothing else notices, and the composed candidate would land although the
+  // second (walled) check never ran on it. The judge and merge phases each defer on a short result list; the
+  // re-run must too.
+  it("defers, never lands, a re-cut whose submit re-run a stop window cut short (24977, review2 de5a4c01)", async () => {
+    const w = await world()
+    const pins = await divergentSubmoduleCommits(w)
+    const closed = join(w.work, "..", "review2-window-closed")
+    const checks = [
+      { name: "closes-the-window", on: ["submit"], run: `touch '${closed}'` },
+      {
+        name: "walled",
+        on: ["submit"],
+        run: "! { test -f submodule/main-side.txt && test -f submodule/change-side.txt; }",
+      },
+    ] as const
+    // 25301: as above, the first round merges a plain-file head and checks
+    // second-side on a tree it alone moves; main's gitlink then moves around
+    // the queue, so the second round's merge is the one that composes.
+    await submitFile(w, "task/unrelated-head")
+    await submitGitlink(w, "task/second-side", pins.changeSide)
+    const landing = await queueRun({ ...(await w.options()), checks })
+    expect(landing).toMatchObject({ exitCode: 0, failed: [], merged: ["task/unrelated-head"], stuck: [] })
+    await mainAfterRound(w)
+    await gitlinkAroundQueue(w, pins.mainSide)
+    rmSync(closed, { force: true })
+    const stopAtMs = Date.now() + 3_600_000
+
+    const outcome = await queueRun({
+      ...(await w.options()),
+      checks,
+      stopAtMs,
+      now: () => (existsSync(closed) ? stopAtMs : stopAtMs - 1),
+    })
+
+    expect(existsSync(closed)).toBe(true)
+    expect(outcome).toMatchObject({ deferred: ["task/second-side"], failed: [], merged: [], stuck: [] })
   })
 })

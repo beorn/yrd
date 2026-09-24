@@ -21,6 +21,7 @@
 import {
   changeOf,
   legacyStore,
+  primeLegacyHistory,
   recordFromMeta,
   recordsFromHistory,
   standsEnded,
@@ -49,6 +50,27 @@ export type QueueObservation = Readonly<{
   checked: readonly Readonly<{ mergeOid: string; recordRef: string; recordOid: string }>[]
   fence: Readonly<{ prefixes: readonly string[]; refs: readonly Readonly<{ ref: string; oid: string }>[] }>
 }>
+
+/** One captured queue reading whose object fetch failed. */
+export class CapturedQueueObjectsUnavailable extends Error {
+  readonly kind = "captured-queue-objects-unavailable"
+
+  constructor(
+    readonly remote: string,
+    readonly queue: string,
+    readonly capturedTarget: string,
+    readonly detail: string,
+    cause: unknown,
+  ) {
+    super(
+      `${remote}#${queue} at ${capturedTarget}: could not fetch captured queue objects; read the queue again: ${detail}`,
+      {
+        cause,
+      },
+    )
+    this.name = "CapturedQueueObjectsUnavailable"
+  }
+}
 
 /**
  * Every change at the remote, read: one entry per change ref, and nothing for
@@ -86,6 +108,8 @@ export async function readQueue(
   // fetch both names every legacy record ref and brings its history into
   // Gitomic's private namespace. Neither operation moves an application ref.
   const listedHeadRefs = await store.backend.listRefs(store.repo, "refs/heads/", remote)
+  // Gitomic's prefix fetch is the reader's authority. Its failure must surface
+  // once, rather than enter the retired captured-advertisement retry path.
   const queueRefs = await store.backend.fetchRefs(store.repo, queueRefPrefix(target), remote)
   const headRefs = new Map(listedHeadRefs)
   const heads = new Map<string, string>()
@@ -137,6 +161,7 @@ export async function readQueue(
   const pauseSha = queueRefs.get(pause)
   const historyTips = [...new Set([...changeRefs.map(({ oid }) => oid), ...(pauseSha === undefined ? [] : [pauseSha])])]
   const history = await store.backend.readHistory(store.repo, historyTips)
+  primeLegacyHistory(git, history)
   const byOid = new Map(history.map((meta) => [meta.oid, meta] as const))
   const tips = tipRecords(byOid, changeRefs)
   const uniqueHeads = [...new Set(changeRefs.map(({ change }) => change.head))]

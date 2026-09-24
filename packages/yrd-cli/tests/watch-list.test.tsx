@@ -16,8 +16,9 @@
 import { act } from "react"
 import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
-import type { Row, WatchRow } from "@yrd/queue-core"
+import { foldDrafts, type Draft, type Row, type WatchRow } from "@yrd/queue-core"
 import { ListRow, changesSuffix, type ListLayout } from "../src/watch-list.tsx"
+import { draftsSaid } from "../src/watch-frame.tsx"
 import { NowContext, NowProvider } from "../src/watch-clock.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
@@ -121,21 +122,19 @@ async function paintAge(row: Row) {
   return { first, second }
 }
 
-describe("AGE / RUN (ia.md): RUN freezes; AGE is not tip Opened", () => {
-  it("keeps a merged row's RUN at endedAt − startedAt across a real tick, and does not print Opened as AGE", async () => {
+describe("AGE / RUN (item 5, 24196): every row has AGE, runner and after have RUN", () => {
+  it("shows AGE from since and keeps merged row's RUN at endedAt − startedAt", async () => {
     const { first, second } = await paintAge(DECIDED_ROW)
-    expect(first).toContain("— / 15:00")
-    expect(second).toContain("— / 15:00")
-    expect(first).not.toContain("45:00")
+    expect(first).toContain("45:00 / 15:00")
+    expect(second).toContain("45:01 / 15:00")
     expect(first).not.toContain("took")
   }, 10_000)
 
-  it("does not count an open row's tip Opened as AGE", async () => {
+  it("shows AGE for open row with — for RUN", async () => {
     const { first, second } = await paintAge(OPEN_ROW)
-    expect(first).toContain("— / —")
-    expect(second).toContain("— / —")
+    expect(first).toContain("45:00 / —")
+    expect(second).toContain("45:01 / —")
     expect(first).not.toContain("waiting")
-    expect(first).not.toContain("45:00")
   }, 10_000)
 })
 
@@ -183,5 +182,35 @@ describe("changesSuffix for deferred row", () => {
       color: "$fg-accent",
       text: "projected 30m = 30m, waits for the long check",
     })
+  })
+})
+
+describe("the drafts the home list folds into a count (25424)", () => {
+  const now = new Date("2026-09-23T20:00:00Z")
+  const draft = (branch: string, hoursAgo: number | undefined): Draft => ({
+    branch,
+    head: branch.padEnd(40, "0"),
+    ...(hoursAgo === undefined ? {} : { committedAt: new Date(now.getTime() - hoursAgo * 3_600_000) }),
+    movedSinceSubmit: false,
+  })
+
+  it("lists the drafts of the last day as rows and counts the older ones of the week", () => {
+    const folded = foldDrafts(
+      [draft("task/hour", 1), draft("task/day", 24), draft("task/days", 30), draft("task/week", 6 * 24)],
+      now,
+    )
+    expect({ rows: folded.rows.map((row) => row.branch), older: folded.older }).toEqual({
+      rows: ["task/hour", "task/day"],
+      older: 2,
+    })
+  })
+
+  it("says the fold in words: the day's rows, then how many older ones and unread heads there are", () => {
+    const rows: readonly WatchRow[] = ["task/a", "task/b"].map((branch) => ({
+      row: { at: now, branch, head: branch.padEnd(40, "0"), state: "draft" } as Row,
+    }))
+    expect(draftsSaid(rows, { older: 98, unread: 2, window: "7d" })).toBe("2 drafts (1d) · 98 older · 2 not yet read")
+    expect(draftsSaid(rows, { older: 0, unread: 0, window: "all" })).toBe("2 drafts (all)")
+    expect(draftsSaid([], { older: 0, unread: 0, window: "7d" })).toBeUndefined()
   })
 })

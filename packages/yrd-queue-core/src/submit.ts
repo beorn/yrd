@@ -23,7 +23,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createEventStore, selectionFor, listRefs, openEvents } from "./git.ts"
+import { createEventStore, listRefs, openEvents, selectionFor } from "./git.ts"
 import { targetName, type Target } from "./config.ts"
 import { ABSENT, legacyStore, recordCommit } from "./legacy-records.ts"
 import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, type Git } from "./git.ts"

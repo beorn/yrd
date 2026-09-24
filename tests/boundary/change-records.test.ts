@@ -78,11 +78,15 @@ async function tipTrailer(repo: string, key: string): Promise<readonly string[]>
     `--format=%(refname)%00%(trailers:key=${key},valueonly)`,
     "refs/yrd/main/**",
   )
-  return listed
-    .split("\n")
-    .filter((line) => !line.startsWith("refs/yrd/main/pause\0"))
-    .map((line) => (line.split("\0")[1] ?? "").trim())
-    .filter((line) => line !== "")
+  return (
+    listed
+      .split("\n")
+      // The pause and the merge-check override are the queue's own operational
+      // refs, not changes; every merge's fence advances the override ref (25296).
+      .filter((line) => !line.startsWith("refs/yrd/main/pause\0") && !line.startsWith("refs/yrd/main/override\0"))
+      .map((line) => (line.split("\0")[1] ?? "").trim())
+      .filter((line) => line !== "")
+  )
 }
 
 /** A submitted change on a fresh throwaway repository. */

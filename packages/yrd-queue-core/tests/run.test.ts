@@ -25,6 +25,9 @@ import * as gitomic from "gitomic"
 import { openEvents } from "gitomic/events"
 import type { RefUpdate } from "gitomic"
 import { gitEnvironment } from "../src/git.ts"
+import { incidentTrailers } from "../src/incident.ts"
+import { reminderDue } from "../src/override.ts"
+import { CapturedQueueObjectsUnavailable } from "../src/remote.ts"
 import {
   appendRecord,
   changeName,
@@ -58,6 +61,12 @@ import {
   withdraw,
   writeQueueEvent,
   writePause,
+  expireOverrides,
+  OverrideRefused,
+  overrideRef,
+  parseUntil,
+  readOverrides,
+  writeOverride,
 } from "../src/index.ts"
 import type {
   ChangeRecord,
@@ -81,6 +90,20 @@ if (!existsSync(gitSuperBin)) {
 }
 const CHANGES = queueRefPrefix("main")
 const PAUSE_REF = pauseRef("main")
+// A rival writer's stuck record is a whole incident, as every real one is: since
+// 25301 the round reads the queue again after its merge, and a reader refuses a
+// stuck record that does not carry one.
+const RIVAL_STUCK_TRAILERS = [
+  ...incidentTrailers({
+    code: "yrd-rival-writer",
+    subject: "another queue got there first",
+    via: "a rival writer in this test",
+    evidence: "/dev/null",
+    next: "nothing: a test fixture",
+    owner: "the test",
+  }),
+  ["Reason", "crash"],
+] as const
 
 /** Intercept the real Gitomic publication seam while retaining its shell backend. */
 function beforeGitomicPublish(
@@ -146,6 +169,8 @@ type World = Readonly<{
     check: Readonly<{
       exit?: number
       sleep?: number
+      /** A file the check waits for (bounded) after it starts: the case releases it once it has acted mid-check. */
+      hold?: string
       timeoutMs?: number
       everywhere?: boolean
       setup?: string
@@ -201,6 +226,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     [
       "#!/bin/sh",
       `echo "started" >> "${startedLog}"`,
+      'i=0; while [ -n "${FAKE_HOLD:-}" ] && [ ! -f "$FAKE_HOLD" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done',
       'sleep "${FAKE_SLEEP:-0}"',
       `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
       'if [ -f one.txt ] || [ "${FAKE_EVERYWHERE:-0}" = 1 ]; then exit "${FAKE_EXIT:-0}"; fi',
@@ -249,6 +275,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
         FAKE_EVERYWHERE: check.everywhere === true ? "1" : "0",
         FAKE_EXIT: String(check.exit ?? 0),
         FAKE_SLEEP: String(check.sleep ?? 0),
+        FAKE_HOLD: check.hold ?? "",
         PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
       },
       notify: [{ name: "recorder", on: ["merged", "failed", "stuck", "merged-direct"], run: notifier }],
@@ -607,33 +634,12 @@ it("discards a dropped event check once and continues with the next change", asy
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
 
-  const verify = verifying.verifyCandidate
-  let entered!: () => void
-  const checking = new Promise<void>((resolve) => {
-    entered = resolve
-  })
-  let release!: () => void
-  const continueRun = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  let held = false
-  using _held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
-    const outcome = await verify(options)
-    if (!held) {
-      held = true
-      entered()
-      await continueRun
-    }
-    return outcome
-  })
-
-  const running = queueRun({ ...(await w.options({ exit: 0 })), notify: [] })
-  try {
-    await checking
-    await drop(store, { queue: "main", branch: "task/a", by: "operator" })
-  } finally {
-    release()
-  }
+  // The check holds until the drop has landed, then runs its 0.25s: the drop is always mid-check.
+  const hold = `${w.startedLog}.release`
+  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25, hold })), notify: [] })
+  await checkRunning(w)
+  await drop(store, { queue: "main", branch: "task/a", by: "operator" })
+  writeFileSync(hold, "")
 
   const outcome = await running
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/b"], failed: [], stuck: [] })
@@ -651,47 +657,23 @@ it("discards a resubmitted event check once and continues with the next change",
   const first = await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
 
-  const verify = verifying.verifyCandidate
-  let entered!: () => void
-  const checking = new Promise<void>((resolve) => {
-    entered = resolve
+  // The check holds until the resubmit has landed, then runs its 0.25s: always mid-check.
+  const hold = `${w.startedLog}.release`
+  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25, hold })), notify: [] })
+  await checkRunning(w)
+  await w.git(["checkout", "--quiet", "task/a"])
+  writeFileSync(join(w.work, "resubmitted.txt"), "new head\n")
+  await w.git(["add", "resubmitted.txt"])
+  await w.git(["commit", "--quiet", "-m", "resubmit task/a"])
+  const next = (await w.git(["rev-parse", "HEAD"])).trim()
+  expect(next).not.toBe(first)
+  const resubmitted = await submit(w.git, "origin", {
+    branch: "task/a",
+    target: { remote: "origin", branch: "main" },
+    submitter: "@dev/2",
   })
-  let release!: () => void
-  const continueRun = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  let held = false
-  using _held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
-    const outcome = await verify(options)
-    if (!held) {
-      held = true
-      entered()
-      await continueRun
-    }
-    return outcome
-  })
-
-  const running = queueRun({ ...(await w.options({ exit: 0 })), notify: [] })
-  const next = await (async () => {
-    try {
-      await checking
-      await w.git(["checkout", "--quiet", "task/a"])
-      writeFileSync(join(w.work, "resubmitted.txt"), "new head\n")
-      await w.git(["add", "resubmitted.txt"])
-      await w.git(["commit", "--quiet", "-m", "resubmit task/a"])
-      const head = (await w.git(["rev-parse", "HEAD"])).trim()
-      expect(head).not.toBe(first)
-      const resubmitted = await submit(w.git, "origin", {
-        branch: "task/a",
-        target: { remote: "origin", branch: "main" },
-        submitter: "@dev/2",
-      })
-      expect(resubmitted).toMatchObject({ head, retry: false })
-      return head
-    } finally {
-      release()
-    }
-  })()
+  expect(resubmitted).toMatchObject({ head: next, retry: false })
+  writeFileSync(hold, "")
 
   const outcome = await running
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/b"], failed: [], stuck: [] })
@@ -1526,7 +1508,10 @@ describe("a queue run", () => {
     const oneOutput = readFileSync(oneLog, "utf8").trim().split("\n")
     const twoOutput = readFileSync(twoLog, "utf8").trim().split("\n")
     expect(oneOutput).toEqual(["one.txt", expect.stringMatching(/^[0-9a-f]{40}$/u)])
-    expect(twoOutput).toEqual(["two.txt", expect.stringMatching(/^[0-9a-f]{40}$/u)])
+    // Head first (25301): task/two is judged after task/one merged, as the
+    // round's prefetch, on the target that merge left, so one.txt is there.
+    expect(twoOutput).toEqual(["one.txt", expect.stringMatching(/^[0-9a-f]{40}$/u)])
+    expect(twoOutput[1]).not.toBe(oneOutput[1])
     const after = await remoteTarget(w)
     expect(after).not.toBe(w.target)
     await w.git(["fetch", "--quiet", "origin", "main"])
@@ -1575,7 +1560,8 @@ describe("a queue run", () => {
     expect(logRecords(outcome)[kinds.indexOf("queue")]).toMatchObject({ kind: "queue", queue: expect.any(String) })
     // The preamble's Git rows are still journaled: they sit between the header
     // and the queue record, which is where a died-in-preamble run's evidence is.
-    expect(kinds.slice(1, kinds.indexOf("queue")).every((kind) => kind === "git")).toBe(true)
+    // The queue read is part of that preamble and is timed as a `step` (25303 box 1).
+    expect(kinds.slice(1, kinds.indexOf("queue")).every((kind) => kind === "git" || kind === "step")).toBe(true)
     // Addendum 2/T1: every ordinary run invocation is linked before the run
     // summarizes it, including successful calls rebound to a worktree.
     const runRecords = logRecords(outcome)
@@ -1601,7 +1587,10 @@ describe("a queue run", () => {
         checkedHeads.push(readFileSync(evidence.artifacts.stdout, "utf8").trim())
       }
       if (invocation.cwd !== w.work && Array.isArray(invocation.args) && invocation.args[0] === "merge-base") {
-        expect(readFileSync(evidence.artifacts.stdout, "utf8").trim()).toBe(w.target)
+        // task/two's prefetch stands on the target task/one's merge left (25301).
+        expect(readFileSync(evidence.artifacts.stdout, "utf8").trim()).toBe(
+          invocation.args[1] === twoOutput[1] ? after : w.target,
+        )
         checkedBases.push(String(invocation.args[1]))
       }
     }
@@ -1697,7 +1686,7 @@ describe("a queue run", () => {
                   change: { branch: "task/one", head },
                   kind: "stuck",
                   subject: "another queue got there first",
-                  trailers: [["Reason", "crash"]],
+                  trailers: RIVAL_STUCK_TRAILERS,
                 })
         // Only the disposable fixture's remote rewinds, under its exact
         // previous value, to exercise an external writer moving backwards.
@@ -1822,6 +1811,541 @@ describe("a queue run", () => {
       log: expect.stringContaining("verify.log"),
       reason: "verify",
       submitter: "@dev/2",
+    })
+  })
+
+  // @i/10-yrd/25301 A1 (@cto c7115f0f): the head merges before the rest of the line is judged,
+  // and (@cto 20a360d8, cure (a)) the round then prepares only the NEXT head: the rest of the
+  // line is judged when the walk of a later round reaches it, never all at once after a merge.
+  it("with 40 changes waiting, the head merges, the next head is judged, and the other 38 wait unjudged (25301 A1)", async () => {
+    const w = await world()
+    const branches = Array.from({ length: 40 }, (_, i) => `task/c${String(i).padStart(2, "0")}`)
+    const heads: string[] = []
+    for (const branch of branches) heads.push(await submitCommit(w, branch, `${branch.slice(5)}.txt`))
+
+    const outcome = await queueRun(await w.options({ exit: 0, on: ["submit", "merge"] }))
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/c00"])
+    const mergeCommit = await remoteTarget(w)
+    const lines = readFileSync(w.checkLog, "utf8").trim().split("\n")
+    // The check log is in time order: the head's judge, the head's merge check
+    // (whose candidate IS the merge that landed), then ONE judge, the next
+    // head's, standing on that merge. Nothing else in the line is judged.
+    expect(lines).toHaveLength(3)
+    expect(/candidate=(\S+)/u.exec(lines[1]!)?.[1]).toBe(mergeCommit)
+    expect(lines.map((line) => /base=(\S+)/u.exec(line)?.[1])).toEqual([w.target, w.target, mergeCommit])
+    expect(outcome.checkedWaiting).toBe(1)
+    await fetchChanges(w)
+    // @cto 62ed0395 (2): the prepared head's verdict names the target it stood on.
+    const next = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/c01", head: heads[1]! })))!,
+    )
+    expect(trailer(next.find((record) => record.kind === "checked")!, "Base")).toBe(mergeCommit)
+    // The last change was never judged: its chain holds only its opening record.
+    const last = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/c39", head: heads[39]! })))!,
+    )
+    expect(last.map((record) => record.kind)).toEqual(["opened"])
+    // review2 25301 r2 record 1: each read step names the target that read stood
+    // on, so the next head's read and the final re-read name the head's merge.
+    const reads = readFileSync(outcome.log, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind?: string; name?: string; base?: string })
+      .filter((row) => row.kind === "step" && row.name === "read")
+    expect([...new Set(reads.map((row) => row.base))]).toEqual([w.target, mergeCommit])
+  }, 180_000)
+
+  // @cto 62ed0395 (3): a head whose merge changes .yrd.yml leaves the tail unjudged,
+  // so no verdict is written under a declaration the target no longer carries.
+  it("a head whose merge edits .yrd.yml prefetches nothing, and the next round judges the tail (25301)", async () => {
+    const w = await world()
+    // A valid edit: the declaration stays the empty mapping, as another blob.
+    await w.git(["checkout", "--quiet", "-b", "task/declaration", "main"])
+    writeFileSync(join(w.work, ".yrd.yml"), "# edited by the head\n{}\n")
+    await w.git(["add", ".yrd.yml"])
+    await w.git(["commit", "--quiet", "-m", "edit the declaration"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/declaration",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    const tailHead = await submitCommit(w, "task/after", "after.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, on: ["submit", "merge"] }))
+
+    expect(outcome.merged).toEqual(["task/declaration"])
+    expect(outcome.checkedWaiting).toBe(0)
+    // The head's judge and its merge check, and nothing for the tail.
+    expect(readFileSync(w.checkLog, "utf8").trim().split("\n")).toHaveLength(2)
+    const journal = readFileSync(outcome.log, "utf8")
+    expect(journal).toContain("the head's merge changed .yrd.yml")
+    await fetchChanges(w)
+    const tail = (await readQueue(w.git, "origin", "main", await remoteTarget(w))).changes.find(
+      (entry) => entry.change.head === tailHead,
+    )!
+    expect(tail.reading.state).toBe("queued")
+  })
+
+  // @i/10-yrd/25351: after a head whose merge changes .yrd.yml, a change checked in an
+  // earlier round under the old declaration is not ready; the recount compares each
+  // verdict with the declaration the target ENDED on, not the one the round started under.
+  it("after a head whose merge edits .yrd.yml, a change checked under the old declaration is not counted waiting (25351)", async () => {
+    const w = await world()
+    await w.git(["checkout", "--quiet", "-b", "task/declaration", "main"])
+    writeFileSync(join(w.work, ".yrd.yml"), "# edited by the head\n{}\n")
+    await w.git(["add", ".yrd.yml"])
+    await w.git(["commit", "--quiet", "-m", "edit the declaration"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/declaration",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    // The change behind it was checked in an earlier round, under the declaration this round starts under.
+    const options = await w.options({ exit: 0, on: ["submit", "merge"] })
+    const laterHead = await submitCommit(w, "task/later", "later.txt")
+    await appendRemoteRecord(w.git, "main", {
+      change: { branch: "task/later", head: laterHead },
+      kind: "checked",
+      subject: `task/later passed the on-submit checks at main ${w.target.slice(0, 12)}`,
+      trailers: [
+        ["Config", options.configBlob],
+        ["Base", w.target],
+      ],
+    })
+
+    const outcome = await queueRun(options)
+
+    expect(outcome.merged).toEqual(["task/declaration"])
+    expect(readFileSync(outcome.log, "utf8")).toContain("the head's merge changed .yrd.yml")
+    expect(outcome.checkedWaiting).toBe(0)
+  })
+
+  // @cto ac87d1e5: a head in FRONT of a stuck row merges; the line still stops on
+  // that row in the same round, and one outcome names both.
+  it("a head in front of a stuck change merges, and the same round stops the line on the stuck change (25301)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/a", "a.txt")
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 2, on: ["submit", "merge"] }))
+
+    expect(outcome.merged).toEqual(["task/a"])
+    expect(outcome.stuck).toEqual(["task/one"])
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stopped).toBeDefined()
+    expect(await remoteTarget(w)).not.toBe(w.target)
+  })
+
+  // @cto ac87d1e5: the prefetch is cancellable at the stop-time check and writes no partial verdict.
+  it("a stop time that closes while the head merges leaves the rest of the line unjudged (25301)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/head", "head.txt")
+    await submitCommit(w, "task/tail", "tail.txt")
+    const closed = join(w.workdir, "window-closed.flag")
+    const submitLog = join(w.workdir, "submit-checks.log")
+    const script = (name: string, body: string): string => {
+      const path = join(w.workdir, name)
+      writeFileSync(
+        path,
+        ["#!/bin/sh", body, `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`, "exit 0", ""].join("\n"),
+      )
+      chmodSync(path, 0o755)
+      return path
+    }
+    const base = await w.options({ timeoutMs: 1800000 })
+    const onSubmit: CheckSpec = {
+      ...base.checks[0]!,
+      name: "on-submit",
+      on: ["submit"] as const,
+      run: script("on-submit.sh", `echo "$YRD_CANDIDATE_SHA" >> "${submitLog}"`),
+    }
+    const onMerge: CheckSpec = {
+      ...base.checks[0]!,
+      name: "on-merge",
+      on: ["merge"] as const,
+      run: script("on-merge.sh", `touch "${closed}"`),
+    }
+
+    const outcome = await queueRun({
+      ...base,
+      checks: [onSubmit, onMerge],
+      stopAtMs: 2000,
+      // The window closes during the head's on-merge check, after its last stop-time gate.
+      now: () => (existsSync(closed) ? 3000 : 1000),
+    })
+
+    expect(outcome.merged).toEqual(["task/head"])
+    expect(outcome.failed).toEqual([])
+    expect(outcome.deferred).toEqual([])
+    // One on-submit check ran, the head's: the prefetch never started on the tail.
+    expect(readFileSync(submitLog, "utf8").trim().split("\n")).toHaveLength(1)
+    await fetchChanges(w)
+    const tail = (await readQueue(w.git, "origin", "main", await remoteTarget(w))).changes.find(
+      (entry) => entry.change.branch === "task/tail",
+    )!
+    // No partial verdict: the tail's chain holds only its opening record.
+    expect(tail.reading.state).toBe("queued")
+    expect(tail.change.records.map((record) => record.kind)).toEqual(["opened"])
+  })
+
+  // @i/10-yrd/25301 row 3: a withdrawn record is never composed or judged. The round
+  // re-reads each change's state before it judges it; one withdrawn meanwhile is
+  // skipped with one journal line (the service judged task/25314-fence-eof after it
+  // had been withdrawn, 2026-09-23).
+  it("a change withdrawn while an earlier change is judged is skipped with one journal line, never judged (25301 row 3)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    const twoHead = await submitCommit(w, "task/two", "two.txt")
+
+    // task/one fails its judge (its file is one.txt); while that check runs,
+    // task/two is withdrawn, so the walk reaches a change that has left the line.
+    const running = queueRun(await w.options({ exit: 1, sleep: 2, on: ["submit", "merge"] }))
+    await checkRunning(w)
+    await withdraw(w.git, "origin", { branch: "task/two", by: "@chief", target: { branch: "main", remote: "origin" } })
+    const outcome = await running
+
+    expect(outcome.failed).toEqual(["task/one"])
+    expect(outcome.merged).toEqual([])
+    expect(await remoteTarget(w)).toBe(w.target)
+    // One judge ran, task/one's; task/two was never composed or judged.
+    expect(readFileSync(w.checkLog, "utf8").trim().split("\n")).toHaveLength(1)
+    const skips = logRecords(outcome).filter(
+      (record) => record.kind === "observation" && String(record.why ?? "").includes("left the line"),
+    )
+    expect(skips).toHaveLength(1)
+    expect(String(skips[0]?.why)).toContain(`task/two@${twoHead.slice(0, 12)}`)
+    expect(String(skips[0]?.why)).toContain("withdrawn")
+  })
+
+  // @i/10-yrd/25301 A2 (restated by @cto ac87d1e5): a config edit re-judges no
+  // change before the head merges; each stale verdict is re-judged when reached.
+  it("after a config edit, the round re-judges the head, merges it, then re-judges the next against the new target (25301 A2)", async () => {
+    const w = await world()
+    for (const branch of ["task/c0", "task/c1", "task/c2"]) await submitCommit(w, branch, `${branch.slice(5)}.txt`)
+    const first = await queueRun(await w.options({ exit: 0, on: ["submit", "merge"] }))
+    expect(first.merged).toEqual(["task/c0"])
+    const afterFirst = await remoteTarget(w)
+    const linesBefore = readFileSync(w.checkLog, "utf8").trim().split("\n").length
+
+    // The declared check config changes between the rounds: c1 and c2 were checked under the old one.
+    const second = await queueRun({ ...(await w.options({ exit: 0, on: ["submit", "merge"] })), configBlob: "edited" })
+
+    expect(second.merged).toEqual(["task/c1"])
+    const afterSecond = await remoteTarget(w)
+    const lines = readFileSync(w.checkLog, "utf8").trim().split("\n").slice(linesBefore)
+    const candidates = lines.map((line) => /candidate=(\S+)/u.exec(line)?.[1])
+    // Three checks this round, in time order: c1's re-judge, c1's merge check
+    // (its candidate IS the merge that landed), then c2's re-judge, on the
+    // target c1's merge left. One judge before the head merged: never the
+    // whole line first.
+    expect(lines.map((line) => /base=(\S+)/u.exec(line)?.[1])).toEqual([afterFirst, afterFirst, afterSecond])
+    expect(candidates).toHaveLength(3)
+    expect(candidates[1]).toBe(afterSecond)
+    expect(candidates[2]).not.toBe(afterSecond)
+  })
+
+  describe("a merge-check override (25296)", () => {
+    const actor = { by: "@dev/3", verified: false }
+    const hour = 3_600_000
+    const lines = (w: World): string[] => readFileSync(w.checkLog, "utf8").trim().split("\n").filter(Boolean)
+
+    // @cto 842fdb30 (7): set -> the next rounds merge without the check and with
+    // no .yrd.yml change; clear -> the following round runs it again.
+    it("set holds the merge check off with no declaration change and no re-judge; clear turns it back on", async () => {
+      const w = await world()
+      const heads: string[] = []
+      for (let i = 0; i < 10; i++) heads.push(await submitCommit(w, `task/o${String(i)}`, `o${String(i)}.txt`))
+      const base = await w.options({ exit: 0, on: ["submit", "merge"] })
+      const declared = structuredClone(base.checks)
+      const set = await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "a flaky gate", until: new Date(Date.now() + hour) },
+        ["verify"],
+      )
+      expect(set.kind).toBe("set")
+
+      const first = await queueRun({ ...base, overrides: await readOverrides(w.git, "origin", "main") })
+
+      expect(first.merged).toEqual(["task/o0"])
+      // The head's submit judge and the next head's judge (25301 cure (a)),
+      // and no merge check: with the check on, this round writes three lines.
+      expect(lines(w)).toHaveLength(2)
+      const journal = readFileSync(first.log, "utf8")
+      expect(journal).toContain('"kind":"skipped"')
+      expect(journal).toContain("verify OFF until")
+      await fetchChanges(w)
+      const records = await readRecords(
+        w.git,
+        (await refAt(w.git, changeRef("main", { branch: "task/o0", head: heads[0]! })))!,
+      )
+      const record = records.find((entry) => entry.kind === "merged")!
+      expect(trailer(record, "Skipped")).toContain(`verify override=${set.record.sha}`)
+      // (C3) the declaration the run was given is untouched.
+      expect(base.checks).toEqual(declared)
+
+      // (C2) the next round re-judges nothing: o1 is checked, and its merge check is still off.
+      const second = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        overrides: await readOverrides(w.git, "origin", "main"),
+      })
+      expect(second.merged).toEqual(["task/o1"])
+      // o1 merges on round one's verdict with no merge check; the one new line is
+      // the next head's (o2's) first judge, not a re-judge of o1.
+      expect(lines(w)).toHaveLength(3)
+
+      await writeOverride(w.git, "origin", "main", { actor, check: "verify", kind: "clear", reason: "gate fixed" }, [
+        "verify",
+      ])
+      const third = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        overrides: await readOverrides(w.git, "origin", "main"),
+      })
+      expect(third.merged).toEqual(["task/o2"])
+      // o2 was judged by round two, so its merge check runs with no re-judge;
+      // then o3, the next head, is judged: two new lines.
+      expect(lines(w)).toHaveLength(5)
+    }, 180_000)
+
+    // (C4) the next round after expiry runs the check, and the entry reads expired, never absent.
+    it("an expired override is written expired by the round's caller and the check runs again", async () => {
+      const w = await world()
+      await submitCommit(w, "task/expiry", "expiry.txt")
+      const now = Date.now()
+      await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "window", until: new Date(now + hour) },
+        ["verify"],
+      )
+      const later = now + 2 * hour
+      const expired = await expireOverrides(w.git, "origin", "main", later, "yrd")
+      expect(expired.expired.map((entry) => entry.check)).toEqual(["verify"])
+      expect(expired.table.entries).toMatchObject([{ check: "verify", state: "expired" }])
+
+      const paged = join(w.workdir, "paged.jsonl")
+      const outcome = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        notify: [{ name: "pager", on: ["override"], run: `cat >> ${paged}` }],
+        now: () => later,
+        overrides: expired.table,
+        overridesExpired: expired.expired,
+      })
+
+      expect(outcome.merged).toEqual(["task/expiry"])
+      // @cto ccd8dfa8: the round pages the expiry once, naming itself.
+      const [notice, ...more] = readFileSync(paged, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+      expect(more).toEqual([])
+      expect(notice).toMatchObject({
+        action: "expired",
+        check: "verify",
+        owner: "@dev/3",
+        reason: "window",
+        record: "override",
+      })
+      expect(notice?.["round"]).toEqual(expect.any(String))
+      expect(readFileSync(outcome.log, "utf8")).toContain(String(notice?.["round"]))
+      expect(readFileSync(outcome.log, "utf8")).toContain("told pager that merge check verify override expired")
+      // Its submit judge and its merge check: the check ran at merge again.
+      expect(lines(w)).toHaveLength(2)
+      const journal = readFileSync(outcome.log, "utf8")
+      expect(journal).toContain('"kind":"override"')
+      expect(journal).toContain("verify override expired")
+      // A second expiry pass writes nothing more.
+      expect((await expireOverrides(w.git, "origin", "main", later, "yrd")).expired).toEqual([])
+    })
+
+    // @cto ccd8dfa8: the half-window reminder is recorded on the chain, so the
+    // round pages it once and the next round does not page it again.
+    it("pages the half-window reminder once, recorded on the override chain", async () => {
+      const w = await world()
+      await submitCommit(w, "task/remind", "remind.txt")
+      const now = Date.now()
+      await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "window", until: new Date(now + 2 * hour) },
+        ["verify"],
+      )
+      const early = await expireOverrides(w.git, "origin", "main", now + hour / 2, "yrd")
+      expect(early.reminded).toEqual([])
+      const halfway = now + 1.5 * hour
+      const reminded = await expireOverrides(w.git, "origin", "main", halfway, "yrd")
+      expect(reminded.expired).toEqual([])
+      expect(reminded.reminded.map((entry) => entry.check)).toEqual(["verify"])
+      expect(reminderDue(reminded.table.entries[0]!, halfway)).toBe(false)
+      expect(reminded.table.entries).toMatchObject([
+        { check: "verify", state: "active", remindedAt: new Date(halfway) },
+      ])
+
+      const paged = join(w.workdir, "paged.jsonl")
+      const outcome = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        notify: [{ name: "pager", on: ["override"], run: `cat >> ${paged}` }],
+        now: () => halfway,
+        overrides: reminded.table,
+        overridesExpired: reminded.expired,
+        overridesReminded: reminded.reminded,
+      })
+
+      expect(outcome.merged).toEqual(["task/remind"])
+      const notices = readFileSync(paged, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+      expect(notices).toMatchObject([
+        { action: "reminder", check: "verify", owner: "@dev/3", round: expect.any(String) },
+      ])
+      // Recorded on the chain: a later pass reminds nobody.
+      expect((await expireOverrides(w.git, "origin", "main", halfway + 60_000, "yrd")).reminded).toEqual([])
+    })
+
+    // r3 triage F5: a skip is never a result, so a merge phase that stopped
+    // before an un-overridden check defers on stop time instead of merging.
+    it("a skipped check never counts as a result: a stop before the next merge check defers, never merges", async () => {
+      const w = await world()
+      await submitCommit(w, "task/f5", "f5.txt")
+      const flag = join(w.workdir, "window.flag")
+      const ran = join(w.workdir, "second.log")
+      const script = (name: string, body: string): string => {
+        const path = join(w.workdir, name)
+        writeFileSync(path, ["#!/bin/sh", body, "exit 0", ""].join("\n"))
+        chmodSync(path, 0o755)
+        return path
+      }
+      const base = await w.options({ exit: 0 })
+      const spec = base.checks[0]!
+      const checks: CheckSpec[] = [
+        { ...spec, name: "held", on: ["merge"], run: script("held.sh", "true") },
+        { ...spec, name: "closer", on: ["merge"], run: script("closer.sh", `touch "${flag}"`) },
+        { ...spec, name: "second", on: ["merge"], run: script("second.sh", `echo ran >> "${ran}"`) },
+      ]
+      await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "held", kind: "off", reason: "f5", until: new Date(Date.now() + hour) },
+        ["held", "closer", "second"],
+      )
+
+      const outcome = await queueRun({
+        ...base,
+        checks,
+        now: () => (existsSync(flag) ? 3000 : 1000),
+        overrides: await readOverrides(w.git, "origin", "main"),
+        stopAtMs: 2000,
+      })
+
+      expect(outcome.merged).toEqual([])
+      expect(outcome.deferred).toEqual(["task/f5"])
+      expect(existsSync(ran)).toBe(false)
+    })
+
+    // @cto e2642976 (3): probe B as a test. A rival override write after the
+    // round's snapshot refuses the merge push; main does not move, and the
+    // ending names the rival.
+    it("a rival override write after the snapshot refuses the merge, and the ending names it", async () => {
+      const w = await world()
+      await submitCommit(w, "task/fenced", "fenced.txt")
+      const snapshot = await readOverrides(w.git, "origin", "main")
+      const rival = await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "rival", until: new Date(Date.now() + hour) },
+        ["verify"],
+      )
+      const before = await remoteTarget(w)
+
+      const outcome = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        overrides: snapshot,
+      })
+
+      expect(outcome.merged).toEqual([])
+      expect(await remoteTarget(w)).toBe(before)
+      const row = readFileSync(outcome.log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((entry) => entry.kind === "change" && entry.reason === "override-moved")
+      expect(row).toMatchObject({ branch: "task/fenced", saw: rival.record.sha })
+    })
+
+    it("a merge fence advances the override ref and names the merge; the next write chains on it", async () => {
+      const w = await world()
+      const head = await submitCommit(w, "task/fence-audit", "audit.txt")
+      const outcome = await queueRun({
+        ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+        overrides: await readOverrides(w.git, "origin", "main"),
+      })
+      expect(outcome.merged).toEqual(["task/fence-audit"])
+      const table = await readOverrides(w.git, "origin", "main")
+      expect(table.sha).toBeDefined()
+      const subject = (await w.git(["log", "-1", "--format=%s", table.sha!])).trim()
+      expect(subject).toBe(`merge fence: task/fence-audit@${head} in round ${outcome.run}`)
+      expect(table.entries).toEqual([])
+    })
+
+    it("refuses an unknown check, an out-of-window --until, a clear with nothing standing, and an unreadable tip", async () => {
+      const w = await world()
+      const now = Date.now()
+      await expect(
+        writeOverride(
+          w.git,
+          "origin",
+          "main",
+          { actor, check: "nope", kind: "off", reason: "x", until: new Date(now + hour) },
+          ["verify"],
+        ),
+      ).rejects.toThrow("no merge check named 'nope' is declared; the declared merge checks are: verify")
+      expect(() => parseUntil(new Date(now + 13 * hour).toISOString(), now)).toThrow(OverrideRefused)
+      expect(() => parseUntil(new Date(now - hour).toISOString(), now)).toThrow("must be after now")
+      expect(() => parseUntil("tomorrow", now)).toThrow("neither an ISO instant")
+      await expect(
+        writeOverride(w.git, "origin", "main", { actor, check: "verify", kind: "clear", reason: "x" }, ["verify"]),
+      ).rejects.toThrow("no override stands on 'verify' to clear")
+      // A tip that is not an override record is loud, never read as "no overrides".
+      const junk = (await w.git(["commit-tree", (await w.git(["mktree"], "")).trim(), "-m", "not a record"])).trim()
+      await w.git(["push", "--quiet", "origin", `${junk}:${overrideRef("main")}`])
+      await expect(readOverrides(w.git, "origin", "main")).rejects.toThrow("carries no valid Record")
+    })
+
+    it("a second --off on the same check replaces the first and names it", async () => {
+      const w = await world()
+      const first = await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "one", until: new Date(Date.now() + hour) },
+        ["verify"],
+      )
+      const second = await writeOverride(
+        w.git,
+        "origin",
+        "main",
+        { actor, check: "verify", kind: "off", reason: "two", until: new Date(Date.now() + 2 * hour) },
+        ["verify"],
+      )
+      expect(second.kind).toBe("replaced")
+      expect(second.replaced?.record).toBe(first.record.sha)
+      expect(second.record.entries).toMatchObject([{ check: "verify", reason: "two", record: second.record.sha }])
+      const body = await w.git(["log", "-1", "--format=%B", second.record.sha!])
+      expect(body).toContain(`Replaces: ${first.record.sha!}`)
     })
   })
 
@@ -2001,7 +2525,7 @@ describe("a queue run", () => {
         change: { branch: "task/one", head },
         kind: "stuck",
         subject: `rival sent append ${String(competing.length + 1)}`,
-        trailers: [["Reason", "crash"]],
+        trailers: RIVAL_STUCK_TRAILERS,
       })
       await rival(["push", "--quiet", "origin", `${competingRecord}:${ref}`])
       competing.push(competingRecord)
@@ -3001,7 +3525,7 @@ describe("a queue run", () => {
           change: { branch: "task/one", head },
           kind: "stuck",
           subject: "another queue got there first",
-          trailers: [["Reason", "crash"]],
+          trailers: RIVAL_STUCK_TRAILERS,
         })
         await rival(["push", "--quiet", "origin", `${moved}:${ref}`])
       }
@@ -3835,7 +4359,7 @@ describe("a queue run", () => {
     expect(await trailerOn(w, merge, "Merged-By")).toBe(by)
     // The queue commits as itself, so a reader tells its merges from a person's
     // with `git log` alone.
-    expect((await w.git(["log", "-1", "--format=%cn <%ce>", merge])).trim()).toMatch(/^yrd-service <yrd-service@/u)
+    expect((await w.git(["log", "-1", "--format=%cn <%ce>", merge])).trim()).toMatch(/^yrd <yrd@/u)
     expect(trailer(merged, "Merge")).toBe(merge)
     // One `Check:` per on-merge check, in the shape the checked record uses.
     expect(trailers(merged, "Check")).toEqual([expect.stringMatching(/^verify exit=0 ms=\d+ log=\S+$/u)])
@@ -4799,6 +5323,128 @@ describe("the target's setup", () => {
     const setupRows = logRecords(outcome).filter((record) => record.kind === "check" && record.name === "setup")
     expect(setupRows).toHaveLength(6)
     expect(setupRows.filter((record) => record.end === undefined)).toHaveLength(3)
+  })
+
+  /**
+   * @i/10-yrd/25303 box 1. A compose is one git-super process whose settle rows
+   * are written only after it returns, and a prepare and the queue read had no
+   * rows of their own: on the garage each was a 20 to 28 s silence in the run
+   * journal. Each is now a timed `step`: a start row, then an end row with `ms`.
+   * The compose here is made slow on purpose, so the end row's `ms` is shown to
+   * span the step rather than to exist.
+   */
+  it("brackets the queue read, each compose and each prepare with timed step rows (25303 box 1)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    const slowMs = 300
+    await using runner = createProcess({ cwd: w.work })
+    const slowCompose = {
+      ...runner,
+      run: async (request: Parameters<typeof runner.run>[0]) => {
+        if (request.argv.includes("super") && request.argv.includes("merge")) {
+          await new Promise((resolve) => setTimeout(resolve, slowMs))
+        }
+        return runner.run(request)
+      },
+    }
+
+    const outcome = await queueRun({
+      ...(await w.options({ exit: 0, setup: w.setupCommand(0) })),
+      process: slowCompose,
+    })
+
+    expect(outcome.merged).toEqual(["task/one"])
+    const records = logRecords(outcome)
+    const at = (predicate: (record: Record<string, unknown>) => boolean) => records.findIndex(predicate)
+    const bracketed = (name: string, phase: string) => {
+      const start = at((row) => row.kind === "step" && row.name === name && row.phase === phase && row.ms === undefined)
+      const end = at(
+        (row) =>
+          row.kind === "step" &&
+          row.name === name &&
+          row.phase === phase &&
+          typeof row.ms === "number" &&
+          row.start === records[start]?.start,
+      )
+      return { start, end, ms: records[end]?.ms }
+    }
+    for (const [name, phase] of [
+      ["read", "run"],
+      ["compose", "submit"],
+      ["prepare", "submit"],
+      ["compose", "merge"],
+      ["prepare", "merge"],
+    ] as const) {
+      const step = bracketed(name, phase)
+      expect({ name, phase, started: step.start >= 0 }).toEqual({ name, phase, started: true })
+      expect({ name, phase, endsAfterStart: step.end > step.start }).toEqual({ name, phase, endsAfterStart: true })
+    }
+    // A compose ends before the prepare that uses its merge commit starts, in both phases.
+    for (const phase of ["submit", "merge"]) {
+      expect(bracketed("compose", phase).end).toBeLessThan(bracketed("prepare", phase).start)
+      expect(bracketed("compose", phase).ms).toBeGreaterThanOrEqual(slowMs)
+    }
+    expect(records.filter((row) => row.kind === "step" && row.threw === true)).toEqual([])
+  })
+
+  /**
+   * @i/10-yrd/25303 tier 2. Box 1's compose row spans the whole git-super call
+   * and says nothing about what inside it was slow. git-super now reports each
+   * of its phases with a duration, and the round writes them: one `step` row per
+   * phase, `within: "compose"`, after the compose's end row and before the
+   * prepare that follows it. The compose's own worktree is timed as a step
+   * inside the compose, so the two together account for the whole span.
+   */
+  it("writes git-super's own phases after each compose and times the compose worktree (25303 tier 2)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, setup: w.setupCommand(0) }))
+
+    expect(outcome.merged).toEqual(["task/one"])
+    const records = logRecords(outcome)
+    const at = (predicate: (record: Record<string, unknown>) => boolean) => records.findIndex(predicate)
+    for (const phase of ["submit", "merge"]) {
+      const step = (name: string, end: boolean) =>
+        at(
+          (row) =>
+            row.kind === "step" &&
+            row.name === name &&
+            row.phase === phase &&
+            (row.ms !== undefined) === end &&
+            row.within === undefined,
+        )
+      const composeStart = step("compose", false)
+      const composeEnd = step("compose", true)
+      const worktreeStart = step("worktree", false)
+      const worktreeEnd = step("worktree", true)
+      expect({
+        phase,
+        order: [composeStart, worktreeStart, worktreeEnd, composeEnd].every(
+          (i, n, all) => i >= 0 && (n === 0 || i > (all[n - 1] ?? -1)),
+        ),
+      }).toEqual({ phase, order: true })
+
+      const inside = records
+        .map((row, index) => ({ row, index }))
+        .filter(({ row }) => row.kind === "step" && row.phase === phase && row.within === "compose")
+      // git-super's closed list, in the order its phases run.
+      expect(inside.map(({ row }) => row.name)).toEqual([
+        "preflight",
+        "merge-tree",
+        "plan",
+        "capture",
+        "checkouts",
+        "merge",
+        "settle",
+        "commit",
+      ])
+      for (const { row, index } of inside) {
+        expect(row).toMatchObject({ branch: "task/one", head: expect.any(String), ms: expect.any(Number) })
+        expect(index).toBeGreaterThan(composeEnd)
+        expect(index).toBeLessThan(step("prepare", false))
+      }
+    }
   })
 
   /**

@@ -13,7 +13,7 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
@@ -74,12 +74,26 @@ import {
   refAt,
   readDrafts,
   DRAFT_WINDOW_MS,
+  foldDrafts,
   endingInstants,
   submit,
   withdraw,
   NothingToWithdraw,
   liftLine,
   pauseStop,
+  STOPPED_BY,
+  OverrideRefused,
+  expireOverrides,
+  overrideFacts,
+  overrideLine,
+  parseUntil,
+  readOverrides,
+  writeOverride,
+  type OverrideFact,
+  type OverrideEntry,
+  notifyOutsideRound,
+  overrideNotice,
+  skippedChecks,
   HEARTBEAT_GRACE_MS,
   HEARTBEAT_INTERVAL_MS,
   QUEUE_HEALTH_DOCUMENT,
@@ -87,6 +101,7 @@ import {
   ROUND_LOCK,
   relaunchStalledHealthDocument,
   roundHealthDocument,
+  gracefulStopHealthDocument,
   writtenHealthDocument,
   runtimeGitlinkPath,
   readStop,
@@ -111,6 +126,7 @@ import {
   type LogRecord,
   type QueueConfig,
   type QueueHealthDocument,
+  type ServiceIntentFact,
   type QueueRunOutcome,
   type PauseRecord,
   type RuntimeGitlinkOff,
@@ -121,7 +137,10 @@ import {
   type DraftReading,
   type Row,
   type StopFact,
+  tipOf,
+  trailer,
 } from "@yrd/queue-core"
+import { readUnitIntent } from "./unit-intent.ts"
 import { noticeLine } from "./watch-notice.ts"
 import { FILTER_FIELDS, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
@@ -217,6 +236,28 @@ const sourceAtLoad = await (async () => {
   }
 })()
 
+/** The termination signal a running service answers with its last document (25430). */
+export type TerminatePort = Readonly<{
+  /** Call `handler` on termination; answers the unsubscribe. */
+  on: (handler: () => void) => () => void
+  /** End the process as the signal would have, after the handler ran. */
+  reraise: () => void
+}>
+
+const processTerminate: TerminatePort = {
+  on: (handler) => {
+    process.on("SIGTERM", handler)
+    return () => {
+      process.off("SIGTERM", handler)
+    }
+  },
+  // Re-raised with no listener left, so the process dies OF the signal exactly
+  // as before: the service's `restart: "on-codes"` keeps a signal terminal.
+  reraise: () => {
+    process.kill(process.pid, "SIGTERM")
+  },
+}
+
 export type CoreQueueCommand =
   | Readonly<{
       command: "submit"
@@ -227,6 +268,15 @@ export type CoreQueueCommand =
     }>
   | Readonly<{ command: "pause"; by: string; reason: string }>
   | Readonly<{ command: "resume"; by: string; reason?: string }>
+  | Readonly<{
+      command: "override"
+      action: "off" | "clear" | "list"
+      check?: string
+      until?: string
+      reason?: string
+      by: string
+      verified: boolean
+    }>
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string }>
   | Readonly<{ command: "drop"; branch: string; by: string; reason?: string }>
   | Readonly<{ command: "ignore"; branch: string; by: string; reason: string }>
@@ -243,6 +293,7 @@ export type CoreQueueCommand =
        * only a change already in line.
        */
       author?: Readonly<{ repo: string; selection: GitSelection; remote?: string }>
+      noCheck?: boolean
     }>
   | Readonly<{
       command: "up"
@@ -297,6 +348,12 @@ export type CoreQueueCommand =
        * behaviour and an untestable one.
        */
       afterHealth?: (document: QueueHealthDocument) => void | Promise<void>
+      /**
+       * The process's termination signal, as a port (25430). Defaults to this
+       * process's SIGTERM and a re-raise of it; a test supplies its own, since
+       * a real SIGTERM would end the test runner.
+       */
+      terminate?: TerminatePort
     }>
   | Readonly<{
       command: "list"
@@ -341,6 +398,7 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   pause: "queue pause",
   list: "queue list",
   merge: "merge",
+  override: "queue override",
   run: "queue run",
   show: "queue show",
   stats: "queue stats",
@@ -456,20 +514,31 @@ export async function coreQueueCommand(
     only?: Change,
     tier?: "normal" | "long",
     stopAtMs?: number,
+    noCheck?: boolean,
   ): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
-      if (
+      const event =
         (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
-      ) {
-        assertPlainEventQueueConfig(config, "run")
-      }
+      if (event) assertPlainEventQueueConfig(config, "run")
+      // Expire, then snapshot, BEFORE the run and so before its header (25296,
+      // @cto 462dfe95): a window that passed gets its `expired` record in its
+      // own leased push, and the round is judged, and its merge fenced, under
+      // the table that write left. An event queue has no override (refused at
+      // the verb), so it reads none.
+      const overrides = event
+        ? undefined
+        : await expireOverrides(git, config.target.remote, config.target.branch, Date.now(), STOPPED_BY)
       outcome = await queueRun({
         ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
+        ...(overrides === undefined
+          ? {}
+          : { overrides: overrides.table, overridesExpired: overrides.expired, overridesReminded: overrides.reminded }),
         foreground: request.command === "run" || request.command === "merge",
         ...(only === undefined ? {} : { only }),
         ...(tier === undefined ? {} : { tier }),
         ...(stopAtMs === undefined ? {} : { stopAtMs }),
+        ...(noCheck === undefined ? {} : { noCheck }),
       })
     } catch (error) {
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
@@ -551,6 +620,7 @@ export async function coreQueueCommand(
       stopAtMs?: number
       stallMs?: number
       stop?: AbortSignal
+      noCheck?: boolean
       waiting?: Readonly<{
         onWait: (wait: RoundLockWait) => void
         onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>) => void
@@ -620,7 +690,7 @@ export async function coreQueueCommand(
       if (declared === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
       const before = await round.before?.(declared)
       if (before !== undefined) return before
-      const outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs)
+      const outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck)
       return outcome === undefined ? 2 : { declared, outcome }
     } finally {
       lock.release()
@@ -664,6 +734,8 @@ export async function coreQueueCommand(
         return "the change's own record ref moved after this round read it, so the merge was not pushed"
       case "pause-moved":
         return "the queue's pause record moved after this round read it, so the merge was not pushed"
+      case "override-moved":
+        return `the queue's merge-check override moved${saw} after this round read it, so the merge was not pushed; the next round judges it under the new table`
       case undefined:
         return outcome.stopped === undefined
           ? "this round did not reach it"
@@ -772,6 +844,112 @@ export async function coreQueueCommand(
         return 0
       } catch (error) {
         if (error instanceof QueuePaused || error instanceof QueueNotPaused) {
+          io.stderr(`yrd: ${error.message}\n`)
+          return 1
+        }
+        throw error
+      }
+    }
+    case "override": {
+      // The merge-check override (25296). An event queue has its own merge
+      // selection (event-run.ts) that no override reaches, so it refuses rather
+      // than accept a switch nothing would read (X4).
+      if ((await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event") {
+        io.stderr(
+          `yrd: ${config.target.remote}#${config.target.branch} is an event queue; a merge-check override is not ` +
+            "supported there, and nothing would read it\n",
+        )
+        return 1
+      }
+      const now = Date.now()
+      if (request.action === "list") {
+        const table = await readOverrides(git, config.target.remote, config.target.branch)
+        emit(
+          io,
+          options.json,
+          { overrides: overrideFacts(table, now), record: table.sha ?? null },
+          table.entries.length === 0
+            ? `no merge-check overrides on ${targetLabel}`
+            : table.entries.map((entry) => overrideLine(entry, now)).join("\n"),
+        )
+        return 0
+      }
+      try {
+        // The declared merge checks, read from the FETCHED target's `.yrd.yml`
+        // (captured above), never a local clone's copy.
+        const declaredMerge = config.checks
+          .filter((spec) => (spec.on ?? ["merge"]).includes("merge"))
+          .map((spec) => spec.name)
+        const actor = { by: request.by, verified: request.verified }
+        const written = await writeOverride(
+          git,
+          config.target.remote,
+          config.target.branch,
+          request.action === "off"
+            ? {
+                actor,
+                check: request.check ?? "",
+                kind: "off",
+                reason: request.reason ?? "",
+                until: parseUntil(request.until ?? "", now),
+              }
+            : { actor, check: request.check ?? "", kind: "clear", reason: request.reason ?? "" },
+          declaredMerge,
+        )
+        const standing = written.record.entries.find((entry) => entry.check === request.check)
+        // The page is the override's side effect, never its condition (@cto
+        // ccd8dfa8): a notifier that fails is said on stderr and journaled, and
+        // the override it was telling about stands.
+        // A clear's notice names the entry it ended, told by whoever ended it,
+        // why, and the clear record itself.
+        const noticed =
+          standing ??
+          (written.replaced === undefined
+            ? undefined
+            : {
+                ...written.replaced,
+                by: request.by,
+                reason: request.reason ?? "",
+                record: written.record.sha ?? written.replaced.record,
+                verified: request.verified,
+              })
+        if (noticed === undefined) {
+          throw new Error(
+            `override write for '${request.check ?? ""}' returned neither a standing nor a cleared entry (record ${String(written.record.sha)})`,
+          )
+        }
+        const told = await tellOverride(
+          {
+            config,
+            git,
+            repo,
+            targetSha: captured.oid,
+            workdir,
+            ...(options.env === undefined ? {} : { env: options.env }),
+            ...(options.populateReference === undefined ? {} : { populateReference: options.populateReference }),
+          },
+          written.kind === "clear" ? "clear" : written.kind === "replaced" ? "replace" : "set",
+          noticed,
+          io,
+        )
+        const replaced = written.replaced === undefined ? "" : `; replaces ${overrideLine(written.replaced, now)}`
+        emit(
+          io,
+          options.json,
+          {
+            kind: written.kind,
+            told,
+            overrides: overrideFacts(written.record, now),
+            record: written.record.sha ?? null,
+            ...(written.replaced === undefined ? {} : { replaces: written.replaced.record }),
+          },
+          standing === undefined
+            ? `merge check ${request.check ?? ""} back on for ${targetLabel} (record ${String(written.record.sha).slice(0, 12)})`
+            : `${overrideLine(standing, now)} on ${targetLabel} (record ${String(written.record.sha).slice(0, 12)})${replaced}`,
+        )
+        return 0
+      } catch (error) {
+        if (error instanceof OverrideRefused) {
           io.stderr(`yrd: ${error.message}\n`)
           return 1
         }
@@ -959,7 +1137,7 @@ export async function coreQueueCommand(
         change = { branch, head: submitted.head }
       }
 
-      const merging = await lockedRound({ only: change })
+      const merging = await lockedRound({ only: change, noCheck: request.noCheck })
       if (typeof merging === "number") return merging
       let after = await readChangeNow(change)
       // A stopped line waits on a stuck change, and a change merged past it may
@@ -987,8 +1165,15 @@ export async function coreQueueCommand(
       emit(
         io,
         options.json,
-        { branch, change: changeName(change), exitCode: ending ?? 2, state, stopped: stopFact(after.stop) },
-        `${changeName(change)} ${state}`,
+        {
+          branch,
+          change: changeName(change),
+          exitCode: ending ?? 2,
+          state,
+          stopped: stopFact(after.stop),
+          ...(request.noCheck === true ? { noCheck: true } : {}),
+        },
+        `${changeName(change)} ${state}${request.noCheck === true ? " (checks skipped: --no-check)" : ""}`,
       )
       if (ending !== undefined) return ending
       // Still in line: checked and not merged, or never reached. Exit 2 and no
@@ -1047,6 +1232,11 @@ export async function coreQueueCommand(
       const writeHealth = (document: QueueHealthDocument): QueueHealthDocument => {
         const written = writtenHealthDocument(document, writer, heartbeat, new Date())
         stated = written
+        persistHealth(written)
+        return written
+      }
+      /** The one atomic write, shared by the heartbeat's documents and the graceful stop's last one. */
+      const persistHealth = (written: QueueHealthDocument): void => {
         try {
           // ATOMIC, and the reason is a page nobody should ever have got:
           // `writeFileSync` truncates before it writes, so a probe landing in
@@ -1067,8 +1257,13 @@ export async function coreQueueCommand(
             }; the declared health probe reads the last document written until its deadline, then reads it overdue`,
           )
         }
-        return written
       }
+      // WHO STARTED IT AND WHY (25430): the supervisor's start intent when it
+      // gave one, else the plain default, as resume's is "pause lifted". Keyed
+      // on the verb, so a previous stop's record is never read as this start's.
+      const startIntent = readUnitIntent("start", options.env ?? process.env, new Date())
+      const serviceStarted: ServiceIntentFact =
+        startIntent.kind === "intent" ? startIntent.fact : { reason: "started", since: writer.startedAt }
       // THE RELAUNCH EXIT, and whether it is armed (@i/10-yrd/24515). An
       // injected gitlink is a test's, and arms it by construction; otherwise
       // the runtime asks what path IT occupies in ITS OWN superproject.
@@ -1098,7 +1293,7 @@ export async function coreQueueCommand(
        */
       const lineDocument = (stop: PauseRecord | undefined, sleepMs: number): QueueHealthDocument => {
         const base = roundHealthDocument(SERVICE, stop, sleepMs, new Date())
-        return identified.kind === "off" ? { ...base, facts: { ...base.facts, ...relaunchOff } } : base
+        return { ...base, facts: { ...base.facts, ...relaunchOff, serviceStarted } }
       }
       /**
        * The last stop the loop knows: read at start, then derived by every round.
@@ -1312,6 +1507,28 @@ export async function coreQueueCommand(
       const beat = setInterval(() => {
         if (stated !== undefined) writeHealth(stated)
       }, heartbeat.intervalMs)
+      // THE GRACEFUL STOP (25430). A signal carries no reason, so the supervisor
+      // wrote its stop intent before sending it; this reads it and leaves ONE
+      // last document saying who stopped the service and why, then dies of the
+      // signal as it always did. Synchronous from start to re-raise, and the
+      // heartbeat is cleared first, so nothing writes over the last document.
+      // A SIGKILL runs none of this: its last document ages into the overdue
+      // reading, which says the service stopped outside a graceful stop.
+      const terminate = request.terminate ?? processTerminate
+      const offTerminate = terminate.on(() => {
+        clearInterval(beat)
+        const intent = readUnitIntent("stop", options.env ?? process.env, new Date())
+        if (intent.kind === "none") log?.warn?.(`stopping without a recorded reason: ${intent.why}`)
+        persistHealth(
+          gracefulStopHealthDocument(
+            SERVICE,
+            intent.kind === "intent" ? intent.fact : { since: new Date().toISOString() },
+            lastStop,
+          ),
+        )
+        offTerminate()
+        terminate.reraise()
+      })
       /**
        * A round the service waits for — a `yrd merge` or `yrd queue run` in the
        * same workdir — is stated where the service is read: the holder as a
@@ -1378,6 +1595,7 @@ export async function coreQueueCommand(
         }
       } finally {
         clearInterval(beat)
+        offTerminate()
       }
     }
     case "list": {
@@ -1424,8 +1642,10 @@ export async function coreQueueCommand(
           journals: Journals
           /** The stop that stands, as the reading derived it. */
           stopped: StopFact | null
-          /** Which drafts the rows list, and the heads of the drafts this repository has not read. */
-          drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
+          /** The merge-check override table, active and expired entries alike (25296); empty on an event queue. */
+          overrides: readonly OverrideFact[]
+          /** Which drafts the rows list, the heads of the drafts this repository has not read, and how many older ones fold into a count. */
+          drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
         }>
       > => {
         // Legacy JSON retains its historical change-only document. An event
@@ -1466,6 +1686,12 @@ export async function coreQueueCommand(
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = reading.format === "event" ? reading.pause : reading.queue.stop
+        // The override table beside the stop (25296 C5). An event queue has no
+        // override (the verb refuses there), so it carries none.
+        const overrides =
+          reading.format === "event"
+            ? []
+            : overrideFacts(await readOverrides(git, config.target.remote, config.target.branch), Date.now())
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table. Zero
         // rows also names the fields the term was checked against, so a state
@@ -1497,6 +1723,8 @@ export async function coreQueueCommand(
             // The everyday reader of a stopped line: always present, null while
             // the line runs, so a stop can never be read as absent.
             stopped: stopFact(pause),
+            // Always present: an empty array is "no overrides", never an absent field.
+            overrides,
             ...(scope === undefined ? {} : { scope }),
           },
           entries: reading.format === "event" ? undefined : reading.queue.changes,
@@ -1517,9 +1745,16 @@ export async function coreQueueCommand(
           unfiltered,
           changes,
           stopped: stopFact(pause),
+          overrides,
           ...(drafts === undefined
             ? {}
-            : { drafts: { unread: drafts.undated.map((draft) => draft.head), window: draftWindow } }),
+            : {
+                drafts: {
+                  unread: drafts.undated.map((draft) => draft.head),
+                  window: draftWindow,
+                  older: "olderDrafts" in reading ? (reading.olderDrafts ?? 0) : 0,
+                },
+              }),
         }
       }
       /**
@@ -2055,6 +2290,7 @@ export async function coreQueueCommand(
                   ...(change.row.live.log === undefined ? {} : { log: change.row.live.log }),
                 },
             decided ? undefined : journalFor({ row: change.row }, journals)?.checks,
+            skippedChecks(change.records),
           ),
           ...(declared.note === undefined ? {} : { note: declared.note }),
         })
@@ -2195,6 +2431,74 @@ function gitlinks(listing: string): readonly Readonly<{ path: string; sha: strin
   return rows
 }
 
+/** Where the verb journals each override notice it handed out: beside the run journals, never among them (`logs/*.jsonl` are runs). */
+const OVERRIDE_NOTIFY_JOURNAL = "override-notify.jsonl"
+
+/**
+ * Hand one override notice to the declared `notify:` entries that want
+ * `override`, say each outcome on stderr, and journal it. Never throws: the
+ * override is written already, and the page is its side effect (@cto ccd8dfa8).
+ * No entry wanting the event is said once, naming the override chain as the
+ * record that stands in its place.
+ */
+async function tellOverride(
+  context: Readonly<{
+    config: QueueConfig
+    git: Git
+    repo: string
+    targetSha: string
+    workdir: string
+    env?: NodeJS.ProcessEnv
+    populateReference?: boolean
+  }>,
+  action: "set" | "clear" | "replace",
+  entry: OverrideEntry,
+  io: YrdCliIO,
+): Promise<readonly Readonly<{ name: string; delivery: string; failure?: string }>[]> {
+  const { config } = context
+  const notice = overrideNotice(entry, action, `${config.target.branch}@${context.targetSha}`)
+  let handed: readonly Readonly<{ name: string; delivery: string; failure?: string }>[]
+  try {
+    handed = await notifyOutsideRound(
+      {
+        git: context.git,
+        notify: config.notify,
+        repo: context.repo,
+        targetSha: context.targetSha,
+        workdir: context.workdir,
+        ...(config.setup === undefined ? {} : { setup: config.setup }),
+        ...(context.env === undefined ? {} : { env: context.env }),
+        ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
+      },
+      notice,
+    )
+  } catch (error) {
+    handed = [{ delivery: "failed", failure: error instanceof Error ? error.message : String(error), name: "notify" }]
+  }
+  for (const told of handed) {
+    if (told.delivery === "none") {
+      io.stderr(
+        `yrd: no notify entry in .yrd.yml wants override events, so nobody was told; the override's own record ${entry.record.slice(0, 12)} is the notice\n`,
+      )
+    } else if (told.delivery === "failed") {
+      io.stderr(
+        `yrd: could not tell ${told.name} about the override (it stands): ${told.failure ?? "no reason given"}\n`,
+      )
+    }
+  }
+  try {
+    appendFileSync(
+      join(context.workdir, OVERRIDE_NOTIFY_JOURNAL),
+      `${JSON.stringify({ at: new Date().toISOString(), notice, told: handed })}\n`,
+    )
+  } catch (error) {
+    io.stderr(
+      `yrd: could not journal the override notice in ${join(context.workdir, OVERRIDE_NOTIFY_JOURNAL)}: ${error instanceof Error ? error.message : String(error)}\n`,
+    )
+  }
+  return handed
+}
+
 function runOptions(
   repo: string,
   declared: Readonly<{ config: QueueConfig; oid: string }>,
@@ -2292,17 +2596,40 @@ export function summarize(kind: string, rest: Readonly<Record<string, unknown>>)
     .filter(Boolean)
     .join(" at ")
   switch (kind) {
-    case "run":
-      return `queue run at ${String(rest.target)} ${String(rest.gitlink).slice(0, 12)}`
+    case "run": {
+      // Every merge check an override held off this round, in the header's own
+      // line: a round judged with a check off says so before any change does (25296 C5).
+      const overrides = Array.isArray(rest.overrides) ? rest.overrides.map(String) : []
+      return (
+        `queue run at ${String(rest.target)} ${String(rest.gitlink).slice(0, 12)}` +
+        (overrides.length === 0 ? "" : `; merge check ${overrides.join("; ")}`)
+      )
+    }
+    case "skipped":
+      return `${where}: merge check ${String(rest.check)} skipped: override ${String(rest.record).slice(0, 12)} by ${String(rest.by)}${rest.verified === true ? "" : " (claimed)"} until ${String(rest.until)}`
+    case "override":
+      return `merge check ${String(rest.check)} override ${String(rest.record)}: ${String(rest.reason)}`
     case "change":
       if (typeof rest.text === "string") return rest.text
       return `${where}: ${String(rest.decision ?? rest.state)}`
     case "check":
-      // Two rows per check: `ms` is the end row's, and its absence is the
+    case "step": {
+      // Two rows per check or step: `ms` is the end row's, and its absence is the
       // start row, the one that says a long check is running rather than hung.
+      // A run's own step (the queue read) names its target, not a change.
+      const about =
+        where !== "" || typeof rest.target !== "string"
+          ? where
+          : [rest.target, typeof rest.base === "string" ? rest.base.slice(0, 12) : undefined]
+              .filter(Boolean)
+              .join(" at ")
+      // A step git-super timed inside a compose names its owner, so its `merge`
+      // is never read as the queue's merge phase.
+      const name = typeof rest.within === "string" ? `${rest.within}/${String(rest.name)}` : String(rest.name)
       return rest.ms === undefined
-        ? `${String(rest.name)} started for ${where}`
-        : `${String(rest.name)} ran for ${where} in ${String(rest.ms)} ms`
+        ? `${name} started for ${about}`
+        : `${name} ran for ${about} in ${String(rest.ms)} ms`
+    }
     case "result":
       return `${String(rest.name)} ${String(rest.result)} for ${where}${rest.whose === undefined ? "" : `, ${String(rest.whose)}'s`}`
     case "settle":
@@ -2355,11 +2682,14 @@ function describeRun(
     log: string
     stopped?: Readonly<{ says: string }>
     observation: GitObservation
+    noCheck?: boolean
   }>,
 ): string {
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
   const parts = [
-    outcome.merged.length > 0 ? `${STATE_WORDS.merged.word} ${outcome.merged.join(", ")}` : undefined,
+    outcome.merged.length > 0
+      ? `${STATE_WORDS.merged.word} ${outcome.merged.join(", ")}${outcome.noCheck === true ? " (checks skipped: --no-check)" : ""}`
+      : undefined,
     outcome.failed.length > 0 ? `${STATE_WORDS.failed.word} ${outcome.failed.join(", ")}` : undefined,
     outcome.stuck.length > 0 ? `${STATE_WORDS.stuck.word} ${outcome.stuck.join(", ")}` : undefined,
     outcome.directMerges.length > 0
@@ -2565,6 +2895,7 @@ export async function openDetail(
       ? undefined
       : { name: row.live.check, ...(row.live.log === undefined ? {} : { log: row.live.log }) },
     decided ? undefined : item.run?.checks,
+    skippedChecks(judgementOf(records, item.run?.id)),
   )
   const checks = views.map(readOutput)
   const about = row.state === "direct" ? {} : await headFacts(git, config, row)
@@ -2682,7 +3013,8 @@ function snapshotOf(
     runner: RunnerFacts
     decisions: readonly RunDecision[]
     stopped: StopFact | null
-    drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
+    overrides?: readonly OverrideFact[]
+    drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
   }>,
 ): WatchSnapshot {
   return {
@@ -2695,9 +3027,10 @@ function snapshotOf(
     unfiltered: round.unfiltered,
     runner: round.runner,
     stopped: round.stopped,
+    ...(round.overrides === undefined ? {} : { overrides: round.overrides }),
     ...(round.drafts === undefined
       ? {}
-      : { drafts: { unread: round.drafts.unread.length, window: round.drafts.window } }),
+      : { drafts: { unread: round.drafts.unread.length, window: round.drafts.window, older: round.drafts.older } }),
     ...(round.pause === undefined ? {} : { pause: round.pause }),
     ...(round.journalAbsent === undefined ? {} : { journalAbsent: round.journalAbsent }),
   }
@@ -2966,11 +3299,13 @@ function checkLines(check: CheckView): readonly string[] {
   const state =
     check.state === "not-run"
       ? " NOT RUN"
-      : check.state === "running"
-        ? " running"
-        : check.state === "unmeasured"
-          ? " unmeasured — no result recorded"
-          : ""
+      : check.state === "off"
+        ? " off"
+        : check.state === "running"
+          ? " running"
+          : check.state === "unmeasured"
+            ? " unmeasured — no result recorded"
+            : ""
   return [
     `  ${CHECK_GLYPH[check.state]} ${check.name}${state}${exit}${ms}`,
     // The command above its output, which here is the path the output went to
@@ -3102,6 +3437,8 @@ export async function readListing(
     all: readonly Row[]
     /** The drafts of the window asked for; absent when none was. */
     drafts?: DraftReading
+    /** The seven-day drafts older than a day, folded into a count rather than listed (25424). */
+    olderDrafts?: number
     observation: GitObservation
   }>
 > {
@@ -3129,6 +3466,7 @@ export async function readListing(
           targetSha: targetOid,
           ...(window === "7d" ? { since: new Date(Date.now() - DRAFT_WINDOW_MS) } : {}),
         })
+  const folded = foldDrafts(drafts?.dated ?? [], new Date())
   const all = list(queue.changes, {
     directMerges: await directMergeCommits(git, config.target.branch, targetOid, queue.changes),
     journals,
@@ -3137,10 +3475,45 @@ export async function readListing(
       queue.changes.map((entry) => entry.change.head),
     ),
     ...(options.shown === undefined ? {} : { endings: await endingInstants(git, queue.changes) }),
-    // Seven days lists the drafts it can date and counts the rest; every draft lists them all, marked.
-    ...(drafts === undefined ? {} : { drafts: window === "all" ? [...drafts.dated, ...drafts.undated] : drafts.dated }),
+    // Seven days lists the drafts of the last day and counts the older ones
+    // and the undated apart; every draft lists them all, marked.
+    ...(drafts === undefined ? {} : { drafts: window === "all" ? [...drafts.dated, ...drafts.undated] : folded.rows }),
   })
-  return { all, journals, queue, observation, ...(drafts === undefined ? {} : { drafts }) }
+  return {
+    all: markStaleVerdicts(all, queue.changes, config.blob),
+    journals,
+    queue,
+    observation,
+    ...(drafts === undefined ? {} : { drafts }),
+    ...(drafts === undefined || window === "all" ? {} : { olderDrafts: folded.older }),
+  }
+}
+
+/**
+ * A checked change whose verdict names a check config the target no longer
+ * declares is not yet judged under the current one (@i/10-yrd/25301, @cto
+ * c7115f0f (3)): the round re-judges it when its walk reaches it, so until then
+ * the list says so instead of reading as checked and ready.
+ */
+function markStaleVerdicts(
+  rows: readonly Row[],
+  changes: Awaited<ReturnType<typeof readQueue>>["changes"],
+  blob: string,
+): readonly Row[] {
+  const stale = new Set(
+    changes
+      .filter((entry) => {
+        const tip = tipOf(entry.change)
+        return tip.kind === "checked" && trailer(tip, "Config") !== blob
+      })
+      .map((entry) => `${entry.change.branch}@${entry.change.head}`),
+  )
+  if (stale.size === 0) return rows
+  return rows.map((row) =>
+    row.state === "checked" && stale.has(`${row.branch}@${row.head}`)
+      ? { ...row, reason: `not yet judged under ${blob.slice(0, 12)}` }
+      : row,
+  )
 }
 
 /** Prefilter only advertised draft heads; a submitted change remains in the listing. */
