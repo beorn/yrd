@@ -22,7 +22,13 @@ const round = (
   judged: Partial<Record<"merged" | "failed" | "stuck", readonly string[]>>,
   line?: RoundLine,
 ): QueueRunOutcome =>
-  ({ merged: [], failed: [], stuck: [], ...judged, ...(line === undefined ? {} : { line }) }) as unknown as QueueRunOutcome
+  ({
+    merged: [],
+    failed: [],
+    stuck: [],
+    ...judged,
+    ...(line === undefined ? {} : { line }),
+  }) as unknown as QueueRunOutcome
 
 const now = new Date("2026-09-24T21:09:00.000Z")
 const oldest = { branch: "task/a", openedAt: "2026-09-24T20:10:00.000Z" }
@@ -75,7 +81,11 @@ describe("the line's flow after one service round", () => {
   })
 
   it("drops the oldest waiting change once the round reads an empty line", () => {
-    const flow = flowAfterRound({ waiting: 1, oldestWaiting: oldest }, round({ merged: ["task/a"] }, { waiting: 0 }), now)
+    const flow = flowAfterRound(
+      { waiting: 1, oldestWaiting: oldest },
+      round({ merged: ["task/a"] }, { waiting: 0 }),
+      now,
+    )
     expect(flow.waiting).toBe(0)
     expect(flow.oldestWaiting).toBeUndefined()
   })

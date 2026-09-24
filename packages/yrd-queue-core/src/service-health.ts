@@ -298,7 +298,11 @@ export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date):
   if (flow.roundOpen !== undefined) {
     const running = span(now.getTime() - Date.parse(flow.roundOpen.startedAt))
     const on = flow.roundOpen.branch === undefined ? "" : ` on ${flow.roundOpen.branch}`
-    return { cause: `a round has been running its checks for ${running}${on}; ${observation}`, forMs, shape: "slow-round" }
+    return {
+      cause: `a round has been running its checks for ${running}${on}; ${observation}`,
+      forMs,
+      shape: "slow-round",
+    }
   }
   const last =
     flow.lastRoundEndedAt === undefined
@@ -382,7 +386,9 @@ function stalledFailure(stall: LineStall, flow: LineFlow): QueueHealthFailure {
       stall.shape === "slow-round"
         ? "A round is running: read its journal (yrd queue list shows the RUNNER line and the round's log) to see which check it is in and whether that check is making progress."
         : "No round is judging anything: read the last round's journal and the service's own log for why rounds complete without taking a change.",
-      ...(oldest === undefined ? [] : [`The oldest waiting change, its records and its log: yrd queue show ${oldest}.`]),
+      ...(oldest === undefined
+        ? []
+        : [`The oldest waiting change, its records and its log: yrd queue show ${oldest}.`]),
       "The service is alive and heartbeating: no restart is needed to read this, and a restart alone does not cure a line that judges nothing.",
       "This page clears on the next judgement — a change merged, failed or recorded stuck — and never by itself.",
     ],

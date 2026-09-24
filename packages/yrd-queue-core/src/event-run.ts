@@ -587,7 +587,9 @@ export async function eventQueueRun(
     kind: "observation",
     subject: "line",
     waiting: roundLine.waiting,
-    ...(roundLine.oldest === undefined ? {} : { oldestBranch: roundLine.oldest.branch, oldestOpenedAt: roundLine.oldest.openedAt }),
+    ...(roundLine.oldest === undefined
+      ? {}
+      : { oldestBranch: roundLine.oldest.branch, oldestOpenedAt: roundLine.oldest.openedAt }),
     ...(roundLine.lastJudgedAt === undefined ? {} : { lastJudgedAt: roundLine.lastJudgedAt }),
   })
   const standing = remaining.find((change) => change.status === "stuck")

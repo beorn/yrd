@@ -13,7 +13,17 @@ type EventQueueRunConfig = Readonly<{
 
 type EventQueueConfigAction = "create" | "run" | "submit"
 
-const QUEUE_KEYS = new Set(["target", "archiveAfter", "checks", "health", "ignore", "blob", "notify", "setup", "teardown"])
+const QUEUE_KEYS = new Set([
+  "target",
+  "archiveAfter",
+  "checks",
+  "health",
+  "ignore",
+  "blob",
+  "notify",
+  "setup",
+  "teardown",
+])
 const CHECK_KEYS = new Set([
   "name",
   "run",

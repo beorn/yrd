@@ -263,7 +263,12 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
   const oldest = { branch: "task/oldest", openedAt: "2026-09-24T19:00:00.000Z" }
 
   test("waiting changes and no judgement past the threshold: a stopped line, naming the round, the waiting and the threshold", () => {
-    const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", lastRoundEndedAt: "2026-09-24T20:20:00.000Z", oldestWaiting: oldest, waiting: 16 }
+    const flow = {
+      lastJudgedAt: "2026-09-24T19:40:00.000Z",
+      lastRoundEndedAt: "2026-09-24T20:20:00.000Z",
+      oldestWaiting: oldest,
+      waiting: 16,
+    }
     const stall = lineStall(flow, threshold, at("20:27:00"))
     expect(stall?.shape).toBe("stopped-line")
     expect(stall?.forMs).toBe(minutes(47))
@@ -313,19 +318,28 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
   })
 
   test("the round document pages a stalled line as unhealthy with its own code, and carries the flow either way", () => {
-    const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", lastRoundEndedAt: "2026-09-24T20:20:00.000Z", oldestWaiting: oldest, waiting: 16 }
+    const flow = {
+      lastJudgedAt: "2026-09-24T19:40:00.000Z",
+      lastRoundEndedAt: "2026-09-24T20:20:00.000Z",
+      oldestWaiting: oldest,
+      waiting: 16,
+    }
     const stalled = roundHealthDocument("yrd", undefined, INTERVAL, at("20:27:00"), { flow, threshold })
     expect(stalled.state).toBe("unhealthy")
     expect(stalled.verdict).toEqual({ kind: "running" })
     expect(stalled.error?.code).toBe(STALLED_LINE_CODE)
     expect(stalled.error?.cause).toContain("judged nothing while 16 waited")
-    expect(stalled.error?.resolution.join("\n")).toContain("yrd queue show task/oldest")
-    expect(stalled.facts?.flow).toMatchObject({ stallAfterMs: DEFAULT_STALL_AFTER_MS, stalledForMs: minutes(47), waiting: 16 })
+    expect((stalled.error?.resolution ?? []).join("\n")).toContain("yrd queue show task/oldest")
+    expect(stalled.facts?.flow).toMatchObject({
+      stallAfterMs: DEFAULT_STALL_AFTER_MS,
+      stalledForMs: minutes(47),
+      waiting: 16,
+    })
 
     const flowing = roundHealthDocument("yrd", undefined, INTERVAL, at("19:50:00"), { flow, threshold })
     expect(flowing.state).toBe("healthy")
     expect(flowing.facts?.flow).toMatchObject({ waiting: 16 })
-    expect((flowing.facts?.flow as Record<string, unknown>).stalledForMs).toBeUndefined()
+    expect(flowing.facts?.flow).not.toHaveProperty("stalledForMs")
   })
 
   test("past the round budget with no judgement the document says slow, before any page (row 2)", () => {
@@ -354,7 +368,12 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
   })
 
   test("the heartbeat re-judges the flow on its own clock: healthy at round end becomes stalled mid-round, then clears on a judgement", () => {
-    const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", oldestWaiting: oldest, roundOpen: { startedAt: "2026-09-24T19:41:00.000Z" }, waiting: 5 }
+    const flow = {
+      lastJudgedAt: "2026-09-24T19:40:00.000Z",
+      oldestWaiting: oldest,
+      roundOpen: { startedAt: "2026-09-24T19:41:00.000Z" },
+      waiting: 5,
+    }
     const reading = { flow, threshold }
     const atRoundStart = roundHealthDocument("yrd", undefined, INTERVAL, at("19:41:00"), reading)
     expect(atRoundStart.state).toBe("healthy")
@@ -362,14 +381,23 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
     expect(midRound.state).toBe("unhealthy")
     expect(midRound.error?.code).toBe(STALLED_LINE_CODE)
     expect(midRound.error?.cause).toMatch(/^a round has been running its checks for 45m; no change judged for 46m/u)
-    const judged = withLineFlow(midRound, undefined, { flow: { ...flow, lastJudgedAt: "2026-09-24T20:26:30.000Z" }, threshold }, at("20:27:00"))
+    const judged = withLineFlow(
+      midRound,
+      undefined,
+      { flow: { ...flow, lastJudgedAt: "2026-09-24T20:26:30.000Z" }, threshold },
+      at("20:27:00"),
+    )
     expect(judged.state).toBe("healthy")
     expect(judged.error).toBeUndefined()
   })
 
   test("another page stands: a stall never overwrites the page a document already carries", () => {
     const flow = { lastJudgedAt: "2026-09-24T19:40:00.000Z", oldestWaiting: oldest, waiting: 16 }
-    const relaunch = { ...roundHealthDocument("yrd", undefined, INTERVAL, at("21:00:00")), state: "unhealthy" as const, error: { code: "queue-relaunch-stalled", cause: "waiting on a checkout", resolution: [] } }
+    const relaunch = {
+      ...roundHealthDocument("yrd", undefined, INTERVAL, at("21:00:00")),
+      state: "unhealthy" as const,
+      error: { code: "queue-relaunch-stalled", cause: "waiting on a checkout", resolution: [] },
+    }
     const restated = withLineFlow(relaunch, undefined, { flow, threshold }, at("21:00:00"))
     expect(restated.error?.code).toBe("queue-relaunch-stalled")
     expect(restated.facts?.flow).toMatchObject({ waiting: 16 })
