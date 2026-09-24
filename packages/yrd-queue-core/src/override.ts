@@ -389,8 +389,9 @@ async function overrideCommit(
 export async function parseOverrides(git: Git, sha: string, where: string): Promise<OverrideTable> {
   const [commit, , block] = (await git(["log", "-1", `--format=${RECORD_FORMAT}`, sha])).split("\x00")
   const id = commit?.trim()
-  if (id === undefined || id === "")
-    {throw new Error(`${where} at ${sha.slice(0, 12)} is not a readable override record`)}
+  if (id === undefined || id === "") {
+    throw new Error(`${where} at ${sha.slice(0, 12)} is not a readable override record`)
+  }
   const parsed = commitTrailers(block ?? "")
   const kinds = parsed.filter(([name]) => name === "Record").map(([, value]) => value)
   if (kinds.length !== 1 || !["set", "replaced", "clear", "expired", "reminded", "fence"].includes(kinds[0] ?? "")) {
@@ -419,14 +420,16 @@ function parseEntry(value: string, self: string, where: string): OverrideEntry {
     raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>)[name] : undefined
   const text = (name: string): string => {
     const found = field(name)
-    if (typeof found !== "string" || found === "")
-      {throw new Error(`${where} carries an Override: entry with no ${name}: '${value}'`)}
+    if (typeof found !== "string" || found === "") {
+      throw new Error(`${where} carries an Override: entry with no ${name}: '${value}'`)
+    }
     return found
   }
   const time = (name: string): Date => {
     const found = new Date(text(name))
-    if (Number.isNaN(found.getTime()))
-      {throw new Error(`${where} carries an Override: entry with an unreadable ${name}: '${value}'`)}
+    if (Number.isNaN(found.getTime())) {
+      throw new Error(`${where} carries an Override: entry with an unreadable ${name}: '${value}'`)
+    }
     return found
   }
   const state = text("state")
@@ -434,8 +437,9 @@ function parseEntry(value: string, self: string, where: string): OverrideEntry {
     throw new Error(`${where} carries an Override: entry in an unknown state '${state}' (active or expired)`)
   }
   const verified = field("verified")
-  if (typeof verified !== "boolean")
-    {throw new Error(`${where} carries an Override: entry with no boolean verified: '${value}'`)}
+  if (typeof verified !== "boolean") {
+    throw new Error(`${where} carries an Override: entry with no boolean verified: '${value}'`)
+  }
   const record = text("record")
   return Object.freeze({
     by: text("by"),
