@@ -1,7 +1,7 @@
 /** Run a change from the event projection, leasing its merge with the queue. */
 import { mkdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { Conflict } from "gitomic"
+import { Conflict } from "./git.ts"
 
 import {
   appendChangeEvent,

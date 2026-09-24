@@ -24,6 +24,7 @@ import { createShellBackend, type GitomicBackend } from "gitomic"
 export { chainsUnder, listRefs, openEvents } from "gitomic/events"
 export type { AlsoRef, Event, EventInput } from "gitomic/events"
 export type { CommitMeta, GitomicBackend, Oid } from "gitomic"
+export { Conflict } from "gitomic"
 import {
   coreSshCommandFromConfig,
   isExactPublickeyRefusal,

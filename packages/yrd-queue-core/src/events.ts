@@ -1,5 +1,5 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
-import { Conflict } from "gitomic"
+import { Conflict } from "./git.ts"
 import { chainsUnder, listRefs, openEvents } from "./git.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
