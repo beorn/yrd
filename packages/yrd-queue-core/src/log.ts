@@ -433,12 +433,11 @@ export type JournalRun = Readonly<{
   /**
    * Every step of the round that touched this change, in journal order: its
    * own (compose, merge, …) and the round's (read), which serve every change
-   * the round held (25441). The reader always writes it; it is optional only
-   * so a JournalRun built by hand, as a caller's fixture, need not say it.
+   * the round held (25441).
    */
-  steps?: readonly JournalStep[]
-  /** Git commands the round ran outside any step; the display's `round` tab, shown only when non-empty. Always written by the reader. */
-  commands?: readonly JournalCommand[]
+  steps: readonly JournalStep[]
+  /** Git commands the round ran outside any step; the display's `round` tab, shown only when non-empty. */
+  commands: readonly JournalCommand[]
   /** The check running now: a start row this run never ended. */
   running?: JournalCheck
   /** The decision this run recorded — `checked`, `merged`, `failed`, `stuck` — when it made one. */

@@ -34,6 +34,7 @@ import type { QueueEntry } from "../src/remote.ts"
 // `openLog` is the writer, and index.ts lists only what a consumer outside the
 // package imports. A test that writes a journal is inside it.
 import { openLog } from "../src/log.ts"
+import { journalRun } from "../../../tests/support/journal-run.ts"
 
 const roots: string[] = []
 
@@ -892,7 +893,7 @@ describe("the table's one order (24196)", () => {
         [
           journalKey(held.change.branch, held.change.head),
           [
-            {
+            journalRun({
               at: ago(4),
               branch: held.change.branch,
               checks: [check],
@@ -900,7 +901,7 @@ describe("the table's one order (24196)", () => {
               id: run,
               running: check,
               startedAt: ago(5),
-            },
+            }),
           ],
         ],
       ]),
@@ -979,7 +980,7 @@ describe("the declared checks, joined to what ran", () => {
         runs: new Map([
           [
             journalKey(current.branch, current.head),
-            [{ ...current, id: "q", startedAt, at: startedAt, checks: measured, decision: "failed" }],
+            [journalRun({ ...current, id: "q", startedAt, at: startedAt, checks: measured, decision: "failed" })],
           ],
         ]),
       },

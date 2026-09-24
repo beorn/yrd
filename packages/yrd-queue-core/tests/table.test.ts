@@ -26,6 +26,7 @@ import {
 } from "../src/index.ts"
 import type { Git, Row } from "../src/index.ts"
 import { ABSENT, legacyStore, recordCommit, recordMessage, type WriteRecord } from "../src/legacy-records.ts"
+import { journalRun } from "../../../tests/support/journal-run.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -120,17 +121,14 @@ describe("the table is the queue read rendered", () => {
       reason: "change-ref-taken",
       text: "ref write failed",
     }
-    const run = { branch: "task/one", head: one, at, startedAt: at, checks: [] }
+    const run = journalRun({ branch: "task/one", head: one, at, startedAt: at, id: "new" })
     const journals = {
       dir: "/journal-fixture",
       malformed: [],
       runs: new Map([
         [
           journalKey(run.branch, run.head),
-          [
-            { ...run, id: "new", diagnostics: [diagnostic] },
-            { ...run, id: "old" },
-          ],
+          [journalRun({ ...run, id: "new", diagnostics: [diagnostic] }), journalRun({ ...run, id: "old" })],
         ],
       ]),
     }
@@ -157,7 +155,7 @@ describe("the table is the queue read rendered", () => {
     const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
 
     const at = new Date()
-    const base = { at, checks: [], startedAt: at }
+    const base = { at, startedAt: at }
     const message =
       `run journal q-1 has an incomplete incident for ${journalKey("task/one", one)}: ` +
       "missing subject, via, evidence, next, owner"
@@ -165,8 +163,11 @@ describe("the table is the queue read rendered", () => {
       dir: "/journal-fixture",
       malformed: [{ key: journalKey("task/one", one), message, run: "q-1" }],
       runs: new Map([
-        [journalKey("task/one", one), [{ ...base, branch: "task/one", head: one, id: "q-1", malformed: [message] }]],
-        [journalKey("task/two", two), [{ ...base, branch: "task/two", head: two, id: "q-1" }]],
+        [
+          journalKey("task/one", one),
+          [journalRun({ ...base, branch: "task/one", head: one, id: "q-1", malformed: [message] })],
+        ],
+        [journalKey("task/two", two), [journalRun({ ...base, branch: "task/two", head: two, id: "q-1" })]],
       ]),
     }
 
@@ -591,7 +592,7 @@ describe("a terminal change is never rendered as checking (24972)", () => {
         dir: "/journal-fixture",
         malformed: [],
         runs: new Map([
-          [journalKey(branch, head), [{ at: startedAt, branch, checks: [], head, id: "q-stale", running, startedAt }]],
+          [journalKey(branch, head), [journalRun({ at: startedAt, branch, head, id: "q-stale", running, startedAt })]],
         ]),
       },
     }
@@ -689,7 +690,7 @@ describe("only one change can hold the line at a time (24972)", () => {
         [
           journalKey("task/one", head),
           [
-            {
+            journalRun({
               at: current,
               branch: "task/one",
               checks: [currentCheck],
@@ -697,8 +698,8 @@ describe("only one change can hold the line at a time (24972)", () => {
               id: "q-current",
               running: currentCheck,
               startedAt: current,
-            },
-            { at: older, branch: "task/one", checks: [oldCheck], head, id: "q-old", startedAt: older },
+            }),
+            journalRun({ at: older, branch: "task/one", checks: [oldCheck], head, id: "q-old", startedAt: older }),
           ],
         ],
       ]),
@@ -731,29 +732,27 @@ describe("only one change can hold the line at a time (24972)", () => {
         [
           journalKey("task/stale", stale),
           [
-            {
+            journalRun({
               at: older,
               branch: "task/stale",
-              checks: [],
               head: stale,
               id: "q-old",
               running: { name: "affected-tests", phase: "merge", startedAt: older },
               startedAt: older,
-            },
+            }),
           ],
         ],
         [
           journalKey("task/real", real),
           [
-            {
+            journalRun({
               at: newer,
               branch: "task/real",
-              checks: [],
               head: real,
               id: "q-live",
               running: { name: "affected-tests", phase: "merge", startedAt: newer },
               startedAt: newer,
-            },
+            }),
           ],
         ],
       ]),

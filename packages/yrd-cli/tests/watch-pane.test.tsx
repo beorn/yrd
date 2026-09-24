@@ -43,6 +43,7 @@ import { rowLine, watchRowKey, type WatchRow } from "../src/watch-rows.ts"
 import { bandPlan, queueLine, runnerOf, RunnerTitledBox } from "../src/watch-frame.tsx"
 import { RunnerRow, listLayout } from "../src/watch-list.tsx"
 import type { RunnerLine } from "../src/watch-runner.ts"
+import { journalRun } from "../../../tests/support/journal-run.ts"
 
 async function waitFor<T>(callback: () => T | Promise<T>, options?: number | { timeout?: number }): Promise<T> {
   const timeout = typeof options === "number" ? options : (options?.timeout ?? 1000)
@@ -961,7 +962,7 @@ describe("the pane's keys and the detail's identity", () => {
       // latest output when the operator selected the older attempt.
       const rows: WatchRow[] = ["second", "first"].map((id) => ({
         row: row({ run: id, state: "failed", result: id === "first" ? "stuck verify" : "fail verify" }),
-        run: { id, branch: "task/one", head: row().head, startedAt: NOW, at: NOW, checks: [] },
+        run: journalRun({ id, branch: "task/one", head: row().head, startedAt: NOW, at: NOW }),
       }))
       rows.push({
         row: row({ branch: "task/other", run: "first", state: "failed" }),
@@ -1583,15 +1584,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
   /** The run a watch row is split by: as much of one as the row's identity needs. */
   function split(item: Row, id: string, decision?: string): WatchRow {
-    const run: JournalRun = {
+    const run = journalRun({
       at: item.at ?? NOW,
       branch: item.branch,
-      checks: [],
       head: item.head,
       id,
       startedAt: NOW,
       ...(decision === undefined ? {} : { decision }),
-    }
+    })
     return { row: { ...item, run: id }, run }
   }
 

@@ -13,6 +13,7 @@ import { CHANGE_STATUSES, journalKey } from "@yrd/queue-core"
 import * as format from "../src/watch-format.ts"
 import { noticeLine, watchNotice } from "../src/watch-notice.ts"
 import { filterRows, rowLine, watchRows, watchRowKey } from "../src/watch-rows.ts"
+import { journalRun } from "../../../tests/support/journal-run.ts"
 
 const since = new Date("2026-09-03T19:00:00.000Z")
 const now = new Date("2026-09-03T20:00:00.000Z")
@@ -25,14 +26,16 @@ function journals(entries: Readonly<Record<string, readonly string[]>>): Journal
   const runs = new Map(
     Object.entries(entries).map(([key, ids]) => [
       key,
-      ids.map((id) => ({
-        at: now,
-        branch: "task/one",
-        checks: [],
-        head: "a".repeat(40),
-        id,
-        startedAt: now,
-      })),
+      ids.map((id) =>
+        journalRun({
+          at: now,
+          branch: "task/one",
+          checks: [],
+          head: "a".repeat(40),
+          id,
+          startedAt: now,
+        }),
+      ),
     ]),
   )
   // 24408: a journal read carries the rows it could not read; this fixture has none.
@@ -195,7 +198,7 @@ describe("the one row renderer", () => {
     expect(
       rowLine({
         row: current,
-        run: { id: "q-1", branch: current.branch, head: current.head, startedAt: now, at: now, checks: [] },
+        run: journalRun({ id: "q-1", branch: current.branch, head: current.head, startedAt: now, at: now, checks: [] }),
       }),
     ).toBe(" 1 submitted task/one abcdef012345 pass @i/1 [q-1]")
   })
