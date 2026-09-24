@@ -20,6 +20,7 @@
  */
 
 import { DIRECT_MERGE, trailer, type ChangeRecord, type Event, type Row } from "@yrd/queue-core"
+import { DISCLOSURE_MARKERS } from "silvery"
 import { STATE_WORDS, clock, mediaDuration } from "./watch-format.ts"
 
 export type HistoryEntry = Readonly<{
@@ -263,7 +264,7 @@ export function metadataKeyWidth(groups: readonly (readonly MetadataFact[])[]): 
   return Math.max(0, ...groups.flat().map((fact) => fact.key.length)) + 2
 }
 
-/** The fold's summary line (item 4/31): `▶ Diff +A −B`, plain triangle (U+FE0E), unicode minus before the deletions. */
+/** The section disclosure and its diff counts, using Silvery's one-cell markers. */
 export function diffSummary(stat: Readonly<{ additions: number; deletions: number }>, expanded: boolean): string {
-  return `${expanded ? "▼︎" : "▶︎"} Diff +${String(stat.additions)} −${String(stat.deletions)}`
+  return `${expanded ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} Diff +${String(stat.additions)} −${String(stat.deletions)}`
 }

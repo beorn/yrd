@@ -57,7 +57,7 @@ import {
   Box,
   ListView,
   ModalDialog,
-  FOLD_MARKERS,
+  DISCLOSURE_MARKERS,
   ModalOverlay,
   SplitPane,
   Text,
@@ -714,22 +714,19 @@ export function WatchPane({
           }
         />
         {/* The line under the top line: the fold marker, then what is in hand now and the last 24 hours (24196, 25416). */}
-        <Box
-          flexDirection="column"
-          flexShrink={0}
-          minWidth={0}
-          paddingLeft={1}
-          paddingRight={1}
-          onClick={() => {
-            setStatsOpen((was) => !was)
-          }}
-        >
-          <Text wrap="truncate">
-            {statsOpen ? FOLD_MARKERS.unfolded : FOLD_MARKERS.folded} STATS · {statsLine}
-            {decisions === undefined
-              ? ""
-              : ` (${String(decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
-          </Text>
+        <Box flexDirection="column" flexShrink={0} minWidth={0}>
+          <Box
+            paddingLeft={1}
+            paddingRight={1}
+            backgroundColor="$bg-inverse"
+            onClick={() => {
+              setStatsOpen((was) => !was)
+            }}
+          >
+            <Text color="$fg-on-inverse" wrap="truncate">
+              {statsOpen ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} STATS · {statsLine}
+            </Text>
+          </Box>
           {statsOpen && decisions !== undefined ? (
             <StatsBox decisions={decisions} columns={columns - 2} timeRows={terminalRows >= STATS_TIME_MIN_ROWS} />
           ) : null}
@@ -811,10 +808,11 @@ function draftsIn(rows: readonly WatchRow[]): number {
 /**
  * Derive status marker, word, colour and reason for the top line (RUNNING /
  * PAUSED / STOPPED, the 25367 fix-forward). RUNNING only for a beating service
- * or a live run (CTO 693b0a69, bead 25500); otherwise STOPPED with its detail,
- * or PAUSED when the queue is held. The reason is the pause record's own sentence
- * when the line was paused, else what the runner's row says it holds; the marker
- * pulses while the line runs or is held with a reason (25416).
+ * or a live run (CTO 693b0a69, bead 25500); otherwise STOPPED,
+ * or PAUSED when the queue is held. A stopped line carries only the service's
+ * recorded reason, when present; generated diagnostics stay in the runner's
+ * detail. A paused line carries its pause sentence. The marker pulses while
+ * the line runs or is held with a reason.
  */
 export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
   const runner = runnerOf(snapshot, now)
@@ -823,7 +821,15 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
   const word =
     held || runner.state === "paused" || runner.state === "stuck" ? "PAUSED" : isRunning ? "RUNNING" : "STOPPED"
   if (word === "RUNNING") return { marker: RUNNING_GLYPH, word, color: "$fg-info", pulse: true }
-  const reason = snapshot.pause ?? (runner.holds === "" ? undefined : runner.holds)
+  const reason =
+    snapshot.pause ??
+    (word === "STOPPED"
+      ? snapshot.runner?.service.kind === "stopped"
+        ? snapshot.runner.service.stopReason
+        : undefined
+      : runner.holds === ""
+        ? undefined
+        : runner.holds)
   return {
     marker: "■",
     word,
