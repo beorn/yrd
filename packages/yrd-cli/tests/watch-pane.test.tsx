@@ -3355,3 +3355,43 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     offApp.unmount()
   })
 })
+
+describe("g and G move between the RUNNER box, the top and the bottom (25419)", () => {
+  it("G goes to the bottom; g goes to the RUNNER box, then the top, then back to the box", async () => {
+    const waiting = row({
+      branch: "task/top",
+      head: "a".repeat(40),
+      position: 1,
+      state: "queued",
+      subject: "at the top",
+    })
+    const merged = row({
+      branch: "task/bottom",
+      head: "b".repeat(40),
+      merge: "c".repeat(40),
+      state: "merged",
+      subject: "at the bottom",
+    })
+    const app = render(
+      <WatchPane snapshot={snapshot({ rows: [{ row: waiting }, { row: merged }] })} open={opener()} live={false} />,
+      { cols: 200, rows: 40 },
+    )
+    await settle(app)
+    const on = (): string => {
+      const text = app.text
+      if (text.includes("Queue: example.test/repo#main")) return "runner"
+      if (text.includes("· task/top@")) return "top"
+      if (text.includes("· task/bottom@")) return "bottom"
+      return "none"
+    }
+    const steps: string[] = []
+    for (const key of ["G", "g", "g", "g"]) {
+      app.press(key)
+      await settle(app)
+      steps.push(`${key}:${on()}`)
+    }
+    app.unmount()
+
+    expect(steps).toEqual(["G:bottom", "g:runner", "g:top", "g:runner"])
+  })
+})
