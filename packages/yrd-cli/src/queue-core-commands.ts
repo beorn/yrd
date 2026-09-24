@@ -2257,9 +2257,12 @@ export function summarize(kind: string, rest: Readonly<Record<string, unknown>>)
           : [rest.target, typeof rest.base === "string" ? rest.base.slice(0, 12) : undefined]
               .filter(Boolean)
               .join(" at ")
+      // A step git-super timed inside a compose names its owner, so its `merge`
+      // is never read as the queue's merge phase.
+      const name = typeof rest.within === "string" ? `${rest.within}/${String(rest.name)}` : String(rest.name)
       return rest.ms === undefined
-        ? `${String(rest.name)} started for ${about}`
-        : `${String(rest.name)} ran for ${about} in ${String(rest.ms)} ms`
+        ? `${name} started for ${about}`
+        : `${name} ran for ${about} in ${String(rest.ms)} ms`
     }
     case "result":
       return `${String(rest.name)} ${String(rest.result)} for ${where}${rest.whose === undefined ? "" : `, ${String(rest.whose)}'s`}`

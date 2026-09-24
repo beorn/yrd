@@ -5005,6 +5005,66 @@ describe("the target's setup", () => {
   })
 
   /**
+   * @i/10-yrd/25303 tier 2. Box 1's compose row spans the whole git-super call
+   * and says nothing about what inside it was slow. git-super now reports each
+   * of its phases with a duration, and the round writes them: one `step` row per
+   * phase, `within: "compose"`, after the compose's end row and before the
+   * prepare that follows it. The compose's own worktree is timed as a step
+   * inside the compose, so the two together account for the whole span.
+   */
+  it("writes git-super's own phases after each compose and times the compose worktree (25303 tier 2)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, setup: w.setupCommand(0) }))
+
+    expect(outcome.merged).toEqual(["task/one"])
+    const records = logRecords(outcome)
+    const at = (predicate: (record: Record<string, unknown>) => boolean) => records.findIndex(predicate)
+    for (const phase of ["submit", "merge"]) {
+      const step = (name: string, end: boolean) =>
+        at(
+          (row) =>
+            row.kind === "step" &&
+            row.name === name &&
+            row.phase === phase &&
+            (row.ms !== undefined) === end &&
+            row.within === undefined,
+        )
+      const composeStart = step("compose", false)
+      const composeEnd = step("compose", true)
+      const worktreeStart = step("worktree", false)
+      const worktreeEnd = step("worktree", true)
+      expect({
+        phase,
+        order: [composeStart, worktreeStart, worktreeEnd, composeEnd].every(
+          (i, n, all) => i >= 0 && (n === 0 || i > (all[n - 1] ?? -1)),
+        ),
+      }).toEqual({ phase, order: true })
+
+      const inside = records
+        .map((row, index) => ({ row, index }))
+        .filter(({ row }) => row.kind === "step" && row.phase === phase && row.within === "compose")
+      // git-super's closed list, in the order its phases run.
+      expect(inside.map(({ row }) => row.name)).toEqual([
+        "preflight",
+        "merge-tree",
+        "plan",
+        "capture",
+        "checkouts",
+        "merge",
+        "settle",
+        "commit",
+      ])
+      for (const { row, index } of inside) {
+        expect(row).toMatchObject({ branch: "task/one", head: expect.any(String), ms: expect.any(Number) })
+        expect(index).toBeGreaterThan(composeEnd)
+        expect(index).toBeLessThan(step("prepare", false))
+      }
+    }
+  })
+
+  /**
    * A run that dies removes nothing, so its worktrees stay registered in the
    * repository and on disk, and every later `git worktree list` carries them:
    * R8's did (plan § Owed after M5). The next run takes them down.
