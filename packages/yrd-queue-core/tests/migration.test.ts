@@ -70,6 +70,17 @@ describe("25041 old resting-state conversion", () => {
     expect(migrated(inputs).status).toBe("merged")
   })
 
+  it("keeps a merged head merged when a later head gives its fold a superseded reason", () => {
+    const opened = record("opened", "1".repeat(40), OPENED)
+    const ended = record("merged", "2".repeat(40), "2026-09-24T10:05:00.000Z")
+    const reading = { state: "merged" as const, reason: "superseded", supersededBy: "c".repeat(40) }
+    expect(migratedStatus(reading)).toBe("merged")
+    expect(inputsForLegacy(source([opened, ended], reading), QUEUE).map(({ type }) => type)).toEqual([
+      "opened",
+      "merged",
+    ])
+  })
+
   it("projects a superseded head to the live resubmission word and fences unrecorded reasons", () => {
     const opened = record("opened", "1".repeat(40), OPENED)
     const withdrawn = record("withdrawn", "2".repeat(40), "2026-09-24T10:05:00.000Z")

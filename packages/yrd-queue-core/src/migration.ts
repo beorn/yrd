@@ -8,13 +8,15 @@ export type LegacyMigrationChange = Readonly<{ ref: string; change: ChangeRecord
 
 /** The only word table shared by conversion and old-row parity. */
 export function migratedStatus(reading: ChangeReading): "queued" | "merged" | "failed" | "stuck" | "cancelled" {
+  // A later branch head can add a superseded reason to a head that already
+  // merged. The recorded ending still wins for that head.
+  if (reading.state === "merged") return "merged"
   if (reading.reason === "superseded" || reading.reason === "replaced") return "cancelled"
   switch (reading.state) {
     case "queued":
     case "checked":
     case "deferred":
       return "queued"
-    case "merged":
     case "failed":
     case "stuck":
       return reading.state
