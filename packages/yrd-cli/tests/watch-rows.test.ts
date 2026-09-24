@@ -9,10 +9,10 @@
 
 import { describe, expect, it, vi } from "vitest"
 import type { Journals, Row } from "@yrd/queue-core"
-import { CHANGE_STATUSES, journalKey } from "@yrd/queue-core"
+import { CHANGE_STATUSES, eventRows, evolve, initial, journalKey } from "@yrd/queue-core"
 import * as format from "../src/watch-format.ts"
 import { noticeLine, watchNotice } from "../src/watch-notice.ts"
-import { filterRows, rowLine, watchRows, watchRowKey } from "../src/watch-rows.ts"
+import { eventNoticeLines, filterRows, rowLine, watchRows, watchRowKey } from "../src/watch-rows.ts"
 import { journalRun } from "../../../tests/support/journal-run.ts"
 
 const since = new Date("2026-09-03T19:00:00.000Z")
@@ -43,6 +43,73 @@ function journals(entries: Readonly<Record<string, readonly string[]>>): Journal
 }
 
 describe("the rows a watch shows", () => {
+  it("prints deferred detail and settled notices from one folded event reading", () => {
+    const queue = "a".repeat(40)
+    const head = "b".repeat(40)
+    const event = (
+      type: string,
+      id: string,
+      extra: readonly (readonly [string, string])[] = [],
+      links: string[] = [],
+    ) => ({
+      id,
+      type,
+      props: [["Queue", queue], ["Time", "2026-09-22T14:00:00.000Z"], ...extra] as readonly (readonly [
+        string,
+        string,
+      ])[],
+      links,
+    })
+    const opened = evolve(
+      initial,
+      event(
+        "opened",
+        queue,
+        [
+          ["Commit", head],
+          ["By", "@dev/2"],
+        ],
+        [head],
+      ),
+    )
+    const verifying = evolve(opened, event("verifying", "c".repeat(40), [["Commit", head]], [head]))
+    const checking = evolve(verifying, event("checking", "d".repeat(40)))
+    const deferred = evolve(
+      checking,
+      event(
+        "deferred",
+        "e".repeat(40),
+        [
+          ["Commit", head],
+          ["Reason", "outside short window"],
+          ["Check-Name", "affected-tests"],
+          ["Phase", "long"],
+          ["ProjectedMs", "60000"],
+          ["BoundMs", "10000"],
+          ["Base", queue],
+          ["Config", head],
+          ["Check", "affected-tests exit=unsettled ms=0 result=deferred attempt=1 phase=long log=/tmp/removed.log"],
+        ],
+        [head],
+      ),
+    )
+    const notified = evolve(
+      deferred,
+      event("notified", "f".repeat(40), [
+        ["For", deferred.tip as string],
+        ["To", "@dev/2"],
+        ["Result", "refused"],
+        ["Key", `${deferred.tip}:@dev/2`],
+        ["Reason", "recipient unavailable"],
+      ]),
+    )
+    const projected = eventRows(new Map([["task/long", notified]]))[0]
+    if (projected === undefined) throw new Error("folded fixture lost its row")
+    expect(rowLine({ row: projected })).toContain("queued    task/long")
+    expect(rowLine({ row: projected })).toContain("deferred affected-tests: outside short window")
+    expect(eventNoticeLines(notified)).toEqual(["  notice to @dev/2: refused — recipient unavailable"])
+  })
+
   it("gives a change ONE row by default, however many runs touched it, because the page is about changes", () => {
     // The operator read their own queue on 2026-09-17 and saw one branch twice.
     // Two runs per change was the default wherever a run journal could be read,

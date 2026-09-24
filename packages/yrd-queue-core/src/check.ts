@@ -187,8 +187,18 @@ function checkedProgramRoot(run: RunCheck): string | undefined {
  * the name off with a `split(" ")` and the log path off with a regex of its
  * own, neither of them anywhere near the line that wrote them.
  */
-export function checkTrailer(result: CheckResult): string {
-  return `${result.name} exit=${String(result.exit)} ms=${String(result.durationMs)} log=${result.log}`
+export function checkTrailer(
+  result: CheckResult,
+  occurrence?: Readonly<{ attempt: number; phase: "submit" | "merge" | "long" }>,
+): string {
+  if (occurrence !== undefined && (!Number.isSafeInteger(occurrence.attempt) || occurrence.attempt < 1)) {
+    throw new TypeError(`check ${result.name}: attempt must be a positive integer`)
+  }
+  const evidence =
+    occurrence === undefined
+      ? ""
+      : ` result=${result.result} attempt=${String(occurrence.attempt)} phase=${occurrence.phase}`
+  return `${result.name} exit=${String(result.exit)} ms=${String(result.durationMs)}${evidence} log=${result.log}`
 }
 
 /**
@@ -198,11 +208,25 @@ export function checkTrailer(result: CheckResult): string {
  * wanted the exit went to the trailer text itself with a regex of its own; the
  * format has one reader and this is it.
  */
-export function readCheckTrailer(packed: string): Readonly<{ name: string; exit?: string; ms?: number; log?: string }> {
+export function readCheckTrailer(packed: string): Readonly<{
+  name: string
+  exit?: string
+  ms?: number
+  result?: CheckResult["result"]
+  attempt?: number
+  phase?: "submit" | "merge" | "long"
+  log?: string
+}> {
   const name = packed.split(" ")[0] ?? ""
   const exit = /(?:^| )exit=([^ ]*)/u.exec(packed)?.[1]
   const written = /(?:^| )ms=(\d+)/u.exec(packed)?.[1]
   const ms = written === undefined ? undefined : Number(written)
+  const result = /(?:^| )result=(pass|fail|stuck|deferred)(?: |$)/u.exec(packed)?.[1] as
+    | CheckResult["result"]
+    | undefined
+  const attemptWritten = /(?:^| )attempt=(\d+)(?: |$)/u.exec(packed)?.[1]
+  const attempt = attemptWritten === undefined ? undefined : Number(attemptWritten)
+  const phase = /(?:^| )phase=(submit|merge|long)(?: |$)/u.exec(packed)?.[1] as "submit" | "merge" | "long" | undefined
   // `log=` is written last, so its value runs to the end and a path with an
   // `=` in it survives the reading.
   const log = /(?:^| )log=(.+)$/u.exec(packed)?.[1]
@@ -210,6 +234,9 @@ export function readCheckTrailer(packed: string): Readonly<{ name: string; exit?
     name,
     ...(exit === undefined ? {} : { exit }),
     ...(ms === undefined || Number.isNaN(ms) ? {} : { ms }),
+    ...(result === undefined ? {} : { result }),
+    ...(attempt === undefined || !Number.isSafeInteger(attempt) || attempt < 1 ? {} : { attempt }),
+    ...(phase === undefined ? {} : { phase }),
     ...(log === undefined ? {} : { log }),
   }
 }

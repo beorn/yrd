@@ -91,6 +91,37 @@ describe("event changes use the shared table row", () => {
     )
   })
 
+  it("shows the deferred check beside queued without inventing a status", () => {
+    const opened = evolve(
+      initial,
+      event(
+        "opened",
+        QUEUE,
+        [
+          ["Commit", HEAD],
+          ["By", "@dev/2"],
+        ],
+        [HEAD],
+      ),
+    )
+    const deferred = {
+      ...opened,
+      deferred: {
+        id: "c".repeat(40),
+        check: "affected-tests",
+        phase: "long" as const,
+        reason: "outside short window",
+        projectedMs: 60000,
+        boundMs: 10000,
+        at: new Date(TIME),
+      },
+    }
+    expect(eventRows(new Map([["task/long", deferred]]))[0]).toMatchObject({
+      state: "queued",
+      reason: "deferred affected-tests: outside short window",
+    })
+  })
+
   it("keeps an ignored open change visible with actor and reason but no place in line", () => {
     const opened = evolve(
       initial,
