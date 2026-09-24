@@ -1872,6 +1872,48 @@ describe("a queue run", () => {
     expect(tail.reading.state).toBe("queued")
   })
 
+  // @i/10-yrd/25351: after a head whose merge changes .yrd.yml, a change checked in an
+  // earlier round under the old declaration is not ready; the recount compares each
+  // verdict with the declaration the target ENDED on, not the one the round started under.
+  it("after a head whose merge edits .yrd.yml, a change checked under the old declaration is not counted waiting (25351)", async () => {
+    const w = await world()
+    await w.git(["checkout", "--quiet", "-b", "task/declaration", "main"])
+    writeFileSync(join(w.work, ".yrd.yml"), "# edited by the head\n{}\n")
+    await w.git(["add", ".yrd.yml"])
+    await w.git(["commit", "--quiet", "-m", "edit the declaration"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/declaration",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    // The change behind it was checked in an earlier round, under the declaration this round starts under.
+    const options = await w.options({ exit: 0, on: ["submit", "merge"] })
+    const laterHead = await submitCommit(w, "task/later", "later.txt")
+    const checked = await appendRecord(w.git, "main", {
+      change: { branch: "task/later", head: laterHead },
+      kind: "checked",
+      subject: `task/later passed the on-submit checks at main ${w.target.slice(0, 12)}`,
+      trailers: [
+        ["Config", options.configBlob],
+        ["Base", w.target],
+      ],
+    })
+    await w.git([
+      "push",
+      "--quiet",
+      "origin",
+      `${checked}:${changeRef("main", { branch: "task/later", head: laterHead })}`,
+    ])
+
+    const outcome = await queueRun(options)
+
+    expect(outcome.merged).toEqual(["task/declaration"])
+    expect(readFileSync(outcome.log, "utf8")).toContain("the head's merge changed .yrd.yml")
+    expect(outcome.checkedWaiting).toBe(0)
+  })
+
   // @cto ac87d1e5: a head in FRONT of a stuck row merges; the line still stops on
   // that row in the same round, and one outcome names both.
   it("a head in front of a stuck change merges, and the same round stops the line on the stuck change (25301)", async () => {
