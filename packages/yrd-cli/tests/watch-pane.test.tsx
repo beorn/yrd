@@ -471,8 +471,8 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     const runnerTitle = app.lines.find((line) => line.includes("RUNNER"))
     expect(runnerTitle, afterO).toBeDefined()
     expect(runnerTitle, afterO).not.toMatch(/RUNNER\w/)
-    const pillsY = app.lines.findIndex((line) => /\bopen\b/u.test(line) && line.includes("failed"))
-    const openX = (app.lines[pillsY] ?? "").indexOf("open")
+    const pillsY = app.lines.findIndex((line) => line.includes("[o]pen") && line.includes("[f]ailed"))
+    const openX = (app.lines[pillsY] ?? "").indexOf("[o]pen")
     expect(app.cell(openX, pillsY).bold).toBe(true)
     expect(JSON.stringify(app.cell(openX, pillsY).fg)).toEqual(fgOf("$fg-warning"))
     app.press("a")
@@ -1408,7 +1408,7 @@ describe("the RUNNER box's wrapped rails and the height budget", () => {
     // The footer shares its row with nothing: no box border, no STATS cell.
     expect(last).not.toMatch(/[╭╰│─╮╯]/u)
     // The pills are on screen, on line 2 with STATS (25630).
-    expect(lines.findIndex((line) => /\bopen\b.*\brunning\b.*\bdone\b.*\bfailed\b/u.test(line))).toBe(1)
+    expect(lines.findIndex((line) => /\[o\]pen.*\[r\]unning.*\[d\]one.*\[f\]ailed/u.test(line))).toBe(1)
     // The pause is on the RUNNER rail, wrapped onto rows under its marker, once.
     expect(app.text.match(/paused by @ci/gu)).toHaveLength(1)
     app.unmount()
@@ -3051,14 +3051,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const painted = app.lines
     const line1 = painted[1] ?? ""
     expect(line1).toContain("STATS")
-    expect(line1).toContain("open")
-    expect(line1).toContain("running")
-    expect(line1).toContain("done")
-    expect(line1).toContain("failed")
+    expect(line1).toContain("[o]pen")
+    expect(line1).toContain("[r]unning")
+    expect(line1).toContain("[d]one")
+    expect(line1).toContain("[f]ailed")
     // There is no separate pills line in the body.
-    expect(painted.slice(2).some((l) => l.includes("open") && l.includes("running") && l.includes("failed"))).toBe(
-      false,
-    )
+    expect(
+      painted.slice(2).some((l) => l.includes("[o]pen") && l.includes("[r]unning") && l.includes("[f]ailed")),
+    ).toBe(false)
     app.unmount()
   })
 
@@ -3732,8 +3732,8 @@ describe("the top line (25416)", () => {
     await settle(app)
     const pair = (needle: string): readonly (string | undefined)[] => [fgAt(app, 1, needle), bgAt(app, 1, needle)]
     const seen = {
-      selectedFilter: pair("failed"),
-      unselectedFilter: pair("open"),
+      selectedFilter: pair("[f]ailed"),
+      unselectedFilter: pair("[o]pen"),
     }
     app.unmount()
     const chip = [fgOf("$fg-warning"), "null"]
@@ -3771,8 +3771,8 @@ describe("the top line (25416)", () => {
       running: ratioAt(running, 0, "RUNNING"),
       paused: ratioAt(paused, 0, "PAUSED"),
       stopped: ratioAt(stopped, 0, "STOPPED"),
-      selectedFilter: ratioAt(running, 1, "failed"),
-      unselectedFilter: ratioAt(running, 1, "open"),
+      selectedFilter: ratioAt(running, 1, "[f]ailed"),
+      unselectedFilter: ratioAt(running, 1, "[o]pen"),
     }
     running.unmount()
     paused.unmount()
@@ -3871,10 +3871,10 @@ describe("the top line (25416)", () => {
       // Line 2 has STATS with fold marker at left
       expect(line1).toContain(`${DISCLOSURE_MARKERS.collapsed} STATS · `)
       // Line 2 has filter toggles at right
-      expect(line1).toContain("open")
-      expect(line1).toContain("running")
-      expect(line1).toContain("done")
-      expect(line1).toContain("failed")
+      expect(line1).toContain("[o]pen")
+      expect(line1).toContain("[r]unning")
+      expect(line1).toContain("[d]one")
+      expect(line1).toContain("[f]ailed")
       // When clicking fold marker, STATS expands
       await app.click(5, 1)
       await settle(app)
