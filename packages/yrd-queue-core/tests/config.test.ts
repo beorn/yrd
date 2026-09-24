@@ -18,6 +18,8 @@ describe("the queue declaration grammar", () => {
       [
         "setup: bun install --frozen-lockfile",
         "teardown: bun run clean",
+        "archive-after: never",
+        "ignore: [draft/*, 'scratch/**']",
         "checks:",
         "  - verify:",
         "      run: bun run verify",
@@ -46,6 +48,7 @@ describe("the queue declaration grammar", () => {
     )
 
     expect(config).toEqual({
+      archiveAfter: "never",
       blob: SOURCE.blob,
       checks: [
         {
@@ -66,6 +69,7 @@ describe("the queue declaration grammar", () => {
           timeoutMs: undefined,
         },
       ],
+      ignore: ["draft/*", "scratch/**"],
       notify: [
         { name: "submitter", on: ["merged", "failed"], run: "bun tools/notify.ts --to submitter" },
         { name: "supervisor", on: ["stuck"], run: "bun tools/notify.ts --to supervisor" },
@@ -81,13 +85,57 @@ describe("the queue declaration grammar", () => {
       teardown: "bun run clean",
     })
     expect(parseConfig("{}\n", SOURCE)).toEqual({
+      archiveAfter: "never",
       blob: SOURCE.blob,
       checks: [],
+      ignore: [],
       notify: [],
       setup: undefined,
       target: TARGET,
       teardown: undefined,
     })
+  })
+
+  it.each([
+    [
+      "positive retention is halted",
+      "archive-after: 1\n",
+      /yrd-archive-after-disabled: \.yrd\.yml archive-after 1 days: ref deletion is disabled.*25041/u,
+    ],
+    [
+      "zero retention",
+      "archive-after: 0\n",
+      /yrd-archive-after-invalid: \.yrd\.yml archive-after: expected never or a positive integer/u,
+    ],
+    [
+      "fractional retention",
+      "archive-after: 1.5\n",
+      /yrd-archive-after-invalid: \.yrd\.yml archive-after: expected never or a positive integer/u,
+    ],
+    [
+      "string retention",
+      "archive-after: soon\n",
+      /yrd-archive-after-invalid: \.yrd\.yml archive-after: expected never or a positive integer/u,
+    ],
+    ["scalar ignore", "ignore: draft/*\n", /yrd-ignore-pattern-invalid: \.yrd\.yml ignore: must be a list/u],
+    ["empty pattern", "ignore: ['']\n", /yrd-ignore-pattern-invalid: \.yrd\.yml ignore entry 0: pattern is empty/u],
+    [
+      "negated pattern",
+      "ignore: ['!draft/*']\n",
+      /yrd-ignore-pattern-invalid: \.yrd\.yml ignore entry 0: pattern starts with !/u,
+    ],
+    [
+      "absolute pattern",
+      "ignore: ['/draft/*']\n",
+      /yrd-ignore-pattern-invalid: \.yrd\.yml ignore entry 0: pattern starts with \/ /u,
+    ],
+    [
+      "NUL pattern",
+      'ignore: ["draft\\0bad"]\n',
+      /yrd-ignore-pattern-invalid: \.yrd\.yml ignore entry 0: pattern contains NUL/u,
+    ],
+  ] as const)("refuses %s", (_name, text, problem) => {
+    expect(() => parseConfig(text, SOURCE)).toThrow(problem)
   })
 
   it.each([

@@ -44,6 +44,7 @@ import {
   changesRef,
   readChangeEvents,
   readEventQueue,
+  setBranchIgnored,
   writeQueueEvent,
   prepareWorktree,
   checkedTree,
@@ -278,6 +279,8 @@ export type CoreQueueCommand =
     }>
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string }>
   | Readonly<{ command: "drop"; branch: string; by: string; reason?: string }>
+  | Readonly<{ command: "ignore"; branch: string; by: string; reason: string }>
+  | Readonly<{ command: "unignore"; branch: string; by: string }>
   | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
   | Readonly<{
       command: "merge"
@@ -391,6 +394,7 @@ export type CoreQueueCommand =
 const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   check: "check",
   drop: "drop",
+  ignore: "ignore",
   pause: "queue pause",
   list: "queue list",
   merge: "merge",
@@ -399,6 +403,7 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   show: "queue show",
   stats: "queue stats",
   submit: "submit",
+  unignore: "unignore",
   resume: "queue resume",
   up: "queue up",
   withdraw: "queue withdraw",
@@ -741,6 +746,38 @@ export async function coreQueueCommand(
   }
 
   switch (request.command) {
+    case "ignore":
+    case "unignore": {
+      if (request.command === "unignore" && "reason" in request) {
+        throw new TypeError(`yrd-ignore-reason-conflict: ${request.branch}: unignore does not accept --reason`)
+      }
+      const eventStore = createEventStore(repo, config.target.remote, selection)
+      if ((await queueFormat(eventStore, config.target.branch)) !== "event") {
+        io.stderr(`yrd: ${request.command} needs an event queue at ${config.target.remote}#${config.target.branch}\n`)
+        return 1
+      }
+      await setBranchIgnored(eventStore, {
+        queue: config.target.branch,
+        branch: request.branch,
+        by: request.by,
+        ...(request.command === "ignore"
+          ? { ignored: true as const, reason: request.reason }
+          : { ignored: false as const }),
+      })
+      const result = {
+        branch: request.branch,
+        ignored: request.command === "ignore" ? { reason: request.reason, by: request.by } : null,
+      }
+      emit(
+        io,
+        options.json,
+        result,
+        request.command === "ignore"
+          ? `ignored ${request.branch} by ${request.by}: ${request.reason}`
+          : `unignored ${request.branch} by ${request.by}`,
+      )
+      return 0
+    }
     case "drop": {
       const eventStore = createEventStore(repo, config.target.remote, selection)
       const dropped = await drop(eventStore, {
@@ -817,7 +854,9 @@ export async function coreQueueCommand(
       // The merge-check override (25296). An event queue has its own merge
       // selection (event-run.ts) that no override reaches, so it refuses rather
       // than accept a switch nothing would read (X4).
-      if ((await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event") {
+      if (
+        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
+      ) {
         io.stderr(
           `yrd: ${config.target.remote}#${config.target.branch} is an event queue; a merge-check override is not ` +
             "supported there, and nothing would read it\n",
@@ -1666,10 +1705,16 @@ export async function coreQueueCommand(
             ? undefined
             : `${String(documentRows.length)} of ${String(reading.format === "event" ? all.length : all.filter((row) => row.state !== "draft").length)} ${reading.format === "event" ? "branch(es)" : "change(s)"} match ${request.terms.join(" or ")}` +
               (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
-        const scope =
+        const baseScope =
           reading.format === "event"
-            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.${filteredScope === undefined ? "" : ` ${filteredScope}`}`
-            : filteredScope
+            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
+            : undefined
+        const ignoreScope =
+          config.ignore.length === 0
+            ? undefined
+            : `Excluded draft heads matching .yrd.yml ignore: ${config.ignore.map((pattern) => JSON.stringify(pattern)).join(", ")}.`
+        const scopeParts = [baseScope, filteredScope, ignoreScope].filter((part) => part !== undefined)
+        const scope = scopeParts.length === 0 ? undefined : scopeParts.join(" ")
         return {
           observation,
           data: {
@@ -2136,7 +2181,7 @@ export async function coreQueueCommand(
       // Pushed, never submitted: the drafts (the KPI ruling on 24163), from the
       // one derivation over this same reading and the same window. Nothing is
       // fetched, so a head never read here counts as undated.
-      const drafts = await readDrafts(git, queue, {
+      const drafts = await readDrafts(git, withoutIgnoredDraftHeads(queue, config.ignore), {
         since: window?.since ?? new Date(now.getTime() - DEFAULT_WINDOW_MS),
         targetSha: captured.oid,
       })
@@ -3294,7 +3339,7 @@ async function readEventListing(
 > {
   const store = createEventStore(repo, config.target.remote, selection)
   const queue = await readEventQueue(store, config.target.branch)
-  const histories = await listChangeHistories(store, config.target.branch)
+  const histories = await listChangeHistories(store, config.target.branch, { knownQueue: queue })
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
   const directMerges = await eventDirectMergeCommits(git, config.target.branch, targetOid, queue.declaration, histories)
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
@@ -3303,12 +3348,15 @@ async function readEventListing(
   const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
   const drafts = await readDrafts(
     git,
-    {
-      heads,
-      changes: [...changes].flatMap(([branch, change]) =>
-        change.commit === undefined ? [] : [{ change: { branch, head: change.commit } }],
-      ),
-    },
+    withoutIgnoredDraftHeads(
+      {
+        heads,
+        changes: [...changes].flatMap(([branch, change]) =>
+          change.commit === undefined ? [] : [{ change: { branch, head: change.commit } }],
+        ),
+      },
+      config.ignore,
+    ),
     { targetSha: targetOid },
   )
   const projected = [
@@ -3351,7 +3399,7 @@ async function readEventListing(
 /** A history read and its final observation must name the same event tips. */
 export function assertEventListingFence(
   name: string,
-  queue: EventQueue,
+  queue: Pick<EventQueue, "tip">,
   changes: ReadonlyMap<string, EventChange>,
   advertised: ReadonlyMap<string, string>,
 ): void {
@@ -3416,7 +3464,7 @@ export async function readListing(
   const drafts =
     window === undefined
       ? undefined
-      : await readDrafts(git, queue, {
+      : await readDrafts(git, withoutIgnoredDraftHeads(queue, config.ignore), {
           targetSha: targetOid,
           ...(window === "7d" ? { since: new Date(Date.now() - DRAFT_WINDOW_MS) } : {}),
         })
@@ -3468,6 +3516,19 @@ function markStaleVerdicts(
       ? { ...row, reason: `not yet judged under ${blob.slice(0, 12)}` }
       : row,
   )
+}
+
+/** Prefilter only advertised draft heads; a submitted change remains in the listing. */
+function withoutIgnoredDraftHeads(
+  source: Parameters<typeof readDrafts>[1],
+  patterns: readonly string[],
+): Parameters<typeof readDrafts>[1] {
+  if (patterns.length === 0) return source
+  const globs = patterns.map((pattern) => new Bun.Glob(pattern))
+  return {
+    heads: new Map([...source.heads].filter(([branch]) => !globs.some((glob) => glob.match(branch)))),
+    changes: source.changes,
+  }
 }
 
 /** A commit's committer instant; undefined only when the name is absent, while unreadable or malformed commits throw. */
