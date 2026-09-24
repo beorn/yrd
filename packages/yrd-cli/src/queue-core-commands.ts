@@ -817,7 +817,9 @@ export async function coreQueueCommand(
       // The merge-check override (25296). An event queue has its own merge
       // selection (event-run.ts) that no override reaches, so it refuses rather
       // than accept a switch nothing would read (X4).
-      if ((await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event") {
+      if (
+        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
+      ) {
         io.stderr(
           `yrd: ${config.target.remote}#${config.target.branch} is an event queue; a merge-check override is not ` +
             "supported there, and nothing would read it\n",
@@ -1480,7 +1482,8 @@ export async function coreQueueCommand(
       const terminate = request.terminate ?? processTerminate
       const offTerminate = terminate.on(() => {
         clearInterval(beat)
-        const intent = readUnitIntent("stop", options.env ?? process.env, new Date())
+        // Only a stop written since this writer started is this stop's (25430 review P2).
+        const intent = readUnitIntent("stop", options.env ?? process.env, new Date(), writer.startedAt)
         if (intent.kind === "none") log?.warn?.(`stopping without a recorded reason: ${intent.why}`)
         persistHealth(
           gracefulStopHealthDocument(

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A graceful stop uses the supervisor's stop intent only when it was written after this runner started: a signal
+  no intent write preceded (a custody or pty stop, a plain `kill`) no longer records the previous stop's who and why,
+  and reads "no stop reason was recorded" (25430 review P2). A start intent (`hab up yrd --reason`, 25466) names who
+  started the runner and why on its first document.
 - `yrd queue up` answers its termination signal with one last health document: `absent`/`stopped`, no deadline,
   and `facts.serviceStopped: {by, reason, since}` read from the supervisor's intent file (`HAB_UNIT_INTENT_FILE`,
   verb `stop` only), then dies of the signal as before. The watch reads it as "stopped by X since T: reason"; a

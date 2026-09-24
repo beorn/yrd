@@ -2864,8 +2864,13 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
   it("a graceful stop writes its supervisor's stop reason into the last document, then re-raises", async () => {
     const w = await world()
     const intentFile = join(mkdtempSync(join(tmpdir(), "yrd-intent-")), "intent.json")
-    const at = "2026-09-23T23:45:00.000Z"
-    writeFileSync(intentFile, `${JSON.stringify({ verb: "stop", by: "@chief", reason: "cutover", at })}\n`)
+    // An earlier stop's record stands when the service starts, as it does after
+    // any reasonless start; the supervisor overwrites it just before its signal.
+    writeFileSync(
+      intentFile,
+      `${JSON.stringify({ verb: "stop", by: "@dev/1", reason: "an earlier stop", at: "2026-09-23T23:45:00.000Z" })}\n`,
+    )
+    let at = ""
     let terminate: (() => void) | undefined
     let reraised = 0
     const run = capture(w.work)
@@ -2893,6 +2898,8 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
           },
           afterHealth: (document) => {
             seen.push(document)
+            at = new Date().toISOString()
+            writeFileSync(intentFile, `${JSON.stringify({ verb: "stop", by: "@chief", reason: "cutover", at })}\n`)
             terminate?.()
             stop.abort()
           },
@@ -2919,6 +2926,86 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     })
     expect(last.facts).not.toHaveProperty("staleAfter")
     expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({ state: "absent" })
+  }, 30_000)
+
+  // 25466. `hab up yrd --reason` writes the start intent before the spawn; the
+  // first document this start writes names who started it and why.
+  it("the first document after a start with a reason carries that start's by and reason", async () => {
+    const w = await world()
+    const intentFile = join(mkdtempSync(join(tmpdir(), "yrd-intent-")), "intent.json")
+    const at = new Date().toISOString()
+    writeFileSync(intentFile, `${JSON.stringify({ verb: "start", by: "@chief", reason: "cutover restart", at })}\n`)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          ...HEARTBEAT,
+          afterHealth: (document) => {
+            seen.push(document)
+            stop.abort()
+          },
+        },
+        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+      ),
+      run.stderr(),
+    ).toBe(0)
+
+    expect(seen[0]?.facts).toMatchObject({ serviceStarted: { by: "@chief", reason: "cutover restart", since: at } })
+  }, 30_000)
+
+  // 25430 review P2. A signal no intent write preceded — hab's custody or pty
+  // paths, a plain kill — finds the previous stop's record still in the file.
+  // It is not this stop's reason: the last document says none was recorded.
+  it("a stop intent written before this writer started is an earlier stop's, never this stop's reason", async () => {
+    const w = await world()
+    const intentFile = join(mkdtempSync(join(tmpdir(), "yrd-intent-")), "intent.json")
+    writeFileSync(
+      intentFile,
+      `${JSON.stringify({ verb: "stop", by: "@dev/1", reason: "an earlier stop", at: "2026-09-23T23:45:00.000Z" })}\n`,
+    )
+    let terminate: (() => void) | undefined
+    const run = capture(w.work)
+    const stop = new AbortController()
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          ...HEARTBEAT,
+          terminate: {
+            on: (handler) => {
+              terminate = handler
+              return () => {
+                terminate = undefined
+              }
+            },
+            reraise: () => {},
+          },
+          afterHealth: () => {
+            terminate?.()
+            stop.abort()
+          },
+        },
+        { env: { ...process.env, HAB_UNIT_INTENT_FILE: intentFile }, json: true, workdir: w.workdir },
+      ),
+      run.stderr(),
+    ).toBe(0)
+
+    const last = JSON.parse(readFileSync(join(w.workdir, QUEUE_HEALTH_DOCUMENT), "utf8")) as QueueHealthDocument
+    expect(last).toMatchObject({ state: "absent", verdict: { kind: "stopped" } })
+    expect(last.facts?.serviceStopped).not.toHaveProperty("by")
+    expect(last.facts?.serviceStopped).not.toHaveProperty("reason")
+    expect(last.facts?.why).toMatch(/^stopped since .+: no stop reason was recorded$/u)
   }, 30_000)
 
   // T5, the stop half (F1). A line already stopped at start says so from the
