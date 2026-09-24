@@ -398,12 +398,14 @@ export type JournalCommand = Readonly<{
 }>
 
 /**
- * One step of a round (25441): compose, prepare, read, push, merge, publish —
- * the queue's own names — with the git commands it ran. A command belongs to
- * the step open when its row was written. That pairing is exact because a
- * round is serial: `timedStep` writes its end row on a throw too, and git rows
- * come only from the round's own runner. A step still open when the next one
- * starts was cut short by a killed process: it is closed there and `unended`.
+ * One step of a round (25441): compose, worktree, prepare, read, push, merge,
+ * publish — the queue's own names — with the git commands it ran. Steps NEST
+ * (a compose times its worktree inside it, measured on a live journal), so a
+ * command belongs to the innermost step open when its row was written. That
+ * pairing is exact because a round is serial within those nested scopes:
+ * `timedStep` writes its end row on a throw too, and git rows come only from
+ * the round's own runner. An end row settles its own start; a step still open
+ * inside it was cut short by a killed call: it is closed there and `unended`.
  */
 export type JournalStep = Readonly<{
   name: string
@@ -700,7 +702,8 @@ function stepsIn(records: readonly LogRecord[]): Readonly<{
   }
   const built: Building[] = []
   const commands: JournalCommand[] = []
-  let open: Building | undefined
+  // The steps open now, outermost first: a start pushes, its own end row pops it.
+  const open: Building[] = []
   const date = (value: unknown): Date | undefined => {
     if (typeof value !== "string") return undefined
     const at = new Date(value)
@@ -710,8 +713,9 @@ function stepsIn(records: readonly LogRecord[]): Readonly<{
     if (record.kind === "git") {
       const command = commandOf(record)
       if (command === undefined) continue
-      if (open === undefined) commands.push(command)
-      else open.step.commands.push(command)
+      const innermost = open.at(-1)
+      if (innermost === undefined) commands.push(command)
+      else innermost.step.commands.push(command)
       continue
     }
     if (record.kind !== "step" || typeof record.name !== "string") continue
@@ -723,7 +727,7 @@ function stepsIn(records: readonly LogRecord[]): Readonly<{
       // git-super's phases, written after the compose's end row: parts of the last compose.
       const compose = built.findLast((entry) => entry.step.name === "compose" && entry.key === key)
       if (compose !== undefined && typeof record.ms === "number") {
-        ;(compose.step.parts ??= []).push({ name: record.name, ms: record.ms })
+        ;(compose.step.parts ??= []).push({ ms: record.ms, name: record.name })
       }
       continue
     }
@@ -731,35 +735,35 @@ function stepsIn(records: readonly LogRecord[]): Readonly<{
     if (startedAt === undefined || typeof record.phase !== "string") continue
     const endedAt = date(record.end)
     if (endedAt === undefined) {
-      if (open !== undefined) open.step.unended = true
-      open = {
+      const started: Building = {
         order,
         ...(key === undefined ? {} : { key }),
         step: { commands: [], name: record.name, phase: record.phase, startedAt },
       }
-      built.push(open)
+      built.push(started)
+      open.push(started)
       continue
     }
-    // The end row settles the start row it names, which is the open one in a serial round.
-    const settles =
-      open !== undefined && open.step.name === record.name && open.step.startedAt.getTime() === startedAt.getTime()
-        ? open
-        : undefined
     const ending = {
       endedAt,
       ...(typeof record.ms === "number" ? { ms: record.ms } : {}),
       ...(record.threw === true ? { threw: true as const } : {}),
     }
-    if (settles === undefined) {
+    // The end row settles its own start; anything still open inside it never ended.
+    const at = open.findLastIndex(
+      (entry) => entry.step.name === record.name && entry.step.startedAt.getTime() === startedAt.getTime(),
+    )
+    if (at === -1) {
       built.push({
         order,
         ...(key === undefined ? {} : { key }),
         step: { commands: [], name: record.name, phase: record.phase, startedAt, ...ending },
       })
-    } else {
-      Object.assign(settles.step, ending)
-      open = undefined
+      continue
     }
+    for (const inner of open.splice(at + 1)) inner.step.unended = true
+    const settled = open.pop()
+    if (settled !== undefined) Object.assign(settled.step, ending)
   }
   const byChange = new Map<string, Readonly<{ order: number; step: JournalStep }>[]>()
   const round: Readonly<{ order: number; step: JournalStep }>[] = []
