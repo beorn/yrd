@@ -11,7 +11,6 @@
  * @consumer the operator reading `yrd watch`
  */
 
-import { queueLine } from "../src/watch-frame.tsx"
 import { mkdirSync, writeFileSync } from "node:fs"
 import type React from "react"
 import { act } from "react"
