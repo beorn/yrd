@@ -48,10 +48,19 @@ describe("the one definition of a draft (24196, A2-set-v3)", () => {
     const seed = gitIn(root)
     await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
     await seed(["clone", "--quiet", remote, work])
-    // Every commit is dated, so the window has exact edges to fall on either side of.
-    const dated = (dir: string, at: Date) =>
+    // Every commit is dated, so the window has exact edges to fall on either side of. The author rides the
+    // environment too: a caller's GIT_AUTHOR_NAME (every seat exports one) outranks `-c user.name`.
+    const dated = (dir: string, at: Date, author = "yrd") =>
       gitIn(dir, undefined, undefined, {
-        env: { ...process.env, GIT_AUTHOR_DATE: at.toISOString(), GIT_COMMITTER_DATE: at.toISOString() },
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: author,
+          GIT_AUTHOR_EMAIL: "queue@yrd.test",
+          GIT_COMMITTER_NAME: author,
+          GIT_COMMITTER_EMAIL: "queue@yrd.test",
+          GIT_AUTHOR_DATE: at.toISOString(),
+          GIT_COMMITTER_DATE: at.toISOString(),
+        },
       })
     const git = gitIn(work)
     await git(["config", "user.email", "queue@yrd.test"])
@@ -68,7 +77,7 @@ describe("the one definition of a draft (24196, A2-set-v3)", () => {
       await git(["checkout", "--quiet", name])
       writeFileSync(join(work, `${name.replaceAll("/", "-")}-${String(at.getTime())}.txt`), `${name}\n`)
       await git(["add", "."])
-      await dated(work, at)(["-c", `user.name=${author}`, "commit", "--quiet", "-m", name])
+      await dated(work, at, author)(["commit", "--quiet", "-m", name])
       const head = (await git(["rev-parse", "HEAD"])).trim()
       await git(["checkout", "--quiet", "main"])
       await git(["push", "--quiet", "origin", `${head}:refs/heads/${name}`])
@@ -96,7 +105,7 @@ describe("the one definition of a draft (24196, A2-set-v3)", () => {
     await elsewhere(["checkout", "--quiet", "-b", "task/moved", "origin/task/moved"])
     writeFileSync(join(other, "task-moved-later.txt"), "task/moved\n")
     await elsewhere(["add", "task-moved-later.txt"])
-    await dated(other, ago(30 * 60_000))(["-c", "user.name=grace", "commit", "--quiet", "-m", "task/moved"])
+    await dated(other, ago(30 * 60_000), "grace")(["commit", "--quiet", "-m", "task/moved"])
     const moved = (await elsewhere(["rev-parse", "HEAD"])).trim()
     await elsewhere(["push", "--quiet", "origin", "task/moved"])
     const recent = await pushed("task/recent", ago(hour), "ada")

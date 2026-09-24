@@ -25,7 +25,7 @@ describe("the legacy Gitomic boundary", () => {
       "override.ts": ["push", "push"],
       "publication.ts": ["push"],
       "reference.ts": ["update-ref", "fetch", "ls-remote"],
-      "run.ts": ["fetch"],
+      "settled-base.ts": ["fetch"],
       "submit.ts": ["fetch", "push"],
     })
 
@@ -39,10 +39,13 @@ describe("the legacy Gitomic boundary", () => {
     expect(refCommands(gitlinkPublication ?? ""), "gitlink retention publication").toEqual(["fetch", "push"])
     expect(refCommands(queueSubmission ?? ""), "legacy queue submission").toEqual([])
 
+    // The run's one fetch (the composing checkout's commit) lives in settled-base.ts.
     const run = source("run.ts")
-    expect(refCommands(run), "queue run").toEqual(["fetch"])
-    expect(run).toContain('await run.git(["fetch", "--quiet", composing.path, commit])')
+    expect(refCommands(run), "queue run").toEqual([])
     expect(run).toContain("publishCheckedChildren(")
+    const settledBase = source("settled-base.ts")
+    expect(refCommands(settledBase), "settled base").toEqual(["fetch"])
+    expect(settledBase).toContain('await options.git(["fetch", "--quiet", composing.path, commit])')
 
     const publication = source("publication.ts")
     // This marker read-back is a format-agnostic ref-level check shared by both
