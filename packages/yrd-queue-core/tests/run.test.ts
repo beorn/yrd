@@ -83,6 +83,7 @@ import { resolveGitSelection } from "../src/git.ts"
 import { ABSENT, legacyStore, recordCommit, type WriteRecord } from "../src/legacy-records.ts"
 import * as verifying from "../src/verifying.ts"
 import { appendChangeEvent, appendPublishedMerge } from "../src/events.ts"
+import { eventNoticeOwed } from "../src/event-run.ts"
 import { settledBaseCommit } from "../src/settled-base.ts"
 import { prepareWorktree, SetupFailed } from "../src/worktree.ts"
 
@@ -1096,6 +1097,49 @@ it("delivers an event ending and settles its recipient on the branch chain", asy
       [`${merged?.id}:recorder`]: { for: merged?.id, to: "recorder", result: "delivered" },
     },
   })
+})
+
+/** @failure Migration replayed a pre-switch merge as a fresh notification every round.
+ * @level l0 @consumer queue notifier
+ */
+it("counts migrated endings as told and fresh endings by their receipt", () => {
+  const id = "a".repeat(40)
+  const fresh = { id, props: [] }
+  const migrated = { id, props: [["Migrated-From", `refs/yrd/main/task/old@${"b".repeat(40)}`] as const] }
+  const delivered = { [`${id}:recorder`]: { for: id, to: "recorder", result: "delivered" as const } }
+
+  expect(eventNoticeOwed(migrated, undefined, "recorder")).toBe(false)
+  expect(eventNoticeOwed(fresh, undefined, "recorder")).toBe(true)
+  expect(eventNoticeOwed(fresh, delivered, "recorder")).toBe(false)
+})
+
+/** @failure Migration replayed a pre-switch merge as a fresh notification every round.
+ * @level l3 @consumer submitter and queue operator
+ */
+it("does not notify a migrated ending again", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const queueTip = await createWorldEventQueue(w)
+  const chain = await openEvents({ ...store, ref: changesRef("main", "task/migrated-notice") })
+  const source = `refs/yrd/main/task/migrated-notice@${w.target}`
+  const migrated = (input: ReturnType<typeof changeInput>) => ({
+    ...input,
+    props: [...(input.props ?? []), ["Migrated-From", source] as const],
+    keeps: [...new Set([...(input.keeps ?? []), w.target])],
+  })
+  await chain.append(
+    [
+      migrated(changeInput("opened", { queueTip, at: new Date(), commit: w.target, by: "@dev/2" })),
+      migrated(changeInput("merged", { queueTip, at: new Date(), commit: w.target })),
+    ],
+    { expect: null },
+  )
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [] })
+
+  expect(outcome.exitCode).toBe(0)
+  expect(existsSync(w.notifyLog)).toBe(false)
+  expect((await chain.events()).map((event) => event.type)).toEqual(["opened", "merged"])
 })
 
 /** @failure A queue-owned stuck event could not retain a notice although the notifier received it.

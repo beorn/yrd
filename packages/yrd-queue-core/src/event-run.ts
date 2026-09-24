@@ -19,7 +19,7 @@ import {
 import { eventRows } from "./event-table.ts"
 import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
-import { createEventStore, selectionFor, listRefs } from "./git.ts"
+import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
 import { queueName } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
@@ -49,6 +49,15 @@ function noticeReason(reason: string): string {
   const written = reason.trim().replace(/[\x00-\x1f\x7f]/gu, (char) => JSON.stringify(char).slice(1, -1))
   if (written === "") throw new Error("notification failure has no reason to retain")
   return written
+}
+
+/** A migrated ending was already told by the old queue; fresh endings need their own receipt. */
+export function eventNoticeOwed(
+  ending: Pick<Event, "id" | "props">,
+  notices: EventChange["notices"],
+  recipient: string,
+): boolean {
+  return !ending.props.some(([key]) => key === "Migrated-From") && notices?.[`${ending.id}:${recipient}`] === undefined
 }
 
 type SettledNotice = Readonly<{ result: "delivered" | "refused" | "failed"; reason?: string }>
@@ -218,6 +227,7 @@ export async function eventQueueRun(
     branch: string,
     kind: "merged" | "failed" | "stuck" | "deferred" | "cancelled",
     eventId: string,
+    existingEnding?: Pick<Event, "id" | "props">,
   ): Promise<void> => {
     if ((options.notify?.length ?? 0) === 0) return
     const change = await readStatus(store, queue, branch)
@@ -237,10 +247,13 @@ export async function eventQueueRun(
     })
     let tip = change.tip
     if (tip === undefined) throw new Error(`event queue ${url}#${queue}: ${branch} notice has no chain tip`)
+    // Endings written by this round cannot carry migration provenance. The
+    // existing-ending pass supplies the actual event so old delivery is settled.
+    const ending = existingEnding ?? { id: eventId, props: [] }
     for (const entry of options.notify ?? []) {
       if (!entry.on.includes(kind)) continue
+      if (!eventNoticeOwed(ending, change.notices, entry.name)) continue
       const key = `${eventId}:${entry.name}`
-      if (change.notices?.[key] !== undefined) continue
       const final = await settleEventNotice(
         { options, git, target, log, url, queue },
         entry,
@@ -315,8 +328,19 @@ export async function eventQueueRun(
   for (const [branch, change] of changes) {
     const latest = change.lastNotifiable
     if (latest !== undefined && (latest.kind !== "cancelled" || change.reason === "deleted")) {
-      await tell(branch, latest.kind, latest.id)
-      changes.set(branch, await readStatus(store, queue, branch))
+      const history = histories.get(branch)
+      const ending = history?.events.find((event) => event.id === latest.id)
+      if (ending === undefined) {
+        throw new Error(`event queue ${url}#${queue}: ${branch} has no event ${latest.id} for its latest notice`)
+      }
+      if (
+        (options.notify ?? []).some(
+          (entry) => entry.on.includes(latest.kind) && eventNoticeOwed(ending, change.notices, entry.name),
+        )
+      ) {
+        await tell(branch, latest.kind, latest.id, ending)
+        changes.set(branch, await readStatus(store, queue, branch))
+      }
     }
   }
   const direct = await eventDirectMergeCommits(
