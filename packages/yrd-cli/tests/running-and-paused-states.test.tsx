@@ -19,7 +19,6 @@ import type { YrdCliIO } from "../src/types.ts"
 import {
   boundaryRepository,
   checkAttempts,
-  logOfQueueRun,
   removeTemporaryRoots,
   runYrd,
   submitOneCommit,
@@ -159,24 +158,91 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
       expect(text).not.toContain("STUCK")
     })
 
-    it("running/idle: watch header shows RUNNING (never IDLE)", async () => {
-      const snap = snapshot({
-        stopped: null,
-        runner: {
-          journalDir: "/w/logs",
-          service: { kind: "beating", state: "healthy" },
-          latest: { alive: false, id: "q-1", lastWriteAt: NOW, startedAt: NOW },
-        },
+    describe("ruling 693b0a69 (bead 25500): queue line shows RUNNING only for beating service or live run, else STOPPED with detail", () => {
+      it("case 1 (beating service): queue line shows RUNNING", async () => {
+        const snap = snapshot({
+          stopped: null,
+          runner: {
+            journalDir: "/w/logs",
+            service: { kind: "beating", state: "healthy" },
+            latest: { alive: false, id: "q-1", lastWriteAt: NOW, startedAt: NOW },
+          },
+        })
+
+        const status = queueLineStatus(snap, NOW)
+        expect(status.word).toBe("RUNNING")
+        expect(status.marker).toBe("◉")
+
+        const text = await paint(snap)
+        expect(text).toContain("◉ YRD RUNNING")
+        expect(text).not.toContain("IDLE")
+        expect(text).not.toContain("STUCK")
       })
 
-      const status = queueLineStatus(snap, NOW)
-      expect(status.word).toBe("RUNNING")
-      expect(status.marker).toBe("◉")
+      it("case 2 (live run): queue line shows RUNNING", async () => {
+        const snap = snapshot({
+          stopped: null,
+          runner: {
+            journalDir: "/w/logs",
+            service: { kind: "absent", why: "no health document" },
+            latest: { alive: true, id: "q-1", lastWriteAt: NOW, startedAt: NOW },
+          },
+        })
 
-      const text = await paint(snap)
-      expect(text).toContain("◉ YRD RUNNING")
-      expect(text).not.toContain("IDLE")
-      expect(text).not.toContain("STUCK")
+        const status = queueLineStatus(snap, NOW)
+        expect(status.word).toBe("RUNNING")
+        expect(status.marker).toBe("◉")
+
+        const text = await paint(snap)
+        expect(text).toContain("◉ YRD RUNNING")
+        expect(text).not.toContain("IDLE")
+        expect(text).not.toContain("STUCK")
+      })
+
+      it("case 3 (absent service document, no run): queue line shows STOPPED with detail", async () => {
+        const snap = snapshot({
+          stopped: null,
+          runner: {
+            journalDir: "/w/logs",
+            service: { kind: "absent", why: "no health document" },
+          },
+        })
+
+        const status = queueLineStatus(snap, NOW)
+        expect(status.word, "ruled (693b0a69): STOPPED with detail unless a beating service or a live run").toBe(
+          "STOPPED",
+        )
+        expect(status.marker).toBe("■")
+        expect(status.color).toBe("$fg-error")
+        expect(status.reason).toBeDefined()
+        expect(status.reason).toContain("no runner status published at origin")
+
+        const text = await paint(snap)
+        expect(text).toContain("■ YRD STOPPED")
+        expect(text).toContain("no runner status published at origin")
+      })
+
+      it("case 4 (dead run): queue line shows STOPPED with detail", async () => {
+        const snap = snapshot({
+          stopped: null,
+          runner: {
+            journalDir: "/w/logs",
+            service: { kind: "absent", why: "no health document" },
+            latest: { alive: false, id: "q-1", lastWriteAt: NOW, startedAt: NOW },
+          },
+        })
+
+        const status = queueLineStatus(snap, NOW)
+        expect(status.word, "ruled (693b0a69): STOPPED with detail unless a beating service or a live run").toBe(
+          "STOPPED",
+        )
+        expect(status.marker).toBe("■")
+        expect(status.color).toBe("$fg-error")
+        expect(status.reason).toBeDefined()
+
+        const text = await paint(snap)
+        expect(text).toContain("■ YRD STOPPED")
+      })
     })
   })
 

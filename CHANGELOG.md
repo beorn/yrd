@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Queue-run failure exit 1 is exported as `QUEUE_RUN_FAILED_EXIT` and used by the failure paths.
+
 - `hab.projects.ts` no longer declares `TRIBE_NAME` for the `yrd` service: hab scrubs every caller identity name
   at launch, a declared one included, so it never reached the process. The queue's notices speak as the service's
   name through the root's `tools/yrd-notify.ts`, which registers its own service launch under `HAB_SERVICE_NAME`

@@ -192,6 +192,9 @@ export type QueueRunOptions = Readonly<{
 }> &
   RingOptions
 
+/** A completed queue round with a failed change; reported by the long runner. */
+export const QUEUE_RUN_FAILED_EXIT = 1
+
 export type QueueRunOutcome = Readonly<{
   observation: GitObservation
   exitCode: 0 | 1 | 2
@@ -749,7 +752,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     }
     if (outcome === "failed") {
       failed.push(entry.change.branch)
-      return finish(run, 1, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+      return finish(run, QUEUE_RUN_FAILED_EXIT, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
     }
     if (outcome === "deferred") {
       deferred.push(entry.change.branch)
@@ -788,7 +791,14 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
         }
         if (mergeOutcome === "failed") {
           failed.push(entry.change.branch)
-          return finish(run, 1, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+          return finish(run, QUEUE_RUN_FAILED_EXIT, {
+            checkedWaiting: 0,
+            directMerges,
+            failed,
+            merged,
+            stuck,
+            deferred,
+          })
         }
         if (mergeOutcome === "merged") {
           merged.push(entry.change.branch)
@@ -942,7 +952,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 
   return finish(
     run,
-    stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0,
+    stuck.length > 0 ? 2 : failed.length > 0 ? QUEUE_RUN_FAILED_EXIT : 0,
     { checkedWaiting, directMerges, failed, merged, stuck, deferred },
     stopped,
   )

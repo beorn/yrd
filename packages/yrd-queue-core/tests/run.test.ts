@@ -26,6 +26,7 @@ import { openEvents } from "gitomic/events"
 import type { RefUpdate } from "gitomic"
 import { gitEnvironment } from "../src/git.ts"
 import { incidentTrailers } from "../src/incident.ts"
+import { QUEUE_RUN_FAILED_EXIT } from "../src/run.ts"
 import { reminderDue } from "../src/override.ts"
 import { CapturedQueueObjectsUnavailable } from "../src/remote.ts"
 import {
@@ -227,7 +228,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
       "#!/bin/sh",
       `echo "started" >> "${startedLog}"`,
       'i=0; while [ -n "${FAKE_HOLD:-}" ] && [ ! -f "$FAKE_HOLD" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done',
-      `if [ -n "\${FAKE_HOLD:-}" ]; then echo "held" >> "${startedLog}"; fi`,
+      `if [ "$i" -gt 0 ]; then echo "held" >> "${startedLog}"; fi`,
       'sleep "${FAKE_SLEEP:-0}"',
       `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
       'if [ -f one.txt ] || [ "${FAKE_EVERYWHERE:-0}" = 1 ]; then exit "${FAKE_EXIT:-0}"; fi',
@@ -601,7 +602,7 @@ it("ends a failed configured event check and continues with the next change", as
 
   const outcome = await queueRun({ ...(await w.options({ exit: 1 })), notify: [] })
 
-  expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/a"], merged: ["task/b"], stuck: [] })
+  expect(outcome).toMatchObject({ exitCode: QUEUE_RUN_FAILED_EXIT, failed: ["task/a"], merged: ["task/b"], stuck: [] })
   expect(await remoteTarget(w)).not.toBe(w.target)
   expect((await readStatus(store, "main", "task/a")).status).toBe("failed")
   expect((await readStatus(store, "main", "task/b")).status).toBe("merged")
