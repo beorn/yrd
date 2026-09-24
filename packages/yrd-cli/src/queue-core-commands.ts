@@ -854,7 +854,9 @@ export async function coreQueueCommand(
       // The merge-check override (25296). An event queue has its own merge
       // selection (event-run.ts) that no override reaches, so it refuses rather
       // than accept a switch nothing would read (X4).
-      if ((await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event") {
+      if (
+        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
+      ) {
         io.stderr(
           `yrd: ${config.target.remote}#${config.target.branch} is an event queue; a merge-check override is not ` +
             "supported there, and nothing would read it\n",
