@@ -247,6 +247,69 @@ describe("ADR-0016 event fold", () => {
     ).toThrow(/Check:.*tier/u)
   })
 
+  it("refuses duplicate result fields in retained check evidence", () => {
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const verified = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
+    const checking = evolve(verified, event("checking", "c".repeat(40)))
+    expect(() =>
+      evolve(
+        checking,
+        event(
+          "merging",
+          "d".repeat(40),
+          [
+            ["Commit", B],
+            ["Base", A],
+            ["Config", B],
+            ["Check", "unit exit=0 ms=42 result=pass result=fail attempt=1 phase=merge log=/tmp/removed.log"],
+          ],
+          [B],
+        ),
+      ),
+    ).toThrow(/Check:.*repeats result/u)
+  })
+
+  it("requires both check attempts when a stuck event says Retried: 1", () => {
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const second = {
+      run: { name: "remote", result: "stuck" as const, exit: 2, durationMs: 42, log: "/tmp/second.log" },
+      attempt: 2,
+      phase: "merge" as const,
+    }
+    expect(() =>
+      changeInput("stuck", {
+        queueTip: A,
+        at,
+        commit: B,
+        checks: [second],
+        base: A,
+        config: B,
+        retry: { retried: 1 },
+      }),
+    ).toThrow(/first Check: attempt/u)
+
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const verified = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
+    const checking = evolve(verified, event("checking", "c".repeat(40)))
+    expect(() =>
+      evolve(
+        checking,
+        event(
+          "stuck",
+          "d".repeat(40),
+          [
+            ["Commit", B],
+            ["Base", A],
+            ["Config", B],
+            ["Retried", "1"],
+            ["Check", "remote exit=2 ms=42 result=stuck attempt=2 phase=merge log=/tmp/second.log"],
+          ],
+          [B],
+        ),
+      ),
+    ).toThrow(/first Check: attempt/u)
+  })
+
   it("derives phases and endings without a Status trailer", () => {
     const opened = event("opened", A, [["Commit", A]], [A])
     const verifying = event("verifying", B, [["Commit", B]], [B])
@@ -378,8 +441,60 @@ describe("ADR-0016 event fold", () => {
     expect(notified.tip).toBe(notice.id)
     expect(notified.notices?.[`${B}:@dev/2`]).toMatchObject({ for: B, to: "@dev/2", result: "delivered" })
     expect(() => evolve(notified, notice)).toThrow(/settled|duplicate/u)
-    expect(() => evolve(queued, notice)).toThrow(/ending|defer/u)
+    expect(() => evolve(queued, notice)).toThrow(/last notifiable/u)
     expect(evolve(notified, event("opened", "d".repeat(40), [["Commit", A]], [A])).notices).toBeUndefined()
+    const merged = evolve(queued, event("merged", B, [["Commit", A]], [A]))
+    expect(evolve(merged, notice)).toMatchObject({
+      status: "merged",
+      lastNotifiable: { id: B, kind: "merged" },
+      notices: { [`${B}:@dev/2`]: { result: "delivered" } },
+    })
+  })
+
+  it("settles multiple recipients for a stuck event while keeping the stop in place", () => {
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const verified = evolve(queued, event("verifying", B, [["Commit", B]], [B]))
+    const checking = evolve(verified, event("checking", "c".repeat(40)))
+    const stuckId = "d".repeat(40)
+    const stuck = evolve(checking, event("stuck", stuckId, [["Reason", "remote unavailable"]]))
+    expect(stuck.lastNotifiable).toEqual({ id: stuckId, kind: "stuck" })
+    const first = evolve(
+      stuck,
+      event("notified", "e".repeat(40), [
+        ["For", stuckId],
+        ["To", "@dev/2"],
+        ["Result", "delivered"],
+        ["Key", `${stuckId}:@dev/2`],
+      ]),
+    )
+    const second = evolve(
+      first,
+      event("notified", "f".repeat(40), [
+        ["For", stuckId],
+        ["To", "@chief"],
+        ["Result", "refused"],
+        ["Key", `${stuckId}:@chief`],
+        ["Reason", "recipient unavailable"],
+      ]),
+    )
+    expect(second.status).toBe("stuck")
+    expect(second.reason).toBe("remote unavailable")
+    expect(second.at).toEqual(stuck.at)
+    expect(second.lastNotifiable).toEqual({ id: stuckId, kind: "stuck" })
+    expect(Object.keys(second.notices ?? {})).toHaveLength(2)
+    const resumed = evolve(second, event("verifying", "1".repeat(40), [["Commit", B]], [B]))
+    expect(resumed.lastNotifiable).toBeUndefined()
+    expect(() =>
+      evolve(
+        resumed,
+        event("notified", "2".repeat(40), [
+          ["For", stuckId],
+          ["To", "@dev/3"],
+          ["Result", "delivered"],
+          ["Key", `${stuckId}:@dev/3`],
+        ]),
+      ),
+    ).toThrow(/last notifiable/u)
   })
 
   it("keeps ignore attribution separate from a change's reason and refuses malformed overlays", () => {

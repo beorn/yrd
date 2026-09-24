@@ -1,4 +1,5 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
+import { Conflict } from "gitomic"
 import { chainsUnder, listRefs, openEvents } from "./git.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
@@ -82,6 +83,8 @@ export type EventChange = Readonly<{
   tip?: string
   /** This chain's latest ending, including the event that recorded it. */
   ending?: { kind: ChangeEnding; id: string }
+  /** The latest verdict a notification may name; a stuck verdict leaves the change open. */
+  lastNotifiable?: Readonly<{ id: string; kind: ChangeEnding | "deferred" | "stuck" }>
   reason?: string
   ignored?: Readonly<{ reason: string; by: string }>
   deferred?: Readonly<{
@@ -177,6 +180,13 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
     details.retry.reason === undefined
   ) {
     throw new TypeError("Retried: 1 needs a second Check: attempt or Retry-Reason:")
+  }
+  if (
+    details.retry !== undefined &&
+    details.retry.reason === undefined &&
+    !details.checks?.some(({ attempt }) => attempt === 1)
+  ) {
+    throw new TypeError("Retried: 1 needs the first Check: attempt or Retry-Reason:")
   }
   const props: [string, string][] = []
   if (details.base !== undefined) props.push([EVENT_TRAILERS.base, details.base])
@@ -302,6 +312,13 @@ function checkedRows(event: EventShape): void {
     .filter(([key]) => key === EVENT_TRAILERS.check)
     .map(([, value]) => {
       const header = value.split(" log=", 1)[0] ?? ""
+      const seen = new Set<string>()
+      for (const field of header.split(" ").slice(1)) {
+        const key = field.split("=", 1)[0]
+        if (key === undefined || !["exit", "ms", "result", "attempt", "phase", "tier"].includes(key)) continue
+        if (seen.has(key)) throw new Error(`event ${event.id} Check: repeats ${key}`)
+        seen.add(key)
+      }
       const tier = /(?:^| )tier=([^ ]*)(?: |$)/u.exec(header)?.[1]
       if (tier !== undefined && tier !== "long") throw new Error(`event ${event.id} Check: has invalid tier=${tier}`)
       return readCheckTrailer(value)
@@ -345,6 +362,9 @@ function checkedRows(event: EventShape): void {
     if (event.type !== "stuck" || retried !== "1") throw new Error(`event ${event.id} has invalid Retried:`)
     if (!rows.some((row) => row.attempt === 2) && prop(event, EVENT_TRAILERS.retryReason) === undefined) {
       throw new Error(`event ${event.id} Retried: 1 needs second attempt or Retry-Reason:`)
+    }
+    if (!rows.some((row) => row.attempt === 1) && prop(event, EVENT_TRAILERS.retryReason) === undefined) {
+      throw new Error(`event ${event.id} Retried: 1 needs first Check: attempt or Retry-Reason:`)
     }
   }
 }
@@ -410,7 +430,8 @@ function advanceChange(
     status: type,
     candidate: type === "verifying" ? keptCommit(event) : state.candidate,
     reason: prop(event, EVENT_TRAILERS.reason),
-    ...(type === "verifying" ? { deferred: undefined } : {}),
+    ...(type === "verifying" ? { deferred: undefined, lastNotifiable: undefined } : {}),
+    ...(type === "stuck" ? { lastNotifiable: { id: event.id, kind: "stuck" as const } } : {}),
   }
 }
 
@@ -428,6 +449,7 @@ function deferChange(state: EventChange, event: EventShape, next: EventChange, a
     ...next,
     status: "queued",
     reason,
+    lastNotifiable: { id: event.id, kind: "deferred" },
     deferred: {
       id: event.id,
       check: requiredProp(event, EVENT_TRAILERS.checkName),
@@ -442,8 +464,8 @@ function deferChange(state: EventChange, event: EventShape, next: EventChange, a
 
 function settleNotice(state: EventChange, event: EventShape): EventChange {
   const forEvent = requiredProp(event, EVENT_TRAILERS.for)
-  if (state.ending?.id !== forEvent && state.deferred?.id !== forEvent) {
-    throw new Error(`event ${event.id} notified needs For: matching the ending or deferred event`)
+  if (state.lastNotifiable?.id !== forEvent) {
+    throw new Error(`event ${event.id} notified needs For: matching the last notifiable event`)
   }
   const to = requiredProp(event, EVENT_TRAILERS.to)
   const key = requiredProp(event, EVENT_TRAILERS.key)
@@ -497,7 +519,13 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       if (isOpen(state.status)) throw new Error(`event ${event.id} opens a second change before the first ends`)
       const submitter = prop(event, EVENT_TRAILERS.by)
       if (submitter === undefined || submitter.trim() === "") throw new Error(`event ${event.id} opened needs By:`)
-      const { ignored: _previousIgnore, deferred: _previousDeferred, notices: _previousNotices, ...fresh } = next
+      const {
+        ignored: _previousIgnore,
+        deferred: _previousDeferred,
+        notices: _previousNotices,
+        lastNotifiable: _previousNotifiable,
+        ...fresh
+      } = next
       return {
         ...fresh,
         status: "queued",
@@ -534,6 +562,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
           submitter: undefined,
           since: undefined,
           ending: { kind: "cancelled", id: event.id },
+          lastNotifiable: { kind: "cancelled", id: event.id },
           endedAt: at,
           reason,
         }
@@ -556,6 +585,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         ...next,
         status: event.type,
         ending: { kind: event.type, id: event.id },
+        lastNotifiable: { kind: event.type, id: event.id },
         endedAt: at,
         reason,
       }
@@ -584,6 +614,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         ...next,
         status: "merged",
         ending: { kind: "merged", id: event.id },
+        lastNotifiable: { kind: "merged", id: event.id },
         endedAt: at,
         reason: prop(event, "Reason"),
       }
@@ -945,7 +976,9 @@ export async function readChangeEvents(
   const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
   const state = project(events, ref, store.repo)
   if (state.tip !== selectedTip) {
-    throw new Error(`${ref} moved after the selected reading: expected ${selectedTip}, read ${state.tip}`)
+    throw new Conflict(`${ref} moved after the selected reading: expected ${selectedTip}, read ${state.tip}`, {
+      refs: [ref],
+    })
   }
   return events
 }
