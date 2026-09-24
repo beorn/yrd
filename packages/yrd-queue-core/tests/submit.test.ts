@@ -6,7 +6,7 @@
  * the remote is the one store and what it holds is the only truth.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -574,7 +574,12 @@ describe("the queue read is every submitted change at the remote", () => {
     const before = withoutGitomicRefs(await w.git(refs))
     const fetchHead = (await w.git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
     writeFileSync(fetchHead, "caller-owned fetch evidence\n")
-    const reading = await readQueue(w.git, "origin", "main", w.target)
+    const withinGrace = await readQueue(w.git, "origin", "main", w.target)
+    expect(withinGrace.changes.find((entry) => entry.change.branch === "task/gone")).toMatchObject({
+      branchUnconfirmed: true,
+      reading: { state: "queued" },
+    })
+    const reading = await readQueue(w.git, "origin", "main", w.target, { now: Date.now() + 75_001 })
     const resumed = await writePause(w.git, "origin", "main", {
       by: "operator",
       kind: "resumed",
@@ -590,6 +595,41 @@ describe("the queue read is every submitted change at the remote", () => {
     expect(await refAt(w.git, "refs/remotes/origin/task/gone")).toBe(head)
     expect(withoutGitomicRefs(await w.git(refs))).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned fetch evidence\n")
+  })
+
+  /** @failure One incomplete remote branch listing permanently withdrew a live submitted change.
+   * @level l2 @consumer Yrd queue reader and runner
+   * A real deletion is covered above; this case hides the live ref only from the broad listing.
+   */
+  it("keeps a submitted change when an exact remote read finds the branch omitted by the broad listing", async () => {
+    const w = await world()
+    const head = await branchWithCommit(w, "task/live", "live.txt")
+    await submit(w.git, "origin", {
+      branch: "task/live",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+    const wrapper = join(dirname(w.remote), "git-omit-broad-head.sh")
+    writeFileSync(
+      wrapper,
+      [
+        "#!/bin/sh",
+        'case " $* " in',
+        '  *"ls-remote"*"refs/heads/*"*)',
+        '    output=$(git "$@") || exit $?',
+        '    printf "%s\\n" "$output" | sed "/refs\\/heads\\/task\\/live$/d"',
+        "    exit 0;;",
+        "esac",
+        'exec git "$@"',
+        "",
+      ].join("\n"),
+    )
+    chmodSync(wrapper, 0o755)
+    const selected = { ...selectionFor(w.git), executable: wrapper }
+    const reading = await readQueue(gitIn(w.work, undefined, selected), "origin", "main", w.target)
+    expect(reading.changes.find(({ change }) => change.branch === "task/live")?.reading).toEqual({ state: "queued" })
+    expect(reading.heads.get("task/live")).toBe(head)
+    expect(await w.git(["ls-remote", "--refs", "origin", "refs/heads/task/live"])).toContain(head)
   })
 
   // D1: only a current checked Merge is an observation witness; unknown

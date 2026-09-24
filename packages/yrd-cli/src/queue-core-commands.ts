@@ -534,6 +534,8 @@ export async function coreQueueCommand(
         : await expireOverrides(git, config.target.remote, config.target.branch, Date.now(), STOPPED_BY)
       outcome = await queueRun({
         ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
+        branchDeletionGraceMs:
+          Math.max(1, request.command === "up" ? (request.intervalSeconds ?? 15) : 15) * 1000 + 60_000,
         ...(overrides === undefined
           ? {}
           : { overrides: overrides.table, overridesExpired: overrides.expired, overridesReminded: overrides.reminded }),

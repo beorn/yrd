@@ -33,13 +33,15 @@ import { offTheTarget, type Git } from "./git.ts"
 import type { CommitMeta } from "./git.ts"
 import { lineStop, pauseFromMeta, readPause, type PauseRecord } from "./pause.ts"
 import { changeName, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
-import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"
+import { openedAt, readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"
 
 /** One change as the queue read sees it. */
 export type QueueEntry = Readonly<{
   /** The change itself, its own branch and head included. */
   change: ChangeRecords
   reading: ChangeReading
+  /** The remote omitted this open branch, but deletion is not yet confirmed for action. */
+  branchUnconfirmed?: boolean
 }>
 
 /** What one reading of the remote yields: every change, and where each stands. */
@@ -72,6 +74,69 @@ export class CapturedQueueObjectsUnavailable extends Error {
   }
 }
 
+/** Confirm a branch omitted by a broad remote listing before treating it as deleted. */
+export const DEFAULT_BRANCH_DELETION_GRACE_MS = 75_000
+
+export type BranchOmission = Readonly<{
+  branch: string
+  answer: "present" | "absent" | "error"
+  ms: number
+  protected: boolean
+  remainingMs: number
+  error?: string
+}>
+
+/** Repair one broad remote advertisement for its open submitted branches. */
+export async function repairMissingBranchHeads(
+  listed: ReadonlyMap<string, string>,
+  open: readonly Readonly<{ branch: string; openedAt: number }>[],
+  remote: string,
+  listExact: (ref: string) => Promise<ReadonlyMap<string, string>>,
+  now: () => number = Date.now,
+  graceMs = DEFAULT_BRANCH_DELETION_GRACE_MS,
+): Promise<Readonly<{ heads: Map<string, string>; omissions: readonly BranchOmission[] }>> {
+  if (!Number.isFinite(graceMs) || graceMs < 60_000) {
+    throw new Error(`${remote}: branch deletion confirmation needs a grace window of at least 60 seconds`)
+  }
+  const heads = new Map(listed)
+  const omissions: BranchOmission[] = []
+  const checked = new Set<string>()
+  let checkedAt: number | undefined
+  for (const change of open) {
+    const ref = `refs/heads/${change.branch}`
+    if (!Number.isFinite(change.openedAt)) throw new Error(`${remote} ${ref}: opening time is not readable`)
+    if (listed.has(ref) || checked.has(ref)) continue
+    checked.add(ref)
+    checkedAt ??= now()
+    if (!Number.isFinite(checkedAt))
+      {throw new Error(`${remote} ${ref}: branch deletion confirmation clock is not finite`)}
+    const started = Date.now()
+    let answer: BranchOmission["answer"]
+    let error: string | undefined
+    try {
+      const exact = (await listExact(ref)).get(ref)
+      if (exact === undefined) answer = "absent"
+      else {
+        heads.set(ref, exact)
+        answer = "present"
+      }
+    } catch (cause) {
+      answer = "error"
+      error = `${remote} ${ref}: ${cause instanceof Error ? cause.message : String(cause)}`
+    }
+    const remainingMs = Math.max(0, change.openedAt + graceMs - checkedAt)
+    omissions.push({
+      branch: change.branch,
+      answer,
+      ms: Date.now() - started,
+      protected: answer === "error" || (answer === "absent" && remainingMs > 0),
+      remainingMs,
+      ...(error === undefined ? {} : { error }),
+    })
+  }
+  return { heads, omissions }
+}
+
 /**
  * Every change at the remote, read: one entry per change ref, and nothing for
  * a branch nobody submitted (E2; `submit` is the one writer of a change), with
@@ -87,6 +152,11 @@ export async function readQueue(
   remote: string,
   target: string,
   targetSha: string,
+  options: Readonly<{
+    now?: number | (() => number)
+    graceMs?: number
+    onOmissions?: (omissions: readonly BranchOmission[]) => void
+  }> = {},
 ): Promise<
   Readonly<{
     changes: QueueRead
@@ -111,7 +181,7 @@ export async function readQueue(
   // Gitomic's prefix fetch is the reader's authority. Its failure must surface
   // once, rather than enter the retired captured-advertisement retry path.
   const queueRefs = await store.backend.fetchRefs(store.repo, queueRefPrefix(target), remote)
-  const headRefs = new Map(listedHeadRefs)
+  let headRefs = new Map(listedHeadRefs)
   const heads = new Map<string, string>()
   const prefixes = ["refs/heads/", `${queueRefPrefix(target)}/`]
   const changeRefs: Array<Readonly<{ change: Change; oid: string; ref: string }>> = []
@@ -130,16 +200,53 @@ export async function readQueue(
     if (change !== undefined && change.branch !== target) changeRefs.push({ change, oid, ref })
   }
 
-  // Listing heads avoids downloading thousands of unrelated draft objects.
-  // Fetch only the current heads of submitted branches: readDrafts must be
-  // able to date a branch pushed again after submit even when this clone has
-  // never seen the new object. Deleted branches remain valid withdrawn changes
-  // and therefore contribute no named ref to this exact fetch.
+  const pauseSha = queueRefs.get(pause)
+  const historyTips = [...new Set([...changeRefs.map(({ oid }) => oid), ...(pauseSha === undefined ? [] : [pauseSha])])]
+  const history = await store.backend.readHistory(store.repo, historyTips)
+  primeLegacyHistory(git, history)
+  const byOid = new Map(history.map((meta) => [meta.oid, meta] as const))
+  const tips = tipRecords(byOid, changeRefs)
+  const uniqueHeads = [...new Set(changeRefs.map(({ change }) => change.head))]
+  const offTarget = await offTheTarget(git, uniqueHeads, targetSha)
+  // A successful broad listing can omit a live ref. Confirm only names whose
+  // open change could otherwise become a permanent deleted-branch decision.
+  // Terminal chains and heads already on target do not need that decision.
+  const open = changeRefs.flatMap(({ change, ref }) => {
+    const tip = tips.get(ref)
+    if (tip === undefined || standsEnded(tip) || !offTarget.has(change.head)) return []
+    return [
+      {
+        branch: change.branch,
+        openedAt: openedAt({ branch: change.branch, head: change.head, headOnTarget: false, records: [tip] }),
+      },
+    ]
+  })
+  const repaired = await repairMissingBranchHeads(
+    headRefs,
+    open,
+    remote,
+    (exact) => store.backend.listRefs(store.repo, exact, remote),
+    () => (typeof options.now === "function" ? options.now() : (options.now ?? Date.now())),
+    options.graceMs,
+  )
+  headRefs = repaired.heads
+  options.onOmissions?.(repaired.omissions)
+  if (options.onOmissions === undefined) {
+    const failed = repaired.omissions.find((row) => row.answer === "error")
+    if (failed !== undefined) throw new Error(`${failed.error}: branch confirmation failed; change remains in line`)
+  }
+  const protectedBranches = new Set(repaired.omissions.filter((row) => row.protected).map((row) => row.branch))
+  for (const [ref, oid] of headRefs) {
+    if (ref !== `refs/heads/${target}`) heads.set(ref.slice("refs/heads/".length), oid)
+  }
+
+  // Fetch only moved submitted heads that this clone lacks. The confirmation
+  // above must precede this batch so a repaired head is available to drafts.
   const submittedHeadsByBranch = new Map<string, Set<string>>()
   for (const { change } of changeRefs) {
-    const heads = submittedHeadsByBranch.get(change.branch) ?? new Set<string>()
-    heads.add(change.head)
-    submittedHeadsByBranch.set(change.branch, heads)
+    const submittedHeads = submittedHeadsByBranch.get(change.branch) ?? new Set<string>()
+    submittedHeads.add(change.head)
+    submittedHeadsByBranch.set(change.branch, submittedHeads)
   }
   const submittedHeadRefs = [...submittedHeadsByBranch].flatMap(([branch, submittedHeads]) => {
     const ref = `refs/heads/${branch}`
@@ -152,20 +259,18 @@ export async function readQueue(
   )
   if (missingHeadRefs.length > 0) {
     const fetchedHeads = await store.backend.fetchRefs(store.repo, missingHeadRefs, remote)
+    for (const ref of missingHeadRefs) {
+      if (!fetchedHeads.has(ref)) {
+        throw new Error(
+          `${remote} ${ref}: exact remote listing named ${headRefs.get(ref)} but its object could not be fetched`,
+        )
+      }
+    }
     for (const [ref, oid] of fetchedHeads) {
       headRefs.set(ref, oid)
       heads.set(ref.slice("refs/heads/".length), oid)
     }
   }
-
-  const pauseSha = queueRefs.get(pause)
-  const historyTips = [...new Set([...changeRefs.map(({ oid }) => oid), ...(pauseSha === undefined ? [] : [pauseSha])])]
-  const history = await store.backend.readHistory(store.repo, historyTips)
-  primeLegacyHistory(git, history)
-  const byOid = new Map(history.map((meta) => [meta.oid, meta] as const))
-  const tips = tipRecords(byOid, changeRefs)
-  const uniqueHeads = [...new Set(changeRefs.map(({ change }) => change.head))]
-  const offTarget = await offTheTarget(git, uniqueHeads, targetSha)
   const pauseMeta = pauseSha === undefined ? undefined : byOid.get(pauseSha)
   if (pauseSha !== undefined && pauseMeta === undefined) {
     throw new Error(`${remote} ${pause} at ${pauseSha.slice(0, 12)} was fetched but absent from the history batch`)
@@ -175,7 +280,7 @@ export async function readQueue(
   const entries: QueueEntry[] = []
   const checked: Array<QueueObservation["checked"][number]> = []
   for (const { change: submitted, ref, oid } of changeRefs) {
-    const branchHead = heads.get(submitted.branch)
+    const branchHead = protectedBranches.has(submitted.branch) ? submitted.head : heads.get(submitted.branch)
     const tip = tips.get(ref)
     if (tip === undefined) {
       throw new Error(`${ref} at ${oid.slice(0, 12)} was fetched but absent from the history batch`)
@@ -197,7 +302,11 @@ export async function readQueue(
       head: submitted.head,
       headOnTarget: isHeadOnTarget,
     }
-    entries.push({ change, reading: readChange(change) })
+    entries.push({
+      change,
+      reading: readChange(change),
+      ...(protectedBranches.has(submitted.branch) ? { branchUnconfirmed: true } : {}),
+    })
   }
   // THE STOP, derived once per reading and never by a reader of its own
   // (pause.ts lineStop). A stuck stop is judged against its named change's
