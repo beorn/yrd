@@ -19,7 +19,7 @@ import { bufferToText, render } from "silvery/test"
 import type { ChangeRecord, GitObservation, JournalRun, Row } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
-import { WatchPane, watchTier, type WatchSnapshot } from "../src/watch-pane.tsx"
+import { DETAIL_BG, WatchPane, watchTier, type WatchSnapshot } from "../src/watch-pane.tsx"
 import {
   CHANGES_TAB,
   RunStatusBox,
@@ -34,7 +34,9 @@ import { noticeLine } from "../src/watch-notice.ts"
 import { printListing } from "../src/watch-print.tsx"
 import { runOf, type WatchRun } from "../src/watch-run.ts"
 import { rowLine, watchRowKey, type WatchRow } from "../src/watch-rows.ts"
-import { queueLine, runnerOf } from "../src/watch-frame.tsx"
+import { bandPlan, queueLine, runnerOf, RunnerTitledBox } from "../src/watch-frame.tsx"
+import { RunnerRow, listLayout } from "../src/watch-list.tsx"
+import type { RunnerLine } from "../src/watch-runner.ts"
 
 async function waitFor<T>(callback: () => T | Promise<T>, options?: number | { timeout?: number }): Promise<T> {
   const timeout = typeof options === "number" ? options : (options?.timeout ?? 1000)
@@ -2068,8 +2070,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       state: "checked",
     })
     const listing = await lines(snapshot({ rows: [{ row: held }], runner: RUNNER }), 120, 40)
-    const header =
-      listing.find((line) => (line.includes("ISSUE") || line.includes("TASK")) && line.includes("AGE / RUN")) ?? ""
+    const header = listing.find((line) => line.includes("ISSUE / BRANCH") && line.includes("AGE / RUN")) ?? ""
     const change = tableRow(listing, " task/long-wait ")
     const detail = await paint(at(<WatchDetail detail={detailOf({ row: held }, [])} selected={CHANGES_TAB} />), [], 100)
 
@@ -2473,10 +2474,10 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       )
       // The row under the header opens a band; the change's own row is the
       // first one after that rule.
-      const first = painted.slice(header + 1).find((line) => line.includes("task/x")) ?? ""
+      const first = painted.slice(header + 1).find((line) => line.includes("task/")) ?? ""
       const pills = /\bopen\b.*\brunning\b.*\bdone\b.*\bfailed\b/u
       seen.push({
-        changeRowWhole: header > title + 1 && first.includes("task/x") && !pills.test(first),
+        changeRowWhole: header > title + 1 && first.includes("task/") && !pills.test(first),
         pillsWhole: painted
           .filter((line) => pills.test(line))
           .every((line) => /\bopen\b/.test(line) && /\bfailed\b/.test(line) && !/\ball\b/.test(line.trimEnd())),
@@ -2708,16 +2709,19 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(runnerStart).toBe(13)
     expect(runnerEnd).toBe(15)
 
-    // Above runner item: queued items in viewport (lines 4..11: task/queued-7..0).
-    expect(lines[4]).toContain("task/queued-7")
+    // Above runner item: overflow indicator at line 4 (saying more items above, item 9),
+    // and queued items in viewport (lines 5..11: task/queued-6..0).
+    expect(lines[4]).toContain("▲")
+    expect(lines[5]).toContain("task/queued-6")
     expect(lines[11]).toContain("task/queued-0")
     expect(text).not.toContain("task/queued-19")
-    expect(text).not.toContain("task/queued-8")
+    expect(text).not.toContain("task/queued-7")
 
-    // Below runner box: task/done-0..6 (lines 17..23).
+    // Below runner box: task/done-0..5 (lines 17..22) and bottom overflow indicator at line 23 (saying more items below, item 9).
     expect(lines[17]).toContain("task/done-0")
-    expect(lines[23]).toContain("task/done-6")
-    expect(text).not.toContain("task/done-7")
+    expect(lines[22]).toContain("task/done-5")
+    expect(lines[23]).toContain("▼")
+    expect(text).not.toContain("task/done-6")
     expect(text).not.toContain("task/done-19")
 
     // Proves vertical centering of the runner item in the 20-row viewport (lines 4..23):
@@ -3012,9 +3016,10 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const listBg = app.cell(10, runnerLineIdx).bg
     const detailBg = app.cell(runnerX, runnerLineIdx).bg
 
-    // Detail background must differ from list background and match subtle color
+    // Detail background must differ from list background and match raised surface color (item 8, 24196)
+    expect(DETAIL_BG).toBe("$bg-surface-raised")
     expect(detailBg).not.toEqual(listBg)
-    expect(detailBg).toEqual({ r: 46, g: 52, b: 64 })
+    expect(detailBg).toEqual({ r: 61, g: 67, b: 79 })
 
     // 2. Blank padding line: first row of detail pane (line 2, under STATS) is blank (<Box height={1} flexShrink={0} />)
     const detailTop = app.lines[2]?.slice(143).trim() ?? ""
@@ -3061,5 +3066,236 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(lines[16]?.replace(/[█▅]/g, "").trim()).toBe("")
 
     app.unmount()
+  })
+
+  it("item 2: RunnerRow with stopped/paused runner renders STOPPED: <reason> and to start / to resume cure", async () => {
+    const layout = listLayout([], 120, NOW)
+
+    // 1. Stopped with start cure
+    const stoppedLine: RunnerLine = {
+      state: "stopped",
+      holds: "the service stopped restating its health document · start: yrd queue up",
+      detail: "",
+    }
+    const stoppedApp = render(<RunnerRow line={stoppedLine} layout={layout} />, { cols: 120, rows: 5 })
+    await settle(stoppedApp)
+    expect(stoppedApp.text).toContain("STOPPED: the service stopped restating its health document")
+    expect(stoppedApp.text).toContain("to start: yrd queue up")
+    stoppedApp.unmount()
+
+    // 2. Paused with resume cure
+    const pausedLine: RunnerLine = {
+      state: "paused",
+      holds: "paused: by @user · resume: yrd queue resume",
+      detail: "",
+    }
+    const pausedApp = render(<RunnerRow line={pausedLine} layout={layout} />, { cols: 120, rows: 5 })
+    await settle(pausedApp)
+    expect(pausedApp.text).toContain("STOPPED: paused: by @user")
+    expect(pausedApp.text).toContain("to resume: yrd queue resume")
+    pausedApp.unmount()
+  })
+
+  it("item 7: bandPlan produces a rule only for drafts, and no rules between drafts/waiting or waiting/done or below RUNNER box", () => {
+    const draftRows: WatchRow[] = [
+      { row: row({ state: "draft", branch: "task/d1", at: NOW }) },
+      { row: row({ state: "draft", branch: "task/d2", at: NOW }) },
+    ]
+    const waitingRows: WatchRow[] = [
+      { row: row({ state: "queued", branch: "task/q1", position: 1 }) },
+      { row: row({ state: "queued", branch: "task/q2", position: 2 }) },
+    ]
+    const doneRows: WatchRow[] = [{ row: row({ state: "merged", branch: "task/m1" }) }]
+    const rows = [...draftRows, ...waitingRows, ...doneRows]
+    const plan = bandPlan(rows, 120)
+
+    // Rule opens drafts at index 0
+    const draftsBreak = plan.before.get(0)
+    expect(draftsBreak?.rules).toHaveLength(1)
+    expect(draftsBreak?.rules[0]).toContain("drafts")
+
+    // No rule between drafts and waiting (index 2)
+    const waitingBreak = plan.before.get(2)
+    expect(waitingBreak?.rules ?? []).toEqual([])
+
+    // Runner break (index 4) has no rules and runner: true
+    const runnerBreak = plan.before.get(4)
+    expect(runnerBreak?.rules ?? []).toEqual([])
+    expect(runnerBreak?.runner).toBe(true)
+
+    // No rules after or below RUNNER box
+    if (plan.after !== undefined) {
+      expect(plan.after.rules).toEqual([])
+    }
+    for (const [idx, brk] of plan.before) {
+      if (idx !== 0) {
+        expect(brk.rules).toEqual([])
+      }
+    }
+  })
+
+  it("item 10: clicking the STATS box toggles statsOpen", async () => {
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({
+          decisions: DECISIONS,
+          rows: [{ row: row({ state: "queued", position: 1, branch: "task/queued-1" }) }],
+          runner: RUNNER,
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(app)
+
+    const topIdx = app.lines.findIndex((l) => l.includes("YRD"))
+    expect(topIdx).toBeGreaterThanOrEqual(0)
+    const statsLineIdx = topIdx + 1
+
+    expect(app.lines[statsLineIdx]).toContain("▸ STATS")
+    expect(app.lines[statsLineIdx]).toContain("s to expand")
+
+    await app.click(5, statsLineIdx)
+    await settle(app)
+    expect(app.lines[statsLineIdx]).toContain("▾ STATS")
+    expect(app.lines[statsLineIdx]).toContain("s to fold")
+
+    await app.click(5, statsLineIdx)
+    await settle(app)
+    expect(app.lines[statsLineIdx]).toContain("▸ STATS")
+    expect(app.lines[statsLineIdx]).toContain("s to expand")
+
+    app.unmount()
+  })
+
+  it("item 11: top line renders status.marker and YRD <word> at the far left", async () => {
+    // 1. Idle runner
+    const idleApp = render(
+      <WatchPane
+        snapshot={snapshot({ runner: RUNNER, queues: [{ branch: "main", label: "main", path: "/repo" }] })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(idleApp)
+    const idleTop = idleApp.lines.find((l) => l.includes("YRD"))!
+    expect(idleTop.trimStart().startsWith("○ YRD IDLE")).toBe(true)
+    idleApp.unmount()
+
+    // 2. Stopped runner
+    const stoppedApp = render(
+      <WatchPane
+        snapshot={snapshot({
+          runner: {
+            journalDir: "/w/logs",
+            service: { kind: "stopped", why: "heartbeat overdue", cause: "timeout" },
+          },
+          queues: [{ branch: "main", label: "main", path: "/repo" }],
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(stoppedApp)
+    const stoppedTop = stoppedApp.lines.find((l) => l.includes("YRD"))!
+    expect(stoppedTop.trimStart().startsWith("■ YRD STOPPED")).toBe(true)
+    stoppedApp.unmount()
+
+    // 3. Stuck runner
+    const stuckApp = render(
+      <WatchPane
+        snapshot={snapshot({
+          runner: RUNNER,
+          stopped: STOP,
+          queues: [{ branch: "main", label: "main", path: "/repo" }],
+        })}
+        live={false}
+      />,
+      { cols: 120, rows: 30 },
+    )
+    await settle(stuckApp)
+    const stuckTop = stuckApp.lines.find((l) => l.includes("YRD"))!
+    expect(stuckTop.trimStart().startsWith("◌ YRD STUCK")).toBe(true)
+    stuckApp.unmount()
+  })
+
+  it("acceptance 5 (25364): renders each step (compose, check, merge, publish, all checks off) in RunnerTitledBox", async () => {
+    const layout = listLayout([], 120, NOW)
+
+    // compose step
+    const composeLine: RunnerLine = {
+      state: "checking",
+      holds: "between entries: re-reading main",
+      duration: "checking 0:02",
+      detail: "",
+    }
+    const composeApp = render(<RunnerTitledBox line={composeLine} snapshot={snapshot({})} layout={layout} />, {
+      cols: 120,
+      rows: 5,
+    })
+    await settle(composeApp)
+    expect(composeApp.text).toContain("╭─ RUNNER")
+    expect(composeApp.text).toContain("between entries: re-reading main")
+    composeApp.unmount()
+
+    // check step
+    const checkLine: RunnerLine = {
+      state: "checking",
+      holds: "judging task/foo@111122223333: vitest",
+      duration: "checking 0:10",
+      detail: "",
+    }
+    const checkApp = render(<RunnerTitledBox line={checkLine} snapshot={snapshot({})} layout={layout} />, {
+      cols: 120,
+      rows: 5,
+    })
+    await settle(checkApp)
+    expect(checkApp.text).toContain("judging task/foo@111122223333: vitest")
+    checkApp.unmount()
+
+    // merge step
+    const mergeLine: RunnerLine = {
+      state: "merging",
+      holds: "merging task/foo@111122223333: merge",
+      duration: "merging 0:05",
+      detail: "",
+    }
+    const mergeApp = render(<RunnerTitledBox line={mergeLine} snapshot={snapshot({})} layout={layout} />, {
+      cols: 120,
+      rows: 5,
+    })
+    await settle(mergeApp)
+    expect(mergeApp.text).toContain("merging task/foo@111122223333: merge")
+    mergeApp.unmount()
+
+    // publish step
+    const publishLine: RunnerLine = {
+      state: "merging",
+      holds: "merging task/foo@111122223333: publish",
+      duration: "merging 0:03",
+      detail: "",
+    }
+    const publishApp = render(<RunnerTitledBox line={publishLine} snapshot={snapshot({})} layout={layout} />, {
+      cols: 120,
+      rows: 5,
+    })
+    await settle(publishApp)
+    expect(publishApp.text).toContain("merging task/foo@111122223333: publish")
+    publishApp.unmount()
+
+    // all checks off
+    const offLine: RunnerLine = {
+      state: "checking",
+      holds: "judging task/foo@111122223333: merge",
+      duration: "checking 0:01",
+      detail: "off, off, off",
+    }
+    const offApp = render(<RunnerTitledBox line={offLine} snapshot={snapshot({})} layout={layout} />, {
+      cols: 120,
+      rows: 5,
+    })
+    await settle(offApp)
+    expect(offApp.text).toContain("judging task/foo@111122223333: merge")
+    offApp.unmount()
   })
 })

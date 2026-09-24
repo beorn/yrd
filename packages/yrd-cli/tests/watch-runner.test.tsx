@@ -646,4 +646,129 @@ describe("the runner's row", () => {
     expect(line.holds).toBe("no process is running the check this row is holding · start: yrd queue up")
     expect(line.detail).toContain("no process: beat 0:02 ago")
   })
+
+  describe("active round steps and effective checks (25364)", () => {
+    it("reads active steps and effective checks from journal records", async () => {
+      const workdir = mkdtempSync(join(tmpdir(), "yrd-watch-active-step-"))
+      const logs = join(workdir, "logs")
+      mkdirSync(logs, { recursive: true })
+      const id = runId(new Date(NOW.getTime() - 60_000))
+      const path = join(logs, `${id}.jsonl`)
+      const header = {
+        at: NOW.toISOString(),
+        checks: ["typecheck", "manifest-co-change", "affected-tests"],
+        effectiveChecks: ["typecheck", "off", "off"],
+        config: "b9a2fe721c65",
+        gitlink: "3c285a41af46".padEnd(40, "0"),
+        kind: "run",
+        queue: "main",
+        run: id,
+        target: "main",
+      }
+      const step1 = {
+        at: new Date(NOW.getTime() - 50_000).toISOString(),
+        branch: "task/feat",
+        head: "abcdef0123456789abcdef0123456789abcdef01",
+        kind: "step",
+        name: "worktree",
+        phase: "submit",
+        run: id,
+        start: new Date(NOW.getTime() - 50_000).toISOString(),
+      }
+      writeFileSync(path, `${JSON.stringify(header)}\n${JSON.stringify(step1)}\n`)
+      mkdirSync(join(workdir, "worktrees", id), { recursive: true })
+      writeFileSync(join(workdir, "worktrees", id, ".pid"), `${String(process.pid)}\n`)
+
+      const facts = await readRunnerFacts(workdir)
+      expect(facts.latest?.effectiveChecks).toEqual(["typecheck", "off", "off"])
+      expect(facts.latest?.activeStep).toEqual({
+        branch: "task/feat",
+        head: "abcdef0123456789abcdef0123456789abcdef01",
+        kind: "step",
+        name: "worktree",
+        phase: "submit",
+        start: new Date(NOW.getTime() - 50_000),
+      })
+
+      const line = runnerLine(facts, NOW, { waiting: 5 })
+      expect(line.state).toBe("checking")
+      expect(line.holds).toBe("judging task/feat@abcdef012345: compose")
+      expect(line.duration).toBe("checking 0:50")
+      expect(line.detail).toContain("typecheck, off, off")
+    })
+
+    it("formats merge phase steps (merge, publish, push)", () => {
+      const factsWithStep = (step: NonNullable<NonNullable<RunnerFacts["latest"]>["activeStep"]>): RunnerFacts => ({
+        journalDir: "/w/logs",
+        service: BEATING,
+        latest: {
+          activeStep: step,
+          alive: true,
+          effectiveChecks: ["off", "off", "off"],
+          id: "q-test",
+          lastWriteAt: NOW,
+          startedAt: NOW,
+        },
+      })
+
+      const mergeStep = factsWithStep({
+        branch: "task/land",
+        head: "1111222233334444555566667777888899990000",
+        kind: "step",
+        name: "merge",
+        phase: "merge",
+        start: new Date(NOW.getTime() - 15_000),
+      })
+      const mergeLine = runnerLine(mergeStep, NOW, {})
+      expect(mergeLine.state).toBe("merging")
+      expect(mergeLine.holds).toBe("merging task/land@111122223333: merge")
+      expect(mergeLine.duration).toBe("merging 0:15")
+      expect(mergeLine.detail).toContain("off, off, off")
+
+      const publishStep = factsWithStep({
+        branch: "task/land",
+        head: "1111222233334444555566667777888899990000",
+        kind: "step",
+        name: "publish",
+        phase: "merge",
+        start: new Date(NOW.getTime() - 5_000),
+      })
+      const publishLine = runnerLine(publishStep, NOW, {})
+      expect(publishLine.state).toBe("merging")
+      expect(publishLine.holds).toBe("merging task/land@111122223333: publish")
+      expect(publishLine.duration).toBe("merging 0:05")
+
+      const readStep = factsWithStep({
+        kind: "step",
+        name: "read",
+        phase: "run",
+        start: new Date(NOW.getTime() - 2_000),
+      })
+      const readLine = runnerLine(readStep, NOW, {})
+      expect(readLine.state).toBe("checking")
+      expect(readLine.holds).toBe("between entries: re-reading main")
+      expect(readLine.duration).toBe("checking 0:02")
+    })
+
+    it("formats round lock holder when runner is idle and queue has waiting items", () => {
+      const idleWithLock: RunnerFacts = {
+        journalDir: "/w/logs",
+        service: BEATING,
+        roundLockHolder: {
+          command: "bun yrd queue up",
+          pid: 99999,
+          since: NOW.toISOString(),
+        },
+        latest: {
+          alive: true,
+          id: "q-idle",
+          lastWriteAt: NOW,
+          startedAt: NOW,
+        },
+      }
+      const line = runnerLine(idleWithLock, NOW, { waiting: 3 })
+      expect(line.state).toBe("idle")
+      expect(line.holds).toBe("round lock held by pid 99999 (bun yrd queue up)")
+    })
+  })
 })

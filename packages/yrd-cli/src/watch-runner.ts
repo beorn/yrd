@@ -47,6 +47,17 @@ import { STATE_WORDS, type RunnerState } from "./watch-words.ts"
 /** The run's `.pid` file name, as `claimWorktrees` in the core spells it. */
 const RUN_PID = ".pid"
 
+export type ActiveRunnerStep = Readonly<{
+  kind: "step" | "check"
+  name: string
+  phase: string
+  branch?: string
+  head?: string
+  target?: string
+  base?: string
+  start: Date
+}>
+
 export type RunnerRun = Readonly<{
   id: string
   startedAt: Date
@@ -57,6 +68,8 @@ export type RunnerRun = Readonly<{
   gitlink?: string
   queue?: string
   checks?: readonly string[]
+  effectiveChecks?: readonly string[]
+  activeStep?: ActiveRunnerStep
   /** The process the run's `.pid` file names, when the file is still there. */
   pid?: number
   /** True when that process answers `kill -0`: the run is executing right now. */
@@ -67,6 +80,12 @@ export type RunnerRun = Readonly<{
    * not the malformed-journal refusal it used to read as (24470).
    */
   unstarted?: true
+}>
+
+export type RoundLockHolder = Readonly<{
+  command: string
+  pid: number
+  since: string
 }>
 
 /**
@@ -99,6 +118,8 @@ export type RunnerFacts = Readonly<{
   latest?: RunnerRun
   /** What the service's own heartbeat document says: the ONE liveness reading. */
   service: RunnerService
+  /** Round lock holder if currently held by an active process. */
+  roundLockHolder?: RoundLockHolder
 }>
 
 /** The pid the health document names as its writer, when it names one. */
@@ -193,9 +214,29 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
   const pid = read.pid ?? claimed
   const alive = pid !== undefined && running(pid)
   const header = journalVerdict(path, read, alive)
+  const lockPath = join(workdir, "round.lock")
+  let roundLockHolder: RoundLockHolder | undefined
+  if (existsSync(lockPath)) {
+    try {
+      const body = readFileSync(lockPath, "utf8").trim()
+      if (body !== "") {
+        const parsed = JSON.parse(body) as Record<string, unknown>
+        if (typeof parsed === "object" && parsed !== null && typeof parsed.pid === "number" && running(parsed.pid)) {
+          roundLockHolder = {
+            command: typeof parsed.command === "string" ? parsed.command : "yrd",
+            pid: parsed.pid,
+            since: typeof parsed.since === "string" ? parsed.since : "",
+          }
+        }
+      }
+    } catch {
+      // silent-fallback-allow: unreadable lock body means no usable holder
+    }
+  }
   return {
     journalDir,
     service,
+    ...(roundLockHolder === undefined ? {} : { roundLockHolder }),
     latest: {
       alive,
       id,
@@ -210,13 +251,15 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
 /** What one journal's opening says, before anything is known about liveness. */
 type JournalHead = Readonly<{
   /** The header's own fields, empty when there is no header to read. */
-  fields: Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks">
+  fields: Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks" | "effectiveChecks">
   /** Was a `run` record found at all. */
   headed: boolean
   /** The process the HEADER names, which is the only pid a run in its preamble has. */
   pid?: number
   /** The run never reached its queue — true of one still in its preamble as much as one that died there. */
   died: boolean
+  /** The step or check currently running, if any. */
+  activeStep?: ActiveRunnerStep
 }>
 
 /**
@@ -246,14 +289,12 @@ function readRunHeader(path: string): JournalHead {
   if (lines.at(-1) === "") lines.pop()
   const records: LogRecord[] = []
   let header: Record<string, unknown> | undefined
+  const openSteps: ActiveRunnerStep[] = []
   for (const [index, line] of lines.entries()) {
     if (header !== undefined) {
       // PAST THE HEADER the journal is the run's ordinary business, which this
-      // reader neither validates nor understands. It wants one more record, the
-      // `queue` row that closes the preamble, and reads the rest the way
-      // `readRunLog` does: a line that is not a record is skipped, never guessed
-      // at. Making those fatal here would refuse journals this box has always
-      // rendered.
+      // reader neither validates nor understands. It reads steps and checks to
+      // track the active step, skipping unparseable lines as readRunLog does.
       let after: unknown
       try {
         after = JSON.parse(line)
@@ -264,7 +305,44 @@ function readRunHeader(path: string): JournalHead {
       const record = after as Record<string, unknown>
       if (typeof record.kind !== "string") continue
       records.push(record as unknown as LogRecord)
-      if (record.kind === "queue") break
+      if (record.kind === "step" || record.kind === "check") {
+        const kind = record.kind as "step" | "check"
+        const name = typeof record.name === "string" ? record.name : ""
+        const phase = typeof record.phase === "string" ? record.phase : ""
+        const startStr = typeof record.start === "string" ? record.start : undefined
+        const endStr = typeof record.end === "string" ? record.end : undefined
+        const branch = typeof record.branch === "string" ? record.branch : undefined
+        const head = typeof record.head === "string" ? record.head : undefined
+        const target = typeof record.target === "string" ? record.target : undefined
+        const base = typeof record.base === "string" ? record.base : undefined
+
+        if (startStr !== undefined) {
+          if (endStr !== undefined) {
+            const idx = openSteps.findLastIndex(
+              (s) =>
+                s.kind === kind &&
+                s.name === name &&
+                s.phase === phase &&
+                s.branch === branch &&
+                s.head === head &&
+                s.target === target,
+            )
+            if (idx >= 0) openSteps.splice(idx, 1)
+          } else {
+            const start = new Date(startStr)
+            openSteps.push({
+              kind,
+              name,
+              phase,
+              branch,
+              head,
+              target,
+              base,
+              start: Number.isNaN(start.getTime()) ? new Date() : start,
+            })
+          }
+        }
+      }
       continue
     }
     const where = `run journal ${path}: record ${index + 1} before the run header`
@@ -300,7 +378,9 @@ function readRunHeader(path: string): JournalHead {
   if (header === undefined) return { died, fields: {}, headed: false }
   const resolved = records.find((record) => record.kind === "queue")?.queue ?? header.queue
   const pid = header.pid
+  const activeStep = openSteps.at(-1)
   return {
+    activeStep,
     died,
     headed: true,
     ...(typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? { pid } : {}),
@@ -310,6 +390,9 @@ function readRunHeader(path: string): JournalHead {
       ...(typeof resolved === "string" ? { queue: resolved } : {}),
       ...(Array.isArray(header.checks) && header.checks.every((check) => typeof check === "string")
         ? { checks: header.checks as string[] }
+        : {}),
+      ...(Array.isArray(header.effectiveChecks) && header.effectiveChecks.every((check) => typeof check === "string")
+        ? { effectiveChecks: header.effectiveChecks as string[] }
         : {}),
     },
   }
@@ -329,7 +412,7 @@ function journalVerdict(
   path: string,
   read: JournalHead,
   alive: boolean,
-): Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks" | "unstarted"> {
+): Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks" | "effectiveChecks" | "activeStep" | "unstarted"> {
   const unstarted = !alive && read.died
   if (!read.headed) {
     if (alive) return {}
@@ -339,7 +422,11 @@ function journalVerdict(
         "a finished run must have written its header before its Git preamble",
     )
   }
-  return { ...read.fields, ...(unstarted ? { unstarted: true as const } : {}) }
+  return {
+    ...read.fields,
+    ...(alive && read.activeStep !== undefined ? { activeStep: read.activeStep } : {}),
+    ...(unstarted ? { unstarted: true as const } : {}),
+  }
 }
 
 function readPid(path: string): number | undefined {
@@ -447,8 +534,12 @@ export function runnerWord(
   switch (facts?.service.kind) {
     case "stopped":
       return "stopped"
-    case "beating":
+    case "beating": {
+      if (facts.latest?.activeStep !== undefined) {
+        return facts.latest.activeStep.phase === "merge" ? "merging" : "checking"
+      }
       return underCheck ? "checking" : "idle"
+    }
     default:
       // `absent` and `unreadable` alike: no document to read a word from. The
       // defect an unreadable one is stays loud on the detail line rather than
@@ -456,6 +547,9 @@ export function runnerWord(
       break
   }
   if (facts?.latest === undefined) return "unpublished"
+  if (facts.latest.alive && facts.latest.activeStep !== undefined) {
+    return facts.latest.activeStep.phase === "merge" ? "merging" : "checking"
+  }
   // No document, so the run's own pid is the liveness fact. Nothing is claimed
   // about a SERVICE here, because on this edge there is not one to claim it of.
   if (!underCheck) return "idle"
@@ -515,6 +609,8 @@ export function runnerLine(
     latest?.unstarted === true
       ? `run ${latest.id} died in its Git preamble before it could read its queue; its last Git row names the call that failed (${join(facts?.journalDir ?? "", `${latest.id}.jsonl`)})`
       : undefined
+  const displayChecks = latest?.effectiveChecks ?? latest?.checks?.map((check) => (check === "true" ? "off" : check))
+  const checksText = displayChecks === undefined ? "the run's header record was not read" : displayChecks.join(", ")
   // Never a blank: with a journal this says the beat, the round and the checks;
   // without one it says where it looked and whose machine the output is on.
   const found =
@@ -524,7 +620,7 @@ export function runnerLine(
         [
           `${latest.alive ? "alive" : "no process"}: beat ${String(beat)} ago`,
           `this round since ${clock(latest.startedAt, { seconds: true })}`,
-          `${latest.checks === undefined ? "the run's header record was not read" : latest.checks.join(", ")}, output ${String(beat)} ago (this machine only)`,
+          `${checksText}, output ${String(beat)} ago (this machine only)`,
         ].join(" · "))
   // A health document that is there and is not a document decides no word, so
   // it would go unsaid entirely if it were not said here.
@@ -535,14 +631,51 @@ export function runnerLine(
     case "checking":
     case "merging":
     case "deprovisioning": {
-      const holding = held as HeldChange
+      const holding = held as HeldChange | undefined
+      const activeStep = facts?.latest?.activeStep
+
+      let holdsText: string
+      let byText: string | undefined = holding?.submitter
+      let durationText: string
+
+      if (activeStep !== undefined) {
+        const stepName =
+          activeStep.kind === "check" ? activeStep.name : activeStep.name === "worktree" ? "compose" : activeStep.name
+        const stepElapsed = since(activeStep.start)
+        durationText = `${word} ${stepElapsed}`
+
+        if (activeStep.phase === "submit") {
+          const entry =
+            activeStep.branch !== undefined
+              ? `${activeStep.branch}${activeStep.head ? `@${activeStep.head.slice(0, 12)}` : ""}`
+              : (holding?.branch ?? "entry")
+          holdsText = `judging ${entry}: ${stepName}`
+        } else if (activeStep.phase === "merge") {
+          const entry =
+            activeStep.branch !== undefined
+              ? `${activeStep.branch}${activeStep.head ? `@${activeStep.head.slice(0, 12)}` : ""}`
+              : (holding?.branch ?? "entry")
+          holdsText = `merging ${entry}: ${stepName}`
+        } else if (activeStep.phase === "run" && activeStep.name === "read") {
+          holdsText = "between entries: re-reading main"
+        } else {
+          holdsText = `${stepName} ${activeStep.branch ?? ""}`.trim()
+        }
+      } else if (holding !== undefined) {
+        durationText = `${word} ${since(holding.since)}`
+        holdsText = `${holding.branch}${holding.subject === undefined ? "" : ` ${holding.subject}`}`
+      } else {
+        durationText = `${word} 0:00`
+        holdsText = `${word}`
+      }
+
       return {
         ...at,
         detail,
-        duration: `${word} ${since(holding.since)}`,
-        holds: `${holding.branch}${holding.subject === undefined ? "" : ` ${holding.subject}`}`,
+        duration: durationText,
+        holds: holdsText,
         state,
-        ...(holding.submitter === undefined ? {} : { by: holding.submitter }),
+        ...(byText === undefined ? {} : { by: byText }),
       }
     }
     case "stuck":
@@ -559,7 +692,7 @@ export function runnerLine(
         duration: `${word} ${since(stoppedAt)}`,
         holds:
           change === undefined
-            ? `by ${stop.by === "" ? "an operator" : stop.by} since ${clock(stoppedAt)} · resume: yrd queue resume`
+            ? `paused: by ${stop.by === "" ? "an operator" : stop.by} since ${clock(stoppedAt)} · resume: yrd queue resume`
             : // The spec's cure text, with ONE correction: the verb is
               // `yrd queue withdraw` (cli.ts). There is no `yrd cancel`, and a
               // cure a reader cannot run is worse than no cure at all.
@@ -588,11 +721,20 @@ export function runnerLine(
       }
     }
     default: {
+      let holdsText: string
+      if (waiting === 0) {
+        holdsText = "nothing in line"
+      } else if (facts?.roundLockHolder !== undefined) {
+        const holder = facts.roundLockHolder
+        holdsText = `round lock held by pid ${String(holder.pid)} (${holder.command})`
+      } else {
+        holdsText = `nothing under a check, and ${String(waiting)} in line`
+      }
       return {
         ...at,
         detail,
         ...(beat === undefined ? {} : { duration: `${word} ${beat}` }),
-        holds: waiting === 0 ? "nothing in line" : `nothing under a check, and ${String(waiting)} in line`,
+        holds: holdsText,
         state,
       }
     }
