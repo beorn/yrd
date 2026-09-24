@@ -864,6 +864,23 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   return written
 }
 
+function createdQueueDetails(event: QueueEventShape, ref: string): Pick<EventQueueProjection, "declaration" | "pause"> {
+  if (event.type !== "created") throw new Error(`${ref}: first event ${event.id} must be created`)
+  const declaration = keptCommit(event)
+  if (prop(event, EVENT_TRAILERS.queue) !== undefined) {
+    throw new Error(`${ref}: created event ${event.id} cannot name a preceding Queue:`)
+  }
+  const reason = prop(event, "Start-Paused")
+  if (reason === undefined) return { declaration }
+  if (reason.trim() === "" || event.writer === null) {
+    throw new Error(`${ref}: created event ${event.id} needs a nonempty Start-Paused: and writer`)
+  }
+  return {
+    declaration,
+    pause: { id: event.id, at: new Date(requiredProp(event, EVENT_TRAILERS.time)), reason, by: event.writer },
+  }
+}
+
 function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo: string): EventQueueProjection {
   const first = events[0]
   if (first === undefined) throw new Error(`missing event queue chain ${ref} in ${repo}`)
@@ -880,12 +897,11 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   > = {}
   for (const [index, event] of events.entries()) {
     if (index === 0) {
-      if (event.type !== "created") throw new Error(`${ref}: first event ${event.id} must be created`)
-      declaration = keptCommit(event)
-      if (prop(event, EVENT_TRAILERS.queue) !== undefined) {
-        throw new Error(`${ref}: created event ${event.id} cannot name a preceding Queue:`)
-      }
+      const created = createdQueueDetails(event, ref)
+      declaration = created.declaration
+      pause = created.pause
     } else {
+      if (prop(event, "Start-Paused") !== undefined) throw new Error(`${ref}: Start-Paused: belongs only on created`)
       if (prop(event, EVENT_TRAILERS.queue) !== previous) {
         throw new Error(`${ref}: event ${event.id} (${event.type}) needs Queue: ${previous}`)
       }

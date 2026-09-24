@@ -929,6 +929,41 @@ describe("the queue-format boundary", () => {
     ).rejects.toThrow(/resumes a running queue/)
   })
 
+  it("starts a migrated queue paused on its created event and can resume normally", async () => {
+    const { store, location } = remoteMemStore("yrd-event-start-paused")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const staged = await (
+      await openEvents({ ...store, ref: queueRef("lab"), writer: "@dev/2" })
+    ).stage(
+      [
+        {
+          type: "created",
+          props: [
+            ["Commit", commit],
+            ["Time", at.toISOString()],
+            ["Start-Paused", "migration cutover"],
+          ],
+          keeps: [commit],
+        },
+      ],
+      { expect: null },
+    )
+    await staged.publish()
+    const created = staged.events[0]?.id
+    if (created === undefined) throw new Error("fixture created event was not staged")
+    const queue = await readEventQueue(location, "lab")
+    expect(queue.pause).toEqual({ id: created, at, reason: "migration cutover", by: "@dev/2" })
+    await writeQueueEvent(location, "lab", {
+      type: "resumed",
+      reason: "migration verified",
+      by: "operator",
+      at: new Date("2026-09-22T14:01:00.000Z"),
+    })
+    expect((await readEventQueue(location, "lab")).pause).toBeUndefined()
+  })
+
   it("retains one direct landing and its settled notice on the queue chain", async () => {
     const { store, location } = remoteMemStore("yrd-event-direct-notice")
     const target = await open({ ...store, ref: "refs/heads/lab" })
