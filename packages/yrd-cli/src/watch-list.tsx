@@ -3,7 +3,7 @@
  * pills (watch-redesign items 3, 28, 30–33, 38; 24196):
  *
  *   yrd watch  [1 main]                                ● YRD RUNNING  [open] [running] [done] [failed]
- *   ▸ STATS (N decisions · s to expand)
+ *   ► STATS · current queue and 24h summary
  *   HH:MM  Q   RUN    TASK                          STATE      AGENT   AGE / RUN
  *   ────────────────────────────────────────────────────────────────────────
  *   12:00  1   —      Improve table expansion       draft      @dev/7  — / —
@@ -27,7 +27,7 @@
  */
 
 import React, { memo } from "react"
-import { Box, Pulse, Text, actionFill, useInteractionTreatment } from "silvery"
+import { Box, Pulse, Text, useInteractionTreatment } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import { TimeText } from "./watch-primitives.tsx"
@@ -258,6 +258,9 @@ export function TopLine({
   live?: boolean
   onStatusClick?: () => void
 }) {
+  // Semantic foreground tokens are tuned for the dark canvas. Blend them
+  // toward inverse ink so each status remains legible on the pale top line.
+  const statusInk = `mix($fg-on-inverse, ${status.color}, ${status.color === "$fg-warning" ? "30%" : "50%"})`
   return (
     <Box
       height={1}
@@ -277,26 +280,25 @@ export function TopLine({
         overflow="hidden"
         gap={1}
         paddingX={1}
-        backgroundColor={status.color}
         onClick={onStatusClick}
       >
         {live && status.pulse ? (
-          <Pulse synchronized colors={["$bg", status.color]} intervalMs={900} flexShrink={0}>
+          <Pulse synchronized colors={["$fg-on-inverse", statusInk]} intervalMs={900} flexShrink={0}>
             {status.marker}
           </Pulse>
         ) : (
-          <Text color="$bg" flexShrink={0}>
+          <Text color={statusInk} flexShrink={0}>
             {status.marker}
           </Text>
         )}
-        <Text bold color="$bg" flexShrink={0}>
+        <Text bold color={statusInk} flexShrink={0}>
           YRD
         </Text>
-        <Text bold color="$bg" flexShrink={0}>
+        <Text bold color={statusInk} flexShrink={0}>
           {status.word}
         </Text>
         {status.reason === undefined ? null : (
-          <Text color="$bg" wrap="truncate">
+          <Text color={statusInk} wrap="truncate">
             {status.reason}
           </Text>
         )}
@@ -318,14 +320,9 @@ export function TopLine({
   )
 }
 
-/** A selected tab or filter: the warning chip, `$bg` on `$warning` (25416). */
-const SELECTED_PILL = actionFill("warning", "filled")
-
 /**
- * A queue tab or a filter option on the top line, drawn by silvery's recipes
- * so the chrome's palette decides every pair: a selected one is the warning
- * chip; an unselected one is `inverseText`'s muted tone, lifted by
- * `inverseWash` under the pointer (25416, @cto fa39eb84).
+ * The top line stays on the inverse surface. Silvery's text recipes show
+ * selection and hover through foreground colour alone.
  */
 function TopPill({
   label,
@@ -338,22 +335,20 @@ function TopPill({
   onToggle: () => void
   boldFirstLetter?: boolean
 }) {
-  const text = useInteractionTreatment("control", active ? SELECTED_PILL : "inverseText")
-  const wash = useInteractionTreatment("control", "inverseWash", !active)
-  const color = text.treatment.color
+  const text = useInteractionTreatment("control", active ? "warningText" : "inverseText", true, {
+    selected: active,
+  })
+  const color = active ? `mix($fg-on-inverse, ${text.treatment.color ?? "$fg-warning"}, 30%)` : text.treatment.color
   return (
     <Box
       flexShrink={0}
       onClick={onToggle}
       onMouseEnter={(event) => {
         text.onMouseEnter(event)
-        wash.onMouseEnter(event)
       }}
       onMouseLeave={(event) => {
         text.onMouseLeave(event)
-        wash.onMouseLeave(event)
       }}
-      backgroundColor={active ? text.treatment.backgroundColor : wash.treatment.backgroundColor}
     >
       {boldFirstLetter && label.length > 0 ? (
         <>
@@ -654,7 +649,12 @@ export function RunnerRow({
   const timeText = line.at !== undefined ? clock(line.at) : "—"
   const parsed = splitRunnerCure(line.holds)
   const isStoppedOrPaused = line.state === "stopped" || line.state === "paused"
-  const displayText = isStoppedOrPaused && !parsed.text.startsWith("STOPPED:") ? `STOPPED: ${parsed.text}` : parsed.text
+  const displayText =
+    line.state === "stopped"
+      ? `YRD STOPPED${parsed.text === "" ? "" : ` ${parsed.text}`}`
+      : isStoppedOrPaused && !parsed.text.startsWith("STOPPED:")
+        ? `STOPPED: ${parsed.text}`
+        : parsed.text
   const cureText =
     parsed.cure === undefined
       ? undefined

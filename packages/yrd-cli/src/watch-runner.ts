@@ -108,7 +108,7 @@ export type RoundLockHolder = Readonly<{
 export type RunnerService =
   | Readonly<{ kind: "absent"; why: string }>
   | Readonly<{ kind: "beating"; state: string }>
-  | Readonly<{ kind: "stopped"; why: string; cause: string; since?: Date }>
+  | Readonly<{ kind: "stopped"; why: string; cause: string; since?: Date; stopReason?: string }>
   | Readonly<{ kind: "unreadable"; why: string }>
 
 export type RunnerFacts = Readonly<{
@@ -154,6 +154,7 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
       cause: "the service wrote this as its last document when it was stopped",
       kind: "stopped",
       why: serviceStoppedLine(serviceStopped, Number.isNaN(since.getTime()) ? serviceStopped.since : clock(since)),
+      ...(serviceStopped.reason === undefined ? {} : { stopReason: serviceStopped.reason }),
       ...(Number.isNaN(since.getTime()) ? {} : { since }),
     }
   }
@@ -748,7 +749,7 @@ export function runnerLine(
         ...at,
         detail: gone === undefined ? detail : `${gone.cause} · ${detail}`,
         ...(gone?.since === undefined ? {} : { duration: `${word} ${since(gone.since)}` }),
-        holds: `${gone?.why ?? "no process is running the check this row is holding"} · start: yrd queue up`,
+        holds: `${gone?.stopReason ?? ""} · start: yrd queue up`,
         state,
       }
     }
