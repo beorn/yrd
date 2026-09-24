@@ -22,11 +22,11 @@ import {
 } from "../src/git.ts"
 import { readHistories, readQueue } from "../src/remote.ts"
 import { isActive, readOverrides } from "../src/override.ts"
-import { changeRef, overrideRef, parseChangeRef, pauseRef, queueRefPrefix } from "../src/refs.ts"
+import { overrideRef, parseChangeRef, pauseRef, queueRefPrefix } from "../src/refs.ts"
 import { changesRef, enumerateChangeSegments, queueFormat, queueRef, readEventQueueWithChanges } from "../src/events.ts"
 import { readConfig } from "../src/config.ts"
 import { assertPlainEventQueueConfig } from "../src/event-config.ts"
-import { inputsForLegacy, migratedStatus, type LegacyMigrationChange } from "../src/migration.ts"
+import { inputsForLegacy, migratedStatus, sourcesForMigration, type LegacyMigrationChange } from "../src/migration.ts"
 import { tipOf } from "../src/state.ts"
 import { trailer } from "../src/legacy-records.ts"
 import { subjects } from "../src/table.ts"
@@ -283,11 +283,7 @@ async function plan(options: Options, git: Git, selection: GitSelection, pin: st
     )
   }
   const histories = await readHistories(git, reading.changes, options.remote, options.queue)
-  const sources = histories.map((entry) => ({
-    ref: changeRef(options.queue, entry.change),
-    change: entry.change,
-    reading: entry.reading,
-  }))
+  const sources = sourcesForMigration(options.queue, reading.changes, histories)
   const projected = await legacyRows(git, options.queue, sources)
   const directCommits = (await directMergeCommits(git, options.queue, first.target, reading.changes)).map(
     ({ commit }) => commit,
@@ -434,11 +430,7 @@ async function legacyChanges(plan: Plan, git: Git): Promise<readonly LegacyMigra
     failure("active-override", overrideRef(queue), "a check override is active at apply")
   }
   const hydrated = await readHistories(git, reading.changes, remote, queue)
-  const sources = hydrated.map((entry) => ({
-    ref: changeRef(queue, entry.change),
-    change: entry.change,
-    reading: entry.reading,
-  }))
+  const sources = sourcesForMigration(queue, reading.changes, hydrated)
   const expected = new Map(plan.changes.map(({ ref, oid }) => [ref, oid]))
   if (sources.length !== expected.size) {
     failure(

@@ -4,8 +4,9 @@
 
 import { describe, expect, it } from "vitest"
 import { evolve, initial } from "../src/events.ts"
-import { inputsForLegacy, migratedStatus, type LegacyMigrationChange } from "../src/migration.ts"
+import { inputsForLegacy, migratedStatus, sourcesForMigration, type LegacyMigrationChange } from "../src/migration.ts"
 import type { ChangeRecord } from "../src/legacy-records.ts"
+import type { QueueRead } from "../src/remote.ts"
 
 const HEAD = "a".repeat(40)
 const QUEUE = "b".repeat(40)
@@ -45,6 +46,34 @@ function migrated(inputs: ReturnType<typeof inputsForLegacy>) {
 }
 
 describe("25041 old resting-state conversion", () => {
+  it("uses the captured list state when hydrating a record history changes its fold", () => {
+    const opened = record("opened", "1".repeat(40), OPENED)
+    const tip = record("sent", "2".repeat(40), "2026-09-24T10:05:00.000Z")
+    const captured: QueueRead = [
+      {
+        change: { branch: "task/example", head: HEAD, headOnTarget: true, records: [tip] },
+        reading: { state: "merged" },
+      },
+    ]
+    const hydrated: QueueRead = [
+      {
+        change: { branch: "task/example", head: HEAD, headOnTarget: true, records: [opened, tip] },
+        reading: { state: "withdrawn" as const, reason: "superseded" },
+      },
+    ]
+    const selected = sourcesForMigration("main", captured, hydrated)
+    expect(selected[0]?.reading.state).toBe("merged")
+    expect(selected[0]?.change.records).toEqual([opened, tip])
+    expect(selected[0]?.ref).toBe(REF)
+    expect(() =>
+      sourcesForMigration("main", captured, [
+        {
+          change: { branch: "task/example", head: HEAD, headOnTarget: true, records: [opened] },
+          reading: { state: "withdrawn" },
+        },
+      ]),
+    ).toThrow(/tip differs/)
+  })
   it("absorbs checked-at-rest into one queued event and keeps every old record", () => {
     const opened = record("opened", "1".repeat(40), OPENED)
     const checked = record("checked", "2".repeat(40), "2026-09-24T10:05:00.000Z")

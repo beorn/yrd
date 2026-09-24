@@ -3,8 +3,33 @@ import type { EventInput } from "./git.ts"
 import { changeInput } from "./events.ts"
 import { tipOf, type ChangeReading, type ChangeRecords } from "./state.ts"
 import { trailer, type ChangeRecord } from "./legacy-records.ts"
+import { changeRef } from "./refs.ts"
+import type { QueueRead } from "./remote.ts"
 
 export type LegacyMigrationChange = Readonly<{ ref: string; change: ChangeRecords; reading: ChangeReading }>
+
+/** Keep the exact list's tip reading while hydrating records for source retention. */
+export function sourcesForMigration(
+  queue: string,
+  captured: QueueRead,
+  hydrated: QueueRead,
+): readonly LegacyMigrationChange[] {
+  const listed = new Map(captured.map((entry) => [changeRef(queue, entry.change), entry]))
+  if (listed.size !== captured.length || hydrated.length !== captured.length) {
+    throw new Error(`${queue}: captured and hydrated legacy change counts differ`)
+  }
+  const sources = hydrated.map((entry) => {
+    const ref = changeRef(queue, entry.change)
+    const selected = listed.get(ref)
+    if (selected === undefined || tipOf(selected.change).sha !== tipOf(entry.change).sha) {
+      throw new Error(`${ref}: hydrated record tip differs from the captured list reading`)
+    }
+    listed.delete(ref)
+    return { ref, change: entry.change, reading: selected.reading }
+  })
+  if (listed.size !== 0) throw new Error(`${queue}: hydrated histories omitted ${[...listed.keys()].join(", ")}`)
+  return sources
+}
 
 /** The only word table shared by conversion and old-row parity. */
 export function migratedStatus(reading: ChangeReading): "queued" | "merged" | "failed" | "stuck" | "cancelled" {
