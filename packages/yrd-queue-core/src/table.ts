@@ -457,12 +457,20 @@ export async function endingInstants(git: Git, entries: QueueRead): Promise<Read
   return found
 }
 
+/** How many first parents a merge head's title walk steps back before it keeps the merge's own subject. */
+const TITLE_WALK_DEPTH = 8
+
 /**
- * The head commit subject of every change in one reading.
+ * The title of every change in one reading: its head commit's subject, or,
+ * when the head is a merge, the subject of the newest non-merge commit on its
+ * first-parent line. A merge-only re-cut is still the change it re-cut, so it
+ * keeps that change's title rather than "Merge … into …" (25425).
  *
  * ONE git call for the whole table, never one per row: a list of forty changes
  * used to be forty `git show`s, and at a fifth of a second each that is the
- * difference between a watch that refreshes and one that stutters.
+ * difference between a watch that refreshes and one that stutters. A merge
+ * head adds one batched call per first-parent step, for every merge head at
+ * once, at most {@link TITLE_WALK_DEPTH} of them.
  * `--ignore-missing` is what makes it one call — an object this repository has
  * not fetched is simply not in the answer, and the caller sees no entry for
  * that head rather than an empty subject.
@@ -471,14 +479,37 @@ export async function subjects(git: Git, heads: readonly string[]): Promise<Read
   const wanted = [...new Set(heads)].filter((head) => head !== "")
   // Git with no revision walks HEAD, so an empty table must not ask at all.
   if (wanted.length === 0) return new Map()
-  const out = await git(["log", "--ignore-missing", "--no-walk=unsorted", "--format=%H %s", ...wanted])
+  const read = async (shas: readonly string[]) => {
+    const out = await git(["log", "--ignore-missing", "--no-walk=unsorted", "--format=%H%x00%P%x00%s", ...shas])
+    const commits = new Map<string, Readonly<{ parents: readonly string[]; subject: string }>>()
+    for (const line of out.split("\n")) {
+      const [sha, parents, subject] = line.split("\0")
+      if (sha === undefined || parents === undefined || subject === undefined) continue
+      if (!/^[0-9a-f]{40}$/u.test(sha)) continue
+      commits.set(sha, { parents: parents.split(" ").filter((parent) => parent !== ""), subject })
+    }
+    return commits
+  }
   const found = new Map<string, string>()
-  for (const line of out.split("\n")) {
-    const space = line.indexOf(" ")
-    if (space === -1) continue
-    const sha = line.slice(0, space)
-    if (!/^[0-9a-f]{40}$/u.test(sha)) continue
-    found.set(sha, line.slice(space + 1))
+  // Each merge head, and the first parent its walk has reached.
+  let walking = new Map<string, string>()
+  for (const [sha, commit] of await read(wanted)) {
+    found.set(sha, commit.subject)
+    const first = commit.parents[0]
+    if (commit.parents.length > 1 && first !== undefined) walking.set(sha, first)
+  }
+  for (let depth = 0; walking.size > 0 && depth < TITLE_WALK_DEPTH; depth++) {
+    const commits = await read([...new Set(walking.values())])
+    const next = new Map<string, string>()
+    for (const [head, at] of walking) {
+      const commit = commits.get(at)
+      // A first parent this repository has not fetched: the merge's own subject stands.
+      if (commit === undefined) continue
+      const first = commit.parents[0]
+      if (commit.parents.length > 1 && first !== undefined) next.set(head, first)
+      else found.set(head, commit.subject)
+    }
+    walking = next
   }
   return found
 }

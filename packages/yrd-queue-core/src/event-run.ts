@@ -327,7 +327,7 @@ export async function eventQueueRun(
       }
       const candidate = verified.verifying.candidate
       tip = await appendChangeEvent(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })
-      const checks = options.checks.filter((check) => (check.on ?? ["merge"]).includes("merge"))
+      const checks = options.noCheck === true ? [] : options.checks.filter((check) => (check.on ?? ["merge"]).includes("merge"))
       const logDir = join(options.workdir, "checks", `${branch}@${head}`, log.id, "attempt-1", "merge")
       const checkLogs = checks.map((check) => checkLogPath(logDir, check.name))
       tip = await appendChangeEvent(store, queue, branch, tip, {

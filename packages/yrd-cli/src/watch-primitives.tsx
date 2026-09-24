@@ -147,3 +147,24 @@ export function MarkerRow({
     </Box>
   )
 }
+
+/**
+ * A time, a date or a duration whose numbers are the reading and whose
+ * separators (h, d, m, colon, slash, dash) are muted (25420): `20:41`,
+ * `2026-09-23`, `1h05m / 03:02`.
+ */
+export function TimeText({ text, color }: { text: string; color?: string | undefined }) {
+  return (
+    <Text {...(color === undefined ? {} : { color })} wrap="truncate">
+      {text.split(/(\d+)/u).map((part, index) =>
+        part === "" ? null : /^\d+$/u.test(part) ? (
+          part
+        ) : (
+          <Text key={index} color="$fg-muted">
+            {part}
+          </Text>
+        ),
+      )}
+    </Text>
+  )
+}

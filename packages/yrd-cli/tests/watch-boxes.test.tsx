@@ -117,7 +117,7 @@ describe("item 27 — an ERROR is never dimmed, and wears the state's own color"
   // stop record. The states that would have been louder — `silent`, `stopped` —
   // are the runner's own published beat, and it publishes none yet.
   const STUCK = {
-    by: "yrd-service",
+    by: "yrd",
     cause: "stuck" as const,
     change: `task/s@${"4".repeat(40)}`,
     since: new Date(NOW.getTime() - 6 * 60_000).toISOString(),

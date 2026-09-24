@@ -42,6 +42,9 @@ export const DRAFT_EXCLUDED_PREFIXES: readonly string[] = ["yrd/", "preserve/"]
 /** The watch's draft window: a draft committed longer ago than this shows only when every draft is asked for. */
 export const DRAFT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
+/** Inside the window, a draft committed longer ago than this folds into a count (25424): the home view is a board, not a log. */
+export const DRAFT_ROW_MS = 24 * 60 * 60 * 1000
+
 export type Draft = Readonly<{
   branch: string
   head: string
@@ -128,4 +131,12 @@ async function commitFacts(
     throw new Error(`git log gave no committer date for present commit(s) ${unanswered.join(", ")}`)
   }
   return facts
+}
+
+/** The window's drafts that are rows, in their order, and how many older ones fold into a count (25424). */
+export function foldDrafts(dated: readonly Draft[], now: Date): Readonly<{ rows: readonly Draft[]; older: number }> {
+  const rows = dated.filter(
+    (draft) => draft.committedAt !== undefined && now.getTime() - draft.committedAt.getTime() <= DRAFT_ROW_MS,
+  )
+  return { rows, older: dated.length - rows.length }
 }
