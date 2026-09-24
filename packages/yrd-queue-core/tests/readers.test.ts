@@ -637,7 +637,10 @@ describe("a run's journal, read back", () => {
       start: start.toISOString(),
     }
     const { dir, run: oldId } = journalDir([check], start)
-    const current: Row = { branch: check.branch, head: check.head, state: "failed" }
+    // In line: an ended change is under no check whatever its journal says
+    // (24972, and 25521 for these per-run rows), so only a change still in
+    // line can show its newest unended run as live.
+    const current: Row = { branch: check.branch, head: check.head, state: "queued" }
     const newestUnended = watchRows([current], { journals: readJournals(dir, { now: later }), perRun: true })[0]!
     expect(newestUnended.row.live?.run).toBe(oldId)
     expect(clocks(newestUnended.row, later).runtimeMs).toBe(60 * 60 * 1000)
