@@ -105,6 +105,7 @@ import {
   bandOf,
   bandPlan,
   bandedRows,
+  draftsSaid,
   runnerOf,
   type Band,
   type BandPlan,
@@ -326,6 +327,7 @@ export function WatchPane({
   // bands are applied HERE, before the cursor and the detail read an index, so
   // every one of them addresses the sequence the reader is looking at.
   const runner = runnerOf(shown, shown.at)
+  const draftsLine = draftsSaid(shown.rows, shown.drafts)
   const visible = bandedRows(
     shown.rows.filter(
       (item) =>
@@ -659,6 +661,7 @@ export function WatchPane({
         >
           <Text wrap="truncate">
             {statsOpen ? "▾" : "▸"} STATS
+            {draftsLine === undefined ? "" : ` · ${draftsLine}`}
             {shown.decisions === undefined
               ? ""
               : ` (${String(shown.decisions.length)} decisions · s to ${statsOpen ? "fold" : "expand"})`}
@@ -702,14 +705,6 @@ export function WatchPane({
             </Text>
           </Box>
         )}
-        <Box height={1} flexShrink={0}>
-          <Text color="$fg-muted" wrap="truncate">
-            {cursorRow === undefined ? "" : "Home follows the newest again · "}
-            {/* A draft is a row and no change: the queue line counts the drafts. */}
-            {String(changesIn(visible))} of {String(changesIn(shown.rows))} change(s) · {String(draftsIn(visible))} of{" "}
-            {String(draftsIn(shown.rows))} draft(s) · ? for help · q leaves
-          </Text>
-        </Box>
         {helpOpen ? (
           // An overlay, so the help covers the pane where it stands and moves nothing under it.
           <ModalOverlay
@@ -735,15 +730,6 @@ export function WatchPane({
   )
 }
 
-/** How many of these rows are changes: every row but a draft's. */
-function changesIn(rows: readonly WatchRow[]): number {
-  return rows.filter((item) => item.row.state !== "draft").length
-}
-
-/** How many of these rows are drafts: the other population the footer must name. */
-function draftsIn(rows: readonly WatchRow[]): number {
-  return rows.filter((item) => item.row.state === "draft").length
-}
 
 /** Derive status marker, word, and color for the top line (only RUNNING or STOPPED, 25367). */
 export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
@@ -850,15 +836,7 @@ function Table({
     singleQueue: isSingleQueue,
     separateColumns: true,
   })
-  const plan: BandPlan = bandPlan(
-    rows,
-    columns - 4,
-    snapshot.drafts?.window ?? "7d",
-    false,
-    snapshot.drafts?.unread ?? 0,
-    false,
-    snapshot.drafts?.older ?? 0,
-  )
+  const plan: BandPlan = bandPlan(rows, columns - 4)
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       <Box height={1} flexShrink={0} />

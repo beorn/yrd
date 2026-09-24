@@ -18,7 +18,7 @@ import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
 import { foldDrafts, type Draft, type Row, type WatchRow } from "@yrd/queue-core"
 import { ListRow, changesSuffix, type ListLayout } from "../src/watch-list.tsx"
-import { bandRule } from "../src/watch-frame.tsx"
+import { draftsSaid } from "../src/watch-frame.tsx"
 import { NowContext, NowProvider } from "../src/watch-clock.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
@@ -205,8 +205,12 @@ describe("the drafts the home list folds into a count (25424)", () => {
     })
   })
 
-  it("says the fold on the drafts rule: the day's rows, then how many older ones it holds", () => {
-    expect(bandRule("drafts", 2, 40, "7d", 0, 98)).toMatch(/^── 2 drafts \(1d\) · 98 older ─+$/u)
-    expect(bandRule("drafts", 5, 40, "all", 0, 0)).toMatch(/^── 5 drafts \(all\) ─+$/u)
+  it("says the fold in words: the day's rows, then how many older ones and unread heads there are", () => {
+    const rows: readonly WatchRow[] = ["task/a", "task/b"].map((branch) => ({
+      row: { at: now, branch, head: branch.padEnd(40, "0"), state: "draft" } as Row,
+    }))
+    expect(draftsSaid(rows, { older: 98, unread: 2, window: "7d" })).toBe("2 drafts (1d) · 98 older · 2 not yet read")
+    expect(draftsSaid(rows, { older: 0, unread: 0, window: "all" })).toBe("2 drafts (all)")
+    expect(draftsSaid([], { older: 0, unread: 0, window: "7d" })).toBeUndefined()
   })
 })

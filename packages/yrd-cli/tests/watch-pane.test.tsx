@@ -2009,7 +2009,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     })
   })
 
-  it("draws drafts band rule with '0 drafts (1d) · N not yet read' when unread heads exist without dated drafts", async () => {
+  it("says '0 drafts (1d) · N not yet read' on the STATS line when unread heads exist without dated drafts", async () => {
     const W = await words()
     const snap = snapshot({
       drafts: { unread: 2, window: "7d" },
@@ -2030,6 +2030,21 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const draftsLine = painted.find((l) => l.includes(`${W.draft.word}`))
     expect(draftsLine).toBeDefined()
     expect(draftsLine).toContain(`0 ${W.draft.word}s (1d) · 2 not yet read`)
+    expect(draftsLine).toContain("STATS")
+  })
+
+  it("draws neither a drafts line in the table nor the bottom help line (25417)", async () => {
+    const W = await words()
+    const snap = snapshot({
+      drafts: { older: 98, unread: 0, window: "7d" },
+      rows: [draft("task/d1", "a".repeat(40), ago(2 * 60 * MINUTE), "ada")],
+      runner: RUNNER,
+    } as Partial<WatchSnapshot>)
+    const painted = await lines(snap, 140, 40)
+
+    expect(painted.filter((line) => line.includes(`${W.draft.word}`) && line.includes("──"))).toEqual([])
+    expect(painted.some((line) => line.includes("? for help") || line.includes("q leaves"))).toBe(false)
+    expect(painted.find((line) => line.includes("STATS"))).toContain(`1 ${W.draft.word} (1d) · 98 older`)
   })
 
   it("draws draft rows and a draft's detail from the snapshot alone: redrawing, moving over drafts and opening one reads nothing (A2-set-v3)", async () => {
@@ -3136,7 +3151,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     pausedApp.unmount()
   })
 
-  it("item 7: bandPlan produces a rule only for drafts, and no rules between drafts/waiting or waiting/done or below RUNNER box", () => {
+  it("item 7: bandPlan opens the drafts with a bare rule only when asked, and no rules between drafts/waiting or waiting/done or below RUNNER box", () => {
     const draftRows: WatchRow[] = [
       { row: row({ state: "draft", branch: "task/d1", at: NOW }) },
       { row: row({ state: "draft", branch: "task/d2", at: NOW }) },
@@ -3147,12 +3162,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     ]
     const doneRows: WatchRow[] = [{ row: row({ state: "merged", branch: "task/m1" }) }]
     const rows = [...draftRows, ...waitingRows, ...doneRows]
-    const plan = bandPlan(rows, 120)
+    // The watch draws no drafts line (25417); the page's static list opens them with a bare rule.
+    expect(bandPlan(rows, 120).before.get(0)).toBeUndefined()
+    const plan = bandPlan(rows, 120, "bare")
 
-    // Rule opens drafts at index 0
+    // A bare rule opens drafts at index 0
     const draftsBreak = plan.before.get(0)
     expect(draftsBreak?.rules).toHaveLength(1)
-    expect(draftsBreak?.rules[0]).toContain("drafts")
+    expect(draftsBreak?.rules[0]).toMatch(/^─+$/u)
 
     // No rule between drafts and waiting (index 2)
     const waitingBreak = plan.before.get(2)
