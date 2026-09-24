@@ -114,6 +114,8 @@ describe("`yrd list` is `yrd queue list`", () => {
     expect(canonicalHelp.exitCode, canonicalHelp.report).toBe(0)
     expect(aliasHelp.exitCode, aliasHelp.report).toBe(0)
     expect(flagsOf(aliasHelp.stdout)).toEqual([
+      "--all",
+      "--drafts",
       "--interval",
       "--json",
       "--latest",

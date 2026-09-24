@@ -193,14 +193,12 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
       blob: "config-blob",
     }
 
-    const mockSelection: any = {
-      executable: "git",
-      backend: proxyBackend,
-    }
+    const mockSelection: any = { executable: "git" }
 
     // Call 1 at t=0s: initial reading
     // Should list event refs (refs/yrd/main/) and full heads (refs/heads/)
     const r1 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, mockSelection, {
+      backend: proxyBackend,
       now: 1000,
     })
     expect(r1).toBeDefined()
@@ -211,6 +209,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     // Should ONLY list event refs, and NOT list refs/heads/, and REUSE the reading!
     listRefsCalls.length = 0
     const r2 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, mockSelection, {
+      backend: proxyBackend,
       now: 11000, // 10s later
     })
     expect(r2).toBeDefined()
@@ -226,6 +225,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     )
     listRefsCalls.length = 0
     const r3 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, mockSelection, {
+      backend: proxyBackend,
       now: 31000, // 30s later
     })
     expect(r3).toBeDefined()
@@ -236,6 +236,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     // Should reuse round without listing refs/heads/!
     listRefsCalls.length = 0
     const r4 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, mockSelection, {
+      backend: proxyBackend,
       now: 51000, // 20s after call 3
     })
     expect(r4.all).toBe(r3.all) // Reused!
@@ -245,6 +246,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     // Head listing due! Must list refs/heads/!
     listRefsCalls.length = 0
     const r5 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, mockSelection, {
+      backend: proxyBackend,
       now: 96000, // 65s after call 3
     })
     expect(r5).toBeDefined()
