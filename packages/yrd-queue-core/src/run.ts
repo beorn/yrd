@@ -91,6 +91,7 @@ import {
 } from "./git.ts"
 import { incidentTrailers, type Incident } from "./incident.ts"
 import { stuckCures, type PauseRecord } from "./pause.ts"
+import { isActive, overrideLine, type OverrideEntry, type OverrideTable } from "./override.ts"
 import {
   gitSuperExecution,
   readSuperMergeDetail,
@@ -177,6 +178,17 @@ export type QueueRunOptions = Readonly<{
   stopAtMs?: number
   /** Injected clock for testing stop windows; defaults to Date.now. */
   now?: () => number
+  /**
+   * The override table this round is judged under (25296): expired, then read,
+   * by the CALLER before the run starts, so the header carries it without a Git
+   * call ahead of it. The service always passes it; absent is a caller that
+   * read no override ref, which holds no check off and fences nothing.
+   */
+  overrides?: OverrideTable
+  /** The entries whose `expired` record the caller wrote for this round; journaled after the header, and notified. */
+  overridesExpired?: readonly OverrideEntry[]
+  /** The entries whose half-window reminder the caller recorded for this round; notified once (25296). */
+  overridesReminded?: readonly OverrideEntry[]
 }> &
   RingOptions
 
@@ -493,6 +505,9 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     config: options.configBlob,
     kind: "run",
     gitlink: options.targetSha,
+    // Every override entry this round reads, active or expired, one line each
+    // (25296 C5): the journal says a check was off before any change says so.
+    overrides: (options.overrides?.entries ?? []).map((entry) => overrideLine(entry, nowMs(options))),
     pid: process.pid,
     target: options.target.branch,
   })
@@ -531,9 +546,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const readStep = (at: string) => ({ base: at, name: "read", phase: "run", target: options.target.branch })
   const read = async (at = targetSha) => {
     try {
-      return await timedStep(log, readStep(at), () =>
-        readQueue(git, options.target.remote, options.target.branch, at),
-      )
+      return await timedStep(log, readStep(at), () => readQueue(git, options.target.remote, options.target.branch, at))
     } catch (error) {
       if (retried !== undefined) throw failedAgain(retried, error)
       if (!(error instanceof CapturedQueueObjectsUnavailable)) throw error
@@ -560,6 +573,16 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // record after it is a run that died in that preamble, and its Git rows above
   // name the call that failed (@i/10-yrd/24470).
   log.write({ kind: "queue", queue: name })
+  for (const entry of options.overridesExpired ?? []) {
+    log.write({
+      by: entry.by,
+      check: entry.check,
+      kind: "override",
+      record: "expired",
+      reason: entry.reason,
+      until: entry.until.toISOString(),
+    })
+  }
 
   const observation = await selected.observe({
     version: 1,
@@ -2285,7 +2308,12 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
       retained = worktree.path
       return await attributedFailure(run, entry, results, failing, "merge", rootChanges?.changes ?? [])
     }
-    const declaredForMerge = run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes("merge"))
+    // The merge checks this round runs: the declared ones less those an
+    // override holds off (25296). The shortfall counts this phase's own results
+    // (not the rechecks) against the SAME list, so a skipped check is never a
+    // missing result, and a phase that stopped before an un-overridden check is
+    // still a shortfall.
+    const declaredForMerge = phaseChecks(run, "merge")
     if (phaseResults.length < declaredForMerge.length) {
       return await writeDeferredRecord(
         run,
@@ -2338,6 +2366,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
           ...publishing.map((row) => ["Published", publishedRow(row)] as const),
           ...recuts.map((recut) => ["Recut", recutRow(recut)] as const),
           ...checkTrailers(results),
+          ...skippedTrailers(run),
         ],
       },
       expectedTip,
@@ -2747,7 +2776,22 @@ async function runPhase(
   narrowed: ReadonlyMap<string, Readonly<Record<string, string>>> = new Map(),
 ): Promise<readonly CheckResult[]> {
   const results: CheckResult[] = []
-  for (const spec of run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes(declaredPhase))) {
+  if (declaredPhase === "merge") {
+    for (const off of overriddenAtMerge(run)) {
+      run.log.write({
+        branch: entry.change.branch,
+        by: off.by,
+        check: off.check,
+        head: entry.change.head,
+        kind: "skipped",
+        phase,
+        record: off.record,
+        until: off.until.toISOString(),
+        verified: off.verified,
+      })
+    }
+  }
+  for (const spec of phaseChecks(run, declaredPhase)) {
     if (isStopWindowClosed(run.options)) {
       run.log.write({
         kind: "observation",
@@ -2984,6 +3028,43 @@ function stuckWrite(
 
 function checkTrailers(results: readonly CheckResult[]): readonly (readonly [string, string])[] {
   return results.map((result) => ["Check", checkTrailer(result)] as const)
+}
+
+/**
+ * The checks one phase runs: every declared check for that phase and, at MERGE
+ * only, none an override holds off this round (25296). Keyed on the DECLARED
+ * phase, so the settled-base re-run of a merge check (`phase` "base") selects
+ * the same list; submit never consults the override.
+ */
+function phaseChecks(run: Run, declaredPhase: CandidatePhase): readonly CheckSpec[] {
+  const declared = run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes(declaredPhase))
+  if (declaredPhase !== "merge") return declared
+  const off = new Set(overriddenAtMerge(run).map((entry) => entry.check))
+  return declared.filter((spec) => !off.has(spec.name))
+}
+
+/** The override entries holding a declared merge check off at this round's clock. */
+function overriddenAtMerge(run: Run): readonly OverrideEntry[] {
+  const now = nowMs(run.options)
+  const merge = new Set(
+    run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes("merge")).map((spec) => spec.name),
+  )
+  return (run.options.overrides?.entries ?? []).filter((entry) => merge.has(entry.check) && isActive(entry, now))
+}
+
+/**
+ * The merged record's account of every merge check it did not run (25296 X3):
+ * `Skipped:`, never `Check:` — a check result has no skipped value, and a
+ * check with no trailer would read as not run at all.
+ */
+function skippedTrailers(run: Run): readonly (readonly [string, string])[] {
+  return overriddenAtMerge(run).map(
+    (entry) =>
+      [
+        "Skipped",
+        `${entry.check} override=${entry.record} by=${entry.by}${entry.verified ? "" : " (claimed)"} until=${entry.until.toISOString()}`,
+      ] as const,
+  )
 }
 
 /**

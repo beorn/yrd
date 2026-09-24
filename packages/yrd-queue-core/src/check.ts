@@ -258,10 +258,20 @@ export type CheckView = Readonly<{
   spec?: CheckSpec
   /** What the record says this check did; absent also covers a journal with no measured result. */
   result?: CheckRun
-  state: "passed" | "failed" | "stuck" | "running" | "not-run" | "unmeasured" | "deferred"
+  /** `skipped`: a merge-check override held it off (25296); its record's `Skipped:` trailer says whose and until when. */
+  state: "passed" | "failed" | "stuck" | "running" | "not-run" | "unmeasured" | "deferred" | "skipped"
   /** The real log path: the result's when it ran, the journal's while it runs. */
   log?: string
 }>
+
+/** The check names a change's records say an override skipped: the first word of each `Skipped:` trailer. */
+export function skippedChecks(records: readonly Readonly<{ trailers: readonly (readonly [string, string])[] }>[]): ReadonlySet<string> {
+  return new Set(
+    records.flatMap((record) =>
+      record.trailers.filter(([name]) => name === "Skipped").map(([, value]) => value.split(" ")[0] ?? ""),
+    ),
+  )
+}
 
 /** The check a run journal says is running right now on this change. */
 export type CheckedNow = Readonly<{ name: string; log?: string }>
@@ -277,6 +287,8 @@ export function checksOf(
   declared: readonly CheckSpec[],
   live?: CheckedNow,
   measured?: readonly JournalCheck[],
+  /** The checks a record's `Skipped:` trailers name: an override held them off at merge, so they read skipped, never not run. */
+  skipped: ReadonlySet<string> = new Set(),
 ): readonly CheckView[] {
   void ending
   // An ending record's own `Check:` trailers are carried forward verbatim
@@ -310,7 +322,7 @@ export function checksOf(
   ): CheckView => {
     seen.add(name)
     if (found === undefined) {
-      const state = measured === undefined && live?.name === name ? "running" : "not-run"
+      const state = measured === undefined && live?.name === name ? "running" : skipped.has(name) ? "skipped" : "not-run"
       return {
         name,
         state,
