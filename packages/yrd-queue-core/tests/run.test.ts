@@ -1787,8 +1787,10 @@ describe("a queue run", () => {
     })
   })
 
-  // @i/10-yrd/25301 A1 (@cto c7115f0f): the head merges before the rest of the line is judged.
-  it("with 40 changes waiting, the head merges before any other change is judged (25301 A1)", async () => {
+  // @i/10-yrd/25301 A1 (@cto c7115f0f): the head merges before the rest of the line is judged,
+  // and (@cto 20a360d8, cure (a)) the round then prepares only the NEXT head: the rest of the
+  // line is judged when the walk of a later round reaches it, never all at once after a merge.
+  it("with 40 changes waiting, the head merges, the next head is judged, and the other 38 wait unjudged (25301 A1)", async () => {
     const w = await world()
     const branches = Array.from({ length: 40 }, (_, i) => `task/c${String(i).padStart(2, "0")}`)
     const heads: string[] = []
@@ -1800,24 +1802,28 @@ describe("a queue run", () => {
     expect(outcome.merged).toEqual(["task/c00"])
     const mergeCommit = await remoteTarget(w)
     const lines = readFileSync(w.checkLog, "utf8").trim().split("\n")
-    // The check log is in time order. Its first line is the head's judge; its
-    // second is the head's merge check, whose candidate IS the merge that landed;
-    // only then the other 39 judges, the prefetch, each standing on that merge.
-    expect(lines).toHaveLength(41)
+    // The check log is in time order: the head's judge, the head's merge check
+    // (whose candidate IS the merge that landed), then ONE judge, the next
+    // head's, standing on that merge. Nothing else in the line is judged.
+    expect(lines).toHaveLength(3)
     expect(/candidate=(\S+)/u.exec(lines[1]!)?.[1]).toBe(mergeCommit)
-    expect(lines.map((line) => /base=(\S+)/u.exec(line)?.[1])).toEqual([
-      w.target,
-      w.target,
-      ...Array.from({ length: 39 }, () => mergeCommit),
-    ])
-    expect(outcome.checkedWaiting).toBe(39)
-    // @cto 62ed0395 (2): every prefetch verdict names the target it stood on,
-    // the checked record's Base trailer, and here that is the head's merge.
+    expect(lines.map((line) => /base=(\S+)/u.exec(line)?.[1])).toEqual([w.target, w.target, mergeCommit])
+    expect(outcome.checkedWaiting).toBe(1)
     await fetchChanges(w)
-    const tail = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/c39", head: heads[39]! })))!)
-    expect(trailer(tail.find((record) => record.kind === "checked")!, "Base")).toBe(mergeCommit)
+    // @cto 62ed0395 (2): the prepared head's verdict names the target it stood on.
+    const next = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/c01", head: heads[1]! })))!,
+    )
+    expect(trailer(next.find((record) => record.kind === "checked")!, "Base")).toBe(mergeCommit)
+    // The last change was never judged: its chain holds only its opening record.
+    const last = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/c39", head: heads[39]! })))!,
+    )
+    expect(last.map((record) => record.kind)).toEqual(["opened"])
     // review2 25301 r2 record 1: each read step names the target that read stood
-    // on, so the prefetch's and the final re-read's steps name the head's merge.
+    // on, so the next head's read and the final re-read name the head's merge.
     const reads = readFileSync(outcome.log, "utf8")
       .trim()
       .split("\n")
@@ -1884,7 +1890,10 @@ describe("a queue run", () => {
     const submitLog = join(w.workdir, "submit-checks.log")
     const script = (name: string, body: string): string => {
       const path = join(w.workdir, name)
-      writeFileSync(path, ["#!/bin/sh", body, `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`, "exit 0", ""].join("\n"))
+      writeFileSync(
+        path,
+        ["#!/bin/sh", body, `echo 'YRD-CHECK-RESULT {"result":"pass","exit":0}'`, "exit 0", ""].join("\n"),
+      )
       chmodSync(path, 0o755)
       return path
     }
@@ -1922,6 +1931,35 @@ describe("a queue run", () => {
     // No partial verdict: the tail's chain holds only its opening record.
     expect(tail.reading.state).toBe("queued")
     expect(tail.change.records.map((record) => record.kind)).toEqual(["opened"])
+  })
+
+  // @i/10-yrd/25301 row 3: a withdrawn record is never composed or judged. The round
+  // re-reads each change's state before it judges it; one withdrawn meanwhile is
+  // skipped with one journal line (the service judged task/25314-fence-eof after it
+  // had been withdrawn, 2026-09-23).
+  it("a change withdrawn while an earlier change is judged is skipped with one journal line, never judged (25301 row 3)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    const twoHead = await submitCommit(w, "task/two", "two.txt")
+
+    // task/one fails its judge (its file is one.txt); while that check runs,
+    // task/two is withdrawn, so the walk reaches a change that has left the line.
+    const running = queueRun(await w.options({ exit: 1, sleep: 2, on: ["submit", "merge"] }))
+    await checkRunning(w)
+    await withdraw(w.git, "origin", { branch: "task/two", by: "@chief", target: { branch: "main", remote: "origin" } })
+    const outcome = await running
+
+    expect(outcome.failed).toEqual(["task/one"])
+    expect(outcome.merged).toEqual([])
+    expect(await remoteTarget(w)).toBe(w.target)
+    // One judge ran, task/one's; task/two was never composed or judged.
+    expect(readFileSync(w.checkLog, "utf8").trim().split("\n")).toHaveLength(1)
+    const skips = logRecords(outcome).filter(
+      (record) => record.kind === "observation" && String(record.why ?? "").includes("left the line"),
+    )
+    expect(skips).toHaveLength(1)
+    expect(String(skips[0]?.why)).toContain(`task/two@${twoHead.slice(0, 12)}`)
+    expect(String(skips[0]?.why)).toContain("withdrawn")
   })
 
   // @i/10-yrd/25301 A2 (restated by @cto ac87d1e5): a config edit re-judges no
