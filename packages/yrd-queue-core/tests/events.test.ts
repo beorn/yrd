@@ -786,7 +786,7 @@ describe("the queue-format boundary", () => {
       selected = await appendChangeEvent(location, "lab", "task/landing", selected, {
         type,
         at: new Date(),
-        ...(type === "verifying" ? { commit: base } : {}),
+        ...(type === "verifying" || type === "merging" ? { commit: base } : {}),
       })
     }
     await expect(

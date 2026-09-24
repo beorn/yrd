@@ -327,7 +327,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       if (status === "checking" || status === "merging") {
         events.push(changeInput("checking", { queueTip, at: at(index * 5 + 3) }))
       }
-      if (status === "merging") events.push(changeInput("merging", { queueTip, at: at(index * 5 + 4) }))
+      if (status === "merging") events.push(changeInput("merging", { queueTip, at: at(index * 5 + 4), commit }))
       if (status === "merged") events.push(changeInput("merged", { queueTip, at: at(index * 5 + 2), commit }))
       if (status === "failed") {
         events.push(changeInput("failed", { queueTip, at: at(index * 5 + 2), reason: "check failed" }))
