@@ -14,7 +14,7 @@
 import { describe, expect, test } from "vitest"
 
 import { TERMINAL_DECISIONS } from "../src/log.ts"
-import { RECORD_KINDS } from "../src/records.ts"
+import { RECORD_KINDS } from "../src/legacy-records.ts"
 
 describe("the record and decision vocabularies are pinned (a new word freezes every older running reader)", () => {
   test("the Record: kinds are exactly these eight", () => {

@@ -23,9 +23,11 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import { afterAll, beforeEach, describe, expect, it } from "vitest"
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { Process } from "@yrd/process"
+import * as gitomic from "gitomic"
+import type { RefUpdate } from "gitomic"
 import {
   appendRecord,
   changeRef,
@@ -55,6 +57,25 @@ beforeEach(() => {
 })
 
 const roots: string[] = []
+
+/** Intercept the real Gitomic publication seam while retaining its shell backend. */
+function beforeGitomicPublish(
+  before: (repo: string, updates: readonly RefUpdate[], remote?: string) => Promise<void>,
+): ReturnType<typeof vi.spyOn> {
+  const createBackend = gitomic.createShellBackend
+  return vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+    const backend = createBackend(options)
+    const publish = backend.publish
+    if (publish === undefined) throw new Error("Gitomic shell backend has no publish capability")
+    return {
+      ...backend,
+      publish: async (repo, updates, remote) => {
+        await before(repo, updates, remote)
+        return publish(repo, updates, remote)
+      },
+    }
+  })
+}
 
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
@@ -394,8 +415,6 @@ describe("settling gitlinks", () => {
     )
   })
 
-
-
   it("a pin that is an ancestor of refs/heads/main submits silently", async () => {
     const w = await world()
     await expect(submitGitlink(w, "task/behind", w.onMain)).resolves.toMatch(/^[0-9a-f]{40}$/u)
@@ -590,31 +609,23 @@ describe("settling gitlinks", () => {
     const w = await world()
     const ahead = await aheadOfSubmodule(w, "seven")
     const head = await submitGitlink(w, "task/partial", ahead)
-    await using real = createProcess({ cwd: w.work })
     let rootPushesSeen = 0
     let movedAround = ""
-    const observing: Process = {
-      ...real,
-      async run(request) {
-        const rootPush =
-          request.argv.includes("push") &&
-          !request.argv.includes("super") &&
-          request.argv.some((arg) => arg.endsWith(":refs/heads/main"))
-        if (rootPush && rootPushesSeen++ === 0) {
-          // Between the children's publication and the root push, root main
-          // moves around the queue: the lease must refuse, and nothing else.
-          expect(await submoduleMain(w)).toBe(ahead)
-          await w.git(["checkout", "--quiet", "main"])
-          writeFileSync(join(w.work, "around.txt"), "around the queue\n")
-          await w.git(["add", "around.txt"])
-          await w.git(["commit", "--quiet", "-m", "a file landed around the queue"])
-          await w.git(["push", "--quiet", "origin", "main"])
-          movedAround = (await w.git(["rev-parse", "HEAD"])).trim()
-        }
-        return real.run(request)
-      },
-    }
-    const first = await queueRun({ ...(await w.options()), process: observing })
+    using _publication = beforeGitomicPublish(async (_repo, updates, remote) => {
+      const rootPush = remote !== undefined && updates.some((update) => update.ref === "refs/heads/main")
+      if (rootPush && rootPushesSeen++ === 0) {
+        // Between the children's publication and the root push, root main
+        // moves around the queue: the lease must refuse, and nothing else.
+        expect(await submoduleMain(w)).toBe(ahead)
+        await w.git(["checkout", "--quiet", "main"])
+        writeFileSync(join(w.work, "around.txt"), "around the queue\n")
+        await w.git(["add", "around.txt"])
+        await w.git(["commit", "--quiet", "-m", "a file landed around the queue"])
+        await w.git(["push", "--quiet", "origin", "main"])
+        movedAround = (await w.git(["rev-parse", "HEAD"])).trim()
+      }
+    })
+    const first = await queueRun(await w.options())
     expect(first.exitCode).toBe(0)
     expect(first.merged).toEqual([])
     expect(first.stuck).toEqual([])
@@ -669,18 +680,6 @@ describe("settling gitlinks", () => {
     const observing: Process = {
       ...real,
       async run(request) {
-        const deletion = request.argv.indexOf("update-ref")
-        const ref = request.argv[deletion + 2]
-        if (deletion >= 0 && request.argv[deletion + 1] === "-d" && ref?.startsWith("refs/git-super/receipts/")) {
-          const merge = ref.slice("refs/git-super/receipts/".length)
-          expect(await remoteTip(w.git, "refs/heads/main")).toBe(merge)
-          const record = (
-            await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/on", head })))
-          ).find((row) => row.kind === "merged")
-          expect(record).toBeDefined()
-          expect(trailer(record!, "Root-Changes")).toBe(produced.get(merge))
-          cleaned = true
-        }
         const result = await real.run(request)
         if (result.exitCode === 0 && request.argv.includes("merge") && request.argv.includes("super")) {
           const merge = (JSON.parse(result.stdout) as { commit: string }).commit
@@ -690,6 +689,20 @@ describe("settling gitlinks", () => {
         return result
       },
     }
+    using _publication = beforeGitomicPublish(async (_repo, updates) => {
+      const deletion = updates.find(
+        (update) => update.oid === null && update.ref.startsWith("refs/git-super/receipts/"),
+      )
+      if (deletion === undefined) return
+      const merge = deletion.ref.slice("refs/git-super/receipts/".length)
+      expect(await remoteTip(w.git, "refs/heads/main")).toBe(merge)
+      const record = (
+        await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/on", head })))
+      ).find((row) => row.kind === "merged")
+      expect(record).toBeDefined()
+      expect(trailer(record!, "Root-Changes")).toBe(produced.get(merge))
+      cleaned = true
+    })
     const outcome = await queueRun({ ...(await w.options()), process: observing })
 
     expect(outcome.exitCode).toBe(0)

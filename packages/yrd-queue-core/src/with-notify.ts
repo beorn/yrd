@@ -42,13 +42,13 @@ import {
   trailers,
   type ChangeRecord,
   type WriteRecord,
-} from "./records.ts"
+} from "./legacy-records.ts"
 import { changeName } from "./refs.ts"
 import { recordProgramStart, recordProgramResult, short, shortRecut, writeRecord, type Ring, type Run } from "./run.ts"
 import { tipOf } from "./state.ts"
 import type { QueueEntry } from "./remote.ts"
 import type { OverrideEntry } from "./override.ts"
-import type { Git } from "./records.ts"
+import type { Git } from "./git.ts"
 
 /** This ring's own option, which the run's options carry for it (rings.ts). */
 export type NotifyOptions = Readonly<{
@@ -508,7 +508,7 @@ const NOBODY = "none"
 /** What a sent record's subject says about its entry, in two words. */
 /**
  * One trailer is one line, and a value carrying a line break is REFUSED at
- * record-write time (`recordMessage` in records.ts), which throws out of the
+ * record-write time (`recordMessage` in legacy-records.ts), which throws out of the
  * notify path and takes the whole run down with it. A delivery that failed is
  * the worst moment to lose a run: the ending it was reporting is already
  * decided, and the crash replaces a record saying so with no record at all.

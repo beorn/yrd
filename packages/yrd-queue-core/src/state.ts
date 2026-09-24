@@ -52,7 +52,7 @@ import {
   DEFERRED_WORD,
   type ChangeRecord,
   type NotTold,
-} from "./records.ts"
+} from "./legacy-records.ts"
 import { incidentFrom } from "./incident.ts"
 
 export const CHANGE_STATE_DEFERRED = DEFERRED_WORD

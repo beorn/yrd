@@ -19,7 +19,6 @@ import { dirname, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
-import { listRefs } from "gitomic/events"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import {
@@ -36,6 +35,9 @@ import {
   eventPause,
   eventRows,
   listChangeHistories,
+  createEventStore,
+  selectionFor,
+  listRefs,
   queueFormat,
   queueRef,
   queueRefPrefix,
@@ -511,7 +513,8 @@ export async function coreQueueCommand(
   ): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
-      const event = (await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event"
+      const event =
+        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
       if (event) assertPlainEventQueueConfig(config, "run")
       // Expire, then snapshot, BEFORE the run and so before its header (25296,
       // @cto 462dfe95): a window that passed gets its `expired` record in its
@@ -739,7 +742,7 @@ export async function coreQueueCommand(
 
   switch (request.command) {
     case "drop": {
-      const eventStore = { repo, remote: config.target.remote }
+      const eventStore = createEventStore(repo, config.target.remote, selection)
       const dropped = await drop(eventStore, {
         queue: config.target.branch,
         branch: request.branch,
@@ -757,7 +760,7 @@ export async function coreQueueCommand(
     case "pause":
     case "resume": {
       try {
-        const eventStore = { repo, remote: config.target.remote }
+        const eventStore = createEventStore(repo, config.target.remote, selection)
         if ((await queueFormat(eventStore, config.target.branch)) === "event") {
           const now = await readEventQueue(eventStore, config.target.branch)
           const standing = eventPause(now)
@@ -814,7 +817,7 @@ export async function coreQueueCommand(
       // The merge-check override (25296). An event queue has its own merge
       // selection (event-run.ts) that no override reaches, so it refuses rather
       // than accept a switch nothing would read (X4).
-      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
+      if ((await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event") {
         io.stderr(
           `yrd: ${config.target.remote}#${config.target.branch} is an event queue; a merge-check override is not ` +
             "supported there, and nothing would read it\n",
@@ -917,7 +920,9 @@ export async function coreQueueCommand(
       }
     }
     case "withdraw": {
-      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
+      if (
+        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
+      ) {
         io.stderr(
           `yrd: ${config.target.remote}#${config.target.branch} is an event queue; use yrd drop ${request.branch}\n`,
         )
@@ -952,7 +957,9 @@ export async function coreQueueCommand(
       }
     }
     case "submit": {
-      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
+      if (
+        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
+      ) {
         assertPlainEventQueueConfig(config, "submit")
       }
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
@@ -1607,10 +1614,10 @@ export async function coreQueueCommand(
         // Legacy JSON retains its historical change-only document. An event
         // queue has one status vocabulary beginning at `draft`, so its JSON
         // and table both project the same one row per branch.
-        const format = await queueFormat({ repo, remote: config.target.remote }, config.target.branch)
+        const format = await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)
         const reading =
           format === "event"
-            ? await readEventListing(git, declared.config, repo, workdir, declared.oid)
+            ? await readEventListing(git, declared.config, repo, workdir, declared.oid, selection)
             : {
                 format: "legacy" as const,
                 ...(await readListing(
@@ -2143,8 +2150,10 @@ export async function coreQueueCommand(
       return 0
     }
     case "show": {
-      if ((await queueFormat({ repo, remote: config.target.remote }, config.target.branch)) === "event") {
-        const reading = await readEventListing(git, config, repo, workdir, captured.oid)
+      if (
+        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
+      ) {
+        const reading = await readEventListing(git, config, repo, workdir, captured.oid, selection)
         if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
           io.stderr(`${reading.observation.message}\n`)
           return 2
@@ -2162,7 +2171,7 @@ export async function coreQueueCommand(
           selected === undefined
             ? []
             : await readChangeEvents(
-                { repo, remote: config.target.remote },
+                createEventStore(repo, config.target.remote, selection),
                 config.target.branch,
                 request.branch,
                 selected.tip as string,
@@ -2503,7 +2512,7 @@ function runOptions(
  * `Check` and silently drop the rest, which is the failure this repo bans; a
  * `string | string[]` union would push a type test onto every reader for a
  * difference the record model does not make. So every name gets a list, and the
- * two JSON reads are the twins of the two accessors in records.ts:
+ * two JSON reads are the twins of the two accessors in legacy-records.ts:
  * `trailers.By[0]` is `trailer(record, "By")` and `trailers.Check` is
  * `trailers(record, "Check")`. Names come in the order the record first carries
  * them, values in record order. Always present, empty when there are none: a
@@ -2769,7 +2778,12 @@ export async function openEventDetail(
   ) {
     throw new Error(`event detail for ${row.branch} disagrees with the selected table row`)
   }
-  const events = await readChangeEvents({ repo, remote: config.target.remote }, label, row.branch, selected.tip)
+  const events = await readChangeEvents(
+    createEventStore(repo, config.target.remote, selectionFor(git)),
+    label,
+    row.branch,
+    selected.tip,
+  )
   return {
     row,
     run: runOf(row, label, [], item.run?.id ?? row.run),
@@ -3266,6 +3280,7 @@ async function readEventListing(
   repo: string,
   workdir: string,
   targetOid: string,
+  selection: GitSelection,
 ): Promise<
   Readonly<{
     format: "event"
@@ -3277,7 +3292,7 @@ async function readEventListing(
     observation: GitObservation
   }>
 > {
-  const store = { repo, remote: config.target.remote }
+  const store = createEventStore(repo, config.target.remote, selection)
   const queue = await readEventQueue(store, config.target.branch)
   const histories = await listChangeHistories(store, config.target.branch)
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))

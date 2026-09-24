@@ -39,8 +39,15 @@
  * at-least-once, the plan's shape for every message.
  */
 
-import { endedKind, endingRecordThrough, mergedByRun, trailer, type ChangeRecord, type Git } from "./records.ts"
-import { gitlinkRows } from "./git.ts"
+import {
+  endedKind,
+  endingRecordThrough,
+  legacyStore,
+  mergedByRun,
+  trailer,
+  type ChangeRecord,
+} from "./legacy-records.ts"
+import { gitlinkRows, type Git } from "./git.ts"
 import { changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
 import { tipOf } from "./state.ts"
@@ -164,9 +171,10 @@ export async function directMergeCommits(
   // Each change's ENDING record, never its literal tip: a stray record
   // appended after a merged ending must not hide the merge, however shallow
   // the caller's capture was (@i/10-yrd/24635).
+  const store = await legacyStore(git)
   const byName = new Map<string, ChangeRecord | undefined>()
   for (const entry of entries) {
-    byName.set(changeName(entry.change), await endingRecordThrough(git, entry.change))
+    byName.set(changeName(entry.change), await endingRecordThrough(git, entry.change, store))
   }
   const accounted = new Set<string>()
   for (const ending of byName.values()) {
@@ -197,7 +205,7 @@ export async function directMergeCommits(
  * judged nothing and has no history to start.
  *
  * The walk is first-parent from every change tip, so it reads records and ends
- * at the genesis (records.ts). `--min-parents=1` drops the genesis itself, whose
+ * at the genesis (legacy-records.ts). `--min-parents=1` drops the genesis itself, whose
  * committer date is the epoch by construction and would put the boundary in
  * 1970. No entries means no walk: `git log` without commits would fall back to
  * HEAD and invent a boundary from the project's own history. Pause records

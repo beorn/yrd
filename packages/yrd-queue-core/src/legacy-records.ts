@@ -34,12 +34,36 @@
  * time, so it has the same sha in every repository and is written at most
  * once per repository.
  *
- * Writing uses `update-ref` with the expected old value, so two writers racing
- * on one change lose loudly instead of interleaving.
+ * Writing uses Gitomic publication with the expected old value, so two writers
+ * racing on one change lose loudly instead of interleaving.
  */
 
-import { refAt } from "./git.ts"
+import type { CommitMeta, GitomicBackend } from "./git.ts"
+import { createLegacyBackend, executableFor, type Git } from "./git.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
+
+type LegacyBackend = GitomicBackend &
+  Required<Pick<GitomicBackend, "fetchRefs" | "listRefs" | "publish" | "readHistory">>
+
+/** The one Gitomic boundary used by the legacy format until #25041 deletes it. */
+export type LegacyStore = Readonly<{ repo: string; backend: LegacyBackend }>
+
+/**
+ * Resolve the repository once, then require every Gitomic capability the
+ * legacy adapter uses. The optional backend is an internal test seam; queue-core's
+ * public functions keep their existing signatures.
+ */
+export async function legacyStore(git: Git, providedBackend?: GitomicBackend): Promise<LegacyStore> {
+  const repo = (await git(["rev-parse", "--absolute-git-dir"])).trim()
+  if (repo === "") throw new Error("legacy queue store: git rev-parse returned an empty repository store")
+  const backend = providedBackend ?? createLegacyBackend(executableFor(git))
+  for (const capability of ["fetchRefs", "listRefs", "publish", "readHistory"] as const) {
+    if (typeof backend[capability] !== "function") {
+      throw new Error(`legacy queue store: Gitomic backend lacks ${capability}`)
+    }
+  }
+  return { repo, backend: backend as LegacyBackend }
+}
 
 /** The one word for a deferred record and state, kept behind one constant (CTO ruling 25029). */
 export const DEFERRED_WORD = "deferred" as const
@@ -71,9 +95,6 @@ export type ChangeRecord = Readonly<{
   trailers: readonly (readonly [string, string])[]
 }>
 
-/** One git invocation, returning its stdout; `input` is its stdin. Throws on a non-zero exit. */
-export type Git = (args: readonly string[], input?: string) => Promise<string>
-
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 /** Git's expected-old value for a ref that must not exist yet. */
 export const ABSENT = "0".repeat(40)
@@ -104,119 +125,57 @@ const CARRIED = ["Opened", "Submitter", "Issue"] as const
  */
 export const RECORD_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
 
-/**
- * The queue read's one record log (@i/10-yrd/25303 f1): {@link RECORD_FORMAT}
- * with the parents second, records separated by `%x01`, read `--first-parent`
- * over every captured tip. First-parent from a tip reads exactly that change's
- * records and stops at the genesis, and it never follows a checked record's
- * second parent into the target's history (the module comment above).
- */
-export const PRIME_FORMAT = "%H%x00%P%x00%cI%x00%(trailers:only,unfold)%x00%B%x01"
-
-/** One commit as a prime read it: what `readRecord` parses, plus the first parent that `readRecords` walks. */
-type PrimedCommit = Readonly<{ at: string; block: string; body: string; parent: string | undefined }>
-
-/**
- * Commits a queue read has already read, per Git instance. A commit is
- * immutable by its sha, so an entry is never stale, only absent. A round reads
- * one ended record and its receipts per change (with-notify's repair pass),
- * which cost two processes per change before this cache: 847 to 1,152 pairs a
- * round on the garage, 4 to 10 s under load. Primed by the read that already
- * held every tip, they cost none.
- */
-const primed = new WeakMap<Git, Map<string, PrimedCommit>>()
-
-/** Ten times the prime the garage measured on 2026-09-23 (7,538 commits, 10.5 MB): past it, say so. */
+/** Immutable commits from the last queue-wide Gitomic history batch, per Git runner. */
+const primed = new WeakMap<Git, Map<string, CommitMeta>>()
 const PRIME_WARN_COMMITS = 75_000
 const PRIME_WARN_BYTES = 100 * 1024 * 1024
 
-/** `DEBUG` names yrd the way loggily reads it: `*`, `yrd`, or a `yrd…` prefix pattern in the list. */
-function debugging(): boolean {
-  return (process.env["DEBUG"] ?? "").split(/[\s,]+/u).some((name) => name === "*" || name.startsWith("yrd"))
-}
-
 function debugLine(message: string): void {
-  if (debugging()) console.error(`DEBUG yrd:queue:records ${message}`)
+  const enabled = (process.env["DEBUG"] ?? "").split(/[\s,]+/u).some((name) => name === "*" || name.startsWith("yrd"))
+  if (enabled) console.error(`DEBUG yrd:queue:records ${message}`)
 }
 
-/**
- * Parse one {@link PRIME_FORMAT} log into rows, and keep every commit for
- * `readRecord` and `readRecords` on this Git instance. Returns the rows so
- * the reader that ran the log uses the same parse.
- */
-export function primeRecords(
-  git: Git,
-  output: string,
-): readonly Readonly<{ sha: string; at: string; block: string; body: string }>[] {
-  const cache = primed.get(git) ?? new Map<string, PrimedCommit>()
+/** Keep the batch already read by the queue, so per-change readers spawn no new history process. */
+export function primeLegacyHistory(git: Git, history: readonly CommitMeta[]): void {
+  const cache = primed.get(git) ?? new Map<string, CommitMeta>()
   primed.set(git, cache)
-  const rows: Readonly<{ sha: string; at: string; block: string; body: string }>[] = []
-  for (const record of output.split("\x01")) {
-    const [shaField, parents, at, block, body] = record.replace(/^\n/u, "").split("\x00")
-    const sha = shaField?.trim()
-    if (
-      sha === undefined ||
-      sha === "" ||
-      parents === undefined ||
-      at === undefined ||
-      block === undefined ||
-      body === undefined
-    ) {
-      continue
-    }
-    cache.set(sha, { at, block, body, parent: parents.split(" ")[0] || undefined })
-    rows.push({ sha, at, block, body })
+  let bytes = 0
+  for (const meta of history) {
+    cache.set(meta.oid, meta)
+    bytes += Buffer.byteLength(meta.message)
   }
-  const bytes = Buffer.byteLength(output)
-  debugLine(`record prime: ${rows.length} commits, ${bytes} bytes, ${cache.size} held`)
-  if (rows.length > PRIME_WARN_COMMITS || bytes > PRIME_WARN_BYTES) {
+  debugLine(`record prime: ${history.length} commits, ${bytes} message bytes, ${cache.size} held`)
+  if (history.length > PRIME_WARN_COMMITS || bytes > PRIME_WARN_BYTES) {
     console.error(
-      `yrd: the queue read's record log read ${rows.length} commits and ${bytes} bytes, past the ${PRIME_WARN_COMMITS} / ${PRIME_WARN_BYTES} it is watched at; the change refs are growing faster than the read was sized for (@i/10-yrd/25303 f1)`,
+      `yrd: the queue read's record history read ${history.length} commits and ${bytes} message bytes, past the ${PRIME_WARN_COMMITS} / ${PRIME_WARN_BYTES} it is watched at; the change refs are growing faster than the read was sized for (@i/10-yrd/25303 f1)`,
     )
   }
-  return rows
 }
 
-/** A primed commit, or undefined with the miss named at debug: the caller reads it the way it always did. */
-function primedCommit(git: Git, sha: string, reader: string): PrimedCommit | undefined {
+/** A fully held first-parent chain, or undefined when Gitomic must read a cache miss. */
+function primedHistory(git: Git, from: string): readonly CommitMeta[] | undefined {
   const cache = primed.get(git)
   if (cache === undefined) return undefined
-  const commit = cache.get(sha)
-  if (commit === undefined) debugLine(`record cache miss: ${reader} ${sha}`)
-  return commit
-}
-
-const OBJECT_ID = "[0-9a-f]{40}(?:[0-9a-f]{24})?"
-const TIP_ONLY = new RegExp(`^(${OBJECT_ID})$`, "u")
-const RANGE = new RegExp(`^(${OBJECT_ID})\\.\\.(${OBJECT_ID})$`, "u")
-
-/**
- * The first-parent chain `readRecords` would log for `from`, from primed
- * commits alone, newest first; undefined when any commit is absent or `from`
- * is a shape this walk does not answer. `a..b` stops before `a`, and only
- * when `a` lies on `b`'s chain; otherwise the log answers it as before.
- */
-function primedChain(git: Git, from: string): readonly (readonly [string, PrimedCommit])[] | undefined {
-  if (primed.get(git) === undefined) return undefined
-  const range = RANGE.exec(from)
-  const tip = range?.[2] ?? TIP_ONLY.exec(from)?.[1]
+  const range = /^([0-9a-f]{40}(?:[0-9a-f]{24})?)\.\.([0-9a-f]{40}(?:[0-9a-f]{24})?)$/u.exec(from)
+  const tip = range?.[2] ?? (/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(from) ? from : undefined)
   if (tip === undefined) return undefined
   const stop = range?.[1]
-  const chain: (readonly [string, PrimedCommit])[] = []
-  let sha: string | undefined = tip
-  while (sha !== undefined && sha !== stop) {
-    const commit = primedCommit(git, sha, `readRecords ${from}:`)
-    if (commit === undefined) return undefined
-    chain.push([sha, commit])
-    sha = commit.parent
+  const history: CommitMeta[] = []
+  let oid: string | null = tip
+  while (oid !== null && oid !== stop) {
+    const meta = cache.get(oid)
+    if (meta === undefined) {
+      debugLine(`record cache miss: readRecords ${from}: ${oid}`)
+      return undefined
+    }
+    history.push(meta)
+    oid = meta.parent
   }
-  // A range whose base is not on the tip's chain excludes what the base reaches,
-  // which this walk cannot see; the log answers it.
-  if (stop !== undefined && sha !== stop) {
+  if (stop !== undefined && oid !== stop) {
     debugLine(`record cache miss: readRecords ${from}: ${stop} is not on ${tip}'s first-parent chain`)
     return undefined
   }
-  return chain
+  return history
 }
 
 /**
@@ -342,13 +301,10 @@ export async function readRootChanges(git: Git, merge: string, copied?: string):
   let receipt: RootChanges["receipt"]
   if (copied === undefined) {
     const ref = `refs/git-super/receipts/${merge}`
-    const refs = (await git(["for-each-ref", "--format=%(refname)%00%(objecttype)%00%(objectname)", ref]))
-      .split("\n")
-      .filter((line) => line.split("\0")[0] === ref)
-    if (refs.length === 0) return undefined
-    const row = refs[0]?.split("\0")
-    const receiptOid = row?.[2]
-    if (refs.length !== 1 || row?.[1] !== "commit" || !oid(receiptOid)) {
+    const store = await legacyStore(git)
+    const receiptOid = (await store.backend.listRefs(store.repo, ref)).get(ref)
+    if (receiptOid === undefined) return undefined
+    if (!oid(receiptOid) || (await git(["cat-file", "-t", receiptOid])).trim() !== "commit") {
       invalid(`present receipt ref ${ref} does not name one commit`)
     }
     if ((await git(["show", "-s", "--format=%P", receiptOid])).trim() !== merge) {
@@ -462,7 +418,10 @@ export async function cleanupRootChanges(git: Git, rootChanges: RootChanges, dur
   ) {
     throw new Error(`Root-Changes cleanup: ${rootChanges.receipt.ref} changed; preserve its unexpected value`)
   }
-  await git(["update-ref", "-d", rootChanges.receipt.ref, rootChanges.receipt.oid])
+  const store = await legacyStore(git)
+  await store.backend.publish(store.repo, [
+    { ref: rootChanges.receipt.ref, expect: rootChanges.receipt.oid, oid: null },
+  ])
 }
 
 async function recordRootChanges(
@@ -502,9 +461,10 @@ async function recordRootChanges(
  */
 export async function appendRecord(git: Git, queue: string, write: WriteRecord): Promise<string> {
   const ref = changeRef(queue, write.change)
-  const tip = await refAt(git, ref)
+  const store = await legacyStore(git)
+  const tip = (await store.backend.listRefs(store.repo, ref)).get(ref)
   const sha = await recordCommit(git, write, tip)
-  await git(["update-ref", ref, sha, tip ?? ABSENT])
+  await store.backend.publish(store.repo, [{ ref, expect: tip ?? ABSENT, oid: sha }])
   return sha
 }
 
@@ -513,17 +473,53 @@ async function genesis(git: Git): Promise<string> {
   return (await git(["hash-object", "-w", "-t", "commit", "--stdin"], GENESIS_OBJECT)).trim()
 }
 
+/** Read one exact commit through Gitomic's history seam. */
+export async function readLegacyCommit(git: Git, sha: string): Promise<CommitMeta> {
+  const store = await legacyStore(git)
+  const [meta] = await store.backend.readHistory(store.repo, [sha], { limit: 1 })
+  if (meta?.oid !== sha) throw new Error(`${sha.slice(0, 12)} is not a readable commit`)
+  return meta
+}
+
+/**
+ * The exact legacy pause bytes. Gitomic owns the ref, while this private
+ * compatibility writer survives until #25041 deletes the legacy format.
+ */
+export async function legacyPauseCommit(
+  git: Git,
+  previous: Readonly<{ sha: string }> | undefined,
+  write: Readonly<{
+    kind: "paused" | "resumed"
+    reason: string
+    by: string
+    cause?: "operator" | "stuck"
+    change?: Change
+    next?: string
+  }>,
+  pausedAt?: Date,
+): Promise<string> {
+  const tree = (await git(["mktree"], "")).trim()
+  const trailers = [
+    `Record: ${write.kind}`,
+    `Paused-By: ${write.by}`,
+    ...(pausedAt === undefined ? [] : [`Paused-At: ${pausedAt.toISOString()}`]),
+    ...(write.kind === "paused" ? [`Cause: ${write.cause ?? "operator"}`] : []),
+    ...(write.kind === "paused" && write.change !== undefined ? [`Change: ${changeName(write.change)}`] : []),
+    ...(write.kind === "paused" && write.next !== undefined
+      ? [`Next: ${write.next.replace(/\s+/gu, " ").trim()}`]
+      : []),
+  ]
+  const message = `${write.reason}\n\n${trailers.join("\n")}\n`
+  const args = ["commit-tree", tree]
+  if (previous !== undefined) args.push("-p", previous.sha)
+  return (await git([...args, "-m", message])).trim()
+}
+
 /** The record at `sha`. A commit there that is not a record is loud: a change's ref holds only records. */
 export async function readRecord(git: Git, sha: string): Promise<ChangeRecord> {
-  const held = primedCommit(git, sha, "readRecord")
-  const [id, at, block, body] =
-    held === undefined
-      ? (await git(["log", "-1", `--format=${RECORD_FORMAT}`, sha])).split("\x00")
-      : [sha, held.at, held.block, held.body]
-  const record =
-    id === undefined || at === undefined || block === undefined || body === undefined
-      ? undefined
-      : recordFrom(id.trim(), at, body, block)
+  const held = primed.get(git)?.get(sha)
+  if (held === undefined && primed.has(git)) debugLine(`record cache miss: readRecord ${sha}`)
+  const record = recordFromMeta(held ?? (await readLegacyCommit(git, sha)))
   if (record === undefined) throw new Error(`${sha.slice(0, 12)} is not a record; a change's ref holds only records`)
   await recordRootChanges(git, record.trailers, record)
   return record
@@ -534,39 +530,116 @@ async function carriedFrom(git: Git, sha: string): Promise<readonly (readonly [s
   return (await readRecord(git, sha)).trailers.filter(([name]) => (CARRIED as readonly string[]).includes(name))
 }
 
-/** Every record through the captured commit, oldest first. Never re-read a moving ref. */
+/**
+ * Every record through the captured commit, oldest first. A `before..through`
+ * selection returns only records after `before`, preserving the public range
+ * contract used by notification receipt reads. Never re-read a moving ref.
+ */
 export async function readRecords(git: Git, from: string): Promise<readonly ChangeRecord[]> {
-  // %x00 separates the fields and %x01 the records, because a commit message
-  // holds newlines and a naive split would cut a record in half.
-  const held = primedChain(git, from)
-  const rows =
-    held === undefined
-      ? (await git(["log", "--first-parent", `--format=${RECORD_FORMAT}%x01`, from]))
-          .split("\x01")
-          .map((record) => record.trim())
-          .filter((row) => row !== "")
-          .map((row) => row.split("\x00"))
-      : held.map(([sha, commit]) => [sha, commit.at, commit.block, commit.body])
+  const held = primedHistory(git, from)
+  if (held !== undefined) {
+    const separator = from.indexOf("..")
+    return recordsFromHistorySelection(git, held, separator < 0 ? from : from.slice(separator + 2), separator < 0)
+  }
+  const store = await legacyStore(git)
+  return readRecordsFromStore(git, from, store)
+}
+
+/** Read a captured legacy chain through an operation's already-resolved store. */
+async function readRecordsFromStore(git: Git, from: string, store: LegacyStore): Promise<readonly ChangeRecord[]> {
+  const separator = from.indexOf("..")
+  if (separator < 0) {
+    const history = await store.backend.readHistory(store.repo, [from])
+    return recordsFromHistory(git, history, from)
+  }
+  const before = from.slice(0, separator)
+  const through = from.slice(separator + 2)
+  const history = await store.backend.readHistory(store.repo, [through], { exclude: [before] })
+  return recordsFromHistorySelection(git, history, through, false)
+}
+
+/**
+ * Reconstruct one first-parent legacy chain from a possibly multi-tip Gitomic
+ * history batch, preserving the legacy validation and oldest-first result.
+ */
+export async function recordsFromHistory(
+  git: Git,
+  history: readonly CommitMeta[],
+  from: string,
+): Promise<readonly ChangeRecord[]> {
+  return recordsFromHistorySelection(git, history, from, true)
+}
+
+async function recordsFromHistorySelection(
+  git: Git,
+  history: readonly CommitMeta[],
+  from: string,
+  complete: boolean,
+): Promise<readonly ChangeRecord[]> {
+  const byOid = new Map(history.map((meta) => [meta.oid, meta] as const))
   const records: ChangeRecord[] = []
-  for (const [sha, at, block, body] of rows) {
-    if (sha === undefined || at === undefined || block === undefined || body === undefined) continue
-    const parsed = recordFrom(sha, at, body, block)
+  let oid: string | null = from
+  while (oid !== null) {
+    const meta = byOid.get(oid)
+    if (meta === undefined) {
+      // A range deliberately excludes its lower bound and everything reachable
+      // from it. The first missing first parent is therefore its exact end;
+      // an unbounded history remains loud when Gitomic omitted a commit.
+      if (!complete) break
+      throw new Error(`history from ${from} did not include first-parent commit ${oid}`)
+    }
+    const parsed = recordFromMeta(meta)
     // The tip is the first record this reads, and the one check that these
     // records are in the format this code understands happens on it, once. It
     // comes BEFORE the walk's own ending below, because a captured tip that is not
     // a record at all is the very case that check is about.
     if (records.length === 0) {
       const where = parsed === undefined ? `history from ${from}` : `${changeOf(parsed, from)} history from ${from}`
-      records.push(tipRecord(parsed, sha, where))
+      records.push(tipRecord(parsed, meta.oid, where))
+      oid = meta.parent
       continue
     }
     // The first-parent walk ends at the genesis, which carries no `Record:`
     // trailer. That is where this change's history ends.
     if (parsed === undefined) break
     records.push(parsed)
+    oid = meta.parent
   }
   for (const record of records) await recordRootChanges(git, record.trailers, record)
   return records.reverse()
+}
+
+/** Git's final trailer paragraph, preserving folded continuation values. */
+export function legacyTrailers(message: string): readonly (readonly [string, string])[] {
+  const paragraphs = message.trimEnd().split(/\n[ \t]*\n/u)
+  if (paragraphs.length < 2) return []
+  const parsed: Array<[string, string]> = []
+  for (const line of (paragraphs.at(-1) ?? "").split("\n")) {
+    if (/^[ \t]+/u.test(line)) {
+      const previous = parsed.at(-1)
+      if (previous === undefined) return []
+      previous[1] = `${previous[1]} ${line.trim()}`
+      continue
+    }
+    const match = /^([A-Za-z0-9][A-Za-z0-9-]*):[ \t]?(.*)$/u.exec(line)
+    if (match === null) return []
+    parsed.push([match[1] as string, (match[2] ?? "").trimEnd()])
+  }
+  return parsed
+}
+
+/** Convert Gitomic's one batched history row into the unchanged legacy shape. */
+export function recordFromMeta(meta: CommitMeta): ChangeRecord | undefined {
+  const trailers = legacyTrailers(meta.message)
+  const kind = trailers.find(([name]) => name === "Record")?.[1]
+  if (kind === undefined || !isRecordKind(kind)) return undefined
+  return {
+    at: new Date(meta.timestamp * 1_000),
+    kind,
+    sha: meta.oid,
+    subject: meta.message.split("\n")[0]?.trim() ?? "",
+    trailers,
+  }
 }
 
 /** The message one record commit carries. */
@@ -729,13 +802,14 @@ export function endingRecord(records: readonly ChangeRecord[]): ChangeRecord | u
 export async function endingRecordThrough(
   git: Git,
   change: Readonly<{ records: readonly ChangeRecord[] }>,
+  store: LegacyStore,
 ): Promise<ChangeRecord | undefined> {
   const held = endingRecord(change.records)
   if (held !== undefined) return held
   if (change.records[0]?.kind === "opened") return undefined
   const tip = change.records.at(-1)
   if (tip === undefined || tip.kind === "opened") return undefined
-  return endingRecord(await readRecords(git, tip.sha))
+  return endingRecord(await readRecordsFromStore(git, tip.sha, store))
 }
 
 /** Parse Git's already-isolated, unfolded trailer block into ordered pairs. */

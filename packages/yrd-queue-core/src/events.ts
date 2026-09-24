@@ -1,12 +1,12 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
-import { chainsUnder, listRefs, openEvents } from "gitomic/events"
-import type { AlsoRef, Event, EventInput } from "gitomic/events"
-import type { GitomicBackend, Oid } from "gitomic"
+import { chainsUnder, listRefs, openEvents } from "./git.ts"
+import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
 import { queueRefPrefix } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
-import { gitIn, readRemoteCommit, refAt } from "./git.ts"
+import { gitIn, refAt } from "./git.ts"
+import type { GitSelection } from "./git.ts"
 import type { QueueConfig } from "./config.ts"
 
 export const CHANGE_STATUSES = [
@@ -326,7 +326,7 @@ export function decide(events: readonly Event[], input: EventInput): readonly Ev
   return [input]
 }
 
-export type QueueLocation = Readonly<{ repo: string; remote: string; backend?: GitomicBackend }>
+export type QueueLocation = Readonly<{ repo: string; remote: string; selection: GitSelection; backend: GitomicBackend }>
 export type DropRequest = Readonly<{ queue: string; branch: string; by: string; note?: string }>
 export type Dropped = Readonly<{ queue: string; branch: string; head: string; event: string }>
 
@@ -372,7 +372,7 @@ export async function createEventQueue(
       `cannot create event queue ${store.remote}#${queue}: QueueConfig targets ${config.target.remote}#${config.target.branch}`,
     )
   }
-  const blob = await refAt(gitIn(store.repo), `${commit}:.yrd.yml`, "blob")
+  const blob = await refAt(gitIn(store.repo, undefined, store.selection), `${commit}:.yrd.yml`, "blob")
   if (blob === undefined) {
     throw new Error(
       `cannot create event queue ${queue} at ${commit}: the pinned commit has no .yrd.yml; #25040 does not invent a default`,
@@ -661,10 +661,9 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   const history = selectedTip === null ? [] : await chain.events({ limit: 1024 })
   const state = selectedTip === null ? initial : project(history, ref, store.repo)
   const branchRef = `refs/heads/${branch}`
-  const head =
-    store.backend === undefined
-      ? await readRemoteCommit(gitIn(store.repo), store.remote, branchRef)
-      : (await listRefs(branchRef, store)).get(branchRef)
+  const fetchRefs = store.backend.fetchRefs
+  if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs for dropped branch commit")
+  const head = (await fetchRefs(store.repo, branchRef, store.remote)).get(branchRef)
   if (head === undefined) {
     if (state.ending !== undefined && state.reason === "dropped") {
       const ending = history.findLast((event) => event.id === state.ending?.id)
