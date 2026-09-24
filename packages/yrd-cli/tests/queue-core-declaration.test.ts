@@ -50,7 +50,7 @@ it("refuses future event queue and check keys by name", () => {
     blob: "a".repeat(40),
   }
   expect(() => assertPlainEventQueueConfig({ ...plain, futureQueueFeature: true } as QueueConfig, "run")).toThrow(
-    /queue key futureQueueFeature:.*#25040.*25065/u,
+    /queue key futureQueueFeature:.*25065/u,
   )
   expect(() =>
     assertPlainEventQueueConfig({ ...plain, futureQueueFeature: undefined } as QueueConfig, "run"),
@@ -66,7 +66,7 @@ it("refuses future event queue and check keys by name", () => {
       },
       "run",
     ),
-  ).toThrow(/check key futureCheckFeature:.*#25040.*25065/u)
+  ).toThrow(/check key futureCheckFeature:.*25065/u)
   expect(() =>
     assertPlainEventQueueConfig(
       {
@@ -157,35 +157,50 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await git(["show", `${published}:plain-check.txt`])).toBe("plain check\n")
   }, 15_000)
 
+  // 25065 (f478ef49e1) gave the event runner an executor for these, so a declaration using
+  // them creates its queue; teardown alone still has none.
   it.each([
     ["setup:", 'setup: "true"\n'],
-    ["teardown:", 'teardown: "true"\n'],
     ["notify:", 'notify:\n  - recorder: {on: [merged], run: "true"}\n'],
     ["submit-phase", 'checks:\n  - verify: {run: "true", on: submit}\n'],
     ["programRoot", 'checks:\n  - verify: {run: "true", programRoot: true}\n'],
     ["scripts", 'checks:\n  - verify: {run: "true", scripts: [tools/check.ts]}\n'],
     ["deferred-capable", 'checks:\n  - verify: {run: "true", long: {timeoutMs: 60000}}\n'],
-  ])("refuses event queue creation with %s before writing a queue ref", async (feature, declaration) => {
-    const repo = await world(declaration)
-    const git = gitIn(repo)
-    const target = (await git(["rev-parse", "HEAD"])).trim()
-    const config = await readConfig(git, target, { branch: "main", remote: "origin" })
-    if (config === undefined) throw new Error("fixture declaration is absent")
-    const before = await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])
+  ])(
+    "creates an event queue whose declaration uses %s, which the event runner executes",
+    async (_feature, declaration) => {
+      const repo = await world(declaration)
+      const git = gitIn(repo)
+      const target = (await git(["rev-parse", "HEAD"])).trim()
+      await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+      expect(await git(["ls-remote", "--refs", "origin", queueRef("main")])).not.toBe("")
+    },
+  )
 
-    await expect(
-      createEventQueue(
-        createEventStore(repo, "origin", gitIn(repo).selection),
-        "main",
-        target,
-        config,
-        new Date("2026-09-22T14:00:00.000Z"),
-      ),
-    ).rejects.toThrow(new RegExp(`${feature}.*#25040.*25065`))
+  it.each([["teardown:", 'teardown: "true"\n']])(
+    "refuses event queue creation with %s before writing a queue ref",
+    async (feature, declaration) => {
+      const repo = await world(declaration)
+      const git = gitIn(repo)
+      const target = (await git(["rev-parse", "HEAD"])).trim()
+      const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+      if (config === undefined) throw new Error("fixture declaration is absent")
+      const before = await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])
 
-    expect(await git(["ls-remote", "--refs", "origin", queueRef("main")])).toBe("")
-    expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])).toBe(before)
-  })
+      await expect(
+        createEventQueue(
+          createEventStore(repo, "origin", gitIn(repo).selection),
+          "main",
+          target,
+          config,
+          new Date("2026-09-22T14:00:00.000Z"),
+        ),
+      ).rejects.toThrow(new RegExp(`${feature}.*25065`))
+
+      expect(await git(["ls-remote", "--refs", "origin", queueRef("main")])).toBe("")
+      expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])).toBe(before)
+    },
+  )
 
   it("refuses event queue creation when config came from another blob", async () => {
     const repo = await world("{}\n")
@@ -654,7 +669,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await drop(store, { queue: "main", branch: "task/remote-draft", by: "@dev/2" })).toEqual(dropped)
   }, 15_000)
 
-  it("refuses notify configuration when submitting to an event queue until 25065", async () => {
+  it("accepts a change to an event queue whose declaration configures notify (25065)", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
     const target = (await git(["rev-parse", "HEAD"])).trim()
@@ -669,9 +684,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     await git(["commit", "--quiet", "-m", "event notify"])
 
     const submitted = capture(repo)
-    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main"], submitted.io)).toBe(2)
-    expect(submitted.stderr()).toMatch(/notify:.*#25040.*25065/u)
-    expect(await git(["ls-remote", "--refs", "origin", "refs/heads/task/event-notify"])).toBe("")
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main"], submitted.io), submitted.stderr()).toBe(0)
   })
 
   it("directs drop on a legacy queue to the existing withdraw command", async () => {
