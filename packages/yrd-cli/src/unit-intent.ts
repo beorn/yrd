@@ -64,7 +64,10 @@ export function readUnitIntent(
   }
   const atMs = Date.parse(record.at)
   if (Number.isNaN(atMs)) {
-    return { kind: "none", why: `the ${verb} intent at ${path} has an unparseable timestamp: ${JSON.stringify(record.at)}` }
+    return {
+      kind: "none",
+      why: `the ${verb} intent at ${path} has an unparseable timestamp: ${JSON.stringify(record.at)}`,
+    }
   }
   if (verb === "stop") {
     if (startedAt === undefined) {

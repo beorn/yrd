@@ -39,9 +39,11 @@ describe("readUnitIntent (25430, @cto 16ab7d00)", () => {
       file,
       `${JSON.stringify({ verb: "stop", by: "@chief", reason: "maintenance", at: "2026-09-24T07:15:00.000Z" })}\n`,
     )
-    expect(readUnitIntent("start", { [UNIT_INTENT_FILE_ENV]: file }, new Date("2026-09-24T07:00:00.000Z"))).toMatchObject({
+    expect(
+      readUnitIntent("start", { [UNIT_INTENT_FILE_ENV]: file }, new Date("2026-09-24T07:00:00.000Z")),
+    ).toMatchObject({
       kind: "none",
-      why: expect.stringContaining("is for \"stop\", not start"),
+      why: expect.stringContaining('is for "stop", not start'),
     })
   })
 
@@ -49,13 +51,20 @@ describe("readUnitIntent (25430, @cto 16ab7d00)", () => {
     const dir = mkdtempSync(join(tmpdir(), "unit-intent-test-"))
     const file = join(dir, "intent.json")
     writeFileSync(file, `${JSON.stringify({ verb: "stop", reason: "cutover", at: "2026-09-24T07:15:00.000Z" })}\n`)
-    expect(readUnitIntent("stop", { [UNIT_INTENT_FILE_ENV]: file }, new Date("2026-09-24T07:00:00.000Z"))).toMatchObject({
+    expect(
+      readUnitIntent("stop", { [UNIT_INTENT_FILE_ENV]: file }, new Date("2026-09-24T07:00:00.000Z")),
+    ).toMatchObject({
       kind: "none",
       why: expect.stringContaining("has no by and reason"),
     })
 
-    writeFileSync(file, `${JSON.stringify({ verb: "stop", by: "@chief", reason: "  ", at: "2026-09-24T07:15:00.000Z" })}\n`)
-    expect(readUnitIntent("stop", { [UNIT_INTENT_FILE_ENV]: file }, new Date("2026-09-24T07:00:00.000Z"))).toMatchObject({
+    writeFileSync(
+      file,
+      `${JSON.stringify({ verb: "stop", by: "@chief", reason: "  ", at: "2026-09-24T07:15:00.000Z" })}\n`,
+    )
+    expect(
+      readUnitIntent("stop", { [UNIT_INTENT_FILE_ENV]: file }, new Date("2026-09-24T07:00:00.000Z")),
+    ).toMatchObject({
       kind: "none",
       why: expect.stringContaining("has no by and reason"),
     })
@@ -119,10 +128,7 @@ describe("readUnitIntent (25430, @cto 16ab7d00)", () => {
     const processStartedAt = "2026-09-24T07:00:00.000Z"
     const freshAt = "2026-09-24T07:15:00.000Z"
 
-    writeFileSync(
-      file,
-      `${JSON.stringify({ verb: "stop", by: "@chief", reason: "redeploy", at: freshAt })}\n`,
-    )
+    writeFileSync(file, `${JSON.stringify({ verb: "stop", by: "@chief", reason: "redeploy", at: freshAt })}\n`)
     // Pass ISO string startedAt
     const result = readUnitIntent("stop", { [UNIT_INTENT_FILE_ENV]: file }, processStartedAt)
     expect(result).toEqual({
@@ -154,10 +160,7 @@ describe("readUnitIntent (25430, @cto 16ab7d00)", () => {
     const dir = mkdtempSync(join(tmpdir(), "unit-intent-test-"))
     const file = join(dir, "intent.json")
     const at = "2026-09-24T07:00:00.000Z"
-    writeFileSync(
-      file,
-      `${JSON.stringify({ verb: "start", by: "@chief", reason: "morning launch", at })}\n`,
-    )
+    writeFileSync(file, `${JSON.stringify({ verb: "start", by: "@chief", reason: "morning launch", at })}\n`)
     const result = readUnitIntent("start", { [UNIT_INTENT_FILE_ENV]: file }, at)
     expect(result).toEqual({
       kind: "intent",
