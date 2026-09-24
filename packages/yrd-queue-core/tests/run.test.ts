@@ -1952,7 +1952,7 @@ describe("a queue run", () => {
     // The change behind it was checked in an earlier round, under the declaration this round starts under.
     const options = await w.options({ exit: 0, on: ["submit", "merge"] })
     const laterHead = await submitCommit(w, "task/later", "later.txt")
-    const checked = await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/later", head: laterHead },
       kind: "checked",
       subject: `task/later passed the on-submit checks at main ${w.target.slice(0, 12)}`,
@@ -1961,12 +1961,6 @@ describe("a queue run", () => {
         ["Base", w.target],
       ],
     })
-    await w.git([
-      "push",
-      "--quiet",
-      "origin",
-      `${checked}:${changeRef("main", { branch: "task/later", head: laterHead })}`,
-    ])
 
     const outcome = await queueRun(options)
 

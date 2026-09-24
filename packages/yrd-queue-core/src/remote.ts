@@ -62,9 +62,12 @@ export class CapturedQueueObjectsUnavailable extends Error {
     readonly detail: string,
     cause: unknown,
   ) {
-    super(`${remote}#${queue} at ${capturedTarget}: could not fetch captured queue objects; read the queue again: ${detail}`, {
-      cause,
-    })
+    super(
+      `${remote}#${queue} at ${capturedTarget}: could not fetch captured queue objects; read the queue again: ${detail}`,
+      {
+        cause,
+      },
+    )
     this.name = "CapturedQueueObjectsUnavailable"
   }
 }
@@ -105,13 +108,9 @@ export async function readQueue(
   // fetch both names every legacy record ref and brings its history into
   // Gitomic's private namespace. Neither operation moves an application ref.
   const listedHeadRefs = await store.backend.listRefs(store.repo, "refs/heads/", remote)
-  let queueRefs: ReadonlyMap<string, string>
-  try {
-    queueRefs = await store.backend.fetchRefs(store.repo, queueRefPrefix(target), remote)
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    throw new CapturedQueueObjectsUnavailable(remote, target, targetSha, detail, error)
-  }
+  // Gitomic's prefix fetch is the reader's authority. Its failure must surface
+  // once, rather than enter the retired captured-advertisement retry path.
+  const queueRefs = await store.backend.fetchRefs(store.repo, queueRefPrefix(target), remote)
   const headRefs = new Map(listedHeadRefs)
   const heads = new Map<string, string>()
   const prefixes = ["refs/heads/", `${queueRefPrefix(target)}/`]

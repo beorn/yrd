@@ -98,14 +98,15 @@ it("keeps the exact legacy record and pause object ids under a fixed clock", asy
       resumed: resumed.sha,
       retainedHead,
     }).toEqual({
-      candidate: "917c4fed28a939a7e4c16cacf070306641541fa8",
-      checked: "6b38dab6b4709170bfd27fb0d33ef8044aa0c868",
+      // #25429 intentionally renamed the queue committer from yrd-service to yrd.
+      candidate: "bf9428028fafaed8b945da0834b48e32eb9da4bb",
+      checked: "420f6626740fd641c67b286ba6f1ebec129e04a9",
       genesis: "538f8f98bbb84332337777f997139c8464b80cd9",
-      head: "591a78a8d7634696ba4aac046eb98e2e05bcc476",
-      opened: "e9a72abd40b3942a356132f821fbcda698b1e14b",
-      paused: "e8d10831f1a28d485ea6070b6b6dc94129fb19a6",
-      resumed: "c7d6d84fa8acc1247864966ebad8d30e6a144838",
-      retainedHead: "591a78a8d7634696ba4aac046eb98e2e05bcc476",
+      head: "16dd428a661213c8ec0ece125ccffc88718e4977",
+      opened: "55247712357de02a897df4fed3a0b40f0a716756",
+      paused: "d1c7695c38ebfbca6c11da6f2fd77e16f98772cb",
+      resumed: "91d4b7331cebd2dbd733f13b71beb0573a7d503c",
+      retainedHead: "16dd428a661213c8ec0ece125ccffc88718e4977",
     })
   } finally {
     vi.useRealTimers()
