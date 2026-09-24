@@ -453,13 +453,39 @@ it("finishes a two-child event from a cold clone after the runner dies between c
   for (const hook of hooks) {
     writeFileSync(
       hook,
-      `#!/bin/sh\nwhile read old new ref; do\n  if test "$ref" = refs/heads/main; then\n    if mkdir '${gate}' 2>/dev/null; then :; else\n      i=0\n      while test ! -e '${gate}/first-written' && test "$i" -lt 1200; do sleep 0.05; i=$((i+1)); done\n      sleep 30\n    fi\n  fi\ndone\nexit 0\n`,
+      `#!/bin/sh
+trap 'exit 1' TERM INT HUP
+target_main=0
+while read old new ref; do
+  if test "$ref" = refs/heads/main; then target_main=1; fi
+done
+if test "$target_main" -eq 1; then
+  if ( set -C; : > '${gate}.lock' ) 2>/dev/null; then
+    mkdir -p '${gate}'
+    exit 0
+  else
+    i=0
+    while test ! -e '${gate}/first-written' && test "$i" -lt 1200; do sleep 0.05; i=$((i+1)); done
+    sleep 30 &
+    wait $!
+    exit 1
+  fi
+fi
+exit 0
+`,
     )
     chmodSync(hook, 0o755)
     const after = hook.replace("pre-receive", "post-receive")
     writeFileSync(
       after,
-      `#!/bin/sh\nwhile read old new ref; do\n  if test "$ref" = refs/heads/main; then : > '${gate}/first-written'; fi\ndone\nexit 0\n`,
+      `#!/bin/sh
+while read old new ref; do
+  if test "$ref" = refs/heads/main; then
+    : > '${gate}/first-written'
+  fi
+done
+exit 0
+`,
     )
     chmodSync(after, 0o755)
   }
@@ -487,7 +513,7 @@ it("finishes a two-child event from a cold clone after the runner dies between c
           controller.abort()
           break
         }
-        await new Promise((done) => setTimeout(done, 25))
+        await new Promise((done) => setTimeout(done, 10))
       }
       return pending
     },
