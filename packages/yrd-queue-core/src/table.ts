@@ -29,10 +29,11 @@ import { directMergeLine, type DirectMerge } from "./direct.ts"
 import type { Draft } from "./drafts.ts"
 import { journalKey, type Journals, type JournalRun, type LogRecord } from "./log.ts"
 import { incidentFrom, incidentLine, type Incident } from "./incident.ts"
-import type { ChangeStatus } from "./events.ts"
+import { CHANGE_STATUSES, isOpen, type ChangeStatus } from "./events.ts"
 import type { Git } from "./git.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
 import {
+  CHANGE_STATES,
   holdsPlaceInLine,
   inLine,
   nextOwner,
@@ -250,7 +251,10 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
       : incidentLine(run.incident)
   // Runs are serialized per change: a newer run proves an abandoned older
   // check is no longer running, even when no decision was recorded for it.
-  const live = newest ? run.running : undefined
+  // And the newest run's marker is the same overlay `list` gates (24972): a
+  // change no longer in line is under no check, whatever its journal still
+  // says (25521 — a cancelled change's detail read `checking` for 6 days).
+  const live = newest && stillInLine(current.state) ? run.running : undefined
   const defect = malformedNext(run)
   return {
     ...current,
@@ -282,6 +286,24 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
             ...(live.log === undefined ? {} : { log: live.log }),
           },
   }
+}
+
+/**
+ * Whether a row's change still holds its place, in the model its state word
+ * comes from: the records' `holdsPlaceInLine`, or the events' `isOpen`. A row
+ * carries either vocabulary, and each model already owns its own answer.
+ */
+function stillInLine(state: Row["state"]): boolean {
+  if (isChangeState(state)) return holdsPlaceInLine(state)
+  return isChangeStatus(state) && isOpen(state)
+}
+
+function isChangeState(state: string): state is ChangeState {
+  return (CHANGE_STATES as readonly string[]).includes(state)
+}
+
+function isChangeStatus(state: string): state is ChangeStatus {
+  return (CHANGE_STATUSES as readonly string[]).includes(state)
 }
 
 export type ListOptions = Readonly<{

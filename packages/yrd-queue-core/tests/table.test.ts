@@ -662,6 +662,42 @@ describe("a terminal change is never rendered as checking (24972)", () => {
     // marker is that re-check's only signal.
     expect(row?.live?.check).toBe("affected-tests")
   })
+
+  // 25521: the watch's per-run rows (the pane's `unfiltered`) re-joined the newest run's own `running`
+  // marker onto the row after `list` had gated it, so a cancelled change's
+  // detail read "Cancelled, checking affected-tests" with a check tab at
+  // `◉ 6d06h`. The split is the same row by run, and the same gate applies.
+  it.each([
+    ["merged", [["Merge", "0".repeat(40)]]],
+    ["withdrawn", [["Reason", "replaced"]]],
+  ] as const)("keeps the overlay off a %s change's per-run watch row too (25521)", async (kind, trailers) => {
+    const w = await world("{}\n")
+    const head = await submitCommit(w, "task/one", "one.txt")
+    await appendRemoteRecord(w.git, "main", {
+      change: { branch: "task/one", head },
+      kind,
+      subject: `task/one ${kind}`,
+      trailers: trailers as unknown as readonly (readonly [string, string])[],
+    })
+    const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
+    const { journals } = await withUnclosedRun(w, "task/one", head)
+
+    const split = watchRows(list(entries, { journals }), { journals, perRun: true })
+    expect(split.map((item) => item.row.state)).toEqual([kind])
+    expect(split[0]?.run?.id).toBe("q-stale")
+    expect(split[0]?.row.live).toBeUndefined()
+  })
+
+  it("keeps the overlay on an in-line change's per-run watch row (25521 control)", async () => {
+    const w = await world("{}\n")
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
+    const { journals } = await withUnclosedRun(w, "task/one", head)
+
+    const split = watchRows(list(entries, { journals }), { journals, perRun: true })
+    expect(split[0]?.row.state).toBe("queued")
+    expect(split[0]?.row.live?.check).toBe("affected-tests")
+  })
 })
 
 /**
