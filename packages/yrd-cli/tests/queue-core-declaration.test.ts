@@ -803,17 +803,17 @@ describe("a queue is the selected origin branch carrying config", () => {
     const refs = async (): Promise<string> =>
       (await gitIn(join(dirname(repo), "remote.git"))(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).trim()
 
-    const unknown = await yrd("--check", "nope", "--off", "--until", "23:59", "--reason", "x")
+    const until = new Date(Date.now() + 3_600_000).toISOString()
+    const unknown = await yrd("--check", "nope", "--off", "--until", until, "--reason", "x")
     expect(unknown.code).toBe(1)
     expect(unknown.stderr).toContain("no merge check named 'nope' is declared; the declared merge checks are: verify")
     // A submit-only check is not a merge check, so it cannot be held off at merge.
-    expect((await yrd("--check", "lint", "--off", "--until", "23:59", "--reason", "x")).stderr).toContain(
+    expect((await yrd("--check", "lint", "--off", "--until", until, "--reason", "x")).stderr).toContain(
       "the declared merge checks are: verify",
     )
     expect((await yrd("--check", "verify", "--off", "--reason", "x")).stderr).toContain("needs --until <time>")
     expect(await refs()).toBe("")
 
-    const until = new Date(Date.now() + 3_600_000).toISOString()
     const set = await yrd("--check", "verify", "--off", "--until", until, "--reason", "flaky gate", "--json")
     expect(set.code, set.stderr).toBe(0)
     expect(JSON.parse(set.stdout)).toMatchObject({
