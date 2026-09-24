@@ -159,6 +159,8 @@ export const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
   "not-run": "−",
   passed: "✓",
   running: "◉",
+  // Held off at merge by an override (25296): it did not run, on purpose.
+  skipped: "⊘",
   stuck: "◌",
   unmeasured: "?",
 }
@@ -170,6 +172,7 @@ export const CHECK_COLOR: Readonly<Record<CheckView["state"], string>> = {
   "not-run": "$fg-muted",
   passed: "$fg-success",
   running: "$fg-info",
+  skipped: "$fg-warning",
   stuck: "$fg-warning",
   unmeasured: "$fg-warning",
 }
@@ -293,15 +296,18 @@ export function durationText(row: Row, now: Date): string {
 }
 
 /**
- * AGE / RUN for the table (ia.md 2026-09-19, 24196). RUN is that attempt's
- * `clocks.runtimeMs` (or active `checkingMs`) and freezes when the attempt ends.
- * AGE is unknown (`—`) because tip Opened is not submission lifetime across retries.
+ * AGE / RUN for the table (item 5, 24196): every row has an AGE from its commit
+ * or submission instant; rows in the runner or after it have a RUN time.
  */
 export function ageRunText(row: Row, now: Date): string {
   const measured = clocks(row, now)
-  const runtime = measured.runtimeMs ?? measured.checkingMs
+  const origin = row.since ?? row.at
+  const age = origin === undefined ? "—" : mediaDuration(Math.max(0, now.getTime() - origin.getTime()))
+  const isEnded =
+    row.state === "merged" || row.state === "failed" || row.state === "cancelled" || row.state === "withdrawn"
+  const runtime = measured.runtimeMs ?? measured.checkingMs ?? (isEnded ? measured.tookMs : undefined)
   const run = runtime === undefined ? "—" : mediaDuration(runtime)
-  return `— / ${run}`
+  return `${age} / ${run}`
 }
 
 /** Bare numeric attempt / timestamp identifier without label prefix: `085315` or `—`. */

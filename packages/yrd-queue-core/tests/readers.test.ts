@@ -25,6 +25,7 @@ import {
   readChange,
   readJournals,
   runStartedAt,
+  skippedChecks,
   subjects,
   watchRows,
 } from "../src/index.ts"
@@ -992,5 +993,33 @@ describe("the head subjects", () => {
 
     expect((await subjects(git, [])).size).toBe(0)
     expect(asked).toBe(0)
+  })
+})
+
+/**
+ * @failure A merge check an override held off reads as "not run", which is the absence C5 forbids.
+ * @level l1 @consumer `yrd show` and the watch's check tabs
+ */
+describe("a check an override skipped (25296 X3)", () => {
+  it("reads skipped from the merged record's Skipped: trailer, and a check with no trailer stays not-run", () => {
+    const records = [
+      {
+        trailers: [
+          ["Check", "lint exit=0 ms=10 log=/l.log"],
+          ["Skipped", "verify override=aaaa by=@dev/3 (claimed) until=2026-09-23T23:00:00.000Z"],
+        ] as const,
+      },
+    ]
+    const skipped = skippedChecks(records)
+    expect([...skipped]).toEqual(["verify"])
+    const declared = [
+      { name: "verify", run: "verify" },
+      { name: "other", run: "other" },
+    ]
+    const views = checksOf([], "merged", declared, undefined, undefined, skipped)
+    expect(views.map((view) => [view.name, view.state])).toEqual([
+      ["verify", "skipped"],
+      ["other", "not-run"],
+    ])
   })
 })

@@ -295,6 +295,80 @@ function buildProgram(
         ),
       )
     })
+  queue
+    .command("override")
+    .description(
+      "hold one declared merge check off for a bounded window, without a commit to the gated repository: " +
+        "--check <name> --off --until <time> --reason <text>; --check <name> --clear --reason <text>; --list",
+    )
+    .option("--check <name>", "the declared merge check to turn off or back on")
+    .option("--off", "turn the check off at merge until --until")
+    .option("--clear", "turn the check back on now")
+    .option("--list", "print the override table, active and expired entries alike")
+    .option("--until <time>", "an ISO instant, or HH:MM on this host's clock; at most 12 h from now")
+    .option("--reason <text>", "why; required for --off and --clear")
+    .option("--json", "emit stable JSON")
+    .option("--notify <seat>", "name who set or cleared the override")
+    .option("--queue <value>", QUEUE_HELP)
+    .addHelpSection(
+      "On override:",
+      "Applies at MERGE judging only; submit verdicts and the declaration are untouched. The first round " +
+        "after a set applies it, and the first round after --clear or --until runs the check again. An " +
+        "expired entry reads as expired, never as absent. The actor is the claimed git actor until the " +
+        "who-acted token lands (25074).",
+    )
+    .action(async (options) => {
+      const declared = options as PauseOptions & {
+        check?: string
+        off?: boolean
+        clear?: boolean
+        list?: boolean
+        until?: string
+        reason?: string
+      }
+      const actions = [declared.off === true, declared.clear === true, declared.list === true].filter(Boolean).length
+      if (actions !== 1) {
+        io.stderr("yrd: queue override takes exactly one of --off, --clear or --list\n")
+        setExit(1)
+        return
+      }
+      const action = declared.off === true ? "off" : declared.clear === true ? "clear" : "list"
+      const missing = [
+        action !== "list" && declared.check === undefined ? "--check <name>" : undefined,
+        action !== "list" && declared.reason === undefined ? "--reason <text>" : undefined,
+        action === "off" && declared.until === undefined ? "--until <time>" : undefined,
+      ].filter((flag): flag is string => flag !== undefined)
+      if (missing.length > 0) {
+        io.stderr(`yrd: queue override --${action} needs ${missing.join(", ")}\n`)
+        setExit(1)
+        return
+      }
+      const location = await resolveQueueLocation(cwd(), declared.queue, env)
+      setExit(
+        await coreQueueCommand(
+          location.repo,
+          io,
+          {
+            action,
+            by: resolveSubmitter(declared.notify, env),
+            command: "override",
+            verified: false,
+            ...(declared.check === undefined ? {} : { check: declared.check }),
+            ...(declared.until === undefined ? {} : { until: declared.until }),
+            ...(declared.reason === undefined ? {} : { reason: declared.reason }),
+          },
+          {
+            json: declared.json,
+            env,
+            log: log(),
+            selection: location.selection,
+            populateReference: location.owned,
+            queue: location.queue,
+            workdir: location.workdir,
+          },
+        ),
+      )
+    })
   withdrawOptions(queue.command("withdraw <branch>").description(WITHDRAW_DESCRIPTION))
     .addHelpSection("On withdraw:", WITHDRAW_HELP)
     .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "withdraw"))
