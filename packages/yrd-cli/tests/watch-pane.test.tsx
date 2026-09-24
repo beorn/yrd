@@ -3395,3 +3395,46 @@ describe("g and G move between the RUNNER box, the top and the bottom (25419)", 
     expect(steps).toEqual(["G:bottom", "g:runner", "g:top", "g:runner"])
   })
 })
+
+describe("a click on the table's overflow indicator jumps to that end (25418)", () => {
+  const rows: WatchRow[] = Array.from({ length: 60 }, (_, index) => ({
+    row: row({
+      branch: `task/r${String(index).padStart(2, "0")}`,
+      head: String(index % 10).repeat(40),
+      merge: "f".repeat(40),
+      state: "merged",
+      subject: `change ${String(index)}`,
+    }),
+  }))
+  /** Which item the cursor is on, read from the detail it opens. */
+  const on = (text: string): string =>
+    text.includes("Queue: example.test/repo#main") ? "runner" : (/· (task\/r\d\d)@/u.exec(text)?.[1] ?? "none")
+
+  it("clicking ▼N selects the last item, as G does, and ▲N the first", async () => {
+    const app = render(<WatchPane snapshot={snapshot({ rows })} open={opener()} live={false} />, {
+      cols: 200,
+      rows: 40,
+    })
+    await settle(app)
+    const at = (mark: "▲" | "▼"): { col: number; row: number } => {
+      const lines = app.text.split("\n")
+      const line = lines.findIndex((text) => text.includes(mark))
+      return { col: line < 0 ? -1 : (lines[line] ?? "").indexOf(mark), row: line }
+    }
+    const steps: string[] = []
+    const down = at("▼")
+    await app.click(down.col, down.row)
+    await settle(app)
+    steps.push(`▼:${on(app.text)}`)
+    const up = at("▲")
+    await app.click(up.col, up.row)
+    await settle(app)
+    steps.push(`▲:${on(app.text)}`)
+    app.press("G")
+    await settle(app)
+    steps.push(`G:${on(app.text)}`)
+    app.unmount()
+
+    expect(steps).toEqual(["▼:task/r59", "▲:runner", "G:task/r59"])
+  })
+})
