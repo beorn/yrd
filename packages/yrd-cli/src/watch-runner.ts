@@ -107,7 +107,7 @@ export type RoundLockHolder = Readonly<{
  */
 export type RunnerService =
   | Readonly<{ kind: "absent"; why: string }>
-  | Readonly<{ kind: "beating"; state: string }>
+  | Readonly<{ kind: "beating"; state: string; since?: Date }>
   | Readonly<{ kind: "stopped"; why: string; cause: string; since?: Date; stopReason?: string }>
   | Readonly<{ kind: "unreadable"; why: string }>
 
@@ -190,7 +190,10 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
       why: outsideGracefulStop(document),
     }
   }
-  return { kind: "beating", state: document.state }
+  const runner = document.facts?.runner as Readonly<Record<string, unknown>> | undefined
+  const startedAt = typeof runner?.startedAt === "string" ? new Date(Date.parse(runner.startedAt)) : undefined
+  const since = startedAt !== undefined && !Number.isNaN(startedAt.getTime()) ? startedAt : undefined
+  return { kind: "beating", state: document.state, ...(since === undefined ? {} : { since }) }
 }
 
 /** The graceful stop's own fact, when this is the document a stopping service left (25430). */

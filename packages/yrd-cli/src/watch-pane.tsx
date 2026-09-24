@@ -77,6 +77,7 @@ import {
   clock,
   firstLine,
   legendLines,
+  mediaDuration,
   runShortName,
   stateGlyph,
 } from "./watch-format.ts"
@@ -100,6 +101,7 @@ import { StatsBox } from "./watch-boxes.tsx"
 import {
   BandBreakRows,
   ListStack,
+  LoudPause,
   RunnerTitledBox,
   bandHeight,
   bandOf,
@@ -700,37 +702,50 @@ export function WatchPane({
   return (
     <NowProvider readAt={shown.at} live={live}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {/* The top line: the status and its reason left, the queue tabs and filter group right (24196, 25416).
-            It carries the pause sentence, so the pane draws no LoudPause line of its own. */}
+        {/* Line 1 (inverted): YRD QUEUE and the queue address left, status word and timer right (25630). */}
         <TopLine
+          queue={shown.queue}
           queues={shown.queues}
           visible={visibleQueues}
           onToggle={toggleQueue}
           status={queueLineStatus(shown, shown.at)}
+          columns={columns}
           live={live}
           onStatusClick={pointAtRunner}
-          statusPills={
-            terminalRows < PILLS_MIN_ROWS ? null : <StatusPills buckets={buckets} onSelectOnly={selectOnly} />
-          }
         />
-        {/* The line under the top line: the fold marker, then what is in hand now and the last 24 hours (24196, 25416). */}
+        {/* Line 2 (plain): STATS with fold marker, and filter toggles on that same line (25630). */}
         <Box flexDirection="column" flexShrink={0} minWidth={0}>
           <Box
+            height={1}
+            flexDirection="row"
+            justifyContent="space-between"
             paddingLeft={1}
             paddingRight={1}
-            backgroundColor="$bg-inverse"
-            onClick={() => {
-              setStatsOpen((was) => !was)
-            }}
+            minWidth={0}
+            overflow="hidden"
           >
-            <Text color="$fg-on-inverse" wrap="truncate">
-              {statsOpen ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} STATS · {statsLine}
-            </Text>
+            <Box
+              flexDirection="row"
+              flexShrink={1}
+              minWidth={0}
+              overflow="hidden"
+              onClick={() => {
+                setStatsOpen((was) => !was)
+              }}
+            >
+              <Text color="$fg-muted" wrap="truncate">
+                {statsOpen ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} STATS · {statsLine}
+              </Text>
+            </Box>
+            {terminalRows < PILLS_MIN_ROWS ? null : (
+              <StatusPills buckets={buckets} onSelectOnly={selectOnly} />
+            )}
           </Box>
           {statsOpen && decisions !== undefined ? (
             <StatsBox decisions={decisions} columns={columns - 2} timeRows={terminalRows >= STATS_TIME_MIN_ROWS} />
           ) : null}
         </Box>
+        {shown.pause === undefined ? null : <LoudPause snapshot={shown} />}
         {/* Where the journal was looked for, when there was none. A watch that
             showed no running check because it had no journal to read must say
             so, or it reads as a queue with nothing to do. */}
@@ -820,13 +835,40 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
   const isRunning = snapshot.runner?.service.kind === "beating" || snapshot.runner?.latest?.alive === true
   const word =
     held || runner.state === "paused" || runner.state === "stuck" ? "PAUSED" : isRunning ? "RUNNING" : "STOPPED"
-  if (word === "RUNNING") return { marker: RUNNING_GLYPH, word, color: "$fg-info", pulse: true }
+
+  const runnerStart =
+    word === "RUNNING"
+      ? (snapshot.runner?.service.kind === "beating" ? snapshot.runner.service.since : undefined) ??
+        snapshot.runner?.latest?.startedAt
+      : word === "STOPPED"
+        ? (snapshot.runner?.service.kind === "stopped" ? snapshot.runner.service.since : undefined) ??
+          snapshot.runner?.latest?.startedAt
+        : snapshot.stopped?.since !== undefined
+          ? new Date(snapshot.stopped.since)
+          : undefined
+
+  const timer =
+    runnerStart !== undefined
+      ? mediaDuration(Math.max(0, now.getTime() - runnerStart.getTime()))
+      : undefined
+
+  if (word === "RUNNING") {
+    return {
+      marker: RUNNING_GLYPH,
+      word,
+      color: "$fg-info",
+      pulse: true,
+      ...(timer === undefined ? {} : { timer }),
+    }
+  }
   const reason =
     snapshot.pause ??
     (word === "STOPPED"
       ? snapshot.runner?.service.kind === "stopped"
         ? snapshot.runner.service.stopReason
-        : undefined
+        : runner.holds === ""
+          ? undefined
+          : runner.holds
       : runner.holds === ""
         ? undefined
         : runner.holds)
@@ -836,6 +878,7 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
     color: word === "PAUSED" ? "$fg-warning" : "$fg-error",
     pulse: reason !== undefined,
     ...(reason === undefined ? {} : { reason }),
+    ...(timer === undefined ? {} : { timer }),
   }
 }
 

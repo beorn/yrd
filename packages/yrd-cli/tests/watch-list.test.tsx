@@ -123,10 +123,10 @@ async function paintAge(row: Row) {
 }
 
 describe("AGE / RUN (item 5, 24196): every row has AGE, runner and after have RUN", () => {
-  it("shows AGE from since and keeps merged row's RUN at endedAt − startedAt", async () => {
+  it("shows AGE from since and keeps merged row's RUN at endedAt − startedAt (freezes on done, 25630)", async () => {
     const { first, second } = await paintAge(DECIDED_ROW)
-    expect(first).toContain("45:00 / 15:00")
-    expect(second).toContain("45:01 / 15:00")
+    expect(first).toContain("30:00 / 15:00")
+    expect(second).toContain("30:00 / 15:00")
     expect(first).not.toContain("took")
   }, 10_000)
 

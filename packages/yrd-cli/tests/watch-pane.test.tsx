@@ -17,7 +17,7 @@ import { join } from "node:path"
 import type React from "react"
 import { act } from "react"
 import { describe, expect, it, vi } from "vitest"
-import { bufferToText, render } from "silvery/test"
+import { bufferToStyledText, bufferToText, render } from "silvery/test"
 import { Box, DISCLOSURE_MARKERS, Text } from "silvery"
 import type { ChangeRecord, GitObservation, JournalCommand, JournalRun, Row } from "@yrd/queue-core"
 import { checksOf, journalKey, watchRows as perRunRows } from "@yrd/queue-core"
@@ -168,17 +168,40 @@ async function paint(element: Parameters<typeof render>[0], keys: readonly strin
   return text
 }
 
+function fgOf(token: string): string {
+  const app = render(<Text color={token}>X</Text>, { cols: 4, rows: 1 })
+  const fg = JSON.stringify(app.cell(0, 0).fg)
+  app.unmount()
+  return fg
+}
+
+function bgOf(token: string): string {
+  const app = render(
+    <Box backgroundColor={token} width={2}>
+      <Text>X</Text>
+    </Box>,
+    { cols: 4, rows: 1 },
+  )
+  const bg = JSON.stringify(app.cell(0, 0).bg)
+  app.unmount()
+  return bg
+}
+
 describe("the top line (items 30, 32d, 33)", () => {
-  it("is yrd watch and one pill per queue, digit + friendly path + branch glyph, and nothing else", async () => {
-    const text = await paint(<WatchPane snapshot={snapshot()} live={false} />)
+  it("25630: top line shows YRD QUEUE and queue address at left, and YRD status at right", async () => {
+    const text = await paint(
+      <WatchPane
+        snapshot={snapshot({
+          runner: { journalDir: "/w/logs", service: { kind: "beating", state: "healthy" } },
+        })}
+        live={false}
+      />,
+    )
 
     const [first] = text.split("\n")
-    expect(first).toContain("YRD")
-    expect(first).toContain("[1] /repo ⎇ main")
-    // The old `QUEUE main ROOT /repo` row and the queue's address are gone from the top.
-    expect(text).not.toContain("QUEUE main")
-    expect(first).not.toContain("example.test")
-    expect(first?.trimEnd().endsWith("all")).toBe(false)
+    expect(first).toContain("YRD QUEUE")
+    expect(first).toContain("example.test/repo#main")
+    expect(first).toContain("YRD RUNNING")
   })
 
   it("has no queue All pill; the a key still shows every status", async () => {
@@ -186,7 +209,7 @@ describe("the top line (items 30, 32d, 33)", () => {
     const app = render(<WatchPane snapshot={snapshot({ rows })} live />, { cols: 120, rows: 40 })
     await app.waitForLayoutStable()
     const [first] = app.text.split("\n")
-    expect(first).toContain("[1] /repo ⎇ main")
+    expect(first).toContain("YRD QUEUE")
     expect(first?.trimEnd().endsWith("all")).toBe(false)
 
     app.press("f")
@@ -222,10 +245,8 @@ describe("the top line (items 30, 32d, 33)", () => {
     )
 
     const lines = text.split("\n").filter((line) => line.trim() !== "")
-    // The pause is the loudest state on the page and it LEADS it, beside the
-    // status word on the top line (25416); the runner's row says the word
-    // `paused` and what lifts the stop, never this sentence.
-    expect(lines[0]).toContain(`YRD PAUSED ${pause}`)
+    // 25630: line 1 shows YRD PAUSED; LoudPause draws the pause sentence
+    expect(lines[0]).toContain("YRD PAUSED")
     // The band is IN the table now, under the header, between waiting and done.
     expect(lines.findIndex((line) => line.includes("RUNNER"))).toBeGreaterThan(
       lines.findIndex((line) => line.includes("ISSUE / BRANCH")),
@@ -240,7 +261,7 @@ describe("the top line (items 30, 32d, 33)", () => {
     const text = await paint(<WatchPane snapshot={snapshot({ pause })} live={false} />)
 
     const lines = text.split("\n").filter((line) => line.trim() !== "")
-    expect(lines[0]).toContain(pause)
+    expect(lines[0]).toContain("YRD PAUSED")
     expect(lines.findIndex((line) => line.includes(pause))).toBeLessThan(
       lines.findIndex((line) => line.includes("ISSUE / BRANCH")),
     )
@@ -371,14 +392,15 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     await settle(app)
     dump("o")
     const openCell = app.cell(openX, pillsY)
-    expect(openCell.bg, JSON.stringify(openCell)).not.toBeNull()
+    expect(openCell.bold).toBe(true)
+    expect(JSON.stringify(openCell.fg)).toEqual(fgOf("$fg-warning"))
     app.press("a")
     await settle(app)
     dump("a")
     app.unmount()
   })
 
-  it("paints the active status pill with an inverse background after o", async () => {
+  it("paints the active status pill with warning tint and bold after o", async () => {
     const app = render(<WatchPane snapshot={snapshot()} live={false} />, { cols: 160, rows: 24 })
     await settle(app)
     app.press("o")
@@ -387,7 +409,8 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     const x = (app.lines[y] ?? "").indexOf("open")
     expect(y, app.lines.join("\n")).toBeGreaterThanOrEqual(0)
     expect(x).toBeGreaterThanOrEqual(0)
-    expect(app.cell(x, y).bg, JSON.stringify(app.cell(x, y))).not.toBeNull()
+    expect(app.cell(x, y).bold).toBe(true)
+    expect(JSON.stringify(app.cell(x, y).fg)).toEqual(fgOf("$fg-warning"))
     app.unmount()
   })
 
@@ -450,7 +473,8 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     expect(runnerTitle, afterO).not.toMatch(/RUNNER\w/)
     const pillsY = app.lines.findIndex((line) => /\bopen\b/u.test(line) && line.includes("failed"))
     const openX = (app.lines[pillsY] ?? "").indexOf("open")
-    expect(app.cell(openX, pillsY).bg, JSON.stringify(app.cell(openX, pillsY))).not.toBeNull()
+    expect(app.cell(openX, pillsY).bold).toBe(true)
+    expect(JSON.stringify(app.cell(openX, pillsY).fg)).toEqual(fgOf("$fg-warning"))
     app.press("a")
     await settle(app)
     const afterA = app.lines.join("\n")
@@ -567,8 +591,7 @@ describe("the table (items 3, 28, 38)", () => {
     const lines = text.split("\n")
     const topLine = lines.find((line) => line.includes("YRD"))
     expect(topLine).toBeDefined()
-    expect(topLine).toContain("[2]")
-    expect(topLine).toContain("staging")
+    expect(topLine).toContain("YRD QUEUE")
 
     const header = lines.find((line) => line.includes("ISSUE / BRANCH"))
     expect(header).toBeDefined()
@@ -1384,8 +1407,8 @@ describe("the RUNNER box's wrapped rails and the height budget", () => {
     expect(last).toContain("change(s)")
     // The footer shares its row with nothing: no box border, no STATS cell.
     expect(last).not.toMatch(/[╭╰│─╮╯]/u)
-    // The pills are on screen, on the top line (25416).
-    expect(lines.findIndex((line) => /\bopen\b.*\brunning\b.*\bdone\b.*\bfailed\b/u.test(line))).toBe(0)
+    // The pills are on screen, on line 2 with STATS (25630).
+    expect(lines.findIndex((line) => /\bopen\b.*\brunning\b.*\bdone\b.*\bfailed\b/u.test(line))).toBe(1)
     // The pause is on the RUNNER rail, wrapped onto rows under its marker, once.
     expect(app.text.match(/paused by @ci/gu)).toHaveLength(1)
     app.unmount()
@@ -2151,7 +2174,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       },
       held: held.includes("40:00 / 03:21"),
       waiting: waiting.includes("12:03 / —"),
-      merged: merged.includes("12:00 / 04:10"),
+      merged: merged.includes("7:10 / 04:10"),
     }).toEqual({
       header: { age: true, time: true, runtime: false },
       held: true,
@@ -3030,25 +3053,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(app)
     const painted = app.lines
-    const topLine = painted[0] ?? ""
-    // The tabs follow the status area and the filter group closes the line at its right edge.
-    const [, first, betweenTabs, second, beforeFilters] =
-      /(\[1\][^[]*?\S)( +)(\[2\][^[]*?\S)( +)open running done failed\s*$/u.exec(topLine) ?? []
-    expect({
-      endsWithFilters: topLine.trimEnd().endsWith("failed"),
-      tabsAfterStatus: topLine.indexOf("[1]") > topLine.indexOf("RUNNING") + "RUNNING".length + 3,
-      betweenTabs: betweenTabs?.length,
-      beforeFilters: beforeFilters?.length,
-      tabs: [first, second],
-    }).toEqual({
-      endsWithFilters: true,
-      tabsAfterStatus: true,
-      betweenTabs: 3,
-      beforeFilters: 3,
-      tabs: ["[1] /repo ⎇ main", "[2] /repo ⎇ next"],
-    })
+    const line1 = painted[1] ?? ""
+    expect(line1).toContain("STATS")
+    expect(line1).toContain("open")
+    expect(line1).toContain("running")
+    expect(line1).toContain("done")
+    expect(line1).toContain("failed")
     // There is no separate pills line in the body.
-    expect(painted.slice(1).some((l) => l.includes("open") && l.includes("running") && l.includes("failed"))).toBe(
+    expect(painted.slice(2).some((l) => l.includes("open") && l.includes("running") && l.includes("failed"))).toBe(
       false,
     )
     app.unmount()
@@ -3292,7 +3304,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.unmount()
   })
 
-  it("item 11: top line renders status.marker and YRD <word> at the far left", async () => {
+  it("item 11: top line renders YRD QUEUE at left and status at right (25630)", async () => {
     // 1. Idle runner
     const idleApp = render(
       <WatchPane
@@ -3302,8 +3314,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       { cols: 120, rows: 30 },
     )
     await settle(idleApp)
-    const idleTop = idleApp.lines.find((l) => l.includes("YRD"))!
-    expect(idleTop.trimStart().startsWith("◉ YRD RUNNING")).toBe(true)
+    const idleTop = idleApp.lines[0]!
+    expect(idleTop.trimStart().startsWith("YRD QUEUE")).toBe(true)
+    expect(idleTop).toContain("◉ YRD RUNNING")
     idleApp.unmount()
 
     // 2. Stopped runner
@@ -3321,8 +3334,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       { cols: 120, rows: 30 },
     )
     await settle(stoppedApp)
-    const stoppedTop = stoppedApp.lines.find((l) => l.includes("YRD"))!
-    expect(stoppedTop.trimStart().startsWith("■ YRD STOPPED")).toBe(true)
+    const stoppedTop = stoppedApp.lines[0]!
+    expect(stoppedTop.trimStart().startsWith("YRD QUEUE")).toBe(true)
+    expect(stoppedTop).toContain("■ YRD STOPPED")
     stoppedApp.unmount()
 
     // 3. Stuck runner
@@ -3338,8 +3352,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       { cols: 120, rows: 30 },
     )
     await settle(stuckApp)
-    const stuckTop = stuckApp.lines.find((l) => l.includes("YRD"))!
-    expect(stuckTop.trimStart().startsWith("■ YRD PAUSED")).toBe(true)
+    const stuckTop = stuckApp.lines[0]!
+    expect(stuckTop.trimStart().startsWith("YRD QUEUE")).toBe(true)
+    expect(stuckTop).toContain("■ YRD PAUSED")
     stuckApp.unmount()
   })
 
@@ -3368,7 +3383,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     }
 
     const absent = await paintStop()
-    expect(absent.lines[0]?.slice(0, absent.lines[0].indexOf("[1]")).trim()).toBe("■ YRD STOPPED")
+    expect(absent.lines[0]).toContain("■ YRD STOPPED")
     expect(absent.text).not.toContain("no stop reason was recorded")
     expect(absent.text).toContain("to start: yrd queue up")
     absent.unmount()
@@ -3576,24 +3591,6 @@ describe("the top line (25416)", () => {
     }),
   }))
 
-  /** What the renderer resolves a token to, read through the same `cell()` the pane is read through. */
-  function fgOf(token: string): string {
-    const app = render(<Text color={token}>X</Text>, { cols: 4, rows: 1 })
-    const fg = JSON.stringify(app.cell(0, 0).fg)
-    app.unmount()
-    return fg
-  }
-  function bgOf(token: string): string {
-    const app = render(
-      <Box backgroundColor={token} width={2}>
-        <Text>X</Text>
-      </Box>,
-      { cols: 4, rows: 1 },
-    )
-    const bg = JSON.stringify(app.cell(0, 0).bg)
-    app.unmount()
-    return bg
-  }
   const fgAt = (app: ReturnType<typeof render>, y: number, needle: string, offset = 0): string | undefined => {
     const x = (app.lines[y] ?? "").indexOf(needle)
     return x < 0 ? undefined : JSON.stringify(app.cell(x + offset, y).fg)
@@ -3606,13 +3603,15 @@ describe("the top line (25416)", () => {
   const ratioAt = (app: ReturnType<typeof render>, y: number, needle: string): number => {
     const x = (app.lines[y] ?? "").indexOf(needle)
     const cell = app.cell(x, y)
+    const defaultBg = JSON.parse(bgOf("$bg")) as { r: number; g: number; b: number }
     const luminance = (color: { r: number; g: number; b: number } | null | undefined): number => {
-      if (color == null) throw new Error(`no colour painted at "${needle}"`)
+      const c = color ?? defaultBg
+      if (c == null) throw new Error(`no colour painted at "${needle}"`)
       const channel = (value: number): number => {
         const s = value / 255
         return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
       }
-      return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+      return 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
     }
     const [light, dark] = [luminance(cell.fg), luminance(cell.bg)].sort((a, b) => b - a)
     return Math.round(((light! + 0.05) / (dark! + 0.05)) * 100) / 100
@@ -3623,12 +3622,7 @@ describe("the top line (25416)", () => {
     await settle(app)
     // The chrome is every cell that is neither the status block nor a pill: the gap between them and the edge.
     const blockEnd = (app.lines[0] ?? "").indexOf("RUNNING") + "RUNNING".length + 1
-    const firstTab = (app.lines[0] ?? "").indexOf("[1]")
-    const lineBg = new Set(
-      [...Array.from({ length: firstTab - blockEnd }, (_, x) => blockEnd + x), 119].map((x) =>
-        JSON.stringify(app.cell(x, 0).bg),
-      ),
-    )
+    const lineBg = new Set([2, 50, 119].map((x) => JSON.stringify(app.cell(x, 0).bg)))
     const seen = {
       lineBg: [...lineBg],
       underIsInverse: JSON.stringify(app.cell(2, 1).bg) === bgOf("$bg-inverse"),
@@ -3638,8 +3632,8 @@ describe("the top line (25416)", () => {
     app.unmount()
     expect(seen).toEqual({
       lineBg: [bgOf("$bg-inverse")],
-      underIsInverse: true,
-      underRightIsInverse: true,
+      underIsInverse: false,
+      underRightIsInverse: false,
       statusIsInverse: true,
     })
   })
@@ -3656,18 +3650,16 @@ describe("the top line (25416)", () => {
     })
     await settle(narrow)
     const seen = {
-      wide: wide.lines[0]?.includes(`■ YRD PAUSED ${PAUSE}`),
+      wide: wide.lines[0]?.includes("YRD PAUSED"),
       paused: [fgAt(wide, 0, "PAUSED"), bgAt(wide, 0, "PAUSED")],
-      narrowTruncated: /PAUSED paused by @chief: .*…\s+\[1\]/u.test(narrow.lines[0] ?? ""),
-      narrowKeepsFilters: narrow.lines[0]?.trimEnd().endsWith("failed"),
+      loudPause: wide.text.includes(PAUSE),
     }
     wide.unmount()
     narrow.unmount()
     expect(seen).toEqual({
       wide: true,
       paused: [fgOf("mix($fg-on-inverse, $fg-warning, 30%)"), bgOf("$bg-inverse")],
-      narrowTruncated: true,
-      narrowKeepsFilters: true,
+      loudPause: true,
     })
   })
 
@@ -3678,7 +3670,8 @@ describe("the top line (25416)", () => {
       rows: 30,
     })
     await settle(app)
-    const marker = (): string => `${app.cell(1, 0).char}:${JSON.stringify(app.cell(1, 0).fg)}`
+    const markerX = (app.lines[0] ?? "").indexOf("■")
+    const marker = (): string => `${app.cell(markerX, 0).char}:${JSON.stringify(app.cell(markerX, 0).fg)}`
     const samples = [marker()]
     for (const wait of [470, 470]) {
       await act(async () => {
@@ -3731,20 +3724,17 @@ describe("the top line (25416)", () => {
       { cols: 140, rows: 30 },
     )
     await settle(app)
-    app.press("2")
     app.press("f")
     await settle(app)
-    const pair = (needle: string): readonly (string | undefined)[] => [fgAt(app, 0, needle), bgAt(app, 0, needle)]
+    const pair = (needle: string): readonly (string | undefined)[] => [fgAt(app, 1, needle), bgAt(app, 1, needle)]
     const seen = {
-      selectedTab: pair("[1]"),
-      unselectedTab: pair("[2]"),
       selectedFilter: pair("failed"),
       unselectedFilter: pair("open"),
     }
     app.unmount()
-    const chip = [fgOf("mix($fg-on-inverse, $fg-warning, 30%)"), bgOf("$bg-inverse")]
-    const muted = [fgOf("$fg-on-inverse-muted"), bgOf("$bg-inverse")]
-    expect(seen).toEqual({ selectedTab: chip, unselectedTab: muted, selectedFilter: chip, unselectedFilter: muted })
+    const chip = [fgOf("$fg-warning"), "null"]
+    const muted = [fgOf("$fg-muted"), "null"]
+    expect(seen).toEqual({ selectedFilter: chip, unselectedFilter: muted })
   })
 
   it("every pair on the top line reads at 3:1 or better against the ground it is painted on", async () => {
@@ -3756,7 +3746,6 @@ describe("the top line (25416)", () => {
       { cols: 160, rows: 30 },
     )
     await settle(running)
-    running.press("2")
     running.press("f")
     await settle(running)
     const paused = render(<WatchPane snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })} live={false} />, {
@@ -3777,17 +3766,260 @@ describe("the top line (25416)", () => {
     const ratios = {
       running: ratioAt(running, 0, "RUNNING"),
       paused: ratioAt(paused, 0, "PAUSED"),
-      reason: ratioAt(paused, 0, "maintenance"),
       stopped: ratioAt(stopped, 0, "STOPPED"),
-      selectedTab: ratioAt(running, 0, "[1]"),
-      unselectedTab: ratioAt(running, 0, "[2]"),
-      selectedFilter: ratioAt(running, 0, "failed"),
-      unselectedFilter: ratioAt(running, 0, "open"),
+      selectedFilter: ratioAt(running, 1, "failed"),
+      unselectedFilter: ratioAt(running, 1, "open"),
     }
     running.unmount()
     paused.unmount()
     stopped.unmount()
     expect(Object.entries(ratios).filter(([, ratio]) => !(ratio >= 3))).toEqual([])
+  })
+
+  describe("25630: yrd watch timers and header lines", () => {
+    it("line 1 inverted: YRD QUEUE and queue address at left, status and timer at right (25630)", async () => {
+      const RUNNER_START = new Date(NOW.getTime() - 17_000)
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            queue: "github.com/beorn/hh#main",
+            runner: {
+              journalDir: "/w/logs",
+              service: { kind: "beating", state: "healthy", since: RUNNER_START },
+            },
+          })}
+          live={false}
+        />,
+        { cols: 120, rows: 30 },
+      )
+      await settle(app)
+      const line0 = app.lines[0] ?? ""
+      // Line 1 is inverted across its full width
+      expect(JSON.stringify(app.cell(2, 0).bg)).toBe(bgOf("$bg-inverse"))
+      expect(JSON.stringify(app.cell(119, 0).bg)).toBe(bgOf("$bg-inverse"))
+      // Line 1 has YRD QUEUE and address at left
+      expect(line0.trimStart().startsWith("YRD QUEUE github.com/beorn/hh#main")).toBe(true)
+      // Line 1 has status and timer at right, nothing else
+      expect(line0).toContain("RUNNING 0:17")
+      // Filter toggles and tabs are not on line 1
+      expect(line0).not.toContain("[1]")
+      expect(line0).not.toContain("open")
+      expect(line0).not.toContain("failed")
+      app.unmount()
+    })
+
+    it("the timer after YRD RUNNING counts from when the runner started (25630)", async () => {
+      const RUNNER_START = new Date(NOW.getTime() - 17_000)
+      const app1 = render(
+        <WatchPane
+          snapshot={snapshot({
+            at: NOW,
+            runner: {
+              journalDir: "/w/logs",
+              service: { kind: "beating", state: "healthy", since: RUNNER_START },
+            },
+          })}
+          live={false}
+        />,
+        { cols: 120, rows: 30 },
+      )
+      await settle(app1)
+      expect(app1.lines[0]).toContain("RUNNING 0:17")
+      app1.unmount()
+
+      const LATER = new Date(NOW.getTime() + 10_000) // 10s later
+      const app2 = render(
+        <WatchPane
+          snapshot={snapshot({
+            at: LATER,
+            runner: {
+              journalDir: "/w/logs",
+              service: { kind: "beating", state: "healthy", since: RUNNER_START },
+            },
+          })}
+          live={false}
+        />,
+        { cols: 120, rows: 30 },
+      )
+      await settle(app2)
+      // 17s + 10s = 27s
+      expect(app2.lines[0]).toContain("RUNNING 0:27")
+      app2.unmount()
+    })
+
+    it("line 2 plain: STATS, its fold marker and the filter toggles (25630)", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            queues: QUEUES,
+            rows: [{ row: failedRow() }],
+            runner: RUNNER_READ,
+          })}
+          live={false}
+        />,
+        { cols: 140, rows: 30 },
+      )
+      await settle(app)
+      const line1 = app.lines[1] ?? ""
+      // Line 2 is plain (NOT inverted)
+      expect(JSON.stringify(app.cell(2, 1).bg)).not.toBe(bgOf("$bg-inverse"))
+      expect(JSON.stringify(app.cell(119, 1).bg)).not.toBe(bgOf("$bg-inverse"))
+      // Line 2 has STATS with fold marker at left
+      expect(line1).toContain(`${DISCLOSURE_MARKERS.collapsed} STATS · `)
+      // Line 2 has filter toggles at right
+      expect(line1).toContain("open")
+      expect(line1).toContain("running")
+      expect(line1).toContain("done")
+      expect(line1).toContain("failed")
+      // When clicking fold marker, STATS expands
+      await app.click(5, 1)
+      await settle(app)
+      expect(app.lines[1]).toContain(`${DISCLOSURE_MARKERS.expanded} STATS · `)
+      app.unmount()
+    })
+
+    it("line 1 shortens queue address with .. when it does not fit (25630)", async () => {
+      const RUNNER_START = new Date(NOW.getTime() - 17_000)
+      const longAddress = "github.com/a-very-long-organization-name/a-very-long-repository-name#main"
+      const narrow = render(
+        <WatchPane
+          snapshot={snapshot({
+            queue: longAddress,
+            runner: {
+              journalDir: "/w/logs",
+              service: { kind: "beating", state: "healthy", since: RUNNER_START },
+            },
+          })}
+          live={false}
+        />,
+        { cols: 50, rows: 30 },
+      )
+      await settle(narrow)
+      const line0 = narrow.lines[0] ?? ""
+      expect(line0.trimStart().startsWith("YRD QUEUE ")).toBe(true)
+      expect(line0).toContain("..")
+      expect(line0).not.toContain(longAddress)
+      expect(line0).toContain("RUNNING 0:17")
+      narrow.unmount()
+    })
+
+    it("merged change AGE is unchanged after the clock advances in watch pane (25630)", async () => {
+      const T0 = new Date("2026-09-24T12:00:00Z")
+      const T1 = new Date("2026-09-24T12:01:00Z")
+      const T2 = new Date("2026-09-24T12:03:00Z")
+      const T3 = new Date("2026-09-24T13:03:00Z")
+
+      const mergedChange: Row = {
+        branch: "task/freeze",
+        head: "e".repeat(40),
+        state: "merged",
+        since: T0,
+        startedAt: T1,
+        endedAt: T2,
+        subject: "test change",
+      }
+
+      const appAtT2 = render(
+        <WatchPane
+          snapshot={snapshot({
+            at: T2,
+            rows: [{ row: mergedChange }],
+          })}
+          live={false}
+        />,
+        { cols: 120, rows: 30 },
+      )
+      await settle(appAtT2)
+      const lineAtT2 = appAtT2.lines.find((l) => l.includes("task/freeze")) ?? ""
+      expect(lineAtT2).toContain("3:00 / 02:00")
+      appAtT2.unmount()
+
+      const appAtT3 = render(
+        <WatchPane
+          snapshot={snapshot({
+            at: T3,
+            rows: [{ row: mergedChange }],
+          })}
+          live={false}
+        />,
+        { cols: 120, rows: 30 },
+      )
+      await settle(appAtT3)
+      const lineAtT3 = appAtT3.lines.find((l) => l.includes("task/freeze")) ?? ""
+      expect(lineAtT3).toContain("3:00 / 02:00")
+      appAtT3.unmount()
+    })
+
+    it("renders watch pane ANSI capture for operator screenshot (25630)", async () => {
+      const RUNNER_START = new Date(NOW.getTime() - 17_000)
+      const now = NOW
+      const rows: WatchRow[] = [
+        {
+          row: {
+            branch: "task/25630-timer-freeze",
+            head: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+            since: new Date(now.getTime() - 35 * 60_000),
+            startedAt: new Date(now.getTime() - 20 * 60_000),
+            state: "checked",
+            submitter: "@dev/9",
+            subject: "fix(watch): freeze done clocks and count RUNNING from runner start",
+          },
+        },
+        {
+          row: {
+            branch: "task/25556-white-headers",
+            head: "f3a317b254e90000000000000000000000000000",
+            since: new Date(now.getTime() - 90 * 60_000),
+            startedAt: new Date(now.getTime() - 45 * 60_000),
+            endedAt: new Date(now.getTime() - 30 * 60_000),
+            state: "merged",
+            submitter: "@dev/7",
+            subject: "carry white headers and disclosure markers",
+          },
+        },
+        {
+          row: {
+            branch: "task/25546-bare-form-heading",
+            head: "c4d5e6f7a8b90000000000000000000000000000",
+            since: new Date(now.getTime() - 15 * 60_000),
+            state: "queued",
+            submitter: "@dev/9",
+            subject: "fix(km): keep bare heading field intact",
+          },
+        },
+      ]
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            at: now,
+            queue: "github.com/beorn/hh#main",
+            queues: [{ branch: "main", label: "main", path: "/hh" }],
+            rows,
+            unfiltered: rows,
+            runner: {
+              journalDir: "/w/logs",
+              service: { kind: "beating", state: "healthy", since: RUNNER_START },
+              latest: {
+                alive: true,
+                id: "q-20260924T200000000Z-a1b2c3d4",
+                lastWriteAt: new Date(now.getTime() - 20_000),
+                startedAt: new Date(now.getTime() - 20 * 60_000),
+              },
+            },
+          })}
+          live={false}
+        />,
+        { cols: 120, rows: 20 },
+      )
+      await settle(app)
+      const ansi = bufferToStyledText(app.term.buffer)
+      writeFileSync("/tmp/yrd-watch-25630.ansi", ansi, "utf8")
+      expect(ansi).toContain("YRD QUEUE")
+      expect(ansi).toContain("RUNNING")
+      expect(ansi).toContain("0:17")
+      expect(ansi).toContain("STATS")
+      app.unmount()
+    })
   })
 })
 

@@ -413,12 +413,21 @@ export type Clocks = Readonly<{
   stuckMs?: number
   /** How long an ended change took, from when it was submitted to when it ended. */
   tookMs?: number
+  /** How long since opened: now minus opened for queued/running, ended minus opened for done. */
+  ageMs?: number
 }>
 
 export function clocks(row: Row, now: Date = new Date()): Clocks {
   // A change waiting in line holds no check, so nothing about it is running:
   // only a check holding the row runs its clock to now (@i/10-yrd/24196).
-  const until = row.endedAt ?? (row.live === undefined ? undefined : now)
+  const ended =
+    row.state === "merged" ||
+    row.state === "failed" ||
+    row.state === "withdrawn" ||
+    row.state === "cancelled" ||
+    row.state === "direct"
+  const endedWhen = row.endingAt ?? row.endedAt ?? (ended ? row.at : undefined)
+  const until = endedWhen ?? row.endedAt ?? (row.live === undefined ? undefined : now)
   const runtimeMs =
     row.startedAt === undefined || until === undefined
       ? undefined
@@ -427,17 +436,21 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
     at === undefined ? undefined : Math.max(0, now.getTime() - at.getTime())
   const waitingState = row.state === "queued" || row.state === "checked" || row.state === "stuck"
   const inLineState = waitingState || row.state === "verifying" || row.state === "checking" || row.state === "merging"
-  const ended =
-    row.state === "merged" || row.state === "failed" || row.state === "withdrawn" || row.state === "cancelled"
-  const endedWhen = row.endingAt ?? row.endedAt
   const clockAt = inLineState ? (row.since ?? row.at) : ended ? (endedWhen ?? row.at) : row.at
   const checkingMs = since(row.live?.since)
   const waitingMs = waitingState && row.live === undefined ? since(row.since) : undefined
   const stuckMs = row.state === "stuck" && row.live === undefined ? since(endedWhen) : undefined
   const tookMs =
-    ended && row.since !== undefined && endedWhen !== undefined
-      ? Math.max(0, endedWhen.getTime() - row.since.getTime())
+    ended && (row.since ?? row.at) !== undefined && endedWhen !== undefined
+      ? Math.max(0, endedWhen.getTime() - (row.since ?? row.at)!.getTime())
       : undefined
+  const opened = row.since ?? row.at
+  const ageMs =
+    opened === undefined
+      ? undefined
+      : ended && endedWhen !== undefined
+        ? Math.max(0, endedWhen.getTime() - opened.getTime())
+        : Math.max(0, now.getTime() - opened.getTime())
   return {
     ...(runtimeMs === undefined ? {} : { runtimeMs }),
     ...(clockAt === undefined ? {} : { clockAt }),
@@ -445,6 +458,7 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
     ...(waitingMs === undefined ? {} : { waitingMs }),
     ...(stuckMs === undefined ? {} : { stuckMs }),
     ...(tookMs === undefined ? {} : { tookMs }),
+    ...(ageMs === undefined ? {} : { ageMs }),
   }
 }
 
