@@ -215,6 +215,38 @@ function buildProgram(
     )
   }
 
+  const queueIgnore = async (branch: string, options: PauseOptions, ignored: boolean): Promise<void> => {
+    let action: Parameters<typeof coreQueueCommand>[2]
+    if (ignored) {
+      const reason = options.reason
+      if (reason === undefined || reason.trim() === "") {
+        io.stderr(`yrd-ignore-reason-required: ${branch}: ignoring an open change requires --reason <text>\n`)
+        setExit(2)
+        return
+      }
+      action = { command: "ignore", branch, by: resolveSubmitter(options.notify, env), reason }
+    } else {
+      if (options.reason !== undefined) {
+        io.stderr(`yrd-ignore-reason-conflict: ${branch}: unignore does not accept --reason\n`)
+        setExit(2)
+        return
+      }
+      action = { command: "unignore", branch, by: resolveSubmitter(options.notify, env) }
+    }
+    const location = await resolveQueueLocation(cwd(), options.queue, env)
+    setExit(
+      await coreQueueCommand(location.repo, io, action, {
+        json: options.json,
+        env,
+        log: log(),
+        selection: location.selection,
+        populateReference: location.owned,
+        queue: location.queue,
+        workdir: location.workdir,
+      }),
+    )
+  }
+
   const queueSubmit = async (branch: string | undefined, options: SubmitOptions): Promise<void> => {
     const location = await resolveQueueLocation(cwd(), options.queue, env, "submit")
     const taken = await coreQueueCommand(
@@ -820,6 +852,24 @@ function buildProgram(
     .option("--queue <value>", QUEUE_HELP)
     .option("--reason <text>", "operator note kept in the ending event")
     .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
+
+  program
+    .command("ignore <branch>")
+    .description("ignore one open event change while keeping it visible outside the queue position")
+    .option("--reason <text>", "why this change is ignored")
+    .option("--queue <value>", QUEUE_HELP)
+    .option("--notify <seat>", "name who ignored the change")
+    .option("--json", "emit stable JSON")
+    .action(async (branch, options) => queueIgnore(branch as string, options as PauseOptions, true))
+
+  program
+    .command("unignore <branch>")
+    .description("return one ignored event change to the queue position")
+    .option("--reason <text>", "refused: unignore clears the previous reason")
+    .option("--queue <value>", QUEUE_HELP)
+    .option("--notify <seat>", "name who unignored the change")
+    .option("--json", "emit stable JSON")
+    .action(async (branch, options) => queueIgnore(branch as string, options as PauseOptions, false))
 
   program
     .command("check <name...>")

@@ -45,6 +45,7 @@ export function eventRows(
       ...(change.at === undefined ? {} : { at: change.at }),
       ...(change.endedAt === undefined ? {} : { endedAt: change.endedAt }),
       ...(change.reason === undefined ? {} : { reason: change.reason }),
+      ...(change.ignored === undefined ? {} : { ignored: change.ignored }),
     })
   }
   const changeRows = rows.sort((left, right) => {
@@ -54,15 +55,17 @@ export function eventRows(
     return (right.endedAt?.getTime() ?? 0) - (left.endedAt?.getTime() ?? 0) || left.branch.localeCompare(right.branch)
   })
   const draftRows: Row<ChangeStatus>[] = drafts
-    .map((draft): Row<ChangeStatus> => ({
-      branch: draft.branch,
-      head: draft.head,
-      state: "draft",
-      format: "event",
-      ...(draft.committedAt === undefined ? {} : { at: draft.committedAt }),
-      ...(draft.author === undefined ? {} : { author: draft.author }),
-      ...(draft.movedSinceSubmit ? { movedSinceSubmit: true } : {}),
-    }))
+    .map(
+      (draft): Row<ChangeStatus> => ({
+        branch: draft.branch,
+        head: draft.head,
+        state: "draft",
+        format: "event",
+        ...(draft.committedAt === undefined ? {} : { at: draft.committedAt }),
+        ...(draft.author === undefined ? {} : { author: draft.author }),
+        ...(draft.movedSinceSubmit ? { movedSinceSubmit: true } : {}),
+      }),
+    )
     .sort(
       (left, right) =>
         (right.at?.getTime() ?? Number.NEGATIVE_INFINITY) - (left.at?.getTime() ?? Number.NEGATIVE_INFINITY) ||

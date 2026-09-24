@@ -86,9 +86,43 @@ describe("event changes use the shared table row", () => {
 
   it("names a branch whose selected chain has no submitted commit", () => {
     expect(() => eventRows(new Map([["task/missing", initial]]))).toThrow(/task\/missing.*submitted commit/)
-    expect(() => eventRows(new Map([["task/no-time", { status: "queued", commit: HEAD, ignored: false }]]))).toThrow(
+    expect(() => eventRows(new Map([["task/no-time", { status: "queued", commit: HEAD }]]))).toThrow(
       /task\/no-time.*Time/,
     )
+  })
+
+  it("keeps an ignored open change visible with actor and reason but no place in line", () => {
+    const opened = evolve(
+      initial,
+      event(
+        "opened",
+        QUEUE,
+        [
+          ["Commit", HEAD],
+          ["By", "@dev/2"],
+        ],
+        [HEAD],
+      ),
+    )
+    const ignored = evolve(
+      opened,
+      event("ignored", "c".repeat(40), [
+        ["Reason", "waiting"],
+        ["By", "@dev/3"],
+      ]),
+    )
+    const rows = eventRows(
+      new Map([
+        ["task/ignored", ignored],
+        ["task/queued", opened],
+      ]),
+    )
+    expect(rows).toEqual([
+      expect.objectContaining({ branch: "task/queued", position: 1 }),
+      expect.objectContaining({ branch: "task/ignored", ignored: { reason: "waiting", by: "@dev/3" } }),
+    ])
+    expect(rows[1]?.position).toBeUndefined()
+    expect(rows[1]?.reason).toBeUndefined()
   })
 
   it("puts unsubmitted branch heads after folded changes as draft rows", () => {
