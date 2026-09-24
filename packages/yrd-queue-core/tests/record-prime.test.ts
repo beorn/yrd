@@ -13,7 +13,18 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
-import { appendRecord, gitIn, readQueue, readRecord, readRecords, submit, tipOf, type Git } from "../src/index.ts"
+import {
+  appendRecord,
+  changeRef,
+  gitIn,
+  readQueue,
+  readRecord,
+  readRecords,
+  selectionFor,
+  submit,
+  tipOf,
+  type Git,
+} from "../src/index.ts"
 import { primeLegacyHistory } from "../src/legacy-records.ts"
 import type { CommitMeta } from "gitomic"
 
@@ -64,6 +75,9 @@ async function queueWithChains(): Promise<Fixture> {
     await git(["push", "--quiet", "origin", `${head}:refs/heads/${name}`])
     await submit(git, "origin", { branch: name, submitter: "@dev/1", target: { branch: "main", remote: "origin" } })
     const change = { branch: name, head }
+    // Gitomic's remote publication leaves application refs local only after an explicit fetch.
+    const ref = changeRef("main", change)
+    await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `${ref}:${ref}`])
     const failed = await appendRecord(git, "main", {
       change,
       kind: "failed",
@@ -90,10 +104,13 @@ async function queueWithChains(): Promise<Fixture> {
 /** A Git that records every invocation through the queue's existing runner. */
 function counting(git: Git): Readonly<{ git: Git; calls: string[][] }> {
   const calls: string[][] = []
-  const counted: Git = async (args, input) => {
-    calls.push([...args])
-    return git(args, input)
-  }
+  const counted: Git = Object.assign(
+    async (args: readonly string[], input?: string) => {
+      calls.push([...args])
+      return git(args, input)
+    },
+    { selection: selectionFor(git) },
+  )
   return { git: counted, calls }
 }
 
@@ -126,7 +143,9 @@ describe("the queue read's Gitomic history primes every per-change reader (25303
     const { git } = counting(fixture.git)
     await readQueue(git, "origin", "main", fixture.target)
     // A different Git instance holds no prime: it reads the way every reader did before.
-    const unprimed: Git = (args, input) => fixture.git(args, input)
+    const unprimed: Git = Object.assign((args: readonly string[], input?: string) => fixture.git(args, input), {
+      selection: selectionFor(fixture.git),
+    })
 
     for (const { failed, sent } of fixture.chains) {
       expect(await readRecord(git, sent)).toEqual(await readRecord(unprimed, sent))
@@ -141,7 +160,9 @@ describe("the queue read's Gitomic history primes every per-change reader (25303
   it("keeps the queue read's own tip records exactly as the tip-only read gave them", async () => {
     const fixture = await queueWithChains()
     const read = await readQueue(fixture.git, "origin", "main", fixture.target)
-    const unprimed: Git = (args, input) => fixture.git(args, input)
+    const unprimed: Git = Object.assign((args: readonly string[], input?: string) => fixture.git(args, input), {
+      selection: selectionFor(fixture.git),
+    })
 
     const tips = read.changes.map((entry) => tipOf(entry.change))
     expect(tips.map(({ sha }) => sha).sort()).toEqual(fixture.chains.map(({ sent }) => sent).sort())
@@ -193,8 +214,7 @@ describe("the queue read's Gitomic history primes every per-change reader (25303
 
   it("warns with the numbers when one prime passes ten times the garage's measured size", () => {
     const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined)
-    const row = (index: number) =>
-      ({ oid: index.toString(16).padStart(40, "0"), message: "x\n" }) as CommitMeta
+    const row = (index: number) => ({ oid: index.toString(16).padStart(40, "0"), message: "x\n" }) as CommitMeta
     const history = Array.from({ length: 75_001 }, (_, index) => row(index + 1))
     const git: Git = async () => ""
 

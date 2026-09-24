@@ -2002,6 +2002,8 @@ describe("yrd list marks a stale verdict (@i/10-yrd/25301, @cto c7115f0f (3))", 
       const head = (await w.git(["rev-parse", "HEAD"])).trim()
       await w.git(["checkout", "--quiet", "main"])
       await submit(w.git, "origin", { branch, submitter: "@dev/3", target })
+      const ref = changeRef("main", { branch, head })
+      await w.git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `${ref}:${ref}`])
       await appendRecord(w.git, "main", {
         change: { branch, head },
         kind: "checked",
