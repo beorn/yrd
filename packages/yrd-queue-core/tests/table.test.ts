@@ -711,6 +711,34 @@ describe("a terminal change is never rendered as checking (24972)", () => {
     expect(split[0]?.row.state).toBe("queued")
     expect(split[0]?.row.live?.check).toBe("affected-tests")
   })
+
+  // The events model's half of the gate (@dev/review-adhoc5 on 25521): a row can carry an event status, and the
+  // records' holdsPlaceInLine does not know those words. Built as rows directly, because `list` over records never
+  // yields them: an open status keeps the overlay, an ended one drops it.
+  it.each([
+    ["verifying", true],
+    ["checking", true],
+    ["merging", true],
+    ["cancelled", false],
+  ] as const)("an events-model %s row's per-run watch row keeps its overlay: %s", (state, kept) => {
+    const head = "a".repeat(40)
+    const startedAt = new Date(Date.now() - 60 * 60 * 1000)
+    const running = { name: "affected-tests", phase: "merge", startedAt }
+    const journals = {
+      dir: "/journal-fixture",
+      malformed: [],
+      runs: new Map([
+        [
+          journalKey("task/one", head),
+          [journalRun({ at: startedAt, branch: "task/one", head, id: "q-1", running, startedAt })],
+        ],
+      ]),
+    }
+    const current: Row = { branch: "task/one", head, state }
+
+    const [split] = watchRows([current], { journals, perRun: true })
+    expect(split?.row.live?.check).toBe(kept ? "affected-tests" : undefined)
+  })
 })
 
 /**
