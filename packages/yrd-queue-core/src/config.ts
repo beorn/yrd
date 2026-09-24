@@ -13,6 +13,8 @@
  */
 
 import { refAt, type Git } from "./git.ts"
+import { parseDuration } from "./duration.ts"
+import { DEFAULT_STALL_AFTER_MS, STALL_AFTER_FLOOR_MS } from "./service-health.ts"
 import type { CheckSpec } from "./check.ts"
 
 /**
@@ -122,6 +124,8 @@ export type Notifier = Readonly<{
   run: string
 }>
 
+export type QueueHealthConfig = Readonly<{ stallAfterMs: number; declared: boolean }>
+
 export type QueueConfig = Readonly<{
   /** The branch the queue merges on, at the remote holding it; `origin#main` unless declared. */
   target: Target
@@ -136,6 +140,13 @@ export type QueueConfig = Readonly<{
   teardown?: string
   /** What the queue notifies, per ending; empty when the declaration names none. */
   notify: readonly Notifier[]
+  /**
+   * How the service judges its own line (25669). `stallAfter` is how long waiting
+   * changes may go without one being judged before health reads STALLED; the
+   * default applies when the declaration names none, and `declared` says which
+   * one a page is quoting.
+   */
+  health: QueueHealthConfig
   /** The blob the declaration was read from, recorded on every checked record. */
   blob: string
 }>
@@ -172,6 +183,7 @@ export function parseConfig(
     archiveAfter: readArchiveAfter(raw["archive-after"]),
     blob,
     checks: readChecks(raw.checks),
+    health: readHealth(raw.health),
     ignore: readIgnore(raw.ignore),
     notify,
     setup,
@@ -190,6 +202,33 @@ function readArchiveAfter(value: unknown): "never" {
   throw new Error(
     `yrd-archive-after-invalid: .yrd.yml archive-after: the only accepted value is never; received ${JSON.stringify(value)}`,
   )
+}
+
+/**
+ * `health: { stallAfter: <duration> }` (25669, @cto fa6f3457). Validated like
+ * every other key: a malformed duration, or one under the round budget (a round
+ * may run that long, so a smaller threshold pages on every long round), refuses
+ * by name. Absent is the documented default, never a fallback from a bad value.
+ */
+function readHealth(value: unknown): QueueHealthConfig {
+  if (value === undefined) return { declared: false, stallAfterMs: DEFAULT_STALL_AFTER_MS }
+  if (!isRecord(value)) throw new Error("yrd-health-invalid: .yrd.yml health: must be a mapping with stallAfter")
+  onlyKeys(value, ["stallAfter"], ".yrd.yml health")
+  const raw = value.stallAfter
+  if (raw === undefined) return { declared: false, stallAfterMs: DEFAULT_STALL_AFTER_MS }
+  const ms = typeof raw === "string" ? parseDuration(raw) : undefined
+  if (ms === undefined) {
+    throw new Error(
+      `yrd-health-stall-after-invalid: .yrd.yml health.stallAfter: ${JSON.stringify(raw)} is not a duration; write one such as 45m or 1h`,
+    )
+  }
+  if (ms < STALL_AFTER_FLOOR_MS) {
+    throw new Error(
+      `yrd-health-stall-after-below-floor: .yrd.yml health.stallAfter ${String(raw)} is below the round budget of ` +
+        `${String(STALL_AFTER_FLOOR_MS / 60_000)}m: a round may legitimately run that long, so this would page on every long round`,
+    )
+  }
+  return { declared: true, stallAfterMs: ms }
 }
 
 function readIgnore(value: unknown): readonly string[] {
@@ -369,7 +408,7 @@ function readChecks(value: unknown): readonly CheckSpec[] {
 // consumer, and one nobody reads is still refused. A fresh worktree has
 // submodules and nothing else, so the target says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
-const TOP_KEYS = ["archive-after", "checks", "ignore", "setup", "teardown", "notify"] as const
+const TOP_KEYS = ["archive-after", "checks", "health", "ignore", "setup", "teardown", "notify"] as const
 
 /**
  * A key the declaration used to read, and where its meaning went. A typo is

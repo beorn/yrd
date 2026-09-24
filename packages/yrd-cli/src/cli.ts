@@ -29,6 +29,7 @@
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { drainOutput } from "loggily"
+import { parseDuration } from "@yrd/queue-core"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
 import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
@@ -447,26 +448,6 @@ function buildProgram(
         ),
       )
     })
-  function parseDuration(value: string): number | undefined {
-    const match = /^(\d+(?:\.\d+)?)\s*(h|m|s|ms)?$/i.exec(value.trim())
-    if (!match) return undefined
-    const amount = Number(match[1])
-    if (Number.isNaN(amount) || amount <= 0) return undefined
-    const unit = (match[2] ?? "s").toLowerCase()
-    switch (unit) {
-      case "h":
-        return Math.round(amount * 3600 * 1000)
-      case "m":
-        return Math.round(amount * 60 * 1000)
-      case "s":
-        return Math.round(amount * 1000)
-      case "ms":
-        return Math.round(amount)
-      default:
-        return undefined
-    }
-  }
-
   function parseStopAt(value: string): number | undefined {
     const parsed = Date.parse(value)
     if (!Number.isNaN(parsed)) return parsed

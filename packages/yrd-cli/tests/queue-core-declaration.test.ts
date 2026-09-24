@@ -45,6 +45,7 @@ it("refuses future event queue and check keys by name", () => {
     target: { remote: "origin", branch: "main" },
     archiveAfter: "never",
     checks: [{ name: "verify", run: "true" }],
+    health: { declared: false, stallAfterMs: 45 * 60_000 },
     ignore: [],
     notify: [],
     blob: "a".repeat(40),

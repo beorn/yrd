@@ -53,6 +53,31 @@ export const ROUND_LOCK = "round.lock"
 export const ROUND_BUDGET_MS = 10 * 60 * 1000
 
 /**
+ * How long a line may hold waiting changes without judging one before its
+ * health says it is STALLED (25669): the documented default of `.yrd.yml`
+ * `health.stallAfter`, used when the declaration names none.
+ *
+ * 45 minutes, from one week of this repository's round journals (09-18 to
+ * 09-24, @cto d3af5793): rounds that judged one change with checks on took 31
+ * to 37 minutes, with outliers to 82, so a 30-minute default would page on
+ * ordinary long rounds. A bead row re-tunes it from the per-round waiting count
+ * once a week of that count exists.
+ *
+ * This is the port of the flow instrument the old core carried
+ * (`queueProgressAuditFindings`, 08-10; `queue-liveness-wedged`, 08-30) and
+ * lost with it on 09-03 in b5b468037c.
+ */
+export const DEFAULT_STALL_AFTER_MS = 45 * 60 * 1000
+
+/**
+ * The lowest `health.stallAfter` a declaration may set. A round may legitimately
+ * run to the round budget, so a smaller threshold would page on every long
+ * round; until @i/10-yrd/24227 derives a bound from the declared checks, the
+ * floor is {@link ROUND_BUDGET_MS}.
+ */
+export const STALL_AFTER_FLOOR_MS = ROUND_BUDGET_MS
+
+/**
  * How often the service restates its document while it lives
  * (@i/4-supervision/24523 D6).
  *
