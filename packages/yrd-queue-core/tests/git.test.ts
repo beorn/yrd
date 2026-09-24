@@ -828,4 +828,127 @@ describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
     expect(existsSync(evidence.artifacts.stderr)).toBe(true)
     expect(readFileSync(evidence.artifacts.stderr, "utf8")).toBe(heartbeat)
   })
+
+  it("gitSuperExecution logs publication failure loudly rather than throwing after a successful push (25517)", async () => {
+    const root = temporaryRoot("gse-pub-failure")
+    const log = openLog(join(root, "logs"))
+    const fakeProcess: Process = {
+      async close() {},
+      async [Symbol.asyncDispose]() {},
+      async run(request) {
+        request.onOutput?.({ stream: "stdout", chunk: new TextEncoder().encode('{"state":"updated"}\n') })
+        return {
+          durationMs: 0,
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: '{"state":"updated"}',
+          stderr: "",
+        }
+      },
+    }
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const result = await gitSuperExecution(
+        {
+          process: fakeProcess,
+          gitOptions: {
+            openOutput: log.openGitOutput,
+            onInvocation: () => {
+              throw new Error("disk full while writing evidence")
+            },
+          },
+        },
+        root,
+        ["push", "--recurse-submodules=only", "origin", "main"],
+      )
+      expect(result.exitCode).toBe(0)
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/Git evidence publication failed: Error: disk full while writing evidence/),
+      )
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/raw stdout: .*1\.stdout\.bin; raw stderr: .*1\.stderr\.bin/),
+      )
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it("gitSuperExecution records a timed-out push as incomplete and throws (25517)", async () => {
+    const root = temporaryRoot("gse-timeout")
+    const log = openLog(join(root, "logs"))
+    const fakeProcess: Process = {
+      async close() {},
+      async [Symbol.asyncDispose]() {},
+      async run() {
+        return {
+          durationMs: 5000,
+          exitCode: null as never,
+          signal: "SIGKILL" as never,
+          timedOut: true,
+          stdout: "",
+          stderr: "timed out waiting for lock\n",
+        }
+      },
+    }
+    let handedInvocation: gitRunner.GitInvocation | undefined
+    await expect(
+      gitSuperExecution(
+        {
+          process: fakeProcess,
+          gitOptions: {
+            openOutput: log.openGitOutput,
+            onInvocation: (inv) => {
+              handedInvocation = inv
+            },
+          },
+        },
+        root,
+        ["push", "--recurse-submodules=only", "origin", "main"],
+      ),
+    ).rejects.toThrow(/did not settle normally/)
+
+    expect(handedInvocation).toBeDefined()
+    expect(handedInvocation!.failure).toMatch(/timedOut=true/)
+    expect(handedInvocation!.artifacts).toBeDefined()
+    expect(handedInvocation!.artifacts!.complete).toBe(false)
+  })
+
+  it("gitSuperExecution drops fallback file write and relies on streaming output (25517)", async () => {
+    const root = temporaryRoot("gse-no-fallback-write")
+    const log = openLog(join(root, "logs"))
+    const fakeProcess: Process = {
+      async close() {},
+      async [Symbol.asyncDispose]() {},
+      async run() {
+        return {
+          durationMs: 0,
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: '{"state":"updated"}',
+          stderr: "buffered output not streamed to onOutput",
+        }
+      },
+    }
+    let handedInvocation: gitRunner.GitInvocation | undefined
+    const result = await gitSuperExecution(
+      {
+        process: fakeProcess,
+        gitOptions: {
+          openOutput: log.openGitOutput,
+          onInvocation: (inv) => {
+            handedInvocation = inv
+          },
+        },
+      },
+      root,
+      ["push", "--recurse-submodules=only", "origin", "main"],
+    )
+    expect(result.exitCode).toBe(0)
+    expect(handedInvocation).toBeDefined()
+    expect(handedInvocation!.artifacts).toBeDefined()
+    // The fallback write is dropped: unstreamed runner output is not written into the sink file
+    expect(readFileSync(handedInvocation!.artifacts!.stderr, "utf8")).toBe("")
+  })
 })
