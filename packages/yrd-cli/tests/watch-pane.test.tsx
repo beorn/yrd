@@ -218,7 +218,7 @@ describe("the top line (items 30, 32d, 33)", () => {
     // The pause is the loudest state on the page and it LEADS it, beside the
     // status word on the top line (25416); the runner's row says the word
     // `paused` and what lifts the stop, never this sentence.
-    expect(lines[0]).toContain(`YRD STOPPED ${pause}`)
+    expect(lines[0]).toContain(`YRD PAUSED ${pause}`)
     // The band is IN the table now, under the header, between waiting and done.
     expect(lines.findIndex((line) => line.includes("RUNNER"))).toBeGreaterThan(
       lines.findIndex((line) => line.includes("ISSUE / BRANCH")),
@@ -1871,7 +1871,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(line).toContain(`lint override expired ${clock(ended)}`)
   })
 
-  it("says an operator's pause that names no change as stopped, since when and by whom, in the stop's slot, and never drops the word (A2-set-v3 Q3, 25367)", async () => {
+  it("says an operator's pause that names no change as paused, since when and by whom, in the stop's slot, and never drops the word (A2-set-v3 Q3)", async () => {
     const W = await words()
     const since = ago(25 * MINUTE)
     const rows: WatchRow[] = [
@@ -1889,14 +1889,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
           columns: cols,
         })
       ).split("\n")
-      return (page.find((l) => l.includes("stopped")) ?? "").trim()
+      return (page.find((l) => l.includes("paused")) ?? "").trim()
     }
     const waiting = `5 ${W.waiting.word}`
 
     expect({ 70: await at(70), 50: await at(50), 40: await at(40) }).toEqual({
-      70: `${waiting}: 2 ${W.pending.word}, 3 ${W.submitted.word} · stopped since ${clock(since)} by @chief`,
-      50: `${waiting} · stopped since ${clock(since)} by @chief`,
-      40: `${waiting} · stopped by @chief`,
+      70: `${waiting}: 2 ${W.pending.word}, 3 ${W.submitted.word} · paused since ${clock(since)} by @chief`,
+      50: `${waiting} · paused since ${clock(since)} by @chief`,
+      40: `${waiting} · paused by @chief`,
     })
   })
 
@@ -3289,7 +3289,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(stuckApp)
     const stuckTop = stuckApp.lines.find((l) => l.includes("YRD"))!
-    expect(stuckTop.trimStart().startsWith("■ YRD STOPPED")).toBe(true)
+    expect(stuckTop.trimStart().startsWith("■ YRD PAUSED")).toBe(true)
     stuckApp.unmount()
   })
 
@@ -3463,8 +3463,8 @@ describe("the top line (25416)", () => {
     service: BEATING,
     latest: { alive: false, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
   }
-  const PAUSE = "stopped by @chief: maintenance window for the host move"
-  const STOPPED: Partial<WatchSnapshot> = {
+  const PAUSE = "paused by @chief: maintenance window for the host move"
+  const PAUSED: Partial<WatchSnapshot> = {
     pause: PAUSE,
     stopped: { by: "@chief", cause: "operator", change: null, since: NOW.toISOString() },
   }
@@ -3543,35 +3543,35 @@ describe("the top line (25416)", () => {
     expect(seen).toEqual({ lineBg: [bgOf("$bg-inverse")], underIsInverse: false })
   })
 
-  it("row 2: the state word wears its status colour with the stop reason beside it, truncated before the tabs", async () => {
-    const wide = render(<WatchPane snapshot={snapshot({ ...STOPPED, runner: RUNNER_READ })} live={false} />, {
+  it("row 2: the status area is a block in its status colour with the pause reason beside the word, truncated before the tabs", async () => {
+    const wide = render(<WatchPane snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })} live={false} />, {
       cols: 160,
       rows: 30,
     })
     await settle(wide)
-    const narrow = render(<WatchPane snapshot={snapshot({ ...STOPPED, runner: RUNNER_READ })} live={false} />, {
+    const narrow = render(<WatchPane snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })} live={false} />, {
       cols: 100,
       rows: 30,
     })
     await settle(narrow)
     const seen = {
-      wide: wide.lines[0]?.includes(`■ YRD STOPPED ${PAUSE}`),
-      stopped: [fgAt(wide, 0, "STOPPED"), bgAt(wide, 0, "STOPPED")],
-      narrowTruncated: /STOPPED stopped by @chief: .*…\s+\[1\]/u.test(narrow.lines[0] ?? ""),
+      wide: wide.lines[0]?.includes(`■ YRD PAUSED ${PAUSE}`),
+      paused: [fgAt(wide, 0, "PAUSED"), bgAt(wide, 0, "PAUSED")],
+      narrowTruncated: /PAUSED paused by @chief: .*…\s+\[1\]/u.test(narrow.lines[0] ?? ""),
       narrowKeepsFilters: narrow.lines[0]?.trimEnd().endsWith("failed"),
     }
     wide.unmount()
     narrow.unmount()
     expect(seen).toEqual({
       wide: true,
-      stopped: [fgOf("$bg"), bgOf("$fg-error")],
+      paused: [fgOf("$bg"), bgOf("$fg-warning")],
       narrowTruncated: true,
       narrowKeepsFilters: true,
     })
   })
 
-  it("row 2: the marker pulses while the line is stopped with a reason", async () => {
-    const app = render(<WatchPane snapshot={snapshot({ ...STOPPED, runner: RUNNER_READ })} live />, {
+  it("row 2: the marker pulses while the line is paused with a reason", async () => {
+    const app = render(<WatchPane snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })} live />, {
       autoRender: true,
       cols: 120,
       rows: 30,
@@ -3658,21 +3658,33 @@ describe("the top line (25416)", () => {
     running.press("2")
     running.press("f")
     await settle(running)
-    const stopped = render(<WatchPane snapshot={snapshot({ ...STOPPED, runner: RUNNER_READ })} live={false} />, {
+    const paused = render(<WatchPane snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })} live={false} />, {
       cols: 160,
       rows: 30,
     })
+    await settle(paused)
+    const stopped = render(
+      <WatchPane
+        snapshot={snapshot({
+          runner: { journalDir: "/w/logs", service: { kind: "stopped", why: "heartbeat overdue", cause: "timeout" } },
+        })}
+        live={false}
+      />,
+      { cols: 160, rows: 30 },
+    )
     await settle(stopped)
     const ratios = {
       running: ratioAt(running, 0, "RUNNING"),
+      paused: ratioAt(paused, 0, "PAUSED"),
+      reason: ratioAt(paused, 0, "maintenance"),
       stopped: ratioAt(stopped, 0, "STOPPED"),
-      reason: ratioAt(stopped, 0, "maintenance"),
       selectedTab: ratioAt(running, 0, "[1]"),
       unselectedTab: ratioAt(running, 0, "[2]"),
       selectedFilter: ratioAt(running, 0, "failed"),
       unselectedFilter: ratioAt(running, 0, "open"),
     }
     running.unmount()
+    paused.unmount()
     stopped.unmount()
     expect(Object.entries(ratios).filter(([, ratio]) => !(ratio >= 3))).toEqual([])
   })

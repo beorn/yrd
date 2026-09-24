@@ -66,6 +66,7 @@ import {
   DecisionAfterEnding,
   commitTrailers,
   endedKind,
+  legacyStore,
   recordCommit,
   standsEnded,
   mergedBy,
@@ -74,14 +75,16 @@ import {
   readRootChanges,
   cleanupRootChanges,
   type RootChanges,
-  type Git,
   type WriteRecord,
-} from "./records.ts"
+} from "./legacy-records.ts"
 import { queueName, readConfig, type Target } from "./config.ts"
 import {
   GitExit,
+  createEventStore,
+  selectionFor,
   gitIn,
   isAncestor,
+  type Git,
   type GitObservation,
   type ObservationNotice,
   mergeBase,
@@ -533,7 +536,12 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     )
   }
   const url = await remoteUrl(git, options.target.remote)
-  if ((await queueFormat({ repo: options.repo, remote: options.target.remote }, options.target.branch)) === "event") {
+  if (
+    (await queueFormat(
+      createEventStore(options.repo, options.target.remote, options.selection ?? selectionFor(selected)),
+      options.target.branch,
+    )) === "event"
+  ) {
     return await eventQueueRun(options, { git, gitOptions, hooksPath, log, selected, url })
   }
   const targetSha = options.targetSha
@@ -2075,14 +2083,8 @@ async function publishChildren(
     expectedTip,
   )
   try {
-    await run.git([
-      "push",
-      "--quiet",
-      "--atomic",
-      `--force-with-lease=${ref}:${expectedTip}`,
-      target.remote,
-      `${landingRecord}:${ref}`,
-    ])
+    const store = await legacyStore(run.git)
+    await store.backend.publish(store.repo, [{ ref, expect: expectedTip, oid: landingRecord }], target.remote)
   } catch (error) {
     const moved = await remoteHeads(run, branch, ref)
     if (moved.change === expectedTip) throw error
@@ -2504,14 +2506,13 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
  */
 async function push(run: Run, entry: QueueEntry, plan: PushPlan): Promise<Pushed> {
   try {
-    await run.git([
-      "push",
-      "--quiet",
-      "--atomic",
-      ...plan.leases.map(([ref, expected]) => `--force-with-lease=${ref}:${expected}`),
-      run.options.target.remote,
-      ...plan.updates.map(([object, ref]) => `${object}:${ref}`),
-    ])
+    const store = await legacyStore(run.git)
+    const updates = plan.updates.map(([oid, ref]) => {
+      const expected = plan.leases.find(([leased]) => leased === ref)?.[1]
+      if (expected === undefined) throw new Error(`atomic push plan has no lease for ${ref}`)
+      return { ref, expect: expected, oid }
+    })
+    await store.backend.publish(store.repo, updates, run.options.target.remote)
     return { merged: true }
   } catch (error) {
     const ref = changeRef(run.options.target.branch, entry.change)
@@ -3150,17 +3151,12 @@ function skippedTrailers(run: Run): readonly (readonly [string, string])[] {
  */
 export async function writeRecord(run: Run, write: WriteRecord, expectedTip: string): Promise<string | undefined> {
   const ref = changeRef(run.options.target.branch, write.change)
+  const store = await legacyStore(run.git)
   let onto = expectedTip
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const record = await recordCommit(run.git, write, onto)
     try {
-      await run.git([
-        "push",
-        "--quiet",
-        `--force-with-lease=${ref}:${onto}`,
-        run.options.target.remote,
-        `${record}:${ref}`,
-      ])
+      await store.backend.publish(store.repo, [{ ref, expect: onto, oid: record }], run.options.target.remote)
       return record
     } catch (error) {
       // Git's rejection text varies (`stale info`, `fetch first`,
@@ -3207,19 +3203,9 @@ export async function writeRecord(run: Run, write: WriteRecord, expectedTip: str
 
 /** Read one authoritative remote change tip and make that exact object local. */
 async function fetchRemoteChange(run: Run, ref: string): Promise<string> {
-  const rows = (await run.git(["ls-remote", "--refs", run.options.target.remote, ref])).split("\n")
-  const remote = rows.map((row) => row.trim().split(/\s+/u)).find(([, name]) => name === ref)?.[0]
-  if (remote === undefined || remote === "") throw new Error(`${ref}: the remote change tip is absent`)
-  await run.git([
-    "fetch",
-    "--quiet",
-    "--no-tags",
-    "--no-recurse-submodules",
-    "--no-write-fetch-head",
-    "--refmap=",
-    run.options.target.remote,
-    remote,
-  ])
+  const store = await legacyStore(run.git)
+  const remote = (await store.backend.fetchRefs(store.repo, ref, run.options.target.remote)).get(ref)
+  if (remote === undefined) throw new Error(`${ref}: the remote change tip is absent`)
   return remote
 }
 
@@ -3235,21 +3221,20 @@ async function remoteHeads(
   branch: string,
   change?: string,
 ): Promise<Readonly<{ target?: string; branch?: string; change?: string }>> {
-  const rows = (
-    await run.git([
-      "ls-remote",
-      "--refs",
-      run.options.target.remote,
-      `refs/heads/${run.options.target.branch}`,
-      `refs/heads/${branch}`,
-      ...(change === undefined ? [] : [change]),
-    ])
-  ).split("\n")
-  const at = new Map(rows.map((row) => row.trim().split(/\s+/u)).map(([sha, ref]) => [ref ?? "", sha ?? ""]))
+  const store = await legacyStore(run.git)
+  const targetRef = `refs/heads/${run.options.target.branch}`
+  const branchRef = `refs/heads/${branch}`
+  const [targets, branches, changes] = await Promise.all([
+    store.backend.listRefs(store.repo, targetRef, run.options.target.remote),
+    store.backend.listRefs(store.repo, branchRef, run.options.target.remote),
+    change === undefined
+      ? Promise.resolve(new Map<string, string>())
+      : store.backend.listRefs(store.repo, change, run.options.target.remote),
+  ])
   return {
-    branch: at.get(`refs/heads/${branch}`),
-    ...(change === undefined ? {} : { change: at.get(change) }),
-    target: at.get(`refs/heads/${run.options.target.branch}`),
+    branch: branches.get(branchRef),
+    ...(change === undefined ? {} : { change: changes.get(change) }),
+    target: targets.get(targetRef),
   }
 }
 

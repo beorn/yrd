@@ -774,26 +774,26 @@ function draftsIn(rows: readonly WatchRow[]): number {
 }
 
 /**
- * Derive status marker, word, colour and reason for the top line (only RUNNING
- * or STOPPED, 25367). The reason is the pause record's own sentence when the
- * line was stopped, else what the runner's row says it holds; the marker
- * pulses while the line runs or is stopped with a reason (25416).
+ * Derive status marker, word, colour and reason for the top line (RUNNING /
+ * PAUSED / STOPPED, the 25367 fix-forward). The reason is the pause record's
+ * own sentence when the line was paused, else what the runner's row says it
+ * holds; the marker pulses while the line runs or is held with a reason (25416).
  */
 export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
   const runner = runnerOf(snapshot, now)
-  const stopped =
-    snapshot.pause !== undefined ||
-    (snapshot.stopped !== undefined && snapshot.stopped !== null) ||
-    runner.state === "stopped" ||
-    runner.state === "silent" ||
-    runner.state === "stuck" ||
-    runner.state === "paused"
-  if (!stopped) return { marker: RUNNING_GLYPH, word: "RUNNING", color: "$fg-info", pulse: true }
+  const held = snapshot.pause !== undefined || (snapshot.stopped !== undefined && snapshot.stopped !== null)
+  const word =
+    held || runner.state === "paused" || runner.state === "stuck"
+      ? "PAUSED"
+      : runner.state === "stopped" || runner.state === "silent"
+        ? "STOPPED"
+        : "RUNNING"
+  if (word === "RUNNING") return { marker: RUNNING_GLYPH, word, color: "$fg-info", pulse: true }
   const reason = snapshot.pause ?? (runner.holds === "" ? undefined : runner.holds)
   return {
     marker: "■",
-    word: "STOPPED",
-    color: "$fg-error",
+    word,
+    color: word === "PAUSED" ? "$fg-warning" : "$fg-error",
     pulse: reason !== undefined,
     ...(reason === undefined ? {} : { reason }),
   }

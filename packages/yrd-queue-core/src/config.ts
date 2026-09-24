@@ -12,8 +12,7 @@
  * guessed at its own configuration would judge every change by that guess.
  */
 
-import type { Git } from "./records.ts"
-import { refAt } from "./git.ts"
+import { refAt, type Git } from "./git.ts"
 import type { CheckSpec } from "./check.ts"
 
 /**

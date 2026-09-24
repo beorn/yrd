@@ -24,14 +24,16 @@
 
 import {
   ABSENT,
-  RECORD_FORMAT,
-  commitTrailers,
   endedKind,
+  legacyPauseCommit,
+  legacyStore,
+  legacyTrailers,
+  readLegacyCommit,
   standsEnded,
   type ChangeRecord,
-  type Git,
-} from "./records.ts"
-import { readRemoteCommit } from "./git.ts"
+} from "./legacy-records.ts"
+import type { CommitMeta } from "./git.ts"
+import type { Git } from "./git.ts"
 
 import { changeName, parseChangeName, pauseRef, type Change } from "./refs.ts"
 import { holdsPlaceInLine, type ChangeState } from "./state.ts"
@@ -147,7 +149,8 @@ export function stopFact(stop: PauseRecord | undefined): StopFact | null {
  */
 export async function readPause(git: Git, remote: string, queue: string): Promise<PauseRecord | undefined> {
   const ref = pauseRef(queue)
-  const captured = await readRemoteCommit(git, remote, ref)
+  const store = await legacyStore(git)
+  const captured = (await store.backend.fetchRefs(store.repo, ref, remote)).get(ref)
   return captured === undefined ? undefined : parsePause(git, captured, `${remote} ${ref}`)
 }
 
@@ -180,8 +183,9 @@ export async function writePause(
   if (write.kind === "resumed" && stands === undefined) {
     throw new QueueNotPaused(previous?.kind === "paused" ? previous : undefined)
   }
-  const commit = await pauseCommit(git, previous, { ...write, by, reason })
-  await git(["push", "--quiet", `--force-with-lease=${ref}:${previous?.sha ?? ABSENT}`, remote, `${commit}:${ref}`])
+  const commit = await legacyPauseCommit(git, previous, { ...write, by, reason })
+  const store = await legacyStore(git)
+  await store.backend.publish(store.repo, [{ ref, expect: previous?.sha ?? ABSENT, oid: commit }], remote)
   return parsePause(git, commit, `${remote} ${ref}`)
 }
 
@@ -211,20 +215,21 @@ export async function pauseFence(
   }
   const sha =
     previous?.kind === "paused" && previous.sha === admittedPause?.sha
-      ? await pauseCommit(git, previous, { ...carried(previous), kind: "paused" }, previous.at)
-      : await pauseCommit(git, previous, { by, kind: "resumed", reason })
+      ? await legacyPauseCommit(git, previous, { ...carried(previous), kind: "paused" }, previous.at)
+      : await legacyPauseCommit(git, previous, { by, kind: "resumed", reason })
   return { expected: previous?.sha ?? ABSENT, previous, sha }
 }
 
 /** The operator-facing line shared by list, the submit echo, refusals and the pause commands. */
 export function pauseLine(record: PauseRecord): string {
+  const since = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "long" }).format(record.at)
   if (record.kind === "resumed") {
     return `running: ${record.reason}`
   }
   if (record.cause === "stuck" || record.change !== undefined) {
-    return `stopped: stuck on ${record.change !== undefined ? changeName(record.change) : record.reason}`
+    return `paused since ${since}: stuck on ${record.change !== undefined ? changeName(record.change) : record.reason}`
   }
-  return `stopped by ${record.by}: ${record.reason}`
+  return `paused by ${record.by} since ${since}: ${record.reason}`
 }
 
 /**
@@ -259,9 +264,16 @@ export function stuckCures(branch: string): string {
 }
 
 export async function parsePause(git: Git, sha: string, where: string): Promise<PauseRecord> {
-  const [commit, atText, block, body] = (await git(["log", "-1", `--format=${RECORD_FORMAT}`, sha])).split("\x00")
-  const id = commit?.trim()
-  const parsed = commitTrailers(block ?? "")
+  return pauseFromMeta(await readLegacyCommit(git, sha), where)
+}
+
+/** Parse one pause from a Gitomic history row already read in a batch. */
+export function pauseFromMeta(meta: CommitMeta, where: string): PauseRecord {
+  const sha = meta.oid
+  const id = sha
+  const atText = new Date(meta.timestamp * 1_000).toISOString()
+  const body = meta.message
+  const parsed = legacyTrailers(body)
   const kinds = parsed.filter(([name]) => name === "Record").map(([, value]) => value)
   const kind = kinds[0]
   if (kinds.length !== 1 || (kind !== "paused" && kind !== "resumed")) {
@@ -331,30 +343,6 @@ function carried(previous: PauseRecord): Omit<WritePause, "kind"> {
     ...(previous.change === undefined ? {} : { change: previous.change }),
     ...(previous.next === undefined ? {} : { next: previous.next }),
   }
-}
-
-async function pauseCommit(
-  git: Git,
-  previous: PauseRecord | undefined,
-  write: WritePause,
-  pausedAt?: Date,
-): Promise<string> {
-  const tree = (await git(["mktree"], "")).trim()
-  const trailers = [
-    `Record: ${write.kind}`,
-    `Paused-By: ${write.by}`,
-    ...(pausedAt === undefined ? [] : [`Paused-At: ${pausedAt.toISOString()}`]),
-    // A resume ends whatever stood, so it names no cause of its own.
-    ...(write.kind === "paused" ? [`Cause: ${write.cause ?? "operator"}`] : []),
-    ...(write.kind === "paused" && write.change !== undefined ? [`Change: ${changeName(write.change)}`] : []),
-    ...(write.kind === "paused" && write.next !== undefined
-      ? [`Next: ${write.next.replace(/\s+/gu, " ").trim()}`]
-      : []),
-  ]
-  const message = `${write.reason}\n\n${trailers.join("\n")}\n`
-  const args = ["commit-tree", tree]
-  if (previous !== undefined) args.push("-p", previous.sha)
-  return (await git([...args, "-m", message])).trim()
 }
 
 function oneLine(value: string, missing: string): string {

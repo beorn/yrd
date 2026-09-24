@@ -82,7 +82,7 @@ const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_EN
 const SUBMITTER_HELP = `the agent submitting this change, who hears its result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP =
   "the issue, checked against the branch's first Refs/Resolves binding; unbound legacy name fallback is reported"
-const DRY_RUN_HELP = "print the change this would open and push nothing"
+const DRY_RUN_HELP = "preview admission and push nothing; fetches the queue tip into refs/gitomic/fetched/"
 const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to origin/HEAD inside a clone"
 
 const SUBMIT_HELP: [string, string][] = [
@@ -273,50 +273,36 @@ function buildProgram(
       const location = await resolveQueueLocation(cwd(), declared.queue, env)
       setExit(await queueHealthCommand(location.workdir, io))
     })
-  const queueStopAction = async (options: PauseOptions & { reason: string }, deprecatedAlias = false): Promise<void> => {
-    if (deprecatedAlias) {
-      io.stderr("yrd: `pause` is now `stop`\n")
-    }
-    const location = await resolveQueueLocation(cwd(), options.queue, env)
-    setExit(
-      await coreQueueCommand(
-        location.repo,
-        io,
-        { by: resolveSubmitter(options.notify, env), command: "pause", reason: options.reason },
-        {
-          json: options.json,
-          env,
-          log: log(),
-          selection: location.selection,
-          populateReference: location.owned,
-          queue: location.queue,
-          workdir: location.workdir,
-        },
-      ),
-    )
-  }
-
-  const STOP_DESCRIPTION =
-    "stop checking and merging, while the service keeps the queue visible; the line still accepts new " +
-    "submissions, which wait in line behind the stop and are judged once it is resumed"
-
-  queue
-    .command("stop")
-    .description(STOP_DESCRIPTION)
-    .option("--json", "emit stable JSON")
-    .option("--notify <seat>", "name who stopped the queue")
-    .option("--queue <value>", QUEUE_HELP)
-    .requiredOption("--reason <text>", "why checking and merging are stopped")
-    .action(async (options) => queueStopAction(options as PauseOptions & { reason: string }))
-
   queue
     .command("pause")
-    .description(STOP_DESCRIPTION)
+    .description(
+      "stop checking and merging, while the service keeps the queue visible; the line still accepts new " +
+        "submissions, which wait in line behind the stop and are judged once it is resumed",
+    )
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who paused the queue")
     .option("--queue <value>", QUEUE_HELP)
     .requiredOption("--reason <text>", "why checking and merging are paused")
-    .action(async (options) => queueStopAction(options as PauseOptions & { reason: string }, true))
+    .action(async (options) => {
+      const declared = options as PauseOptions & { reason: string }
+      const location = await resolveQueueLocation(cwd(), declared.queue, env)
+      setExit(
+        await coreQueueCommand(
+          location.repo,
+          io,
+          { by: resolveSubmitter(declared.notify, env), command: "pause", reason: declared.reason },
+          {
+            json: declared.json,
+            env,
+            log: log(),
+            selection: location.selection,
+            populateReference: location.owned,
+            queue: location.queue,
+            workdir: location.workdir,
+          },
+        ),
+      )
+    })
   queue
     .command("override")
     .description(
@@ -394,54 +380,40 @@ function buildProgram(
   withdrawOptions(queue.command("withdraw <branch>").description(WITHDRAW_DESCRIPTION))
     .addHelpSection("On withdraw:", WITHDRAW_HELP)
     .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "withdraw"))
-  const queueStartAction = async (options: PauseOptions, deprecatedAlias = false): Promise<void> => {
-    if (deprecatedAlias) {
-      io.stderr("yrd: `resume` is now `start`\n")
-    }
-    const location = await resolveQueueLocation(cwd(), options.queue, env)
-    setExit(
-      await coreQueueCommand(
-        location.repo,
-        io,
-        {
-          by: resolveSubmitter(options.notify, env),
-          command: "resume",
-          ...(options.reason === undefined ? {} : { reason: options.reason }),
-        },
-        {
-          json: options.json,
-          env,
-          log: log(),
-          selection: location.selection,
-          populateReference: location.owned,
-          queue: location.queue,
-          workdir: location.workdir,
-        },
-      ),
-    )
-  }
-
-  const START_DESCRIPTION =
-    "resume checking and merging on the next service interval; a stop the queue put on a stuck change also " +
-    "lifts when that change is withdrawn or merged"
-
-  queue
-    .command("start")
-    .description(START_DESCRIPTION)
-    .option("--json", "emit stable JSON")
-    .option("--notify <seat>", "name who started the queue")
-    .option("--queue <value>", QUEUE_HELP)
-    .option("--reason <text>", "why checking and merging may resume")
-    .action(async (options) => queueStartAction(options as PauseOptions))
-
   queue
     .command("resume")
-    .description(START_DESCRIPTION)
+    .description(
+      "resume checking and merging on the next service interval; a stop the queue put on a stuck change also " +
+        "lifts when that change is withdrawn or merged",
+    )
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who resumed the queue")
     .option("--queue <value>", QUEUE_HELP)
     .option("--reason <text>", "why checking and merging may resume")
-    .action(async (options) => queueStartAction(options as PauseOptions, true))
+    .action(async (options) => {
+      const declared = options as PauseOptions
+      const location = await resolveQueueLocation(cwd(), declared.queue, env)
+      setExit(
+        await coreQueueCommand(
+          location.repo,
+          io,
+          {
+            by: resolveSubmitter(declared.notify, env),
+            command: "resume",
+            ...(declared.reason === undefined ? {} : { reason: declared.reason }),
+          },
+          {
+            json: declared.json,
+            env,
+            log: log(),
+            selection: location.selection,
+            populateReference: location.owned,
+            queue: location.queue,
+            workdir: location.workdir,
+          },
+        ),
+      )
+    })
   function parseDuration(value: string): number | undefined {
     const match = /^(\d+(?:\.\d+)?)\s*(h|m|s|ms)?$/i.exec(value.trim())
     if (!match) return undefined

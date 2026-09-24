@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from "vitest"
-import type { Git } from "../src/records.ts"
+import type { Git } from "../src/git.ts"
 import { worktreeWithoutSubmodules } from "../src/worktree.ts"
 
 // THE INVARIANT IS A CONDITION, NOT A SHAPE (@chief ruling 2026-09-11,

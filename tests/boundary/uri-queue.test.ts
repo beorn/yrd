@@ -12,10 +12,43 @@ import { afterAll, describe, expect, it } from "vitest"
 import { parseQueueAddress, queueDirectory } from "../../packages/yrd-cli/src/address.ts"
 import { git } from "./fixture.ts"
 import { installSelectedGit } from "../../packages/yrd-cli/tests/support/selected-git.ts"
+import {
+  createEventQueue,
+  createEventStore,
+  gitIn,
+  readConfig,
+  resolveGitSelection,
+} from "../../packages/yrd-queue-core/src/index.ts"
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..")
 const roots: string[] = []
 const gitSuperBin = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin")
+
+function gitSubcommand(args: readonly string[]): Readonly<{ name: string; tail: readonly string[] }> | undefined {
+  const withValue = new Set(["--git-dir", "--work-tree", "--namespace", "--config-env", "-C", "-c"])
+  const alone = new Set([
+    "--bare",
+    "--no-pager",
+    "--paginate",
+    "--literal-pathspecs",
+    "--glob-pathspecs",
+    "--noglob-pathspecs",
+    "--icase-pathspecs",
+    "--no-replace-objects",
+    "--no-lazy-fetch",
+  ])
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!
+    if (withValue.has(arg)) {
+      index++
+      continue
+    }
+    if (alone.has(arg) || /^(?:--git-dir|--work-tree|--namespace|--config-env)=/u.test(arg)) continue
+    if (arg.startsWith("-")) return undefined
+    return { name: arg, tail: args.slice(index + 1) }
+  }
+  return undefined
+}
 
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
@@ -147,7 +180,24 @@ describe("a queue started by address on a host with no checkout", () => {
     const selectedCalls = selected.readCalls()
     expect(selectedCalls.some(({ cwd, args }) => cwd === dirname(owned) && args[0] === "clone")).toBe(true)
     expect(selectedCalls.some(({ cwd, args }) => cwd === owned && args[0] === "remote")).toBe(true)
-    expect(selectedCalls.some(({ cwd, args }) => cwd === author && args[0] === "push")).toBe(true)
+    // Gitomic places global options before the subcommand. The selected
+    // executable still owns the one atomic, leased author publication.
+    const authorPush = selectedCalls
+      .filter(({ cwd }) => cwd === author)
+      .map(({ args }) => gitSubcommand(args))
+      .find((call) => call?.name === "push")
+    expect(authorPush, "selected author Git saw no push verb").toBeDefined()
+    expect(authorPush?.tail).toContain("--atomic")
+    expect(authorPush?.tail.filter((arg) => arg.startsWith("--force-with-lease="))).toHaveLength(2)
+    expect(
+      selectedCalls.some(
+        ({ cwd, args }) =>
+          cwd === author &&
+          args[0] === "--git-dir" &&
+          gitSubcommand(args)?.name === "fetch" &&
+          args.some((arg) => arg.includes("refs/heads/main")),
+      ),
+    ).toBe(true)
     expect(result, `${stderr}\n${readFileSync(result.log, "utf8")}`).toMatchObject({
       exitCode: 0,
       merged: ["task/uri"],
@@ -162,5 +212,57 @@ describe("a queue started by address on a host with no checkout", () => {
     expect((await git(owned, "worktree", "list", "--porcelain")).match(/^worktree /gmu)).toHaveLength(1)
     const target = await git(remote, "rev-parse", "refs/heads/main")
     expect((await git(remote, "rev-list", "--parents", "-n", "1", target)).split(" ")).toHaveLength(3)
+
+    // An event queue read must use the same selected executable as legacy
+    // submission. Gitomic's remote fetch uses --git-dir before the verb.
+    await git(author, "checkout", "--quiet", "main")
+    await git(author, "pull", "--quiet", "--ff-only", "origin", "main")
+    writeFileSync(join(author, ".yrd.yml"), "{}\n")
+    await git(author, "add", ".yrd.yml")
+    await git(author, "commit", "--quiet", "-m", "declare event queue")
+    await git(author, "push", "--quiet", "origin", "main")
+    const declared = await git(author, "rev-parse", "HEAD")
+    const config = await readConfig(gitIn(author), declared, { remote: "origin", branch: "main" })
+    if (config === undefined) throw new Error("event boundary fixture lost its queue declaration")
+    await createEventQueue(
+      createEventStore(author, "origin", await resolveGitSelection(author)),
+      "main",
+      declared,
+      config,
+      new Date(),
+    )
+    const beforeEventRead = selected.readCalls().length
+    const listing = Bun.spawn(["bun", join(REPO_ROOT, "bin/yrd.ts"), "queue", "list", "--queue", address, "--json"], {
+      cwd: owned,
+      timeout: 15_000,
+      env: {
+        ...process.env,
+        PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
+        GIT_CONFIG_GLOBAL: selectionConfig,
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "yrd.workdir",
+        GIT_CONFIG_VALUE_0: workdir,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [listOut, listErr, listExit] = await Promise.all([
+      new Response(listing.stdout).text(),
+      new Response(listing.stderr).text(),
+      listing.exited,
+    ])
+    expect(listExit, `${listErr}\n${listOut}`).toBe(0)
+    expect(
+      selected
+        .readCalls()
+        .slice(beforeEventRead)
+        .some(
+          ({ cwd, args }) =>
+            cwd === owned &&
+            args[0] === "--git-dir" &&
+            gitSubcommand(args)?.name === "fetch" &&
+            args.some((arg) => arg.includes("refs/yrd/main/queue")),
+        ),
+    ).toBe(true)
   }, 120_000)
 })

@@ -9,7 +9,6 @@ import { afterAll, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import { gitEnvironment } from "../src/git.ts"
 import {
-  appendRecord,
   changeRef,
   checkTrailer,
   gitIn,
@@ -26,11 +25,9 @@ import {
   watchRows,
 } from "../src/index.ts"
 import type { Git, Row } from "../src/index.ts"
-import { recordMessage } from "../src/records.ts"
+import { ABSENT, legacyStore, recordCommit, recordMessage, type WriteRecord } from "../src/legacy-records.ts"
 
 const roots: string[] = []
-const MAIN = { branch: "main", remote: "origin" } as const
-
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
@@ -71,6 +68,15 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
     issue: `@i/1/${file}`,
   })
   return head
+}
+
+async function appendRemoteRecord(git: Git, queue: string, write: WriteRecord): Promise<string> {
+  const ref = changeRef(queue, write.change)
+  const store = await legacyStore(git)
+  const tip = (await store.backend.fetchRefs(store.repo, ref, "origin")).get(ref)
+  const record = await recordCommit(git, write, tip)
+  await store.backend.publish(store.repo, [{ ref, expect: tip ?? ABSENT, oid: record }], "origin")
+  return record
 }
 
 describe("the declaration is read from the queue branch commit", () => {
@@ -251,7 +257,7 @@ describe("the table is the queue read rendered", () => {
     const merge = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["push", "--quiet", "origin", "main"])
     const ref = changeRef("main", { branch: "task/one", head })
-    await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/one", head },
       kind: "merged",
       subject: "task/one merged",
@@ -261,7 +267,7 @@ describe("the table is the queue read rendered", () => {
       ],
     })
     // The specimen's failed delivery attempt, between the ending and the stray.
-    await appendRecord(w.git, "main", {
+    const tip = await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/one", head },
       kind: "sent",
       subject: "could not tell the submitter",
@@ -276,7 +282,6 @@ describe("the table is the queue read rendered", () => {
     // The stray decision the specimen's stale round appended (measured chain,
     // @i/10-yrd/24635). The store refuses it through appendRecord now, so
     // write the record commit the way that defective run did — with git.
-    const tip = (await w.git(["rev-parse", ref])).trim()
     const stray = (
       await w.git([
         "commit-tree",
@@ -292,10 +297,11 @@ describe("the table is the queue read rendered", () => {
         }),
       ])
     ).trim()
-    await w.git(["update-ref", ref, stray, tip])
+    const store = await legacyStore(w.git)
+    await store.backend.publish(store.repo, [{ ref, expect: tip, oid: stray }], "origin")
     // The rest of the measured specimen: the catch-up's second merged record,
     // then its delivered notice.
-    await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/one", head },
       kind: "merged",
       subject: "task/one already on the target",
@@ -304,7 +310,7 @@ describe("the table is the queue read rendered", () => {
         ["Merged-By", mergedBy("main", "q-20260916T123506349Z-06365f3f")],
       ],
     })
-    await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/one", head },
       kind: "sent",
       subject: "told the submitter",
@@ -316,8 +322,6 @@ describe("the table is the queue read rendered", () => {
         ["Delivery", "sent"],
       ],
     })
-    await w.git(["push", "--quiet", "--force", "origin", `${ref}:${ref}`])
-
     const entries = (await readQueue(w.git, "origin", "main", merge)).changes
     // The chain's ending accounts for the queue's own merge: no page.
     expect(await directMergeCommits(w.git, "main", merge, entries)).toEqual([])
@@ -364,7 +368,7 @@ describe("the table is the queue read rendered", () => {
       const head = await submitCommit(w, "task/one", "one.txt")
       const change = { branch: "task/one", head }
       const base = (await w.git(["rev-parse", "main"])).trim()
-      await appendRecord(w.git, "main", {
+      await appendRemoteRecord(w.git, "main", {
         change,
         kind: "checked",
         subject: "on-submit checks passed",
@@ -399,12 +403,11 @@ describe("the table is the queue read rendered", () => {
       }
       const ending = { change, kind, subject: `${kind} task/one`, trailers: endingTrailers }
       if (kind === "failed") {
-        await appendRecord(gitAt(new Date(endedAt.getTime() - 30_000)), "main", ending)
+        await appendRemoteRecord(gitAt(new Date(endedAt.getTime() - 30_000)), "main", ending)
         // A retry is an opened record on the existing change (submit.ts); only
         // then may a round judge it again (@i/10-yrd/24635).
-        await appendRecord(w.git, "main", { change, kind: "opened", subject: "resubmitted" })
-        await appendRecord(w.git, "main", { change, kind: "checked", subject: "retry checked" })
-        await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
+        await appendRemoteRecord(w.git, "main", { change, kind: "opened", subject: "resubmitted" })
+        await appendRemoteRecord(w.git, "main", { change, kind: "checked", subject: "retry checked" })
         const retry = await readHistories(
           w.git,
           (await readQueue(w.git, "origin", "main", w.target)).changes,
@@ -413,18 +416,15 @@ describe("the table is the queue read rendered", () => {
         )
         expect(show(retry, change.branch)[0]?.row.endedAt).toBeUndefined()
       }
-      await appendRecord(gitAt(endedAt), "main", ending)
-      await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
+      await appendRemoteRecord(gitAt(endedAt), "main", ending)
       const direct = list((await readQueue(w.git, "origin", "main", w.target)).changes, { now: sentAt })[0]
       expect(direct?.endedAt).toEqual(endedAt)
-      await appendRecord(gitAt(sentAt), "main", {
+      await appendRemoteRecord(gitAt(sentAt), "main", {
         change,
         kind: "sent",
         subject: "sent ending notice",
         trailers: [["State", kind], ...endingTrailers],
       })
-      await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
-
       const queue = await readQueue(w.git, "origin", "main", w.target)
       const entry = queue.changes[0]
       if (entry === undefined) throw new Error("submitted change missing from the queue read")
@@ -458,19 +458,18 @@ describe("the table is the queue read rendered", () => {
     /** A failed ending, then its one sent record, pushed as the queue writes them. */
     async function failAndTell(branch: string, delivery: readonly (readonly [string, string])[]): Promise<void> {
       const change = { branch, head: await submitCommit(w, branch, `${branch.slice("task/".length)}.txt`) }
-      await appendRecord(w.git, "main", {
+      await appendRemoteRecord(w.git, "main", {
         change,
         kind: "failed",
         subject: `${branch} failed verify`,
         trailers: [["Reason", "verify"]],
       })
-      await appendRecord(w.git, "main", {
+      await appendRemoteRecord(w.git, "main", {
         change,
         kind: "sent",
         subject: "send it back",
         trailers: [["To", "submitter"], ["State", "failed"], ...delivery, ["Reason", "verify"]],
       })
-      await w.git(["push", "--quiet", "--force", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
     }
     await failAndTell("task/refused", [
       ["Delivery", "failed"],
@@ -568,7 +567,7 @@ describe("a packed Check: trailer", () => {
  * change as the current occupant while the line was checking another one.
  *
  * The suppression set is the three kinds that END a chain — merged, failed,
- * withdrawn (records.ts ENDING_KINDS) — and deliberately NOT `stuck`. A stuck
+ * withdrawn (legacy-records.ts ENDING_KINDS) — and deliberately NOT `stuck`. A stuck
  * chain keeps its place in line (state.ts `holdsPlaceInLine`) and the next run
  * takes it again, and there is no `checking` record kind, so the journal's
  * `running` marker is the ONLY in-flight signal a re-check has. Suppressing it
@@ -607,14 +606,12 @@ describe("a terminal change is never rendered as checking (24972)", () => {
     async (kind, trailers) => {
       const w = await world("{}\n")
       const head = await submitCommit(w, "task/one", "one.txt")
-      await appendRecord(w.git, "main", {
+      await appendRemoteRecord(w.git, "main", {
         change: { branch: "task/one", head },
         kind,
         subject: `task/one ${kind}`,
         trailers: trailers as unknown as readonly (readonly [string, string])[],
       })
-      const ref = changeRef("main", { branch: "task/one", head })
-      await w.git(["push", "--quiet", "--force", "origin", `${ref}:${ref}`])
       const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
       const { journals } = await withUnclosedRun(w, "task/one", head)
 
@@ -642,7 +639,7 @@ describe("a terminal change is never rendered as checking (24972)", () => {
   it("keeps the overlay on a STUCK change, which still holds its place and is taken again", async () => {
     const w = await world("{}\n")
     const head = await submitCommit(w, "task/one", "one.txt")
-    await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/one", head },
       kind: "stuck",
       subject: "task/one stuck",
@@ -655,8 +652,6 @@ describe("a terminal change is never rendered as checking (24972)", () => {
         ["Owner", "the submitter"],
       ],
     })
-    const ref = changeRef("main", { branch: "task/one", head })
-    await w.git(["push", "--quiet", "--force", "origin", `${ref}:${ref}`])
     const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
     const { journals } = await withUnclosedRun(w, "task/one", head)
 
@@ -719,14 +714,12 @@ describe("only one change can hold the line at a time (24972)", () => {
     const w = await world("{}\n")
     const stale = await submitCommit(w, "task/stale", "stale.txt")
     const real = await submitCommit(w, "task/real", "real.txt")
-    await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/stale", head: stale },
       kind: "merged",
       subject: "task/stale merged",
       trailers: [["Merge", "0".repeat(40)]],
     })
-    const ref = changeRef("main", { branch: "task/stale", head: stale })
-    await w.git(["push", "--quiet", "--force", "origin", `${ref}:${ref}`])
     const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
 
     const older = new Date(Date.now() - 38 * 60 * 1000)
@@ -776,7 +769,7 @@ describe("only one change can hold the line at a time (24972)", () => {
   it("yrd list shows the state, the projected minutes and the bound", async () => {
     const w = await world("{}\n")
     const head = await submitCommit(w, "task/wide", "wide.txt")
-    await appendRecord(w.git, "main", {
+    await appendRemoteRecord(w.git, "main", {
       change: { branch: "task/wide", head },
       kind: "deferred" as any,
       subject: "task/wide deferred",
@@ -786,8 +779,6 @@ describe("only one change can hold the line at a time (24972)", () => {
         ["BoundMs", "1800000"],
       ],
     })
-    const ref = changeRef("main", { branch: "task/wide", head })
-    await w.git(["push", "--quiet", "--force", "origin", `${ref}:${ref}`])
     const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
     const rows = list(entries)
     const wideRow = rows.find((r) => r.branch === "task/wide")

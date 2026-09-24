@@ -20,7 +20,7 @@
  */
 
 import { overrideFence, readOverrides } from "./override.ts"
-import { mergedBy } from "./records.ts"
+import { mergedBy } from "./legacy-records.ts"
 import { changeName, overrideRef } from "./refs.ts"
 import { QueueAuthorityUnreadable, type Ring } from "./run.ts"
 

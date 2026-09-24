@@ -44,7 +44,7 @@
     "@silvery/scope": "^0.24.0",
     "loggily": "^0.11.0",
     "react": "^19.2.0",
-    "silvery": "^0.24.1",
+    "silvery": "^0.24.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -54,8 +54,8 @@
     "vitest": "4.1.9"
   },
   "overrides": {
-    "gitomic": "github:beorn/gitomic#2df3e1053b17a68dcf56d271aa3a106edf978462",
     "git-super": "github:beorn/git-super#ec68517c1ecfcd9571d7193355af1dab5df78283",
+    "gitomic": "^0.3.0",
     "loggily": "^0.11.0"
   }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { holdsPlaceInLine, inLine, readChange } from "../src/state.ts"
-import type { ChangeRecord } from "../src/records.ts"
+import type { ChangeRecord } from "../src/legacy-records.ts"
 import type { ChangeRecords } from "../src/state.ts"
 
 function record(kind: string, trailers: readonly (readonly [string, string])[] = []): ChangeRecord {
@@ -60,10 +60,7 @@ describe("deferred state and line placement", () => {
       head: "a".repeat(40),
       headOnTarget: false,
       branchHead: "a".repeat(40),
-      records: [
-        ...deferredChange.records,
-        record("opened", [["Opened", "2026-09-18T20:30:00.000Z"]]),
-      ],
+      records: [...deferredChange.records, record("opened", [["Opened", "2026-09-18T20:30:00.000Z"]])],
     }
 
     const retriedReading = readChange(resubmittedChange)

@@ -86,7 +86,19 @@ describe("the one definition of a draft (24196, A2-set-v3)", () => {
     // Submitted once, then pushed again: the new head has no change ref of its own.
     await pushed("task/moved", ago(3 * hour))
     await submitted("task/moved")
-    const moved = await commitOn("task/moved", ago(30 * 60_000), "grace")
+    // Move the submitted branch from another clone, so the queue reader does
+    // not already have the new object. readQueue must fetch submitted branch
+    // heads before readDrafts can date this moved-since-submit draft.
+    await seed(["clone", "--quiet", remote, other])
+    const elsewhere = gitIn(other)
+    await elsewhere(["config", "user.email", "queue@yrd.test"])
+    await elsewhere(["config", "user.name", "yrd"])
+    await elsewhere(["checkout", "--quiet", "-b", "task/moved", "origin/task/moved"])
+    writeFileSync(join(other, "task-moved-later.txt"), "task/moved\n")
+    await elsewhere(["add", "task-moved-later.txt"])
+    await dated(other, ago(30 * 60_000))(["-c", "user.name=grace", "commit", "--quiet", "-m", "task/moved"])
+    const moved = (await elsewhere(["rev-parse", "HEAD"])).trim()
+    await elsewhere(["push", "--quiet", "origin", "task/moved"])
     const recent = await pushed("task/recent", ago(hour), "ada")
     const old = await pushed("task/old", ago(10 * 24 * hour))
     await pushed("yrd/pin", ago(hour))
@@ -94,10 +106,6 @@ describe("the one definition of a draft (24196, A2-set-v3)", () => {
     await git(["push", "--quiet", "origin", `${behind}:refs/heads/task/behind-target`])
     await git(["push", "--quiet", "origin", `${target}:refs/heads/task/at-target`])
     // A head this clone never fetched, and a kept one it never fetched: absence decides nothing about exclusion.
-    await seed(["clone", "--quiet", remote, other])
-    const elsewhere = gitIn(other)
-    await elsewhere(["config", "user.email", "queue@yrd.test"])
-    await elsewhere(["config", "user.name", "yrd"])
     for (const name of ["task/elsewhere", "preserve/elsewhere"]) {
       await elsewhere(["checkout", "--quiet", "-b", name, "origin/main"])
       writeFileSync(join(other, `${name.replaceAll("/", "-")}.txt`), `${name}\n`)
