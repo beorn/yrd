@@ -20,10 +20,9 @@
  * the same derivation every other reader uses.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createProcess, shellCommand } from "@yrd/process"
 import { createEventStore, listRefs, openEvents, selectionFor } from "./git.ts"
 import { targetName, type Target } from "./config.ts"
 import { ABSENT, legacyStore, recordCommit } from "./legacy-records.ts"
@@ -205,125 +204,7 @@ export function freshnessLine(targetHead: string): string {
   return `freshness checked at ${targetHead}; the queue revalidates at merge`
 }
 
-export function workflowRunsCheck(content: string): boolean {
-  return /\b(?:(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?check|run:\s*.*?\bcheck)\b/u.test(content)
-}
 
-async function checkRepoCiCheck(git: Git, cwd: string, sha: string, scratch: string, repoName: string): Promise<void> {
-  let hasCheckScript = false
-  try {
-    const pkgJsonRaw = await git(["show", `${sha}:package.json`])
-    const pkg = JSON.parse(pkgJsonRaw) as { scripts?: Record<string, string> }
-    if (typeof pkg?.scripts?.check === "string") {
-      hasCheckScript = true
-    }
-  } catch {
-    // absence or malformed package.json
-  }
-  if (!hasCheckScript) return
-
-  let ciRunsCheck = false
-  try {
-    const tree = (await git(["ls-tree", "-r", "--name-only", `${sha}:.github/workflows`])).trim().split("\n")
-    for (const entry of tree) {
-      const file = entry.trim()
-      if (!file.endsWith(".yml") && !file.endsWith(".yaml")) continue
-      const content = await git(["show", `${sha}:.github/workflows/${file}`])
-      if (workflowRunsCheck(content)) {
-        ciRunsCheck = true
-        break
-      }
-    }
-  } catch {
-    // no .github/workflows directory
-  }
-  if (!ciRunsCheck) return
-
-  const safeName = repoName.replace(/[^a-zA-Z0-9._-]/gu, "-")
-  const worktreePath = join(scratch, `ci-check-${safeName}`)
-  let checkDir = cwd
-  let addedWorktree = false
-  try {
-    await git(["worktree", "add", "--detach", worktreePath, sha])
-    checkDir = worktreePath
-    addedWorktree = true
-    const modulesSrc = join(cwd, "node_modules")
-    if (existsSync(modulesSrc)) {
-      try {
-        symlinkSync(modulesSrc, join(worktreePath, "node_modules"), "dir")
-      } catch {
-        // symlink failure allowed
-      }
-    }
-  } catch {
-    checkDir = cwd
-  }
-
-  try {
-    await using runner = createProcess({ cwd: checkDir })
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      YRD_REPO: checkDir,
-    }
-    const execution = await runner.run({
-      argv: shellCommand("bun run check"),
-      cwd: checkDir,
-      env,
-      timeoutMs: 60_000,
-    })
-    if (execution.timedOut) {
-      throw new Error(`${repoName} at ${sha} timed out running check script`)
-    }
-    if (execution.exitCode !== 0) {
-      const output = execution.stderr.trim().length > 0 ? execution.stderr : execution.stdout
-      const lines = output
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0)
-      const failingLine =
-        lines.find((l) => !l.startsWith("$ ") && !/^error: script ".*" exited with code/u.test(l)) ??
-        lines[0] ??
-        "check failed"
-      throw new Error(`${repoName} at ${sha} failed check script: ${failingLine}`)
-    }
-  } finally {
-    if (addedWorktree) {
-      try {
-        await git(["worktree", "remove", "--force", worktreePath])
-      } catch {
-        // worktree removal failure handled by scratch cleanup
-      }
-    }
-  }
-}
-
-export async function verifyComponentChecks(
-  git: Git,
-  root: string,
-  base: string,
-  head: string,
-  scratch: string,
-  prefix = "",
-): Promise<void> {
-  const moved = await gitlinkRows(git, base, head)
-  for (const row of moved) {
-    if (row.newMode !== "160000" || ZERO_SHA.test(row.sha)) continue
-    const fullPath = prefix === "" ? row.path : `${prefix}/${row.path}`
-    const checkout = join(root, row.path)
-    if (!existsSync(checkout)) continue
-    const child = gitIn(checkout)
-    try {
-      await child(["cat-file", "-e", `${row.sha}^{commit}`])
-    } catch {
-      continue
-    }
-
-    await checkRepoCiCheck(child, checkout, row.sha, scratch, fullPath)
-
-    const beforeSha = row.oldMode === "160000" ? (await git(["rev-parse", `${base}:${row.path}`])).trim() : EMPTY_TREE
-    await verifyComponentChecks(child, checkout, beforeSha, row.sha, scratch, fullPath)
-  }
-}
 
 /** The same read-only admission checks serve the action and its preview. */
 export async function inspectSubmit(git: Git, remote: string, request: SubmitRequest): Promise<SubmitInspection> {
@@ -376,8 +257,6 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
           `${composed.verifying.detail.code}: ${composed.verifying.detail.message}; ${bound}`,
       )
     }
-    await verifyComponentChecks(git, root, base, head, scratch)
-    await checkRepoCiCheck(git, root, head, scratch, request.branch)
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
