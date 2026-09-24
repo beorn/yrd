@@ -112,6 +112,7 @@ import {
   readObscuredEndings,
   readQueue,
   remoteUrl,
+  type BranchOmission,
   type QueueEntry,
   type QueueRead,
 } from "./remote.ts"
@@ -174,6 +175,8 @@ export type QueueRunOptions = Readonly<{
   tier?: "normal" | "long"
   /** Stop starting new checks after this epoch timestamp in ms (Condition 5). */
   stopAtMs?: number
+  /** Service round interval plus 60 seconds; defaults to 75 seconds for one-shot runs. */
+  branchDeletionGraceMs?: number
   /** Injected clock for testing stop windows; defaults to Date.now. */
   now?: () => number
   /**
@@ -559,17 +562,35 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // `base` is the target it read at: the round's start, or, for the prefetch
   // and the final re-read, the target the head's merge left (25301).
   const readStep = (at: string) => ({ base: at, name: "read", phase: "run", target: options.target.branch })
+  const writeOmissions = (rows: readonly BranchOmission[]) => {
+    log.write({
+      kind: "observation",
+      subject: "branch-list-omissions",
+      count: rows.length,
+      branches: rows.map((row) => row.branch),
+    })
+    for (const row of rows) log.write({ kind: "observation", subject: "branch-list-omission", ...row })
+  }
+  let queueNamed = false
+  let pendingOmissions: readonly BranchOmission[] | undefined
   const read = async (at = targetSha) => {
+    const readOnce = () =>
+      readQueue(git, options.target.remote, options.target.branch, at, {
+        now: options.now ?? Date.now,
+        graceMs: options.branchDeletionGraceMs,
+        onOmissions: (rows) => {
+          if (queueNamed) writeOmissions(rows)
+          else pendingOmissions = rows
+        },
+      })
     try {
-      return await timedStep(log, readStep(at), () => readQueue(git, options.target.remote, options.target.branch, at))
+      return await timedStep(log, readStep(at), readOnce)
     } catch (error) {
       if (retried !== undefined) throw failedAgain(retried, error)
       if (!(error instanceof CapturedQueueObjectsUnavailable)) throw error
       retried = error
       try {
-        return await timedStep(log, readStep(at), () =>
-          readQueue(git, options.target.remote, options.target.branch, at),
-        )
+        return await timedStep(log, readStep(at), readOnce)
       } catch (again) {
         throw failedAgain(error, again)
       }
@@ -588,6 +609,8 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // record after it is a run that died in that preamble, and its Git rows above
   // name the call that failed (@i/10-yrd/24470).
   log.write({ kind: "queue", queue: name })
+  queueNamed = true
+  if (pendingOmissions !== undefined) writeOmissions(pendingOmissions)
   for (const entry of options.overridesExpired ?? []) {
     log.write({
       by: entry.by,
@@ -696,12 +719,12 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   if (stopped !== undefined) {
     return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred }, stopped)
   }
-
   // Bookkeeping at the edges of the records first, so every reader below reads
   // records and never reconciles. A bookkeeping pass can itself end an entry
   // stuck (an orphaned merge recovery could not trust, @i/10-yrd/24344), and
   // that stops the round exactly like a stuck judge or merge does.
   for (const entry of entries) {
+    if (entry.branchUnconfirmed) continue
     if ((await run.steps.bookkeep(run, entry)) === "stuck") {
       stuck.push(entry.change.branch)
       return finish(
@@ -738,6 +761,10 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 
     const entry = deferredEntries[0]
     if (entry === undefined) {
+      return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+    }
+    if (entry.branchUnconfirmed) {
+      log.write({ kind: "observation", subject: "branch-confirmation-pending", branch: entry.change.branch })
       return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
     }
     const outcome = await judged(run, entry, () => run.steps.judge(run, entry))
@@ -872,6 +899,10 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     const entry = walked ? await stillInLine(walkedTo) : walkedTo
     walked = true
     if (entry === undefined) continue
+    if (entry.branchUnconfirmed) {
+      log.write({ kind: "observation", subject: "branch-confirmation-pending", branch: entry.change.branch })
+      return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck, deferred })
+    }
     let head = entry
     if (needsJudge(entry)) {
       const judgedAs = await judged(run, entry, () => run.steps.judge(run, entry))
@@ -927,7 +958,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     const next = ordered((await read(run.targetSha)).changes, undefined, "queued", "stuck", "checked").find(
       (entry) => !sameChange(entry, acted),
     )
-    if (next !== undefined && needsJudge(next) && !pastStopTime()) {
+    if (next !== undefined && !next.branchUnconfirmed && needsJudge(next) && !pastStopTime()) {
       const judgedAs = await judged(run, next, () => run.steps.judge(run, next))
       if (judgedAs === "stuck") return await andon(next)
       if (judgedAs === "failed") failed.push(next.change.branch)
@@ -2491,7 +2522,7 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
       kind: "withdrawn",
       subject:
         reason === "deleted"
-          ? `${branch} was deleted by its submitter`
+          ? `${branch} is absent from the remote`
           : `${branch} moved off ${head.slice(0, 12)}; its submitter replaced it`,
       trailers: [["Reason", reason]],
     },

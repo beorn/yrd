@@ -397,7 +397,12 @@ it("ends a deleted event branch with its last commit kept, then continues the li
   })
   await w.git(["push", "--quiet", "origin", ":refs/heads/task/deleted-event"])
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [],
+    now: () => Date.now() + 75_001,
+  })
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/after-deleted"], stuck: [] })
   const state = await readStatus(store, "main", "task/deleted-event")
@@ -407,6 +412,148 @@ it("ends a deleted event branch with its last commit kept, then continues the li
   )
   expect(ending).toMatchObject({ type: "cancelled", links: [deleted] })
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/heads/task/deleted-event"])).toBe("")
+})
+
+/** @failure A just-opened branch could be absent from remote reads during propagation.
+ * @level l3 @consumer event queue submitter
+ */
+it("skips a just-opened event branch absent from the remote during its grace window", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const head = await submitCommit(w, "task/grace", "grace.txt")
+  await w.git(["push", "--quiet", "origin", ":refs/heads/task/grace"])
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [] })
+  expect(await readStatus(store, "main", "task/grace")).toMatchObject({ status: "queued", commit: head })
+  const journal = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
+  if (journal === undefined) throw new Error("queue run left no journal")
+  const rows = readFileSync(join(w.workdir, "logs", journal), "utf8")
+  expect(rows).toContain('"subject":"branch-list-omissions","count":1,"branches":["task/grace"]')
+  expect(rows).toContain('"answer":"absent"')
+  expect(rows).toContain('"protected":true')
+})
+
+/** @failure An incomplete branch listing cancelled a live event change as deleted.
+ * @level l3 @consumer event queue submitter
+ * The deletion case above proves the remote's exact absence still ends a change.
+ */
+it("keeps a live event change when its ref is omitted from the broad listing", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const head = await submitCommit(w, "task/live-event", "live.txt")
+  const wrapper = join(w.workdir, "git-omit-broad-head.sh")
+  writeFileSync(
+    wrapper,
+    [
+      "#!/bin/sh",
+      'case " $* " in',
+      '  *"ls-remote"*"refs/heads/*"*)',
+      '    output=$(git "$@") || exit $?',
+      '    printf "%s\\n" "$output" | sed "/refs\\/heads\\/task\\/live-event$/d"',
+      "    exit 0;;",
+      "esac",
+      'exec git "$@"',
+      "",
+    ].join("\n"),
+  )
+  chmodSync(wrapper, 0o755)
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [],
+    selection: { ...selectionFor(w.git), executable: wrapper },
+  })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/live-event"] })
+  expect(await readStatus(store, "main", "task/live-event")).toMatchObject({ status: "merged", commit: head })
+})
+
+/** @failure A failed exact remote read was mistaken for proof that a branch was deleted.
+ * @level l3 @consumer event queue submitter
+ */
+it("leaves an event change open when confirmation of its missing branch fails", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const head = await submitCommit(w, "task/unconfirmed", "unconfirmed.txt")
+  const wrapper = join(w.workdir, "git-fail-exact-head.sh")
+  writeFileSync(
+    wrapper,
+    [
+      "#!/bin/sh",
+      'case " $* " in',
+      '  *"ls-remote"*"refs/heads/*"*)',
+      '    output=$(git "$@") || exit $?',
+      '    printf "%s\\n" "$output" | sed "/refs\\/heads\\/task\\/unconfirmed$/d"',
+      "    exit 0;;",
+      '  *"ls-remote"*"refs/heads/task/unconfirmed"*) exit 42;;',
+      "esac",
+      'exec git "$@"',
+      "",
+    ].join("\n"),
+  )
+  chmodSync(wrapper, 0o755)
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [],
+    selection: { ...selectionFor(w.git), executable: wrapper },
+  })
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [] })
+  expect(await readStatus(store, "main", "task/unconfirmed")).toMatchObject({ status: "queued", commit: head })
+  const journal = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
+  if (journal === undefined) throw new Error("queue run left no journal")
+  expect(readFileSync(join(w.workdir, "logs", journal), "utf8")).toContain("branch-list-omission")
+  expect(readFileSync(join(w.workdir, "logs", journal), "utf8")).toContain('"answer":"error"')
+})
+
+/** @failure A failed legacy exact read must finish the round without recording withdrawal.
+ * @level l3 @consumer legacy queue submitter
+ */
+it("leaves a legacy change open and journals a failed branch confirmation", async () => {
+  const w = await world()
+  await submitCommit(w, "task/earlier", "earlier.txt")
+  const head = await submitCommit(w, "task/legacy-unconfirmed", "legacy-unconfirmed.txt")
+  const wrapper = join(w.workdir, "git-fail-legacy-exact-head.sh")
+  writeFileSync(
+    wrapper,
+    [
+      "#!/bin/sh",
+      'case " $* " in',
+      '  *"ls-remote"*"refs/heads/*"*)',
+      '    output=$(git "$@") || exit $?',
+      '    printf "%s\\n" "$output" | sed "/refs\\/heads\\/task\\/legacy-unconfirmed$/d"',
+      "    exit 0;;",
+      '  *"ls-remote"*"refs/heads/task/legacy-unconfirmed"*) exit 42;;',
+      "esac",
+      'exec git "$@"',
+      "",
+    ].join("\n"),
+  )
+  chmodSync(wrapper, 0o755)
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [],
+    selection: { ...selectionFor(w.git), executable: wrapper },
+  })
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/earlier"] })
+  expect(
+    (await readQueue(w.git, "origin", "main", w.target)).changes.find(
+      (entry) => entry.change.branch === "task/legacy-unconfirmed",
+    ),
+  ).toMatchObject({
+    change: { head },
+    reading: { state: "queued" },
+  })
+  const journal = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
+  if (journal === undefined) throw new Error("queue run left no journal")
+  const rows = readFileSync(join(w.workdir, "logs", journal), "utf8")
+  expect(rows).toContain('"subject":"branch-list-omissions","count":1,"branches":["task/legacy-unconfirmed"]')
+  expect(rows).toContain('"answer":"error"')
 })
 
 /** @failure A run treated an already-stuck event change as absent and advanced the line.
