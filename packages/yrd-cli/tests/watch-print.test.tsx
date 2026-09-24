@@ -427,4 +427,3 @@ describe("the flow page: four bands, one row per change", () => {
     expect(text80).toContain("stuck=yrd-check-unresolved")
   })
 })
-

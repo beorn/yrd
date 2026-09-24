@@ -77,6 +77,8 @@ export type Row<Status extends string = ChangeState | ChangeStatus | "direct" | 
   submitter?: string
   /** Why: `replaced`, `deleted`, `superseded`, a check's code, or for a `direct` row the one line about that commit. */
   reason?: string
+  /** An open event change's attributed ignore overlay; absent otherwise. */
+  ignored?: Readonly<{ reason: string; by: string }>
   /** The branch's current head, named only when `reason` is `superseded` (state.ts). */
   supersededBy?: string
   /** When the change was opened, from its first record's `Opened:`. */

@@ -116,6 +116,10 @@ export type Notifier = Readonly<{
 export type QueueConfig = Readonly<{
   /** The branch the queue merges on, at the remote holding it; `origin#main` unless declared. */
   target: Target
+  /** Ref deletion is halted; the only accepted retention policy is never. */
+  archiveAfter: "never"
+  /** Whole-branch Bun.Glob patterns that suppress unsubmitted drafts. */
+  ignore: readonly string[]
   checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
   setup?: string
@@ -155,7 +159,53 @@ export function parseConfig(
   const notify = readNotify(raw.notify)
   const setup = optionalString(raw, "setup")
   const teardown = optionalString(raw, "teardown")
-  return { blob, checks: readChecks(raw.checks), notify, setup, teardown, target }
+  return {
+    archiveAfter: readArchiveAfter(raw["archive-after"]),
+    blob,
+    checks: readChecks(raw.checks),
+    ignore: readIgnore(raw.ignore),
+    notify,
+    setup,
+    teardown,
+    target,
+  }
+}
+
+function readArchiveAfter(value: unknown): "never" {
+  if (value === undefined || value === "never") return "never"
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
+    throw new Error(
+      `yrd-archive-after-disabled: .yrd.yml archive-after ${value} days: ref deletion is disabled by the halt; #25041 lifts it`,
+    )
+  }
+  throw new Error(
+    `yrd-archive-after-invalid: .yrd.yml archive-after: expected never or a positive integer; received ${JSON.stringify(value)}`,
+  )
+}
+
+function readIgnore(value: unknown): readonly string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) {
+    throw new Error("yrd-ignore-pattern-invalid: .yrd.yml ignore: must be a list of Bun.Glob patterns")
+  }
+  return value.map((pattern, index) => {
+    const where = `.yrd.yml ignore entry ${index}`
+    if (typeof pattern !== "string") {
+      throw new Error(`yrd-ignore-pattern-invalid: ${where}: pattern must be a string`)
+    }
+    if (pattern.length === 0) throw new Error(`yrd-ignore-pattern-invalid: ${where}: pattern is empty`)
+    if (pattern.includes("\0")) throw new Error(`yrd-ignore-pattern-invalid: ${where}: pattern contains NUL`)
+    if (pattern.startsWith("!")) throw new Error(`yrd-ignore-pattern-invalid: ${where}: pattern starts with !`)
+    if (pattern.startsWith("/")) throw new Error(`yrd-ignore-pattern-invalid: ${where}: pattern starts with / `)
+    try {
+      new Bun.Glob(pattern)
+    } catch (cause) {
+      throw new Error(`yrd-ignore-pattern-invalid: ${where}: invalid Bun.Glob pattern ${JSON.stringify(pattern)}`, {
+        cause,
+      })
+    }
+    return pattern
+  })
 }
 
 export type Hints = Readonly<{
@@ -310,7 +360,7 @@ function readChecks(value: unknown): readonly CheckSpec[] {
 // consumer, and one nobody reads is still refused. A fresh worktree has
 // submodules and nothing else, so the target says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
-const TOP_KEYS = ["checks", "setup", "teardown", "notify"] as const
+const TOP_KEYS = ["archive-after", "checks", "ignore", "setup", "teardown", "notify"] as const
 
 /**
  * A key the declaration used to read, and where its meaning went. A typo is
