@@ -34,6 +34,7 @@ import {
   type StatsGroup,
 } from "../src/queue-stats.ts"
 import { statsBuckets } from "../src/watch-stats.ts"
+import { journalRun } from "../../../tests/support/journal-run.ts"
 
 /** Eighteen rows of the live /hh queue as `yrd queue list --json` printed them at 2026-09-05 06:36Z: five branches, eight heads. */
 const WITNESS = join(import.meta.dirname, "fixtures/queue-list-witness-2026-09-05T0636Z.json")
@@ -289,7 +290,7 @@ describe("a verdict the reader cannot name (@cto 0686be28)", () => {
       // A journal run whose decision is a word this reader does not know.
       {
         row: { at: at("2026-09-05T04:00:00Z"), branch: "task/z", head: "3".repeat(40), state: "failed" },
-        run: {
+        run: journalRun({
           at: at("2026-09-05T04:00:00Z"),
           branch: "task/z",
           checks: [],
@@ -297,7 +298,7 @@ describe("a verdict the reader cannot name (@cto 0686be28)", () => {
           head: "3".repeat(40),
           id: "q-9",
           startedAt: at("2026-09-05T03:50:00Z"),
-        },
+        }),
       },
     ]
     const stats = queueStats(rows, [], { now: NOW })

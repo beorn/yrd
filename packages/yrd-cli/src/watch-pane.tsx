@@ -68,7 +68,7 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import type { GitObservation, OverrideFact, Row, StopFact } from "@yrd/queue-core"
+import type { GitObservation, JournalCommand, OverrideFact, Row, StopFact } from "@yrd/queue-core"
 import { NowProvider, useMinute, useNow } from "./watch-clock.ts"
 import {
   RUNNER_GLYPH,
@@ -80,7 +80,7 @@ import {
   runShortName,
   stateGlyph,
 } from "./watch-format.ts"
-import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
+import { WatchDetail, commandKey, commandsOfTab, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
 import {
   BUCKETS,
   ListHeader,
@@ -242,6 +242,7 @@ export function WatchPane({
   load,
   open,
   loadDiff,
+  loadCommandOutput,
   intervalMs = 5000,
   live = true,
   onEnding,
@@ -253,6 +254,8 @@ export function WatchPane({
   open?: (row: WatchRow) => Promise<ChangeDetail>
   /** The unified diff of one change, read only when its fold opens. */
   loadDiff?: (row: WatchRow) => Promise<DiffText>
+  /** One git command's output from the round's raw files, read only when its stage tab opens (25441). */
+  loadCommandOutput?: (command: JournalCommand) => Promise<DiffText>
   intervalMs?: number
   /** False in a test or a single frame: the tick that ages the screen stands still and nothing pulses. */
   live?: boolean
@@ -280,6 +283,8 @@ export function WatchPane({
   const [held, setHeld] = useState<readonly HeldDetail[]>([])
   const [diffOpen, setDiffOpen] = useState(false)
   const [diffs, setDiffs] = useState<ReadonlyMap<string, DiffText>>(new Map())
+  // A command's output, once read: its row is written when it has finished, so the file never changes after.
+  const [outputs, setOutputs] = useState<ReadonlyMap<string, DiffText>>(new Map())
   const [statsOpen, setStatsOpen] = useState(false)
   const centeredRunner = useRef(false)
   const listRef = useRef<ListViewHandle | null>(null)
@@ -363,9 +368,11 @@ export function WatchPane({
   const keyed = cursorKey === undefined ? -1 : visibleItems.findIndex((item) => item.key === cursorKey)
   const at = keyed >= 0 ? keyed : Math.min(cursor, Math.max(0, visibleItems.length - 1))
   const selectedItem = visibleItems[at]
-  const selected = selectedItem?.kind === "row" ? selectedItem.item : undefined
-  const selectedKey = selected === undefined ? undefined : watchRowKey(selected)
   const isRunnerSelected = selectedItem?.kind === "runner"
+  // The RUNNER's detail is the same pane on the change it holds (25441); with none held it is the runner's own.
+  const runnerHolds = isRunnerSelected ? shown.unfiltered.find((item) => item.row.live !== undefined) : undefined
+  const selected = selectedItem?.kind === "row" ? selectedItem.item : runnerHolds
+  const selectedKey = selected === undefined ? undefined : watchRowKey(selected)
   const vanished = cursorKey !== undefined && keyed < 0 && visibleItems.length > 0 ? cursorRow : undefined
 
   useEffect(() => {
@@ -466,6 +473,33 @@ export function WatchPane({
       cancelled = true
     }
   }, [diffOpen, draft, loadDiff, selected, selectedKey, diffs])
+
+  // A stage tab's commands, read when the tab opens and never again.
+  const openedDetail = held.find((entry) => entry.key === selectedKey)?.detail
+  useEffect(() => {
+    if (loadCommandOutput === undefined || openedDetail === undefined) return
+    const missing = commandsOfTab(openedDetail, tab).filter(
+      (command) => command.failure === undefined && !outputs.has(commandKey(command)),
+    )
+    if (missing.length === 0) return
+    let cancelled = false
+    void (async () => {
+      const read = await Promise.all(
+        missing.map(async (command): Promise<readonly [string, DiffText]> => {
+          try {
+            return [commandKey(command), await loadCommandOutput(command)]
+          } catch (error: unknown) {
+            return [commandKey(command), { why: error instanceof Error ? error.message : String(error) }]
+          }
+        }),
+      )
+      if (cancelled) return
+      setOutputs((was) => new Map([...was, ...read]))
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [loadCommandOutput, openedDetail, tab, outputs])
 
   const selectOnly = (bucket: StatusBucket): void => {
     setBuckets(new Set([bucket]))
@@ -584,34 +618,36 @@ export function WatchPane({
   if (failure !== undefined) throw failure
 
   const detail = heldDetail?.detail
-  const detailContent = isRunnerSelected ? (
-    <RunnerDetailPane snapshot={shown} />
-  ) : draft !== undefined ? (
-    <DraftDetail row={draft} />
-  ) : (
-    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-      {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
-        <Text bold color="$fg-warning" wrap="truncate">
-          {readFailureLine(
-            "this change's read",
-            detailFailure,
-            heldDetail === undefined ? "" : "; the detail shown is the last good read",
-          )}
-        </Text>
-      )}
-      <WatchDetail
-        detail={detail}
-        joinedRun={selected?.run !== undefined}
-        {...(tab === undefined ? {} : { selected: tab })}
-        onSelect={setTab}
-        diffOpen={diffOpen}
-        {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
-        onToggleDiff={() => {
-          setDiffOpen((was) => !was)
-        }}
-      />
-    </Box>
-  )
+  const detailContent =
+    isRunnerSelected && runnerHolds === undefined ? (
+      <RunnerDetailPane snapshot={shown} />
+    ) : draft !== undefined ? (
+      <DraftDetail row={draft} />
+    ) : (
+      <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+        {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
+          <Text bold color="$fg-warning" wrap="truncate">
+            {readFailureLine(
+              "this change's read",
+              detailFailure,
+              heldDetail === undefined ? "" : "; the detail shown is the last good read",
+            )}
+          </Text>
+        )}
+        <WatchDetail
+          detail={detail}
+          joinedRun={selected?.run !== undefined}
+          {...(tab === undefined ? {} : { selected: tab })}
+          onSelect={setTab}
+          diffOpen={diffOpen}
+          {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
+          onToggleDiff={() => {
+            setDiffOpen((was) => !was)
+          }}
+          outputs={outputs}
+        />
+      </Box>
+    )
 
   const detailPane = (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} backgroundColor={DETAIL_BG}>

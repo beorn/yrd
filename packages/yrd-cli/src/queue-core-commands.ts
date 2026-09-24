@@ -135,6 +135,7 @@ import {
   type EventChange,
   type EventQueue,
   type DraftReading,
+  type JournalCommand,
   type Row,
   type StopFact,
   tipOf,
@@ -1919,6 +1920,7 @@ export async function coreQueueCommand(
               return snapshotOf(next)
             },
             loadDiff: (item) => readDiff(git, config, item),
+            loadCommandOutput: (command) => Promise.resolve(readCommandOutput(command)),
             open: (item) => {
               if (entries === undefined) {
                 if (item.row.state === "direct") {
@@ -3049,6 +3051,43 @@ const LOG_TAIL_BYTES = 64 * 1024
  * could not be read — because an empty pane that does not say what it looked
  * for is the failure this whole port is against.
  */
+/**
+ * One git command's output from the round's raw files (25441): stdout, then
+ * stderr, each tail-limited like a check's log and cut at a line boundary, so
+ * the first line shown is a whole one. The row is written when the command has
+ * finished, so these files are complete. Missing here means this is not the
+ * machine the queue runs on, and the sentence says where it looked.
+ */
+export function readCommandOutput(command: JournalCommand): DiffText {
+  if (command.stdout === undefined) {
+    return { why: command.failure ?? "the journal names no output file for this command" }
+  }
+  const parts: string[] = []
+  for (const path of [command.stdout, command.stderr]) {
+    if (path === undefined) continue
+    let bytes: Buffer
+    try {
+      bytes = readFileSync(path)
+    } catch (error) {
+      return {
+        why:
+          (error as NodeJS.ErrnoException).code === "ENOENT"
+            ? `no output at ${path} on this machine; the queue writes its journal where it runs`
+            : `the output at ${path} could not be read: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+    let text = bytes.toString("utf8")
+    if (bytes.length > LOG_TAIL_BYTES) {
+      const tail = bytes.subarray(bytes.length - LOG_TAIL_BYTES).toString("utf8")
+      const firstBreak = tail.indexOf("\n")
+      text = firstBreak === -1 ? tail : tail.slice(firstBreak + 1)
+    }
+    const clean = stripAnsi(text).trimEnd()
+    if (clean !== "") parts.push(clean)
+  }
+  return { text: parts.join("\n") }
+}
+
 function readOutput(check: CheckView): CheckPanel {
   if (check.log === undefined) {
     return { ...check, why: "no log path is recorded for this check" }

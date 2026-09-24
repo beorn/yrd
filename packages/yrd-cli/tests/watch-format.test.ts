@@ -23,6 +23,7 @@ import {
   withoutGitConflictsBlock,
   ageRunText,
 } from "../src/watch-format.ts"
+import { journalRun } from "../../../tests/support/journal-run.ts"
 
 describe("ref-write diagnostic lines", () => {
   it("names an absent decision only when the run journal was actually read", () => {
@@ -35,7 +36,7 @@ describe("ref-write diagnostic lines", () => {
       inspect: "git show the-ref",
     }
     const row = { branch: "task/one", head: "abcd", diagnostics: [diagnostic] }
-    const journal = {
+    const journal = journalRun({
       id: "q-one",
       branch: row.branch,
       head: row.head,
@@ -43,7 +44,7 @@ describe("ref-write diagnostic lines", () => {
       at: new Date(diagnostic.at),
       checks: [],
       diagnostics: row.diagnostics,
-    }
+    })
     expect(diagnosticLines(row).join("\n")).not.toContain("no run decision recorded")
     expect(diagnosticLines(row, journal).join("\n")).toContain("no run decision recorded")
     expect(diagnosticLines(row, { ...journal, decision: "merged" }).join("\n")).not.toContain(
