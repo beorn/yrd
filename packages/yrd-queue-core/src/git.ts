@@ -794,7 +794,7 @@ function isLegacyPublickeyRefusal(error: unknown, verb: "fetch" | "ls-remote"): 
 
 /** The configured event store; every event opener receives this backend. */
 export function createEventStore(repo: string, remote: string, selection: GitSelection) {
-  return { repo, remote, selection, backend: createLegacyBackend(selection.executable) }
+  return { repo, remote, selection, backend: (selection as any).backend ?? createLegacyBackend(selection.executable) }
 }
 
 /** Use the executable that handled this runner's immediately preceding call. */

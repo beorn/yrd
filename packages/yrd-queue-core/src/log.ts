@@ -163,6 +163,16 @@ export const LOG_KINDS = [
   // A write to the override ref this run made itself: the `expired` record for
   // a window that passed, written before the round took its snapshot (25296).
   "override",
+  // A merged change's task branch, deleted on origin after its merged record
+  // landed, leased on the merged head so origin's advertisement stops growing
+  // (@i/10-yrd/25568, @cto 50480459). `branch-kept` is the refused lease: the
+  // branch moved or was already gone, and `saw` says which, a sha or "absent".
+  "branch-deleted",
+  "branch-kept",
+  // The round's remote calls, counted from git's trace2 log when the round ends (25570 row 3): processes,
+  // ssh_children (an upper bound on logins), remote_ms, unreadable lines and one field per remote verb. Readers match kinds by equality, so this
+  // closing row breaks none of them.
+  "remote-calls",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]

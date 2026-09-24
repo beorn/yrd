@@ -88,6 +88,7 @@ import {
   type GitObservation,
   type ObservationNotice,
   mergeBase,
+  readRemoteCommit,
   refAt,
   type GitInvocationOptions,
   type GitSelection,
@@ -95,10 +96,17 @@ import {
 import { incidentTrailers, type Incident } from "./incident.ts"
 import { stuckCures, type PauseRecord } from "./pause.ts"
 import { isActive, overrideLine, type OverrideEntry, type OverrideTable } from "./override.ts"
-import { type SuperMergeStep, verifyCandidate, type SuperMergeDetail, type SettledGitlink } from "./verifying.ts"
+import {
+  type SuperMergeStep,
+  verifyCandidate,
+  type SuperMergeDetail,
+  type SettledGitlink,
+  type VerifiedCandidate,
+} from "./verifying.ts"
 import { publishCheckedChildren } from "./publication.ts"
 export { readSuperMergeResult } from "./verifying.ts"
 import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } from "./log.ts"
+import { remoteCallsRow, traceRemoteCalls } from "./remote-calls.ts"
 import { narrowingOf } from "./narrowing.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
@@ -211,6 +219,8 @@ export type QueueRunOutcome = Readonly<{
   /** What a ring stopped this round for, before any merge could be made, when one did. */
   stopped?: Stopped
   merged: readonly string[]
+  /** What became of each merged change's task branch on origin, deleted or kept and why (25568). */
+  branches?: readonly string[]
   failed: readonly string[]
   stuck: readonly string[]
   deferred: readonly string[]
@@ -264,6 +274,8 @@ export type Run = Readonly<{
   recutting: Map<string, string>
   /** The target OID this run successfully pushed, or its captured starting OID. */
   targetAfter: { sha: string }
+  /** What became of each merged change's task branch, one line each, printed with the outcome (25568). */
+  branches: string[]
   /**
    * Worktrees this run's own reap took down at its start, with what each stood
    * at when git's registration still said so: empty until reaping runs, fixed
@@ -287,6 +299,11 @@ export type Run = Readonly<{
   steps: Steps
   /** Say a ring stopped this round before it could merge; the outcome carries what it said. */
   stop: (stopped: Stopped) => void
+  /**
+   * The submit phase's successful composes, by {@link composeKey}, so the merge phase of the same head on the
+   * same target reuses the commit instead of composing it again (25570, @cto 0de59b3c). This round's only.
+   */
+  composed: Map<string, Extract<VerifiedCandidate, { state: "verified" }>>
 }> & {
   /**
    * The target every judgement stands on: the caller's declaration-captured
@@ -524,6 +541,24 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     pid: process.pid,
     target: options.target.branch,
   })
+  // THE ROUND'S REMOTE CALLS (25570 row 3). Every git process the round starts, yrd's own, Gitomic's and
+  // git-super's children, writes git's trace2 event log under the run's own directory, and one `remote-calls`
+  // row counts them when the round ends, however it ends. Set in both environments a round's Git reads from; a
+  // check's environment is built, never inherited, so a check's own git is not counted here.
+  const traced = traceRemoteCalls(join(options.workdir, "logs", log.id, "trace2"))
+  if (options.env !== undefined) options = { ...options, env: { ...options.env, ...traced.env } }
+  resources.defer(() => {
+    try {
+      log.write({ kind: "remote-calls", ...remoteCallsRow(traced.end()) })
+    } catch (error) {
+      // The count is evidence about the round, never its outcome: an unreadable trace is a named warning row.
+      log.write({
+        kind: "warning",
+        subject: "remote-calls",
+        reason: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })
   const gitOptions = gitInvocationOptions(options, log)
   const selected = gitIn(options.repo, options.process, options.selection, gitOptions)
   const git = options.git ?? selected
@@ -651,8 +686,10 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
       stopped = said
     },
     tmpdir: join(options.workdir, "tmp"),
+    composed: new Map(),
     targetSha,
     targetAfter: { sha: targetSha },
+    branches: [],
     worktrees: join(options.workdir, "worktrees", log.id),
   }
   mkdirSync(run.worktrees, { recursive: true })
@@ -1507,14 +1544,53 @@ function writeComposeSteps(
 async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePhase): Promise<ComposedCandidate> {
   const { head } = entry.change
   const step = { branch: entry.change.branch, head, phase }
-  const composed = await timedStep(run.log, { ...step, name: "compose" }, () =>
+  const message = mergeMessage(run, entry)
+  const key = composeKey(head, run.targetSha, message)
+  const reused = phase === "merge" ? run.composed.get(key) : undefined
+  if (reused !== undefined) {
+    run.log.write({
+      ...step,
+      base: run.targetSha,
+      candidate: reused.verifying.candidate,
+      from: "submit",
+      kind: "observation",
+      subject: "compose-reused",
+    })
+  }
+  const composed = reused ?? (await composeFresh(run, entry, phase, message))
+  if (reused === undefined) writeComposeSteps(run.log, step, composed.verifying.steps)
+  if (phase === "submit" && composed.state === "verified") run.composed.set(key, composed)
+  if (composed.state === "failed") {
+    return { detail: composed.verifying.detail, kind: "failed", worktree: composed.failedWorktree }
+  }
+  return readyCandidate(run, entry, phase, composed)
+}
+
+/**
+ * What makes two composes the same compose: the head, the target it merges onto, and the merge message, which is
+ * all git-super's merge is given. A child main can still move between a round's two phases; a kept-ahead pin then
+ * meets the publication's lease, which refuses rather than landing over it.
+ */
+function composeKey(head: string, target: string, message: string): string {
+  return `${head} ${target} ${message}`
+}
+
+async function composeFresh(
+  run: Run,
+  entry: QueueEntry,
+  phase: CandidatePhase,
+  message: string,
+): Promise<VerifiedCandidate> {
+  const { head } = entry.change
+  const step = { branch: entry.change.branch, head, phase }
+  return timedStep(run.log, { ...step, name: "compose" }, () =>
     verifyCandidate({
       git: run.git,
       repo: run.options.repo,
       targetHead: run.targetSha,
       head,
       path: join(run.worktrees, "compose", phase, head.slice(0, 12)),
-      message: mergeMessage(run, entry),
+      message,
       env: run.options.env,
       process: run.options.process,
       hooksPath: run.hooksPath,
@@ -1529,10 +1605,17 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
       },
     }),
   )
-  writeComposeSteps(run.log, step, composed.verifying.steps)
-  if (composed.state === "failed") {
-    return { detail: composed.verifying.detail, kind: "failed", worktree: composed.failedWorktree }
-  }
+}
+
+/** The settle, re-cut and descent rows of a composed candidate, then the worktree its phase judges. */
+async function readyCandidate(
+  run: Run,
+  entry: QueueEntry,
+  phase: CandidatePhase,
+  composed: Extract<VerifiedCandidate, { state: "verified" }>,
+): Promise<ComposedCandidate> {
+  const { head } = entry.change
+  const step = { branch: entry.change.branch, head, phase }
   const { verifying } = composed
   const mergeCommit = verifying.candidate
   const rootChanges = await readRootChanges(run.git, mergeCommit)
@@ -2424,6 +2507,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     run.log.write({ branch, decision: "merged", head, kind: "change" })
     if (rootChanges !== undefined) await cleanupRootChanges(run.git, rootChanges, mergedRecord)
     await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
+    await deleteMergedBranch(run, entry)
     return "merged"
   } finally {
     if (retained === undefined) {
@@ -2605,6 +2689,46 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
   if (mergedRecord === undefined) return
   run.log.write({ branch, decision: "merged", head, kind: "change", reason: "already on the target" })
   await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
+  await deleteMergedBranch(run, entry)
+}
+
+/**
+ * A merged change's task branch leaves origin, so origin's ref advertisement
+ * stops growing (@i/10-yrd/25568, @cto 50480459). One delete leased on the
+ * merged head, after the merged record lands and never inside the merge's
+ * atomic push. A branch its submitter moved or already deleted is kept, and
+ * the row says what the lease saw; a delete that fails with the branch still
+ * at the head is kept with its error. The change stays merged either way: its
+ * head is on the target, and the merge has already landed.
+ */
+async function deleteMergedBranch(run: Run, entry: QueueEntry): Promise<void> {
+  const { branch, head } = entry.change
+  const ref = `refs/heads/${branch}`
+  try {
+    const store = await legacyStore(run.git)
+    await store.backend.publish(store.repo, [{ ref, expect: head, oid: null }], run.options.target.remote)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    let saw: string
+    try {
+      saw = (await readRemoteCommit(run.git, run.options.target.remote, ref)) ?? "absent"
+    } catch (readError) {
+      saw = `unread (${readError instanceof Error ? readError.message : String(readError)})`
+    }
+    const why =
+      saw === "absent"
+        ? "already gone"
+        : saw === head
+          ? `the delete failed: ${message}`
+          : saw.startsWith("unread")
+            ? `the delete failed and its branch is ${saw}: ${message}`
+            : `moved to ${saw.slice(0, 12)}`
+    run.log.write({ branch, head, kind: "branch-kept", saw, ...(saw === "absent" ? {} : { error: message }) })
+    run.branches.push(`kept ${branch} (merged at ${head.slice(0, 12)}): ${why}`)
+    return
+  }
+  run.log.write({ branch, head, kind: "branch-deleted" })
+  run.branches.push(`deleted ${branch} at ${head.slice(0, 12)}, merged`)
 }
 
 /**
@@ -3233,6 +3357,7 @@ function finish(
     run: run.log.id,
     target: targetNow,
     ...(run.options.noCheck === true ? { noCheck: true } : {}),
+    ...(run.branches.length === 0 ? {} : { branches: [...run.branches] }),
     ...lists,
   }
 }

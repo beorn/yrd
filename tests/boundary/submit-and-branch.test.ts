@@ -26,7 +26,7 @@
  */
 import { readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   addYrdRemote,
   amendHead,
@@ -418,9 +418,12 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
   })
 
   /**
-   * The submitter took their own branch out, so the change is over and nobody
-   * is told: "ends failed with the reason `deleted` ... and no message, since
-   * the submitter did it."
+   * The submitter took their own branch out, so the change is over. It ends
+   * withdrawn with the reason `deleted`, and since 25541 the queue tells the
+   * submitter once, with a `cancelled` notice: "a change withdrawn by the queue
+   * itself tells its submitter, so a cancel is never silent" (25541's
+   * acceptance; b4fd59d0bf). A reader confirms the branch gone only after the
+   * deletion grace, so the run reads a clock past it.
    *
    * AMBIGUITY: the exit rule says a queue run exits 1 "when a change ended
    * failed", and this change ended failed — but nobody was billed and nothing
@@ -430,7 +433,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
    * today: red — the submit puts no branch at the yrd remote and writes no
    * change ref, so there is nothing to delete and nothing to end.
    */
-  it("a change whose branch is gone ends withdrawn with the reason `deleted`, and sends nothing", async () => {
+  it("a change whose branch is gone ends withdrawn with the reason `deleted`, and tells its submitter once", async () => {
     const { repo, origin, hookLog } = await boundaryRepository({ exit: 0, hooks: true })
     await addYrdRemote(repo, origin)
     const branch = "24099-gone"
@@ -442,14 +445,27 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
     await git(repo, "push", "-q", "yrd", `:${branch}`)
     const before = await targetTip(repo)
 
-    const run = await queueRunOnce(repo)
+    // A reader confirms a missing branch only once its change is older than the
+    // deletion grace (25541, at least 60 s): the run reads a clock past it.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 120_000 })
+    const run = await queueRunOnce(repo).finally(() => vi.useRealTimers())
 
     expect(run.exitCode, run.report).not.toBe(2)
     expect(await targetTip(repo), run.report).toBe(before)
     const tip = (await recordMessages(origin, changeRef("main", { branch: branch, head })))[0] ?? ""
     expect(tip, run.report).toContain("withdrawn")
     expect(tip, run.report).toContain("deleted")
-    expect(await hookRecords(hookLog), run.report).toBe("")
+    const notices = (await hookRecords(hookLog))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(notices, run.report).toEqual([
+      expect.objectContaining({
+        change: `${branch}@${head}`,
+        record: "cancelled",
+        reason: "branch absent from remote",
+      }),
+    ])
   })
 
   /**

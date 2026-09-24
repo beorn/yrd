@@ -17,6 +17,7 @@ import {
   changeInput,
   changesRef,
   decide,
+  enumerateChangeSegments,
   drop,
   evolve,
   initial,
@@ -152,6 +153,49 @@ describe("ADR-0017 ref tree", () => {
 })
 
 describe("ADR-0016 event fold", () => {
+  it("enumerates every opened head segment without collapsing an older failed head", () => {
+    const record = "c".repeat(40)
+    const chain = [
+      event("opened", "1".repeat(40), [["Commit", A]], [A]),
+      event(
+        "failed",
+        "2".repeat(40),
+        [
+          ["Reason", "superseded"],
+          ["Migrated-From", `refs/yrd/main/task/example@${A}@${record}`],
+        ],
+        [record],
+      ),
+      event("opened", "3".repeat(40), [["Commit", B]], [B]),
+    ]
+    const segments = enumerateChangeSegments(chain, "refs/yrd/main/changes/task/example", "fixture")
+    expect(segments.map(({ head, state }) => [head, state.status])).toEqual([
+      [A, "failed"],
+      [B, "queued"],
+    ])
+    expect(segments.map(({ opened }) => opened)).toEqual(["1".repeat(40), "3".repeat(40)])
+    expect(segments.map(({ sources }) => sources)).toEqual([
+      [{ ref: `refs/yrd/main/task/example@${A}`, oid: record }],
+      [],
+    ])
+  })
+
+  it("accepts an unrecorded cancellation reason only with kept migration evidence", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const source = "c".repeat(40)
+    const migrated = event(
+      "cancelled",
+      B,
+      [
+        ["Reason", "unrecorded"],
+        ["Migrated-From", `refs/yrd/main/task/example@${A}@${source}`],
+      ],
+      [source],
+    )
+    expect(evolve(opened, migrated).reason).toBe("unrecorded")
+    expect(() => evolve(opened, event("cancelled", B, [["Reason", "unrecorded"]]))).toThrow(/cancelled needs Reason/)
+  })
+
   it("keeps the approved change-event vocabulary exact", () => {
     expect(CHANGE_EVENT_TYPES).toEqual([
       "opened",
@@ -927,6 +971,41 @@ describe("the queue-format boundary", () => {
         at: new Date("2026-09-22T14:03:00.000Z"),
       }),
     ).rejects.toThrow(/resumes a running queue/)
+  })
+
+  it("starts a migrated queue paused on its created event and can resume normally", async () => {
+    const { store, location } = remoteMemStore("yrd-event-start-paused")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const staged = await (
+      await openEvents({ ...store, ref: queueRef("lab"), writer: "@dev/2" })
+    ).stage(
+      [
+        {
+          type: "created",
+          props: [
+            ["Commit", commit],
+            ["Time", at.toISOString()],
+            ["Start-Paused", "migration cutover"],
+          ],
+          keeps: [commit],
+        },
+      ],
+      { expect: null },
+    )
+    await staged.publish()
+    const created = staged.events[0]?.id
+    if (created === undefined) throw new Error("fixture created event was not staged")
+    const queue = await readEventQueue(location, "lab")
+    expect(queue.pause).toEqual({ id: created, at, reason: "migration cutover", by: "@dev/2" })
+    await writeQueueEvent(location, "lab", {
+      type: "resumed",
+      reason: "migration verified",
+      by: "operator",
+      at: new Date("2026-09-22T14:01:00.000Z"),
+    })
+    expect((await readEventQueue(location, "lab")).pause).toBeUndefined()
   })
 
   it("retains one direct landing and its settled notice on the queue chain", async () => {

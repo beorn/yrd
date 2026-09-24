@@ -1147,6 +1147,36 @@ describe("settling gitlinks", () => {
     expect(trailer(merged!, "Published")).toBe(`submodule ${w.main} -> ${ahead}`)
   })
 
+  // 25570 (@cto 0de59b3c): a head judged and merged in one round is composed once. The merge phase stands on the
+  // same target with the same head and message, so git-super's merge would read every child main again for the
+  // commit the submit phase already made; it reuses that commit and says so in the journal.
+  it("composes a head judged and merged in one round once, and lands it exactly as a second compose would", async () => {
+    const w = await world()
+    const ahead = await aheadOfSubmodule(w, "once")
+    const head = await submitGitlink(w, "task/once", ahead)
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome.merged).toEqual(["task/once"])
+    const rows = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    const composes = rows.filter(
+      (row) => row.kind === "step" && row.name === "compose" && row.end !== undefined && row.within === undefined,
+    )
+    expect(composes.map((row) => row.phase)).toEqual(["submit"])
+    const reused = rows.filter((row) => row.kind === "observation" && row.subject === "compose-reused")
+    expect(reused).toMatchObject([{ branch: "task/once", head, phase: "merge", from: "submit" }])
+    // The reused commit is the one that landed, with the same settling a fresh compose writes.
+    const target = await remoteTip(w.git, "refs/heads/main")
+    expect(target).toBe(reused[0]?.candidate)
+    expect(await gitlinkAt(w, target)).toBe(ahead)
+    expect(await submoduleMain(w)).toBe(ahead)
+    expect(await w.git(["show", "-s", "--format=%B", target])).toContain(
+      `Settled: submodule@${ahead} kept-ahead submodule-main@${w.main}`,
+    )
+  })
+
   // 24454: the whole landing is one ordinary submit of the root. The author
   // committed inside the submodule and bumped the gitlink; nothing else was
   // pushed. Submit publishes the moved pin to the submodule's remote under
@@ -2631,8 +2661,14 @@ describe("a diverged component the merge composes", () => {
         phase: "merge",
       },
     ])
-    // Never an amend: the change's branch at the remote still names the submitted head.
-    expect(await remoteTip(w.git, "refs/heads/task/second-side")).toBe(head)
+    // Never an amend: the merged branch's delete was leased on the submitted
+    // head, so the branch still named that head when it left (@i/10-yrd/25568).
+    expect(
+      readFileSync(outcome.log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line)),
+    ).toContainEqual(expect.objectContaining({ kind: "branch-deleted", branch: "task/second-side", head }))
     const merged = (
       await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/second-side", head })))
     ).find((record) => record.kind === "merged")

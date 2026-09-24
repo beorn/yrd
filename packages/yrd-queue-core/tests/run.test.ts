@@ -338,7 +338,7 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
  * @level l2 @consumer the submitter and the queue runner
  * Separate behaviour tests cannot prove both entry points invoke one verifier.
  */
-it("submit and both queue phases call the same git-only verifier", async () => {
+it("submit and the queue compose through the same git-only verifier, once per head and target in a round", async () => {
   const w = await world()
   using calls = vi.spyOn(verifying, "verifyCandidate")
   const head = await submitCommit(w, "task/shared-verifier", "one.txt")
@@ -347,8 +347,12 @@ it("submit and both queue phases call the same git-only verifier", async () => {
 
   const outcome = await queueRun(await w.options({ exit: 0 }))
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/shared-verifier"] })
-  expect(calls).toHaveBeenCalledTimes(3)
-  expect(calls.mock.calls.slice(1).map(([options]) => options.head)).toEqual([head, head])
+  // The submit phase composes; the merge phase of the same head on the same target reuses that compose (25570).
+  expect(calls).toHaveBeenCalledTimes(2)
+  expect(calls.mock.calls.slice(1).map(([options]) => options.head)).toEqual([head])
+  expect(
+    logRecords(outcome).filter((row) => row.kind === "observation" && row.subject === "compose-reused"),
+  ).toMatchObject([{ head, phase: "merge", from: "submit" }])
 })
 
 async function remoteTarget(w: Pick<World, "git">): Promise<string> {
@@ -377,6 +381,36 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(state.candidate).not.toBe(head)
   expect(await w.git(["rev-parse", `${state.candidate}^1`])).toMatch(new RegExp(w.target))
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
+})
+
+/**
+ * @failure A round's remote calls were unknown: the journal named only yrd's own Git, never Gitomic's reads or
+ *          git-super's children, and no row counted them (25570 row 3).
+ * @level    l3 — a real round through every runner, counted from git's own trace2 log
+ * @consumer the operator reading a round's GitHub login cost
+ */
+it("closes the round's journal with every remote call it made, counted from git's trace2 log", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/event-counted", "counted.txt")
+  const before = process.env.GIT_TRACE2_EVENT
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-counted"] })
+  expect(process.env.GIT_TRACE2_EVENT).toBe(before)
+  const journal = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
+  if (journal === undefined) throw new Error("queue run left no journal")
+  const rows = readFileSync(join(w.workdir, "logs", journal), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+  const counted = rows.at(-1)
+  expect(counted).toMatchObject({ kind: "remote-calls", unreadable: 0 })
+  // The merge fetched and published: both are real remote calls, and every git process wrote its log.
+  expect(counted?.fetch).toEqual(expect.any(Number))
+  expect(counted?.push).toEqual(expect.any(Number))
+  expect(Number(counted?.processes)).toBeGreaterThan(Number(counted?.fetch) + Number(counted?.push))
 })
 
 /** @failure A deleted event branch stayed queued forever and blocked every change behind it.
@@ -2284,10 +2318,12 @@ describe("a queue run", () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>)
 
     expect(records[0]).toMatchObject({ kind: "run", target: "main" })
-    expect(records.slice(1).every((record) => record.kind === "git")).toBe(true)
+    // Between the header and the closing remote-calls count (25570 row 3), only the preamble's Git rows.
+    expect(records.slice(1, -1).every((record) => record.kind === "git")).toBe(true)
+    expect(records.at(-1)).toMatchObject({ kind: "remote-calls", unreadable: 0 })
     expect(records.some((record) => record.kind === "queue")).toBe(false)
     // The Git rows ARE the diagnosis, which is why journaling the preamble was
-    // worth keeping: the run got far enough to try, and the last row says what
+    // worth keeping: the run got far enough to try, and the last Git row says what
     // it tried.
     expect(records.length).toBeGreaterThan(1)
     expect(runDiedInPreamble(records as never)).toBe(true)
@@ -5063,6 +5099,9 @@ describe("a queue run", () => {
     const mergedRun = await queueRun(await w.options({ exit: 0 }))
     expect(mergedRun.exitCode).toBe(0)
     expect(mergedRun.merged).toEqual(["task/one"])
+    // The merge deleted the branch (@i/10-yrd/25568); this row is the branch
+    // still standing at the later head, so the submitter pushes it back.
+    await w.git(["push", "--quiet", "origin", `${headB}:refs/heads/task/one`])
 
     // The next run is where bare reachability used to resurrect the failed head:
     // its own catch-up runs again, now that headOnTarget has flipped true.
@@ -5095,6 +5134,49 @@ describe("a queue run", () => {
     )
     expect(aMessages).toHaveLength(1)
     expect(aMessages[0]?.record).toBe("failed")
+  })
+
+  it("a failed head stays failed once its branch is gone after a later head of it merged (@i/10-yrd/25568)", async () => {
+    const w = await world()
+    const headA = await submitCommit(w, "task/one", "one.txt")
+    const refA = changeRef("main", { branch: "task/one", head: headA })
+    expect((await queueRun(await w.options({ exit: 1 }))).exitCode).toBe(1)
+    await w.git(["checkout", "--quiet", "task/one"])
+    writeFileSync(join(w.work, "two.txt"), "two.txt\n")
+    await w.git(["add", "two.txt"])
+    await w.git(["commit", "--quiet", "-m", "two.txt"])
+    const headB = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/one",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    expect((await queueRun(await w.options({ exit: 0 }))).merged).toEqual(["task/one"])
+    // The branch was the only thing naming headB as what carried headA onto the target.
+    expect((await w.git(["ls-remote", "--refs", "origin", "refs/heads/task/one"])).trim()).toBe("")
+
+    const settled = await queueRun(await w.options({ exit: 0 }))
+    expect(settled.exitCode).toBe(0)
+
+    const rows = list((await readQueue(w.git, "origin", "main", await remoteTarget(w))).changes)
+    const rowA = rows.find((row) => row.head === headA)
+    expect(rows.find((row) => row.head === headB)?.state).toBe("merged")
+    expect(rowA).toMatchObject({ state: "failed", reason: "superseded" })
+    expect(rowA?.supersededBy).toBeUndefined()
+    await fetchChanges(w)
+    expect((await readRecords(w.git, (await refAt(w.git, refA))!)).map((record) => record.kind)).toEqual([
+      "opened",
+      "checked",
+      "failed",
+      "sent",
+    ])
+    expect(
+      messages(w)
+        .filter((message) => message.change === changeName({ branch: "task/one", head: headA }))
+        .map((message) => message.record),
+    ).toEqual(["failed"])
   })
 
   it("the target is not a change: a ref named after it is judged by nothing and messages nobody (2026-09-03 main@0a9db9daf7eb)", async () => {
@@ -5874,6 +5956,76 @@ describe("a stuck change stops the line (the andon, operator 2026-09-16)", () =>
  * @consumer every submitter whose change ended · stuck-stops-the-line row 5
  *           (@i/10-yrd/a-unattended/stuck-stops-the-line-revert-the-step-over-and-the-stuck-round-loop)
  */
+/**
+ * @failure Every merged change left its task branch on origin, so origin's ref
+ * advertisement grew by one branch per merge and every fetch paid for it.
+ * @level l3 @consumer every fetch of the queue's remote (@i/10-yrd/25568)
+ */
+describe("a merged change's task branch leaves origin", () => {
+  async function branchOnOrigin(w: World, branch: string): Promise<string> {
+    return (await w.git(["ls-remote", "--refs", "origin", `refs/heads/${branch}`])).trim().split(/\s+/u)[0] ?? ""
+  }
+
+  it("is deleted once its merged record lands, and the change still reads merged", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [] })
+
+    expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/one"] })
+    expect(await branchOnOrigin(w, "task/one")).toBe("")
+    expect(outcome.branches).toEqual([`deleted task/one at ${head.slice(0, 12)}, merged`])
+    expect(logRecords(outcome).filter((row) => row.kind === "branch-deleted")).toEqual([
+      expect.objectContaining({ branch: "task/one", head }),
+    ])
+    expect((await recordsOf(w, "task/one", head)).map((record) => record.kind)).toContain("merged")
+    const after = await remoteTarget(w)
+    const row = list((await readQueue(w.git, "origin", "main", after)).changes).find((c) => c.branch === "task/one")
+    expect(row?.state).toBe("merged")
+  })
+
+  it("is kept when its submitter moved it past the merged head, and the row names where it went", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/moved", "moved.txt")
+    await w.git(["merge", "--ff-only", "task/moved"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await w.git(["checkout", "--quiet", "task/moved"])
+    writeFileSync(join(w.work, "later.txt"), "later\n")
+    await w.git(["add", "later.txt"])
+    await w.git(["commit", "--quiet", "-m", "later work on the same branch"])
+    const later = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["push", "--quiet", "origin", "task/moved"])
+    await w.git(["checkout", "--quiet", "main"])
+
+    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+    expect(await branchOnOrigin(w, "task/moved")).toBe(later)
+    expect(outcome.branches).toEqual([
+      `kept task/moved (merged at ${head.slice(0, 12)}): moved to ${later.slice(0, 12)}`,
+    ])
+    expect(logRecords(outcome).filter((row) => row.kind === "branch-kept")).toEqual([
+      expect.objectContaining({ branch: "task/moved", head, saw: later }),
+    ])
+    expect((await recordsOf(w, "task/moved", head)).map((record) => record.kind)).toContain("merged")
+  })
+
+  it("is kept as already gone when its submitter deleted it, and the change still reads merged", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/gone", "gone.txt")
+    await w.git(["merge", "--ff-only", "task/gone"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await w.git(["push", "--quiet", "origin", ":refs/heads/task/gone"])
+
+    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+    expect(outcome.branches).toEqual([`kept task/gone (merged at ${head.slice(0, 12)}): already gone`])
+    expect(logRecords(outcome).filter((row) => row.kind === "branch-kept")).toEqual([
+      expect.objectContaining({ branch: "task/gone", head, saw: "absent" }),
+    ])
+    expect((await recordsOf(w, "task/gone", head)).map((record) => record.kind)).toContain("merged")
+  })
+})
+
 describe("an ended change leaves the line for good", () => {
   it("an ended change is never re-judged, whatever main does", async () => {
     const w = await world()
@@ -6231,18 +6383,20 @@ describe("the target's setup", () => {
       ["read", "run"],
       ["compose", "submit"],
       ["prepare", "submit"],
-      ["compose", "merge"],
       ["prepare", "merge"],
     ] as const) {
       const step = bracketed(name, phase)
       expect({ name, phase, started: step.start >= 0 }).toEqual({ name, phase, started: true })
       expect({ name, phase, endsAfterStart: step.end > step.start }).toEqual({ name, phase, endsAfterStart: true })
     }
-    // A compose ends before the prepare that uses its merge commit starts, in both phases.
-    for (const phase of ["submit", "merge"]) {
-      expect(bracketed("compose", phase).end).toBeLessThan(bracketed("prepare", phase).start)
-      expect(bracketed("compose", phase).ms).toBeGreaterThanOrEqual(slowMs)
-    }
+    // A compose ends before the prepare that uses its merge commit starts.
+    expect(bracketed("compose", "submit").end).toBeLessThan(bracketed("prepare", "submit").start)
+    expect(bracketed("compose", "submit").ms).toBeGreaterThanOrEqual(slowMs)
+    // The merge phase reuses that compose (25570): no compose step, and the reuse is said before its prepare starts.
+    expect(at((row) => row.kind === "step" && row.name === "compose" && row.phase === "merge")).toBe(-1)
+    const reused = at((row) => row.kind === "observation" && row.subject === "compose-reused" && row.phase === "merge")
+    expect(reused).toBeGreaterThan(bracketed("compose", "submit").end)
+    expect(reused).toBeLessThan(bracketed("prepare", "merge").start)
     expect(records.filter((row) => row.kind === "step" && row.threw === true)).toEqual([])
   })
 
@@ -6263,7 +6417,11 @@ describe("the target's setup", () => {
     expect(outcome.merged).toEqual(["task/one"])
     const records = logRecords(outcome)
     const at = (predicate: (record: Record<string, unknown>) => boolean) => records.findIndex(predicate)
-    for (const phase of ["submit", "merge"]) {
+    // The merge phase reuses the submit phase's compose (25570), so git-super's phases are written once.
+    expect(records.filter((row) => row.kind === "step" && row.phase === "merge" && row.within === "compose")).toEqual(
+      [],
+    )
+    for (const phase of ["submit"]) {
       const step = (name: string, end: boolean) =>
         at(
           (row) =>

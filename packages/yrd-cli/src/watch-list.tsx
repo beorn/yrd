@@ -220,12 +220,12 @@ export type LineStatus = Readonly<{
   marker: string
   word: string
   color: string
+  /** How long the queue has been in that status, or live status timer node (25556, 25630). */
+  timer?: React.ReactNode
   /** Why the line is stopped, in the pause record's or the runner's own words; absent while it runs. */
   reason?: string
   /** The marker pulses while the line runs, or while it is stopped with a reason (25416). */
   pulse: boolean
-  /** Runner/service elapsed timer string, e.g. "0:17" (25630). */
-  timer?: string
 }>
 
 /**
@@ -270,11 +270,12 @@ export function TopLine({
   const queueAddress = queue ?? (queues && queues[0]?.label) ?? ""
 
   // Right side width: marker + YRD + word + timer + reason + gaps + paddingRight
+  const timerLen = typeof status.timer === "string" ? status.timer.length : status.timer !== undefined ? 10 : 0
   const statusParts = [
     status.marker ? 1 : 0,
     3, // YRD
     status.word.length,
-    status.timer ? status.timer.length : 0,
+    timerLen,
     status.reason ? status.reason.length : 0,
   ].filter((n) => n > 0)
   const statusGaps = Math.max(0, statusParts.length - 1)
@@ -356,11 +357,13 @@ function TopPill({
   active,
   onToggle,
   boldFirstLetter = false,
+  activeTreatment: _activeTreatment = "warningText",
 }: {
   label: string
   active: boolean
   onToggle: () => void
   boldFirstLetter?: boolean
+  activeTreatment?: "accentText" | "warningText"
 }) {
   const color = active ? "$fg-warning" : "$fg-muted"
   return (
@@ -818,9 +821,9 @@ export function StatusPills({
       {BUCKETS.map((bucket) => (
         <TopPill
           key={bucket}
-          label={bucket}
-          boldFirstLetter
+          label={`[${bucket.slice(0, 1)}]${bucket.slice(1)}`}
           active={buckets.has(bucket)}
+          activeTreatment="warningText"
           onToggle={() => {
             onSelectOnly(bucket)
           }}

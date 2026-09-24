@@ -65,6 +65,7 @@ import {
   resolveSplitPaneLayout,
   useInput,
   useScopeEffect,
+  useTerminalFocused,
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
@@ -246,6 +247,9 @@ export function WatchPane({
   loadDiff,
   loadCommandOutput,
   intervalMs = 5000,
+  unfocusedIntervalMs = 30000,
+  focused: focusedProp,
+  now: nowProp,
   live = true,
   onEnding,
 }: {
@@ -259,6 +263,9 @@ export function WatchPane({
   /** One git command's output from the round's raw files, read only when its stage tab opens (25441). */
   loadCommandOutput?: (command: JournalCommand) => Promise<DiffText>
   intervalMs?: number
+  unfocusedIntervalMs?: number
+  focused?: boolean
+  now?: Date
   /** False in a test or a single frame: the tick that ages the screen stands still and nothing pulses. */
   live?: boolean
   /** Called with the ending's code when every watched change has ended, so the command can exit with it. */
@@ -289,9 +296,13 @@ export function WatchPane({
   const [outputs, setOutputs] = useState<ReadonlyMap<string, DiffText>>(new Map())
   const [statsOpen, setStatsOpen] = useState(false)
   const centeredRunner = useRef(false)
+  const shouldCenterRunner = useRef(false)
   const listRef = useRef<ListViewHandle | null>(null)
   /** The drafts the reader asked for, read by every round: a round begun before `w` must not undo it. */
   const draftWindow = useRef<DraftWindow>(snapshot.drafts?.window ?? "7d")
+
+  const terminalFocused = useTerminalFocused()
+  const focused = focusedProp ?? (terminalFocused !== false)
 
   const refresh = useCallback(async () => {
     if (load === undefined) return
@@ -303,15 +314,34 @@ export function WatchPane({
     if (code !== undefined) onEnding?.(code)
   }, [load, onEnding])
 
-  // ONE loop, owned by the scope, so leaving the pane stops it. `scope.sleep`
-  // is interruptible; a bare setTimeout would keep a stopped watch alive for
-  // one more interval.
+  const wasFocusedRef = useRef(focused)
+  const isFirstRun = useRef(true)
+
+  // ONE loop, owned by the scope, so leaving the pane stops it. Focus-aware:
+  // refresh at once on focus-in, every 5 s while focused, about every 30 s while
+  // unfocused, never paused.
   useScopeEffect(
     (scope) => {
       if (load === undefined || !live) return
+      const currentInterval = focused ? intervalMs : unfocusedIntervalMs
+
       void (async () => {
+        // Refresh at once on focus-in
+        if (!isFirstRun.current && focused && !wasFocusedRef.current) {
+          try {
+            await refresh()
+            setReadFailure(undefined)
+          } catch (error: unknown) {
+            if (scope.signal.aborted) return
+            setShown(({ observation: _stale, ...current }) => current)
+            setReadFailure({ at: new Date(), message: firstLine(error) })
+          }
+        }
+        isFirstRun.current = false
+        wasFocusedRef.current = focused
+
         while (!scope.signal.aborted) {
-          await scope.sleep(intervalMs)
+          await scope.sleep(currentInterval)
           if (scope.signal.aborted) return
           try {
             await refresh()
@@ -329,7 +359,7 @@ export function WatchPane({
         setFailure(error instanceof Error ? error : new Error(String(error)))
       })
     },
-    [intervalMs, live, load, refresh],
+    [focused, intervalMs, unfocusedIntervalMs, live, load, refresh],
   )
 
   // The rows on screen: the status buckets and the queue pills are ON/OFF
@@ -545,8 +575,16 @@ export function WatchPane({
   const pointAtRunner = (): void => {
     if (runnerAt < 0) return
     pointAt(runnerAt)
+    shouldCenterRunner.current = true
     listRef.current?.scrollToItem(runnerAt, "center")
   }
+
+  useEffect(() => {
+    if (shouldCenterRunner.current && runnerAt >= 0) {
+      shouldCenterRunner.current = false
+      listRef.current?.scrollToItem(runnerAt, "center")
+    }
+  })
 
   useInput((input, key) => {
     const character = key.text ?? input
@@ -661,8 +699,9 @@ export function WatchPane({
     </Box>
   )
 
+  const showDetail = opened && !(isRunnerSelected && runnerHolds === undefined)
   // The width the list pane gets: the whole terminal, or its share of a split.
-  const listColumns = opened && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) : columns
+  const listColumns = showDetail && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) : columns
   const list = (
     <ListStack snapshot={shown} paddingX={1}>
       <Table
@@ -673,15 +712,15 @@ export function WatchPane({
         empty={shown.rows.length === 0 ? "nothing in line" : "no change matches the filters"}
         cursor={at}
         listRef={listRef}
-        active={!opened || tier !== "full"}
+        active={!showDetail || tier !== "full"}
         live={live}
         onCursor={pointAt}
       />
     </ListStack>
   )
   const body =
-    tier === "full" || !opened ? (
-      opened ? (
+    tier === "full" || !showDetail ? (
+      showDetail ? (
         detailPane
       ) : (
         list
@@ -700,7 +739,7 @@ export function WatchPane({
     )
 
   return (
-    <NowProvider readAt={shown.at} live={live}>
+    <NowProvider readAt={nowProp ?? shown.at} live={live}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
         {/* Line 1 (inverted): YRD QUEUE and the queue address left, status word and timer right (25630). */}
         <TopLine
@@ -708,7 +747,20 @@ export function WatchPane({
           queues={shown.queues}
           visible={visibleQueues}
           onToggle={toggleQueue}
-          status={queueLineStatus(shown, shown.at)}
+          status={
+            statusTimer(shown, nowProp ?? shown.at) !== undefined ||
+            Math.max(0, (nowProp ?? shown.at).getTime() - shown.at.getTime()) > 120_000
+              ? {
+                  ...queueLineStatus(shown, nowProp ?? shown.at),
+                  timer: (
+                    <LiveStatusTimer
+                      snapshot={shown}
+                      fallback={queueLineStatus(shown, nowProp ?? shown.at).timer}
+                    />
+                  ),
+                }
+              : queueLineStatus(shown, nowProp ?? shown.at)
+          }
           columns={columns}
           live={live}
           onStatusClick={pointAtRunner}
@@ -829,6 +881,63 @@ function draftsIn(rows: readonly WatchRow[]): number {
  * detail. A paused line carries its pause sentence. The marker pulses while
  * the line runs or is held with a reason.
  */
+export function statusTimer(snapshot: WatchSnapshot, now: Date): string | undefined {
+  const runner = runnerOf(snapshot, now)
+  const held = snapshot.pause !== undefined || (snapshot.stopped !== undefined && snapshot.stopped !== null)
+  const isRunning = snapshot.runner?.service.kind === "beating" || snapshot.runner?.latest?.alive === true
+  const word =
+    held || runner.state === "paused" || runner.state === "stuck" ? "PAUSED" : isRunning ? "RUNNING" : "STOPPED"
+
+  if (word === "STOPPED") {
+    if (snapshot.runner?.service.kind === "stopped" && snapshot.runner.service.since) {
+      return mediaDuration(Math.max(0, now.getTime() - snapshot.runner.service.since.getTime()))
+    }
+    if (snapshot.stopped?.since) {
+      const at = new Date(snapshot.stopped.since)
+      if (!Number.isNaN(at.getTime())) return mediaDuration(Math.max(0, now.getTime() - at.getTime()))
+    }
+  } else if (word === "PAUSED") {
+    if (snapshot.stopped?.since) {
+      const at = new Date(snapshot.stopped.since)
+      if (!Number.isNaN(at.getTime())) return mediaDuration(Math.max(0, now.getTime() - at.getTime()))
+    }
+    if (runner.duration) {
+      const match = runner.duration.match(/\b\d+:\d+(?::\d+)?\b/u)
+      if (match) return match[0]
+    }
+  } else if (word === "RUNNING") {
+    const runnerStart =
+      (snapshot.runner?.service.kind === "beating" ? snapshot.runner.service.since : undefined) ??
+      snapshot.runner?.latest?.startedAt
+    if (runnerStart) {
+      return mediaDuration(Math.max(0, now.getTime() - runnerStart.getTime()))
+    }
+    if (runner.duration) {
+      const match = runner.duration.match(/\b\d+:\d+(?::\d+)?\b/u)
+      if (match) return match[0]
+    }
+  }
+  return undefined
+}
+
+function LiveStatusTimer({ snapshot, fallback }: { snapshot: WatchSnapshot; fallback?: React.ReactNode }) {
+  const now = useNow()
+  const timer = statusTimer(snapshot, now)
+  const ageMs = Math.max(0, now.getTime() - snapshot.at.getTime())
+  const ageText = ageMs > 120_000 ? `(data ${mediaDuration(ageMs)} old)` : undefined
+
+  if (timer === undefined && ageText === undefined) return <>{fallback ?? null}</>
+  if (timer !== undefined && ageText !== undefined) {
+    return (
+      <>
+        {timer} <Text color="$fg-on-inverse-muted">{ageText}</Text>
+      </>
+    )
+  }
+  if (timer !== undefined) return <>{timer}</>
+  return <Text color="$fg-on-inverse-muted">{ageText}</Text>
+}
+
 export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus {
   const runner = runnerOf(snapshot, now)
   const held = snapshot.pause !== undefined || (snapshot.stopped !== undefined && snapshot.stopped !== null)
@@ -836,21 +945,15 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
   const word =
     held || runner.state === "paused" || runner.state === "stuck" ? "PAUSED" : isRunning ? "RUNNING" : "STOPPED"
 
-  const runnerStart =
-    word === "RUNNING"
-      ? (snapshot.runner?.service.kind === "beating" ? snapshot.runner.service.since : undefined) ??
-        snapshot.runner?.latest?.startedAt
-      : word === "STOPPED"
-        ? (snapshot.runner?.service.kind === "stopped" ? snapshot.runner.service.since : undefined) ??
-          snapshot.runner?.latest?.startedAt
-        : snapshot.stopped?.since !== undefined
-          ? new Date(snapshot.stopped.since)
-          : undefined
-
-  const timer =
-    runnerStart !== undefined
-      ? mediaDuration(Math.max(0, now.getTime() - runnerStart.getTime()))
-      : undefined
+  const timer = statusTimer(snapshot, now)
+  const ageMs = Math.max(0, now.getTime() - snapshot.at.getTime())
+  const ageText = ageMs > 120_000 ? `(data ${mediaDuration(ageMs)} old)` : undefined
+  const displayTimer =
+    timer === undefined
+      ? ageText
+      : ageText === undefined
+        ? timer
+        : `${timer} ${ageText}`
 
   if (word === "RUNNING") {
     return {
@@ -858,7 +961,7 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
       word,
       color: "$fg-info",
       pulse: true,
-      ...(timer === undefined ? {} : { timer }),
+      ...(displayTimer === undefined ? {} : { timer: displayTimer }),
     }
   }
   const reason =
@@ -877,8 +980,8 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
     word,
     color: word === "PAUSED" ? "$fg-warning" : "$fg-error",
     pulse: reason !== undefined,
+    ...(displayTimer === undefined ? {} : { timer: displayTimer }),
     ...(reason === undefined ? {} : { reason }),
-    ...(timer === undefined ? {} : { timer }),
   }
 }
 

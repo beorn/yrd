@@ -25,7 +25,7 @@ export const CHANGE_STATUSES = [
 ] as const
 export type ChangeStatus = (typeof CHANGE_STATUSES)[number]
 export type ChangeEnding = "merged" | "failed" | "cancelled"
-export type CancellationReason = "resubmitted" | "dropped" | "deleted"
+export type CancellationReason = "resubmitted" | "dropped" | "deleted" | "unrecorded"
 const LANDING_IN_PROGRESS = "landing in progress; resubmit after merged/failed/stuck, resume if runner gone"
 
 export const EVENT_TRAILERS = {
@@ -577,8 +577,21 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         throw new Error(`event ${event.id} failed must keep checked candidate ${state.candidate ?? "absent"}`)
       }
       if (event.type === "cancelled") {
-        if (reason !== "resubmitted" && reason !== "dropped" && reason !== "deleted") {
-          throw new Error(`event ${event.id} cancelled needs Reason: resubmitted, dropped or deleted`)
+        const migrated = event.props
+          .filter(([key]) => key === "Migrated-From")
+          .some(([, value]) => {
+            const source = /@([0-9a-f]{40}(?:[0-9a-f]{24})?)$/u.exec(value)?.[1]
+            return source !== undefined && event.links.includes(source)
+          })
+        if (
+          reason !== "resubmitted" &&
+          reason !== "dropped" &&
+          reason !== "deleted" &&
+          (reason !== "unrecorded" || !migrated)
+        ) {
+          throw new Error(
+            `event ${event.id} cancelled needs Reason: resubmitted, dropped, deleted or evidenced unrecorded`,
+          )
         }
         if (reason === "dropped" || reason === "deleted") keptCommit(event)
       }
@@ -864,6 +877,23 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   return written
 }
 
+function createdQueueDetails(event: QueueEventShape, ref: string): Pick<EventQueueProjection, "declaration" | "pause"> {
+  if (event.type !== "created") throw new Error(`${ref}: first event ${event.id} must be created`)
+  const declaration = keptCommit(event)
+  if (prop(event, EVENT_TRAILERS.queue) !== undefined) {
+    throw new Error(`${ref}: created event ${event.id} cannot name a preceding Queue:`)
+  }
+  const reason = prop(event, "Start-Paused")
+  if (reason === undefined) return { declaration }
+  if (reason.trim() === "" || event.writer === null) {
+    throw new Error(`${ref}: created event ${event.id} needs a nonempty Start-Paused: and writer`)
+  }
+  return {
+    declaration,
+    pause: { id: event.id, at: new Date(requiredProp(event, EVENT_TRAILERS.time)), reason, by: event.writer },
+  }
+}
+
 function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo: string): EventQueueProjection {
   const first = events[0]
   if (first === undefined) throw new Error(`missing event queue chain ${ref} in ${repo}`)
@@ -880,12 +910,11 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   > = {}
   for (const [index, event] of events.entries()) {
     if (index === 0) {
-      if (event.type !== "created") throw new Error(`${ref}: first event ${event.id} must be created`)
-      declaration = keptCommit(event)
-      if (prop(event, EVENT_TRAILERS.queue) !== undefined) {
-        throw new Error(`${ref}: created event ${event.id} cannot name a preceding Queue:`)
-      }
+      const created = createdQueueDetails(event, ref)
+      declaration = created.declaration
+      pause = created.pause
     } else {
+      if (prop(event, "Start-Paused") !== undefined) throw new Error(`${ref}: Start-Paused: belongs only on created`)
       if (prop(event, EVENT_TRAILERS.queue) !== previous) {
         throw new Error(`${ref}: event ${event.id} (${event.type}) needs Queue: ${previous}`)
       }
@@ -968,10 +997,24 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   return { created: first.id, declaration, tip: previous, observed, notices, ...(pause === undefined ? {} : { pause }) }
 }
 
-/** One advertisement selects the format. An event queue with no changes is empty. */
+const formatCache = new Map<string, "event" | "legacy">()
+
+/** Reset the process-wide queue format cache (for tests). */
+export function resetQueueFormatCache(): void {
+  formatCache.clear()
+}
+
+/** One advertisement selects the format. An event queue with no changes is empty. Cached once per process. */
 export async function queueFormat(store: QueueLocation, queue: string): Promise<"event" | "legacy"> {
+  const key = `${store.repo}#${store.remote ?? ""}#${queue}`
+  const cached = formatCache.get(key)
+  if (cached !== undefined) return cached
   const refs = await listRefs(queueRefPrefix(queue), store)
-  return refs.has(queueRef(queue)) ? "event" : "legacy"
+  const format = refs.has(queueRef(queue)) ? "event" : "legacy"
+  if (format === "event") {
+    formatCache.set(key, format)
+  }
+  return format
 }
 
 /** Read one existing branch chain; a missing selected chain is a data error. */
@@ -1279,10 +1322,57 @@ export function mergedHistoryCommits(histories: ReadonlyMap<string, ChangeHistor
   return commits
 }
 
-function project(events: readonly Event[], ref: string, repo: string): EventChange {
+function assertCompleteChangeChain(events: readonly Event[], ref: string, repo: string): void {
   if (events.length === 0) throw new Error(`empty event chain ${ref} in ${repo}`)
   if (events[0]?.parent !== null) {
     throw new Error(`event chain ${ref} in ${repo} exceeds 1024 events; refusing a partial status`)
   }
+}
+
+/** One opened head and its resting fold, including older heads on the same branch. */
+export type ChangeSegment = Readonly<{
+  opened: Oid
+  head: Oid
+  state: EventChange
+  /** Original record commits, in the order their migration events absorbed them. */
+  sources: readonly Readonly<{ ref: string; oid: Oid }>[]
+}>
+
+/** Read every opened segment while leaving the normal list's current fold unchanged. */
+export function enumerateChangeSegments(events: readonly Event[], ref: string, repo: string): readonly ChangeSegment[] {
+  assertCompleteChangeChain(events, ref, repo)
+  const segments: ChangeSegment[] = []
+  let state = initial
+  let opened: Oid | undefined
+  let sources: Array<{ ref: string; oid: Oid }> = []
+  const retain = () => {
+    if (opened === undefined) return
+    if (state.commit === undefined) throw new Error(`${ref}: opened segment ${opened} has no Commit:`)
+    segments.push({ opened, head: state.commit, state, sources })
+  }
+  for (const event of events) {
+    if (event.type === "opened") {
+      retain()
+      sources = []
+    }
+    state = evolve(state, event)
+    if (event.type === "opened") opened = event.id
+    for (const [key, value] of event.props) {
+      if (key !== "Migrated-From") continue
+      const split = value.lastIndexOf("@")
+      const sourceRef = value.slice(0, split)
+      const oid = value.slice(split + 1)
+      if (split <= 0 || !sourceRef.startsWith("refs/yrd/") || !COMMIT_OID.test(oid) || !event.links.includes(oid)) {
+        throw new Error(`${ref}: event ${event.id} has unkept or malformed Migrated-From: ${value}`)
+      }
+      sources.push({ ref: sourceRef, oid })
+    }
+  }
+  retain()
+  return segments
+}
+
+function project(events: readonly Event[], ref: string, repo: string): EventChange {
+  assertCompleteChangeChain(events, ref, repo)
   return events.reduce(evolve, initial)
 }

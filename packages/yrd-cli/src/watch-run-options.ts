@@ -16,4 +16,5 @@ export const WATCH_RUN_OPTIONS = {
   mouse: true,
   selection: true,
   copyOnSelect: true,
+  focusReporting: true,
 } as const

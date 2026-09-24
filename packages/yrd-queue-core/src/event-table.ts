@@ -1,7 +1,7 @@
 /** Event-chain changes in the shared table shape. Status comes only from the event fold. */
 import type { ChangeStatus, EventChange } from "./events.ts"
 import type { Draft } from "./drafts.ts"
-import type { Row } from "./table.ts"
+import { clocks, type Row } from "./table.ts"
 
 /** One row per branch; the caller supplies the already-folded change chains. */
 export function eventRows(
@@ -76,4 +76,49 @@ export function eventRows(
         left.branch.localeCompare(right.branch),
     )
   return [...changeRows, ...draftRows]
+}
+
+/** The current table and the opened-segment document share the legacy seven-day ending window. */
+export function eventListRows(
+  histories: ReadonlyMap<string, readonly EventChange[]>,
+  drafts: readonly Draft[],
+  options: Readonly<{ now?: Date; all?: boolean; drafts?: boolean }> = {},
+): Readonly<{ table: readonly Row<ChangeStatus>[]; document: readonly Row<ChangeStatus>[] }> {
+  const now = options.now ?? new Date()
+  const current = new Map(
+    [...histories].map(([branch, segments]) => {
+      const last = segments.at(-1)
+      if (last === undefined) throw new Error(`event change ${branch} has no opened segment`)
+      return [branch, last] as const
+    }),
+  )
+  const active = eventRows(current)
+  const previous = [...histories].flatMap(([branch, segments]) =>
+    segments.slice(0, -1).map((segment) => {
+      const single = eventRows(new Map([[branch, segment]]))[0]
+      if (single === undefined) throw new Error(`event change ${branch} lost an opened segment`)
+      const { position: _position, ...row } = single
+      return row
+    }),
+  )
+  const visible = (row: Row): boolean => {
+    if (options.all) return true
+    if (row.position !== undefined) return true
+    const at = clocks(row, now).clockAt
+    return at === undefined || now.getTime() - at.getTime() <= 7 * 24 * 60 * 60 * 1000
+  }
+  const selected = [...active, ...previous].filter(visible)
+  const ordered = (rows: readonly Row<ChangeStatus>[]): Row<ChangeStatus>[] => [
+    ...rows.filter((row) => row.position !== undefined),
+    ...rows
+      .filter((row) => row.position === undefined)
+      .sort(
+        (left, right) => (clocks(right, now).clockAt?.getTime() ?? 0) - (clocks(left, now).clockAt?.getTime() ?? 0),
+      ),
+  ]
+  const draftRows = options.drafts ? eventRows(new Map(), drafts) : []
+  return {
+    table: [...ordered(active.filter(visible)), ...draftRows],
+    document: [...ordered(selected), ...draftRows],
+  }
 }

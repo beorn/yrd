@@ -44,6 +44,7 @@ export {
   drop,
   eventPause,
   evolve,
+  enumerateChangeSegments,
   initial,
   listChangeHistories,
   listChanges,
@@ -53,6 +54,7 @@ export {
   readEventQueue,
   readEventQueueWithChanges,
   readStatus,
+  resetQueueFormatCache,
   setBranchIgnored,
   writeQueueEvent,
 } from "./events.ts"
@@ -68,7 +70,7 @@ export type {
   DropRequest,
   Dropped,
 } from "./events.ts"
-export { eventRows } from "./event-table.ts"
+export { eventListRows, eventRows } from "./event-table.ts"
 export { assertPlainEventQueueConfig } from "./event-config.ts"
 export {
   appendRecord,
@@ -226,3 +228,22 @@ export { runtimeGitlinkPath } from "./runtime-gitlink.ts"
 export type { RuntimeGitlinkDecision, RuntimeGitlinkOff, RuntimeGitlinkPath } from "./runtime-gitlink.ts"
 
 export { programRootCheck } from "./program-root.ts"
+
+export { readRemoteCalls, remoteCallsLine, traceRemoteCalls } from "./remote-calls.ts"
+export type { RemoteCalls } from "./remote-calls.ts"
+export {
+  MIRROR_LOCK_WAIT_MS,
+  MIRROR_REFRESHED_AT,
+  mirrorLocation,
+  mirrorRefreshedAt,
+  MirrorUnavailable,
+  refreshDeclaredMirrors,
+  refreshMirror,
+} from "./mirror.ts"
+export type {
+  MirrorLocation,
+  MirrorRefresh,
+  MirrorSkip,
+  RefreshDeclaredOptions,
+  RefreshMirrorOptions,
+} from "./mirror.ts"

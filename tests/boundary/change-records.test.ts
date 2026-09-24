@@ -292,7 +292,7 @@ describe("a change and its records", { timeout: 120_000 }, () => {
     })
 
     // today: red — no change ref, so nothing to preserve or to amend.
-    it("a queue run only appends: every record it found is still there, at the same sha, and no ref was deleted", async () => {
+    it("a queue run only appends: every record it found is still there, at the same sha, and only the merged task branch left", async () => {
       const { boundary, change } = await submitted({ exit: 0, hooks: true }, "append")
 
       const before = await readRecords(boundary, change)
@@ -311,11 +311,17 @@ describe("a change and its records", { timeout: 120_000 }, () => {
       ).toEqual(before.records.map((record) => record.sha))
       // Forward only.
       expect(await isAncestor(boundary.origin, before.tip, after.tip), report).toBe(true)
-      // yrd deletes nothing: every ref name is still there. The target and the
-      // change ref moved forward, which is the run's job, not a deletion.
+      // yrd deletes one ref: the merged change's task branch, leased on its head
+      // (25568, @cto 50480459). Every other ref name is still there; the target
+      // and the change ref moved forward, which is the run's job, not a deletion.
       const names = (lines: readonly string[]): readonly string[] => lines.map((line) => line.split(" ")[1] ?? "")
       const refsAfter = names(await refs(boundary.origin))
-      for (const ref of names(refsBefore)) expect(refsAfter, report).toContain(ref)
+      const mergedBranch = "refs/heads/task/append"
+      expect(names(refsBefore), report).toContain(mergedBranch)
+      expect(refsAfter, report).not.toContain(mergedBranch)
+      for (const ref of names(refsBefore).filter((name) => name !== mergedBranch)) {
+        expect(refsAfter, report).toContain(ref)
+      }
     })
 
     // today: red — no change ref, so nothing bounds what a Record: may say.

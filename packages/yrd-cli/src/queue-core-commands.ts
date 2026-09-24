@@ -13,8 +13,17 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { hostname } from "node:os"
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
+import { hostname, tmpdir } from "node:os"
 import { dirname, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
@@ -33,7 +42,8 @@ import {
   pauseLine,
   eventDirectMergeCommits,
   eventPause,
-  eventRows,
+  eventListRows,
+  enumerateChangeSegments,
   createEventStore,
   selectionFor,
   listRefs,
@@ -140,6 +150,8 @@ import {
   type StopFact,
   tipOf,
   trailer,
+  remoteCallsLine,
+  traceRemoteCalls,
 } from "@yrd/queue-core"
 import { readUnitIntent } from "./unit-intent.ts"
 import { noticeLine } from "./watch-notice.ts"
@@ -380,6 +392,10 @@ export type CoreQueueCommand =
        * (exit 2) when a selector matches nothing, which this does not change.
        */
       requireMatch?: boolean
+      /** Show ended event segments beyond the default seven-day window. */
+      all?: boolean
+      /** Include unsubmitted branch heads on event queues. */
+      drafts?: boolean
     }>
   | Readonly<{ command: "show"; branch: string }>
   | Readonly<{
@@ -410,6 +426,32 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   resume: "queue resume",
   up: "queue up",
   withdraw: "queue withdraw",
+}
+
+/**
+ * The environment a command's Git reads, and, for a submit that pushes, its remote-call count said on stderr
+ * when disposed (25570 row 3); the trace directory goes with it. Any other command gets `env` back untouched.
+ */
+function submitCalls(
+  request: CoreQueueCommand,
+  env: NodeJS.ProcessEnv | undefined,
+  io: YrdCliIO,
+): Readonly<{ env: NodeJS.ProcessEnv | undefined }> & Disposable {
+  if (request.command !== "submit" || request.dryRun === true) return { env, [Symbol.dispose]: () => undefined }
+  const directory = mkdtempSync(join(tmpdir(), "yrd-submit-trace2-"))
+  const traced = traceRemoteCalls(directory)
+  return {
+    env: env === undefined ? undefined : { ...env, ...traced.env },
+    [Symbol.dispose]() {
+      try {
+        io.stderr(`yrd: submit remote calls: ${remoteCallsLine(traced.end())}\n`)
+      } catch (error) {
+        io.stderr(`yrd: submit remote calls unknown: ${error instanceof Error ? error.message : String(error)}\n`)
+      } finally {
+        rmSync(directory, { recursive: true, force: true })
+      }
+    },
+  }
 }
 
 /**
@@ -466,8 +508,14 @@ export async function coreQueueCommand(
     )
     return 2
   }
-  const selection = options.selection ?? (await resolveGitSelection(repo, { env: options.env }))
-  const git = gitIn(repo, undefined, selection, { env: options.env })
+  // A SUBMIT SAYS WHAT IT COST (25570 row 3): every git process from here on, this command's own, Gitomic's and
+  // each moved submodule's, writes git's trace2 log, and one stderr line counts the remote calls and ssh logins
+  // when the command ends, however it ends. Traced before the first Git below is built, which is when it reads
+  // its environment. A dry run pushes nothing and is not counted.
+  using traced = submitCalls(request, options.env, io)
+  const env = traced.env
+  const selection = options.selection ?? (await resolveGitSelection(repo, { env }))
+  const git = gitIn(repo, undefined, selection, { env })
   const log = options.log?.child("queue")
   const remote = options.remote ?? "origin"
   const queue = options.queue ?? (await originHead(git))
@@ -1662,13 +1710,15 @@ export async function coreQueueCommand(
           drafts?: Readonly<{ window: DraftWindow; unread: readonly string[]; older: number }>
         }>
       > => {
-        // Legacy JSON retains its historical change-only document. An event
-        // queue has one status vocabulary beginning at `draft`, so its JSON
-        // and table both project the same one row per branch.
+        // JSON keeps one row per opened segment and per local run. The human
+        // table keeps each branch's current segment only.
         const format = await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)
         const reading =
           format === "event"
-            ? await readEventListing(git, declared.config, repo, workdir, declared.oid, selection)
+            ? await readEventListing(git, declared.config, repo, workdir, declared.oid, selection, {
+                all: request.all,
+                drafts: request.drafts,
+              })
             : {
                 format: "legacy" as const,
                 ...(await readListing(
@@ -1693,10 +1743,11 @@ export async function coreQueueCommand(
         // The operator read their own queue on 2026-09-17 and saw one branch
         // on two rows, which is what the old default did wherever a run
         // journal could be read.
-        const unfiltered = watchRows(all, { journals, perRun: true })
+        const unfiltered = watchRows(reading.format === "event" ? reading.document : all, { journals, perRun: true })
         const changes = filterRows(unfiltered, request.terms ?? []).filter((item) => item.row.state !== "draft")
         const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
-        const documentRows = reading.format === "event" ? rows : changes
+        const documentRows =
+          reading.format === "event" && request.drafts === true ? filterRows(unfiltered, request.terms ?? []) : changes
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = reading.format === "event" ? reading.pause : reading.queue.stop
@@ -1715,7 +1766,7 @@ export async function coreQueueCommand(
         const filteredScope =
           request.terms === undefined || request.terms.length === 0
             ? undefined
-            : `${String(documentRows.length)} of ${String(reading.format === "event" ? all.length : all.filter((row) => row.state !== "draft").length)} ${reading.format === "event" ? "branch(es)" : "change(s)"} match ${request.terms.join(" or ")}` +
+            : `${String(documentRows.length)} of ${String(reading.format === "event" ? reading.document.length : all.filter((row) => row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
               (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
         const baseScope =
           reading.format === "event"
@@ -2671,6 +2722,10 @@ export function summarize(kind: string, rest: Readonly<Record<string, unknown>>)
       }
     case "merge":
       return `${where} merged as ${String(rest.commit).slice(0, 12)}`
+    case "branch-deleted":
+      return `${where}: deleted the merged task branch on origin`
+    case "branch-kept":
+      return `${where}: kept the merged task branch on origin; the lease saw ${String(rest.saw)}`
     case "message":
       return `told ${String(rest.to)} about ${where}`
     case "reap":
@@ -2695,6 +2750,7 @@ function describeRun(
   outcome: Readonly<{
     exitCode: number
     merged: readonly string[]
+    branches?: readonly string[]
     failed: readonly string[]
     stuck: readonly string[]
     directMerges: readonly string[]
@@ -2709,6 +2765,7 @@ function describeRun(
     outcome.merged.length > 0
       ? `${STATE_WORDS.merged.word} ${outcome.merged.join(", ")}${outcome.noCheck === true ? " (checks skipped: --no-check)" : ""}`
       : undefined,
+    ...(outcome.branches ?? []),
     outcome.failed.length > 0 ? `${STATE_WORDS.failed.word} ${outcome.failed.join(", ")}` : undefined,
     outcome.stuck.length > 0 ? `${STATE_WORDS.stuck.word} ${outcome.stuck.join(", ")}` : undefined,
     outcome.directMerges.length > 0
@@ -3372,31 +3429,115 @@ function checkLines(check: CheckView): readonly string[] {
   ]
 }
 
+function areRefMapsEqual(
+  a: ReadonlyMap<string, string> | undefined,
+  b: ReadonlyMap<string, string> | undefined,
+): boolean {
+  if (a === b) return true
+  if (a === undefined || b === undefined) return false
+  if (a.size !== b.size) return false
+  for (const [key, val] of a) {
+    if (b.get(key) !== val) return false
+  }
+  return true
+}
+
+export type EventListingResult = Readonly<{
+  format: "event"
+  all: readonly Row[]
+  document: readonly Row[]
+  journals: Journals
+  drafts: DraftReading
+  pause: PauseRecord | undefined
+  changes: ReadonlyMap<string, EventChange>
+  observation: GitObservation
+}>
+
+interface EventListingCache {
+  queuePrefix: string
+  queueRefs: ReadonlyMap<string, string>
+  targetOid: string
+  branchRefs: ReadonlyMap<string, string>
+  lastHeadListingAt: number
+  reading: EventListingResult
+}
+
+const eventListingCaches = new Map<string, EventListingCache>()
+
+/** Reset the process-wide event listing cache (for tests). */
+export function clearEventListingCache(): void {
+  eventListingCaches.clear()
+}
+
 /** Read an event queue through Gitomic and project its change chains and draft branch heads. */
-async function readEventListing(
+export async function readEventListing(
   git: GitRunner,
   config: QueueConfig,
   repo: string,
   workdir: string,
   targetOid: string,
   selection: GitSelection,
-): Promise<
-  Readonly<{
-    format: "event"
-    all: readonly Row[]
-    journals: Journals
-    drafts: DraftReading
-    pause: PauseRecord | undefined
-    changes: ReadonlyMap<string, EventChange>
-    observation: GitObservation
-  }>
-> {
+  options: Readonly<{
+    all?: boolean
+    drafts?: boolean
+    now?: number | Date
+    forceFresh?: boolean
+  }> = {},
+): Promise<EventListingResult> {
   const store = createEventStore(repo, config.target.remote, selection)
+  const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
+  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}`
+  const cache = eventListingCaches.get(cacheKey)
+  const nowMs = typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
+
+  // 1. Fetch event refs first
+  const queueRefs = await listRefs(queuePrefix, store)
+
+  const eventRefsUnchanged =
+    cache !== undefined &&
+    cache.targetOid === targetOid &&
+    areRefMapsEqual(cache.queueRefs, queueRefs)
+
+  const headListingRecent =
+    cache !== undefined &&
+    nowMs - cache.lastHeadListingAt < 60_000
+
+  // 2. An unchanged event-ref fetch reuses the last round if head listing is recent
+  if (options?.forceFresh !== true && eventRefsUnchanged && headListingRecent) {
+    return {
+      ...cache.reading,
+      journals: readJournals(join(workdir, "logs")),
+    }
+  }
+
+  // 3. Head listing: runs at most once a minute, or when event-ref fetch reports a change
+  let branchRefs: ReadonlyMap<string, string>
+  let headListingAt: number
+  if (options?.forceFresh === true || !eventRefsUnchanged || !headListingRecent) {
+    branchRefs = await listRefs("refs/heads/", store)
+    headListingAt = nowMs
+  } else {
+    branchRefs = cache.branchRefs
+    headListingAt = cache.lastHeadListingAt
+  }
+
+  // If event refs were unchanged and branch heads also didn't change:
+  if (
+    options?.forceFresh !== true &&
+    eventRefsUnchanged &&
+    areRefMapsEqual(cache?.branchRefs, branchRefs)
+  ) {
+    cache.lastHeadListingAt = headListingAt
+    return {
+      ...cache.reading,
+      journals: readJournals(join(workdir, "logs")),
+    }
+  }
+
+  // 4. Full read
   const { queue, histories } = await readEventQueueWithChanges(store, config.target.branch)
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
   const directMerges = await eventDirectMergeCommits(git, config.target.branch, targetOid, queue.declaration, histories)
-  const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
-  const [queueRefs, branchRefs] = await Promise.all([listRefs(queuePrefix, store), listRefs("refs/heads/", store)])
   assertEventListingFence(config.target.branch, queue, changes, queueRefs)
   const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
   const drafts = await readDrafts(
@@ -3412,19 +3553,36 @@ async function readEventListing(
     ),
     { targetSha: targetOid },
   )
-  const projected = [
-    ...eventRows(changes),
-    ...list([], { directMerges }),
-    ...eventRows(new Map(), [...drafts.dated, ...drafts.undated]),
-  ]
+  const segmentStates = new Map(
+    [...histories].map(
+      ([branch, history]) =>
+        [
+          branch,
+          enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), repo).map(
+            (segment) => segment.state,
+          ),
+        ] as const,
+    ),
+  )
+  const listNow = options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
+  const selected = eventListRows(segmentStates, [...drafts.dated, ...drafts.undated], {
+    all: options.all,
+    drafts: options.drafts,
+    now: listNow,
+  })
+  const directRows = list([], { directMerges, now: listNow, ...(options.all ? { sinceMs: Number.POSITIVE_INFINITY } : {}) })
+  const projected = [...selected.table, ...selected.document, ...directRows]
   const titles = await subjects(
     git,
     projected.map((row) => row.head),
   )
-  const all = projected.map((row) => ({
-    ...row,
-    ...(titles.get(row.head) === undefined ? {} : { subject: titles.get(row.head) }),
-  }))
+  const titled = (rows: readonly Row[]) =>
+    rows.map((row) => ({
+      ...row,
+      ...(titles.get(row.head) === undefined ? {} : { subject: titles.get(row.head) }),
+    }))
+  const all = titled([...selected.table, ...directRows])
+  const document = titled([...selected.document, ...directRows])
   const observation = await git.observe({
     version: 1,
     root: {
@@ -3438,15 +3596,27 @@ async function readEventListing(
       refs: [...queueRefs, ...branchRefs].map(([ref, oid]) => ({ ref, oid })),
     },
   })
-  return {
+  const reading: EventListingResult = {
     format: "event",
     all,
+    document,
     journals: readJournals(join(workdir, "logs")),
     drafts,
     pause: eventPause(queue),
     changes,
     observation,
   }
+
+  eventListingCaches.set(cacheKey, {
+    queuePrefix,
+    queueRefs,
+    targetOid,
+    branchRefs,
+    lastHeadListingAt: headListingAt,
+    reading,
+  })
+
+  return reading
 }
 
 /** A history read and its final observation must name the same event tips. */

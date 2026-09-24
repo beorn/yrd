@@ -443,8 +443,10 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       const warning = rows.find((row) => row.level === "warn" && row.message.startsWith(`${ref}:`))
       expect(warning?.message).toMatch(/remote [0-9a-f]{40}, intended [0-9a-f]{40} \(diverged\); inspect: git -C /u)
     }
-    // Three rounds launch the real selected executable for every Git call.
-  }, 15_000)
+    // Three rounds launch the real selected executable for every Git call,
+    // plus a spawned notifier per merge: 25 s measured at load average 51
+    // (2026-09-24), so 15 s failed on a busy host while the service was fine.
+  }, 60_000)
 
   // 24472: legacy branch-name inference must be visible in both submit modes;
   // the domain reader tests cannot prove the CLI tells its caller.
@@ -636,7 +638,11 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
 
       if (valid) {
         await expect(attempt).resolves.toBe(0)
-        expect(run.stderr()).toBe("")
+        // The one stderr line a clean submit writes is its remote-call count (25570 row 3): the queue read, the
+        // record push and every fetch, from git's own trace2 log, with no torn line.
+        expect(run.stderr()).toMatch(
+          /^yrd: submit remote calls: processes=\d+ ssh_children=0 remote_ms=\d+ unreadable=0 (?=.*\bpush=1\b)[^\n]*\n$/u,
+        )
         expect(records(run)[0]).toMatchObject({ head })
         const history = await readRecords(w.git, (records(run)[0] as { opened: string }).opened)
         expect(history.map((record) => record.kind)).toEqual(["opened"])
@@ -1050,7 +1056,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     )
     try {
       if (ending !== "already projected") {
-        await vi.waitFor(() => expect(run.stdout()).toContain("waiting for checkout"))
+        await vi.waitFor(() => expect(run.stdout()).toContain("waiting for checkout"), { timeout: 20_000 })
         expect(rounds).toBe(0)
         if (ending === "stop") stop.abort()
         else await project()

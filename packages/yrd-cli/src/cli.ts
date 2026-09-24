@@ -31,6 +31,7 @@ import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { drainOutput } from "loggily"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
 import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
+import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere } from "./declaration.ts"
 import { resolveQueueLocation } from "./queue-location.ts"
@@ -603,6 +604,8 @@ function buildProgram(
       interval?: number
       status?: string
       requireMatch?: boolean
+      all?: boolean
+      drafts?: boolean
     }>,
   ): CoreQueueCommand => {
     // `--status` is a SPELLING of a filter term, never a second filter path.
@@ -621,6 +624,8 @@ function buildProgram(
       ...(options.watch === true ? { watch: true } : {}),
       ...(options.interval === undefined ? {} : { intervalSeconds: options.interval }),
       ...(options.requireMatch === true ? { requireMatch: true } : {}),
+      ...(options.all === true ? { all: true } : {}),
+      ...(options.drafts === true ? { drafts: true } : {}),
     }
   }
   const listOptions = <T extends { option: (flags: string, description: string, parser?: unknown) => T }>(
@@ -628,6 +633,8 @@ function buildProgram(
   ): T =>
     command
       .option("--latest", "one row per change; the default keeps every run that touched it")
+      .option("--all", "include ended changes older than seven days on event queues")
+      .option("--drafts", "include unsubmitted branch heads on event queues")
       .option("--status <state>", "select by state: exactly the same as giving <state> as a filter term")
       .option("--json", "emit stable JSON: result belongs to the run named by run; state is the current change state")
       .option("--queue <value>", QUEUE_HELP)
@@ -642,7 +649,7 @@ function buildProgram(
   const STATES_HELP = legendLines().join("\n")
   const WATCH_FLAG_HELP = "refresh until the selected change ends, exiting with its code as yrd check does"
   const queueList = async (filters: readonly string[] | undefined, options: unknown): Promise<void> => {
-    const { interval, json, latest, status, watch, queue, requireMatch } = options as {
+    const { interval, json, latest, status, watch, queue, requireMatch, all, drafts } = options as {
       interval?: number
       json?: boolean
       latest?: boolean
@@ -650,12 +657,14 @@ function buildProgram(
       watch?: boolean
       queue?: string
       requireMatch?: boolean
+      all?: boolean
+      drafts?: boolean
     }
     const location = await resolveQueueLocation(cwd(), queue, env, "reader")
     const taken = await coreQueueCommand(
       location.repo,
       io,
-      listRequest(filters ?? [], { interval, latest, status, watch, requireMatch }),
+      listRequest(filters ?? [], { interval, latest, status, watch, requireMatch, all, drafts }),
       {
         selection: location.selection,
         populateReference: location.owned,
@@ -921,6 +930,26 @@ function buildProgram(
     )
     .option("--json", "emit stable JSON")
     .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
+
+  const mirror = program
+    .command("mirror")
+    .description("this host's local copy of each hosted repository, read by composes")
+  mirror.helpCommand(false)
+  mirror
+    .command("refresh")
+    .description(
+      "create or fetch the mirror of every hosted repository this repository declares, nested ones included, " +
+        `under the store \`git config ${MIRROR_STORE_SETTING}\` names`,
+    )
+    .option("--commit <rev>", "read the declarations at this commit (default HEAD)")
+    .option("--json", "emit stable JSON")
+    .addHelpSection(
+      "On refresh:",
+      "One clone --mirror or fetch --prune per repository, under that mirror's exclusive lock; a refresh that " +
+        "waited on another one that finished meanwhile fetches nothing. Exits 0 with every mirror refreshed " +
+        "(each skipped path is named), 1 when a mirror could not be created, fetched or locked.",
+    )
+    .action(async (options) => setExit(await refreshMirrors(options as MirrorRefreshOptions, io)))
 
   addExamples(program, name)
   return program

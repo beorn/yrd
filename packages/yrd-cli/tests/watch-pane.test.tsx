@@ -373,13 +373,13 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     }
     dump("before")
     const pillsY = app.lines.findIndex(
-      (line) => line.includes("open") && line.includes("failed") && line.includes("running"),
+      (line) => line.includes("[o]pen") && line.includes("[f]ailed") && line.includes("[r]unning"),
     )
     const pills = app.lines[pillsY] ?? ""
-    const openX = pills.indexOf("open")
+    const openX = pills.indexOf("[o]pen")
     expect(pillsY, app.lines.join("\n")).toBeGreaterThanOrEqual(0)
     expect(openX, pills).toBeGreaterThan(100)
-    expect(pills.trimEnd().endsWith("failed")).toBe(true)
+    expect(pills.trimEnd().endsWith("[f]ailed")).toBe(true)
     expect(
       app.lines.some((line) => line.includes("RUNNER")),
       app.lines.join("\n"),
@@ -405,8 +405,8 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     await settle(app)
     app.press("o")
     await settle(app)
-    const y = app.lines.findIndex((line) => /\bopen\b/u.test(line) && line.includes("failed"))
-    const x = (app.lines[y] ?? "").indexOf("open")
+    const y = app.lines.findIndex((line) => line.includes("[o]pen") && line.includes("[f]ailed"))
+    const x = (app.lines[y] ?? "").indexOf("[o]pen")
     expect(y, app.lines.join("\n")).toBeGreaterThanOrEqual(0)
     expect(x).toBeGreaterThanOrEqual(0)
     expect(app.cell(x, y).bold).toBe(true)
@@ -693,10 +693,10 @@ describe("the table (items 3, 28, 38)", () => {
   it("renders the status pills right-aligned, with no All pill", async () => {
     const text = await paint(<WatchPane snapshot={snapshot()} live={false} />)
 
-    const pills = text.split("\n").find((line) => line.includes("open") && line.includes("failed"))
+    const pills = text.split("\n").find((line) => line.includes("[o]pen") && line.includes("[f]ailed"))
     expect(pills).toBeDefined()
-    expect(pills).toContain("running")
-    expect(pills).toContain("done")
+    expect(pills).toContain("[r]unning")
+    expect(pills).toContain("[d]one")
     expect(pills?.trimEnd().endsWith("all")).toBe(false)
   })
 })
@@ -1435,7 +1435,7 @@ describe("the frame's order under the table", () => {
     await settle(app)
     const lines = app.text.split("\n")
     const lastRow = lines.findIndex((line) => line.includes("task/one"))
-    const pills = lines.findIndex((line) => /\bopen\b.*\brunning\b.*\bdone\b.*\bfailed\b/u.test(line))
+    const pills = lines.findIndex((line) => /\[o\]pen.*\[r\]unning.*\[d\]one.*\[f\]ailed/u.test(line))
     const stats = lines.findIndex((line) => line.includes("STATS"))
     expect(lastRow).toBeGreaterThan(0)
     expect(stats).toBeGreaterThan(0)
@@ -2755,17 +2755,17 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     }).toEqual({ age: true, said: true, silent: false, supervisor: false })
   })
 
-  it("idle queue is selectable and selected by default in an empty queue, and opening it shows runner detail (watch-review-1244)", async () => {
+  it("idle queue is selectable and selected by default in an empty queue, and under 25556 suppresses detail pane when stand-in (watch-review-1244)", async () => {
     const app = render(<WatchPane snapshot={snapshot({ rows: [], runner: RUNNER })} open={opener()} live={false} />, {
       cols: 160,
       rows: 40,
     })
     await settle(app)
+    // Stand-in virtual runner selection suppresses detail pane (25556 Row 5)
+    expect(current(app)).not.toContain("Queue: example.test/repo#main")
     app.press("Enter")
-    await waitFor(() => {
-      expect(current(app)).toContain("▸ RUNNER idle")
-      expect(current(app)).toContain("Queue: example.test/repo#main")
-    })
+    await settle(app)
+    expect(current(app)).not.toContain("Queue: example.test/repo#main")
     app.unmount()
   })
 
@@ -2782,12 +2782,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(app)
     expect(current(app)).not.toContain("Home follows the newest again")
-    // Idle runner is selected by default on mount in queued-only data
-    app.press("Enter")
-    await waitFor(() => {
-      expect(current(app)).toContain("▸ RUNNER idle")
-      expect(current(app)).toContain("Queue: example.test/repo#main")
-    })
+    // Idle runner is selected by default on mount in queued-only data; under 25556 detail pane is suppressed
+    expect(current(app)).not.toContain("Queue: example.test/repo#main")
     // ArrowUp navigates up to q1 (position 1 is right above runner)
     app.press("ArrowUp")
     await settle(app)
@@ -3137,17 +3133,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       { cols: 220, rows: 40 },
     )
     await settle(app)
+    app.press("ArrowDown")
+    await settle(app)
     app.press("Enter")
     await settle(app)
 
     // 1. Subtle background: read cell background in list vs in detail pane
-    const runnerLineIdx = app.lines.findIndex((l) => l.includes("RUNNER"))
-    expect(runnerLineIdx).toBeGreaterThan(0)
-    const runnerX = app.lines[runnerLineIdx]!.indexOf("RUNNER")
-    expect(runnerX).toBeGreaterThan(140)
-
-    const listBg = app.cell(10, runnerLineIdx).bg
-    const detailBg = app.cell(runnerX, runnerLineIdx).bg
+    const listBg = app.cell(10, 3).bg
+    const detailBg = app.cell(160, 3).bg
 
     // Detail background must differ from list background and match raised surface color (item 8, 24196)
     expect(DETAIL_BG).toBe("$bg-surface-raised")
@@ -3396,7 +3389,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
     const long = "a recorded reason ".repeat(18)
     const narrow = await paintStop(long, 80)
-    expect(narrow.lines[0]).toContain("YRD STOPPED a recorded reaso")
+    expect(narrow.lines[0]).toContain("YRD STOPPED a record")
     expect(narrow.lines[0]).toContain("…")
     expect(narrow.lines[0]).not.toContain(long)
     narrow.unmount()
@@ -3509,6 +3502,8 @@ describe("g and G move between the RUNNER box, the top and the bottom (25419)", 
       if (text.includes("Queue: example.test/repo#main")) return "runner"
       if (text.includes("· task/top@")) return "top"
       if (text.includes("· task/bottom@")) return "bottom"
+      const runnerLineIdx = app.lines.findIndex((l) => l.includes("RUNNER"))
+      if (runnerLineIdx >= 0 && app.cell(4, runnerLineIdx + 1).bg !== null) return "runner"
       return "none"
     }
     const steps: string[] = []
@@ -3533,9 +3528,17 @@ describe("a click on the table's overflow indicator jumps to that end (25418)", 
       subject: `change ${String(index)}`,
     }),
   }))
-  /** Which item the cursor is on, read from the detail it opens. */
-  const on = (text: string): string =>
-    text.includes("Queue: example.test/repo#main") ? "runner" : (/· (task\/r\d\d)@/u.exec(text)?.[1] ?? "none")
+  /** Which item the cursor is on, read from the detail it opens or runner selection. */
+  const on = (text: string, a?: ReturnType<typeof render>): string => {
+    if (text.includes("Queue: example.test/repo#main")) return "runner"
+    const match = /· (task\/r\d\d)@/u.exec(text)
+    if (match) return match[1]!
+    if (a) {
+      const runnerLineIdx = a.lines.findIndex((l: string) => l.includes("RUNNER"))
+      if (runnerLineIdx >= 0 && a.cell(4, runnerLineIdx + 1).bg !== null) return "runner"
+    }
+    return "none"
+  }
 
   it("clicking ▼N selects the last item, as G does, and ▲N the first", async () => {
     const app = render(<WatchPane snapshot={snapshot({ rows })} open={opener()} live={false} />, {
@@ -3552,14 +3555,14 @@ describe("a click on the table's overflow indicator jumps to that end (25418)", 
     const down = at("▼")
     await app.click(down.col, down.row)
     await settle(app)
-    steps.push(`▼:${on(app.text)}`)
+    steps.push(`▼:${on(app.text, app)}`)
     const up = at("▲")
     await app.click(up.col, up.row)
     await settle(app)
-    steps.push(`▲:${on(app.text)}`)
+    steps.push(`▲:${on(app.text, app)}`)
     app.press("G")
     await settle(app)
-    steps.push(`G:${on(app.text)}`)
+    steps.push(`G:${on(app.text, app)}`)
     app.unmount()
 
     expect(steps).toEqual(["▼:task/r59", "▲:runner", "G:task/r59"])
@@ -3706,8 +3709,9 @@ describe("the top line (25416)", () => {
     const top = lines.findIndex((line) => /▲\d/u.test(line))
     const bottom = lines.findIndex((line) => /▼\d/u.test(line))
     const third = (bottom - top) / 3
+    const runnerLineIdx = lines.findIndex((line) => line.includes("╭─ RUNNER"))
     const seen = {
-      on: lines.join("\n").includes("Queue: example.test/repo#main") ? "runner" : "elsewhere",
+      on: runnerLineIdx >= 0 && app.cell(4, runnerLineIdx + 1).bg !== null ? "runner" : "elsewhere",
       // Centred: the box sits in the middle third of the list's rows, not at an edge.
       centred: top >= 0 && box > top + third && box < bottom - third,
     }
