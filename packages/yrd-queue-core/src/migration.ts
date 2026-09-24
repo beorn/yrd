@@ -106,7 +106,7 @@ export function inputsForLegacy(source: LegacyMigrationChange, queueTip: string)
   const opened = absorb(
     changeInput("opened", {
       queueTip,
-      at: terminal ? openedAt : tip.at,
+      at: openedAt,
       commit: head,
       by: submitter,
       ...(issue === undefined ? {} : { issue }),

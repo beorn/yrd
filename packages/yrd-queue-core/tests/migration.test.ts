@@ -3,6 +3,7 @@
 // @consumer one-shot 25041 converter and its per-head parity receipt
 
 import { describe, expect, it } from "vitest"
+import { eventRows } from "../src/event-table.ts"
 import { evolve, initial } from "../src/events.ts"
 import { inputsForLegacy, migratedStatus, sourcesForMigration, type LegacyMigrationChange } from "../src/migration.ts"
 import type { ChangeRecord } from "../src/legacy-records.ts"
@@ -18,13 +19,14 @@ function record(
   sha: string,
   at: string,
   extra: readonly (readonly [string, string])[] = [],
+  openedAt = OPENED,
 ): ChangeRecord {
   return {
     kind,
     sha,
     at: new Date(at),
     subject: `${kind} task/example`,
-    trailers: [["Opened", OPENED], ["Submitter", "@dev/2"], ["Issue", "25041"], ...extra],
+    trailers: [["Opened", openedAt], ["Submitter", "@dev/2"], ["Issue", "25041"], ...extra],
   }
 }
 
@@ -80,13 +82,45 @@ describe("25041 old resting-state conversion", () => {
     const inputs = inputsForLegacy(source([opened, checked], { state: "checked" }), QUEUE)
     expect(inputs).toHaveLength(1)
     expect(inputs[0]?.type).toBe("opened")
-    expect(inputs[0]?.props).toContainEqual(["Time", checked.at.toISOString()])
+    expect(inputs[0]?.props).toContainEqual(["Time", OPENED])
     expect(inputs[0]?.props?.filter(([key]) => key === "Migrated-From")).toEqual([
       ["Migrated-From", `${REF}@${opened.sha}`],
       ["Migrated-From", `${REF}@${checked.sha}`],
     ])
     expect(inputs[0]?.keeps).toEqual([HEAD, opened.sha, checked.sha])
     expect(migrated(inputs).status).toBe("queued")
+  })
+
+  it("keeps two queued heads in Opened order when their later record times invert", () => {
+    const first = source(
+      [record("opened", "1".repeat(40), OPENED), record("checked", "2".repeat(40), "2026-09-24T10:05:00.000Z")],
+      { state: "checked" },
+    )
+    const secondOpened = "2026-09-24T10:03:00.000Z"
+    const secondHead = "c".repeat(40)
+    const second = {
+      ref: `refs/yrd/main/task/second@${secondHead}`,
+      change: {
+        branch: "task/second",
+        head: secondHead,
+        headOnTarget: false,
+        records: [
+          record("opened", "3".repeat(40), secondOpened, [], secondOpened),
+          record("checked", "4".repeat(40), "2026-09-24T10:04:00.000Z", [], secondOpened),
+        ],
+      },
+      reading: { state: "checked" },
+    } satisfies LegacyMigrationChange
+    const rows = eventRows(
+      new Map([
+        ["task/example", migrated(inputsForLegacy(first, QUEUE))],
+        ["task/second", migrated(inputsForLegacy(second, QUEUE))],
+      ]),
+    )
+    expect(rows.map(({ branch, position }) => [branch, position])).toEqual([
+      ["task/example", 1],
+      ["task/second", 2],
+    ])
   })
 
   it("maps a merged chain into opened then merged, with each source record on one event", () => {
