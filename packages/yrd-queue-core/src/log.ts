@@ -381,6 +381,43 @@ export type JournalCheck = Readonly<{
   scope?: "narrowed" | "full"
 }>
 
+/**
+ * One git command a round ran, as its journal row says it (25441): the row is
+ * written when the command has finished. Output is never inline: `stdout` and
+ * `stderr` are the run's raw files, read only when a reader asks for them, and
+ * both are absent when the invocation failed before it could write any.
+ */
+export type JournalCommand = Readonly<{
+  args: readonly string[]
+  cwd: string
+  exit?: number
+  stdout?: string
+  stderr?: string
+  /** Why there is no output: the invocation's own failure, as the row says it. */
+  failure?: string
+}>
+
+/**
+ * One step of a round (25441): compose, prepare, read, push, merge, publish —
+ * the queue's own names — with the git commands it ran. A command belongs to
+ * the step open when its row was written. That pairing is exact because a
+ * round is serial: `timedStep` writes its end row on a throw too, and git rows
+ * come only from the round's own runner. A step still open when the next one
+ * starts was cut short by a killed process: it is closed there and `unended`.
+ */
+export type JournalStep = Readonly<{
+  name: string
+  phase: string
+  startedAt: Date
+  endedAt?: Date
+  ms?: number
+  threw?: true
+  unended?: true
+  commands: readonly JournalCommand[]
+  /** git-super's own timed phases of a compose, written after its end row: sub-rows, never steps. */
+  parts?: readonly Readonly<{ name: string; ms: number }>[]
+}>
+
 /** What one run's journal says about one change. */
 export type JournalRun = Readonly<{
   /** The run's own id, which is also its file's name. */
@@ -391,6 +428,15 @@ export type JournalRun = Readonly<{
   head: string
   /** Every check this run ran on this change, in the order it ran them. */
   checks: readonly JournalCheck[]
+  /**
+   * Every step of the round that touched this change, in journal order: its
+   * own (compose, merge, …) and the round's (read), which serve every change
+   * the round held (25441). The reader always writes it; it is optional only
+   * so a JournalRun built by hand, as a caller's fixture, need not say it.
+   */
+  steps?: readonly JournalStep[]
+  /** Git commands the round ran outside any step; the display's `round` tab, shown only when non-empty. Always written by the reader. */
+  commands?: readonly JournalCommand[]
   /** The check running now: a start row this run never ended. */
   running?: JournalCheck
   /** The decision this run recorded — `checked`, `merged`, `failed`, `stuck` — when it made one. */
@@ -632,6 +678,116 @@ function incidentIn(record: LogRecord, id: string, branch: string, head: string)
 }
 
 /** What one run's records say about each change it touched. */
+/**
+ * The steps of one run's journal and the git commands each ran, in journal
+ * order (see {@link JournalStep} for why the pairing is exact). A step naming
+ * a change is that change's; a step naming only the target (`read`) is the
+ * round's. A row that is not a well-formed step or git row is left to
+ * `runsIn`'s own reading and never invents a step.
+ */
+function stepsIn(records: readonly LogRecord[]): Readonly<{
+  byChange: ReadonlyMap<string, readonly Readonly<{ order: number; step: JournalStep }>[]>
+  round: readonly Readonly<{ order: number; step: JournalStep }>[]
+  commands: readonly JournalCommand[]
+}> {
+  type Building = {
+    order: number
+    key?: string
+    step: { -readonly [K in keyof JournalStep]: JournalStep[K] } & {
+      commands: JournalCommand[]
+      parts?: { name: string; ms: number }[]
+    }
+  }
+  const built: Building[] = []
+  const commands: JournalCommand[] = []
+  let open: Building | undefined
+  const date = (value: unknown): Date | undefined => {
+    if (typeof value !== "string") return undefined
+    const at = new Date(value)
+    return Number.isNaN(at.getTime()) ? undefined : at
+  }
+  for (const [order, record] of records.entries()) {
+    if (record.kind === "git") {
+      const command = commandOf(record)
+      if (command === undefined) continue
+      if (open === undefined) commands.push(command)
+      else open.step.commands.push(command)
+      continue
+    }
+    if (record.kind !== "step" || typeof record.name !== "string") continue
+    const key =
+      typeof record.branch === "string" && typeof record.head === "string"
+        ? journalKey(record.branch, record.head)
+        : undefined
+    if (record.within === "compose") {
+      // git-super's phases, written after the compose's end row: parts of the last compose.
+      const compose = built.findLast((entry) => entry.step.name === "compose" && entry.key === key)
+      if (compose !== undefined && typeof record.ms === "number") {
+        ;(compose.step.parts ??= []).push({ name: record.name, ms: record.ms })
+      }
+      continue
+    }
+    const startedAt = date(record.start)
+    if (startedAt === undefined || typeof record.phase !== "string") continue
+    const endedAt = date(record.end)
+    if (endedAt === undefined) {
+      if (open !== undefined) open.step.unended = true
+      open = {
+        order,
+        ...(key === undefined ? {} : { key }),
+        step: { commands: [], name: record.name, phase: record.phase, startedAt },
+      }
+      built.push(open)
+      continue
+    }
+    // The end row settles the start row it names, which is the open one in a serial round.
+    const settles =
+      open !== undefined && open.step.name === record.name && open.step.startedAt.getTime() === startedAt.getTime()
+        ? open
+        : undefined
+    const ending = {
+      endedAt,
+      ...(typeof record.ms === "number" ? { ms: record.ms } : {}),
+      ...(record.threw === true ? { threw: true as const } : {}),
+    }
+    if (settles === undefined) {
+      built.push({
+        order,
+        ...(key === undefined ? {} : { key }),
+        step: { commands: [], name: record.name, phase: record.phase, startedAt, ...ending },
+      })
+    } else {
+      Object.assign(settles.step, ending)
+      open = undefined
+    }
+  }
+  const byChange = new Map<string, Readonly<{ order: number; step: JournalStep }>[]>()
+  const round: Readonly<{ order: number; step: JournalStep }>[] = []
+  for (const entry of built) {
+    const settled = { order: entry.order, step: entry.step as JournalStep }
+    if (entry.key === undefined) round.push(settled)
+    else byChange.set(entry.key, [...(byChange.get(entry.key) ?? []), settled])
+  }
+  return { byChange, commands, round }
+}
+
+/** A git row as a command, with its raw output files named by the evidence path; undefined for a row that is not one. */
+function commandOf(record: LogRecord): JournalCommand | undefined {
+  const { args, cwd, evidence, exit, failure } = record
+  if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string") || typeof cwd !== "string") return undefined
+  const stdout =
+    typeof evidence === "string" && evidence.endsWith(".stdout.bin.json")
+      ? evidence.slice(0, -".json".length)
+      : undefined
+  return {
+    args: args as string[],
+    cwd,
+    ...(typeof exit === "number" ? { exit } : {}),
+    ...(stdout === undefined ? {} : { stdout, stderr: stdout.replace(/\.stdout\.bin$/u, ".stderr.bin") }),
+    ...(typeof failure === "string" ? { failure } : {}),
+  }
+}
+
 function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): readonly JournalRun[] {
   const byChange = new Map<
     string,
@@ -761,12 +917,16 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
     if (standing === -1) change.checks.push(check)
     else change.checks[standing] = check
   }
+  const stepped = stepsIn(records)
   return [...byChange.values()].map((change) => {
     const running = change.checks.findLast((check) => check.endedAt === undefined)
+    const own = stepped.byChange.get(journalKey(change.branch, change.head)) ?? []
     return {
       at: change.at,
       branch: change.branch,
       checks: change.checks,
+      steps: [...own, ...stepped.round].sort((left, right) => left.order - right.order).map(({ step }) => step),
+      commands: stepped.commands,
       ...(change.decision === undefined ? {} : { decision: change.decision }),
       ...(change.reason === undefined ? {} : { reason: change.reason }),
       ...(change.incident === undefined ? {} : { incident: change.incident }),

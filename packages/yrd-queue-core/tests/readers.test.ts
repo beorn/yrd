@@ -119,6 +119,107 @@ describe("a run's journal, read back", () => {
     ])
   })
 
+  it("reads each step of the round with the git commands it ran, in journal order (25441)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const change = { branch: "task/one", head: "abc123" }
+    const git = (n: number, args: readonly string[], exit = 0) => ({
+      args,
+      cwd: "/w",
+      evidence: `/w/logs/run/git/${String(n)}.stdout.bin.json`,
+      exit,
+      kind: "git",
+    })
+    const { dir } = journalDir(
+      [
+        { base: "aaa", checks: ["test"], kind: "run", queue: "q", target: "main" },
+        // Before any step: the round's own command, shown only on the round tab.
+        git(1, ["fetch", "origin"]),
+        { kind: "step", name: "read", phase: "run", start: "2026-09-03T19:50:00.000Z", target: "main", base: "aaa" },
+        git(2, ["for-each-ref", "refs/yrd"]),
+        {
+          base: "aaa",
+          end: "2026-09-03T19:50:02.000Z",
+          kind: "step",
+          ms: 2_000,
+          name: "read",
+          phase: "run",
+          start: "2026-09-03T19:50:00.000Z",
+          target: "main",
+        },
+        { ...change, kind: "step", name: "compose", phase: "merge", start: "2026-09-03T19:51:00.000Z" },
+        git(3, ["merge", "--no-edit", "task/one"], 1),
+        {
+          ...change,
+          end: "2026-09-03T19:51:05.000Z",
+          kind: "step",
+          ms: 5_000,
+          name: "compose",
+          phase: "merge",
+          start: "2026-09-03T19:51:00.000Z",
+          threw: true,
+        },
+        { ...change, kind: "step", ms: 1_200, name: "settle", phase: "merge", within: "compose" },
+        { ...change, kind: "change", decision: "failed", reason: "compose" },
+      ],
+      at,
+    )
+
+    const run = readJournals(dir, { now: at }).runs.get(journalKey("task/one", "abc123"))?.[0]
+    expect(
+      run?.steps?.map((step) => ({
+        name: step.name,
+        ms: step.ms,
+        threw: step.threw,
+        commands: step.commands.map((command) => `${command.args.join(" ")} → ${String(command.exit)}`),
+        parts: step.parts,
+      })),
+    ).toEqual([
+      { name: "read", ms: 2_000, threw: undefined, commands: ["for-each-ref refs/yrd → 0"], parts: undefined },
+      {
+        name: "compose",
+        ms: 5_000,
+        threw: true,
+        commands: ["merge --no-edit task/one → 1"],
+        parts: [{ name: "settle", ms: 1_200 }],
+      },
+    ])
+    expect(run?.commands?.map((command) => command.args.join(" "))).toEqual(["fetch origin"])
+    // Output stays on disk: the command carries its raw files' paths, never their bytes.
+    expect(run?.steps?.[1]?.commands[0]).toMatchObject({
+      stdout: "/w/logs/run/git/3.stdout.bin",
+      stderr: "/w/logs/run/git/3.stderr.bin",
+    })
+  })
+
+  it("closes a step a killed round left open when the next starts, and keeps a step the journal was cut after open (25441)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const change = { branch: "task/one", head: "abc123" }
+    const { dir } = journalDir(
+      [
+        { ...change, kind: "step", name: "compose", phase: "merge", start: "2026-09-03T19:51:00.000Z" },
+        { ...change, kind: "step", name: "merge", phase: "merge", start: "2026-09-03T19:52:00.000Z" },
+        {
+          args: ["push", "origin"],
+          cwd: "/w",
+          evidence: "/w/logs/run/git/1.failed.json",
+          failure: "spawn",
+          kind: "git",
+        },
+      ],
+      at,
+    )
+
+    const steps = readJournals(dir, { now: at }).runs.get(journalKey("task/one", "abc123"))?.[0]?.steps
+    expect(
+      steps?.map((step) => ({ name: step.name, unended: step.unended, ended: step.endedAt !== undefined })),
+    ).toEqual([
+      { name: "compose", unended: true, ended: false },
+      { name: "merge", unended: undefined, ended: false },
+    ])
+    // A command that failed before it could write output names no files, and says why.
+    expect(steps?.[1]?.commands).toEqual([{ args: ["push", "origin"], cwd: "/w", failure: "spawn" }])
+  })
+
   it("rereads a journal when the file's mtime or size changes", () => {
     const at = new Date("2026-09-03T20:00:00.000Z")
     const { dir, run } = journalDir([{ branch: "task/one", head: "abc123", kind: "change" }], at)

@@ -11,13 +11,15 @@
  * @consumer the operator reading `yrd watch`
  */
 
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import type React from "react"
 import { act } from "react"
 import { describe, expect, it, vi } from "vitest"
 import { bufferToText, render } from "silvery/test"
 import { Box, FOLD_MARKERS, Text } from "silvery"
-import type { ChangeRecord, GitObservation, JournalRun, Row } from "@yrd/queue-core"
+import type { ChangeRecord, GitObservation, JournalCommand, JournalRun, Row } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { DETAIL_BG, WatchPane, watchTier, type WatchSnapshot } from "../src/watch-pane.tsx"
@@ -25,10 +27,13 @@ import {
   CHANGES_TAB,
   RunStatusBox,
   WatchDetail,
+  commandKey,
   defaultTab,
   type ChangeDetail,
   type CheckPanel,
+  type DiffText,
 } from "../src/watch-detail.tsx"
+import { readCommandOutput } from "../src/queue-core-commands.ts"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
 import { clock } from "../src/watch-format.ts"
 import { noticeLine } from "../src/watch-notice.ts"
@@ -3709,5 +3714,168 @@ describe("the top line (25416)", () => {
     paused.unmount()
     stopped.unmount()
     expect(Object.entries(ratios).filter(([, ratio]) => !(ratio >= 3))).toEqual([])
+  })
+})
+
+describe("one tab per stage of the round, from its journal (25441 slice 2)", () => {
+  const command = (n: number, args: readonly string[], exit = 0): JournalCommand => ({
+    args,
+    cwd: "/w",
+    exit,
+    stderr: `/w/logs/run/git/${String(n)}.stderr.bin`,
+    stdout: `/w/logs/run/git/${String(n)}.stdout.bin`,
+  })
+  const before = (msAgo: number): Date => new Date(NOW.getTime() - msAgo)
+  const typecheck: CheckPanel = {
+    name: "typecheck",
+    phase: "merge",
+    result: { exit: "0", ms: 62_000, result: "pass" },
+    state: "passed",
+  }
+  function journalOf(over: Partial<JournalRun> = {}): JournalRun {
+    return {
+      at: NOW,
+      branch: "task/one",
+      checks: [{ endedAt: before(40_000), ms: 62_000, name: "typecheck", phase: "merge", startedAt: before(50_000) }],
+      commands: [command(0, ["fetch", "origin"])],
+      head: row().head,
+      id: RUN_ID,
+      startedAt: before(70_000),
+      steps: [
+        {
+          commands: [command(1, ["for-each-ref", "refs/yrd"])],
+          endedAt: before(58_000),
+          ms: 2_000,
+          name: "read",
+          phase: "run",
+          startedAt: before(60_000),
+        },
+        {
+          commands: [command(2, ["merge", "--no-edit", "task/one"], 1)],
+          endedAt: before(51_000),
+          ms: 4_000,
+          name: "compose",
+          parts: [{ ms: 1_200, name: "settle" }],
+          phase: "merge",
+          startedAt: before(55_000),
+        },
+        { commands: [], endedAt: before(9_000), ms: 1_000, name: "merge", phase: "merge", startedAt: before(10_000) },
+      ],
+      ...over,
+    }
+  }
+  const merged = (): WatchRow => ({
+    row: row({ at: NOW, endedAt: NOW, merge: "b".repeat(40), run: RUN_ID, state: "merged" }),
+  })
+
+  it("draws the round's stages as tabs in the order it ran them, each command above what it printed", async () => {
+    const detail = detailOf(merged(), [typecheck], { journal: journalOf() })
+    const compose = journalOf().steps?.[1]?.commands[0]
+    const outputs: ReadonlyMap<string, DiffText> = new Map([
+      [commandKey(compose!), { text: "CONFLICT (content): Merge conflict in vendor/yrd" }],
+    ])
+    const lines = (await paint(at(<WatchDetail detail={detail} selected="step:1" outputs={outputs} />), [], 160)).split(
+      "\n",
+    )
+
+    const strip = lines.findIndex((line) => /Timeline\s+round\s+read\s+compose\s+typecheck\s+merge/u.test(line))
+    expect(strip).toBeGreaterThan(-1)
+    // Each stage's second line is its glyph and duration; the round's says how many commands it holds.
+    expect(lines[strip + 1]).toMatch(/1 git\s+✓ 0:02\s+✓ 0:04\s+✓ 1:02\s+✓ 0:01/u)
+    const said = lines.findIndex((line) => line.includes("$ git merge --no-edit task/one exit 1"))
+    expect(said).toBeGreaterThan(strip)
+    expect(lines[said + 1]).toContain("CONFLICT (content): Merge conflict in vendor/yrd")
+    expect(lines.some((line) => /settle 0:01/u.test(line))).toBe(true)
+  })
+
+  it("reads a stage's output only when its tab opens, and only that stage's commands", async () => {
+    const loadCommandOutput = vi.fn(
+      async (asked: JournalCommand): Promise<DiffText> => ({ text: `printed by ${asked.args[0] ?? ""}` }),
+    )
+    const open = vi.fn(async (item: WatchRow) => detailOf(item, [typecheck], { journal: journalOf() }))
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: [merged()] })}
+        live={false}
+        open={open}
+        loadCommandOutput={loadCommandOutput}
+      />,
+      { cols: 220, rows: 50 },
+    )
+    await settle(app)
+    app.press("ArrowDown")
+    await settle(app)
+    app.press("Enter")
+    await settle(app)
+    expect(loadCommandOutput).not.toHaveBeenCalled()
+    // One to the right of the Timeline is the round's own commands.
+    app.press("ArrowRight")
+    await settle(app)
+    await waitFor(() => expect(current(app)).toContain("printed by fetch"))
+    expect(loadCommandOutput.mock.calls.map(([asked]) => asked.args.join(" "))).toEqual(["fetch origin"])
+    app.unmount()
+  })
+
+  it("gives the RUNNER's detail the same pane on the change the round holds, its open step still writing", async () => {
+    const live = row({
+      live: { check: "typecheck", phase: "merge", run: RUN_ID, since: before(20_000) },
+      position: 1,
+      run: RUN_ID,
+      state: "checked",
+    })
+    const journal = journalOf({
+      steps: [
+        {
+          commands: [command(1, ["checkout", "--detach"])],
+          name: "compose",
+          phase: "merge",
+          startedAt: before(30_000),
+        },
+      ],
+    })
+    const open = vi.fn(async (item: WatchRow) =>
+      detailOf(item, [{ ...typecheck, result: undefined, state: "running" }], { journal }),
+    )
+    const app = render(<WatchPane snapshot={snapshot({ rows: [{ row: live }] })} live={false} open={open} />, {
+      cols: 220,
+      rows: 50,
+    })
+    await settle(app)
+    // The cursor opens on the RUNNER; its detail is the held change's own.
+    await waitFor(() => expect(open).toHaveBeenCalled())
+    await settle(app)
+    expect(open.mock.calls[0]?.[0].row.live?.check).toBe("typecheck")
+    const text = current(app)
+    expect(text).not.toContain("Queue: example.test/repo#main")
+    // Its stages in the order the round started them: the check, then the compose it is still in.
+    expect(text).toMatch(/Timeline\s+round\s+typecheck\s+compose/u)
+    expect(text).toMatch(/◉ 0:20\s+◉ 0:30/u)
+    app.unmount()
+    // The open step's own tab says the round is still writing it.
+    const detail = await open({ row: live })
+    const tab = await paint(at(<WatchDetail detail={detail} selected="step:0" />), [], 160)
+    expect(tab).toContain("$ git checkout --detach")
+    expect(tab).toContain("still writing")
+  })
+
+  it("reads a command's output tail from a line boundary, and says where it looked when there is none", () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-25441-"))
+    try {
+      const stdout = join(dir, "1.stdout.bin")
+      const stderr = join(dir, "1.stderr.bin")
+      const long = Array.from({ length: 20_000 }, (_, index) => `line ${String(index)}`).join("\n")
+      writeFileSync(stdout, long)
+      writeFileSync(stderr, "\u001b[31mwarning: red\u001b[0m\n")
+      const read = readCommandOutput({ args: ["log"], cwd: dir, stderr, stdout })
+      const first = read.text?.split("\n")[0] ?? ""
+      expect(first).toMatch(/^line \d+$/u)
+      expect(read.text?.endsWith("line 19999\nwarning: red")).toBe(true)
+      expect(readCommandOutput({ args: ["log"], cwd: dir, stdout: join(dir, "gone.stdout.bin") }).why).toContain(
+        "gone.stdout.bin on this machine",
+      )
+      expect(readCommandOutput({ args: ["push"], cwd: dir, failure: "spawn" })).toEqual({ why: "spawn" })
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
   })
 })
