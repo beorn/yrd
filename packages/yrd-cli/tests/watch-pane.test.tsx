@@ -651,25 +651,28 @@ describe("the table (items 3, 28, 38)", () => {
   })
 })
 
-describe("the status box (items 1, 23, 29a, 39)", () => {
-  it("is the very top of the detail, wears the run on its border, and hangs a step line per check off a gutter", async () => {
+describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
+  it("is the very top of the detail, wears the run on its border, and is one line; each check is a two-line tab", async () => {
     const open = opener()
     const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={open} />, ["ArrowDown", "Enter"])
+    const lines = text.split("\n")
 
     expect(open).toHaveBeenCalledTimes(1)
     // No identity title row above the box: the first thing in the detail is the border with the run on it.
     expect(text).toContain("RUN main#")
-    expect(text).toContain("× failed test")
-    // The table cell's own duration, then the attempt's runtime, from the one clocks() in the core (24196).
-    expect(text).toContain("took 1h00m · runtime 30:00")
-    expect(text).toContain("Submitted ")
-    // One step line per declared check, the one never reached included, marker in the gutter and the remedy on the failed one.
-    expect(text).toMatch(/✓ typecheck\s+1:02/u)
-    expect(text).toMatch(/× test\s+0:04 — @chief — it failed/u)
-    expect(text).toMatch(/− lint\s+not run/u)
+    // One line: the marker, the bold status and its explanation, and no step line under it (25441).
+    const status = lines.findIndex((line) => line.includes("× Failed test"))
+    expect(status).toBeGreaterThan(-1)
+    expect(lines[status + 1]).toMatch(/╰/u)
+    // One tab per check, the one never reached included: the name, then the glyph and its duration (25441).
+    const names = lines.findIndex((line) => /Timeline.*typecheck.*test.*lint/u.test(line))
+    expect(names).toBeGreaterThan(-1)
+    expect(lines[names + 1]).toMatch(/cut 1\/1.*✓ 1:02.*× 0:04.*− not run/u)
+    // The failed check's remedy leads its own tab, which the detail opens on.
+    expect(text).toContain("@chief — it failed")
   })
 
-  it("reads `passed, merged` with `Merged as <sha> at <time>.` under it for a merged change (item 1)", async () => {
+  it("reads `✓ Merged as <sha> at <time>` on one line for a merged change (item 1, 25441)", async () => {
     const merged = row({
       at: NOW,
       endedAt: NOW,
@@ -686,12 +689,13 @@ describe("the status box (items 1, 23, 29a, 39)", () => {
     )
     const text = await paint(at(<RunStatusBox run={run} />))
 
-    expect(text).toContain("✓ passed, merged")
-    expect(text).toContain("Merged as b234234abcde at")
-    expect(text).toContain("runtime 03:45")
+    expect(text).toMatch(/✓ Merged as b234234abcde at \d\d:\d\d:\d\d/u)
+    expect(text).not.toContain("passed, merged")
+    // The clocks left the box for the timeline tab.
+    expect(text).not.toContain("runtime")
   })
 
-  it("reads a check that is switched off as off, in the step line and on the tab strip, never a tick (25422)", async () => {
+  it("reads a check that is switched off as off on its tab, never a tick (25422, 25441)", async () => {
     const off: readonly CheckPanel[] = [
       {
         log: "/w/checks/typecheck.log",
@@ -701,21 +705,19 @@ describe("the status box (items 1, 23, 29a, 39)", () => {
         state: "off",
       },
     ]
-    const merged = row({ at: NOW, endedAt: NOW, merge: "b234234abcde0123456789abcdef0123456789ab", state: "merged" })
-    const box = await paint(at(<RunStatusBox run={runOf(merged, "main", off)} />))
-    expect(box).toMatch(/○ typecheck\s+off/u)
-    expect(box).not.toContain("✓ typecheck")
-
     const pane = await paint(<WatchPane snapshot={snapshot()} live={false} open={opener(off)} />, [
       "ArrowDown",
       "Enter",
     ])
-    const strip = pane.split("\n").find((line) => line.includes("Changes") && line.includes("typecheck"))
-    expect(strip).toContain("○ typecheck off")
-    expect(strip).not.toContain("✓")
+    const lines = pane.split("\n")
+    const names = lines.findIndex((line) => line.includes("Timeline") && line.includes("typecheck"))
+    expect(names).toBeGreaterThan(-1)
+    const under = lines[names + 1] ?? ""
+    expect(under.slice(lines[names]!.indexOf("typecheck"))).toMatch(/^○ off/u)
+    expect(under).not.toContain("✓")
   })
 
-  it("renders a run of another kind through the same box, with no display code touched (item 37m)", async () => {
+  it("renders a run of another kind through the same one-line box, with no display code touched (item 37m)", async () => {
     const mock: WatchRun = {
       kind: "deployment",
       id: RUN_ID,
@@ -730,24 +732,24 @@ describe("the status box (items 1, 23, 29a, 39)", () => {
     const text = await paint(at(<RunStatusBox run={mock} />))
 
     expect(text).toContain("RUN staging#")
-    expect(text).toMatch(/✓ build image\s+1:30/u)
-    expect(text).toContain("◉ roll out")
-    expect(text).toMatch(/− smoke\s+not run/u)
+    expect(text).toMatch(/◉ Pending #1/u)
+    // Its steps are tabs of the detail, not lines of the box.
+    expect(text).not.toContain("build image")
   })
 })
 
-describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () => {
-  it("lists the change under the box as `· <branch>@<sha12> <subject>` and puts Changes first on the tab strip", async () => {
+describe("the change list and the Timeline tab (items 2, 4, 6, 24, 25, 31; 25441)", () => {
+  it("lists the change under the box as `· <branch>@<sha12> <subject>` and puts Timeline first on the tab strip", async () => {
     const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={opener()} />, ["ArrowDown", "Enter"])
 
     expect(text).toContain("· task/one@abcdef012345 fix the parser")
-    const strip = text.split("\n").find((line) => line.includes("Changes") && line.includes("typecheck"))
+    const strip = text.split("\n").find((line) => line.includes("Timeline") && line.includes("typecheck"))
     expect(strip).toBeDefined()
-    expect(strip!.indexOf("Changes")).toBeLessThan(strip!.indexOf("typecheck"))
+    expect(strip!.indexOf("Timeline")).toBeLessThan(strip!.indexOf("typecheck"))
     expect(text).not.toContain("MERGE REQUESTS")
   })
 
-  it("opens the Changes tab on its own box: the id header, title, body, HISTORY newest first, METADATA groups, the diff fold last", async () => {
+  it("opens the Timeline tab on its own box: the timeline oldest first with times to the next, the clocks, then the id header, title, body, METADATA groups, the diff fold last", async () => {
     const item: WatchRow = { row: failedRow() }
     const records: readonly ChangeRecord[] = [
       {
@@ -776,14 +778,18 @@ describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () =
     })
     const text = await paint(at(<WatchDetail detail={detail} selected={CHANGES_TAB} />), [], 100)
 
-    // Header on the box, then the bold title and the body.
-    expect(text).toContain("task/one@abcdef012345")
+    // The timeline first, oldest first (25441): drafted at the head's date, then this cut's history,
+    // each with its time to the next; the ending has none.
+    const draftedAt = text.search(/\d\d:\d\d:\d\d {2}Drafted · 1:40/u)
+    const openedAt = text.search(/\d\d:\d\d:\d\d {2}Submitted by @chief · 1h00m/u)
+    const failedAt = text.indexOf("Failed test — fix the test and resubmit")
+    expect(draftedAt).toBeGreaterThan(-1)
+    expect(openedAt).toBeGreaterThan(draftedAt)
+    expect(failedAt).toBeGreaterThan(openedAt)
+    expect(text.slice(failedAt).split("\n")[0]).not.toContain(" · ")
+    // Then the header on the box, the bold title and the body.
+    expect(text.lastIndexOf("task/one@abcdef012345")).toBeGreaterThan(failedAt)
     expect(text).toContain("The parser dropped the last token.")
-    // HISTORY newest first, human verbs only where a human acted. Opened paints submitted.
-    const failedAt = text.indexOf("failed test — fix the test and resubmit")
-    const openedAt = text.indexOf("submitted by @chief")
-    expect(failedAt).toBeGreaterThan(-1)
-    expect(openedAt).toBeGreaterThan(failedAt)
     // METADATA: keys uppercase in one column, the three groups.
     expect(text).toMatch(/BY\s+@chief/u)
     expect(text).toMatch(/CREATED\s+\d\d:\d\d:\d\d · 1h00m ago/u)
@@ -810,6 +816,20 @@ describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () =
     expect(text).toContain("The rest stays.")
     expect(text).not.toContain("Conflicts")
     expect(text).not.toContain("vendor/yrd")
+  })
+
+  it("renders a commit body as plain text, never Markdown: a `#` line or `**` stays as written (25441)", async () => {
+    const item: WatchRow = { row: row({ state: "merged", merge: "3".repeat(40) }) }
+    const body = "## Why\n\nThe **parser** dropped `the last` token.\n\n- one\n- two"
+    const text = await paint(
+      at(<WatchDetail detail={detailOf(item, CHECKS, { body })} selected={CHANGES_TAB} />),
+      [],
+      100,
+    )
+
+    expect(text).toContain("## Why")
+    expect(text).toContain("The **parser** dropped `the last` token.")
+    expect(text).toContain("- one")
   })
 
   it("opens the diff through the loader when the fold is toggled, and only then", async () => {
@@ -913,7 +933,7 @@ describe("the pane's keys and the detail's identity", () => {
       await settle(app)
       expect(current(app)).toContain(diagnostic.text)
       expect(current(app)).toContain(diagnostic.next)
-      expect(current(app)).toContain("passed, merged")
+      expect(current(app)).toContain("✓ Merged")
       // A fresh journal read returns new objects even when its records did not change.
       await waitFor(() => expect(rounds.length).toBeGreaterThan(1))
       rounds.at(-1)?.resolve(
@@ -968,7 +988,7 @@ describe("the pane's keys and the detail's identity", () => {
       await settle(app)
       expect(app.text).toContain("first RUN OUTPUT")
       expect(app.text).not.toContain("second RUN OUTPUT")
-      expect(app.text).toContain("change failed")
+      expect(app.text).toContain("Change failed")
       app.press("Escape")
       await settle(app)
       app.press("j")
@@ -1029,20 +1049,21 @@ describe("the layout tier", () => {
 })
 
 describe("the running step and the check-less declaration", () => {
-  it("shows how long the running step has run, from the row's own live instant, beside its marker (item 39)", async () => {
+  it("shows how long the running step has run, from the row's own live instant, under its tab's name (item 39, 25441)", async () => {
     const live = row({
       live: { check: "affected-tests", phase: "merge", run: RUN_ID, since: new Date(NOW.getTime() - 151_000) },
       position: 1,
       state: "checked",
     })
-    const run = runOf(live, "main", [
+    const checks: readonly CheckPanel[] = [
       { name: "typecheck", result: { ms: 8_000, result: "pass" }, state: "passed" },
       { name: "affected-tests", state: "running" },
-    ])
-    const text = await paint(at(<RunStatusBox run={run} />))
+    ]
+    const lines = (await paint(at(<WatchDetail detail={detailOf({ row: live }, checks)} />))).split("\n")
+    const names = lines.findIndex((line) => line.includes("typecheck") && line.includes("affected-tests"))
 
-    expect(text).toMatch(/◉ affected-tests 2:31/u)
-    expect(text).toMatch(/✓ typecheck 0:08/u)
+    expect(names).toBeGreaterThan(-1)
+    expect(lines[names + 1]).toMatch(/✓ 0:08\s+◉ 2:31/u)
   })
 
   it("says so when the declaration a change was judged by names no check, instead of a bare tab strip", async () => {
@@ -1050,7 +1071,7 @@ describe("the running step and the check-less declaration", () => {
     const text = await paint(at(<WatchDetail detail={detail} />))
 
     expect(text).toContain("names no check")
-    expect(text).toContain("Changes")
+    expect(text).toContain("Timeline")
   })
 
   it("gives a direct row's box its one line about the commit where a subject would stand", async () => {
@@ -1067,24 +1088,23 @@ describe("the running step and the check-less declaration", () => {
   })
 })
 
-describe("the status box's step keys", () => {
-  it("draws two steps of the same name and state, the submit-phase and merge-phase setup, as two lines", async () => {
-    const run: WatchRun = {
-      kind: "queue",
-      id: RUN_ID,
-      label: "main",
-      row: row({ state: "checked", position: 1 }),
-      steps: [
-        { name: "setup", state: "passed", ms: 1_000 },
-        { name: "typecheck", state: "passed", ms: 8_000 },
-        { name: "setup", state: "passed", ms: 1_000 },
-        { name: "affected-tests", state: "running" },
-      ],
-    }
-    const text = await paint(at(<RunStatusBox run={run} />))
+describe("the detail's stage tab keys", () => {
+  it("draws two checks of the same name and state, the submit-phase and merge-phase setup, as two tabs", async () => {
+    const checks: readonly CheckPanel[] = [
+      { name: "setup", phase: "submit", result: { ms: 1_000, result: "pass" }, state: "passed" },
+      { name: "typecheck", phase: "submit", result: { ms: 8_000, result: "pass" }, state: "passed" },
+      { name: "setup", phase: "merge", result: { ms: 1_000, result: "pass" }, state: "passed" },
+      { name: "affected-tests", phase: "merge", state: "running" },
+    ]
+    const text = await paint(
+      at(<WatchDetail detail={detailOf({ row: row({ state: "checked", position: 1 }) }, checks)} />),
+      [],
+      160,
+    )
 
-    expect(text.match(/✓ setup 0:01/gu)).toHaveLength(2)
-    expect(text).toContain("◉ affected-tests")
+    expect(text).toContain("setup (submit)")
+    expect(text).toContain("setup (merge)")
+    expect(text.match(/✓ 0:01/gu)).toHaveLength(2)
   })
 })
 
@@ -1184,7 +1204,8 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
     })
     rounds.at(-1)?.resolve(snapshot({ at: new Date(NOW.getTime() + 60_000) }))
     await waitFor(() => {
-      expect(current(app)).toContain("✓ typecheck 1:02")
+      // The typecheck tab's second line: its glyph and duration (25441).
+      expect(current(app)).toMatch(/✓ 1:02/u)
     })
     expect(current(app)).not.toContain("this change's read failed")
     expect(open).toHaveBeenCalledTimes(2)
@@ -2182,7 +2203,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const page = (await printListing(snapshot({ rows: [{ row: pending }] }), { color: false, columns: 120 })).split(
       "\n",
     )
-    const detail = await paint(at(<RunStatusBox run={runOf(pending, "main", [])} />))
+    // The clocks live on the Timeline tab since 25441.
+    const detail = await paint(at(<WatchDetail detail={detailOf({ row: pending }, [])} selected={CHANGES_TAB} />))
 
     const waiting = (text: string): string | undefined =>
       new RegExp(`\\b${W.waiting.word} (\\d+:\\d\\d)\\b`, "u").exec(text)?.[1]

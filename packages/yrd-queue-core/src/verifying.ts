@@ -1,6 +1,6 @@
-/** One git-only verification of a submitted head against the observed target. */
-import { createProcess, type Process } from "@yrd/process"
-import { gitEnvironment, type Git } from "./git.ts"
+import { statSync, writeFileSync } from "node:fs"
+import { createProcess, type Process, type ProcessResult } from "@yrd/process"
+import { gitEnvironment, type Git, type GitInvocationOptions, type GitOutputSink } from "./git.ts"
 import { freshWorktree, type FreshWorktree, type Worktree } from "./worktree.ts"
 
 /** `descents` records git-super's two-direction ancestry checks of nested pins (24320). */
@@ -111,23 +111,37 @@ async function superMerge(
 
 /** Run git-super with the queue's process bounds and preserve the structured refusal. */
 export async function gitSuperExecution(
-  options: Pick<VerificationOptions, "process" | "env" | "hooksPath">,
+  options: Pick<VerificationOptions, "process" | "env" | "hooksPath"> & {
+    gitOptions?: GitInvocationOptions
+  },
   cwd: string,
   argv: readonly string[],
 ): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
   const owned = options.process === undefined
   const process = options.process ?? createProcess({ cwd, env: gitEnvironment(options.env ?? globalThis.process.env) })
+  const gitArgs = [
+    ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
+    "super",
+    "--json",
+    ...argv,
+  ]
+  const invocation = {
+    args: Object.freeze(gitArgs),
+    cwd,
+    selection: { executable: "git", contract: "native", scope: "default", origin: "native git" } as const,
+  }
+  let output: GitOutputSink | undefined
+  let closed = false
+  let execution: ProcessResult | undefined
+  let failure: string | undefined
   try {
-    const execution = await process.run({
-      argv: [
-        "git",
-        ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
-        "super",
-        "--json",
-        ...argv,
-      ],
+    output = options.gitOptions?.openOutput?.(invocation)
+    execution = await process.run({
+      argv: ["git", ...gitArgs],
       cwd,
       env: gitEnvironment(options.env ?? globalThis.process.env),
+      captureRawOutput: true,
+      ...(output === undefined ? {} : { onOutput: output.onOutput }),
     })
     if (
       execution.timedOut ||
@@ -146,7 +160,46 @@ export async function gitSuperExecution(
       )
     }
     return execution
+  } catch (error) {
+    failure = `Git invocation failed: ${String(error)}`
+    throw error
   } finally {
+    try {
+      output?.close()
+      closed = true
+    } catch (error) {
+      failure = [failure, `raw Git output could not be closed: ${String(error)}`].filter(Boolean).join("; ")
+    }
+    if (output !== undefined && execution !== undefined) {
+      try {
+        if (execution.stdout.length > 0 && statSync(output.stdout).size === 0) {
+          writeFileSync(output.stdout, execution.stdout)
+        }
+        if (execution.stderr.length > 0 && statSync(output.stderr).size === 0) {
+          writeFileSync(output.stderr, execution.stderr)
+        }
+      } catch {
+        // best effort write if onOutput was not used by a custom runner
+      }
+    }
+    try {
+      options.gitOptions?.onInvocation?.({
+        ...invocation,
+        ...(execution === undefined ? {} : { result: execution }),
+        ...(failure === undefined ? {} : { failure }),
+        ...(output === undefined
+          ? {}
+          : {
+              artifacts: {
+                stdout: output.stdout,
+                stderr: output.stderr,
+                complete: closed && execution !== undefined,
+              },
+            }),
+      })
+    } catch {
+      // publication errors shouldn't mask original behavior
+    }
     if (owned) await process.close()
   }
 }

@@ -1,12 +1,13 @@
 import { spawnSync } from "node:child_process"
-import { appendFileSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it, vi } from "vitest"
-import { createProcess } from "@yrd/process"
+import { createProcess, type Process } from "@yrd/process"
 import { gitIn } from "../src/git.ts"
 import * as gitRunner from "../src/git.ts"
 import { openLog, readRunLog } from "../src/log.ts"
+import { gitSuperExecution } from "../src/verifying.ts"
 
 it("requires a Git runner's fixed selection before opening Gitomic", () => {
   const selected = {
@@ -778,5 +779,53 @@ describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
     await expect(failure).rejects.toThrow(`${ref} local=${lost} origin=absent object missing locally`)
     await expect(failure).rejects.toThrow(`git update-ref -d ${ref} ${lost}`)
     await expect(failure).rejects.not.toThrow(/probably due to repo corruption/u)
+  })
+
+  it("gitSuperExecution preserves raw stderr and heartbeat lines in evidence (25475)", async () => {
+    const root = temporaryRoot("git-super-evidence")
+    const log = openLog(join(root, "logs"))
+    const heartbeat = "git-super push: select-root 0/1 +0ms\ngit-super push: plan 0/1 +10000ms\n"
+    const fakeProcess: Process = {
+      async close() {},
+      async [Symbol.asyncDispose]() {
+        await this.close()
+      },
+      async run(request) {
+        request.onOutput?.({ stream: "stdout", chunk: new TextEncoder().encode('{"state":"updated"}\n') })
+        request.onOutput?.({ stream: "stderr", chunk: new TextEncoder().encode(heartbeat) })
+        return {
+          durationMs: 0,
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: '{"state":"updated"}',
+          stderr: heartbeat,
+        }
+      },
+    }
+    const result = await gitSuperExecution(
+      {
+        process: fakeProcess,
+        gitOptions: {
+          openOutput: log.openGitOutput,
+          onInvocation: log.writeGitInvocation,
+        },
+      },
+      root,
+      ["push", "--recurse-submodules=only", "origin", "main"],
+    )
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe(heartbeat)
+
+    const rows = readRunLog(join(root, "logs"), log.id)
+    const pushRow = rows.find((r) => r.kind === "git" && Array.isArray(r.args) && r.args.includes("push"))
+    expect(pushRow).toBeDefined()
+    expect(typeof pushRow!.evidence).toBe("string")
+
+    const evidence = JSON.parse(readFileSync(String(pushRow!.evidence), "utf8")) as {
+      artifacts: { stdout: string; stderr: string }
+    }
+    expect(existsSync(evidence.artifacts.stderr)).toBe(true)
+    expect(readFileSync(evidence.artifacts.stderr, "utf8")).toBe(heartbeat)
   })
 })

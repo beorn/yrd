@@ -316,6 +316,7 @@ export async function eventQueueRun(
         process: options.process,
         env: options.env,
         hooksPath,
+        gitOptions,
       })
     } catch (error) {
       const after = await readStatus(store, queue, branch)

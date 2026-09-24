@@ -1,6 +1,6 @@
 /** Child-first publication of a checked merge, shared by legacy and event markers. */
 import type { Process } from "@yrd/process"
-import type { Git } from "./git.ts"
+import type { Git, GitInvocationOptions } from "./git.ts"
 import { gitSuperExecution, readSuperMergeDetail, type SuperMergeDetail } from "./verifying.ts"
 
 export type ChildPublication = Readonly<{
@@ -22,6 +22,7 @@ export async function publishCheckedChildren(
     process?: Process
     env?: NodeJS.ProcessEnv
     hooksPath?: string
+    gitOptions?: GitInvocationOptions
   }>,
 ): Promise<ChildPublication> {
   const observed = (await options.git(["ls-remote", "--refs", options.remote, options.marker.ref]))
@@ -44,7 +45,12 @@ export async function publishCheckedChildren(
   // Git-super reads the frozen child intent and retains/verifies each source
   // before moving a child branch. Yrd neither decodes nor recreates that plan.
   const execution = await gitSuperExecution(
-    { process: options.process, env: options.env, hooksPath: options.hooksPath },
+    {
+      process: options.process,
+      env: { ...(options.env ?? globalThis.process.env), GIT_SUPER_PROGRESS: "1" },
+      hooksPath: options.hooksPath,
+      gitOptions: options.gitOptions,
+    },
     options.cwd,
     ["push", "--recurse-submodules=only", options.remote, `${options.candidate}:refs/heads/${options.branch}`],
   )

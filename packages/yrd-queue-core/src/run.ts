@@ -2113,6 +2113,7 @@ async function publishChildren(
     process: run.options.process,
     env: run.options.env,
     hooksPath: run.hooksPath,
+    gitOptions: gitInvocationOptions(run.options, run.log),
   })
   if (published.state === "published") {
     for (const row of publishing) {

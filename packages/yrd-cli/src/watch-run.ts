@@ -128,6 +128,28 @@ export function explanationLine(row: Row): string | undefined {
 }
 
 /**
+ * The status box's one line (25441): a bold status and its explanation, e.g.
+ * `Merged` + `as 2f5d9fbe7653 at 21:04:20`. A merged change says its merge
+ * once, in the status word; every other state reads its headline, capitalized,
+ * then the explanation line.
+ */
+export function statusLineOf(row: Row, joinedRun = false): Readonly<{ status: string; explanation?: string }> {
+  if (row.state === "merged") {
+    const status = capitalize(STATE_WORDS.merged.word)
+    if (row.merge === undefined) {
+      return { status, explanation: "the head is on the queue branch, and no merged record names the merge commit" }
+    }
+    const at = row.endedAt === undefined ? "" : ` at ${clock(row.endedAt, { seconds: true })}`
+    return { status, explanation: `as ${row.merge.slice(0, 12)}${at}` }
+  }
+  const explanation = explanationLine(row)
+  return {
+    status: capitalize(headlineOf(row, joinedRun)),
+    ...(explanation === undefined ? {} : { explanation }),
+  }
+}
+
+/**
  * The timing rows (item 1, and the retired box's own second row): the clocks
  * as absolute times, then the one timing line (watch-format.ts `timingLine`),
  * whose duration is the table cell's own. A clock nothing measured is left
