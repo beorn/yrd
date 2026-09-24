@@ -386,7 +386,7 @@ export function WatchPane({
     const targetItem = visibleItems[i]
     setCursorItemKey(targetItem?.kind === "row" && i === 0 ? undefined : targetItem?.key)
     setCursorRow(targetItem?.kind === "row" && i === 0 ? undefined : targetItem?.kind === "row" ? targetItem.item : undefined)
-    listRef.current?.scrollToItem(i)
+    listRef.current?.scrollToItem(i, "center")
   }, [visibleItems])
 
   useEffect(() => {
