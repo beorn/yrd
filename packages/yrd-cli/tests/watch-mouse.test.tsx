@@ -61,7 +61,14 @@ function rowOf(lines: readonly string[], branch: string): number {
 
 describe("the pointer in the live pane", () => {
   it("runs the terminal the retired pane ran: alternate screen, mouse, selection, copy on drag", () => {
-    expect(WATCH_RUN_OPTIONS).toEqual({ copyOnSelect: true, mode: "fullscreen", mouse: true, selection: true })
+    // focusReporting since 25619: the watch refreshes on focus-in and slows its cadence while unfocused.
+    expect(WATCH_RUN_OPTIONS).toEqual({
+      copyOnSelect: true,
+      focusReporting: true,
+      mode: "fullscreen",
+      mouse: true,
+      selection: true,
+    })
   })
 
   it("switches SGR mouse tracking on, so a wheel scrolls and a click reaches a row", async () => {

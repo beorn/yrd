@@ -3548,9 +3548,12 @@ export async function readEventListing(
     drafts?: boolean
     now?: number | Date
     forceFresh?: boolean
+    /** The event store's backend in place of the selected executable's: a test's in-memory repository. */
+    backend?: ReturnType<typeof createEventStore>["backend"]
   }> = {},
 ): Promise<EventListingResult> {
-  const store = createEventStore(repo, config.target.remote, selection)
+  const configured = createEventStore(repo, config.target.remote, selection)
+  const store = options.backend === undefined ? configured : { ...configured, backend: options.backend }
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
   const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}`
   const cache = eventListingCaches.get(cacheKey)
