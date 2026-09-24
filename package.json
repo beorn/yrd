@@ -44,7 +44,7 @@
     "@silvery/scope": "^0.24.0",
     "loggily": "^0.11.0",
     "react": "^19.2.0",
-    "silvery": "^0.24.1",
+    "silvery": "^0.24.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
