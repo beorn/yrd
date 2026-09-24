@@ -82,6 +82,28 @@ describe("the printed page's frame", () => {
     expect(text).toContain("task/healthy")
   })
 
+  // @failure 25667: a readable branch with an unknown event showed no warning in the live table.
+  it("marks an arriving unknown-event diagnostic on its row", async () => {
+    const initial = row({ branch: "task/future", state: "queued", format: "event", subject: "future change" })
+    const warning = { ...initial, diagnostic: "unknown Yrd change event adopted at abc123" }
+    const app = render(
+      <ListingPage snapshot={snapshot({ rows: [{ row: initial }] })} options={{ columns: 160, color: false }} />,
+      { cols: 160, rows: 40 },
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text.split("\n").find((line) => line.includes("task/future"))).not.toContain("⚠")
+      app.rerender(
+        <ListingPage snapshot={snapshot({ rows: [{ row: warning }] })} options={{ columns: 160, color: false }} />,
+      )
+      await app.waitForLayoutStable()
+      expect(app.text.split("\n").find((line) => line.includes("task/future"))).toContain("⚠")
+      expect(app.text.split("\n").find((line) => line.includes("task/future"))).toContain("adopted")
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("shows a newly arrived ref-write warning without changing the successful row", async () => {
     // 24202: unchanged terminal fields used to make ListRow's memo hide this arrival.
     const initial = row({ run: RUN_ID, result: "pass", endedAt: NOW })

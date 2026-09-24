@@ -246,10 +246,7 @@ export function shortenAddress(address: string, maxLen: number): string {
 export function TopLine({
   queue,
   queues,
-  visible: _visible,
-  onToggle: _onToggle,
   status,
-  statusPills: _statusPills,
   columns,
   live = false,
   onStatusClick,
@@ -281,8 +278,7 @@ export function TopLine({
   ].filter((n) => n > 0)
   const statusGaps = Math.max(0, statusParts.length - 1)
   const statusRightLen = statusParts.reduce((a, b) => a + b, 0) + statusGaps + 1
-  const availableForAddress =
-    columns !== undefined ? Math.max(0, columns - 1 - 10 - 1 - statusRightLen) : undefined
+  const availableForAddress = columns !== undefined ? Math.max(0, columns - 1 - 10 - 1 - statusRightLen) : undefined
   const displayAddress =
     availableForAddress !== undefined ? shortenAddress(queueAddress, availableForAddress) : queueAddress
 
@@ -298,12 +294,7 @@ export function TopLine({
       justifyContent="space-between"
       backgroundColor="$bg-inverse"
     >
-      <Box
-        flexDirection="row"
-        flexShrink={1}
-        minWidth={0}
-        overflow="hidden"
-      >
+      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
         <Text bold color="$fg-on-inverse" flexShrink={0}>
           YRD QUEUE{" "}
         </Text>
@@ -368,10 +359,7 @@ function TopPill({
 }) {
   const color = active ? "$fg-warning" : "$fg-muted"
   return (
-    <Box
-      flexShrink={0}
-      onClick={onToggle}
-    >
+    <Box flexShrink={0} onClick={onToggle}>
       {boldFirstLetter && label.length > 0 ? (
         <>
           <Text color={color} bold>
@@ -454,6 +442,7 @@ function sameRow(left: ListRowProps, right: ListRowProps): boolean {
     a.run === b.run &&
     a.subject === b.subject &&
     a.reason === b.reason &&
+    a.diagnostic === b.diagnostic &&
     diagnosticsEqual(a.diagnostics, b.diagnostics) &&
     a.submitter === b.submitter &&
     a.author === b.author &&
@@ -521,6 +510,7 @@ export const ListRow = memo(function ListRow({
           ? "not yet read"
           : row.head.slice(0, 12)
         : `${row.head.slice(0, 12)} (subject not fetched)`)
+  const shownTitle = row.diagnostic === undefined ? title : `${row.diagnostic} · ${title}`
   const separateLineSuffix = (layout.columns ?? 120) < 100 && row.state === "stuck" && suffix !== undefined
   return (
     <Box
@@ -551,7 +541,7 @@ export const ListRow = memo(function ListRow({
           task: (
             <Box flexDirection="row" minWidth={0} overflow="hidden">
               <Text color={forced ?? held} wrap="truncate" minWidth={0}>
-                {`${(row.diagnostics?.length ?? 0) > 0 ? "\u26A0\uFE0E " : ""}${title}`}
+                {`${row.diagnostic !== undefined || (row.diagnostics?.length ?? 0) > 0 ? "\u26A0\uFE0E " : ""}${shownTitle}`}
               </Text>
               <Text color={forced ?? held ?? "$fg-muted"} flexShrink={0}>
                 {" "}
