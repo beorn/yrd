@@ -413,8 +413,6 @@ describe("settling gitlinks", () => {
     )
   })
 
-
-
   it("a pin that is an ancestor of refs/heads/main submits silently", async () => {
     const w = await world()
     await expect(submitGitlink(w, "task/behind", w.onMain)).resolves.toMatch(/^[0-9a-f]{40}$/u)

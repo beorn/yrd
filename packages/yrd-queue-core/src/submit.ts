@@ -204,8 +204,6 @@ export function freshnessLine(targetHead: string): string {
   return `freshness checked at ${targetHead}; the queue revalidates at merge`
 }
 
-
-
 /** The same read-only admission checks serve the action and its preview. */
 export async function inspectSubmit(git: Git, remote: string, request: SubmitRequest): Promise<SubmitInspection> {
   refuseTarget(request.branch, request.target.branch)
