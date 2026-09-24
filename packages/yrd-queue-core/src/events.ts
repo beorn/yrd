@@ -87,6 +87,8 @@ export type EventChange = Readonly<{
   /** The latest verdict a notification may name; a stuck verdict leaves the change open. */
   lastNotifiable?: Readonly<{ id: string; kind: ChangeEnding | "deferred" | "stuck" }>
   reason?: string
+  /** A readable historical chain with no opened event; the fold remains authoritative. */
+  diagnostic?: string
   ignored?: Readonly<{ reason: string; by: string }>
   deferred?: Readonly<{
     id: string
@@ -1022,8 +1024,13 @@ export async function readStatus(store: QueueLocation, queue: string, branch: st
   await readEventQueue(store, queue)
   const ref = changesRef(queue, branch)
   const chain = await openEvents({ ...store, ref })
-  if ((await chain.head()) === null) throw new Error(`missing event chain ${ref} in ${store.repo}`)
-  return project(await chain.events({ limit: 1024 }), ref, store.repo)
+  const tip = await chain.head()
+  if (tip === null) throw new Error(`missing event chain ${ref} in ${store.repo}`)
+  try {
+    return project(await chain.events({ limit: 1024 }), ref, store.repo)
+  } catch (error) {
+    throw new Error(`${ref}@${tip}: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+  }
 }
 
 /** Toggle one open change's attributed ignore overlay under its selected chain tip. */
@@ -1231,16 +1238,44 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
       `${branchRef} in ${store.repo}${store.remote === undefined ? "" : ` at ${store.remote}`} is absent; ${disposition}`,
     )
   }
+  if (state.ending !== undefined) {
+    const kept = history.flatMap((event) => event.links)
+    if (!kept.includes(head)) {
+      const lastKept = kept.at(-1)
+      throw new Error(
+        `${branchRef} at ${head} has already ended ${state.ending.kind}; its last kept link is ${lastKept ?? "none"}. ` +
+          `The branch is deletable when its head equals a kept link. ` +
+          `See 25658 P3: drop an ended branch head reachable from origin/main through the one ancestry implementation.`,
+      )
+    }
+    if (store.backend.publish === undefined) {
+      throw new Error("Gitomic backend lacks publish for dropped branch deletion")
+    }
+    if (selectedTip === null) throw new Error(`${ref} in ${store.repo}: ended change has no chain tip`)
+    await store.backend.publish(
+      store.repo,
+      [
+        { ref, expect: selectedTip, oid: selectedTip },
+        { ref: branchRef, expect: head, oid: null },
+      ],
+      store.remote,
+    )
+    return { queue, branch, event: state.ending.id, head }
+  }
+  const at = new Date()
   const input = changeInput("cancelled", {
     queueTip,
-    at: new Date(),
+    at,
     commit: head,
     reason: "dropped",
     by: request.by,
     title: `dropped ${branch}`,
     ...(request.note === undefined ? {} : { content: request.note }),
   })
-  const planned = decide(history, input)
+  const planned =
+    selectedTip === null
+      ? [changeInput("opened", { queueTip, at, commit: head, by: request.by }), input]
+      : decide(history, input)
   const result = await chain.append(planned, {
     expect: selectedTip,
     // The event keeps H, so this branch delete only removes its name.
@@ -1252,30 +1287,43 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
 }
 
 type ChangeHistory = Readonly<{ state: EventChange; events: readonly Event[] }>
+export type InvalidChangeHistory = Readonly<{ ref: string; tip: string; error: string; events: readonly Event[] }>
+type ChangeHistories = Readonly<{
+  histories: ReadonlyMap<string, ChangeHistory>
+  invalid: ReadonlyMap<string, InvalidChangeHistory>
+}>
 
 function projectChangeHistories(
   chains: ReadonlyMap<string, readonly Event[]>,
   prefix: string,
   repo: string,
-): ReadonlyMap<string, ChangeHistory> {
-  const changes = new Map<string, ChangeHistory>()
+): ChangeHistories {
+  const histories = new Map<string, ChangeHistory>()
+  const invalid = new Map<string, InvalidChangeHistory>()
   for (const [ref, events] of chains) {
-    changes.set(ref.slice(prefix.length), { state: project(events, ref, repo), events })
+    const branch = ref.slice(prefix.length)
+    try {
+      histories.set(branch, { state: project(events, ref, repo), events })
+    } catch (error) {
+      const tip = events.at(-1)?.id
+      if (tip === undefined) throw new Error(`${ref} in ${repo}: empty chain has no selected tip`, { cause: error })
+      invalid.set(branch, { ref, tip, error: error instanceof Error ? error.message : String(error), events })
+    }
   }
-  return changes
+  return { histories, invalid }
 }
 
 /** Read the validated queue and its change chains concurrently for a listing. */
 export async function readEventQueueWithChanges(
   store: QueueLocation,
   queue: string,
-): Promise<Readonly<{ queue: EventQueue; histories: ReadonlyMap<string, ChangeHistory> }>> {
+): Promise<Readonly<{ queue: EventQueue } & ChangeHistories>> {
   const prefix = `${queueRefPrefix(queue)}/changes/`
   const [queueState, chains] = await Promise.all([
     readEventQueue(store, queue),
     chainsUnder(prefix, { ...store, limit: 1024 }),
   ])
-  return { queue: queueState, histories: projectChangeHistories(chains, prefix, store.repo) }
+  return { queue: queueState, ...projectChangeHistories(chains, prefix, store.repo) }
 }
 
 /** Branch histories and projections from one batched remote fetch. */
@@ -1283,7 +1331,7 @@ export async function listChangeHistories(
   store: QueueLocation,
   queue: string,
   options: Readonly<{ knownQueue?: EventQueue }> = {},
-): Promise<ReadonlyMap<string, ChangeHistory>> {
+): Promise<ChangeHistories> {
   if (options.knownQueue === undefined) {
     if ((await queueFormat(store, queue)) !== "event") {
       throw new Error(`queue ${queue} in ${store.repo} has no event queue chain`)
@@ -1307,7 +1355,10 @@ export async function listChangeHistories(
 
 /** Branch projections for an event queue. */
 export async function listChanges(store: QueueLocation, queue: string): Promise<ReadonlyMap<string, EventChange>> {
-  const histories = await listChangeHistories(store, queue)
+  const { histories, invalid } = await listChangeHistories(store, queue)
+  for (const [branch, defect] of invalid) {
+    throw new Error(`${branch}: ${defect.error}`)
+  }
   return new Map([...histories].map(([branch, history]) => [branch, history.state]))
 }
 
@@ -1369,10 +1420,23 @@ export function enumerateChangeSegments(events: readonly Event[], ref: string, r
     }
   }
   retain()
+  if (opened === undefined && state.status === "cancelled" && state.commit !== undefined) {
+    const first = events[0]
+    if (first === undefined) throw new Error(`${ref} in ${repo}: empty chain has no opened segment`)
+    segments.push({
+      opened: first.id,
+      head: state.commit,
+      state: { ...state, diagnostic: `${ref}: malformed history has no opened event` },
+      sources,
+    })
+  }
   return segments
 }
 
-function project(events: readonly Event[], ref: string, repo: string): EventChange {
+export function project(events: readonly Event[], ref: string, repo: string): EventChange {
   assertCompleteChangeChain(events, ref, repo)
-  return events.reduce(evolve, initial)
+  const state = events.reduce(evolve, initial)
+  return events.some((event) => event.type === "opened")
+    ? state
+    : { ...state, diagnostic: `${ref}: malformed history has no opened event` }
 }

@@ -18,6 +18,7 @@ import {
   resolveGitSelection,
   type Event,
   type Git,
+  type GitomicBackend,
   type GitSelection,
 } from "../src/git.ts"
 import { readHistories, readQueue } from "../src/remote.ts"
@@ -702,6 +703,9 @@ async function apply(options: Options, plan: Plan, git: Git, selection: GitSelec
     )
   }
   const remote = await readEventQueueWithChanges(store, options.queue)
+  for (const [branch, defect] of remote.invalid) {
+    failure("postflight", branch, `${defect.ref}@${defect.tip}: ${defect.error}`)
+  }
   if (remote.queue.pause === undefined || remote.histories.size !== groups.length) {
     failure(
       "postflight",
@@ -813,7 +817,7 @@ async function rollback(options: Options, plan: Plan, git: Git, selection: GitSe
       "new ref OIDs or branch heads differ from staged apply receipt; rollback lease is unsafe",
     )
   }
-  const backend = createEventStore(options.repo, options.remote, selection).backend
+  const backend = createEventStore(options.repo, options.remote, selection).backend as GitomicBackend
   if (typeof backend.publish !== "function") {
     failure("backend", options.repo, "Gitomic backend lacks atomic publish for rollback")
   }

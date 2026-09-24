@@ -44,7 +44,7 @@ import {
   type Telling,
 } from "./state.ts"
 
-export type Row<Status extends string = ChangeState | ChangeStatus | "direct" | "draft"> = Readonly<{
+export type Row<Status extends string = ChangeState | ChangeStatus | "direct" | "draft" | "invalid"> = Readonly<{
   /** Event rows keep their fold's status word; legacy rows use the historical display vocabulary. */
   format?: "event"
   /** The change's branch; for a `direct` row, the target that commit moved. */
@@ -74,6 +74,12 @@ export type Row<Status extends string = ChangeState | ChangeStatus | "direct" | 
    * Row.next} says the same thing in the one line a reader acts on.
    */
   malformed?: readonly string[]
+  /** A selected event chain whose history cannot fold, or a readable chain with no opened event. */
+  diagnostic?: string
+  /** Exact selected event chain and fold error when state is invalid. */
+  ref?: string
+  tip?: string
+  error?: string
   issue?: string
   submitter?: string
   /** Why: `replaced`, `deleted`, `superseded`, a check's code, or for a `direct` row the one line about that commit. */

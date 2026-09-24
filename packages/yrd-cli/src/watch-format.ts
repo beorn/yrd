@@ -44,6 +44,7 @@ export function displayState(row: DisplayRow): DisplayState {
       case "stuck":
       case "cancelled":
       case "direct":
+      case "invalid":
         return row.state
       default:
         throw new Error(`event row has a legacy status: ${row.state}`)
@@ -75,49 +76,53 @@ export function stateWord(row: DisplayRow): string {
 
 /** Full recorded warnings, shared by plain output and the selected change detail. */
 export function diagnosticLines(
-  row: Pick<Row, "branch" | "head" | "diagnostics">,
+  row: Pick<Row, "branch" | "head" | "diagnostics" | "diagnostic">,
   journal?: JournalRun,
 ): readonly string[] {
-  return (row.diagnostics ?? []).flatMap((record) => {
-    const usable = (value: unknown): value is string => typeof value === "string" && value.trim() !== ""
-    const text = usable(record.text) ? record.text : undefined
-    const inspect = usable(record.inspect) ? record.inspect : undefined
-    const next = usable(record.next) ? record.next : undefined
-    const commands =
-      inspect === next
-        ? [["inspect", inspect]]
-        : [
-            ["inspect", inspect],
-            ["next", next],
-          ]
-    const missing = [
-      text === undefined ? "explanation" : undefined,
-      inspect === undefined && next === undefined ? "inspection command" : undefined,
-    ].filter((part) => part !== undefined)
-    return [
-      `${row.branch}@${row.head} run ${record.run}: ⚠ ref-write warning (${String(record.reason)})${usable(record.ref) ? ` — ${record.ref}` : ""}`,
-      ...(journal !== undefined && journal.decision === undefined ? ["no run decision recorded"] : []),
-      ...(text === undefined ? [] : [text]),
-      ...commands.flatMap(([name, command]) =>
-        command === undefined
+  return [
+    ...(row.diagnostic === undefined ? [] : [`${row.branch}@${row.head}: ⚠ ${row.diagnostic}`]),
+    ...(row.diagnostics ?? []).flatMap((record) => {
+      const usable = (value: unknown): value is string => typeof value === "string" && value.trim() !== ""
+      const text = usable(record.text) ? record.text : undefined
+      const inspect = usable(record.inspect) ? record.inspect : undefined
+      const next = usable(record.next) ? record.next : undefined
+      const commands =
+        inspect === next
+          ? [["inspect", inspect]]
+          : [
+              ["inspect", inspect],
+              ["next", next],
+            ]
+      const missing = [
+        text === undefined ? "explanation" : undefined,
+        inspect === undefined && next === undefined ? "inspection command" : undefined,
+      ].filter((part) => part !== undefined)
+      return [
+        `${row.branch}@${row.head} run ${record.run}: ⚠ ref-write warning (${String(record.reason)})${usable(record.ref) ? ` — ${record.ref}` : ""}`,
+        ...(journal !== undefined && journal.decision === undefined ? ["no run decision recorded"] : []),
+        ...(text === undefined ? [] : [text]),
+        ...commands.flatMap(([name, command]) =>
+          command === undefined
+            ? []
+            : text?.includes(command) === true
+              ? inspect !== undefined && next !== undefined && inspect !== next
+                ? [`${name}: recorded in text above`]
+                : []
+              : [`${name}: ${command}`],
+        ),
+        ...(missing.length === 0
           ? []
-          : text?.includes(command) === true
-            ? inspect !== undefined && next !== undefined && inspect !== next
-              ? [`${name}: recorded in text above`]
-              : []
-            : [`${name}: ${command}`],
-      ),
-      ...(missing.length === 0
-        ? []
-        : [
-            `The record has no ${missing.join(" or ")}${usable(record.remote) ? ` (remote: ${record.remote})` : ""}. Inspect the stored fields with \`yrd list --json\`.`,
-          ]),
-    ]
-  })
+          : [
+              `The record has no ${missing.join(" or ")}${usable(record.remote) ? ` (remote: ${record.remote})` : ""}. Inspect the stored fields with \`yrd list --json\`.`,
+            ]),
+      ]
+    }),
+  ]
 }
 
 /** The one glyph per state — the retired watch's, kept because the operator already reads them. */
 export const STATE_GLYPH: Readonly<Record<DisplayRow["state"], string>> = {
+  invalid: "!",
   cancelled: "⊘",
   checked: "◉",
   checking: "◉",

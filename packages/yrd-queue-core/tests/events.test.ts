@@ -853,6 +853,56 @@ describe("the queue-format boundary", () => {
     expect(await chain.head()).toBe(failed.head)
   })
 
+  // @failure a drop after a failed ending replaces the failed notice event and stops the queue judge (25658).
+  it("deletes an already-ended branch whose head is kept without changing its ending or queued notice", async () => {
+    const { store, location } = remoteMemStore("yrd-event-drop-ended")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/ended" })
+    const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+    const chain = await openEvents({ ...store, ref: changesRef("lab", "task/ended") })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      { expect: null },
+    )
+    const failed = await chain.append(
+      [changeInput("failed", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), reason: "check failed" })],
+      { expect: opened.head },
+    )
+    const before = await readStatus(location, "lab", "task/ended")
+    expect(before.lastNotifiable).toMatchObject({ kind: "failed", id: failed.head })
+    await drop(location, { queue: "lab", branch: "task/ended", by: "@dev/2" })
+    expect(await chain.head()).toBe(failed.head)
+    expect((await listRefs("refs/heads/task/ended", store)).size).toBe(0)
+    expect(await readStatus(location, "lab", "task/ended")).toEqual(before)
+  })
+
+  // @failure delete-only drop loses a branch's newer, unkept commit (ADR-0018 / 25658).
+  it("refuses an ended branch whose current head is not already kept by its chain", async () => {
+    const { store, location } = remoteMemStore("yrd-event-drop-ended-advanced")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/advanced" })
+    const kept = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+    const chain = await openEvents({ ...store, ref: changesRef("lab", "task/advanced") })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: kept, by: "@dev/2" })],
+      { expect: null },
+    )
+    const failed = await chain.append(
+      [changeInput("failed", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), reason: "check failed" })],
+      { expect: opened.head },
+    )
+    const advanced = (await branch.transact(async (map) => map.set("work", "two"), "push after ending")).oid
+    await expect(drop(location, { queue: "lab", branch: "task/advanced", by: "@dev/2" })).rejects.toThrow(
+      new RegExp(`task/advanced.*${advanced}.*${kept}`),
+    )
+    expect(await branch.head()).toBe(advanced)
+    expect(await chain.head()).toBe(failed.head)
+  })
+
   it("writes a runner phase at the selected tip and keeps its candidate, then refuses a stale rival", async () => {
     const { store, location } = remoteMemStore("yrd-event-run-writer")
     const target = await open({ ...store, ref: "refs/heads/lab" })
@@ -1118,14 +1168,17 @@ describe("the queue-format boundary", () => {
     const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
     await seedEventQueue(first.location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
     const queue = await readEventQueue(first.location, "lab")
-    expect(await listChangeHistories(first.location, "lab", { knownQueue: queue })).toEqual(new Map())
+    expect(await listChangeHistories(first.location, "lab", { knownQueue: queue })).toEqual({
+      histories: new Map(),
+      invalid: new Map(),
+    })
     await expect(listChangeHistories(second.location, "lab", { knownQueue: queue })).rejects.toThrow(
       /validated queue.*same location/,
     )
     await expect(listChangeHistories(first.location, "other", { knownQueue: queue })).rejects.toThrow(
       /validated queue.*same location/,
     )
-    expect(await listChangeHistories(first.location, "lab")).toEqual(new Map())
+    expect(await listChangeHistories(first.location, "lab")).toEqual({ histories: new Map(), invalid: new Map() })
   })
 
   it("reads the queue and change histories together with the same projection", async () => {
@@ -1139,10 +1192,44 @@ describe("the queue-format boundary", () => {
     })
     const legacyPause = await openEvents({ ...store, ref: pauseRef("lab") })
     await legacyPause.append([input("paused")], { expect: null })
-    const { queue, histories } = await readEventQueueWithChanges(location, "lab")
+    const { queue, histories, invalid } = await readEventQueueWithChanges(location, "lab")
     expect(queue).toEqual(await readEventQueue(location, "lab"))
-    expect(histories).toEqual(await listChangeHistories(location, "lab", { knownQueue: queue }))
+    expect({ histories, invalid }).toEqual(await listChangeHistories(location, "lab", { knownQueue: queue }))
     expect([...histories.keys()]).toEqual(["task/42"])
+  })
+
+  // @failure one malformed branch chain blinded every healthy branch in the queue (25658).
+  it("projects readable no-opened history and isolates an unfoldable chain beside a healthy one", async () => {
+    const { store, location } = remoteMemStore("yrd-event-mixed-history")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", head, new Date("2026-09-22T14:00:00.000Z"))
+    const at = new Date("2026-09-22T14:01:00.000Z")
+    for (const [branch, input] of [
+      ["task/healthy", changeInput("opened", { queueTip, at, commit: head, by: "@dev/2" })],
+      ["task/old-drop", changeInput("cancelled", { queueTip, at, commit: head, by: "@dev/2", reason: "dropped" })],
+      ["task/broken", changeInput("failed", { queueTip, at, reason: "no opened event" })],
+    ] as const) {
+      await (await openEvents({ ...store, ref: changesRef("lab", branch) })).append([input], { expect: null })
+    }
+    const { histories, invalid } = await readEventQueueWithChanges(location, "lab")
+    expect([...histories.keys()]).toEqual(
+      ["task/broken", "task/healthy", "task/old-drop"].filter((branch) => branch !== "task/broken"),
+    )
+    expect(invalid.get("task/broken")).toMatchObject({
+      ref: changesRef("lab", "task/broken"),
+      error: expect.stringContaining("needs an open change"),
+    })
+    const oldDrop = histories.get("task/old-drop")
+    expect(oldDrop?.state).toMatchObject({
+      status: "cancelled",
+      diagnostic: expect.stringContaining("no opened event"),
+    })
+    const segments = enumerateChangeSegments(oldDrop?.events ?? [], changesRef("lab", "task/old-drop"), store.repo)
+    expect(segments).toHaveLength(1)
+    expect(
+      eventListRows(new Map([["task/old-drop", segments.map((segment) => segment.state)]]), []).table,
+    ).toMatchObject([{ branch: "task/old-drop", state: "cancelled", head }])
   })
 
   it("rejects an invalid queue chain through the combined read", async () => {

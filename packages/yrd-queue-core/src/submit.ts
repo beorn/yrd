@@ -30,7 +30,7 @@ import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, type Git }
 import { changeRef } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
 import { readStop, remoteUrl } from "./remote.ts"
-import { changeInput, changesRef, decide, eventPause, evolve, initial, queueFormat, readEventQueue } from "./events.ts"
+import { changeInput, changesRef, decide, eventPause, initial, project, queueFormat, readEventQueue } from "./events.ts"
 import { verifyCandidate, type Verification } from "./verifying.ts"
 
 export type SubmitRequest = Readonly<{
@@ -308,7 +308,15 @@ async function submitEvent(
   // one atomic publish and refuses a branch lease that went stale.
   const result = await chain.transact(
     (events) => {
-      const current = events.reduce(evolve, initial)
+      let current
+      try {
+        current = events.length === 0 ? initial : project(events, ref, root)
+      } catch (error) {
+        throw new Error(
+          `${ref}@${events.at(-1)?.id ?? "absent"}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        )
+      }
       retry =
         current.commit === head &&
         (current.status === "queued" ||

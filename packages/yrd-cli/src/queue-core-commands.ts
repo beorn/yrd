@@ -1701,6 +1701,7 @@ export async function coreQueueCommand(
           /** The queue read the rows came from, so a detail opened later reads the same tip. */
           entries: QueueEntries | undefined
           eventChanges: ReadonlyMap<string, EventChange> | undefined
+          eventInvalid: EventListingResult["invalid"] | undefined
           journals: Journals
           /** The stop that stands, as the reading derived it. */
           stopped: StopFact | null
@@ -1794,6 +1795,7 @@ export async function coreQueueCommand(
           },
           entries: reading.format === "event" ? undefined : reading.queue.changes,
           eventChanges: reading.format === "event" ? reading.changes : undefined,
+          eventInvalid: reading.format === "event" ? reading.invalid : undefined,
           journals,
           queue: queueName(config.target, await remoteUrl(git, config.target.remote)),
           // Pre-M8 a repository has exactly one queue: the target's branch, on
@@ -1958,6 +1960,7 @@ export async function coreQueueCommand(
         // reads the same tips the table shows, never a fresher or staler one.
         let entries: QueueEntries | undefined = first.entries
         let eventChanges = first.eventChanges
+        let eventInvalid = first.eventInvalid
         let journals = first.journals
         let seen: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }> = first
         const app = await run(
@@ -1976,6 +1979,7 @@ export async function coreQueueCommand(
               }
               entries = next.entries
               eventChanges = next.eventChanges
+              eventInvalid = next.eventInvalid
               journals = next.journals
               return snapshotOf(next)
             },
@@ -1987,6 +1991,15 @@ export async function coreQueueCommand(
                   return openDetail(git, config, [], item, config.target.branch, journalFor(item, journals))
                 }
                 const selected = eventChanges?.get(item.row.branch)
+                const defect = eventInvalid?.get(item.row.branch)
+                if (defect !== undefined) {
+                  return Promise.resolve({
+                    row: item.row,
+                    run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run),
+                    checks: [],
+                    note: `Raw events: yrd queue show ${item.row.branch} --json`,
+                  })
+                }
                 if (selected === undefined) throw new Error(`event change ${item.row.branch} left the selected listing`)
                 return openEventDetail(
                   git,
@@ -2270,21 +2283,24 @@ export async function coreQueueCommand(
         const name = queueName(config.target, await remoteUrl(git, config.target.remote))
         const row = reading.all.find((candidate) => candidate.branch === request.branch)
         const selected = reading.changes.get(request.branch)
-        if ((row === undefined) !== (selected === undefined)) {
+        const defect = reading.invalid.get(request.branch)
+        if ((row === undefined) !== (selected === undefined && defect === undefined)) {
           throw new Error(`event listing for ${request.branch} disagrees with its change fold`)
         }
         if (selected !== undefined && selected.tip === undefined) {
           throw new Error(`event change ${request.branch} has no selected tip`)
         }
         const events =
-          selected === undefined
-            ? []
-            : await readChangeEvents(
-                createEventStore(repo, config.target.remote, selection),
-                config.target.branch,
-                request.branch,
-                selected.tip as string,
-              )
+          defect !== undefined
+            ? defect.events
+            : selected === undefined
+              ? []
+              : await readChangeEvents(
+                  createEventStore(repo, config.target.remote, selection),
+                  config.target.branch,
+                  request.branch,
+                  selected.tip as string,
+                )
         const scope =
           `Read ${changesRef(config.target.branch, request.branch)} at ${config.target.remote}; ` +
           "draft branches and direct target commits are outside this reading; check results are not projected from events yet."
@@ -2305,12 +2321,12 @@ export async function coreQueueCommand(
             ? `no change for ${request.branch} on ${name}. ${scope}`
             : [
                 rowLine({ row }),
+                ...(row.diagnostic === undefined ? [] : [`  diagnostic: ${row.diagnostic}`]),
                 `  queue: ${config.target.branch}`,
                 ...events.map((event) => {
                   const at = event.props.find(([key]) => key === "Time")?.[1]
-                  if (at === undefined) throw new Error(`event ${event.id} has no Time:`)
                   const reason = event.props.find(([key]) => key === "Reason")?.[1]
-                  return `  ${at} ${event.type}${event.writer === null ? "" : ` by ${event.writer}`}${reason === undefined ? "" : ` — ${reason}`}`
+                  return `  ${at ?? "Time absent"} ${event.type}${event.writer === null ? "" : ` by ${event.writer}`}${reason === undefined ? "" : ` — ${reason}`}`
                 }),
                 ...(selected === undefined ? [] : eventNoticeLines(selected)),
               ].join("\n"),
@@ -3450,6 +3466,7 @@ export type EventListingResult = Readonly<{
   drafts: DraftReading
   pause: PauseRecord | undefined
   changes: ReadonlyMap<string, EventChange>
+  invalid: Awaited<ReturnType<typeof readEventQueueWithChanges>>["invalid"]
   observation: GitObservation
 }>
 
@@ -3488,19 +3505,16 @@ export async function readEventListing(
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
   const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}`
   const cache = eventListingCaches.get(cacheKey)
-  const nowMs = typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
+  const nowMs =
+    typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
 
   // 1. Fetch event refs first
   const queueRefs = await listRefs(queuePrefix, store)
 
   const eventRefsUnchanged =
-    cache !== undefined &&
-    cache.targetOid === targetOid &&
-    areRefMapsEqual(cache.queueRefs, queueRefs)
+    cache !== undefined && cache.targetOid === targetOid && areRefMapsEqual(cache.queueRefs, queueRefs)
 
-  const headListingRecent =
-    cache !== undefined &&
-    nowMs - cache.lastHeadListingAt < 60_000
+  const headListingRecent = cache !== undefined && nowMs - cache.lastHeadListingAt < 60_000
 
   // 2. An unchanged event-ref fetch reuses the last round if head listing is recent
   if (options?.forceFresh !== true && eventRefsUnchanged && headListingRecent) {
@@ -3522,11 +3536,7 @@ export async function readEventListing(
   }
 
   // If event refs were unchanged and branch heads also didn't change:
-  if (
-    options?.forceFresh !== true &&
-    eventRefsUnchanged &&
-    areRefMapsEqual(cache?.branchRefs, branchRefs)
-  ) {
+  if (options?.forceFresh !== true && eventRefsUnchanged && areRefMapsEqual(cache?.branchRefs, branchRefs)) {
     cache.lastHeadListingAt = headListingAt
     return {
       ...cache.reading,
@@ -3535,16 +3545,16 @@ export async function readEventListing(
   }
 
   // 4. Full read
-  const { queue, histories } = await readEventQueueWithChanges(store, config.target.branch)
+  const { queue, histories, invalid } = await readEventQueueWithChanges(store, config.target.branch)
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
   const directMerges = await eventDirectMergeCommits(git, config.target.branch, targetOid, queue.declaration, histories)
-  assertEventListingFence(config.target.branch, queue, changes, queueRefs)
+  assertEventListingFence(config.target.branch, queue, changes, queueRefs, invalid)
   const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
   const drafts = await readDrafts(
     git,
     withoutIgnoredDraftHeads(
       {
-        heads,
+        heads: new Map([...heads].filter(([branch]) => !invalid.has(branch))),
         changes: [...changes].flatMap(([branch, change]) =>
           change.commit === undefined ? [] : [{ change: { branch, head: change.commit } }],
         ),
@@ -3564,13 +3574,29 @@ export async function readEventListing(
         ] as const,
     ),
   )
-  const listNow = options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
+  const listNow =
+    options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
   const selected = eventListRows(segmentStates, [...drafts.dated, ...drafts.undated], {
     all: options.all,
     drafts: options.drafts,
     now: listNow,
   })
-  const directRows = list([], { directMerges, now: listNow, ...(options.all ? { sinceMs: Number.POSITIVE_INFINITY } : {}) })
+  const invalidRows: Row[] = [...invalid].map(([branch, defect]) => ({
+    branch,
+    head: defect.tip,
+    state: "invalid",
+    format: "event",
+    ref: defect.ref,
+    tip: defect.tip,
+    error: defect.error,
+    diagnostic: `${defect.ref}@${defect.tip}: ${defect.error}`,
+    subject: defect.error,
+  }))
+  const directRows = list([], {
+    directMerges,
+    now: listNow,
+    ...(options.all ? { sinceMs: Number.POSITIVE_INFINITY } : {}),
+  })
   const projected = [...selected.table, ...selected.document, ...directRows]
   const titles = await subjects(
     git,
@@ -3579,10 +3605,10 @@ export async function readEventListing(
   const titled = (rows: readonly Row[]) =>
     rows.map((row) => ({
       ...row,
-      ...(titles.get(row.head) === undefined ? {} : { subject: titles.get(row.head) }),
+      ...(row.state === "invalid" || titles.get(row.head) === undefined ? {} : { subject: titles.get(row.head) }),
     }))
-  const all = titled([...selected.table, ...directRows])
-  const document = titled([...selected.document, ...directRows])
+  const all = titled([...selected.table, ...invalidRows, ...directRows])
+  const document = titled([...selected.document, ...invalidRows, ...directRows])
   const observation = await git.observe({
     version: 1,
     root: {
@@ -3604,6 +3630,7 @@ export async function readEventListing(
     drafts,
     pause: eventPause(queue),
     changes,
+    invalid,
     observation,
   }
 
@@ -3625,12 +3652,14 @@ export function assertEventListingFence(
   queue: Pick<EventQueue, "tip">,
   changes: ReadonlyMap<string, EventChange>,
   advertised: ReadonlyMap<string, string>,
+  invalid: ReadonlyMap<string, Readonly<{ ref: string; tip: string }>> = new Map(),
 ): void {
   const expected = new Map<string, string>([[queueRef(name), queue.tip]])
   for (const [branch, change] of changes) {
     if (change.tip === undefined) throw new Error(`event change ${branch} has no selected chain tip`)
     expected.set(changesRef(name, branch), change.tip)
   }
+  for (const defect of invalid.values()) expected.set(defect.ref, defect.tip)
   const changePrefix = `${queueRefPrefix(name)}/changes/`
   for (const [ref, tip] of expected) {
     if (advertised.get(ref) !== tip) {

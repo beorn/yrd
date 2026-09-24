@@ -310,7 +310,17 @@ export async function eventQueueRun(
 
   let queueState = await readEventQueue(store, queue)
   for (const [commit, observed] of Object.entries(queueState.observed)) await tellDirect(commit, observed.id)
-  const histories = await listChangeHistories(store, queue)
+  const { histories, invalid } = await listChangeHistories(store, queue)
+  for (const [branch, defect] of invalid) {
+    log.write({
+      kind: "observation",
+      subject: "invalid-change-chain",
+      branch,
+      ref: defect.ref,
+      tip: defect.tip,
+      error: defect.error,
+    })
+  }
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
   for (const [branch, change] of changes) {
     const latest = change.lastNotifiable
