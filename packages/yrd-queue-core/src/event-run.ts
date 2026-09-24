@@ -5,6 +5,7 @@ import { join } from "node:path"
 import {
   appendChangeEvent,
   appendPublishedMerge,
+  changesRef,
   listChangeHistories,
   queueResumedAfter,
   readEventQueue,
@@ -22,6 +23,7 @@ import type { QueueRunLog } from "./log.ts"
 import { recordProgramResult, recordProgramStart } from "./program-root.ts"
 import { queueRefPrefix } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
+import { publishCheckedChildren } from "./publication.ts"
 import { prepareWorktree } from "./worktree.ts"
 import type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
 
@@ -278,6 +280,91 @@ export async function eventQueueRun(
   const line =
     standing === undefined ? remaining : [standing, ...remaining.filter((change) => change.branch !== standing.branch)]
   const failed: string[] = []
+  const publish = async (
+    branch: string,
+    head: string,
+    candidate: string,
+    marker: string,
+    reason?: string,
+  ): Promise<QueueRunOutcome> => {
+    const current = await readStatus(store, queue, branch)
+    if (current.tip !== marker) {
+      log.write({
+        kind: "discarded",
+        branch,
+        head,
+        reason: discardedJudgementReason(current, "marker moved before child publication"),
+      })
+      return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
+    }
+    const parent = (await git(["show", "-s", "--format=%P", candidate])).trim().split(/\s+/u)[0]
+    if (parent === undefined || parent === "") throw new Error(`candidate ${candidate} has no target parent`)
+    let child
+    try {
+      child = await publishCheckedChildren({
+        git,
+        cwd: options.repo,
+        candidate,
+        remote: options.target.remote,
+        branch: queue,
+        marker: { ref: changesRef(queue, branch), tip: marker },
+        process: options.process,
+        env: options.env,
+        hooksPath,
+      })
+    } catch (error) {
+      const after = await readStatus(store, queue, branch)
+      if (after.tip === marker) throw error
+      log.write({ kind: "discarded", branch, head, reason: discardedJudgementReason(after, error) })
+      return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
+    }
+    if (child.state === "refused") {
+      const description =
+        `${branch}: frozen component publication for ${candidate} refused: ${child.evidence}; ` +
+        "repair the named component remote/ref, then resume the queue"
+      const oneLine = description.replace(/\s+/gu, " ").trim()
+      await appendChangeEvent(store, queue, branch, marker, { type: "stuck", at: new Date(), reason: oneLine })
+      log.write({ kind: "change", branch, head, decision: "stuck", reason: oneLine, saw: child.evidence })
+      return result(2, observedMerged, failed, [branch])
+    }
+    try {
+      await appendPublishedMerge(store, queue, branch, marker, {
+        at: new Date(),
+        commit: candidate,
+        targetExpect: parent,
+        queueTip: queueState.tip,
+        ...(reason === undefined ? {} : { reason }),
+      })
+    } catch (error) {
+      const after = await readStatus(store, queue, branch)
+      if (after.tip !== marker) {
+        log.write({ kind: "discarded", branch, head, reason: discardedJudgementReason(after, error) })
+        return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
+      }
+      const movedTarget = (await listRefs(targetRef, store)).get(targetRef)
+      if (movedTarget === undefined) {
+        throw new Error(`event queue ${url}#${queue}: target disappeared after component publication`, { cause: error })
+      }
+      if (movedTarget === parent) throw error
+      await appendChangeEvent(store, queue, branch, marker, {
+        type: "verifying",
+        at: new Date(),
+        commit: candidate,
+        reason: `root target moved after component publication from ${parent} to ${movedTarget}; components at frozen sources`,
+      })
+      log.write({
+        kind: "change",
+        branch,
+        head,
+        decision: "retry",
+        reason: "root target moved after component publication",
+      })
+      return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch], undefined, movedTarget)
+    }
+    log.write({ kind: "merge", branch, head, commit: candidate })
+    log.write({ kind: "change", branch, head, decision: "merged" })
+    return result(failed.length > 0 ? 1 : 0, [...observedMerged, branch], failed, [], [], undefined, candidate)
+  }
   for (const selectedChange of line) {
     const { branch, commit: head } = selectedChange
     let tip = selectedChange.tip
@@ -289,15 +376,12 @@ export async function eventQueueRun(
       await endDeletedChange({ ...selectedChange, tip })
       continue
     }
-    // This first runner slice cannot publish component mains beside the root
-    // target. Refuse either side's gitlinks before composing a candidate.
-    for (const oid of [target, head]) {
-      const tree = await git(["ls-tree", "-r", oid])
-      if (tree.split("\n").some((line) => line.startsWith("160000 ") || line.endsWith("\t.gitmodules"))) {
-        throw new Error(
-          `event queue ${url}#${queue}: component pins in ${oid} need atomic publication; runner support remains pending in #25040`,
-        )
+    if (selectedChange.status === "merging") {
+      const candidate = changes.get(branch)?.candidate
+      if (candidate === undefined) {
+        throw new Error(`event queue ${url}#${queue}: merging ${branch} lost its checked candidate`)
       }
+      return publish(branch, head, candidate, tip, selectedChange.reason)
     }
     log.write({ kind: "change", branch, head })
     const path = join(options.workdir, "worktrees", log.id, branch.replaceAll("/", "_"))
@@ -312,6 +396,13 @@ export async function eventQueueRun(
       process: options.process,
       env: options.env,
       hooksPath,
+      worktree: {
+        env: options.env,
+        gitOptions,
+        populateReference: options.populateReference,
+        process: options.process,
+        selection: options.selection,
+      },
     })
     try {
       if (verified.state === "failed") {
@@ -327,7 +418,8 @@ export async function eventQueueRun(
       }
       const candidate = verified.verifying.candidate
       tip = await appendChangeEvent(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })
-      const checks = options.noCheck === true ? [] : options.checks.filter((check) => (check.on ?? ["merge"]).includes("merge"))
+      const checks =
+        options.noCheck === true ? [] : options.checks.filter((check) => (check.on ?? ["merge"]).includes("merge"))
       const logDir = join(options.workdir, "checks", `${branch}@${head}`, log.id, "attempt-1", "merge")
       const checkLogs = checks.map((check) => checkLogPath(logDir, check.name))
       tip = await appendChangeEvent(store, queue, branch, tip, {
@@ -410,18 +502,10 @@ export async function eventQueueRun(
       tip = await appendChangeEvent(store, queue, branch, tip, {
         type: "merging",
         at: new Date(),
-        ...(checkReason === undefined ? {} : { reason: checkReason }),
-      })
-      await appendPublishedMerge(store, queue, branch, tip, {
-        at: new Date(),
         commit: candidate,
-        targetExpect: target,
-        queueTip: queueState.tip,
         ...(checkReason === undefined ? {} : { reason: checkReason }),
       })
-      log.write({ kind: "merge", branch, head, commit: candidate })
-      log.write({ kind: "change", branch, head, decision: "merged" })
-      return result(failed.length > 0 ? 1 : 0, [...observedMerged, branch], failed, [], [], undefined, candidate)
+      return await publish(branch, head, candidate, tip, checkReason)
     } catch (error) {
       let current
       try {

@@ -95,14 +95,8 @@ import {
 import { incidentTrailers, type Incident } from "./incident.ts"
 import { stuckCures, type PauseRecord } from "./pause.ts"
 import { isActive, overrideLine, type OverrideEntry, type OverrideTable } from "./override.ts"
-import {
-  gitSuperExecution,
-  readSuperMergeDetail,
-  type SuperMergeStep,
-  verifyCandidate,
-  type SuperMergeDetail,
-  type SettledGitlink,
-} from "./verifying.ts"
+import { type SuperMergeStep, verifyCandidate, type SuperMergeDetail, type SettledGitlink } from "./verifying.ts"
+import { publishCheckedChildren } from "./publication.ts"
 export { readSuperMergeResult } from "./verifying.ts"
 import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { narrowingOf } from "./narrowing.ts"
@@ -2099,26 +2093,18 @@ async function publishChildren(
     })
     return { kind: "kept", ended: "checked" }
   }
-  const execution = await gitSuperExecution(
-    { process: run.options.process, env: run.options.env, hooksPath: run.hooksPath },
+  const published = await publishCheckedChildren({
+    git: run.git,
     cwd,
-    ["push", "--recurse-submodules=only", target.remote, `${mergeCommit}:refs/heads/${target.branch}`],
-  )
-  let published: GitSuperPushResult
-  try {
-    published = readGitSuperPushResult(JSON.parse(execution.stdout))
-  } catch (error) {
-    throw new Error(
-      `git-super push exited ${String(execution.exitCode)} without readable JSON: ${execution.stderr.trim() || execution.stdout.trim()}`,
-      { cause: error },
-    )
-  }
-  const moved = published.repositories.flatMap((repository) =>
-    repository.refs
-      .filter((row) => row.state === "updated")
-      .map((row) => `${repository.repository} ${row.destination} -> ${row.source.slice(0, 12)}`),
-  )
-  if (execution.exitCode === 0 && published.state === "updated" && !published.partial) {
+    candidate: mergeCommit,
+    remote: target.remote,
+    branch: target.branch,
+    marker: { ref, tip: landingRecord },
+    process: run.options.process,
+    env: run.options.env,
+    hooksPath: run.hooksPath,
+  })
+  if (published.state === "published") {
     for (const row of publishing) {
       run.log.write({ branch, from: row.to, head, kind: "publish", path: row.path, phase: "merge", to: row.from })
     }
@@ -2134,10 +2120,7 @@ async function publishChildren(
   // that worse, because the commit exists only as a retained ref until this
   // push lands it (24951, @cto 2026-09-18).
   const detail = published.detail
-  const saw =
-    `git-super push exit ${String(execution.exitCode)} state=${published.state} partial=${String(published.partial)}` +
-    (detail === undefined ? "" : ` ${detail.code} (${detail.phase}): ${detail.message}`) +
-    (moved.length === 0 ? "; nothing moved" : `; moved: ${moved.join(", ")}`)
+  const saw = published.evidence
   run.log.write({ branch, decision: "stuck", head, kind: "change", reason: "publication-refused", saw })
   return {
     ended: await run.steps.end(run, entry, "stuck", {
@@ -2152,55 +2135,6 @@ async function publishChildren(
       ...(detail === undefined ? {} : { diagnosis: detail }),
     }),
     kind: "kept",
-  }
-}
-
-type GitSuperPushResult = Readonly<{
-  state: "updated" | "unchanged" | "failed" | "unknown"
-  partial: boolean
-  detail?: SuperMergeDetail
-  repositories: readonly Readonly<{
-    repository: string
-    state: string
-    refs: readonly Readonly<{ source: string; destination: string; state: string }>[]
-  }>[]
-}>
-
-/** git-super push as the ruled command boundary; malformed JSON is never read as a publication. */
-function readGitSuperPushResult(value: unknown): GitSuperPushResult {
-  if (typeof value !== "object" || value === null) throw new Error("git-super push JSON is not an object")
-  const found = value as Record<string, unknown>
-  if (!new Set(["updated", "unchanged", "failed", "unknown"]).has(String(found.state))) {
-    throw new Error(`git-super push JSON has invalid state ${String(found.state)}`)
-  }
-  if (typeof found.partial !== "boolean") throw new Error("git-super push JSON has no boolean partial field")
-  if (!Array.isArray(found.repositories)) throw new Error("git-super push JSON has no repositories array")
-  const repositories = found.repositories.map((row, index) => {
-    if (typeof row !== "object" || row === null) {
-      throw new Error(`git-super push repository ${String(index)} is not an object`)
-    }
-    const repository = row as Record<string, unknown>
-    if (typeof repository.repository !== "string" || !Array.isArray(repository.refs)) {
-      throw new Error(`git-super push repository ${String(index)} is incomplete`)
-    }
-    const refs = repository.refs.map((entry, at) => {
-      if (typeof entry !== "object" || entry === null) {
-        throw new Error(`git-super push ref ${String(index)}.${String(at)} is not an object`)
-      }
-      const ref = entry as Record<string, unknown>
-      if (typeof ref.source !== "string" || typeof ref.destination !== "string" || typeof ref.state !== "string") {
-        throw new Error(`git-super push ref ${String(index)}.${String(at)} is incomplete`)
-      }
-      return { source: ref.source, destination: ref.destination, state: ref.state }
-    })
-    return { repository: repository.repository, state: String(repository.state), refs }
-  })
-  const detail = found.detail === undefined ? undefined : readSuperMergeDetail(found.detail)
-  return {
-    state: found.state as GitSuperPushResult["state"],
-    partial: found.partial,
-    ...(detail === undefined ? {} : { detail }),
-    repositories,
   }
 }
 
