@@ -381,6 +381,13 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(state.candidate).toBe(await remoteTarget(w))
   expect(state.candidate).not.toBe(head)
   expect(await w.git(["rev-parse", `${state.candidate}^1`])).toMatch(new RegExp(w.target))
+  // 25685: Gate-E finds the event landing's checked change through these exact legacy trailers.
+  const message = await w.git(["show", "-s", "--format=%B", state.candidate!])
+  expect(message).toMatch(new RegExp(`^merge task/event-run@${head.slice(0, 12)} into main\\n\\n`))
+  expect(message).toContain(`Change: task/event-run@${head}`)
+  expect(message).toMatch(/Merged-By: yrd queue main \[q-[^\]]+\]/u)
+  expect(message).toContain("Issue: @i/10-yrd/1")
+  expect(message).toContain("Submitter: @dev/2")
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
 })
 
