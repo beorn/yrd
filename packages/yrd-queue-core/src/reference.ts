@@ -278,7 +278,7 @@ export async function populateReferenceStores(options: PopulateReference): Promi
  * that way. `ls-tree` of the one path answers only the question asked — empty
  * output means absent, and a bad commit makes it fail.
  */
-async function declaredSubmodules(git: Git, commit: string): Promise<ReadonlyMap<string, string>> {
+export async function declaredSubmodules(git: Git, commit: string): Promise<ReadonlyMap<string, string>> {
   const byPath = new Map<string, string>()
   if ((await git(["ls-tree", commit, "--", ".gitmodules"])).trim() === "") return byPath
   const declared = await git([
@@ -312,7 +312,7 @@ async function declaredSubmodules(git: Git, commit: string): Promise<ReadonlyMap
  * the same question by listing every blob in the tree — tens of thousands of
  * rows on a real superproject, once per compose, to find fifteen of them.
  */
-async function gitlinksAt(
+export async function gitlinksAt(
   git: Git,
   commit: string,
   paths: readonly string[],
@@ -375,7 +375,7 @@ async function remoteAnswers(git: Git): Promise<boolean> {
   }
 }
 
-async function holdsCommit(git: Git, sha: string): Promise<boolean> {
+export async function holdsCommit(git: Git, sha: string): Promise<boolean> {
   try {
     await git(["cat-file", "-e", `${sha}^{commit}`])
     return true
