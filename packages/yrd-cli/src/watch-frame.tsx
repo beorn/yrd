@@ -123,7 +123,7 @@ export function queueLine(snapshot: WatchSnapshot, now: Date, width: number): st
     if (stop !== undefined) {
       const since = times ? ` since ${clock(new Date(stop.since))}` : ""
       if (stop.change === null) {
-        parts.push(`stopped${since}${names && stop.by !== "" ? ` by ${stop.by}` : ""}`)
+        parts.push(`paused${since}${names && stop.by !== "" ? ` by ${stop.by}` : ""}`)
       } else {
         const branch = stop.change.slice(0, stop.change.lastIndexOf("@"))
         parts.push(`line stopped${names ? ` at ${branch}` : ""}${since}`)

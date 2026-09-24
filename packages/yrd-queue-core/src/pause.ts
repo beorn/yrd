@@ -218,13 +218,14 @@ export async function pauseFence(
 
 /** The operator-facing line shared by list, the submit echo, refusals and the pause commands. */
 export function pauseLine(record: PauseRecord): string {
+  const since = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "long" }).format(record.at)
   if (record.kind === "resumed") {
     return `running: ${record.reason}`
   }
   if (record.cause === "stuck" || record.change !== undefined) {
-    return `stopped: stuck on ${record.change !== undefined ? changeName(record.change) : record.reason}`
+    return `paused since ${since}: stuck on ${record.change !== undefined ? changeName(record.change) : record.reason}`
   }
-  return `stopped by ${record.by}: ${record.reason}`
+  return `paused by ${record.by} since ${since}: ${record.reason}`
 }
 
 /**

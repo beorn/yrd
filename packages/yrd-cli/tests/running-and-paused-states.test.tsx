@@ -82,9 +82,9 @@ function captureIo(cwd: string): Readonly<{ io: YrdCliIO; stdout(): string; stde
   }
 }
 
-describe("25367: yrd has two states, RUNNING and STOPPED, and a stop always says why", () => {
-  describe("acceptance criterion 1 & 4: one STOPPED state with a reason covers pause and stuck-stop", () => {
-    it("stop reason 1 (operator): header shows STOPPED and list shows 'stopped by <seat>: <reason>'", async () => {
+describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
+  describe("acceptance criterion 1 & 4: PAUSED state with reasons covers operator pause and stuck-stop", () => {
+    it("pause reason 1 (operator): header shows PAUSED and list shows 'paused by <seat> since <time>: <reason>'", async () => {
       const operatorStopRecord: PauseRecord = {
         at: NOW,
         by: "@chief",
@@ -94,9 +94,10 @@ describe("25367: yrd has two states, RUNNING and STOPPED, and a stop always says
         sha: "a".repeat(40),
       }
 
-      // Check pauseLine format: "stopped by <seat>: <reason>"
+      // Check pauseLine format: "paused by <seat> since <time>: <reason>"
       const line = pauseLine(operatorStopRecord)
-      expect(line).toBe("stopped by @chief: maintenance window")
+      const since = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "long" }).format(NOW)
+      expect(line).toBe(`paused by @chief since ${since}: maintenance window`)
 
       // Check watch header & list
       const snap = snapshot({
@@ -110,17 +111,17 @@ describe("25367: yrd has two states, RUNNING and STOPPED, and a stop always says
       })
 
       const status = queueLineStatus(snap, NOW)
-      expect(status.word).toBe("STOPPED")
+      expect(status.word).toBe("PAUSED")
       expect(status.marker).toBe("■")
 
       const text = await paint(snap)
-      expect(text).toContain("■ YRD STOPPED")
-      expect(text).toContain("stopped by @chief: maintenance window")
+      expect(text).toContain("■ YRD PAUSED")
+      expect(text).toContain(`paused by @chief since ${since}: maintenance window`)
       expect(text).not.toContain("IDLE")
       expect(text).not.toContain("STUCK")
     })
 
-    it("stop reason 2 (stuck): header shows STOPPED and list shows 'stopped: stuck on <change>'", async () => {
+    it("pause reason 2 (stuck): header shows PAUSED and list shows 'paused since <time>: stuck on <change>'", async () => {
       const stuckStopRecord: PauseRecord = {
         at: NOW,
         by: "yrd",
@@ -131,9 +132,10 @@ describe("25367: yrd has two states, RUNNING and STOPPED, and a stop always says
         sha: "c".repeat(40),
       }
 
-      // Check pauseLine format: "stopped: stuck on <change>"
+      // Check pauseLine format: "paused since <time>: stuck on <change>"
       const line = pauseLine(stuckStopRecord)
-      expect(line).toBe(`stopped: stuck on task/bad@${"b".repeat(40)}`)
+      const since = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "long" }).format(NOW)
+      expect(line).toBe(`paused since ${since}: stuck on task/bad@${"b".repeat(40)}`)
 
       // Check watch header & list
       const snap = snapshot({
@@ -147,12 +149,12 @@ describe("25367: yrd has two states, RUNNING and STOPPED, and a stop always says
       })
 
       const status = queueLineStatus(snap, NOW)
-      expect(status.word).toBe("STOPPED")
+      expect(status.word).toBe("PAUSED")
       expect(status.marker).toBe("■")
 
       const text = await paint(snap)
-      expect(text).toContain("■ YRD STOPPED")
-      expect(text).toContain(`stopped: stuck on task/bad@${"b".repeat(40)}`)
+      expect(text).toContain("■ YRD PAUSED")
+      expect(text).toContain(`paused since ${since}: stuck on task/bad@${"b".repeat(40)}`)
       expect(text).not.toContain("IDLE")
       expect(text).not.toContain("STUCK")
     })
@@ -178,45 +180,27 @@ describe("25367: yrd has two states, RUNNING and STOPPED, and a stop always says
     })
   })
 
-  describe("acceptance criterion 2: CLI verbs use stop/start; old pause/resume print new spelling", () => {
-    it("yrd queue stop stops the queue; yrd queue pause warns to stderr and stops", async () => {
+  describe("acceptance criterion 2: CLI verbs use pause/resume only, no stop/start", () => {
+    it("yrd queue pause pauses the queue; yrd queue resume resumes without alias warnings", async () => {
       const { repo } = await boundaryRepository({ exit: 0 })
       try {
-        // Test yrd queue stop
-        const stopRun = captureIo(repo)
-        const stopExit = await runYrdProcess(
-          [process.execPath, "yrd", "queue", "stop", "--reason", "db maintenance", "--notify", "@dev/8"],
-          stopRun.io,
-        )
-        expect(stopExit).toBe(0)
-        expect(stopRun.stderr()).not.toContain("is now")
-
-        // Test yrd queue start
-        const startRun = captureIo(repo)
-        const startExit = await runYrdProcess(
-          [process.execPath, "yrd", "queue", "start", "--reason", "maintenance complete", "--notify", "@dev/8"],
-          startRun.io,
-        )
-        expect(startExit).toBe(0)
-        expect(startRun.stderr()).not.toContain("is now")
-
-        // Test yrd queue pause (alias warning)
+        // Test yrd queue pause
         const pauseRun = captureIo(repo)
         const pauseExit = await runYrdProcess(
-          [process.execPath, "yrd", "queue", "pause", "--reason", "db maintenance again", "--notify", "@dev/8"],
+          [process.execPath, "yrd", "queue", "pause", "--reason", "db maintenance", "--notify", "@dev/8"],
           pauseRun.io,
         )
         expect(pauseExit).toBe(0)
-        expect(pauseRun.stderr()).toMatch(/`pause` is now `stop`|'pause' is now 'stop'/i)
+        expect(pauseRun.stderr()).toBe("")
 
-        // Test yrd queue resume (alias warning)
+        // Test yrd queue resume
         const resumeRun = captureIo(repo)
         const resumeExit = await runYrdProcess(
-          [process.execPath, "yrd", "queue", "resume", "--reason", "maintenance complete again", "--notify", "@dev/8"],
+          [process.execPath, "yrd", "queue", "resume", "--reason", "maintenance complete", "--notify", "@dev/8"],
           resumeRun.io,
         )
         expect(resumeExit).toBe(0)
-        expect(resumeRun.stderr()).toMatch(/`resume` is now `start`|'resume' is now 'start'/i)
+        expect(resumeRun.stderr()).toBe("")
       } finally {
         removeTemporaryRoots()
       }
