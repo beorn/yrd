@@ -43,7 +43,9 @@ afterAll(() => {
 it("refuses future event queue and check keys by name", () => {
   const plain: QueueConfig = {
     target: { remote: "origin", branch: "main" },
+    archiveAfter: "never",
     checks: [{ name: "verify", run: "true" }],
+    ignore: [],
     notify: [],
     blob: "a".repeat(40),
   }
@@ -227,9 +229,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const changeTip = "b".repeat(40)
     const moved = "c".repeat(40)
     const queue = { created: before, declaration: before, tip: before }
-    const changes = new Map([
-      ["task/one", { status: "queued" as const, commit: before, tip: changeTip, ignored: false }],
-    ])
+    const changes = new Map([["task/one", { status: "queued" as const, commit: before, tip: changeTip }]])
     const advertised = new Map([
       [queueRef("main"), before],
       [changesRef("main", "task/one"), changeTip],
@@ -522,6 +522,98 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(repeated.stdout()).toContain(head.slice(0, 12))
   })
 
+  it.each(["legacy", "event"] as const)(
+    "hides only matching draft heads in a %s listing",
+    async (format) => {
+      const repo = await world("ignore: [task/hidden*, 'scratch/**']\n")
+      const git = gitIn(repo)
+      const commit = (await git(["rev-parse", "HEAD"])).trim()
+      const store = { repo, remote: "origin" }
+      const queueTip =
+        format === "event" ? await createQueue(repo, "main", commit, new Date("2026-09-22T14:00:00.000Z")) : undefined
+      for (const branch of ["task/hidden", "scratch/nested", "task/kept", "other/task/hidden"]) {
+        await git(["checkout", "--quiet", "-b", branch, "main"])
+        writeFileSync(join(repo, `${branch.replaceAll("/", "-")}.txt`), `${branch}\n`)
+        await git(["add", "."])
+        await git(["commit", "--quiet", "-m", branch])
+        await git(["push", "--quiet", "origin", branch])
+      }
+      await git(["checkout", "--quiet", "main"])
+      if (queueTip !== undefined) {
+        await (
+          await openEvents({ ...store, ref: changesRef("main", "task/hidden-submitted"), writer: "yrd" })
+        ).append([changeInput("opened", { queueTip, at: new Date(), commit, by: "@dev/2" })], { expect: null })
+      }
+      const run = capture(repo)
+      expect(
+        await coreQueueCommand(repo, run.io, { command: "list" }, { json: format === "event", queue: "main" }),
+        run.stderr(),
+      ).toBe(0)
+      const shown =
+        format === "event"
+          ? (JSON.parse(run.stdout()) as { changes: readonly { branch: string }[] }).changes.map((row) => row.branch)
+          : run.stdout()
+      expect(shown).toContain("task/kept")
+      expect(shown).toContain("other/task/hidden")
+      if (Array.isArray(shown)) {
+        expect((JSON.parse(run.stdout()) as { scope: string }).scope).toContain("task/hidden*")
+        expect(shown).not.toContain("task/hidden")
+        expect(shown).not.toContain("scratch/nested")
+        expect(shown).toContain("task/hidden-submitted")
+      } else {
+        expect(shown).not.toMatch(/\s+task\/hidden\s+/u)
+        expect(shown).not.toMatch(/\s+scratch\/nested\s+/u)
+      }
+    },
+    30_000,
+  )
+
+  it("requires reason and actor for ignore, then returns byte-clean JSON for both verbs", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const commit = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", commit, new Date("2026-09-22T14:00:00.000Z"))
+    await (
+      await openEvents({ repo, remote: "origin", ref: changesRef("main", "task/one"), writer: "yrd" })
+    ).append([changeInput("opened", { queueTip, at: new Date(), commit, by: "@dev/2" })], { expect: null })
+    const missing = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "ignore", "task/one", "--json"], missing.io)).toBe(2)
+    expect(missing.stderr()).toContain("yrd-ignore-reason-required")
+    expect(missing.stdout()).toBe("")
+    const conflict = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "unignore", "task/one", "--reason", "wrong", "--json"], conflict.io),
+    ).toBe(2)
+    expect(conflict.stderr()).toContain("yrd-ignore-reason-conflict")
+    expect(conflict.stdout()).toBe("")
+    const ignored = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "ignore", "task/one", "--reason", "waiting", "--notify", "@dev/2", "--json"],
+        ignored.io,
+      ),
+      ignored.stderr(),
+    ).toBe(0)
+    expect(ignored.stderr()).toBe("")
+    expect(JSON.parse(ignored.stdout())).toEqual({ branch: "task/one", ignored: { reason: "waiting", by: "@dev/2" } })
+    const cleared = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "unignore", "task/one", "--notify", "@dev/3", "--json"], cleared.io),
+      cleared.stderr(),
+    ).toBe(0)
+    expect(cleared.stderr()).toBe("")
+    expect(JSON.parse(cleared.stdout())).toEqual({ branch: "task/one", ignored: null })
+    const human = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "ignore", "task/one", "--reason", "second hold", "--notify", "@dev/4"],
+        human.io,
+      ),
+      human.stderr(),
+    ).toBe(0)
+    expect(human.stdout()).toContain("ignored task/one by @dev/4: second hold")
+  }, 30_000)
+
   it("drops a draft pushed by another clone after fetching its kept head", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
@@ -711,17 +803,17 @@ describe("a queue is the selected origin branch carrying config", () => {
     const refs = async (): Promise<string> =>
       (await gitIn(join(dirname(repo), "remote.git"))(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).trim()
 
-    const unknown = await yrd("--check", "nope", "--off", "--until", "23:59", "--reason", "x")
+    const until = new Date(Date.now() + 3_600_000).toISOString()
+    const unknown = await yrd("--check", "nope", "--off", "--until", until, "--reason", "x")
     expect(unknown.code).toBe(1)
     expect(unknown.stderr).toContain("no merge check named 'nope' is declared; the declared merge checks are: verify")
     // A submit-only check is not a merge check, so it cannot be held off at merge.
-    expect((await yrd("--check", "lint", "--off", "--until", "23:59", "--reason", "x")).stderr).toContain(
+    expect((await yrd("--check", "lint", "--off", "--until", until, "--reason", "x")).stderr).toContain(
       "the declared merge checks are: verify",
     )
     expect((await yrd("--check", "verify", "--off", "--reason", "x")).stderr).toContain("needs --until <time>")
     expect(await refs()).toBe("")
 
-    const until = new Date(Date.now() + 3_600_000).toISOString()
     const set = await yrd("--check", "verify", "--off", "--until", until, "--reason", "flaky gate", "--json")
     expect(set.code, set.stderr).toBe(0)
     expect(JSON.parse(set.stdout)).toMatchObject({

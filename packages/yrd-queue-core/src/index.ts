@@ -52,6 +52,7 @@ export {
   readChangeEvents,
   readEventQueue,
   readStatus,
+  setBranchIgnored,
   writeQueueEvent,
 } from "./events.ts"
 export type { Event } from "./git.ts"
@@ -62,6 +63,7 @@ export type {
   EventChange,
   EventQueue,
   QueueLocation,
+  SetBranchIgnoredRequest,
   DropRequest,
   Dropped,
 } from "./events.ts"
@@ -128,7 +130,7 @@ export {
   ReferenceUnpopulated,
 } from "./reference.ts"
 export type { PopulateReference, ReferenceStore } from "./reference.ts"
-export { queueRun } from "./run.ts"
+export { queueRun, QUEUE_RUN_FAILED_EXIT } from "./run.ts"
 export type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
 export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from "./config.ts"
 export type { Ending, Notifier, QueueConfig, Target } from "./config.ts"
