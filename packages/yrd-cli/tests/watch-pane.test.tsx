@@ -18,7 +18,7 @@ import type React from "react"
 import { act } from "react"
 import { describe, expect, it, vi } from "vitest"
 import { bufferToText, render } from "silvery/test"
-import { Box, FOLD_MARKERS, Text } from "silvery"
+import { Box, DISCLOSURE_MARKERS, Text } from "silvery"
 import type { ChangeRecord, GitObservation, JournalCommand, JournalRun, Row } from "@yrd/queue-core"
 import { checksOf, journalKey, watchRows as perRunRows } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
@@ -824,7 +824,7 @@ describe("the change list and the Timeline tab (items 2, 4, 6, 24, 25, 31; 25441
     expect(text).toMatch(/HEAD\s+abcdef012345/u)
     expect(text).toMatch(new RegExp(`RUN\\s+${RUN_ID}`, "u"))
     // The fold, last, with the unicode minus.
-    expect(text).toContain("▶︎ Diff +214 −38")
+    expect(text).toContain(`${DISCLOSURE_MARKERS.collapsed} Diff +214 −38`)
     // Live facts are NOT in the metadata: no POSITION, WAIT or AGE row.
     expect(text).not.toMatch(/^\s*(POSITION|WAIT|AGE)\s/mu)
   })
@@ -877,12 +877,12 @@ describe("the change list and the Timeline tab (items 2, 4, 6, 24, 25, 31; 25441
     await settle(app)
     app.press("ArrowLeft")
     await settle(app)
-    expect(app.text).toContain("▶︎ Diff +1 −1")
+    expect(app.text).toContain(`${DISCLOSURE_MARKERS.collapsed} Diff +1 −1`)
     expect(loadDiff).not.toHaveBeenCalled()
     app.press("v")
     await settle(app)
     expect(loadDiff).toHaveBeenCalledTimes(1)
-    expect(app.text).toContain("▼︎ Diff +1 −1")
+    expect(app.text).toContain(`${DISCLOSURE_MARKERS.expanded} Diff +1 −1`)
     expect(app.text).toContain("+new")
     app.unmount()
   })
@@ -2355,7 +2355,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       const painted = app.text.split("\n")
       const compact = painted.findIndex(
         (line) =>
-          line.includes("STATS") && (line.includes(FOLD_MARKERS.folded) || line.includes(FOLD_MARKERS.unfolded)),
+          line.includes("STATS") &&
+          (line.includes(DISCLOSURE_MARKERS.collapsed) || line.includes(DISCLOSURE_MARKERS.expanded)),
       )
       const box = painted.findIndex((line) => line.includes("╭─ STATS"))
       seen.push({
@@ -2366,7 +2367,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         beside: painted.some(
           (line) =>
             line.includes("STATS") &&
-            (line.includes(FOLD_MARKERS.folded) || line.includes(FOLD_MARKERS.unfolded)) &&
+            (line.includes(DISCLOSURE_MARKERS.collapsed) || line.includes(DISCLOSURE_MARKERS.expanded)) &&
             line.includes("╭─ STATS"),
         ),
       })
@@ -3053,7 +3054,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.unmount()
   })
 
-  it("row 15 as 25416 restates it: km's fold marker, STATS, what is in hand now and the last 24 hours, directly under the top line, without stopped or last-merged slugs", async () => {
+  it("25556: section disclosure, STATS, what is in hand now and the last 24 hours directly under the top line", async () => {
     const app = render(
       <WatchPane
         snapshot={snapshot({
@@ -3076,8 +3077,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
     // 1. The line DIRECTLY under the top line is fold marker + STATS
     const lineUnderTop = app.lines[topIdx + 1]!
-    expect(lineUnderTop).toContain(`${FOLD_MARKERS.folded} STATS`)
-    expect(lineUnderTop).toContain(`(${String(DECISIONS.length)} decisions · s to expand)`)
+    expect(lineUnderTop).toContain(`${DISCLOSURE_MARKERS.collapsed} STATS`)
+    expect(lineUnderTop).not.toContain("decisions")
 
     // 2. 25416 superseded row 15's "no waiting count": the operator's STATS line says the changes in line,
     //    then the last 24 hours. Still no stopped slug and no last-merge slug.
@@ -3090,8 +3091,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.press("s")
     await settle(app)
     const lineUnderTopExpanded = app.lines[topIdx + 1]!
-    expect(lineUnderTopExpanded).toContain(`${FOLD_MARKERS.unfolded} STATS`)
-    expect(lineUnderTopExpanded).toContain(`(${String(DECISIONS.length)} decisions · s to fold)`)
+    expect(lineUnderTopExpanded).toContain(`${DISCLOSURE_MARKERS.expanded} STATS`)
+    expect(lineUnderTopExpanded).not.toContain("decisions")
     expect(lineUnderTopExpanded).toContain("STATS · current: 0 drafts, 1 waiting · 24h: ")
     expect(lineUnderTopExpanded).not.toContain("stopped")
     expect(lineUnderTopExpanded).not.toContain("last merge")
@@ -3188,18 +3189,19 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.unmount()
   })
 
-  it("item 2: RunnerRow with stopped/paused runner renders STOPPED: <reason> and to start / to resume cure", async () => {
+  it("25556: RunnerRow gives STOPPED only a recorded reason, with the start or resume cure below", async () => {
     const layout = listLayout([], 120, NOW)
 
     // 1. Stopped with start cure
     const stoppedLine: RunnerLine = {
       state: "stopped",
-      holds: "the service stopped restating its health document · start: yrd queue up",
+      holds: " · start: yrd queue up",
       detail: "",
     }
     const stoppedApp = render(<RunnerRow line={stoppedLine} layout={layout} />, { cols: 120, rows: 5 })
     await settle(stoppedApp)
-    expect(stoppedApp.text).toContain("STOPPED: the service stopped restating its health document")
+    expect(stoppedApp.text).toContain("YRD STOPPED")
+    expect(stoppedApp.text).not.toContain("the service stopped restating its health document")
     expect(stoppedApp.text).toContain("to start: yrd queue up")
     stoppedApp.unmount()
 
@@ -3274,18 +3276,18 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(topIdx).toBeGreaterThanOrEqual(0)
     const statsLineIdx = topIdx + 1
 
-    expect(app.lines[statsLineIdx]).toContain(`${FOLD_MARKERS.folded} STATS`)
-    expect(app.lines[statsLineIdx]).toContain("s to expand")
+    expect(app.lines[statsLineIdx]).toContain(`${DISCLOSURE_MARKERS.collapsed} STATS`)
+    expect(app.lines[statsLineIdx]).not.toContain("decisions")
 
     await app.click(5, statsLineIdx)
     await settle(app)
-    expect(app.lines[statsLineIdx]).toContain(`${FOLD_MARKERS.unfolded} STATS`)
-    expect(app.lines[statsLineIdx]).toContain("s to fold")
+    expect(app.lines[statsLineIdx]).toContain(`${DISCLOSURE_MARKERS.expanded} STATS`)
+    expect(app.lines[statsLineIdx]).not.toContain("decisions")
 
     await app.click(5, statsLineIdx)
     await settle(app)
-    expect(app.lines[statsLineIdx]).toContain(`${FOLD_MARKERS.folded} STATS`)
-    expect(app.lines[statsLineIdx]).toContain("s to expand")
+    expect(app.lines[statsLineIdx]).toContain(`${DISCLOSURE_MARKERS.collapsed} STATS`)
+    expect(app.lines[statsLineIdx]).not.toContain("decisions")
 
     app.unmount()
   })
@@ -3339,6 +3341,50 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const stuckTop = stuckApp.lines.find((l) => l.includes("YRD"))!
     expect(stuckTop.trimStart().startsWith("■ YRD PAUSED")).toBe(true)
     stuckApp.unmount()
+  })
+
+  it("25556: only a recorded stop reason appears beside YRD STOPPED on either surface", async () => {
+    const paintStop = async (stopReason?: string, cols = 120) => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            runner: {
+              journalDir: "/w/logs",
+              service: {
+                kind: "stopped",
+                why: "stopped since 07:14: no stop reason was recorded",
+                cause: "graceful stop",
+                ...(stopReason === undefined ? {} : { stopReason }),
+              },
+            },
+            queues: [{ branch: "main", label: "main", path: "/repo" }],
+          })}
+          live={false}
+        />,
+        { cols, rows: 30 },
+      )
+      await settle(app)
+      return app
+    }
+
+    const absent = await paintStop()
+    expect(absent.lines[0]?.slice(0, absent.lines[0].indexOf("[1]")).trim()).toBe("■ YRD STOPPED")
+    expect(absent.text).not.toContain("no stop reason was recorded")
+    expect(absent.text).toContain("to start: yrd queue up")
+    absent.unmount()
+
+    const recorded = await paintStop("cutover")
+    expect(recorded.lines[0]).toContain("YRD STOPPED cutover")
+    expect(recorded.text.match(/YRD STOPPED cutover/gu)).toHaveLength(2)
+    expect(recorded.text).not.toContain("no stop reason was recorded")
+    recorded.unmount()
+
+    const long = "a recorded reason ".repeat(18)
+    const narrow = await paintStop(long, 80)
+    expect(narrow.lines[0]).toContain("YRD STOPPED a recorded reaso")
+    expect(narrow.lines[0]).toContain("…")
+    expect(narrow.lines[0]).not.toContain(long)
+    narrow.unmount()
   })
 
   it("acceptance 5 (25364): renders each step (compose, check, merge, publish, all checks off) in RunnerTitledBox", async () => {
@@ -3572,7 +3618,7 @@ describe("the top line (25416)", () => {
     return Math.round(((light! + 0.05) / (dark! + 0.05)) * 100) / 100
   }
 
-  it("row 1: the top line is inverse chrome past the status block, and the line under it is not", async () => {
+  it("25556: both top lines use white chrome across status, tabs, and STATS", async () => {
     const app = render(<WatchPane snapshot={snapshot({ runner: RUNNER_READ })} live={false} />, { cols: 120, rows: 30 })
     await settle(app)
     // The chrome is every cell that is neither the status block nor a pill: the gap between them and the edge.
@@ -3586,12 +3632,19 @@ describe("the top line (25416)", () => {
     const seen = {
       lineBg: [...lineBg],
       underIsInverse: JSON.stringify(app.cell(2, 1).bg) === bgOf("$bg-inverse"),
+      underRightIsInverse: JSON.stringify(app.cell(119, 1).bg) === bgOf("$bg-inverse"),
+      statusIsInverse: bgAt(app, 0, "RUNNING") === bgOf("$bg-inverse"),
     }
     app.unmount()
-    expect(seen).toEqual({ lineBg: [bgOf("$bg-inverse")], underIsInverse: false })
+    expect(seen).toEqual({
+      lineBg: [bgOf("$bg-inverse")],
+      underIsInverse: true,
+      underRightIsInverse: true,
+      statusIsInverse: true,
+    })
   })
 
-  it("row 2: the status area is a block in its status colour with the pause reason beside the word, truncated before the tabs", async () => {
+  it("25556: state is shown by foreground colour on white, with the pause reason truncated before the tabs", async () => {
     const wide = render(<WatchPane snapshot={snapshot({ ...PAUSED, runner: RUNNER_READ })} live={false} />, {
       cols: 160,
       rows: 30,
@@ -3612,7 +3665,7 @@ describe("the top line (25416)", () => {
     narrow.unmount()
     expect(seen).toEqual({
       wide: true,
-      paused: [fgOf("$bg"), bgOf("$fg-warning")],
+      paused: [fgOf("mix($fg-on-inverse, $fg-warning, 30%)"), bgOf("$bg-inverse")],
       narrowTruncated: true,
       narrowKeepsFilters: true,
     })
@@ -3669,7 +3722,7 @@ describe("the top line (25416)", () => {
     expect(seen).toEqual({ on: "runner", centred: true })
   })
 
-  it("row 4: a selected tab or filter is the warning chip and an unselected one inverseText's muted tone", async () => {
+  it("25556: selected tabs and filters use warning ink on white while unselected ones stay muted", async () => {
     const app = render(
       <WatchPane
         snapshot={snapshot({ queues: QUEUES, rows: [{ row: failedRow() }], runner: RUNNER_READ })}
@@ -3689,7 +3742,7 @@ describe("the top line (25416)", () => {
       unselectedFilter: pair("open"),
     }
     app.unmount()
-    const chip = [fgOf("$bg"), bgOf("$warning")]
+    const chip = [fgOf("mix($fg-on-inverse, $fg-warning, 30%)"), bgOf("$bg-inverse")]
     const muted = [fgOf("$fg-on-inverse-muted"), bgOf("$bg-inverse")]
     expect(seen).toEqual({ selectedTab: chip, unselectedTab: muted, selectedFilter: chip, unselectedFilter: muted })
   })

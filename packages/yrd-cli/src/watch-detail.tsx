@@ -18,7 +18,7 @@
  *   │ …                                                 │   HISTORY newest first, three
  *   │ 14:15 · 21m ago  merged as b234234abcde           │   METADATA groups, and the
  *   │ ISSUE  @i/10-yrd/24096                            │   `▶ Diff +A −B` fold last (31)
- *   │ ▶︎ Diff +214 −38                                   │
+ *   │ ► Diff +214 −38                                    │
  *   ╰───────────────────────────────────────────────────╯
  *
  * Three rules from the operator's own spec are structural, not incidental:
@@ -601,11 +601,11 @@ function ChangeBox({
 }
 
 /**
- * The fold at the bottom of every change box: `▶︎ Diff +A −B`, opening onto
+ * The fold at the bottom of every change box: `► Diff +A −B`, opening onto
  * the unified diff. A composition of Box and Text rather than silvery's
  * `Accordion`, whose header draws ASCII `>`/`v` and takes no glyph: the plain
- * triangle is item 5's rule, and a glyph prop on `Accordion` is the upstream
- * home this collapses into. Click or `v` toggles; the reading is the loader's.
+ * triangle is item 5's rule, shared with STATS through Silvery's disclosure
+ * markers. Click or `v` toggles; the reading is the loader's.
  */
 function DiffFold({
   stat,

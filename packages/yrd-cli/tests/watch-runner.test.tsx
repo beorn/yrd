@@ -306,17 +306,24 @@ describe("readRunnerService, the loop's own liveness", () => {
 
     // No deadline on the last document, so a day later it still says why.
     const at = clock(new Date(since))
-    expect(service).toMatchObject({ kind: "stopped", why: `stopped by @chief since ${at}: cutover` })
+    expect(service).toMatchObject({
+      kind: "stopped",
+      why: `stopped by @chief since ${at}: cutover`,
+      stopReason: "cutover",
+    })
     if (service.kind !== "stopped") throw new Error("not stopped")
     expect(service.since?.toISOString()).toBe(since)
 
     const unexplained = gracefulStopHealthDocument(SERVICE, { since })
-    expect(
-      await readRunnerService(workdirWith({ ageMs: 1_000, health: JSON.stringify(unexplained) }), NOW),
-    ).toMatchObject({
+    const unexplainedService = await readRunnerService(
+      workdirWith({ ageMs: 1_000, health: JSON.stringify(unexplained) }),
+      NOW,
+    )
+    expect(unexplainedService).toMatchObject({
       kind: "stopped",
       why: `stopped since ${at}: no stop reason was recorded`,
     })
+    expect(unexplainedService).not.toHaveProperty("stopReason")
   })
 
   it("keeps no document and an unreadable one apart: two facts with two cures", async () => {
@@ -657,7 +664,7 @@ describe("the runner's row", () => {
 
     expect(line.state).toBe("stopped")
     expect(line.duration).toBe("stopped 5:00")
-    expect(line.holds).toBe("the service stopped restating its health document · start: yrd queue up")
+    expect(line.holds).toBe(" · start: yrd queue up")
     expect(line.detail).toContain("no longer a measurement of anything")
     // The journal's own facts are not lost behind the document's.
     expect(line.detail).toContain("beat 0:02 ago")
@@ -674,7 +681,7 @@ describe("the runner's row", () => {
 
     expect(line.state).toBe("stopped")
     expect(line.duration).toBeUndefined()
-    expect(line.holds).toBe("no process is running the check this row is holding · start: yrd queue up")
+    expect(line.holds).toBe(" · start: yrd queue up")
     expect(line.detail).toContain("no process: beat 0:02 ago")
   })
 
