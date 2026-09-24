@@ -257,8 +257,11 @@ export type LineFlow = Readonly<{
   lastJudgedAt?: string
   /** When the last round completed. */
   lastRoundEndedAt?: string
-  /** The round running now, when one is, and the change it works when the loop knows it. */
-  roundOpen?: Readonly<{ startedAt: string; branch?: string }>
+  /**
+   * The round running now, when one is: the change it works and the phase it is
+   * in, as its own journal last named them, or why the journal could not say.
+   */
+  roundOpen?: Readonly<{ startedAt: string; branch?: string; phase?: string; phaseUnread?: string }>
 }>
 
 /** The declared stall threshold and whether the declaration named it or the default applies. */
@@ -298,8 +301,14 @@ export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date):
   if (flow.roundOpen !== undefined) {
     const running = span(now.getTime() - Date.parse(flow.roundOpen.startedAt))
     const on = flow.roundOpen.branch === undefined ? "" : ` on ${flow.roundOpen.branch}`
+    const at =
+      flow.roundOpen.phase !== undefined
+        ? `, at ${flow.roundOpen.phase}`
+        : flow.roundOpen.phaseUnread !== undefined
+          ? ` (phase unread: ${flow.roundOpen.phaseUnread})`
+          : ""
     return {
-      cause: `a round has been running its checks for ${running}${on}; ${observation}`,
+      cause: `a round has been running its checks for ${running}${on}${at}; ${observation}`,
       forMs,
       shape: "slow-round",
     }

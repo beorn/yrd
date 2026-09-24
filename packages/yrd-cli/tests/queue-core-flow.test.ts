@@ -14,9 +14,12 @@
  * what the previous round saw.
  */
 
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import type { QueueRunOutcome, RoundLine } from "@yrd/queue-core"
-import { flowAfterRound } from "../src/queue-core-commands.ts"
+import { runId, type QueueRunOutcome, type RoundLine } from "@yrd/queue-core"
+import { flowAfterRound, roundPhase } from "../src/queue-core-commands.ts"
 
 /** A round's outcome, with only the fields this fold reads. */
 const round = (
@@ -98,5 +101,28 @@ describe("the line's flow after one service round", () => {
     )
     expect(flow?.waiting).toBe(0)
     expect(flow?.oldestWaiting).toBeUndefined()
+  })
+})
+
+// 25669 row 2: queue health names the phase an open round is in, from that
+// round's own journal, and says why when the journal cannot say.
+describe("the open round's phase", () => {
+  it("is the newest journal's open step and the change it works", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-round-phase-"))
+    mkdirSync(join(workdir, "logs"))
+    const started = new Date()
+    const id = runId(started)
+    const records = [
+      { at: started.toISOString(), kind: "run", pid: process.pid, queue: "main", run: id, target: "main" },
+      { branch: "task/a", kind: "check", name: "typecheck", phase: "submit", start: started.toISOString() },
+    ]
+    writeFileSync(join(workdir, "logs", `${id}.jsonl`), records.map((r) => `${JSON.stringify(r)}\n`).join(""))
+    expect(await roundPhase(workdir)).toEqual({ branch: "task/a", phase: "submit typecheck" })
+  })
+
+  it("says where it looked when there is no journal to read", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-round-phase-"))
+    const phase = await roundPhase(workdir)
+    expect(phase).toEqual({ phaseUnread: expect.stringContaining(`no run journal was read: ${join(workdir, "logs")}`) })
   })
 })
