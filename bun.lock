@@ -39,7 +39,7 @@
         "@yrd/bay": "workspace:*",
         "@yrd/process": "workspace:*",
         "@yrd/queue-core": "workspace:*",
-        "gitomic": "github:beorn/gitomic#d4043b305402fa6f1d40ba04acea27175f2f1408",
+        "gitomic": "^0.3.0",
         "loggily": "^0.11.0",
         "react": "^19.2.0",
         "silvery": "^0.24.1",
@@ -64,13 +64,13 @@
       "dependencies": {
         "@yrd/process": "workspace:*",
         "git-super": "^0.1.0",
-        "gitomic": "github:beorn/gitomic#d4043b305402fa6f1d40ba04acea27175f2f1408",
+        "gitomic": "^0.3.0",
       },
     },
   },
   "overrides": {
     "git-super": "github:beorn/git-super#ec68517c1ecfcd9571d7193355af1dab5df78283",
-    "gitomic": "github:beorn/gitomic#d4043b305402fa6f1d40ba04acea27175f2f1408",
+    "gitomic": "^0.3.0",
     "loggily": "^0.11.0",
   },
   "packages": {
@@ -278,7 +278,7 @@
 
     "git-super": ["git-super@github:beorn/git-super#ec68517", { "dependencies": { "@bearly/flock": "0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "loggily": "^0.10.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-ec68517", "sha512-O8awTVVEd/P+VkTtUAQt4fs9ru425YOkZ1i8dijcQi+ZgEhuLV0UGZxzYpRM9LUkHISBmt6j8LFSHgdyLuEKpQ=="],
 
-    "gitomic": ["gitomic@github:beorn/gitomic#d4043b3", { "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-d4043b3", "sha512-wg+Vqy8Dv8YwEGQbOAhQwZeLe2WT2LRFoQnnojhtA0YCniB7ASkzxt1ljDR+Q2+/fAnam0uI+rJBwMZ0seV+DQ=="],
+    "gitomic": ["gitomic@0.3.0", "", { "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "dist/bin.js" } }, "sha512-QG1yUSd2CnOY/gaa0WDIdsAfgy5K2G3MKJlL8vhxuPG+6I2DkfPfxIrJwIxEJJIOfTwPIzjry+6OKUimVn+Jmg=="],
 
     "is-fullwidth-code-point": ["is-fullwidth-code-point@5.1.0", "", { "dependencies": { "get-east-asian-width": "^1.3.1" } }, "sha512-5XHYaSyiqADb4RnZ1Bdad6cPp8Toise4TzEjcOYDHZkTCbKgiUl7WTUCpNWHuxmDt91wnsZBc9xinNzopv3JMQ=="],
 
