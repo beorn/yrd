@@ -29,6 +29,7 @@ import {
   coreSshCommandFromConfig,
   isExactPublickeyRefusal,
   isRetryableRead,
+  isSshSessionDrop,
   verboseSshRetryEnvironment,
 } from "git-super/process"
 import type { QueueObservation } from "./remote.ts"
@@ -269,7 +270,17 @@ export function gitIn(
       return evidence
     }
     const first = await attempt(env)
-    if (observation || !isRetryableRead(args) || !isSettledPublickeyRefusal(first)) return first
+    if (observation || !isRetryableRead(args)) return first
+    // One announced SSH retry per read, for either predicate (25282, 25616): the announcement names which matched.
+    if (isSettledSshSessionDrop(first)) {
+      if (options.signal?.aborted) return first
+      console.error(
+        `yrd: git ${args.join(" ")} in ${cwd}: SSH session dropped; retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms`,
+      )
+      if (!(await waitForPublickeyRetry(options.signal))) return first
+      return attempt(env)
+    }
+    if (!isSettledPublickeyRefusal(first)) return first
     if (options.signal?.aborted) return first
     const effectiveEnv = env ?? gitEnvironment(globalThis.process.env)
     let verbose: ReturnType<typeof verboseSshRetryEnvironment>
@@ -365,6 +376,16 @@ function isSettledPublickeyRefusal(evidence: GitInvocation): boolean {
     evidence.protocol?.refusal === undefined &&
     result !== undefined &&
     isExactPublickeyRefusal({ code: result.exitCode, stderr: result.stderr })
+  )
+}
+
+function isSettledSshSessionDrop(evidence: GitInvocation): boolean {
+  const result = evidence.result
+  return (
+    evidence.failure === undefined &&
+    evidence.protocol?.refusal === undefined &&
+    result !== undefined &&
+    isSshSessionDrop({ code: result.exitCode, stderr: result.stderr })
   )
 }
 
@@ -762,6 +783,14 @@ async function retryLegacyPublickeyRead<T>(
   try {
     return await read()
   } catch (error) {
+    if (isLegacySshSessionDrop(error, verb)) {
+      console.error(
+        `yrd: git ${verb} ${remote} ${JSON.stringify(refs)} in ${repo}: SSH session dropped; ` +
+          `retry 2/2 after ${String(PUBLICKEY_BACKOFF_MS)}ms`,
+      )
+      await delay(PUBLICKEY_BACKOFF_MS)
+      return retry(baseEnv)
+    }
     if (!isLegacyPublickeyRefusal(error, verb)) throw error
     let verbose: ReturnType<typeof verboseSshRetryEnvironment>
     try {
@@ -781,6 +810,12 @@ async function retryLegacyPublickeyRead<T>(
     await delay(PUBLICKEY_BACKOFF_MS)
     return retry(verbose.env)
   }
+}
+
+function isLegacySshSessionDrop(error: unknown, verb: "fetch" | "ls-remote"): error is Error {
+  if (!(error instanceof Error)) return false
+  const prefix = `git ${verb} failed (128): `
+  return error.message.startsWith(prefix) && isSshSessionDrop({ code: 128, stderr: error.message.slice(prefix.length) })
 }
 
 function isLegacyPublickeyRefusal(error: unknown, verb: "fetch" | "ls-remote"): error is Error {
