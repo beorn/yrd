@@ -277,25 +277,53 @@ describe("readRunnerService, the loop's own liveness", () => {
   })
 
   /**
+   * @failure An overdue document with a live writer looked definitively stopped, losing the unmeasured state.
+   * @level l1 @consumer queue operator (@i/10-yrd/25816)
+   *
    * The deadline is the WRITER's, applied by `believableHealthDocument`: past
    * it, the stored verdict is a measurement nobody took. Nothing here picks a
    * threshold, and this fixture proves that by moving only that one instant.
    */
-  it("reads a document past that deadline as stopped, and carries the document's own cause", async () => {
+  it("reads an overdue document with a live writer as unknown, while preserving the watch's stopped word", async () => {
     const workdir = workdirWith({ ageMs: 1_000, health: healthDocument({ staleAfterMs: -60_000 }) })
     const service = await readRunnerService(workdir, NOW)
 
-    expect(service.kind).toBe("stopped")
-    if (service.kind !== "stopped") throw new Error("not stopped")
-    // 25430 witness: a SIGKILL leaves the last heartbeat document, with no
-    // graceful stop in it, and it ages into this — never an invented reason.
-    expect(service.why).toBe(
-      `stopped outside a graceful stop since ${new Date(NOW.getTime() - 60_000).toISOString()}; ` +
-        `hab ps ${SERVICE} has the supervisor's record`,
-    )
-    expect(service.graceful, "a stop outside a graceful stop, so the watch shows this sentence").toBe(false)
+    expect(service.kind).toBe("unknown")
+    if (service.kind !== "unknown") throw new Error("not unknown")
     expect(service.cause).toContain("no longer a measurement of anything")
     expect(service.since?.getTime()).toBe(NOW.getTime() - 60_000)
+    expect(runnerWord({ journalDir: workdir, service }, false)).toBe("stopped")
+    // The operator's watch row retains the old stopped presentation until its own display change.
+    expect(runnerLine({ journalDir: workdir, service }, NOW)).toEqual(
+      runnerLine(
+        {
+          journalDir: workdir,
+          service: {
+            kind: "stopped",
+            graceful: false,
+            why: "old watch detail",
+            cause: service.cause,
+            since: service.since,
+          },
+        },
+        NOW,
+      ),
+    )
+  })
+
+  /** @failure An overdue document with a confirmed dead writer must remain a measured stop.
+   * @level l1 @consumer queue operator (@i/10-yrd/25816)
+   */
+  it("reads an overdue document whose writer is confirmed dead as stopped", async () => {
+    const workdir = workdirWith({
+      ageMs: 1_000,
+      health: healthDocument({ pid: 2_147_483_647, staleAfterMs: -60_000 }),
+    })
+    const service = await readRunnerService(workdir, NOW)
+    expect(service.kind).toBe("stopped")
+    if (service.kind !== "stopped") throw new Error("not stopped")
+    expect(service.graceful).toBe(false)
+    expect(service.cause).toContain("process 2147483647")
   })
 
   /**

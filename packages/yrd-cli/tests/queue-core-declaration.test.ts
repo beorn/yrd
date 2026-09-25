@@ -21,6 +21,7 @@ import {
   drop,
   eventRows,
   gitIn,
+  gracefulStopHealthDocument,
   listChanges,
   queueRef,
   readConfig,
@@ -1101,6 +1102,122 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main"], line.io)).toBe(0)
     expect(line.stdout()).toContain("yrd service status is unknown (unreadable health document)")
     expect(line.stdout()).toContain("inspect with hab ps yrd")
+  })
+
+  /** @failure An overdue heartbeat or dead writer previously printed a running service after resume.
+   * @level l2 @consumer queue operator (@i/10-yrd/25816)
+   */
+  it.each([
+    {
+      name: "overdue with live writer",
+      pid: process.pid,
+      overdue: true,
+      running: null,
+      check: "hab ps yrd",
+      start: undefined,
+    },
+    {
+      name: "overdue with dead writer",
+      pid: 2_147_483_647,
+      overdue: true,
+      running: false,
+      check: "hab ps yrd",
+      start: "hab up yrd",
+    },
+    {
+      name: "fresh unhealthy writer",
+      pid: process.pid,
+      overdue: false,
+      running: true,
+      check: undefined,
+      start: undefined,
+    },
+  ])("reports $name from the one service reader after resume", async ({ pid, overdue, running, check, start }) => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    const { workdir } = await resolveQueueLocation(repo, "main", process.env)
+    mkdirSync(workdir, { recursive: true })
+    writeFileSync(
+      join(workdir, QUEUE_HEALTH_DOCUMENT),
+      JSON.stringify({
+        schema: QUEUE_HEALTH_SCHEMA,
+        service: SERVICE,
+        state: overdue ? "healthy" : "unhealthy",
+        verdict: { kind: "running" },
+        facts: {
+          writtenAt: new Date(Date.now() - 120_000).toISOString(),
+          staleAfter: new Date(Date.now() + (overdue ? -60_000 : 60_000)).toISOString(),
+          runner: { pid },
+        },
+      }),
+    )
+    const paused = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "repair"], paused.io),
+    ).toBe(0)
+    const resumed = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main", "--json"], resumed.io)).toBe(0)
+    expect((JSON.parse(resumed.stdout()) as { service: unknown }).service).toEqual({
+      running,
+      health: "unhealthy",
+      ...(check === undefined ? {} : { check }),
+      ...(start === undefined ? {} : { start }),
+    })
+    const pausedAgain = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "repair"], pausedAgain.io),
+    ).toBe(0)
+    const line = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main"], line.io)).toBe(0)
+    expect(line.stdout()).toContain(
+      running === null ? "service status is unknown" : running === false ? "service is stopped" : "service is running",
+    )
+    if (overdue) expect(line.stdout()).toContain("hab ps yrd")
+    if (running === null) expect(line.stdout()).toContain("if stopped run hab up yrd")
+  })
+
+  /** @failure A graceful stop document was reported as missing, hiding who stopped the service and why.
+   * @level l2 @consumer queue operator (@i/10-yrd/25816)
+   */
+  it("reports the attributed graceful stop after resume", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    const { workdir } = await resolveQueueLocation(repo, "main", process.env)
+    mkdirSync(workdir, { recursive: true })
+    writeFileSync(
+      join(workdir, QUEUE_HEALTH_DOCUMENT),
+      JSON.stringify(
+        gracefulStopHealthDocument(SERVICE, {
+          by: "@chief",
+          reason: "maintenance",
+          since: new Date(Date.now() - 30_000).toISOString(),
+        }),
+      ),
+    )
+    const paused = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "repair"], paused.io),
+    ).toBe(0)
+    const resumed = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main", "--json"], resumed.io)).toBe(0)
+    expect((JSON.parse(resumed.stdout()) as { service: unknown }).service).toEqual({
+      running: false,
+      health: "absent",
+      start: "hab up yrd",
+    })
+    const pausedAgain = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "repair"], pausedAgain.io),
+    ).toBe(0)
+    const line = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main"], line.io)).toBe(0)
+    expect(line.stdout()).toContain("stopped by @chief")
+    expect(line.stdout()).toContain("maintenance")
+    expect(line.stdout()).toContain("run hab up yrd")
   })
 
   it("keeps an event-queue override on the legacy ref before ops-cutover", async () => {

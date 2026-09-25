@@ -109,14 +109,15 @@ export type RoundLockHolder = Readonly<{
 /**
  * What the SERVICE's own health document says about the loop that publishes it.
  *
- * Four outcomes with four different cures, kept apart for the reason the reader
+ * Five outcomes with different cures, kept apart for the reason the reader
  * itself gives (queue-health.ts): collapsing any two of them is the
  * silent-error shape.
  *
  * - `absent` — no document here. Nothing was started in this workdir, or a hand
  *   `yrd queue run` did the work, which writes no document at all (24523 C5).
  * - `beating` — believable by its OWN deadline, and its writer answers.
- * - `stopped` — past that deadline, or believable with its writer gone.
+ * - `stopped` — graceful stop, or a named writer proven gone.
+ * - `unknown` — past the document's deadline, but its writer is alive or unnamed.
  * - `unreadable` — a file that is there and is not a document. That is a defect
  *   in the WRITER and says nothing about the process, so it decides no word;
  *   the next heartbeat clears it, and until then it is loud on the detail line.
@@ -133,6 +134,7 @@ export type RunnerService =
   // `graceful`: the service wrote its own stop (25430). False is a stop outside one — a SIGKILL, a crash, a
   // silent writer — and its `why` names where the supervisor's record is.
   | Readonly<{ kind: "stopped"; graceful: boolean; why: string; cause: string; since?: Date; stopReason?: string }>
+  | Readonly<{ kind: "unknown"; why: string; cause: string; since?: Date }>
   | Readonly<{ kind: "unreadable"; why: string }>
 
 /**
@@ -230,17 +232,10 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
   if (document.state === "unknown") {
     return { kind: "unreadable", why: document.error?.cause ?? "the health document could not be read" }
   }
-  if (document.error?.code === "queue-round-overdue") {
-    const staleAfter = document.facts?.staleAfter
-    const since = typeof staleAfter === "string" ? new Date(Date.parse(staleAfter)) : undefined
-    return {
-      cause: document.error.cause,
-      graceful: false,
-      kind: "stopped",
-      why: outsideGracefulStop(document),
-      ...(since === undefined || Number.isNaN(since.getTime()) ? {} : { since }),
-    }
-  }
+  const overdue = document.error?.code === "queue-round-overdue" ? document.error : undefined
+  const staleAfter = overdue === undefined ? undefined : document.facts?.staleAfter
+  const deadline = typeof staleAfter === "string" ? new Date(Date.parse(staleAfter)) : undefined
+  const overdueSince = deadline === undefined || Number.isNaN(deadline.getTime()) ? undefined : deadline
   const pid = writerPid(document)
   // Believable, and its writer is gone. A document outlives its writer by up to
   // one heartbeat plus grace, and this is what closes that window: @cto's "no
@@ -252,6 +247,15 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
       graceful: false,
       kind: "stopped",
       why: outsideGracefulStop(document),
+      ...(overdueSince === undefined ? {} : { since: overdueSince }),
+    }
+  }
+  if (overdue !== undefined) {
+    return {
+      cause: overdue.cause,
+      kind: "unknown",
+      why: `the health document is overdue: ${overdue.cause}`,
+      ...(overdueSince === undefined ? {} : { since: overdueSince }),
     }
   }
   const runner = document.facts?.runner as Readonly<Record<string, unknown>> | undefined
@@ -651,8 +655,11 @@ function running(pid: number): boolean {
   try {
     process.kill(pid, 0)
     return true
-  } catch {
-    return false
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ESRCH") return false
+    if (code === "EPERM") return true
+    throw error
   }
 }
 
@@ -668,9 +675,9 @@ function running(pid: number): boolean {
  *    a GIT fact and so is readable from any clone: a stop outranks both a live
  *    check and a missing journal, because a stop halts the line and a row still
  *    marked live under one is the residue of a run that ended.
- * 2. `stopped` — the service's own health document is past the deadline its
- *    WRITER declared, or is believable and names a writer that does not answer.
- *    Not silence, and not a threshold picked here: {@link readRunnerService}.
+ * 2. `stopped` — the reader proved the writer gone, or its document is overdue
+ *    and the watch keeps its prior stopped word for that unmeasured case.
+ *    No deadline is picked here: {@link readRunnerService} reads the writer's.
  * 3. `checking` — a change is under a check RIGHT NOW **and** the document is
  *    believable. THE PREDICATE IS NOT "THE PROCESS EXISTS" (items 1 and 5): it
  *    used to be `facts.latest.alive`, and because the service is a long-running
@@ -725,6 +732,7 @@ export function runnerWord(
   if (stopped !== undefined && stopped !== null) return stopped.change === null ? "paused" : "stuck"
   switch (facts?.service.kind) {
     case "stopped":
+    case "unknown":
       return "stopped"
     case "beating": {
       if (facts.latest?.activeStep !== undefined) {
@@ -734,7 +742,9 @@ export function runnerWord(
           if (step.name === "setup") return "provisioning"
           return "checking"
         }
-        if (step.name === "remove" || step.name === "retain" || step.name === "deprovision" || step.name === "retire") return "deprovisioning"
+        if (step.name === "remove" || step.name === "retain" || step.name === "deprovision" || step.name === "retire") {
+          return "deprovisioning"
+        }
         return "provisioning"
       }
       if (underCheck) return "checking"
@@ -758,7 +768,9 @@ export function runnerWord(
       if (step.name === "setup") return "provisioning"
       return "checking"
     }
-    if (step.name === "remove" || step.name === "retain" || step.name === "deprovision" || step.name === "retire") return "deprovisioning"
+    if (step.name === "remove" || step.name === "retain" || step.name === "deprovision" || step.name === "retire") {
+      return "deprovisioning"
+    }
     return "provisioning"
   }
   if (facts.roundLockHolder !== undefined) return "provisioning"
@@ -916,12 +928,7 @@ function runnerLineOf(
           activeStep.name === "deprovision" ||
           activeStep.name === "retire"
         ) {
-          subphase =
-            activeStep.name === "retain"
-              ? "retaining"
-              : activeStep.name === "retire"
-                ? "retiring"
-                : "removing"
+          subphase = activeStep.name === "retain" ? "retaining" : activeStep.name === "retire" ? "retiring" : "removing"
         } else {
           subphase = stepName
         }
@@ -948,13 +955,8 @@ function runnerLineOf(
         const holder = facts.roundLockHolder
         const holderDate = holder.since ? new Date(holder.since) : undefined
         durationText =
-          holderDate && !Number.isNaN(holderDate.getTime())
-            ? `${word} ${since(holderDate)}`
-            : `${word} 0:00`
-        holdsText =
-          runnerStart !== undefined
-            ? `runner since ${clock(runnerStart)} · ${durationText}`
-            : durationText
+          holderDate && !Number.isNaN(holderDate.getTime()) ? `${word} ${since(holderDate)}` : `${word} 0:00`
+        holdsText = runnerStart !== undefined ? `runner since ${clock(runnerStart)} · ${durationText}` : durationText
       } else if (holding !== undefined) {
         durationText = `${word} ${since(holding.since)}`
         holdsText = `${holding.branch}${holding.subject === undefined ? "" : ` ${holding.subject}`}`
@@ -1000,12 +1002,12 @@ function runnerLineOf(
       // The document's own typed cause when it is the document talking; on the
       // hand-runner edge there is no document, and the journal's detail — which
       // already says `no process` — is what there is.
-      const gone = service?.kind === "stopped" ? service : undefined
+      const gone = service?.kind === "stopped" || service?.kind === "unknown" ? service : undefined
       return {
         ...at,
         detail: gone === undefined ? detail : `${gone.cause} · ${detail}`,
         ...(gone?.since === undefined ? {} : { duration: `${word} ${since(gone.since)}` }),
-        holds: `${gone?.stopReason ?? ""} · start: yrd queue up`,
+        holds: `${gone?.kind === "stopped" ? (gone.stopReason ?? "") : ""} · start: yrd queue up`,
         state,
       }
     }

@@ -182,7 +182,7 @@ import {
   mediaDuration,
   timingLine,
 } from "./watch-format.ts"
-import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
+import { readRunnerFacts, readRunnerService, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
   DEFAULT_WINDOW_MS,
@@ -193,7 +193,7 @@ import {
   type StatsBy,
 } from "./queue-stats.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
-import { readQueueHealth, SERVICE } from "./queue-health.ts"
+import { SERVICE } from "./queue-health.ts"
 
 const START_SERVICE_COMMAND = `hab up ${SERVICE}`
 const CHECK_SERVICE_COMMAND = `hab ps ${SERVICE}`
@@ -971,21 +971,34 @@ export async function coreQueueCommand(
           emit(io, options.json, pause, pauseLine(pause))
           return
         }
-        const health = await readQueueHealth(workdir, SERVICE)
-        const running = health.verdict.kind === "running" ? true : health.verdict.kind === "stopped" ? false : null
+        const status = await readRunnerService(workdir)
+        const running =
+          status.kind === "beating" ? true : status.kind === "stopped" || status.kind === "absent" ? false : null
+        const health =
+          status.kind === "beating"
+            ? status.state
+            : status.kind === "absent" || (status.kind === "stopped" && status.graceful)
+              ? "absent"
+              : status.kind === "unreadable"
+                ? "unknown"
+                : "unhealthy"
         const healthDetail =
-          health.state === "healthy"
-            ? ""
-            : health.state === "absent"
+          status.kind === "beating"
+            ? status.state === "healthy"
+              ? ""
+              : " (unhealthy)"
+            : status.kind === "absent"
               ? " (no health document)"
-              : health.state === "unknown"
+              : status.kind === "unreadable"
                 ? " (unreadable health document)"
-                : " (unhealthy)"
+                : ` (${status.why})`
         const service = {
           running,
-          health: health.state,
+          health,
           ...(running === false ? { start: START_SERVICE_COMMAND } : {}),
-          ...(running === null ? { check: CHECK_SERVICE_COMMAND } : {}),
+          ...(running === null || (status.kind === "stopped" && !status.graceful)
+            ? { check: CHECK_SERVICE_COMMAND }
+            : {}),
         }
         const line =
           running === true
