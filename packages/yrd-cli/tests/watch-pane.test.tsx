@@ -742,7 +742,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
     // One tab per stage (25716 row 3)
     const names = lines.findIndex((line) => /Timeline.*provisioning.*checking.*merging.*deprovisioning/u.test(line))
     expect(names).toBeGreaterThan(-1)
-    expect(lines[names + 1]).toMatch(/cut 1\/1.*✓ passed.*× failed.*− not run.*✓ passed/u)
+    expect(lines[names + 1]).toMatch(/cut 1\/1.*− not journaled.*× failed.*− not run.*− not journaled/u)
     // The failed check's remedy leads its own tab, which the detail opens on.
     expect(text).toContain("@chief — it failed")
   })
@@ -4828,6 +4828,106 @@ describe("termless screenshots for rows 3 to 5 (25716)", () => {
     expect(ansi).toContain("every declared check is off")
     expect(ansi).toContain("skipped: no check worktree was created")
     app.unmount()
+  })
+
+  it("eliminates unearned passed status when stages were not journaled (25716)", async () => {
+    // Probe 3: a change that failed to compose with no journal steps
+    const composeFailed = row({
+      at: NOW,
+      endedAt: NOW,
+      reason: "merge conflict in vendor/yrd",
+      result: "fail",
+      startedAt: new Date(NOW.getTime() - 60_000),
+      state: "failed",
+      submitter: "@dev/9",
+    })
+    const notRunChecks: readonly CheckPanel[] = [
+      { name: "typecheck", spec: { name: "typecheck", run: "bun run typecheck" }, state: "not-run" },
+    ]
+    const detailNoJournal = detailOf({ row: composeFailed }, notRunChecks)
+    const app1 = render(
+      at(
+        <Box width={120} height={28} flexDirection="column" backgroundColor="$bg-surface" padding={1}>
+          <StageBoxes detail={detailNoJournal} />
+        </Box>,
+      ),
+      { cols: 120, rows: 28 },
+    )
+    await settle(app1)
+    const text1 = app1.text
+    expect(text1).toContain("PROVISIONING  not journaled")
+    expect(text1).not.toContain("PROVISIONING  passed")
+    app1.unmount()
+
+    // Probe 4: a merged change with one real check passed, no journal
+    const mergedNoJournal = row({
+      at: NOW,
+      endedAt: NOW,
+      startedAt: new Date(NOW.getTime() - 60_000),
+      state: "merged",
+      submitter: "@dev/9",
+    })
+    const passedChecks: readonly CheckPanel[] = [
+      {
+        log: "/w/checks/typecheck.log",
+        name: "typecheck",
+        result: { exit: "0", log: "/w/checks/typecheck.log", ms: 62_000, result: "pass" },
+        spec: { name: "typecheck", run: "bun run typecheck" },
+        state: "passed",
+      },
+    ]
+    const detailMerged = detailOf({ row: mergedNoJournal }, passedChecks)
+    const app2 = render(
+      at(
+        <Box width={120} height={28} flexDirection="column" backgroundColor="$bg-surface" padding={1}>
+          <StageBoxes detail={detailMerged} />
+        </Box>,
+      ),
+      { cols: 120, rows: 28 },
+    )
+    await settle(app2)
+    const text2 = app2.text
+    expect(text2).toContain("PROVISIONING  not journaled")
+    expect(text2).toContain("MERGING  not journaled")
+    expect(text2).toContain("DEPROVISIONING  not journaled")
+    expect(text2).toContain("CHECKING")
+    expect(text2).toContain("✓ CHECKING  1:02")
+    app2.unmount()
+
+    // Full event journal with steps: all stages pass with their durations
+    const fullJournal: JournalRun = {
+      at: NOW,
+      branch: mergedNoJournal.branch,
+      head: mergedNoJournal.head,
+      id: "run-full",
+      startedAt: new Date(NOW.getTime() - 60_000),
+      checks: [],
+      steps: [
+        { commands: [], name: "compose", phase: "submit", startedAt: new Date(NOW.getTime() - 60_000), endedAt: new Date(NOW.getTime() - 52_000), ms: 8_000 },
+        { commands: [], name: "prepare", phase: "submit", startedAt: new Date(NOW.getTime() - 52_000), endedAt: new Date(NOW.getTime() - 48_000), ms: 4_000 },
+        { commands: [], name: "publish", phase: "merge", startedAt: new Date(NOW.getTime() - 20_000), endedAt: new Date(NOW.getTime() - 17_000), ms: 3_000 },
+        { commands: [], name: "merge", phase: "merge", startedAt: new Date(NOW.getTime() - 17_000), endedAt: new Date(NOW.getTime() - 15_000), ms: 2_000 },
+        { commands: [], name: "notify", phase: "merge", startedAt: new Date(NOW.getTime() - 15_000), endedAt: new Date(NOW.getTime() - 14_000), ms: 1_000 },
+        { commands: [], name: "remove", phase: "deprovision", startedAt: new Date(NOW.getTime() - 14_000), endedAt: new Date(NOW.getTime() - 12_000), ms: 2_000 },
+      ],
+      commands: [],
+    }
+    const detailJournaled = detailOf({ row: mergedNoJournal }, passedChecks, { journal: fullJournal })
+    const app3 = render(
+      at(
+        <Box width={120} height={28} flexDirection="column" backgroundColor="$bg-surface" padding={1}>
+          <StageBoxes detail={detailJournaled} />
+        </Box>,
+      ),
+      { cols: 120, rows: 28 },
+    )
+    await settle(app3)
+    const text3 = app3.text
+    expect(text3).toContain("✓ PROVISIONING  0:12") // 8s + 4s = 12s provisioning
+    expect(text3).toContain("✓ CHECKING  1:02") // 62s checking
+    expect(text3).toContain("✓ MERGING  0:06") // 3s + 2s + 1s = 6s merging
+    expect(text3).toContain("✓ DEPROVISIONING  0:02") // 2s deprovisioning
+    app3.unmount()
   })
 })
 

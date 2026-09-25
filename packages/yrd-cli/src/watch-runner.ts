@@ -730,8 +730,11 @@ export function runnerWord(
       if (facts.latest?.activeStep !== undefined) {
         const step = facts.latest.activeStep
         if (step.phase === "merge") return "merging"
-        if (step.kind === "check") return "checking"
-        if (step.name === "remove" || step.name === "retain" || step.name === "deprovision") return "deprovisioning"
+        if (step.kind === "check") {
+          if (step.name === "setup") return "provisioning"
+          return "checking"
+        }
+        if (step.name === "remove" || step.name === "retain" || step.name === "deprovision" || step.name === "retire") return "deprovisioning"
         return "provisioning"
       }
       if (underCheck) return "checking"
@@ -751,8 +754,11 @@ export function runnerWord(
   if (facts.latest.alive && facts.latest.activeStep !== undefined) {
     const step = facts.latest.activeStep
     if (step.phase === "merge") return "merging"
-    if (step.kind === "check") return "checking"
-    if (step.name === "remove" || step.name === "retain" || step.name === "deprovision") return "deprovisioning"
+    if (step.kind === "check") {
+      if (step.name === "setup") return "provisioning"
+      return "checking"
+    }
+    if (step.name === "remove" || step.name === "retain" || step.name === "deprovision" || step.name === "retire") return "deprovisioning"
     return "provisioning"
   }
   if (facts.roundLockHolder !== undefined) return "provisioning"
@@ -889,7 +895,7 @@ function runnerLineOf(
         durationText = `${word} ${stepElapsed}`
 
         if (activeStep.kind === "check") {
-          subphase = activeStep.name
+          subphase = activeStep.name === "setup" ? "preparing" : activeStep.name
         } else if (activeStep.name === "compose" || activeStep.name === "worktree") {
           subphase = "composing"
         } else if (activeStep.name === "prepare") {
@@ -897,15 +903,25 @@ function runnerLineOf(
         } else if (activeStep.phase === "merge") {
           step = activeStep.name
           subphase =
-            activeStep.name === "publish"
-              ? "publishing"
-              : activeStep.name === "merge"
-                ? "merging"
-                : activeStep.name === "push"
+            activeStep.name === "publish" || activeStep.name === "components"
+              ? "publishing components"
+              : activeStep.name === "merge" || activeStep.name === "push" || activeStep.name === "root"
+                ? "publishing root"
+                : activeStep.name === "notify"
                   ? "notifying"
                   : activeStep.name
-        } else if (activeStep.name === "remove" || activeStep.name === "retain" || activeStep.name === "deprovision") {
-          subphase = activeStep.name === "retain" ? "retaining" : "removing"
+        } else if (
+          activeStep.name === "remove" ||
+          activeStep.name === "retain" ||
+          activeStep.name === "deprovision" ||
+          activeStep.name === "retire"
+        ) {
+          subphase =
+            activeStep.name === "retain"
+              ? "retaining"
+              : activeStep.name === "retire"
+                ? "retiring"
+                : "removing"
         } else {
           subphase = stepName
         }

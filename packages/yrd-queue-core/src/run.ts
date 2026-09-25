@@ -256,7 +256,7 @@ export type QueueRunOutcome = Readonly<{
   noCheck?: boolean
 }>
 
-/** True when every declared check is off (--no-check, checks declared run "true", or no checks) (25716 row 5). */
+/** True when every declared check is off (--no-check, or all checks declared run "true") (25716 row 5). When no checks are declared, returns false so any declared setup can still run. */
 export function allDeclaredChecksOff(options: QueueRunOptions): boolean {
   if (options.noCheck === true) return true
   if (options.checks.length === 0) return false
@@ -1521,7 +1521,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     return "checked"
   } finally {
     if (worktree !== undefined) {
-      await worktree.remove()
+      await timedStep(run.log, { branch, head, name: "remove", phase: "deprovision" }, () => worktree.remove())
     }
   }
 }
@@ -1546,7 +1546,7 @@ type ComposedCandidate =
  * compose is one git-super process whose settle rows are written only after it
  * returns; without these rows it was a 20 to 28 s silence on the garage.
  */
-async function timedStep<T>(
+export async function timedStep<T>(
   log: Pick<QueueRunLog, "write">,
   about: Readonly<
     { name: string; phase: string } & ({ branch: string; head: string } | { target: string; base: string })
@@ -2613,13 +2613,17 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     })
     run.log.write({ branch, decision: "merged", head, kind: "change" })
     if (rootChanges !== undefined) await cleanupRootChanges(run.git, rootChanges, mergedRecord)
-    await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
-    await deleteMergedBranch(run, entry)
+    await timedStep(run.log, { branch, head, name: "notify", phase: "merge" }, () =>
+      run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord),
+    )
+    await timedStep(run.log, { branch, head, name: "retire", phase: "deprovision" }, () =>
+      deleteMergedBranch(run, entry),
+    )
     return "merged"
   } finally {
     if (worktree !== undefined) {
       if (retained === undefined) {
-        await worktree.remove()
+        await timedStep(run.log, { branch, head, name: "remove", phase: "deprovision" }, () => worktree.remove())
       } else {
         // Say where it is, in the journal that is always written, or a retained
         // root is just disk nobody knows to read.
