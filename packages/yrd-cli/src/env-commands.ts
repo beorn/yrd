@@ -135,6 +135,13 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     await freshWorktree(git, root, base, path)
     provisioned = { path, headSha: base, baseSha: base }
   } else {
+    const shadow = await branchPathConflict(git, branch)
+    if (shadow !== undefined) {
+      throw new Error(
+        `yrd env open: branch ${branch} cannot exist beside branch ${shadow}, because git stores a branch as a path; ` +
+          `name the environment flat with --bay <name>${options.issue === undefined ? "" : ` --issue ${options.issue}`}`,
+      )
+    }
     const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(), process })
     const result = await workspace.provision({ bay: name, name, branch, base })
     if (result.conclusion !== "success") {
@@ -355,4 +362,10 @@ export async function closeEnvironment(
   }
   io.stdout(options.json === true ? `${JSON.stringify({ closed: path })}\n` : `closed environment ${path}\n`)
   return 0
+}
+
+/** A local branch whose path contains `branch`, or sits inside it: git can store only one of the two (25850). */
+async function branchPathConflict(git: Git, branch: string): Promise<string | undefined> {
+  const branches = (await git(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])).split("\n")
+  return branches.find((name) => name !== "" && (branch.startsWith(`${name}/`) || name.startsWith(`${branch}/`)))
 }
