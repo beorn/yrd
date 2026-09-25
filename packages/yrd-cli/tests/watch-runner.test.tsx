@@ -26,6 +26,7 @@ import {
   type RunnerFacts,
   type RunnerService,
 } from "../src/watch-runner.ts"
+import { runnerStatusWord } from "../src/watch-list.tsx"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
@@ -812,6 +813,8 @@ describe("the runner's row", () => {
       const mergeLine = runnerLine(mergeStep, NOW, {})
       expect(mergeLine.state).toBe("merging")
       expect(mergeLine.step).toBe("merge")
+      expect(mergeLine.subphase).toBe("publishing root")
+      expect(runnerStatusWord(mergeLine)).toBe("merging · publishing root")
       expect(mergeLine.holds).toBe("merging task/land@111122223333: merge")
       expect(mergeLine.duration).toBe("merging 0:15")
       expect(mergeLine.detail).toContain("off, off, off")
@@ -827,8 +830,36 @@ describe("the runner's row", () => {
       const publishLine = runnerLine(publishStep, NOW, {})
       expect(publishLine.state).toBe("merging")
       expect(publishLine.step).toBe("publish")
+      expect(publishLine.subphase).toBe("publishing components")
+      expect(runnerStatusWord(publishLine)).toBe("merging · publishing components")
       expect(publishLine.holds).toBe("merging task/land@111122223333: publish")
       expect(publishLine.duration).toBe("merging 0:05")
+
+      const pushStep = factsWithStep({
+        branch: "task/land",
+        head: "1111222233334444555566667777888899990000",
+        kind: "step",
+        name: "push",
+        phase: "merge",
+        start: new Date(NOW.getTime() - 3_000),
+      })
+      const pushLine = runnerLine(pushStep, NOW, {})
+      expect(pushLine.state).toBe("merging")
+      expect(pushLine.subphase).toBe("publishing root")
+      expect(runnerStatusWord(pushLine)).toBe("merging · publishing root")
+
+      const notifyStep = factsWithStep({
+        branch: "task/land",
+        head: "1111222233334444555566667777888899990000",
+        kind: "step",
+        name: "notify",
+        phase: "merge",
+        start: new Date(NOW.getTime() - 1_000),
+      })
+      const notifyLine = runnerLine(notifyStep, NOW, {})
+      expect(notifyLine.state).toBe("merging")
+      expect(notifyLine.subphase).toBe("notifying")
+      expect(runnerStatusWord(notifyLine)).toBe("merging · notifying")
 
       const readStep = factsWithStep({
         kind: "step",
@@ -840,6 +871,88 @@ describe("the runner's row", () => {
       expect(readLine.state).toBe("provisioning")
       expect(readLine.holds).toBe("between entries: re-reading main")
       expect(readLine.duration).toBe("provisioning 0:02")
+    })
+
+    it("formats setup check as provisioning · preparing (25716)", () => {
+      const factsWithCheck = (check: NonNullable<NonNullable<RunnerFacts["latest"]>["activeStep"]>): RunnerFacts => ({
+        journalDir: "/w/logs",
+        service: BEATING,
+        latest: {
+          activeStep: check,
+          alive: true,
+          effectiveChecks: ["vitest", "typecheck"],
+          id: "q-setup",
+          lastWriteAt: NOW,
+          startedAt: NOW,
+        },
+      })
+
+      const setupStep = factsWithCheck({
+        branch: "task/setup",
+        head: "abcdef0123456789abcdef0123456789abcdef01",
+        kind: "check",
+        name: "setup",
+        phase: "submit",
+        start: new Date(NOW.getTime() - 10_000),
+      })
+      const setupLine = runnerLine(setupStep, NOW, {})
+      expect(setupLine.state).toBe("provisioning")
+      expect(setupLine.subphase).toBe("preparing")
+      expect(runnerStatusWord(setupLine)).toBe("provisioning · preparing")
+    })
+
+    it("formats deprovisioning remove, retain, and retire (25716)", () => {
+      const factsWithStep = (step: NonNullable<NonNullable<RunnerFacts["latest"]>["activeStep"]>): RunnerFacts => ({
+        journalDir: "/w/logs",
+        service: BEATING,
+        latest: {
+          activeStep: step,
+          alive: true,
+          effectiveChecks: ["off", "off", "off"],
+          id: "q-deprov",
+          lastWriteAt: NOW,
+          startedAt: NOW,
+        },
+      })
+
+      const removeStep = factsWithStep({
+        branch: "task/cleanup",
+        head: "1111222233334444555566667777888899990000",
+        kind: "step",
+        name: "remove",
+        phase: "deprovision",
+        start: new Date(NOW.getTime() - 4_000),
+      })
+      const removeLine = runnerLine(removeStep, NOW, {})
+      expect(removeLine.state).toBe("deprovisioning")
+      expect(removeLine.subphase).toBe("removing")
+      expect(runnerStatusWord(removeLine)).toBe("deprovisioning · removing")
+
+      const retainStep = factsWithStep({
+        branch: "task/cleanup",
+        head: "1111222233334444555566667777888899990000",
+        kind: "step",
+        name: "retain",
+        phase: "deprovision",
+        start: new Date(NOW.getTime() - 2_000),
+      })
+      const retainLine = runnerLine(retainStep, NOW, {})
+      expect(retainLine.state).toBe("deprovisioning")
+      expect(retainLine.subphase).toBe("retaining")
+      expect(runnerStatusWord(retainLine)).toBe("deprovisioning · retaining")
+
+      const retireStep = factsWithStep({
+        branch: "task/cleanup",
+        head: "1111222233334444555566667777888899990000",
+        kind: "step",
+        name: "retire",
+        phase: "deprovision",
+        start: new Date(NOW.getTime() - 1_000),
+      })
+      const retireLine = runnerLine(retireStep, NOW, {})
+      expect(retireLine.state).toBe("deprovisioning")
+      expect(retireLine.subphase).toBe("retiring")
+      expect(runnerStatusWord(retireLine)).toBe("deprovisioning · retiring")
     })
 
     it("formats runner line when round lock is held between rounds (never warning, 25630)", () => {

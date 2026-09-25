@@ -297,6 +297,9 @@ export function stageInfo(
   if (stage === "provisioning") {
     const compose = steps.find((s) => s.name === "compose")
     const prepare = steps.find((s) => s.name === "prepare")
+    if (compose === undefined && prepare === undefined) {
+      return { said: " not journaled", state: "not-run" }
+    }
     const threw = compose?.threw === true || prepare?.threw === true
     const running =
       (compose !== undefined && compose.endedAt === undefined) ||
@@ -305,7 +308,7 @@ export function stageInfo(
     const state: CheckView["state"] = threw ? "failed" : running ? "running" : "passed"
     return {
       ms: ms > 0 ? ms : undefined,
-      said: running ? undefined : ms > 0 ? ` ${mediaDuration(ms)}` : " passed",
+      said: running ? undefined : threw ? (ms > 0 ? ` ${mediaDuration(ms)}` : " failed") : ms > 0 ? ` ${mediaDuration(ms)}` : " passed",
       since: running ? (compose?.startedAt ?? prepare?.startedAt) : undefined,
       state,
     }
@@ -339,8 +342,15 @@ export function stageInfo(
       (merge !== undefined && merge.endedAt === undefined) ||
       (notify !== undefined && notify.endedAt === undefined)
     const ms = (publish?.ms ?? 0) + (merge?.ms ?? 0) + (notify?.ms ?? 0)
-    if (running) return { since: merge?.startedAt ?? publish?.startedAt, state: "running" }
+    if (running) return { since: merge?.startedAt ?? publish?.startedAt ?? notify?.startedAt, state: "running" }
+    const threw = publish?.threw === true || merge?.threw === true || notify?.threw === true
+    if (threw) {
+      return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " failed", state: "failed" }
+    }
     if (detail.row.state === "merged") {
+      if (publish === undefined && merge === undefined && notify === undefined) {
+        return { said: " not journaled", state: "not-run" }
+      }
       return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
     }
     return { said: " not run", state: "not-run" }
@@ -351,8 +361,15 @@ export function stageInfo(
     const running =
       (remove !== undefined && remove.endedAt === undefined) || (retire !== undefined && retire.endedAt === undefined)
     const ms = (remove?.ms ?? 0) + (retire?.ms ?? 0)
-    if (running) return { since: remove?.startedAt, state: "running" }
+    if (running) return { since: remove?.startedAt ?? retire?.startedAt, state: "running" }
+    const threw = remove?.threw === true || retire?.threw === true
+    if (threw) {
+      return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " failed", state: "failed" }
+    }
     if (detail.row.state === "merged" || detail.row.state === "failed") {
+      if (remove === undefined && retire === undefined) {
+        return { said: " not journaled", state: "not-run" }
+      }
       return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
     }
     return { said: " not run", state: "not-run" }
