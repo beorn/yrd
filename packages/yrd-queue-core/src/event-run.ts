@@ -712,9 +712,10 @@ export async function eventQueueRun(
       // Stage/write failures have no candidate event to reconcile and must
       // keep their original error. Only a publication attempt can be unknown.
       if (preparedMerge === undefined && !(error instanceof Conflict)) throw error
-      // A lease refusal on the target or queue tip is an authority change,
-      // not a transport failure on this change chain.
-      if (error instanceof Conflict && !error.refs.includes(ref)) throw error
+      // A lease refusal on the queue tip is an authority change, not a transport
+      // failure on this change chain. A lost target lease is the root race the
+      // moved-target branch below records as `verifying` and retries.
+      if (error instanceof Conflict && !error.refs.includes(ref) && !error.refs.includes(targetRef)) throw error
       let after: EventChange
       try {
         const present = (await listRefs(ref, store)).get(ref)
