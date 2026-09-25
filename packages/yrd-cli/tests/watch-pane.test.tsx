@@ -4799,12 +4799,7 @@ describe("bead 25630 watch rulings", () => {
     startedAt: new Date(NOW.getTime() - 30_000),
     state: "failed",
   })
-  const beadRows: WatchRow[] = [
-    { row: openRow },
-    { row: runningRow },
-    { row: doneRow },
-    { row: failedChange },
-  ]
+  const beadRows: WatchRow[] = [{ row: openRow }, { row: runningRow }, { row: doneRow }, { row: failedChange }]
 
   describe("row 20: filter toggles on line 2 and STATS counting active set", () => {
     it("key path: letter key 'o' flips open toggle and updates STATS to active set", async () => {
@@ -5130,4 +5125,3 @@ describe("bead 25630 watch rulings", () => {
     })
   })
 })
-

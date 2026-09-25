@@ -308,7 +308,15 @@ export function stageInfo(
     const state: CheckView["state"] = threw ? "failed" : running ? "running" : "passed"
     return {
       ms: ms > 0 ? ms : undefined,
-      said: running ? undefined : threw ? (ms > 0 ? ` ${mediaDuration(ms)}` : " failed") : ms > 0 ? ` ${mediaDuration(ms)}` : " passed",
+      said: running
+        ? undefined
+        : threw
+          ? ms > 0
+            ? ` ${mediaDuration(ms)}`
+            : " failed"
+          : ms > 0
+            ? ` ${mediaDuration(ms)}`
+            : " passed",
       since: running ? (compose?.startedAt ?? prepare?.startedAt) : undefined,
       state,
     }
