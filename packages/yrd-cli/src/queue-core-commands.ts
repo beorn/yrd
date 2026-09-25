@@ -3858,12 +3858,11 @@ export function endingCode(states: readonly Row["state"][]): YrdCliExitCode | un
 /** Preserve the run selected by this row's join, including the collapsed latest lens. */
 function journalFor(item: WatchRow, journals: Journals): JournalRun | undefined {
   if (item.run !== undefined) return item.run
+  const runId = item.row.run ?? item.row.live?.run
+  if (runId === undefined) return undefined
   const runs = journals.runs.get(journalKey(item.row.branch, item.row.head))
   if (runs === undefined || runs.length === 0) return undefined
-  if (item.row.run !== undefined) {
-    return runs.find((run) => run.id === item.row.run)
-  }
-  return runs.at(-1)
+  return runs.find((run) => run.id === runId)
 }
 
 /**
