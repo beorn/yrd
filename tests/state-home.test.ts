@@ -17,6 +17,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { gitIn } from "@yrd/queue-core"
 import { parseQueueAddress, queueRoot } from "../packages/yrd-cli/src/address.ts"
 import { resolveQueueLocation } from "../packages/yrd-cli/src/queue-location.ts"
+import { pinYrdTestStateHome } from "./support/state-home.ts"
 
 const REAL_STATE_HOME = join(homedir(), ".local", "state")
 const roots: string[] = []
@@ -45,15 +46,48 @@ async function fixtureWithoutWorkdir(): Promise<string> {
   return work
 }
 
+/**
+ * The pin is the throwaway root the config named (YRD_TEST_STATE_ROOT), never the operator's real state home or
+ * bun cache. Where that root sits follows the Vitest main process's temp directory, which is not always outside
+ * $HOME: post-merge-tests starts Vitest with TMPDIR under $HOME/.cache (tools/affected-tests.ts, vitestOwnTmpDir),
+ * and a "not under $HOME" rule failed both rows there while the pin was correct (post-merge-tests run c0b9b560,
+ * 2026-09-25).
+ */
+function expectThrowawayPin(stateHome: string | undefined, bunCache: string | undefined): void {
+  const root = process.env.YRD_TEST_STATE_ROOT
+  expect(root, "YRD_TEST_STATE_ROOT is unset: the config did not pin").toBeDefined()
+  expect(stateHome).toBe(join(root!, "state"))
+  expect(bunCache).toBe(join(root!, "bun-install-cache"))
+  for (const real of [REAL_STATE_HOME, join(homedir(), ".bun")]) {
+    expect(root === real || root!.startsWith(real + "/"), `the pinned root ${root} is inside ${real}`).toBe(false)
+  }
+}
+
 describe("25256 yrd tests never resolve the real state home", () => {
   it("pins XDG_STATE_HOME and the bun install cache to a throwaway root", () => {
     const stateHome = process.env.XDG_STATE_HOME
     expect(stateHome, "XDG_STATE_HOME is unset: the state-home setup did not run").toBeDefined()
     expect(stateHome).not.toBe(REAL_STATE_HOME)
-    expect(stateHome!.startsWith(homedir() + "/")).toBe(false)
     const bunCache = process.env.BUN_INSTALL_CACHE_DIR
     expect(bunCache, "BUN_INSTALL_CACHE_DIR is unset: a bun install fixture would fill ~/.bun").toBeDefined()
-    expect(bunCache!.startsWith(join(homedir(), ".bun"))).toBe(false)
+    expectThrowawayPin(stateHome, bunCache)
+  })
+
+  it("a temp directory under $HOME still pins a throwaway root, never the real state home (the guard's shape)", () => {
+    const saved = process.env.TMPDIR
+    const env: NodeJS.ProcessEnv = {}
+    try {
+      process.env.TMPDIR = join(homedir(), ".cache", "km-vitest", "tmp")
+      pinYrdTestStateHome(env)
+    } finally {
+      if (saved === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = saved
+    }
+    const root = env.YRD_TEST_STATE_ROOT!
+    expect(root.startsWith(join(homedir(), ".cache", "km-vitest", "tmp") + "/"), root).toBe(true)
+    expect(env.XDG_STATE_HOME).toBe(join(root, "state"))
+    expect(env.XDG_STATE_HOME!.startsWith(REAL_STATE_HOME + "/")).toBe(false)
+    expect(env.BUN_INSTALL_CACHE_DIR!.startsWith(join(homedir(), ".bun") + "/")).toBe(false)
   })
 
   it("a bare Bun.spawn child sees the pin: the worker's startup environ carries it", async () => {
@@ -68,8 +102,8 @@ describe("25256 yrd tests never resolve the real state home", () => {
     expect(exit).toBe(0)
     const [stateHome, bunCache] = seen.split("\n")
     expect(stateHome).toBe(process.env.XDG_STATE_HOME)
-    expect(stateHome!.startsWith(homedir() + "/")).toBe(false)
     expect(bunCache).toBe(process.env.BUN_INSTALL_CACHE_DIR)
+    expectThrowawayPin(stateHome, bunCache)
   })
 
   it("a fixture with no yrd.workdir gets its queue-owned clone under the pinned root, not the real home", async () => {
