@@ -1193,6 +1193,20 @@ describe("the running step and the check-less declaration", () => {
     expect(text).toContain("Timeline")
   })
 
+  it("puts a migrated change's retained evidence in the Checking stage", async () => {
+    const source = "refs/yrd/main/task/old@head@record"
+    const detail = detailOf({ row: row() }, [], {
+      note: `Migrated change has no check-step detail. Retained legacy record: ${source}. Old check logs: /tmp/checks/task/old@head.`,
+    })
+    const timeline = await paint(at(<WatchDetail detail={detail} selected={CHANGES_TAB} />))
+    const checking = await paint(at(<WatchDetail detail={detail} selected="checking" />))
+
+    expect(timeline).toContain("Migrated change has no check-step detail")
+    expect(timeline).not.toContain(source)
+    expect(checking).toContain(source)
+    expect(checking).toContain("/tmp/checks/task/old@head.")
+  })
+
   it("gives a direct row's box its one line about the commit where a subject would stand", async () => {
     const direct = row({
       branch: "main",
