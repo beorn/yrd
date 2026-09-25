@@ -27,7 +27,7 @@
  */
 
 import React, { memo } from "react"
-import { Box, Pulse, Text } from "silvery"
+import { Box, Pulse, Text, TogglePill } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import { TimeText } from "./watch-primitives.tsx"
@@ -158,17 +158,18 @@ export function taskExtrasLayout(
   taskWidth: number,
   branch: string,
   suffixText: string | undefined,
+  titleLength?: number,
 ): Readonly<{
   minTitle: number
   displayBranch: string
   displaySuffix?: string
 }> {
-  const minTitle = Math.ceil(taskWidth / 3)
+  const minTitle =
+    titleLength !== undefined ? Math.min(titleLength, Math.ceil(taskWidth / 3)) : Math.ceil(taskWidth / 3)
   const maxAllowedBranch = Math.max(1, Math.floor(taskWidth * 0.5) - 1)
   const maxAllowedSuffix = Math.max(1, Math.floor(taskWidth * 0.5) - 3)
 
-  let displayBranch =
-    branch.length > maxAllowedBranch ? truncateWithEllipsis(branch, maxAllowedBranch) : branch
+  let displayBranch = branch.length > maxAllowedBranch ? truncateWithEllipsis(branch, maxAllowedBranch) : branch
 
   let displaySuffix =
     suffixText === undefined
@@ -186,9 +187,7 @@ export function taskExtrasLayout(
     if (branchWidth <= halfBudget) {
       const suffixBudget = maxExtrasBudget - branchWidth
       displaySuffix =
-        suffixText !== undefined && suffixBudget > 3
-          ? truncateWithEllipsis(suffixText, suffixBudget - 3)
-          : undefined
+        suffixText !== undefined && suffixBudget > 3 ? truncateWithEllipsis(suffixText, suffixBudget - 3) : undefined
     } else if (suffixWidth <= halfBudget) {
       const branchBudget = maxExtrasBudget - suffixWidth
       displayBranch = branchBudget > 1 ? truncateWithEllipsis(branch, branchBudget - 1) : ""
@@ -197,9 +196,7 @@ export function taskExtrasLayout(
       const suffixBudget = maxExtrasBudget - branchBudget
       displayBranch = branchBudget > 1 ? truncateWithEllipsis(branch, branchBudget - 1) : ""
       displaySuffix =
-        suffixText !== undefined && suffixBudget > 3
-          ? truncateWithEllipsis(suffixText, suffixBudget - 3)
-          : undefined
+        suffixText !== undefined && suffixBudget > 3 ? truncateWithEllipsis(suffixText, suffixBudget - 3) : undefined
     }
   }
 
@@ -253,7 +250,7 @@ export function listLayout(
     ...rows.map((item) => ageRunText(item.row, now).length),
   )
   const fixedExceptQ = timeWidth + statusWidth + agentWidth + (separate ? runWidth : 0) + ageRunWidth + 8
-  const maxAvailableForQ = Math.max(16, columns - fixedExceptQ - 56)
+  const maxAvailableForQ = Math.max(16, columns - fixedExceptQ - 60)
   const qWidth = separate
     ? fullQueue
       ? Math.max(16, Math.min(queue.label.length, maxAvailableForQ))
@@ -271,9 +268,7 @@ export function listLayout(
   const fixedNonTask =
     timeWidth +
     1 +
-    (separate
-      ? (qWidth > 0 ? qWidth + 1 : 0) + (runWidth > 0 ? runWidth + 1 : 0)
-      : queueRunWidth + 1) +
+    (separate ? (qWidth > 0 ? qWidth + 1 : 0) + (runWidth > 0 ? runWidth + 1 : 0) : queueRunWidth + 1) +
     1 +
     statusWidth +
     (agentWidth > 0 ? 1 + agentWidth : 0) +
@@ -370,15 +365,12 @@ export function TopLine({
 
   const timerText = typeof status.timer === "string" ? toHms(status.timer) : status.timer
   const timerLen = typeof timerText === "string" ? timerText.length : timerText !== undefined ? 8 : 0
-  const statusParts = [
-    timerLen,
-    status.reason ? status.reason.length : 0,
-  ].filter((n) => n > 0)
+  const statusParts = [timerLen, status.reason ? status.reason.length : 0].filter((n) => n > 0)
   const statusGaps = Math.max(0, statusParts.length - 1)
   const statusRightLen = statusParts.reduce((a, b) => a + b, 0) + statusGaps
 
   const runnerDigitsLen = showRunnerDigits
-    ? (queues ?? []).map((_, i) => 3).reduce((a, b) => a + b, 0) + ((queues?.length ?? 0) - 1) + 1
+    ? (queues ?? []).map(() => 3).reduce((a, b) => a + b, 0) + ((queues?.length ?? 0) - 1) + 1
     : 0
   const leftPrefixLen = 1 + 1 + 1 + runnerDigitsLen + 10
   const availableForAddress =
@@ -411,7 +403,7 @@ export function TopLine({
           )}
         </Box>
         {showRunnerDigits
-          ? queues!.map((_, index) => (
+          ? (queues ?? []).map((_, index) => (
               <Text key={index} color="$fg-on-inverse-muted" flexShrink={0}>
                 [{index + 1}]
               </Text>
@@ -448,27 +440,16 @@ export function TopLine({
 }
 
 /**
- * Filter pills on the plain surface (25630, 25716).
- * Uses muted ($fg-muted) when active, and extra-muted ($border-default) when inactive.
- * No bold, no yellow (25716 row 31).
+ * Wraps text into at most two lines by column width, breaking at spaces when possible,
+ * without truncating the second line (25630 Row 21).
  */
-function TopPill({
-  label,
-  active,
-  onToggle,
-}: {
-  label: string
-  active: boolean
-  onToggle: () => void
-  boldFirstLetter?: boolean
-  activeTreatment?: "accentText" | "warningText"
-}) {
-  const color = active ? "$fg-muted" : "$border-default"
-  return (
-    <Box flexShrink={0} onClick={onToggle}>
-      <Text color={color}>{label}</Text>
-    </Box>
-  )
+export function wrapTwoLines(text: string, width: number): readonly [string, string?] {
+  if (width <= 0 || text.length <= width) return [text]
+  const spaceIdx = text.lastIndexOf(" ", width)
+  const splitIdx = spaceIdx > 0 ? spaceIdx : width
+  const line1 = text.slice(0, splitIdx).trimEnd()
+  const line2 = text.slice(splitIdx).trimStart()
+  return line2.length > 0 ? [line1, line2] : [line1]
 }
 
 /** Which drafts a reading lists: those committed in the last seven days, or every one. */
@@ -626,9 +607,14 @@ export const ListRow = memo(function ListRow({
     row.state === "stuck" &&
     suffix !== undefined &&
     ((layout.columns ?? 120) < 100 ||
-      taskExtrasLayout(computedTaskWidth, row.branch, suffix.text).displaySuffix !== suffix.text)
+      taskExtrasLayout(computedTaskWidth, row.branch, suffix.text, shownTitle.length).displaySuffix !== suffix.text)
   const inlineSuffix = suffix === undefined || separateLineSuffix ? undefined : suffix.text
-  const { displayBranch, displaySuffix } = taskExtrasLayout(computedTaskWidth, row.branch, inlineSuffix)
+  const { displayBranch, displaySuffix } = taskExtrasLayout(
+    computedTaskWidth,
+    row.branch,
+    inlineSuffix,
+    shownTitle.length,
+  )
   return (
     <Box
       flexDirection="column"
@@ -779,7 +765,7 @@ export function RunnerRow({
   queueDigit?: number
   queueLabel?: string
 }) {
-  const { color, word } = STATE_WORDS[line.state]
+  const { color } = STATE_WORDS[line.state]
   const forced = cursor ? "$fg-on-selected" : undefined
   const timeText = line.at !== undefined ? clock(line.at) : "—"
   const parsed = splitRunnerCure(line.holds)
@@ -800,6 +786,7 @@ export function RunnerRow({
           : parsed.cure.startsWith("to ")
             ? parsed.cure
             : `to ${parsed.cure}`
+  const [taskLine1, taskLine2] = wrapTwoLines(displayText, layout.taskWidth ?? 40)
   return (
     <Box flexDirection="column" minWidth={0} width="100%" backgroundColor={cursor ? "$bg-selected" : undefined}>
       <Cells layout={layout}>
@@ -810,8 +797,8 @@ export function RunnerRow({
           queueRun: null,
           task: (
             <Box flexDirection="row" minWidth={0} overflow="hidden">
-              <Text color={forced ?? color} wrap="truncate" minWidth={0}>
-                {displayText}
+              <Text color={forced ?? color} minWidth={0}>
+                {taskLine1}
               </Text>
             </Box>
           ),
@@ -838,6 +825,24 @@ export function RunnerRow({
           ),
         }}
       </Cells>
+      {taskLine2 === undefined ? null : (
+        <Cells layout={layout}>
+          {{
+            time: null,
+            q: null,
+            run: null,
+            queueRun: null,
+            task: (
+              <Text color={forced ?? color} minWidth={0}>
+                {taskLine2}
+              </Text>
+            ),
+            status: null,
+            agent: null,
+            ageRun: null,
+          }}
+        </Cells>
+      )}
       {cureText === undefined ? null : (
         <Cells layout={layout}>
           {{
@@ -846,7 +851,7 @@ export function RunnerRow({
             run: null,
             queueRun: null,
             task: (
-              <Text color={forced ?? color} wrap="truncate" minWidth={0}>
+              <Text color={forced ?? color} minWidth={0}>
                 {cureText}
               </Text>
             ),
@@ -918,23 +923,26 @@ function Cells({
   )
 }
 
-/** Status pills, right-aligned. Independent toggles; no All pill (ia.md). `a` still shows every status. */
+/** Status pills, right-aligned. Independent toggles on silvery's TogglePill (25630 Row 20). `a` still shows every status. */
 export function StatusPills({
   buckets,
+  onToggle,
   onSelectOnly,
 }: {
   buckets: ReadonlySet<StatusBucket>
-  onSelectOnly: (bucket: StatusBucket) => void
+  onToggle?: (bucket: StatusBucket) => void
+  onSelectOnly?: (bucket: StatusBucket) => void
 }) {
+  const handleToggle = onToggle ?? onSelectOnly ?? (() => {})
   return (
-    <Box height={1} flexDirection="row" justifyContent="flex-end" minWidth={0} overflow="hidden" gap={1}>
+    <Box height={1} flexShrink={0} flexDirection="row" justifyContent="flex-end" minWidth={0} overflow="hidden" gap={1}>
       {BUCKETS.map((bucket) => (
-        <TopPill
+        <TogglePill
           key={bucket}
           label={`[${bucket.slice(0, 1)}]${bucket.slice(1)}`}
           active={buckets.has(bucket)}
           onToggle={() => {
-            onSelectOnly(bucket)
+            handleToggle(bucket)
           }}
         />
       ))}

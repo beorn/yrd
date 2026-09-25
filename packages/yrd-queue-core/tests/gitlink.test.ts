@@ -412,7 +412,9 @@ it("re-verifies an event after a root race and finishes without another child up
   expect(first).toMatchObject({ exitCode: 0, deferred: ["task/event-root-race"], merged: [], stuck: [] })
   expect(await remoteTip(w.git, "refs/heads/main")).toBe(movedAround)
   expect(await submoduleMain(w)).toBe(ahead)
-  expect((await readStatus(eventStore(w), "main", "task/event-root-race")).status).toBe("verifying")
+  const raced = await readStatus(eventStore(w), "main", "task/event-root-race")
+  expect(raced.status).toBe("verifying")
+  expect(raced.reason).toContain("lease lost on refs/heads/main")
 
   await using real = createProcess({ cwd: w.work })
   const childUpdates: string[] = []

@@ -1221,12 +1221,12 @@ describe("yrd queue list, the table", () => {
     // Compact: the list's row names the incident by its code, in the status
     // suffix the pane draws (`stuck=<code>`, @cto 07b07f37); the sentence
     // itself is `show`'s, below. The status word appears once, in STATUS.
-    const listedLine = listedText
-      .stdout()
-      .split("\n")
-      .find((line) => line.includes("task/incident"))
+    // Since 25716 row 31 (e364d816df) the suffix sits on the row's own second line, under the branch.
+    const listedLines = listedText.stdout().split("\n")
+    const at = listedLines.findIndex((line) => line.includes("task/incident"))
+    const listedLine = at < 0 ? undefined : listedLines[at]
     expect(listedLine, listedText.stdout()).toBeDefined()
-    expect(listedLine, listedText.stdout()).toContain(`stuck=${incident.code}`)
+    expect(`${listedLine}\n${listedLines[at + 1] ?? ""}`, listedText.stdout()).toContain(`stuck=${incident.code}`)
     expect(listedLine).toMatch(/◌ stuck\b/u)
     expect(listedText.stdout()).not.toContain("THE-END-OF-THE-INCIDENT")
 

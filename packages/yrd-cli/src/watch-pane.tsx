@@ -118,7 +118,7 @@ import {
 } from "./watch-frame.tsx"
 import { TimeText } from "./watch-primitives.tsx"
 import type { RunnerFacts, RunnerLine } from "./watch-runner.ts"
-import { lastDayBucket, statsSummary, type RunDecision } from "./watch-stats.ts"
+import { decisionsOfRows, lastDayBucket, statsSummary, type RunDecision } from "./watch-stats.ts"
 
 export type WatchPaneItem =
   | { kind: "row"; item: WatchRow; key: string }
@@ -231,7 +231,7 @@ const HELP = [
   "Enter/Space  open the change                   Escape   close it, or this help",
   "Home         follow the newest rows again      ←/→      move between the tabs",
   "v            fold the diff open or shut        1-9      toggle a queue",
-  "o r d f      show one status; O R D F toggle   a        show everything",
+  "o r d f      toggle status filter              a        show everything",
   "s            expand or fold STATS              w        drafts of 7d, or every draft",
   "g            the RUNNER box, then the top      G        the bottom",
   "The watch writes nothing. Stop a change by moving its ref or pausing the queue.",
@@ -369,14 +369,6 @@ export function WatchPane({
   // bands are applied HERE, before the cursor and the detail read an index, so
   // every one of them addresses the sequence the reader is looking at.
   const runner = runnerOf(shown, shown.at)
-  // The STATS line (25416): what is in hand now, then the last 24 hours, from the one bucket derivation.
-  // With no journal read, the snapshot's decisions are an empty list nobody
-  // measured (25520): they read as unmeasured, never as zero merges.
-  const decisions = shown.journalAbsent === undefined ? shown.decisions : undefined
-  const statsLine = statsSummary(
-    { drafts: draftsSaid(shown.rows, shown.drafts), waiting: lineOf(shown.unfiltered).waiting.length },
-    decisions === undefined ? undefined : lastDayBucket(decisions, shown.at),
-  )
   const visible = bandedRows(
     shown.rows.filter(
       (item) =>
@@ -384,6 +376,16 @@ export function WatchPane({
         (visibleQueues === undefined || shown.queues.length === 0 || visibleQueues.has(shown.queues[0]?.label ?? "")),
     ),
     false,
+  )
+  // The STATS line (25416): what is in hand now, then the last 24 hours, from the one bucket derivation.
+  // With no journal read, the snapshot's decisions are an empty list nobody
+  // measured (25520): they read as unmeasured, never as zero merges.
+  // Row 20: STATS counts the active set (visible).
+  const decisions =
+    shown.journalAbsent === undefined && shown.decisions !== undefined ? decisionsOfRows(visible) : undefined
+  const statsLine = statsSummary(
+    { drafts: draftsSaid(visible, shown.drafts), waiting: lineOf(visible).waiting.length },
+    decisions === undefined ? undefined : lastDayBucket(decisions, shown.at),
   )
 
   const visibleItems: readonly WatchPaneItem[] = useMemo(() => {
@@ -619,14 +621,10 @@ export function WatchPane({
       setDiffOpen((was) => !was)
       return undefined
     }
-    if (character === "o") selectOnly("open")
-    if (character === "r") selectOnly("running")
-    if (character === "d") selectOnly("done")
-    if (character === "f") selectOnly("failed")
-    if (character === "O") toggleBucket("open")
-    if (character === "R") toggleBucket("running")
-    if (character === "D") toggleBucket("done")
-    if (character === "F") toggleBucket("failed")
+    if (character === "o" || character === "O") toggleBucket("open")
+    if (character === "r" || character === "R") toggleBucket("running")
+    if (character === "d" || character === "D") toggleBucket("done")
+    if (character === "f" || character === "F") toggleBucket("failed")
     if (character === "a") showAll()
     if (character === "s") setStatsOpen((was) => !was)
     // g: the RUNNER box, and from the box the top; G (the list's own key) goes to the bottom (25419).
@@ -682,6 +680,7 @@ export function WatchPane({
         )}
         <WatchDetail
           detail={detail}
+          change={selected?.row}
           joinedRun={selected?.run !== undefined}
           {...(tab === undefined ? {} : { selected: tab })}
           onSelect={setTab}
@@ -787,7 +786,9 @@ export function WatchPane({
                 {statsOpen ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} STATS · {statsLine}
               </Text>
             </Box>
-            {terminalRows < PILLS_MIN_ROWS ? null : <StatusPills buckets={buckets} onSelectOnly={selectOnly} />}
+            {terminalRows < PILLS_MIN_ROWS ? null : (
+              <StatusPills buckets={buckets} onToggle={toggleBucket} onSelectOnly={toggleBucket} />
+            )}
           </Box>
           {statsOpen && decisions !== undefined ? (
             <StatsBox decisions={decisions} columns={columns - 2} timeRows={terminalRows >= STATS_TIME_MIN_ROWS} />

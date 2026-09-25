@@ -25,13 +25,24 @@ import {
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join, resolve } from "node:path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
-import { gitIn, readJournals, readRunLog, submit, type Git, type LogRecord } from "@yrd/queue-core"
+import {
+  createEventQueue,
+  createEventStore,
+  gitIn,
+  readConfig,
+  readJournals,
+  readRunLog,
+  submit,
+  type Git,
+  type LogRecord,
+} from "@yrd/queue-core"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
-import type { ChangeDetail } from "../src/watch-detail.tsx"
+import { stageInfo, type ChangeDetail } from "../src/watch-detail.tsx"
 import { runIdentifier, runShortName } from "../src/watch-format.ts"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
+import { readRunnerFacts, runnerLine } from "../src/watch-runner.ts"
 import type { WatchRow } from "../src/watch-rows.ts"
 
 type PaneProps = Readonly<{
@@ -743,16 +754,19 @@ describe("what a watch says it looked at", () => {
     // any row now, and while the line is stopped it names the change it
     // stopped at, so it is told apart by its own word and not by its shape.
     const pageLines = plain.stdout().split("\n")
-    const changeLines = pageLines.filter((line) => line.includes(`stuck=${String(original.reason)}`))
-    expect(changeLines, plain.stdout()).toHaveLength(1)
-    expect(changeLines[0], plain.stdout()).toContain("task/history")
+    const stuckIndex = pageLines.findIndex((line) => line.includes(`stuck=${String(original.reason)}`))
+    expect(stuckIndex, plain.stdout()).toBeGreaterThanOrEqual(0)
+    const changeLine = pageLines[stuckIndex]?.includes("task/history")
+      ? pageLines[stuckIndex]
+      : pageLines[stuckIndex - 1]
+    expect(changeLine, plain.stdout()).toContain("task/history")
     expect(
       pageLines.some((line) => line.includes("RUNNER")) && pageLines.some((line) => line.includes("stopped")),
       plain.stdout(),
     ).toBe(true)
     // QUEUE / RUN names the latest attempt as `1 · main#…` (ia.md); historical
     // run ids stay in `--json` and in the change's own detail, not as extra rows.
-    expect(changeLines[0], plain.stdout()).toContain(runIdentifier(secondId))
+    expect(changeLine, plain.stdout()).toContain(runIdentifier(secondId))
 
     rendered.snapshot = undefined
     const interactive = capture(w.work)
@@ -1104,3 +1118,100 @@ exec '${realGit}' "$@"
     ).toEqual({ exit: 1, refused: false, said: 1, served: true })
   })
 })
+
+/** Create the event queue from the exact declaration commit on main. */
+async function createWorldEventQueue(w: World, at = new Date()): Promise<string> {
+  const commit = (await w.git(["rev-parse", "main"])).trim()
+  const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error(`fixture target ${commit} lost .yrd.yml`)
+  return createEventQueue(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", commit, config, at)
+}
+
+/**
+ * @failure  An event queue round does not write step records, leaving the RUNNER
+ *           and stage tabs with wrong stages or unearned "✓ passed" (25716).
+ * @level    l2 (a real remote, clone, event queue, real queueRun, driving watch snapshot)
+ * @consumer the operator reading live watch runnerLine and stage strip
+ */
+describe("event-queue runner stages end-to-end into runnerLine and stage strip (25716)", () => {
+  it("drives createWorldEventQueue into runnerLine and the stage strip", async () => {
+    const w = await world("test -f pass.txt")
+    await createWorldEventQueue(w)
+    await change(w, "task/event-step", true)
+    await drain(w)
+
+    const journal = [...readJournals(join(w.workdir, "logs")).runs.values()][0]?.[0]
+    if (journal === undefined) throw new Error("merged test run has no journal")
+
+    const steps = journal.steps
+    const stepNames = steps.map((s) => s.name)
+    expect(stepNames).toContain("compose")
+    expect(stepNames).toContain("prepare")
+    expect(stepNames).toContain("remove")
+    expect(stepNames).toContain("publish")
+    expect(stepNames).toContain("merge")
+    expect(stepNames).toContain("notify")
+
+    // Run interactive watch to produce rendered.snapshot and open loader
+    const run = capture(w.work)
+    await coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "list", terms: ["task/event-step"], watch: true },
+      { interactive: true, workdir: w.workdir },
+    )
+
+    const snapshot = renderedSnapshot()
+    expect(snapshot).toBeDefined()
+    if (snapshot === undefined) throw new Error("watch did not render a snapshot")
+
+    // The runner facts reflect the completed event run
+    const facts = await readRunnerFacts(w.workdir)
+    // An active merge step in an event run reports merging · publishing root, not provisioning
+    const mergeFacts: typeof facts = {
+      ...facts,
+      latest: facts.latest === undefined ? undefined : {
+        ...facts.latest,
+        alive: true,
+        activeStep: {
+          branch: "task/event-step",
+          kind: "step",
+          name: "merge",
+          phase: "merge",
+          start: new Date(snapshot.at.getTime() - 5_000),
+        },
+      },
+    }
+    const mergeLine = runnerLine(mergeFacts, snapshot.at)
+    expect(mergeLine.state).toBe("merging")
+    expect(mergeLine.subphase).toBe("publishing root")
+
+    rmSync(join(w.workdir, "round.lock"), { force: true })
+    const idleFacts = await readRunnerFacts(w.workdir)
+    const idleLine = runnerLine(idleFacts, snapshot.at)
+    expect(idleLine.state).toBe("idle")
+
+    const details = await renderedDetails(snapshot)
+    expect(details.length).toBeGreaterThan(0)
+    const detail = details.find((d) => d.row.branch === "task/event-step")
+    expect(detail).toBeDefined()
+    if (detail === undefined) throw new Error("detail not found")
+
+    // Every stage was journaled and passed — no stage says " not journaled"
+    const prov = stageInfo(detail, "provisioning")
+    expect(prov.state).toBe("passed")
+    expect(prov.said).not.toContain("not journaled")
+
+    const check = stageInfo(detail, "checking")
+    expect(check.state).toBe("passed")
+
+    const merge = stageInfo(detail, "merging")
+    expect(merge.state).toBe("passed")
+    expect(merge.said).not.toContain("not journaled")
+
+    const deprov = stageInfo(detail, "deprovisioning")
+    expect(deprov.state).toBe("passed")
+    expect(deprov.said).not.toContain("not journaled")
+  })
+})
+

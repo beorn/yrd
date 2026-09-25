@@ -730,8 +730,11 @@ export function runnerWord(
       if (facts.latest?.activeStep !== undefined) {
         const step = facts.latest.activeStep
         if (step.phase === "merge") return "merging"
-        if (step.kind === "check") return "checking"
-        if (step.name === "remove" || step.name === "retain" || step.name === "deprovision") return "deprovisioning"
+        if (step.kind === "check") {
+          if (step.name === "setup") return "provisioning"
+          return "checking"
+        }
+        if (step.name === "remove" || step.name === "retain" || step.name === "deprovision" || step.name === "retire") return "deprovisioning"
         return "provisioning"
       }
       if (underCheck) return "checking"
@@ -751,8 +754,11 @@ export function runnerWord(
   if (facts.latest.alive && facts.latest.activeStep !== undefined) {
     const step = facts.latest.activeStep
     if (step.phase === "merge") return "merging"
-    if (step.kind === "check") return "checking"
-    if (step.name === "remove" || step.name === "retain" || step.name === "deprovision") return "deprovisioning"
+    if (step.kind === "check") {
+      if (step.name === "setup") return "provisioning"
+      return "checking"
+    }
+    if (step.name === "remove" || step.name === "retain" || step.name === "deprovision" || step.name === "retire") return "deprovisioning"
     return "provisioning"
   }
   if (facts.roundLockHolder !== undefined) return "provisioning"
@@ -889,7 +895,7 @@ function runnerLineOf(
         durationText = `${word} ${stepElapsed}`
 
         if (activeStep.kind === "check") {
-          subphase = activeStep.name
+          subphase = activeStep.name === "setup" ? "preparing" : activeStep.name
         } else if (activeStep.name === "compose" || activeStep.name === "worktree") {
           subphase = "composing"
         } else if (activeStep.name === "prepare") {
@@ -897,15 +903,25 @@ function runnerLineOf(
         } else if (activeStep.phase === "merge") {
           step = activeStep.name
           subphase =
-            activeStep.name === "publish"
-              ? "publishing"
-              : activeStep.name === "merge"
-                ? "merging"
-                : activeStep.name === "push"
+            activeStep.name === "publish" || activeStep.name === "components"
+              ? "publishing components"
+              : activeStep.name === "merge" || activeStep.name === "push" || activeStep.name === "root"
+                ? "publishing root"
+                : activeStep.name === "notify"
                   ? "notifying"
                   : activeStep.name
-        } else if (activeStep.name === "remove" || activeStep.name === "retain" || activeStep.name === "deprovision") {
-          subphase = activeStep.name === "retain" ? "retaining" : "removing"
+        } else if (
+          activeStep.name === "remove" ||
+          activeStep.name === "retain" ||
+          activeStep.name === "deprovision" ||
+          activeStep.name === "retire"
+        ) {
+          subphase =
+            activeStep.name === "retain"
+              ? "retaining"
+              : activeStep.name === "retire"
+                ? "retiring"
+                : "removing"
         } else {
           subphase = stepName
         }
@@ -928,13 +944,17 @@ function runnerLineOf(
           holdsText = `${stepName} ${activeStep.branch ?? ""}`.trim()
         }
       } else if (facts?.roundLockHolder !== undefined) {
+        const runnerStart = (service && "since" in service ? service.since : undefined) ?? latest?.startedAt
         const holder = facts.roundLockHolder
         const holderDate = holder.since ? new Date(holder.since) : undefined
         durationText =
           holderDate && !Number.isNaN(holderDate.getTime())
             ? `${word} ${since(holderDate)}`
             : `${word} 0:00`
-        holdsText = `round lock held by pid ${String(holder.pid)} (${holder.command})`
+        holdsText =
+          runnerStart !== undefined
+            ? `runner since ${clock(runnerStart)} · ${durationText}`
+            : durationText
       } else if (holding !== undefined) {
         durationText = `${word} ${since(holding.since)}`
         holdsText = `${holding.branch}${holding.subject === undefined ? "" : ` ${holding.subject}`}`
@@ -998,11 +1018,12 @@ function runnerLineOf(
     }
     default: {
       let holdsText: string
-      if (waiting === 0) {
+      if (facts?.roundLockHolder !== undefined) {
+        const runnerStart = (service && "since" in service ? service.since : undefined) ?? latest?.startedAt
+        const startText = runnerStart !== undefined ? `runner since ${clock(runnerStart)}` : "runner"
+        holdsText = `${startText} · ${word} ${beat ?? "0:00"}`
+      } else if (waiting === 0) {
         holdsText = "nothing in line"
-      } else if (facts?.roundLockHolder !== undefined) {
-        const holder = facts.roundLockHolder
-        holdsText = `round lock held by pid ${String(holder.pid)} (${holder.command})`
       } else {
         holdsText = `nothing under a check, and ${String(waiting)} in line`
       }

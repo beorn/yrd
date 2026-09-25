@@ -126,6 +126,7 @@ function isMigratedWithoutCheckDetail(detail: ChangeDetail): boolean {
 
 export function WatchDetail({
   detail,
+  change,
   joinedRun = false,
   selected,
   onSelect,
@@ -135,6 +136,8 @@ export function WatchDetail({
   outputs = new Map(),
 }: {
   detail: ChangeDetail | undefined
+  /** The selected change's identity, displayed when loading detail (25630 Row 22). */
+  change?: string | Pick<Row, "branch" | "head">
   /** True when the row is one run's view of the change, not the change's current state. */
   joinedRun?: boolean
   /** The open tab: `CHANGES_TAB`, a check's index as a string, a step's `step:<n>`, or `round`. */
@@ -147,6 +150,14 @@ export function WatchDetail({
   outputs?: ReadonlyMap<string, DiffText>
 }) {
   if (detail === undefined) {
+    const changeName = typeof change === "object" ? changeId(change) : change
+    if (changeName !== undefined) {
+      return (
+        <Box flexDirection="column" flexGrow={1} alignItems="center" justifyContent="center" minHeight={0} minWidth={0}>
+          <Text color="$fg-muted">{`Loading ${changeName}…`}</Text>
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column" paddingX={1} minWidth={0}>
         <Text color="$fg-muted">no change selected</Text>
@@ -286,6 +297,9 @@ export function stageInfo(
   if (stage === "provisioning") {
     const compose = steps.find((s) => s.name === "compose")
     const prepare = steps.find((s) => s.name === "prepare")
+    if (compose === undefined && prepare === undefined) {
+      return { said: " not journaled", state: "not-run" }
+    }
     const threw = compose?.threw === true || prepare?.threw === true
     const running =
       (compose !== undefined && compose.endedAt === undefined) ||
@@ -294,7 +308,7 @@ export function stageInfo(
     const state: CheckView["state"] = threw ? "failed" : running ? "running" : "passed"
     return {
       ms: ms > 0 ? ms : undefined,
-      said: running ? undefined : ms > 0 ? ` ${mediaDuration(ms)}` : " passed",
+      said: running ? undefined : threw ? (ms > 0 ? ` ${mediaDuration(ms)}` : " failed") : ms > 0 ? ` ${mediaDuration(ms)}` : " passed",
       since: running ? (compose?.startedAt ?? prepare?.startedAt) : undefined,
       state,
     }
@@ -328,8 +342,15 @@ export function stageInfo(
       (merge !== undefined && merge.endedAt === undefined) ||
       (notify !== undefined && notify.endedAt === undefined)
     const ms = (publish?.ms ?? 0) + (merge?.ms ?? 0) + (notify?.ms ?? 0)
-    if (running) return { since: merge?.startedAt ?? publish?.startedAt, state: "running" }
+    if (running) return { since: merge?.startedAt ?? publish?.startedAt ?? notify?.startedAt, state: "running" }
+    const threw = publish?.threw === true || merge?.threw === true || notify?.threw === true
+    if (threw) {
+      return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " failed", state: "failed" }
+    }
     if (detail.row.state === "merged") {
+      if (publish === undefined && merge === undefined && notify === undefined) {
+        return { said: " not journaled", state: "not-run" }
+      }
       return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
     }
     return { said: " not run", state: "not-run" }
@@ -340,8 +361,15 @@ export function stageInfo(
     const running =
       (remove !== undefined && remove.endedAt === undefined) || (retire !== undefined && retire.endedAt === undefined)
     const ms = (remove?.ms ?? 0) + (retire?.ms ?? 0)
-    if (running) return { since: remove?.startedAt, state: "running" }
+    if (running) return { since: remove?.startedAt ?? retire?.startedAt, state: "running" }
+    const threw = remove?.threw === true || retire?.threw === true
+    if (threw) {
+      return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " failed", state: "failed" }
+    }
     if (detail.row.state === "merged" || detail.row.state === "failed") {
+      if (remove === undefined && retire === undefined) {
+        return { said: " not journaled", state: "not-run" }
+      }
       return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
     }
     return { said: " not run", state: "not-run" }
