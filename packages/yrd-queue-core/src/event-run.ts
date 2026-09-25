@@ -861,11 +861,14 @@ export async function eventQueueRun(
         }
         return undefined
       }
+      // Name every lease the publication lost, so a record whose queue tip also
+      // moved says so beside the target (@cto on 0bdd02ff62).
+      const lost = error instanceof Conflict && error.refs.length > 0 ? `; lease lost on ${error.refs.join(", ")}` : ""
       await appendOwnedChange(store, queue, branch, marker, {
         type: "verifying",
         at: new Date(),
         commit: candidate,
-        reason: `root target moved after component publication from ${parent} to ${movedTarget}; components at frozen sources`,
+        reason: `root target moved after component publication from ${parent} to ${movedTarget}; components at frozen sources${lost}`,
       })
       log.write({
         kind: "change",
