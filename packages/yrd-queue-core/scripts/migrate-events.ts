@@ -33,6 +33,7 @@ import {
   queueRef,
   readEventOps,
   readEventQueueWithChanges,
+  type OpsCutoverPausePlan,
 } from "../src/events.ts"
 import { encodeOps } from "../src/ops-state.ts"
 import { readConfig } from "../src/config.ts"
@@ -46,7 +47,7 @@ import {
 } from "../src/migration.ts"
 import { tipOf } from "../src/state.ts"
 import { legacyPauseCommit, trailer } from "../src/legacy-records.ts"
-import { eventCutoverTip, type PauseRecord } from "../src/pause.ts"
+import { eventCutoverTip, readPause, type PauseRecord } from "../src/pause.ts"
 import { subjects } from "../src/table.ts"
 import { directMergeCommits, eventDirectMergeCommits } from "../src/direct.ts"
 
@@ -104,12 +105,30 @@ type OpsPlan = Readonly<{
   target: string
   heads: readonly Ref[]
   refs: readonly Ref[]
-  retainedPause?: Ref
+  pause: OpsCutoverPausePlan
   effective: string
   bundle: string
   bundleSha256: string
   snapshot: string
 }>
+
+function opsCensus(queue: string, refs: readonly Ref[]): Readonly<{ changes: number }> {
+  const prefix = `${queueRefPrefix(queue)}/changes/`
+  let changes = 0
+  let queueSeen = false
+  let pauseSeen = false
+  for (const { ref } of refs) {
+    if (ref === queueRef(queue)) queueSeen = true
+    else if (ref === pauseRef(queue)) pauseSeen = true
+    else if (ref === overrideRef(queue)) continue
+    else if (ref.startsWith(prefix) && ref.length > prefix.length) changes += 1
+    else failure("ops-census", ref, `unknown name under ${queueRefPrefix(queue)}/`)
+  }
+  if (!queueSeen || !pauseSeen) {
+    failure("ops-census", queue, "event queue or maintenance pause ref is absent")
+  }
+  return { changes }
+}
 
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 const USAGE =
@@ -997,14 +1016,17 @@ async function rollback(options: Options, plan: Plan, git: Git, selection: GitSe
   return { ...result, postflight: join(options.journal, "rollback-postflight.json") }
 }
 
-function opsExpected(plan: OpsPlan): Readonly<{ queueBefore: string; pauseBefore?: string; overrideBefore?: string }> {
+function opsExpected(plan: OpsPlan): Readonly<{ queueBefore: string; pauseBefore: string; overrideBefore?: string }> {
   const queueBefore = plan.refs.find(({ ref }) => ref === queueRef(plan.options.queue))?.oid
   if (queueBefore === undefined) failure("ops-plan", plan.options.queue, "verified plan has no queue event ref")
   const pauseBefore = plan.refs.find(({ ref }) => ref === pauseRef(plan.options.queue))?.oid
+  if (pauseBefore === undefined || pauseBefore !== plan.pause.tip) {
+    failure("ops-plan", plan.options.queue, "verified plan has no matching maintenance pause ref")
+  }
   const overrideBefore = plan.refs.find(({ ref }) => ref === overrideRef(plan.options.queue))?.oid
   return {
     queueBefore,
-    ...(pauseBefore === undefined ? {} : { pauseBefore }),
+    pauseBefore,
     ...(overrideBefore === undefined ? {} : { overrideBefore }),
   }
 }
@@ -1024,10 +1046,26 @@ function opsReadPlan(options: Options): OpsPlan {
     !OID.test(value.target) ||
     !Array.isArray(value.refs) ||
     !Array.isArray(value.heads) ||
+    value.pause === undefined ||
+    value.pause === null ||
+    typeof value.pause !== "object" ||
+    typeof value.pause.tip !== "string" ||
+    !OID.test(value.pause.tip) ||
+    !["paused", "resumed"].includes(value.pause.priorKind ?? "") ||
+    !["retain", "replace"].includes(value.pause.disposition) ||
+    (value.pause.disposition === "replace" &&
+      (value.pause.record?.kind !== "paused" ||
+        value.pause.record.cause !== "maintenance" ||
+        typeof value.pause.record.by !== "string" ||
+        value.pause.record.by.trim() === "" ||
+        typeof value.pause.record.reason !== "string" ||
+        typeof value.pause.record.at !== "string" ||
+        Number.isNaN(new Date(value.pause.record.at).getTime()))) ||
     typeof value.effective !== "string"
   ) {
     failure("invalid-journal", path, "ops plan scope, target, refs or state is invalid")
   }
+  opsCensus(options.queue, value.refs)
   opsExpected(value)
   return value
 }
@@ -1037,6 +1075,7 @@ async function opsPlan(options: Options, git: Git, selection: GitSelection, pin:
     failure("journal-exists", options.journal, "ops-plan requires a new journal directory")
   }
   const first = await remoteAdvertisement(git, options.remote, options.queue)
+  const census = opsCensus(options.queue, first.queue)
   const store = createEventStore(options.repo, options.remote, selection)
   if ((await queueFormat(store, options.queue)) !== "event") {
     failure("ops-format", `${options.remote}#${options.queue}`, "ops cutover requires an event queue")
@@ -1044,6 +1083,14 @@ async function opsPlan(options: Options, git: Git, selection: GitSelection, pin:
   const state = await readEventOps(store, git, options.queue, first.target)
   if (state.source !== "legacy") failure("ops-cutover", options.queue, "ops-cutover is already present")
   requireMaintenanceStop(state.stop, options.queue)
+  const active = state.overrides.entries.filter((entry) => isActive(entry, Date.now()))
+  if (active.length > 0) {
+    failure(
+      "active-override",
+      overrideRef(options.queue),
+      `${active.length} active entries; clear them before ops cutover`,
+    )
+  }
   const queueOid = first.queue.find(({ ref }) => ref === queueRef(options.queue))?.oid
   if (queueOid !== state.queue.tip) {
     failure("ops-census", options.queue, `queue tip ${state.queue.tip} differs from advertised ${queueOid ?? "absent"}`)
@@ -1052,6 +1099,26 @@ async function opsPlan(options: Options, git: Git, selection: GitSelection, pin:
     ...(state.stop === undefined ? {} : { pause: state.stop }),
     overrides: state.overrides.entries,
   })
+  const pauseTip = first.queue.find(({ ref }) => ref === pauseRef(options.queue))?.oid
+  if (pauseTip === undefined || state.pause?.sha !== pauseTip) {
+    failure("ops-census", options.queue, "maintenance pause ref is absent or differs from the advertised tip")
+  }
+  const capturedAt = new Date().toISOString()
+  const pause: OpsCutoverPausePlan =
+    eventCutoverTip(state.pause) === state.queue.created
+      ? { tip: pauseTip, priorKind: state.pause.kind, disposition: "retain" }
+      : {
+          tip: pauseTip,
+          priorKind: state.pause.kind,
+          disposition: "replace",
+          record: {
+            kind: "paused",
+            cause: "maintenance",
+            by: "yrd-ops-cutover",
+            reason: `moved to event format at ${state.queue.created}`,
+            at: capturedAt,
+          },
+        }
   const remoteUrl = (await git(["remote", "get-url", options.remote])).trim()
   if (remoteUrl === "") failure("remote-url", options.remote, "configured remote resolved to an empty URL")
   const { snapshot, bundle, bundleSha256 } = await verifiedBundle(options, git, selection, first, remoteUrl)
@@ -1061,13 +1128,11 @@ async function opsPlan(options: Options, git: Git, selection: GitSelection, pin:
     options: { repo: options.repo, remote: options.remote, queue: options.queue, journal: options.journal },
     remoteUrl,
     runtimePin: pin,
-    capturedAt: new Date().toISOString(),
+    capturedAt,
     target: first.target,
     heads: first.heads,
     refs: first.queue,
-    ...(eventCutoverTip(state.pause) === state.queue.created
-      ? { retainedPause: { ref: pauseRef(options.queue), oid: state.pause?.sha ?? "" } }
-      : {}),
+    pause,
     effective,
     bundle,
     bundleSha256,
@@ -1078,6 +1143,8 @@ async function opsPlan(options: Options, git: Git, selection: GitSelection, pin:
     phase: "ops-plan",
     queue: `${options.remote}#${options.queue}`,
     refs: first.queue.length,
+    changes: census.changes,
+    pause,
     bundle,
     bundleSha256,
     plan: join(options.journal, "plan.json"),
@@ -1102,8 +1169,12 @@ async function opsApply(options: Options, plan: OpsPlan, git: Git, selection: Gi
   const current = await readEventOps(store, git, options.queue, plan.target)
   if (current.source !== "legacy") failure("ops-cutover", options.queue, "ops-cutover already stands")
   requireMaintenanceStop(current.stop, options.queue)
-  if ((eventCutoverTip(current.pause) === current.queue.created) !== (plan.retainedPause !== undefined)) {
-    failure("changed-state", options.queue, "retained legacy cutover fence differs from the verified ops plan")
+  if (
+    current.pause?.sha !== plan.pause.tip ||
+    current.pause?.kind !== plan.pause.priorKind ||
+    (eventCutoverTip(current.pause) === current.queue.created ? "retain" : "replace") !== plan.pause.disposition
+  ) {
+    failure("changed-state", options.queue, "maintenance pause tip or disposition differs from the verified ops plan")
   }
   const effective = encodeOps({
     ...(current.stop === undefined ? {} : { pause: current.stop }),
@@ -1115,15 +1186,27 @@ async function opsApply(options: Options, plan: OpsPlan, git: Git, selection: Gi
   const expected = opsExpected(plan)
   let publicationError: string | undefined
   try {
-    await appendOpsCutover(store, git, options.queue, plan.target, new Date(), "yrd-ops-cutover", expected, (oid) => {
-      immutableJson(stagedPath, {
-        version: 1,
-        kind: "ops",
-        queueBefore: expected.queueBefore,
-        queueAfter: oid,
-        stagedAt: new Date().toISOString(),
-      })
-    })
+    await appendOpsCutover(
+      store,
+      git,
+      options.queue,
+      plan.target,
+      new Date(plan.capturedAt),
+      "yrd-ops-cutover",
+      { ...expected, pause: plan.pause },
+      (oid, pauseOid) => {
+        immutableJson(stagedPath, {
+          version: 1,
+          kind: "ops",
+          queueBefore: expected.queueBefore,
+          queueAfter: oid,
+          pauseBefore: expected.pauseBefore,
+          pauseAfter: pauseOid,
+          pauseDisposition: plan.pause.disposition,
+          stagedAt: new Date().toISOString(),
+        })
+      },
+    )
   } catch (error) {
     publicationError = error instanceof Error ? error.message : String(error)
   }
@@ -1131,26 +1214,52 @@ async function opsApply(options: Options, plan: OpsPlan, git: Git, selection: Gi
   const staged: unknown = existsSync(stagedPath) ? JSON.parse(readFileSync(stagedPath, "utf8")) : undefined
   const queueAfter =
     staged !== null && typeof staged === "object" && "queueAfter" in staged ? staged.queueAfter : undefined
+  const pauseAfter =
+    staged !== null && typeof staged === "object" && "pauseAfter" in staged ? staged.pauseAfter : undefined
   const expectedRefs = plan.refs
-    .filter(
-      ({ ref }) =>
-        (ref !== pauseRef(options.queue) || plan.retainedPause !== undefined) && ref !== overrideRef(options.queue),
+    .filter(({ ref }) => ref !== overrideRef(options.queue))
+    .map((row) =>
+      row.ref === queueRef(options.queue)
+        ? { ...row, oid: String(queueAfter) }
+        : row.ref === pauseRef(options.queue)
+          ? { ...row, oid: String(pauseAfter) }
+          : row,
     )
-    .map((row) => (row.ref === queueRef(options.queue) ? { ...row, oid: String(queueAfter) } : row))
   const state =
     typeof queueAfter === "string" &&
     OID.test(queueAfter) &&
+    typeof pauseAfter === "string" &&
+    OID.test(pauseAfter) &&
     equalRefs(after.queue, expectedRefs) &&
     equalRefs(after.heads, plan.heads)
       ? "committed"
       : equalRefs(after.queue, plan.refs) && equalRefs(after.heads, plan.heads)
         ? "unchanged"
         : "divergent"
+  let postflightError: string | undefined
+  if (state === "committed") {
+    try {
+      const switched = await readEventOps(store, git, options.queue, plan.target)
+      const actual = encodeOps({
+        ...(switched.pause === undefined ? {} : { pause: switched.pause }),
+        overrides: switched.overrides.entries,
+      })
+      if (switched.source !== "event" || actual !== plan.effective) {
+        throw new Error("event-side pause or override state differs from the verified legacy plan")
+      }
+    } catch (error) {
+      postflightError = error instanceof Error ? error.message : String(error)
+    }
+  }
   const receipt = {
     phase: "ops-apply",
     state,
     queue: `${options.remote}#${options.queue}`,
     ...(typeof queueAfter === "string" ? { queueAfter } : {}),
+    ...(typeof pauseAfter === "string" ? { pauseAfter } : {}),
+    pauseDisposition: plan.pause.disposition,
+    postflight: postflightError === undefined ? "clean" : "failed",
+    ...(postflightError === undefined ? {} : { postflightError }),
     ...(publicationError === undefined ? {} : { publicationError }),
     readback: after.queue,
     bundle: plan.bundle,
@@ -1163,6 +1272,9 @@ async function opsApply(options: Options, plan: OpsPlan, git: Git, selection: Gi
       options.queue,
       `${state}; ${publicationError ?? "push returned success"}; see apply-result.json`,
     )
+  }
+  if (postflightError !== undefined) {
+    failure("ops-postflight", options.queue, `${postflightError}; see apply-result.json and staged rollback`)
   }
   return receipt
 }
@@ -1180,27 +1292,28 @@ async function opsRollback(options: Options, plan: OpsPlan, git: Git, selection:
     applied.state !== "committed" ||
     !("queueAfter" in applied) ||
     typeof applied.queueAfter !== "string" ||
-    !OID.test(applied.queueAfter)
+    !OID.test(applied.queueAfter) ||
+    !("pauseAfter" in applied) ||
+    typeof applied.pauseAfter !== "string" ||
+    !OID.test(applied.pauseAfter)
   ) {
-    failure("invalid-journal", resultPath, "ops apply receipt lacks an exact committed queue tip")
+    failure("invalid-journal", resultPath, "ops apply receipt lacks exact committed queue and pause tips")
   }
   const queueAfter = (applied as { queueAfter: string }).queueAfter
+  const pauseAfter = (applied as { pauseAfter: string }).pauseAfter
   await requireVerifiedBundle(plan.snapshot, plan.bundle, plan.bundleSha256, plan.refs, selection)
-  const current = await readEventOps(
-    createEventStore(options.repo, options.remote, selection),
-    git,
-    options.queue,
-    plan.target,
-  )
-  requireMaintenanceStop(current.stop, options.queue)
+  requireMaintenanceStop(await readPause(git, options.remote, options.queue), options.queue)
   const expected = opsExpected(plan)
   const now = await remoteAdvertisement(git, options.remote, options.queue)
   const afterRefs = plan.refs
-    .filter(
-      ({ ref }) =>
-        (ref !== pauseRef(options.queue) || plan.retainedPause !== undefined) && ref !== overrideRef(options.queue),
+    .filter(({ ref }) => ref !== overrideRef(options.queue))
+    .map((row) =>
+      row.ref === queueRef(options.queue)
+        ? { ...row, oid: queueAfter }
+        : row.ref === pauseRef(options.queue)
+          ? { ...row, oid: pauseAfter }
+          : row,
     )
-    .map((row) => (row.ref === queueRef(options.queue) ? { ...row, oid: queueAfter } : row))
   if (!equalRefs(now.queue, afterRefs) || !equalRefs(now.heads, plan.heads)) {
     failure(
       "changed-census",
@@ -1213,15 +1326,7 @@ async function opsRollback(options: Options, plan: OpsPlan, git: Git, selection:
   const absent = "0".repeat(40)
   const updates = [
     { ref: queueRef(options.queue), expect: queueAfter, oid: expected.queueBefore },
-    ...(expected.pauseBefore === undefined
-      ? []
-      : [
-          {
-            ref: pauseRef(options.queue),
-            expect: plan.retainedPause === undefined ? absent : expected.pauseBefore,
-            oid: expected.pauseBefore,
-          },
-        ]),
+    { ref: pauseRef(options.queue), expect: pauseAfter, oid: expected.pauseBefore },
     ...(expected.overrideBefore === undefined
       ? []
       : [{ ref: overrideRef(options.queue), expect: absent, oid: expected.overrideBefore }]),
@@ -1244,6 +1349,12 @@ async function opsRollback(options: Options, plan: OpsPlan, git: Git, selection:
     state,
     queue: `${options.remote}#${options.queue}`,
     refUpdates: updates.length,
+    pauseDisposition: plan.pause.disposition,
+    pauseAfter: expected.pauseBefore,
+    legacyFence:
+      plan.pause.disposition === "replace"
+        ? "pre-apply maintenance stop restored; M2 absent"
+        : "pre-existing M2 retained",
     ...(publicationError === undefined ? {} : { publicationError }),
     readback: after.queue,
     bundle: plan.bundle,
