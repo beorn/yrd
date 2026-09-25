@@ -3,7 +3,7 @@
  * § The final design, Commands).
  *
  * The command surface is
- * `yrd queue submit|withdraw|run|up|stop|start|pause|resume|list|stats|show|health`,
+ * `yrd queue submit|withdraw|run|up|stop|start|pause|resume|list|stats|show|health|adopt-legacy`,
  * `yrd drop`, `yrd merge`, `yrd check`, `yrd env open|list|close`, with `yrd submit` and
  * `yrd list` as the aliases of the two used most, `yrd watch` as
  * `queue list --watch`, and `yrd bay` as `env`'s until flag day's word is
@@ -276,6 +276,33 @@ function buildProgram(
   }
   const queue = program.command("queue").description("the line of changes for the target branch")
   queue.helpCommand(false)
+  queue
+    .command("adopt-legacy")
+    .description("one-shot migration of remaining old Record refs into event history; dry run by default")
+    .option("--apply", "publish each adoption and delete its old ref under one lease; requires the queue to be paused")
+    .option("--json", "emit stable JSON")
+    .option("--queue <value>", QUEUE_HELP)
+    .action(async (options) => {
+      const declared = options as { apply?: boolean; json?: boolean; queue?: string }
+      const location = await resolveQueueLocation(cwd(), declared.queue, env)
+      setExit(
+        await coreQueueCommand(
+          location.repo,
+          io,
+          { command: "adopt-legacy", apply: declared.apply === true },
+          {
+            json: declared.json,
+            env,
+            log: log(),
+            selection: location.selection,
+            populateReference: location.owned,
+            queue: location.queue,
+            workdir: location.workdir,
+            remote: location.remote,
+          },
+        ),
+      )
+    })
   queue
     .command("submit [branch]")
     .description("push the branch and open its change; defaults to the branch checked out here")

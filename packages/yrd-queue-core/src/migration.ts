@@ -1,9 +1,25 @@
 /** One-time conversion of a legacy change's resting reading into event inputs (25041). */
-import type { EventInput } from "./git.ts"
-import { changeInput } from "./events.ts"
-import { tipOf, type ChangeReading, type ChangeRecords } from "./state.ts"
-import { trailer, type ChangeRecord } from "./legacy-records.ts"
-import { changeRef } from "./refs.ts"
+import { Conflict, offTheTarget, openEvents, type EventInput, type Git } from "./git.ts"
+import {
+  adoptedInput,
+  changeInput,
+  changesRef,
+  project,
+  queueRef,
+  readEventQueue,
+  type QueueLocation,
+} from "./events.ts"
+import { readChange, tipOf, type ChangeReading, type ChangeRecords } from "./state.ts"
+import {
+  changeOf,
+  endedKind,
+  endingRecord,
+  recordFromMeta,
+  recordsFromHistory,
+  trailer,
+  type ChangeRecord,
+} from "./legacy-records.ts"
+import { changeRef, parseChangeRef, queueRefPrefix } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
 
 export type LegacyMigrationChange = Readonly<{ ref: string; change: ChangeRecords; reading: ChangeReading }>
@@ -85,7 +101,11 @@ function cancellationReason(source: LegacyMigrationChange): "resubmitted" | "dro
  * The old ref stays one opened segment. Run-phase records are absorbed into
  * minimal resting-state events; no check result or stage is fabricated.
  */
-export function inputsForLegacy(source: LegacyMigrationChange, queueTip: string): readonly EventInput[] {
+export function inputsForLegacy(
+  source: LegacyMigrationChange,
+  queueTip: string,
+  atForDerivedEnding?: Date,
+): readonly EventInput[] {
   const records = source.change.records
   const tip = tipOf(source.change)
   const head = source.change.head
@@ -115,7 +135,11 @@ export function inputsForLegacy(source: LegacyMigrationChange, queueTip: string)
     openingRecords,
   )
   if (!terminal) return [opened]
-  const at = tip.at
+  const stuckRecord = status === "stuck" ? records.findLast((record) => record.kind === "stuck") : undefined
+  if (status === "stuck" && stuckRecord === undefined) {
+    throw new Error(`${source.ref}@${tip.sha}: stuck reading has no original stuck record`)
+  }
+  const at = originalEndingRecord(records)?.at ?? stuckRecord?.at ?? atForDerivedEnding ?? tip.at
   let ending: EventInput
   if (status === "merged") {
     const merge = records.map((record) => trailer(record, "Merge")).findLast((value) => value !== undefined) ?? head
@@ -142,4 +166,327 @@ export function inputsForLegacy(source: LegacyMigrationChange, queueTip: string)
     })
   }
   return [opened, absorb(ending, source.ref, terminalRecords)]
+}
+
+export type LegacyAdoptionRow = Readonly<{
+  branch: string
+  ref: string
+  record: string
+  head: string
+  branchHead: string
+  opened: Date
+  oldStatus: "queued" | "stuck" | "merged" | "failed" | "cancelled"
+  plannedStatus: "queued" | "stuck" | "merged" | "failed" | "cancelled"
+  /** Absent for an open chainless conversion. */
+  ending?: "merged" | "failed" | "cancelled"
+  targetChainTip: string | null
+  /** Full old chain, retained as event parents on apply. */
+  source: LegacyMigrationChange
+}>
+
+export type LegacyAdoptionPlan = Readonly<{
+  queue: string
+  target: string
+  queueTip: string
+  rows: readonly LegacyAdoptionRow[]
+}>
+
+export type LegacyAdoptionReceipt =
+  | Readonly<{ result: "adopted"; branch: string; oldRef: string; oldOid: string; eventOid: string }>
+  | Readonly<{
+      result: "refused"
+      branch: string
+      oldRef: string
+      oldOid: string
+      ref: string
+      expected: string | null
+      observed: string | null
+    }>
+
+/** Read only old Record refs in the mixed queue namespace; this is a dry run. */
+export async function inspectLegacyAdoption(
+  input: Readonly<{
+    store: QueueLocation
+    git: Git
+    queue: string
+    target: string
+  }>,
+): Promise<LegacyAdoptionPlan> {
+  const { store, git, queue, target } = input
+  const backend = store.backend
+  if (backend.listRefs === undefined || backend.fetchRefs === undefined || backend.readHistory === undefined) {
+    throw new Error("old Record adoption needs Gitomic listRefs, fetchRefs and readHistory")
+  }
+  const targetRef = `refs/heads/${queue}`
+  const remoteTarget = (await backend.listRefs(store.repo, targetRef, store.remote)).get(targetRef)
+  if (remoteTarget !== target) {
+    throw new Error(`${store.remote} ${targetRef}: adoption target moved from ${target} to ${remoteTarget ?? "absent"}`)
+  }
+  const fetchedTarget = (await backend.fetchRefs(store.repo, [targetRef], store.remote)).get(targetRef)
+  if (fetchedTarget !== target) {
+    throw new Error(
+      `${store.remote} ${targetRef}: adoption target moved during fetch from ${target} to ${fetchedTarget ?? "absent"}`,
+    )
+  }
+  const queueTip = (await readEventQueue(store, queue)).tip
+  const prefix = `${queueRefPrefix(queue)}/`
+  const names = await backend.listRefs(store.repo, prefix, store.remote)
+  const candidates = [...names].flatMap(([ref, record]) => {
+    if (ref === queueRef(queue) || ref === `${prefix}pause` || ref === `${prefix}override`) {
+      return []
+    }
+    const change = parseChangeRef(queue, ref)
+    if (change === undefined && ref.startsWith(`${prefix}changes/`)) return []
+    if (change === undefined || change.branch === queue) {
+      throw new Error(`${store.remote} ${ref}: unrecognized old Record ref under ${prefix}`)
+    }
+    return [{ ref, record, change }]
+  })
+  if (candidates.length === 0) return { queue, target, queueTip, rows: [] }
+  const fetched = await backend.fetchRefs(
+    store.repo,
+    candidates.map(({ ref }) => ref),
+    store.remote,
+  )
+  for (const entry of candidates) {
+    if (fetched.get(entry.ref) !== entry.record) {
+      throw new Error(`${store.remote} ${entry.ref}: old Record ref moved during adoption plan`)
+    }
+  }
+  const history = await backend.readHistory(
+    store.repo,
+    candidates.map(({ record }) => record),
+  )
+  const byOid = new Map(history.map((meta) => [meta.oid, meta] as const))
+  const old = [] as typeof candidates
+  for (const candidate of candidates) {
+    if (!candidate.ref.startsWith(`${prefix}changes/`)) {
+      old.push(candidate)
+      continue
+    }
+    const tip = byOid.get(candidate.record)
+    if (tip === undefined) throw new Error(`${store.remote} ${candidate.ref}: fetched ref has no commit history`)
+    if (recordFromMeta(tip) !== undefined) {
+      old.push(candidate)
+      continue
+    }
+    const chain = await openEvents({ ...store, ref: candidate.ref })
+    project(await chain.events({ limit: 1024 }), candidate.ref, store.repo)
+  }
+  if (old.length === 0) return { queue, target, queueTip, rows: [] }
+  const branchRefs = await backend.listRefs(store.repo, "refs/heads/", store.remote)
+  const branchNames = [...new Set(old.map(({ change }) => `refs/heads/${change.branch}`))]
+  const fetchedBranches = await backend.fetchRefs(store.repo, branchNames, store.remote)
+  const offTarget = await offTheTarget(
+    git,
+    old.map(({ change }) => change.head),
+    target,
+  )
+  const rows: LegacyAdoptionRow[] = []
+  for (const entry of old) {
+    const records = await recordsFromHistory(git, history, entry.record)
+    const tip = records.at(-1)
+    if (
+      tip === undefined ||
+      tip.sha !== entry.record ||
+      changeOf(tip, entry.ref) !== `${entry.change.branch}@${entry.change.head}`
+    ) {
+      throw new Error(`${entry.ref}@${entry.record}: Record history does not match its ref`)
+    }
+    const first = records[0]
+    if (first === undefined) throw new Error(`${entry.ref}@${entry.record}: Record history is empty`)
+    const branchRef = `refs/heads/${entry.change.branch}`
+    const branchHead = branchRefs.get(branchRef)
+    if (branchHead === undefined) {
+      throw new Error(`${store.remote} ${branchRef}: cannot atomically lease an absent branch during adoption`)
+    }
+    if (fetchedBranches.get(branchRef) !== branchHead) {
+      throw new Error(`${store.remote} ${branchRef}: branch moved during adoption plan`)
+    }
+    const change: ChangeRecords = {
+      branch: entry.change.branch,
+      head: entry.change.head,
+      headOnTarget: !offTarget.has(entry.change.head),
+      records: [first, ...records.slice(1)],
+      branchHead,
+    }
+    const source = { ref: entry.ref, change, reading: readChange(change) }
+    const opened = new Date(required(tip, "Opened", entry.ref))
+    if (Number.isNaN(opened.getTime())) throw new Error(`${entry.ref}@${entry.record}: Opened: is not a date`)
+    const chain = await openEvents({ ...store, ref: changesRef(queue, entry.change.branch) })
+    const targetChainTip = await chain.head()
+    if (targetChainTip !== null) {
+      project(await chain.events({ limit: 1024 }), changesRef(queue, entry.change.branch), store.repo)
+    }
+    const oldStatus = migratedStatus(source.reading)
+    const actualEnding = originalEndingRecord(change.records)
+    if ((oldStatus === "merged" || oldStatus === "failed") && actualEnding === undefined) {
+      throw new Error(
+        `${entry.ref}@${entry.record}: ${oldStatus} reading has no historical ending record; adoption cannot invent its ending time`,
+      )
+    }
+    if (oldStatus === "merged" && (actualEnding === undefined || trailer(actualEnding, "Merge") === undefined)) {
+      throw new Error(`${entry.ref}@${entry.record}: merged adoption needs the original Merge: evidence`)
+    }
+    const plannedStatus =
+      targetChainTip === null
+        ? oldStatus
+        : actualEnding?.kind === "merged"
+          ? "merged"
+          : actualEnding?.kind === "failed"
+            ? "failed"
+            : actualEnding?.kind === "withdrawn"
+              ? "cancelled"
+              : oldStatus === "queued" || oldStatus === "stuck"
+                ? "cancelled"
+                : oldStatus
+    rows.push({
+      branch: entry.change.branch,
+      ref: entry.ref,
+      record: entry.record,
+      head: entry.change.head,
+      branchHead,
+      opened,
+      oldStatus,
+      plannedStatus,
+      ...(plannedStatus === "queued" || plannedStatus === "stuck" ? {} : { ending: plannedStatus }),
+      targetChainTip,
+      source,
+    })
+  }
+  return { queue, target, queueTip, rows }
+}
+
+/** Keep one source's old record chain and delete its ref in the same Gitomic MULTI. */
+export async function adoptLegacy(
+  input: Readonly<{
+    store: QueueLocation
+    plan: LegacyAdoptionPlan
+    at: Date
+  }>,
+): Promise<readonly LegacyAdoptionReceipt[]> {
+  const { store, plan, at } = input
+  if (Number.isNaN(at.getTime())) throw new TypeError("adoption publication time is not a date")
+  const queueState = await readEventQueue(store, plan.queue)
+  if (queueState.pause === undefined) {
+    throw new Error(`${store.remote}#${plan.queue}: adoption apply requires a paused event queue`)
+  }
+  const rows: LegacyAdoptionReceipt[] = []
+  const backend = store.backend
+  if (backend.listRefs === undefined) throw new Error("old Record adoption needs Gitomic listRefs for lease readback")
+  const targetRef = `refs/heads/${plan.queue}`
+  const queueHeadRef = queueRef(plan.queue)
+  for (const row of plan.rows) {
+    const changeChainRef = changesRef(plan.queue, row.branch)
+    const chain = await openEvents({ ...store, ref: changeChainRef, writer: "yrd-adopter" })
+    const currentTip = await chain.head()
+    if (currentTip !== row.targetChainTip) {
+      rows.push({
+        result: "refused",
+        branch: row.branch,
+        oldRef: row.ref,
+        oldOid: row.record,
+        ref: changeChainRef,
+        expected: row.targetChainTip,
+        observed: currentTip,
+      })
+      continue
+    }
+    const inputs =
+      currentTip === null
+        ? inputsForLegacy(row.source, plan.queueTip, at)
+        : [inputForExistingChain(row, plan.queueTip, at)]
+    try {
+      const staged = await chain.stage(inputs, { expect: currentTip })
+      const result = await staged.publish({
+        also: [
+          { ref: row.ref, expect: row.record, oid: null },
+          { ref: queueHeadRef, expect: plan.queueTip, oid: plan.queueTip },
+          { ref: targetRef, expect: plan.target, oid: plan.target },
+          { ref: `refs/heads/${row.branch}`, expect: row.branchHead, oid: row.branchHead },
+        ],
+      })
+      if (result.head === null) throw new Error(`${row.ref}: adoption published no event`)
+      rows.push({ result: "adopted", branch: row.branch, oldRef: row.ref, oldOid: row.record, eventOid: result.head })
+    } catch (error) {
+      if (!(error instanceof Conflict)) throw error
+      const expected = new Map<string, string | null>([
+        [row.ref, row.record],
+        [changeChainRef, row.targetChainTip],
+        [queueHeadRef, plan.queueTip],
+        [targetRef, plan.target],
+        [`refs/heads/${row.branch}`, row.branchHead],
+      ])
+      let changed: { ref: string; expected: string | null; observed: string | null } | undefined
+      for (const [ref, want] of expected) {
+        const observed = (await backend.listRefs(store.repo, ref, store.remote)).get(ref) ?? null
+        if (observed !== want) {
+          changed = { ref, expected: want, observed }
+          break
+        }
+      }
+      if (changed === undefined) {
+        throw new Error(
+          `${row.ref}: adoption publication conflicted, but every leased ref still has its expected oid; cannot determine which row to retry`,
+          {
+            cause: error,
+          },
+        )
+      }
+      rows.push({ result: "refused", branch: row.branch, oldRef: row.ref, oldOid: row.record, ...changed })
+    }
+  }
+  return rows
+}
+
+function inputForExistingChain(row: LegacyAdoptionRow, queueTip: string, at: Date): EventInput {
+  const { source } = row
+  const records = source.change.records
+  const tip = tipOf(source.change)
+  const ending = originalEndingRecord(records)
+  const status = row.ending
+  if (status === undefined) throw new Error(`${row.ref}@${row.record}: existing chain adoption has no ending`)
+  const actualEnding = status === "cancelled" && ending === undefined ? at : ending?.at
+  if (actualEnding === undefined) {
+    throw new Error(`${row.ref}@${row.record}: ${status} has no recorded ending time; adoption cannot invent one`)
+  }
+  const reason =
+    status === "cancelled" ? (ending === undefined ? "resubmitted" : cancellationReason(source)) : source.reading.reason
+  const merge = status === "merged" ? trailer(ending as ChangeRecord, "Merge") : undefined
+  if (status === "merged" && merge === undefined) {
+    throw new Error(`${row.ref}@${row.record}: merged ending has no Merge: evidence`)
+  }
+  const checks = records.flatMap((record) =>
+    record.trailers.filter(([key]) => key === "Check").map(([, value]) => value),
+  )
+  const last = (key: string) => records.map((record) => trailer(record, key)).findLast((value) => value !== undefined)
+  return adoptedInput({
+    queueTip,
+    at,
+    head: source.change.head,
+    opened: row.opened,
+    status,
+    ended: actualEnding,
+    ...(reason === undefined ? {} : { reason }),
+    submitter: required(tip, "Submitter", row.ref),
+    ...(trailer(tip, "Issue") === undefined ? {} : { issue: trailer(tip, "Issue") }),
+    ...(merge === undefined ? {} : { merge }),
+    ...(last("Base") === undefined ? {} : { base: last("Base") }),
+    ...(last("Config") === undefined ? {} : { config: last("Config") }),
+    checks,
+    sources: records.map((record) => ({ ref: row.ref, oid: record.sha })),
+  })
+}
+
+/** A sent notification repeats an ending, but its timestamp is not when that ending happened. */
+function originalEndingRecord(records: readonly ChangeRecord[]): ChangeRecord | undefined {
+  const standing = endingRecord(records)
+  if (standing === undefined || standing.kind !== "sent") return standing
+  const kind = endedKind(standing)
+  for (let index = records.lastIndexOf(standing) - 1; index >= 0; index -= 1) {
+    const record = records[index]
+    if (record === undefined || record.kind === "opened") break
+    if (record.kind === kind) return record
+  }
+  throw new Error(`sent record ${standing.sha} repeats ${kind} but its original ending record is absent`)
 }

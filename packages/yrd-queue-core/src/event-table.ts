@@ -33,6 +33,13 @@ export function eventRows(
     if (change.commit === undefined) {
       throw new Error(`event change ${branch} has no submitted commit`)
     }
+    const adoptedTimes = change.adoptedPhases
+    const startedAt =
+      adoptedTimes === undefined
+        ? undefined
+        : [adoptedTimes.verifying, adoptedTimes.checking, adoptedTimes.merging]
+            .filter((at): at is Date => at !== undefined)
+            .sort((left, right) => left.getTime() - right.getTime())[0]
     rows.push({
       branch,
       head: change.commit,
@@ -44,6 +51,9 @@ export function eventRows(
       ...(change.since === undefined ? {} : { since: change.since }),
       ...(change.at === undefined ? {} : { at: change.at }),
       ...(change.endedAt === undefined ? {} : { endedAt: change.endedAt }),
+      ...(change.adoptedMerge === undefined ? {} : { merge: change.adoptedMerge }),
+      ...(startedAt === undefined ? {} : { startedAt }),
+      ...(adoptedTimes !== undefined && startedAt === undefined ? { adoptedPhaseMissing: true } : {}),
       ...(change.deferred === undefined
         ? change.reason === undefined
           ? {}

@@ -53,6 +53,8 @@ export const EVENT_TRAILERS = {
 const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 /** Only the run path that atomically publishes the target may write merged with this producer. */
 export const QUEUE_RUN_WRITER = "yrd-run"
+/** Producer named by every state-neutral adoption of an old-format ending. */
+export const YRD_ADOPTER_WRITER = "yrd-adopter"
 
 export const CHANGE_EVENT_TYPES = [
   "opened",
@@ -67,6 +69,7 @@ export const CHANGE_EVENT_TYPES = [
   "ignored",
   "unignored",
   "notified",
+  "adopted",
 ] as const
 export type ChangeEventType = (typeof CHANGE_EVENT_TYPES)[number]
 
@@ -105,6 +108,14 @@ export type EventChange = Readonly<{
     boundMs: number
     at: Date
   }>
+  /** Historical phase instants exist only on an adopted old ending. */
+  adoptedPhases?: Readonly<{ verifying?: Date; checking?: Date; merging?: Date }>
+  /** The target merge retained by an adopted old ending, not the branch's current merge. */
+  adoptedMerge?: string
+  /** Genuine old-format decision evidence carried by the adopted event. */
+  adoptedBase?: string
+  adoptedConfig?: string
+  adoptedChecks?: readonly string[]
   notices?: Readonly<
     Record<string, Readonly<{ for: string; to: string; result: "delivered" | "refused" | "failed"; reason?: string }>>
   >
@@ -224,6 +235,7 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
 /** Construct Yrd's required causal trailers; a recorded commit is always kept. */
 export function changeInput(type: ChangeEventType, details: ChangeInputDetails): EventInput {
   assertChangeEventType(type)
+  if (type === "adopted") throw new TypeError("adopted needs adoptedInput with source provenance")
   if (!COMMIT_OID.test(details.queueTip)) throw new TypeError(`Queue: must name a commit oid, got ${details.queueTip}`)
   if (Number.isNaN(details.at.getTime())) throw new TypeError("Time: needs a valid instant")
   if ((type === "opened" || type === "verifying" || type === "merging") && details.commit === undefined) {
@@ -261,6 +273,113 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
     ...(details.commit === undefined ? {} : { keeps: [details.commit] }),
     ...(details.title === undefined ? {} : { title: details.title }),
     ...(details.content === undefined ? {} : { content: details.content }),
+  }
+}
+
+export type AdoptedInputDetails = Readonly<{
+  queueTip: string
+  /** Publication time. Historical times are separate Adopted-* trailers. */
+  at: Date
+  head: string
+  opened: Date
+  status: ChangeEnding
+  ended: Date
+  reason?: CancellationReason | string
+  submitter: string
+  issue?: string
+  merge?: string
+  base?: string
+  config?: string
+  /** Exact Check: values copied from old records, never synthesized. */
+  checks?: readonly string[]
+  sources: readonly Readonly<{ ref: string; oid: string }>[]
+  verifying?: Date
+  checking?: Date
+  merging?: Date
+}>
+
+/** Keep an old ending as a historical row while only advancing its branch chain tip. */
+export function adoptedInput(details: AdoptedInputDetails): EventInput {
+  const oid = (name: string, value: string | undefined, required = false): void => {
+    if (required && value === undefined) throw new TypeError(`adopted needs ${name}:`)
+    if (value !== undefined && !COMMIT_OID.test(value)) throw new TypeError(`invalid ${name}: ${value}`)
+  }
+  const instant = (name: string, value: Date): string => {
+    if (!(value instanceof Date) || Number.isNaN(value.getTime())) throw new TypeError(`invalid ${name}:`)
+    return value.toISOString()
+  }
+  oid("Queue", details.queueTip, true)
+  oid("Adopted-Head", details.head, true)
+  oid("Adopted-Merge", details.merge)
+  oid("Adopted-Base", details.base)
+  oid("Adopted-Config", details.config)
+  if (details.status !== "merged" && details.status !== "failed" && details.status !== "cancelled") {
+    throw new TypeError(`invalid Adopted-Status: ${String(details.status)}`)
+  }
+  if (details.status === "merged" && details.merge === undefined) {
+    throw new TypeError("merged adoption needs Adopted-Merge:")
+  }
+  if (details.status !== "merged" && details.merge !== undefined) {
+    throw new TypeError("only merged adoption carries Adopted-Merge:")
+  }
+  if (
+    details.status === "cancelled" &&
+    !["resubmitted", "dropped", "deleted", "unrecorded"].includes(details.reason ?? "")
+  ) {
+    throw new TypeError("cancelled adoption needs a CancellationReason")
+  }
+  if (details.submitter.trim() === "") throw new TypeError("adopted needs Adopted-Submitter:")
+  if (details.issue !== undefined && details.issue.trim() === "") throw new TypeError("Adopted-Issue: cannot be empty")
+  if (details.reason !== undefined && details.reason.trim() === "") {
+    throw new TypeError("Adopted-Reason: cannot be empty")
+  }
+  if (details.sources.length === 0) throw new TypeError("adopted needs Migrated-From:")
+  for (const check of details.checks ?? []) {
+    const read = readCheckTrailer(check)
+    if (read.name === "" || read.exit === undefined || read.ms === undefined || read.log === undefined) {
+      throw new TypeError(`adopted has malformed Check: ${check}`)
+    }
+  }
+  const sources = details.sources.map(({ ref, oid: source }) => {
+    if (!ref.startsWith("refs/yrd/") || !ref.endsWith(`@${details.head}`) || !COMMIT_OID.test(source)) {
+      throw new TypeError(`invalid Migrated-From: ${ref}@${source}`)
+    }
+    return `${ref}@${source}`
+  })
+  const props: [string, string][] = [
+    ["Queue", details.queueTip],
+    ["Time", instant("Time", details.at)],
+    ["By", YRD_ADOPTER_WRITER],
+    ["Adopted-Head", details.head],
+    ["Adopted-Opened", instant("Adopted-Opened", details.opened)],
+    ["Adopted-Status", details.status],
+    ["Adopted-Ended", instant("Adopted-Ended", details.ended)],
+    ["Adopted-Submitter", details.submitter],
+  ]
+  if (details.reason !== undefined) props.push(["Adopted-Reason", details.reason])
+  if (details.issue !== undefined) props.push(["Adopted-Issue", details.issue])
+  if (details.merge !== undefined) props.push(["Adopted-Merge", details.merge])
+  if (details.base !== undefined) props.push(["Adopted-Base", details.base])
+  if (details.config !== undefined) props.push(["Adopted-Config", details.config])
+  for (const [key, value] of [
+    ["Adopted-Verifying", details.verifying],
+    ["Adopted-Checking", details.checking],
+    ["Adopted-Merging", details.merging],
+  ] as const) {
+    if (value !== undefined) props.push([key, instant(key, value)])
+  }
+  for (const check of details.checks ?? []) props.push(["Check", check])
+  for (const source of sources) props.push(["Migrated-From", source])
+  return {
+    type: "adopted",
+    props,
+    keeps: [
+      ...new Set([
+        details.head,
+        ...sources.map((source) => source.slice(source.lastIndexOf("@") + 1)),
+        ...(details.merge === undefined ? [] : [details.merge]),
+      ]),
+    ],
   }
 }
 
@@ -515,6 +634,10 @@ function diagnose(state: EventChange, message: string): EventChange {
 export function evolve(state: EventChange, event: EventShape): EventChange {
   if (!CHANGE_EVENT_TYPES.some((known) => known === event.type)) {
     return diagnose({ ...state, tip: event.id }, `unknown Yrd change event ${event.type} at ${event.id}`)
+  }
+  if (event.type === "adopted") {
+    adoptedChange(event)
+    return { ...state, tip: event.id }
   }
   const at = requireCause(event)
   checkedRows(event)
@@ -1384,6 +1507,12 @@ export function mergedHistoryCommits(histories: ReadonlyMap<string, ChangeHistor
   for (const { events } of histories.values()) {
     for (const event of events) {
       if (event.type === "merged") commits.add(keptCommit(event))
+      if (event.type === "adopted") {
+        const adopted = adoptedChange(event)
+        if (adopted.state.status === "merged" && adopted.state.adoptedMerge !== undefined) {
+          commits.add(adopted.state.adoptedMerge)
+        }
+      }
     }
   }
   return commits
@@ -1405,6 +1534,119 @@ export type ChangeSegment = Readonly<{
   sources: readonly Readonly<{ ref: string; oid: Oid }>[]
 }>
 
+/** The historical reading retained by an adopted event; it never changes the live fold. */
+export function adoptedChange(event: EventShape): ChangeSegment {
+  if (event.type !== "adopted") throw new Error(`event ${event.id} is not adopted`)
+  requireCause(event)
+  const one = (key: string, required = true): string | undefined => {
+    const values = event.props.filter(([name]) => name === key).map(([, value]) => value)
+    if (values.length > 1 || (required && (values.length !== 1 || values[0]?.trim() === ""))) {
+      throw new Error(`adopted event ${event.id} needs exactly one ${key}: trailer`)
+    }
+    return values[0]
+  }
+  const head = one("Adopted-Head") as string
+  if (!COMMIT_OID.test(head) || !event.links.includes(head)) {
+    throw new Error(`adopted event ${event.id} does not keep Adopted-Head: ${head}`)
+  }
+  const opened = new Date(one("Adopted-Opened") as string)
+  if (Number.isNaN(opened.getTime())) throw new Error(`adopted event ${event.id} has invalid Adopted-Opened:`)
+  const status = one("Adopted-Status")
+  if (status !== "merged" && status !== "failed" && status !== "cancelled") {
+    throw new Error(`adopted event ${event.id} has invalid Adopted-Status: ${status}`)
+  }
+  const ended = new Date(one("Adopted-Ended") as string)
+  if (Number.isNaN(ended.getTime())) throw new Error(`adopted event ${event.id} has invalid Adopted-Ended:`)
+  if (one("By") !== YRD_ADOPTER_WRITER) throw new Error(`adopted event ${event.id} needs By: ${YRD_ADOPTER_WRITER}`)
+  const sources = event.props
+    .filter(([key]) => key === "Migrated-From")
+    .map(([, value]) => {
+      const split = value.lastIndexOf("@")
+      const ref = value.slice(0, split)
+      const oid = value.slice(split + 1)
+      if (
+        split <= 0 ||
+        !ref.startsWith("refs/yrd/") ||
+        !ref.endsWith(`@${head}`) ||
+        !COMMIT_OID.test(oid) ||
+        !event.links.includes(oid)
+      ) {
+        throw new Error(`adopted event ${event.id} has unkept or malformed Migrated-From: ${value}`)
+      }
+      return { ref, oid }
+    })
+  if (sources.length === 0) throw new Error(`adopted event ${event.id} needs Migrated-From:`)
+  const reason = one("Adopted-Reason", false)
+  if (reason !== undefined && reason.trim() === "")
+    {throw new Error(`adopted event ${event.id} has empty Adopted-Reason:`)}
+  if (
+    status === "cancelled" &&
+    reason !== "resubmitted" &&
+    reason !== "dropped" &&
+    reason !== "deleted" &&
+    reason !== "unrecorded"
+  ) {
+    throw new Error(`adopted event ${event.id} has invalid cancelled reason: ${reason}`)
+  }
+  const issue = one("Adopted-Issue", false)
+  if (issue !== undefined && issue.trim() === "") throw new Error(`adopted event ${event.id} has empty Adopted-Issue:`)
+  const submitter = one("Adopted-Submitter") as string
+  const merge = one("Adopted-Merge", false)
+  if (status === "merged" && (merge === undefined || !COMMIT_OID.test(merge) || !event.links.includes(merge))) {
+    throw new Error(`adopted event ${event.id} does not keep its Adopted-Merge:`)
+  }
+  if (status !== "merged" && merge !== undefined) {
+    throw new Error(`adopted event ${event.id} has Adopted-Merge: without a merged ending`)
+  }
+  const base = one("Adopted-Base", false)
+  const config = one("Adopted-Config", false)
+  for (const [key, value] of [
+    ["Adopted-Base", base],
+    ["Adopted-Config", config],
+  ] as const) {
+    if (value !== undefined && !COMMIT_OID.test(value)) throw new Error(`adopted event ${event.id} has invalid ${key}:`)
+  }
+  const checks = event.props
+    .filter(([key]) => key === "Check")
+    .map(([, value]) => {
+      const read = readCheckTrailer(value)
+      if (read.name === "" || read.exit === undefined || read.ms === undefined || read.log === undefined) {
+        throw new Error(`adopted event ${event.id} has malformed Check: ${value}`)
+      }
+      return value
+    })
+  const phaseAt = (key: string): Date | undefined => {
+    const value = one(key, false)
+    if (value === undefined) return undefined
+    const at = new Date(value)
+    if (Number.isNaN(at.getTime())) throw new Error(`adopted event ${event.id} has invalid ${key}:`)
+    return at
+  }
+  const phases = {
+    verifying: phaseAt("Adopted-Verifying"),
+    checking: phaseAt("Adopted-Checking"),
+    merging: phaseAt("Adopted-Merging"),
+  }
+  const state: EventChange = {
+    status,
+    commit: head,
+    submitter,
+    since: opened,
+    at: ended,
+    tip: event.id,
+    adoptedPhases: phases,
+    adoptedChecks: checks,
+    ...(merge === undefined ? {} : { adoptedMerge: merge }),
+    ...(base === undefined ? {} : { adoptedBase: base }),
+    ...(config === undefined ? {} : { adoptedConfig: config }),
+    ...(issue === undefined ? {} : { issue }),
+    ...(reason === undefined ? {} : { reason }),
+    endedAt: ended,
+    ending: { kind: status, id: event.id },
+  }
+  return { opened: event.id, head, state, sources }
+}
+
 /** Read every opened segment while leaving the normal list's current fold unchanged. */
 export function enumerateChangeSegments(events: readonly Event[], ref: string, repo: string): readonly ChangeSegment[] {
   assertCompleteChangeChain(events, ref, repo)
@@ -1412,18 +1654,21 @@ export function enumerateChangeSegments(events: readonly Event[], ref: string, r
   let state = initial
   let opened: Oid | undefined
   let sources: Array<{ ref: string; oid: Oid }> = []
+  const adopted: ChangeSegment[] = []
   const retain = () => {
     if (opened === undefined) return
     if (state.commit === undefined) throw new Error(`${ref}: opened segment ${opened} has no Commit:`)
     segments.push({ opened, head: state.commit, state, sources })
   }
   for (const event of events) {
+    if (event.type === "adopted") adopted.push(adoptedChange(event))
     if (event.type === "opened") {
       retain()
       sources = []
     }
     state = evolve(state, event)
     if (event.type === "opened") opened = event.id
+    if (event.type === "adopted") continue
     for (const [key, value] of event.props) {
       if (key !== "Migrated-From") continue
       const split = value.lastIndexOf("@")
@@ -1436,6 +1681,13 @@ export function enumerateChangeSegments(events: readonly Event[], ref: string, r
     }
   }
   retain()
+  if (adopted.length > 0) {
+    const current = segments.pop()
+    // Adoption is appended to the event chain. Historical Opened is data,
+    // never authority to reorder the chain's existing event identities.
+    segments.push(...adopted)
+    if (current !== undefined) segments.push(current)
+  }
   if (opened === undefined && state.status === "cancelled" && state.commit !== undefined) {
     const first = events[0]
     if (first === undefined) throw new Error(`${ref} in ${repo}: empty chain has no opened segment`)

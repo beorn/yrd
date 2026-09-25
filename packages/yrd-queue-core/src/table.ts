@@ -116,6 +116,8 @@ export type Row<Status extends string = ChangeState | ChangeStatus | "direct" | 
   run?: string
   /** When this run's checks began — its first check-start, or the tip's own instant when no journal exists and the tip IS the checked record. */
   startedAt?: Date
+  /** An adopted ending whose old records retained no verifying/checking/merging instant. */
+  adoptedPhaseMissing?: true
   /** When the actual ending record was written; absent when only its sent notice was read, while queued or checked, or for an ending git read (`replaced`, `deleted`, a direct ancestor). */
   endedAt?: Date
   /**

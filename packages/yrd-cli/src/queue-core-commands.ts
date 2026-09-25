@@ -33,6 +33,7 @@ import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from
 import {
   CHANGE_REF_DIAGNOSTICS,
   assertPlainEventQueueConfig,
+  adoptLegacy,
   directMergeCommits,
   changeName,
   checksOf,
@@ -63,6 +64,7 @@ import {
   gitIn,
   incidentLine,
   incidentLines,
+  inspectLegacyAdoption,
   journalKey,
   list,
   queueName,
@@ -276,6 +278,7 @@ const processTerminate: TerminatePort = {
 }
 
 export type CoreQueueCommand =
+  | Readonly<{ command: "adopt-legacy"; apply: boolean }>
   | Readonly<{
       command: "submit"
       branch?: string
@@ -415,6 +418,7 @@ export type CoreQueueCommand =
 
 /** What each command is called when it has to say it needs a queue. */
 const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
+  "adopt-legacy": "queue adopt-legacy",
   check: "check",
   drop: "drop",
   ignore: "ignore",
@@ -803,6 +807,90 @@ export async function coreQueueCommand(
   }
 
   switch (request.command) {
+    case "adopt-legacy": {
+      const eventStore = createEventStore(repo, config.target.remote, selection)
+      const name = config.target.branch
+      if ((await queueFormat(eventStore, name)) !== "event") {
+        io.stderr(`${config.target.remote}#${name}: yrd-adopt-legacy-format: adoption needs an event queue\n`)
+        return 1
+      }
+      if (request.apply && eventPause(await readEventQueue(eventStore, name)) === undefined) {
+        io.stderr(
+          `${config.target.remote}#${name}: yrd-adopt-legacy-unpaused: pause with yrd queue pause --reason <text> before --apply\n`,
+        )
+        return 1
+      }
+      const targetOid = await readRemoteCommit(git, config.target.remote, `refs/heads/${name}`)
+      if (targetOid === undefined) {
+        throw new Error(
+          `${config.target.remote} refs/heads/${name}: yrd-adopt-legacy-target-missing: target ref is absent`,
+        )
+      }
+      const plan = await inspectLegacyAdoption({ store: eventStore, git, queue: name, target: targetOid })
+      const prefix = `${queueRefPrefix(name)}/`
+      const scope = `under ${prefix} at ${config.target.remote}`
+      const inspected = plan.rows.map((row) => ({
+        branch: row.branch,
+        oldRef: row.ref,
+        oldOid: row.record,
+        head: row.head,
+        opened: row.opened.toISOString(),
+        oldStatus: row.oldStatus,
+        plannedStatus: row.plannedStatus,
+        ending: row.ending ?? null,
+        targetChainTip: row.targetChainTip,
+      }))
+      const plannedCount = `${String(inspected.length)} legacy record${inspected.length === 1 ? "" : "s"}`
+      if (!request.apply) {
+        emit(
+          io,
+          options.json,
+          {
+            mode: "dry-run",
+            remote: config.target.remote,
+            prefix,
+            excluded: [`${prefix}changes/`, `${prefix}queue`, `${prefix}pause`, `${prefix}override`],
+            count: inspected.length,
+            rows: inspected,
+          },
+          [
+            `${plannedCount} ${scope}; excluded ${prefix}changes/ and queue control refs`,
+            ...inspected.map(
+              (row) =>
+                `${row.branch}: ${row.oldRef}@${row.oldOid} → ${row.ending === null ? `opened (${row.plannedStatus})` : `ending ${row.ending}`} · Opened ${row.opened} · target chain ${row.targetChainTip ?? "absent"}`,
+            ),
+          ].join("\n"),
+        )
+        return 0
+      }
+      const receipts = await adoptLegacy({ store: eventStore, plan, at: new Date() })
+      const adopted = receipts.filter((row) => row.result === "adopted").length
+      const refused = receipts.length - adopted
+      emit(
+        io,
+        options.json,
+        {
+          mode: "apply",
+          remote: config.target.remote,
+          prefix,
+          planned: inspected.length,
+          adopted,
+          refused,
+          rows: receipts,
+          ...(refused === 0 ? {} : { next: "inspect current refs with yrd queue adopt-legacy before another apply" }),
+        },
+        [
+          `${plannedCount} ${scope}; ${String(adopted)} adopted, ${String(refused)} refused`,
+          ...receipts.map((row) =>
+            row.result === "adopted"
+              ? `${row.branch}: ${row.oldRef}@${row.oldOid} → adopted ${row.eventOid}`
+              : `${row.branch}: ${row.oldRef}@${row.oldOid} → refused ${row.ref}: expected ${row.expected ?? "absent"}, observed ${row.observed ?? "absent"}`,
+          ),
+          ...(refused === 0 ? [] : ["Inspect current refs with yrd queue adopt-legacy before another --apply."]),
+        ].join("\n"),
+      )
+      return refused === 0 ? 0 : 1
+    }
     case "ignore":
     case "unignore": {
       if (request.command === "unignore" && "reason" in request) {

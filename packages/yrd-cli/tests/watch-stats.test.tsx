@@ -110,6 +110,47 @@ describe("statsBuckets", () => {
     expect([45_000, 90_000, 3_600_000 * 2, 3_600_000 * 30].map(shortDuration)).toEqual(["45s", "2m", "2h", "1d"])
   })
 
+  // @failure 25647: an adopted merged ending with no old phase instants vanished from STATS or looked fully timed.
+  it("counts an adopted merge in TOTAL and names its missing phase times without counting a cancellation as a run", () => {
+    const oldHead = "c".repeat(40)
+    const since = new Date(NOW.getTime() - 3_600_000)
+    const rows: readonly WatchRow[] = [
+      {
+        row: {
+          branch: "task/old-merge",
+          head: oldHead,
+          state: "merged",
+          format: "event",
+          since,
+          at: NOW,
+          endedAt: NOW,
+          merge: "f".repeat(40),
+          adoptedPhaseMissing: true,
+        },
+      },
+      {
+        row: {
+          branch: "task/24526",
+          head: "d".repeat(40),
+          state: "cancelled",
+          format: "event",
+          since,
+          at: NOW,
+          endedAt: NOW,
+          reason: "resubmitted",
+          adoptedPhaseMissing: true,
+        },
+      },
+    ]
+    const decisions = decisionsOfRows(rows)
+    expect(decisions).toMatchObject([{ decision: "merged", totalMs: 3_600_000, adoptedPhaseMissing: true }])
+    expect(decisions[0]).not.toHaveProperty("queuedMs")
+    expect(decisions[0]).not.toHaveProperty("runMs")
+    const day = lastDayBucket(decisions, NOW)
+    expect(day).toMatchObject({ merges: 1, adoptedMissingPhases: 1, totalMs: 3_600_000 })
+    expect(statsSummary({ drafts: undefined, waiting: 0 }, day)).toContain("1 adopted without phase times")
+  })
+
   it("measures the spans off the rows: opened → started, started → ended, opened → merged, and the retries a merge took", () => {
     const since = new Date(NOW.getTime() - 3_600_000)
     const startedAt = new Date(NOW.getTime() - 1_800_000)

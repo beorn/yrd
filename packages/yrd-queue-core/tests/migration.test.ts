@@ -133,6 +133,19 @@ describe("25041 old resting-state conversion", () => {
     expect(migrated(inputs).status).toBe("merged")
   })
 
+  it("uses the original stuck time when a later sent record repeats that resting state", () => {
+    const opened = record("opened", "1".repeat(40), OPENED)
+    const stuckAt = "2026-09-24T10:05:00.000Z"
+    const stuck = record("stuck", "2".repeat(40), stuckAt, [["Code", "crash"]])
+    const sent = record("sent", "3".repeat(40), "2026-09-24T10:10:00.000Z", [["State", "stuck"]])
+    const inputs = inputsForLegacy(
+      source([opened, stuck, sent], { state: "stuck", reason: "crash" }),
+      QUEUE,
+      new Date("2026-09-24T11:00:00.000Z"),
+    )
+    expect(inputs.at(-1)?.props).toContainEqual(["Time", stuckAt])
+  })
+
   it("keeps a merged head merged when a later head gives its fold a superseded reason", () => {
     const opened = record("opened", "1".repeat(40), OPENED)
     const ended = record("merged", "2".repeat(40), "2026-09-24T10:05:00.000Z")

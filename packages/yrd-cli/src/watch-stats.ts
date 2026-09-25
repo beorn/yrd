@@ -34,6 +34,8 @@ export type RunDecision = Readonly<{
   queuedMs?: number
   runMs?: number
   totalMs?: number
+  /** Old merged/failed ending whose Record lacked all phase instants. */
+  adoptedPhaseMissing?: true
   /** For a merge that merged: the runs the change took beyond the first — its same-head retries. */
   retries?: number
 }>
@@ -140,6 +142,7 @@ export function decisionsOfRows(rows: readonly WatchRow[]): readonly RunDecision
       at,
       ...verdict,
       run: item.run?.id ?? item.row.run ?? `${item.row.branch}@${item.row.head}`,
+      ...(item.row.adoptedPhaseMissing === true ? { adoptedPhaseMissing: true as const } : {}),
       ...spans,
     })
   }
@@ -182,6 +185,7 @@ export type StatsBucket = Readonly<{
   /** A local calendar day starts at or before this bucket, right after the (newer) one to its left (item 20). */
   dayBoundary: boolean
   merges: number
+  adoptedMissingPhases: number
   /** Runs that passed every check and merged nothing: a `checked` verdict — the retired box's PASS. */
   passes: number
   duplicates: number
@@ -329,6 +333,7 @@ function bucketOf(window: StatsWindow, decisions: readonly RunDecision[]): Stats
     duplicates: inside.filter((decision) => decision.duplicate).length,
     fails: inside.filter((decision) => decision.decision === "failed").length,
     merges: inside.filter((decision) => decision.decision === "merged" && !decision.duplicate).length,
+    adoptedMissingPhases: inside.filter((decision) => decision.adoptedPhaseMissing === true).length,
     passes: inside.filter((decision) => decision.decision === "checked").length,
     runs: new Set(inside.map((decision) => decision.run)).size,
     stuck: inside.filter((decision) => decision.decision === "stuck").length,
@@ -367,7 +372,8 @@ export function statsSummary(
   const span = (ms: number | undefined): string => (ms === undefined ? "—" : runTime(ms))
   return (
     `${now} · 24h: ${span(day.queuedMs)} wait, ${span(day.runMs)} run, ` +
-    `${counted(day.merges, "merge")}, ${String(day.fails)} failed, ${String(day.stuck)} stuck`
+    `${counted(day.merges, "merge")}, ${String(day.fails)} failed, ${String(day.stuck)} stuck` +
+    (day.adoptedMissingPhases === 0 ? "" : `, ${String(day.adoptedMissingPhases)} adopted without phase times`)
   )
 }
 

@@ -37,6 +37,8 @@ export {
   CHANGE_EVENT_TYPES,
   CHANGE_STATUSES,
   EVENT_TRAILERS,
+  adoptedChange,
+  adoptedInput,
   changeInput,
   changesRef,
   createEventQueue,
@@ -60,6 +62,7 @@ export {
 } from "./events.ts"
 export type { Event } from "./git.ts"
 export type {
+  AdoptedInputDetails,
   CancellationReason,
   ChangeEventType,
   ChangeStatus,
@@ -184,6 +187,8 @@ export type {
 } from "./override.ts"
 export { notifyOutsideRound, overrideNotice } from "./with-notify.ts"
 export type { OutsideRound, OverrideNotice } from "./with-notify.ts"
+export { inspectLegacyAdoption, adoptLegacy } from "./migration.ts"
+export type { LegacyAdoptionPlan, LegacyAdoptionRow, LegacyAdoptionReceipt } from "./migration.ts"
 
 export { remoteUrl } from "./remote.ts"
 

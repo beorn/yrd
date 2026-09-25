@@ -14,6 +14,8 @@ import { eventListRows, eventRows } from "../src/event-table.ts"
 import { pauseRef } from "../src/refs.ts"
 import {
   CHANGE_EVENT_TYPES,
+  adoptedChange,
+  adoptedInput,
   appendChangeEvent,
   changeInput,
   changesRef,
@@ -24,6 +26,7 @@ import {
   initial,
   listChangeHistories,
   listChanges,
+  mergedHistoryCommits,
   queueFormat,
   queueRef,
   readChangeEvents,
@@ -212,6 +215,7 @@ describe("ADR-0016 event fold", () => {
       "ignored",
       "unignored",
       "notified",
+      "adopted",
     ])
   })
 
@@ -1244,7 +1248,7 @@ describe("the queue-format boundary", () => {
     const written = await changes.append(
       [
         changeInput("opened", { queueTip, at, commit: head, by: "@dev/2" }),
-        input("adopted"),
+        input("future-adopted"),
         changeInput("ignored", { queueTip, at, by: "@dev/2", reason: "manual" }),
         changeInput("unignored", { queueTip, at, by: "@dev/2" }),
         input("future-audit"),
@@ -1259,11 +1263,11 @@ describe("the queue-format boundary", () => {
     const future = histories.get("task/future")
     expect(future?.state).toMatchObject({ status: "queued", commit: head, tip: written.events.at(-1)?.id })
     expect(future?.state.ignored).toBeUndefined()
-    expect(future?.state.diagnostic).toContain("adopted")
+    expect(future?.state.diagnostic).toContain("future-adopted")
     expect(future?.state.diagnostic).toContain("future-audit")
     expect(histories.get("task/healthy")?.state.diagnostic).toBeUndefined()
     expect(eventRows(new Map([...histories].map(([branch, history]) => [branch, history.state])))).toMatchObject([
-      { branch: "task/future", state: "queued", diagnostic: expect.stringContaining("adopted") },
+      { branch: "task/future", state: "queued", diagnostic: expect.stringContaining("future-adopted") },
       { branch: "task/healthy", state: "queued" },
     ])
     expect((await readStatus(location, "lab", "task/future")).tip).toBe(written.events.at(-1)?.id)
@@ -1271,7 +1275,7 @@ describe("the queue-format boundary", () => {
       (await readChangeEvents(location, "lab", "task/future", written.events.at(-1)?.id ?? "")).map(
         (item) => item.type,
       ),
-    ).toEqual(["opened", "adopted", "ignored", "unignored", "future-audit"])
+    ).toEqual(["opened", "future-adopted", "ignored", "unignored", "future-audit"])
     expect(enumerateChangeSegments(future?.events ?? [], changesRef("lab", "task/future"), store.repo)).toMatchObject([
       { state: { status: "queued", diagnostic: expect.stringContaining("future-audit") } },
     ])
@@ -1293,15 +1297,210 @@ describe("the queue-format boundary", () => {
     expect(current?.state.diagnostic).toBeUndefined()
     const segments = enumerateChangeSegments(current?.events ?? [], changesRef("lab", "task/future"), store.repo)
     expect(segments).toHaveLength(2)
-    expect(segments[0]?.state.diagnostic).toContain("adopted")
+    expect(segments[0]?.state.diagnostic).toContain("future-adopted")
     expect(segments[1]?.state.diagnostic).toBeUndefined()
     const document = eventListRows(new Map([["task/future", segments.map((segment) => segment.state)]]), [], {
       all: true,
     }).document
-    expect(document.map((row) => row.diagnostic)).toEqual([undefined, expect.stringContaining("adopted")])
+    expect(document.map((row) => row.diagnostic)).toEqual([undefined, expect.stringContaining("future-adopted")])
     const currentUnknown = await changes.append([input("future-current")], { expect: current?.state.tip ?? null })
     expect((await readStatus(location, "lab", "task/future")).diagnostic).toContain("future-current")
     expect((await readStatus(location, "lab", "task/future")).tip).toBe(currentUnknown.events[0]?.id)
+  })
+
+  // @failure 25647: adopting an older head after a resubmit can make that old head current or hide its ending.
+  it("keeps an adopted old ending as a historical row without changing the live change", () => {
+    const oldHead = "c".repeat(40)
+    const oldRecord = "d".repeat(40)
+    const currentHead = "e".repeat(40)
+    const ref = changesRef("main", "task/24526")
+    const opened = event(
+      "opened",
+      A,
+      [
+        ["Commit", currentHead],
+        ["By", "@dev/12"],
+        ["Time", "2026-09-24T20:00:00.000Z"],
+      ],
+      [currentHead],
+    )
+    const adopted = event(
+      "adopted",
+      B,
+      [
+        ["Time", "2026-09-25T02:00:00.000Z"],
+        ["By", "yrd-adopter"],
+        ["Adopted-Opened", "2026-09-24T12:00:00.000Z"],
+        ["Adopted-Head", oldHead],
+        ["Adopted-Status", "cancelled"],
+        ["Adopted-Ended", "2026-09-24T12:30:00.000Z"],
+        ["Adopted-Reason", "resubmitted"],
+        ["Adopted-Submitter", "@dev/12"],
+        ["Migrated-From", `refs/yrd/main/task/24526@${oldHead}@${oldRecord}`],
+      ],
+      [oldHead, oldRecord],
+    )
+    const events = [opened, adopted]
+    const live = events.reduce(evolve, initial)
+    expect(live).toMatchObject({
+      status: "queued",
+      commit: currentHead,
+      since: new Date("2026-09-24T20:00:00.000Z"),
+      tip: B,
+    })
+    expect(live.diagnostic).toBeUndefined()
+    const segments = enumerateChangeSegments(events, ref, "fixture")
+    expect(segments).toHaveLength(2)
+    expect(segments[0]).toMatchObject({
+      head: oldHead,
+      state: { status: "cancelled", since: new Date("2026-09-24T12:00:00.000Z"), reason: "resubmitted" },
+    })
+    expect(segments[1]).toMatchObject({ head: currentHead, state: { status: "queued" } })
+    const rows = eventListRows(new Map([["task/24526", segments.map((segment) => segment.state)]]), [], { all: true })
+    expect(rows.table).toMatchObject([{ head: currentHead, state: "queued" }])
+    expect(rows.document).toEqual(
+      expect.arrayContaining([expect.objectContaining({ head: oldHead, state: "cancelled" })]),
+    )
+    expect(() => changeInput("adopted", { queueTip: A, at: new Date("2026-09-25T02:00:00.000Z") })).toThrow(
+      /adoptedInput/,
+    )
+  })
+
+  // @failure 25647: an adoption could lose source commits or invent decision evidence when written.
+  it("constructs a kept adopted ending with one readable evidence grammar", () => {
+    const source = { ref: `refs/yrd/main/task/24526@${B}`, oid: "d".repeat(40) }
+    const details = {
+      queueTip: A,
+      at: new Date("2026-09-25T02:00:00.000Z"),
+      head: B,
+      opened: new Date("2026-09-24T12:00:00.000Z"),
+      status: "merged" as const,
+      ended: new Date("2026-09-24T12:30:00.000Z"),
+      submitter: "@dev/12",
+      issue: "24526",
+      merge: "e".repeat(40),
+      base: "f".repeat(40),
+      config: "1".repeat(40),
+      checks: ["test exit=0 ms=42 log=/tmp/real-old-log"],
+      sources: [source],
+      verifying: new Date("2026-09-24T12:10:00.000Z"),
+    }
+    const input = adoptedInput(details)
+    expect(input.keeps).toEqual([B, source.oid, details.merge])
+    expect(input.props).toEqual(
+      expect.arrayContaining([
+        ["By", "yrd-adopter"],
+        ["Time", details.at.toISOString()],
+        ["Adopted-Opened", details.opened.toISOString()],
+        ["Adopted-Ended", details.ended.toISOString()],
+        ["Adopted-Base", details.base],
+        ["Adopted-Config", details.config],
+        ["Check", details.checks[0]],
+        ["Migrated-From", `${source.ref}@${source.oid}`],
+      ]),
+    )
+    const reading = adoptedChange(event("adopted", "2".repeat(40), input.props, [...(input.keeps ?? [])]))
+    expect(reading).toMatchObject({
+      head: B,
+      sources: [source],
+      state: {
+        status: "merged",
+        adoptedMerge: details.merge,
+        adoptedBase: details.base,
+        adoptedConfig: details.config,
+        adoptedChecks: details.checks,
+        adoptedPhases: { verifying: details.verifying },
+      },
+    })
+    expect(() => adoptedInput({ ...details, status: "queued" as never })).toThrow(/Adopted-Status/)
+    expect(() => adoptedInput({ ...details, ended: undefined as never })).toThrow(/Adopted-Ended/)
+    expect(() => adoptedInput({ ...details, sources: [] })).toThrow(/Migrated-From/)
+    expect(() =>
+      adoptedInput({ ...details, sources: [{ ref: `refs/yrd/main/task/24526@${A}`, oid: source.oid }] }),
+    ).toThrow(/Migrated-From/)
+  })
+
+  // @failure 25647: old Opened: values could reorder event-chain history during adoption.
+  it("keeps adoption event order even when old Opened times run backwards", () => {
+    const ref = changesRef("main", "task/reused")
+    const current = event("opened", A, [["Commit", B]], [B])
+    const adopted = (id: string, head: string, opened: string, record: string) =>
+      event(
+        "adopted",
+        id,
+        [
+          ["By", "yrd-adopter"],
+          ["Adopted-Head", head],
+          ["Adopted-Opened", opened],
+          ["Adopted-Status", "cancelled"],
+          ["Adopted-Ended", "2026-09-24T13:00:00.000Z"],
+          ["Adopted-Reason", "resubmitted"],
+          ["Adopted-Submitter", "@dev/12"],
+          ["Migrated-From", `refs/yrd/main/task/reused@${head}@${record}`],
+        ],
+        [head, record],
+      )
+    const events = [
+      current,
+      adopted("1".repeat(40), "c".repeat(40), "2026-09-24T12:00:00.000Z", "e".repeat(40)),
+      adopted("2".repeat(40), "d".repeat(40), "2026-09-23T12:00:00.000Z", "f".repeat(40)),
+    ]
+    const segments = enumerateChangeSegments(events, ref, "fixture")
+    expect(segments.map(({ opened }) => opened)).toEqual(["1".repeat(40), "2".repeat(40), A])
+    expect(segments.map(({ state }) => state.since)).toEqual([
+      new Date("2026-09-24T12:00:00.000Z"),
+      new Date("2026-09-23T12:00:00.000Z"),
+      new Date("2026-09-22T14:00:00.000Z"),
+    ])
+  })
+
+  // @failure 25647: an adopted old merge can disappear from listing, stats and direct-merge accounting.
+  it("projects an adopted merged ending with its retained merge and missing phase evidence", () => {
+    const currentHead = "e".repeat(40)
+    const oldHead = "c".repeat(40)
+    const oldRecord = "d".repeat(40)
+    const merge = "f".repeat(40)
+    const ref = changesRef("main", "task/old-merge")
+    const events = [
+      event(
+        "opened",
+        A,
+        [
+          ["Commit", currentHead],
+          ["By", "@dev/12"],
+        ],
+        [currentHead],
+      ),
+      event(
+        "adopted",
+        B,
+        [
+          ["By", "yrd-adopter"],
+          ["Adopted-Opened", "2026-09-23T12:00:00.000Z"],
+          ["Adopted-Head", oldHead],
+          ["Adopted-Status", "merged"],
+          ["Adopted-Ended", "2026-09-24T12:30:00.000Z"],
+          ["Adopted-Submitter", "@dev/12"],
+          ["Adopted-Merge", merge],
+          ["Migrated-From", `refs/yrd/main/task/old-merge@${oldHead}@${oldRecord}`],
+        ],
+        [oldHead, oldRecord, merge],
+      ),
+    ]
+    const segments = enumerateChangeSegments(events, ref, "fixture")
+    expect(segments.map((segment) => segment.head)).toEqual([oldHead, currentHead])
+    const rows = eventListRows(new Map([["task/old-merge", segments.map((segment) => segment.state)]]), [], {
+      all: true,
+    })
+    expect(rows.table).toMatchObject([{ head: currentHead, state: "queued" }])
+    expect(rows.document).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ head: oldHead, state: "merged", merge, adoptedPhaseMissing: true }),
+      ]),
+    )
+    expect([
+      ...mergedHistoryCommits(new Map([["task/old-merge", { state: segments.at(-1)!.state, events }]])),
+    ]).toContain(merge)
   })
 
   it("rejects an invalid queue chain through the combined read", async () => {
