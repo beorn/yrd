@@ -27,6 +27,7 @@ import { createMemBackend } from "gitomic/mem"
 import { openEvents } from "gitomic/events"
 import { WatchPane, queueLineStatus, type WatchSnapshot } from "../src/watch-pane.tsx"
 import { readEventListing, clearEventListingCache } from "../src/queue-core-commands.ts"
+import { encodeOps } from "../../yrd-queue-core/src/ops-state.ts"
 
 const NOW = new Date("2026-09-24T12:00:00.000Z")
 
@@ -54,6 +55,36 @@ async function seedEventQueue(
   const created = result.events[0]?.id
   if (created === undefined) throw new Error("fixture created event was not written")
   return created
+}
+
+/**
+ * Cut the queue's pause and overrides over onto its event chain. Before the cut-over a listing reads the legacy
+ * pause and override refs through git itself, which this mem-backed fixture has none of (25848).
+ */
+async function seedOpsCutover(
+  location: Readonly<{ repo: string; remote?: string; backend?: any }>,
+  queue: string,
+  tip: string,
+  at: Date,
+): Promise<string> {
+  const result = await (
+    await openEvents({ ...location, ref: queueRef(queue), writer: "yrd" })
+  ).append(
+    [
+      {
+        type: "ops-cutover",
+        props: [
+          ["Queue", tip],
+          ["Time", at.toISOString()],
+          ["Ops", encodeOps({ overrides: [] })],
+        ],
+      },
+    ],
+    { expect: tip },
+  )
+  const cutover = result.events[0]?.id
+  if (cutover === undefined) throw new Error("fixture ops-cutover event was not written")
+  return cutover
 }
 
 function baseSnapshot(overrides: Partial<WatchSnapshot> = {}): WatchSnapshot {
@@ -168,7 +199,8 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     const branchTarget3 = await open({ ...localStore, ref: "refs/heads/task/draft-3" })
     const commit4 = (await branchTarget3.transact(async (map) => map.set("c.txt", "three"), "draft-3")).oid
 
-    const queueTip = await seedEventQueue(store, "main", commit1, new Date("2026-09-24T12:00:00.000Z"))
+    const created = await seedEventQueue(store, "main", commit1, new Date("2026-09-24T12:00:00.000Z"))
+    const queueTip = await seedOpsCutover(store, "main", created, new Date("2026-09-24T12:00:00.000Z"))
     const changeEvents = await openEvents({ ...store, ref: changesRef("main", "task/one"), writer: "yrd" })
     await changeEvents.append(
       [changeInput("opened", { queueTip, commit: commit2, at: new Date("2026-09-24T12:00:00.000Z"), by: "@dev/7" })],
