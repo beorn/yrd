@@ -108,6 +108,7 @@ describe("yrd queue adopt-legacy entry", () => {
       remote: "origin",
       prefix: "refs/yrd/main/",
       count: 0,
+      branchFacts: { present: 0, absent: 0 },
       rows: [],
     })
     expect(json.stdout.trim().split("\n")).toHaveLength(1)
@@ -148,9 +149,11 @@ describe("yrd queue adopt-legacy entry", () => {
     }
     await store.backend.publish(store.repo, [{ ref: oldRef, expect: "0".repeat(40), oid: record }], "origin")
     const dry = await run(work)
-    expect(dry.exitCode).toBe(0)
+    expect(dry.exitCode, dry.stderr).toBe(0)
     expect(dry.stdout).toContain(`1 legacy record under refs/yrd/main/ at origin`)
     expect(dry.stdout).toContain(`${oldRef}@${record}`)
+    expect(dry.stdout).toContain(`Branch: refs/heads/task/old at ${head}, lease on apply`)
+    expect(dry.stdout).toContain("branch facts: 1 present, 0 absent")
     await writeQueueEvent(store, "main", {
       type: "paused",
       by: "@chief",
@@ -160,10 +163,51 @@ describe("yrd queue adopt-legacy entry", () => {
     const applied = await run(work, "--apply")
     expect(applied.exitCode).toBe(0)
     expect(applied.stdout).toContain("1 adopted, 0 refused")
+    expect(applied.stdout).toContain(`Branch: refs/heads/task/old at ${head}, leased`)
     expect((await store.backend.listRefs(store.repo, oldRef, "origin")).has(oldRef)).toBe(false)
     expect((await readStatus(store, "main", "task/old")).commit).toBe(head)
     const after = await run(work)
     expect(after.exitCode).toBe(0)
     expect(after.stdout).toMatch(/0 legacy records under refs\/yrd\/main\/ at origin/u)
+  })
+
+  // @failure 25647: the operator could not see that an absent branch fact cannot be leased.
+  it("counts absent branch facts in the dry run and records the apply read", async () => {
+    const work = await emptyEventQueue()
+    const git = gitIn(work)
+    await git(["checkout", "--quiet", "-b", "task/absent"])
+    writeFileSync(join(work, "absent.txt"), "absent\n")
+    await git(["add", "absent.txt"])
+    await git(["commit", "--quiet", "-m", "absent branch head"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const oldRef = changeRef("main", { branch: "task/absent", head })
+    const record = await appendRecord(git, "main", {
+      change: { branch: "task/absent", head },
+      kind: "opened",
+      subject: "old submission with a deleted branch",
+      trailers: [["Submitter", "@dev/2"]],
+    })
+    const store = createEventStore(work, "origin", git.selection)
+    if (store.backend.publish === undefined) throw new Error("fixture Gitomic backend lacks publication")
+    await store.backend.publish(store.repo, [{ ref: oldRef, expect: "0".repeat(40), oid: record }], "origin")
+    const dry = await run(work, "--json")
+    expect(dry.exitCode, dry.stderr).toBe(0)
+    const planned = JSON.parse(dry.stdout) as {
+      branchFacts: { present: number; absent: number }
+      rows: { branchFact: string }[]
+    }
+    expect(planned.branchFacts).toEqual({ present: 0, absent: 1 })
+    expect(planned.rows[0]?.branchFact).toMatch(/^refs\/heads\/task\/absent absent at .*not leasable$/u)
+    await writeQueueEvent(store, "main", {
+      type: "paused",
+      by: "@chief",
+      reason: "fenced absent branch adoption",
+      at: new Date("2026-09-24T10:30:00.000Z"),
+    })
+    const applied = await run(work, "--apply", "--json")
+    expect(applied.exitCode).toBe(0)
+    const receipt = JSON.parse(applied.stdout) as { adopted: number; refused: number; rows: { branchFact: string }[] }
+    expect(receipt).toMatchObject({ adopted: 1, refused: 0 })
+    expect(receipt.rows[0]?.branchFact).toMatch(/^refs\/heads\/task\/absent absent at .*not leasable$/u)
   })
 })

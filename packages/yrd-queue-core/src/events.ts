@@ -296,6 +296,8 @@ export type AdoptedInputDetails = Readonly<{
   verifying?: Date
   checking?: Date
   merging?: Date
+  /** Exact branch observation made by the one-shot adopter before publication. */
+  branchFact?: string
 }>
 
 /** Keep an old ending as a historical row while only advancing its branch chain tip. */
@@ -333,6 +335,12 @@ export function adoptedInput(details: AdoptedInputDetails): EventInput {
   if (details.reason !== undefined && details.reason.trim() === "") {
     throw new TypeError("Adopted-Reason: cannot be empty")
   }
+  if (
+    details.branchFact !== undefined &&
+    !/^refs\/heads\/.+ (?:absent at .+, not leasable|at [0-9a-f]{40}, leased)$/.test(details.branchFact)
+  ) {
+    throw new TypeError(`invalid Branch: ${details.branchFact}`)
+  }
   if (details.sources.length === 0) throw new TypeError("adopted needs Migrated-From:")
   for (const check of details.checks ?? []) {
     const read = readCheckTrailer(check)
@@ -361,6 +369,7 @@ export function adoptedInput(details: AdoptedInputDetails): EventInput {
   if (details.merge !== undefined) props.push(["Adopted-Merge", details.merge])
   if (details.base !== undefined) props.push(["Adopted-Base", details.base])
   if (details.config !== undefined) props.push(["Adopted-Config", details.config])
+  if (details.branchFact !== undefined) props.push(["Branch", details.branchFact])
   for (const [key, value] of [
     ["Adopted-Verifying", details.verifying],
     ["Adopted-Checking", details.checking],
@@ -1577,8 +1586,9 @@ export function adoptedChange(event: EventShape): ChangeSegment {
     })
   if (sources.length === 0) throw new Error(`adopted event ${event.id} needs Migrated-From:`)
   const reason = one("Adopted-Reason", false)
-  if (reason !== undefined && reason.trim() === "")
-    {throw new Error(`adopted event ${event.id} has empty Adopted-Reason:`)}
+  if (reason !== undefined && reason.trim() === "") {
+    throw new Error(`adopted event ${event.id} has empty Adopted-Reason:`)
+  }
   if (
     status === "cancelled" &&
     reason !== "resubmitted" &&

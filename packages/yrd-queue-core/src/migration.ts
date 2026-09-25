@@ -173,7 +173,8 @@ export type LegacyAdoptionRow = Readonly<{
   ref: string
   record: string
   head: string
-  branchHead: string
+  branchHead: string | null
+  branchObservedAt: Date
   opened: Date
   oldStatus: "queued" | "stuck" | "merged" | "failed" | "cancelled"
   plannedStatus: "queued" | "stuck" | "merged" | "failed" | "cancelled"
@@ -192,7 +193,14 @@ export type LegacyAdoptionPlan = Readonly<{
 }>
 
 export type LegacyAdoptionReceipt =
-  | Readonly<{ result: "adopted"; branch: string; oldRef: string; oldOid: string; eventOid: string }>
+  | Readonly<{
+      result: "adopted"
+      branch: string
+      oldRef: string
+      oldOid: string
+      eventOid: string
+      branchFact: string
+    }>
   | Readonly<{
       result: "refused"
       branch: string
@@ -201,7 +209,56 @@ export type LegacyAdoptionReceipt =
       ref: string
       expected: string | null
       observed: string | null
+      branchFact: string
+      error?: string
     }>
+
+function adoptionBranchFact(branch: string, head: string | null, observedAt: Date): string {
+  const ref = `refs/heads/${branch}`
+  return head === null ? `${ref} absent at ${observedAt.toISOString()}, not leasable` : `${ref} at ${head}, leased`
+}
+
+function plannedAdoptionStatus(
+  oldStatus: LegacyAdoptionRow["oldStatus"],
+  targetChainTip: string | null,
+  actualEnding: ChangeRecord | undefined,
+): LegacyAdoptionRow["plannedStatus"] {
+  if (targetChainTip === null) return oldStatus
+  if (actualEnding?.kind === "merged") return "merged"
+  if (actualEnding?.kind === "failed") return "failed"
+  if (actualEnding?.kind === "withdrawn") return "cancelled"
+  if (oldStatus === "queued" || oldStatus === "stuck") return "cancelled"
+  return oldStatus
+}
+
+function withCurrentBranch(
+  row: LegacyAdoptionRow,
+  branchHead: string | null,
+  branchObservedAt: Date,
+): LegacyAdoptionRow {
+  const change: ChangeRecords = { ...row.source.change, branchHead: branchHead ?? undefined }
+  const source = { ...row.source, change, reading: readChange(change) }
+  const oldStatus = migratedStatus(source.reading)
+  const actualEnding = originalEndingRecord(change.records)
+  if ((oldStatus === "merged" || oldStatus === "failed") && actualEnding === undefined) {
+    throw new Error(
+      `${row.ref}@${row.record}: ${oldStatus} reading has no historical ending record; adoption cannot invent its ending time`,
+    )
+  }
+  if (oldStatus === "merged" && (actualEnding === undefined || trailer(actualEnding, "Merge") === undefined)) {
+    throw new Error(`${row.ref}@${row.record}: merged adoption needs the original Merge: evidence`)
+  }
+  const plannedStatus = plannedAdoptionStatus(oldStatus, row.targetChainTip, actualEnding)
+  return {
+    ...row,
+    branchHead,
+    branchObservedAt,
+    oldStatus,
+    plannedStatus,
+    ending: plannedStatus === "queued" || plannedStatus === "stuck" ? undefined : plannedStatus,
+    source,
+  }
+}
 
 /** Read only old Record refs in the mixed queue namespace; this is a dry run. */
 export async function inspectLegacyAdoption(
@@ -276,7 +333,12 @@ export async function inspectLegacyAdoption(
   if (old.length === 0) return { queue, target, queueTip, rows: [] }
   const branchRefs = await backend.listRefs(store.repo, "refs/heads/", store.remote)
   const branchNames = [...new Set(old.map(({ change }) => `refs/heads/${change.branch}`))]
-  const fetchedBranches = await backend.fetchRefs(store.repo, branchNames, store.remote)
+  const branchObservedAt = new Date()
+  const presentBranchNames = branchNames.filter((ref) => branchRefs.has(ref))
+  const fetchedBranches =
+    presentBranchNames.length === 0
+      ? new Map<string, string>()
+      : await backend.fetchRefs(store.repo, presentBranchNames, store.remote)
   const offTarget = await offTheTarget(
     git,
     old.map(({ change }) => change.head),
@@ -296,11 +358,8 @@ export async function inspectLegacyAdoption(
     const first = records[0]
     if (first === undefined) throw new Error(`${entry.ref}@${entry.record}: Record history is empty`)
     const branchRef = `refs/heads/${entry.change.branch}`
-    const branchHead = branchRefs.get(branchRef)
-    if (branchHead === undefined) {
-      throw new Error(`${store.remote} ${branchRef}: cannot atomically lease an absent branch during adoption`)
-    }
-    if (fetchedBranches.get(branchRef) !== branchHead) {
+    const branchHead = branchRefs.get(branchRef) ?? null
+    if (branchHead !== null && fetchedBranches.get(branchRef) !== branchHead) {
       throw new Error(`${store.remote} ${branchRef}: branch moved during adoption plan`)
     }
     const change: ChangeRecords = {
@@ -308,7 +367,7 @@ export async function inspectLegacyAdoption(
       head: entry.change.head,
       headOnTarget: !offTarget.has(entry.change.head),
       records: [first, ...records.slice(1)],
-      branchHead,
+      branchHead: branchHead ?? undefined,
     }
     const source = { ref: entry.ref, change, reading: readChange(change) }
     const opened = new Date(required(tip, "Opened", entry.ref))
@@ -328,24 +387,14 @@ export async function inspectLegacyAdoption(
     if (oldStatus === "merged" && (actualEnding === undefined || trailer(actualEnding, "Merge") === undefined)) {
       throw new Error(`${entry.ref}@${entry.record}: merged adoption needs the original Merge: evidence`)
     }
-    const plannedStatus =
-      targetChainTip === null
-        ? oldStatus
-        : actualEnding?.kind === "merged"
-          ? "merged"
-          : actualEnding?.kind === "failed"
-            ? "failed"
-            : actualEnding?.kind === "withdrawn"
-              ? "cancelled"
-              : oldStatus === "queued" || oldStatus === "stuck"
-                ? "cancelled"
-                : oldStatus
+    const plannedStatus = plannedAdoptionStatus(oldStatus, targetChainTip, actualEnding)
     rows.push({
       branch: entry.change.branch,
       ref: entry.ref,
       record: entry.record,
       head: entry.change.head,
       branchHead,
+      branchObservedAt,
       opened,
       oldStatus,
       plannedStatus,
@@ -377,6 +426,91 @@ export async function adoptLegacy(
   const targetRef = `refs/heads/${plan.queue}`
   const queueHeadRef = queueRef(plan.queue)
   for (const row of plan.rows) {
+    const branchRef = `refs/heads/${row.branch}`
+    let currentBranchHead: string | null
+    let branchObservedAt: Date
+    try {
+      currentBranchHead = (await backend.listRefs(store.repo, branchRef, store.remote)).get(branchRef) ?? null
+      branchObservedAt = new Date()
+    } catch (error) {
+      rows.push({
+        result: "refused",
+        branch: row.branch,
+        oldRef: row.ref,
+        oldOid: row.record,
+        ref: branchRef,
+        expected: row.branchHead,
+        observed: null,
+        branchFact: adoptionBranchFact(row.branch, row.branchHead, row.branchObservedAt),
+        error: `could not read ${store.remote} ${branchRef}: ${String(error)}`,
+      })
+      continue
+    }
+    const branchFact = adoptionBranchFact(row.branch, currentBranchHead, branchObservedAt)
+    if (row.branchHead !== null && currentBranchHead !== row.branchHead) {
+      rows.push({
+        result: "refused",
+        branch: row.branch,
+        oldRef: row.ref,
+        oldOid: row.record,
+        ref: branchRef,
+        expected: row.branchHead,
+        observed: currentBranchHead,
+        branchFact,
+      })
+      continue
+    }
+    if (row.branchHead === null && currentBranchHead !== null) {
+      if (backend.fetchRefs === undefined)
+        {throw new Error("old Record adoption needs Gitomic fetchRefs for a newly present branch")}
+      let fetchedHead: string | null
+      try {
+        fetchedHead = (await backend.fetchRefs(store.repo, [branchRef], store.remote)).get(branchRef) ?? null
+      } catch (error) {
+        rows.push({
+          result: "refused",
+          branch: row.branch,
+          oldRef: row.ref,
+          oldOid: row.record,
+          ref: branchRef,
+          expected: currentBranchHead,
+          observed: null,
+          branchFact,
+          error: `could not fetch ${store.remote} ${branchRef}: ${String(error)}`,
+        })
+        continue
+      }
+      if (fetchedHead !== currentBranchHead) {
+        rows.push({
+          result: "refused",
+          branch: row.branch,
+          oldRef: row.ref,
+          oldOid: row.record,
+          ref: branchRef,
+          expected: currentBranchHead,
+          observed: fetchedHead,
+          branchFact,
+        })
+        continue
+      }
+    }
+    let currentRow: LegacyAdoptionRow
+    try {
+      currentRow = withCurrentBranch(row, currentBranchHead, branchObservedAt)
+    } catch (error) {
+      rows.push({
+        result: "refused",
+        branch: row.branch,
+        oldRef: row.ref,
+        oldOid: row.record,
+        ref: branchRef,
+        expected: row.branchHead,
+        observed: currentBranchHead,
+        branchFact,
+        error: String(error),
+      })
+      continue
+    }
     const changeChainRef = changesRef(plan.queue, row.branch)
     const chain = await openEvents({ ...store, ref: changeChainRef, writer: "yrd-adopter" })
     const currentTip = await chain.head()
@@ -389,25 +523,39 @@ export async function adoptLegacy(
         ref: changeChainRef,
         expected: row.targetChainTip,
         observed: currentTip,
+        branchFact,
       })
       continue
     }
     const inputs =
       currentTip === null
-        ? inputsForLegacy(row.source, plan.queueTip, at)
-        : [inputForExistingChain(row, plan.queueTip, at)]
+        ? inputsForLegacy(currentRow.source, plan.queueTip, at)
+        : [inputForExistingChain(currentRow, plan.queueTip, at, branchFact)]
+    const recordedInputs =
+      currentTip === null
+        ? inputs.map((event) => ({ ...event, props: [...(event.props ?? []), ["Branch", branchFact] as const] }))
+        : inputs
     try {
-      const staged = await chain.stage(inputs, { expect: currentTip })
+      const staged = await chain.stage(recordedInputs, { expect: currentTip })
       const result = await staged.publish({
         also: [
           { ref: row.ref, expect: row.record, oid: null },
           { ref: queueHeadRef, expect: plan.queueTip, oid: plan.queueTip },
           { ref: targetRef, expect: plan.target, oid: plan.target },
-          { ref: `refs/heads/${row.branch}`, expect: row.branchHead, oid: row.branchHead },
+          ...(currentBranchHead === null
+            ? []
+            : [{ ref: branchRef, expect: currentBranchHead, oid: currentBranchHead }]),
         ],
       })
       if (result.head === null) throw new Error(`${row.ref}: adoption published no event`)
-      rows.push({ result: "adopted", branch: row.branch, oldRef: row.ref, oldOid: row.record, eventOid: result.head })
+      rows.push({
+        result: "adopted",
+        branch: row.branch,
+        oldRef: row.ref,
+        oldOid: row.record,
+        eventOid: result.head,
+        branchFact,
+      })
     } catch (error) {
       if (!(error instanceof Conflict)) throw error
       const expected = new Map<string, string | null>([
@@ -415,7 +563,7 @@ export async function adoptLegacy(
         [changeChainRef, row.targetChainTip],
         [queueHeadRef, plan.queueTip],
         [targetRef, plan.target],
-        [`refs/heads/${row.branch}`, row.branchHead],
+        ...(currentBranchHead === null ? [] : [[branchRef, currentBranchHead] as const]),
       ])
       let changed: { ref: string; expected: string | null; observed: string | null } | undefined
       for (const [ref, want] of expected) {
@@ -433,13 +581,13 @@ export async function adoptLegacy(
           },
         )
       }
-      rows.push({ result: "refused", branch: row.branch, oldRef: row.ref, oldOid: row.record, ...changed })
+      rows.push({ result: "refused", branch: row.branch, oldRef: row.ref, oldOid: row.record, ...changed, branchFact })
     }
   }
   return rows
 }
 
-function inputForExistingChain(row: LegacyAdoptionRow, queueTip: string, at: Date): EventInput {
+function inputForExistingChain(row: LegacyAdoptionRow, queueTip: string, at: Date, branchFact: string): EventInput {
   const { source } = row
   const records = source.change.records
   const tip = tipOf(source.change)
@@ -475,6 +623,7 @@ function inputForExistingChain(row: LegacyAdoptionRow, queueTip: string, at: Dat
     ...(last("Config") === undefined ? {} : { config: last("Config") }),
     checks,
     sources: records.map((record) => ({ ref: row.ref, oid: record.sha })),
+    branchFact,
   })
 }
 

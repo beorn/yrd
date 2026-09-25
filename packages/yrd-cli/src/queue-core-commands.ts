@@ -839,8 +839,16 @@ export async function coreQueueCommand(
         plannedStatus: row.plannedStatus,
         ending: row.ending ?? null,
         targetChainTip: row.targetChainTip,
+        branchHead: row.branchHead,
+        branchObservedAt: row.branchObservedAt.toISOString(),
+        branchFact:
+          row.branchHead === null
+            ? `refs/heads/${row.branch} absent at ${row.branchObservedAt.toISOString()}, not leasable`
+            : `refs/heads/${row.branch} at ${row.branchHead}, lease on apply`,
       }))
       const plannedCount = `${String(inspected.length)} legacy record${inspected.length === 1 ? "" : "s"}`
+      const presentBranches = inspected.filter((row) => row.branchHead !== null).length
+      const absentBranches = inspected.length - presentBranches
       if (!request.apply) {
         emit(
           io,
@@ -851,13 +859,14 @@ export async function coreQueueCommand(
             prefix,
             excluded: [`${prefix}changes/`, `${prefix}queue`, `${prefix}pause`, `${prefix}override`],
             count: inspected.length,
+            branchFacts: { present: presentBranches, absent: absentBranches },
             rows: inspected,
           },
           [
-            `${plannedCount} ${scope}; excluded ${prefix}changes/ and queue control refs`,
+            `${plannedCount} ${scope}; excluded ${prefix}changes/ and queue control refs; branch facts: ${String(presentBranches)} present, ${String(absentBranches)} absent`,
             ...inspected.map(
               (row) =>
-                `${row.branch}: ${row.oldRef}@${row.oldOid} → ${row.ending === null ? `opened (${row.plannedStatus})` : `ending ${row.ending}`} · Opened ${row.opened} · target chain ${row.targetChainTip ?? "absent"}`,
+                `${row.branch}: ${row.oldRef}@${row.oldOid} → ${row.ending === null ? `opened (${row.plannedStatus})` : `ending ${row.ending}`} · Opened ${row.opened} · target chain ${row.targetChainTip ?? "absent"} · Branch: ${row.branchFact}`,
             ),
           ].join("\n"),
         )
@@ -883,8 +892,8 @@ export async function coreQueueCommand(
           `${plannedCount} ${scope}; ${String(adopted)} adopted, ${String(refused)} refused`,
           ...receipts.map((row) =>
             row.result === "adopted"
-              ? `${row.branch}: ${row.oldRef}@${row.oldOid} → adopted ${row.eventOid}`
-              : `${row.branch}: ${row.oldRef}@${row.oldOid} → refused ${row.ref}: expected ${row.expected ?? "absent"}, observed ${row.observed ?? "absent"}`,
+              ? `${row.branch}: ${row.oldRef}@${row.oldOid} → adopted ${row.eventOid} · Branch: ${row.branchFact}`
+              : `${row.branch}: ${row.oldRef}@${row.oldOid} → refused ${row.ref}: expected ${row.expected ?? "absent"}, observed ${row.observed ?? "absent"}${row.error === undefined ? "" : ` · ${row.error}`} · Branch: ${row.branchFact}`,
           ),
           ...(refused === 0 ? [] : ["Inspect current refs with yrd queue adopt-legacy before another --apply."]),
         ].join("\n"),

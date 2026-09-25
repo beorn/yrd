@@ -301,8 +301,16 @@ it("adopts an old head under a newer live chain, retains its records and deletes
       ref: raceRef,
       expected: raceRecord,
       observed: rivalRecord,
+      branchFact: expect.stringContaining("refs/heads/task/race at"),
     },
-    { result: "adopted", branch: "task/zz-after", oldRef: afterRef, oldOid: afterRecord, eventOid: expect.any(String) },
+    {
+      result: "adopted",
+      branch: "task/zz-after",
+      oldRef: afterRef,
+      oldOid: afterRecord,
+      eventOid: expect.any(String),
+      branchFact: expect.stringContaining("refs/heads/task/zz-after at"),
+    },
   ])
   expect((await legacy.backend.listRefs(legacy.repo, raceRef, "origin")).get(raceRef)).toBe(rivalRecord)
   await expect((await openEvents({ ...store, ref: changesRef("main", "task/race") })).head()).resolves.toBeNull()
@@ -389,6 +397,7 @@ it("adopts an old head under a newer live chain, retains its records and deletes
       ref: changesRef("main", "task/race"),
       expected: liveRace.head,
       observed: movedEvent,
+      branchFact: expect.stringContaining("refs/heads/task/race at"),
     },
   ])
   expect((await legacy.backend.listRefs(legacy.repo, raceRef, "origin")).get(raceRef)).toBe(rivalRecord)
@@ -410,6 +419,7 @@ it("adopts an old head under a newer live chain, retains its records and deletes
       ref: "refs/heads/task/race",
       expected: raceNewHead,
       observed: laterHead,
+      branchFact: `refs/heads/task/race at ${laterHead}, leased`,
     },
   ])
   expect((await legacy.backend.listRefs(legacy.repo, raceRef, "origin")).get(raceRef)).toBe(rivalRecord)
@@ -441,6 +451,177 @@ it("adopts an old head under a newer live chain, retains its records and deletes
   })
   expect((await legacy.backend.listRefs(legacy.repo, stragglerRef, "origin")).has(stragglerRef)).toBe(false)
   expect(await (await openEvents({ ...store, ref: changesRef("main", "changes/straggler") })).head()).not.toBeNull()
+
+  // @failure a deleted branch suppresses a readable old Record or silently fabricates a lease.
+  await git(["checkout", "--quiet", "-b", "task/absent", nextTarget])
+  writeFileSync(join(work, "absent.txt"), "absent\n")
+  await git(["add", "absent.txt"])
+  await git(["commit", "--quiet", "-m", "absent head"])
+  const absentHead = (await git(["rev-parse", "HEAD"])).trim()
+  const absentChange = { branch: "task/absent", head: absentHead }
+  const absentRef = changeRef("main", absentChange)
+  const absentRecord = await appendRecord(git, "main", {
+    change: absentChange,
+    kind: "opened",
+    subject: "old submission without a remote branch",
+    trailers: [["Submitter", "@dev/2"]],
+  })
+  await legacy.backend.publish(legacy.repo, [{ ref: absentRef, expect: ABSENT, oid: absentRecord }], "origin")
+  const absentPlan = await inspectLegacyAdoption({ store, git, queue: "main", target: nextTarget })
+  const absentRow = absentPlan.rows.find(({ ref }) => ref === absentRef)
+  expect(absentRow).toMatchObject({ branchHead: null, oldStatus: "cancelled", plannedStatus: "cancelled" })
+  if (absentRow === undefined) throw new Error("fixture absent branch was not planned")
+  expect(absentRow.branchObservedAt).toBeInstanceOf(Date)
+  const absentReceipt = await adoptLegacy({
+    store,
+    plan: { ...absentPlan, rows: [absentRow] },
+    at: new Date("2026-09-24T11:55:00.000Z"),
+  })
+  expect(absentReceipt).toEqual([
+    expect.objectContaining({
+      result: "adopted",
+      branchFact: expect.stringMatching(/^refs\/heads\/task\/absent absent at .+, not leasable$/),
+    }),
+  ])
+  const absentEvents = await (
+    await openEvents({ ...store, ref: changesRef("main", "task/absent") })
+  ).events({ limit: 1024 })
+  expect(absentEvents.map(({ type }) => type)).toEqual(["opened", "cancelled"])
+  expect(
+    absentEvents.every(({ props }) =>
+      props.some(([key, value]) => key === "Branch" && value === absentReceipt[0]?.branchFact),
+    ),
+  ).toBe(true)
+
+  // @failure a branch absent at inspection reappears before apply, but the old absent reading is published.
+  await git(["checkout", "--quiet", "-b", "task/reappears", nextTarget])
+  writeFileSync(join(work, "reappears.txt"), "reappears\n")
+  await git(["add", "reappears.txt"])
+  await git(["commit", "--quiet", "-m", "reappearing head"])
+  const reappearingHead = (await git(["rev-parse", "HEAD"])).trim()
+  const reappearingChange = { branch: "task/reappears", head: reappearingHead }
+  const reappearingRef = changeRef("main", reappearingChange)
+  const reappearingRecord = await appendRecord(git, "main", {
+    change: reappearingChange,
+    kind: "opened",
+    subject: "old submission before branch appears",
+    trailers: [["Submitter", "@dev/2"]],
+  })
+  await legacy.backend.publish(legacy.repo, [{ ref: reappearingRef, expect: ABSENT, oid: reappearingRecord }], "origin")
+  const reappearingPlan = await inspectLegacyAdoption({ store, git, queue: "main", target: nextTarget })
+  const reappearingRow = reappearingPlan.rows.find(({ ref }) => ref === reappearingRef)
+  expect(reappearingRow?.branchHead).toBeNull()
+  if (reappearingRow === undefined) throw new Error("fixture reappearing branch was not planned")
+  await git(["push", "--quiet", "origin", "HEAD:task/reappears"])
+  const reappearingReceipt = await adoptLegacy({
+    store,
+    plan: { ...reappearingPlan, rows: [reappearingRow] },
+    at: new Date("2026-09-24T11:56:00.000Z"),
+  })
+  expect(reappearingReceipt).toEqual([
+    expect.objectContaining({
+      result: "adopted",
+      branchFact: `refs/heads/task/reappears at ${reappearingHead}, leased`,
+    }),
+  ])
+  expect((await readStatus(store, "main", "task/reappears")).status).toBe("queued")
+  const reappearingEvents = await (
+    await openEvents({ ...store, ref: changesRef("main", "task/reappears") })
+  ).events({ limit: 1024 })
+  expect(reappearingEvents.map(({ type }) => type)).toEqual(["opened"])
+  expect(reappearingEvents[0]?.props).toContainEqual(["Branch", reappearingReceipt[0]?.branchFact])
+
+  // @failure a transient remote branch read stops the whole one-shot apply before another row is adopted.
+  await git(["checkout", "--quiet", "-b", "task/after-read-error", nextTarget])
+  writeFileSync(join(work, "after-read-error.txt"), "after read error\n")
+  await git(["add", "after-read-error.txt"])
+  await git(["commit", "--quiet", "-m", "after read error head"])
+  const afterReadHead = (await git(["rev-parse", "HEAD"])).trim()
+  await git(["push", "--quiet", "origin", "HEAD:task/after-read-error"])
+  const afterReadChange = { branch: "task/after-read-error", head: afterReadHead }
+  const afterReadRef = changeRef("main", afterReadChange)
+  const afterReadRecord = await appendRecord(git, "main", {
+    change: afterReadChange,
+    kind: "opened",
+    subject: "old submission after a failed read",
+    trailers: [["Submitter", "@dev/2"]],
+  })
+  await legacy.backend.publish(legacy.repo, [{ ref: afterReadRef, expect: ABSENT, oid: afterReadRecord }], "origin")
+  const readErrorPlan = await inspectLegacyAdoption({ store, git, queue: "main", target: nextTarget })
+  const readErrorRows = readErrorPlan.rows.filter(({ ref }) => ref === raceRef || ref === afterReadRef)
+  expect(readErrorRows).toHaveLength(2)
+  const listRefs = store.backend.listRefs
+  if (listRefs === undefined) throw new Error("fixture Gitomic backend has no listRefs")
+  const readErrorStore = {
+    ...store,
+    backend: {
+      ...store.backend,
+      listRefs: async (...args: Parameters<typeof listRefs>) => {
+        if (args[1] === "refs/heads/task/race") throw new Error("injected branch read error")
+        return listRefs(...args)
+      },
+    },
+  }
+  const readErrorReceipts = await adoptLegacy({
+    store: readErrorStore,
+    plan: { ...readErrorPlan, rows: readErrorRows },
+    at: new Date("2026-09-24T11:57:00.000Z"),
+  })
+  expect(readErrorReceipts).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        result: "refused",
+        oldRef: raceRef,
+        ref: "refs/heads/task/race",
+        error: expect.stringContaining("injected branch read error"),
+        branchFact: expect.stringContaining("refs/heads/task/race at"),
+      }),
+      expect.objectContaining({
+        result: "adopted",
+        oldRef: afterReadRef,
+        branchFact: `refs/heads/task/after-read-error at ${afterReadHead}, leased`,
+      }),
+    ]),
+  )
+  expect((await legacy.backend.listRefs(legacy.repo, raceRef, "origin")).has(raceRef)).toBe(true)
+  expect((await legacy.backend.listRefs(legacy.repo, afterReadRef, "origin")).has(afterReadRef)).toBe(false)
+
+  // @failure an absent branch reappears at an on-target head and turns a recorded failure into an unevidenced merge.
+  const reclassChange = { branch: "task/reclass", head: mergedHead }
+  const reclassRef = changeRef("main", reclassChange)
+  await appendRecord(git, "main", {
+    change: reclassChange,
+    kind: "opened",
+    subject: "old submission later classified",
+    trailers: [["Submitter", "@dev/2"]],
+  })
+  const reclassRecord = await appendRecord(git, "main", {
+    change: reclassChange,
+    kind: "failed",
+    subject: "recorded failure without merge evidence",
+    trailers: [["Reason", "check-failed"]],
+  })
+  await legacy.backend.publish(legacy.repo, [{ ref: reclassRef, expect: ABSENT, oid: reclassRecord }], "origin")
+  const reclassPlan = await inspectLegacyAdoption({ store, git, queue: "main", target: nextTarget })
+  const reclassRow = reclassPlan.rows.find(({ ref }) => ref === reclassRef)
+  expect(reclassRow).toMatchObject({ branchHead: null, oldStatus: "cancelled" })
+  if (reclassRow === undefined) throw new Error("fixture reclassified branch was not planned")
+  await git(["push", "--quiet", "origin", `${mergedHead}:refs/heads/task/reclass`])
+  const reclassReceipt = await adoptLegacy({
+    store,
+    plan: { ...reclassPlan, rows: [reclassRow] },
+    at: new Date("2026-09-24T11:58:00.000Z"),
+  })
+  expect(reclassReceipt).toEqual([
+    expect.objectContaining({
+      result: "refused",
+      ref: "refs/heads/task/reclass",
+      branchFact: `refs/heads/task/reclass at ${mergedHead}, leased`,
+      error: expect.stringContaining("merged adoption needs the original Merge: evidence"),
+    }),
+  ])
+  expect((await legacy.backend.listRefs(legacy.repo, reclassRef, "origin")).get(reclassRef)).toBe(reclassRecord)
+  await expect((await openEvents({ ...store, ref: changesRef("main", "task/reclass") })).head()).resolves.toBeNull()
 
   // @failure a missing original Merge: gets replaced with the old head and deletes the only source.
   await git(["checkout", "--quiet", "-b", "task/merge-without-evidence", nextTarget])
