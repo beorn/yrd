@@ -4,6 +4,7 @@ import {
   adoptedInput,
   changeInput,
   changesRef,
+  eventPause,
   project,
   queueRef,
   readEventQueue,
@@ -417,7 +418,8 @@ export async function adoptLegacy(
   const { store, plan, at } = input
   if (Number.isNaN(at.getTime())) throw new TypeError("adoption publication time is not a date")
   const queueState = await readEventQueue(store, plan.queue)
-  if (queueState.pause === undefined) {
+  // eventPause reads Ops: pause after the ops cut-over, where every paused event now lands (25845).
+  if (eventPause(queueState) === undefined) {
     throw new Error(`${store.remote}#${plan.queue}: adoption apply requires a paused event queue`)
   }
   const rows: LegacyAdoptionReceipt[] = []

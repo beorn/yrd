@@ -8,6 +8,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { openEvents } from "gitomic/events"
 import {
+  appendOpsCutover,
   appendRecord,
   changeRef,
   createEventStore,
@@ -154,6 +155,9 @@ describe("yrd queue adopt-legacy entry", () => {
     expect(dry.stdout).toContain(`${oldRef}@${record}`)
     expect(dry.stdout).toContain(`Branch: refs/heads/task/old at ${head}, lease on apply`)
     expect(dry.stdout).toContain("branch facts: 1 present, 0 absent")
+    // A queue pauses on its event chain only after the ops cut-over, as live adoption did (25845).
+    const main = (await git(["rev-parse", "origin/main"])).trim()
+    await appendOpsCutover(store, git, "main", main, new Date("2026-09-24T10:29:00.000Z"), "@chief")
     await writeQueueEvent(store, "main", {
       type: "paused",
       by: "@chief",
@@ -198,6 +202,9 @@ describe("yrd queue adopt-legacy entry", () => {
     }
     expect(planned.branchFacts).toEqual({ present: 0, absent: 1 })
     expect(planned.rows[0]?.branchFact).toMatch(/^refs\/heads\/task\/absent absent at .*not leasable$/u)
+    // A queue pauses on its event chain only after the ops cut-over, as live adoption did (25845).
+    const main = (await git(["rev-parse", "origin/main"])).trim()
+    await appendOpsCutover(store, git, "main", main, new Date("2026-09-24T10:29:00.000Z"), "@chief")
     await writeQueueEvent(store, "main", {
       type: "paused",
       by: "@chief",
