@@ -6,12 +6,12 @@
  * @consumer the round's `remote-calls` journal row and submit's stderr summary
  */
 
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn } from "../src/git.ts"
-import { readRemoteCalls } from "../src/remote-calls.ts"
+import { readRemoteCalls, traceRemoteCalls } from "../src/remote-calls.ts"
 
 const roots: string[] = []
 
@@ -62,6 +62,26 @@ describe("remote calls are counted from git's trace2 event log", () => {
     expect(calls.unreadable).toBe(0)
     expect(calls.processes).toBeGreaterThanOrEqual(4)
   }, 60_000)
+
+  it("removes its trace directory once it has counted it, so no round leaves its trace2 log behind", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-remote-calls-removed-"))
+    roots.push(root)
+    const directory = join(root, "logs", "round", "trace2")
+    const traced = traceRemoteCalls(directory)
+    await gitIn(root, undefined, undefined, { env: { ...process.env, ...traced.env } })([
+      "init",
+      "-q",
+      join(root, "repo"),
+    ])
+    expect(traced.end().processes).toBeGreaterThanOrEqual(1)
+    expect(existsSync(directory)).toBe(false)
+
+    // A trace that cannot be read is still removed: the count failing is reported, the directory never kept.
+    const unread = traceRemoteCalls(join(root, "unread", "trace2"))
+    rmSync(join(root, "unread", "trace2"), { recursive: true })
+    expect(() => unread.end()).toThrow(/trace2 directory/u)
+    expect(existsSync(join(root, "unread", "trace2"))).toBe(false)
+  })
 
   it("refuses a trace directory that does not exist, rather than reporting zero calls", () => {
     expect(() => readRemoteCalls(join(tmpdir(), "yrd-remote-calls-absent-25570"))).toThrow(/trace2 directory/u)

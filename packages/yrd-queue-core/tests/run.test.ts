@@ -438,6 +438,8 @@ it("closes the round's journal with every remote call it made, counted from git'
   expect(counted?.fetch).toEqual(expect.any(Number))
   expect(counted?.push).toEqual(expect.any(Number))
   expect(Number(counted?.processes)).toBeGreaterThan(Number(counted?.fetch) + Number(counted?.push))
+  // The trace2 log is removed once counted: the row is the evidence, and a kept log grew the workdir every round.
+  expect(existsSync(join(w.workdir, "logs", journal.replace(/\.jsonl$/u, ""), "trace2"))).toBe(false)
 })
 
 /** @failure A deleted event branch stayed queued forever and blocked every change behind it.
