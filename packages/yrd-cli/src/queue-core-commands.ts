@@ -1779,10 +1779,18 @@ export async function coreQueueCommand(
         const format = await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)
         const reading =
           format === "event"
-            ? await readEventListing(git, declared.config, repo, workdir, declared.oid, selection, {
-                all: request.all,
-                drafts: request.drafts,
-              })
+            ? await readEventListing(
+                git,
+                declared.config,
+                repo,
+                workdir,
+                declared.oid,
+                createEventStore(repo, declared.config.target.remote, selection),
+                {
+                  all: request.all,
+                  drafts: request.drafts,
+                },
+              )
             : {
                 format: "legacy" as const,
                 ...(await readListing(
@@ -2338,7 +2346,14 @@ export async function coreQueueCommand(
       if (
         (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
       ) {
-        const reading = await readEventListing(git, config, repo, workdir, captured.oid, selection)
+        const reading = await readEventListing(
+          git,
+          config,
+          repo,
+          workdir,
+          captured.oid,
+          createEventStore(repo, config.target.remote, selection),
+        )
         if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
           io.stderr(`${reading.observation.message}\n`)
           return 2
@@ -3632,18 +3647,14 @@ export async function readEventListing(
   repo: string,
   workdir: string,
   targetOid: string,
-  selection: GitSelection,
+  store: ReturnType<typeof createEventStore>,
   options: Readonly<{
     all?: boolean
     drafts?: boolean
     now?: number | Date
     forceFresh?: boolean
-    /** The event store's backend in place of the selected executable's: a test's in-memory repository. */
-    backend?: ReturnType<typeof createEventStore>["backend"]
   }> = {},
 ): Promise<EventListingResult> {
-  const configured = createEventStore(repo, config.target.remote, selection)
-  const store = options.backend === undefined ? configured : { ...configured, backend: options.backend }
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
   const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}`
   const cache = eventListingCaches.get(cacheKey)

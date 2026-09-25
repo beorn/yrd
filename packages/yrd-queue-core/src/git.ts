@@ -793,8 +793,18 @@ function isLegacyPublickeyRefusal(error: unknown, verb: "fetch" | "ls-remote"): 
 }
 
 /** The configured event store; every event opener receives this backend. */
-export function createEventStore(repo: string, remote: string, selection: GitSelection) {
-  return { repo, remote, selection, backend: createLegacyBackend(selection.executable) }
+/**
+ * The event store at the composition root. The backend defaults to the
+ * selected executable's; a caller that already holds one (the memory backend
+ * the drop API runs on, or a counting test's) passes it here.
+ */
+export function createEventStore(
+  repo: string,
+  remote: string,
+  selection: GitSelection,
+  backend: GitomicBackend = createLegacyBackend(selection.executable),
+) {
+  return { repo, remote, selection, backend }
 }
 
 /** Use the executable that handled this runner's immediately preceding call. */

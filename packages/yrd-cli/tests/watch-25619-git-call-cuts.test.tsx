@@ -14,7 +14,14 @@
 import { describe, expect, it, vi, beforeEach } from "vitest"
 import { render } from "silvery/test"
 import React, { act } from "react"
-import { queueFormat, resetQueueFormatCache, queueRef, changesRef, changeInput } from "@yrd/queue-core"
+import {
+  createEventStore,
+  queueFormat,
+  resetQueueFormatCache,
+  queueRef,
+  changesRef,
+  changeInput,
+} from "@yrd/queue-core"
 import { open } from "gitomic"
 import { createMemBackend } from "gitomic/mem"
 import { openEvents } from "gitomic/events"
@@ -194,11 +201,11 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     }
 
     const mockSelection: any = { executable: "git" }
+    const listingStore = createEventStore("/repo", "origin", mockSelection, proxyBackend)
 
     // Call 1 at t=0s: initial reading
     // Should list event refs (refs/yrd/main/) and full heads (refs/heads/)
-    const r1 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, mockSelection, {
-      backend: proxyBackend,
+    const r1 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, {
       now: 1000,
     })
     expect(r1).toBeDefined()
@@ -208,8 +215,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     // Call 2 at t=10s: unchanged event refs (< 60s)
     // Should ONLY list event refs, and NOT list refs/heads/, and REUSE the reading!
     listRefsCalls.length = 0
-    const r2 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, mockSelection, {
-      backend: proxyBackend,
+    const r2 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, {
       now: 11000, // 10s later
     })
     expect(r2).toBeDefined()
@@ -224,8 +230,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
       { expect: null },
     )
     listRefsCalls.length = 0
-    const r3 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, mockSelection, {
-      backend: proxyBackend,
+    const r3 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, {
       now: 31000, // 30s later
     })
     expect(r3).toBeDefined()
@@ -235,8 +240,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     // Call 4 at t=50s: event refs unchanged (< 60s since call 3's head listing at t=30s)
     // Should reuse round without listing refs/heads/!
     listRefsCalls.length = 0
-    const r4 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, mockSelection, {
-      backend: proxyBackend,
+    const r4 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, {
       now: 51000, // 20s after call 3
     })
     expect(r4.all).toBe(r3.all) // Reused!
@@ -245,8 +249,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     // Call 5 at t=95s: event refs unchanged, BUT 65s have elapsed since call 3's head listing (t=30s to 95s is 65s > 60s)
     // Head listing due! Must list refs/heads/!
     listRefsCalls.length = 0
-    const r5 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, mockSelection, {
-      backend: proxyBackend,
+    const r5 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, {
       now: 96000, // 65s after call 3
     })
     expect(r5).toBeDefined()
