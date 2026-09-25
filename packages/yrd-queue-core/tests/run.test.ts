@@ -1474,8 +1474,11 @@ it("records a typed merge-publication refusal and judges the next event change",
     if (marker === undefined) return
     refusedBranch = branch
     refusedRef = ref
+    // A rival moved the target beside the change ref: after @cto a8b9146d a
+    // chain-only refusal is retried inside transact, and a lost `also` lease
+    // is what reaches the cas-refused path on the first attempt.
     throw new gitomic.Conflict(`lease lost, nothing published: ${ref} expected ${marker}, observed locked`, {
-      refs: [ref],
+      refs: [ref, "refs/heads/main"],
     })
   })
   const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
@@ -1510,8 +1513,11 @@ it("counts repeated CAS refusals in round journals and resets after publication"
     const marker = updates.find((update) => update.ref === ref)?.expect
     if (marker === undefined) return
     refused++
+    // A rival moved the target beside the change ref: after @cto a8b9146d a
+    // chain-only refusal is retried inside transact, and a lost `also` lease
+    // is what reaches the cas-refused path on the first attempt.
     throw new gitomic.Conflict(`lease lost, nothing published: ${ref} expected ${marker}, observed locked`, {
-      refs: [ref],
+      refs: [ref, "refs/heads/main"],
     })
   })
   const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
