@@ -1133,7 +1133,7 @@ export async function eventQueueRun(
                       )
                     ),
                 )
-          // A declared setup still runs when every check is off or skipped: its failure is the verdict the rows bill.
+          // A declared setup still runs when this phase has no check to run, unless every declared check is off (then the phase was skipped above).
           if (checks.length === 0 && options.setup === undefined) continue
           const logDir = join(
             options.workdir,

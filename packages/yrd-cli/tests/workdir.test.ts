@@ -25,4 +25,20 @@ describe("workdirOf (25716 row 9)", () => {
     const expectedAddress = parseQueueAddress("github.com/beorn/hh#main")
     expect(workdir).toBe(queueRoot("/custom/state/yrd", expectedAddress))
   })
+
+  it("is the host workdir when the repository has no origin, and fails loud when origin cannot be read (25843)", async () => {
+    const env = { XDG_STATE_HOME: "/custom/state" }
+    const unaddressed = async (args: readonly string[]) => {
+      if (args[0] === "ls-remote") throw new Error("a repository without origin has no remote to ask")
+      return ""
+    }
+    expect(await workdirOf(unaddressed, { env })).toBe("/custom/state/yrd")
+
+    const unreachable = async (args: readonly string[]) => {
+      if (args[0] === "remote") return "origin\n"
+      if (args[0] === "ls-remote") throw new Error("git ls-remote exited 128: Could not resolve host")
+      return ""
+    }
+    await expect(workdirOf(unreachable, { env })).rejects.toThrow(/Could not resolve host/)
+  })
 })

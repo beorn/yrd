@@ -4394,7 +4394,7 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
       subphase: "typecheck",
       holds: "task/check-1@abcdef012345: typecheck",
       by: "@dev/9",
-      duration: "checking 0:25",
+      duration: "0:25",
       detail: "",
     }
     const checkLayout = listLayout([], 120, NOW, checkLine)
@@ -4406,7 +4406,7 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
     expect(checkApp.text).toContain("task/check-1@abcdef012345: typecheck")
     expect(checkApp.text).toContain("checking · typecheck")
     expect(checkApp.text).toContain("@dev/9")
-    expect(checkApp.text).toContain("checking 0:25")
+    expect(checkApp.text).toContain("0:25")
     checkApp.unmount()
 
     // 3. Merge phase with step
@@ -4415,7 +4415,7 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
       step: "publish",
       holds: "task/merge-1@abcdef012345: publish",
       by: "@dev/9",
-      duration: "merging 0:08",
+      duration: "0:08",
       detail: "",
     }
     const mergeLayout = listLayout([], 120, NOW, mergeLine)
@@ -4427,7 +4427,7 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
     expect(mergeApp.text).toContain("task/merge-1@abcdef012345: publish")
     expect(mergeApp.text).toContain("merging · publish")
     expect(mergeApp.text).toContain("@dev/9")
-    expect(mergeApp.text).toContain("merging 0:08")
+    expect(mergeApp.text).toContain("0:08")
     mergeApp.unmount()
   })
 
@@ -4712,7 +4712,7 @@ describe("termless screenshots for rows 3 to 5 (25716)", () => {
       subphase: "affected-tests",
       holds: "task/dev9-25716-runner-stages@18c8c19b: affected-tests",
       by: "@dev/9",
-      duration: "checking 0:25",
+      duration: "0:25",
       detail: "",
     }
     const activeRow = row({

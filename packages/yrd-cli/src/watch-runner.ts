@@ -904,7 +904,7 @@ function runnerLineOf(
         const stepName =
           activeStep.kind === "check" ? activeStep.name : activeStep.name === "worktree" ? "compose" : activeStep.name
         const stepElapsed = since(activeStep.start)
-        durationText = `${word} ${stepElapsed}`
+        durationText = stepElapsed
 
         if (activeStep.kind === "check") {
           subphase = activeStep.name === "setup" ? "preparing" : activeStep.name

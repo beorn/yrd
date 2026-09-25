@@ -9,7 +9,7 @@ import { join } from "node:path"
 import { afterAll, expect, it } from "vitest"
 import { openEvents } from "gitomic/events"
 import { adoptLegacy, inspectLegacyAdoption } from "../src/migration.ts"
-import { changeInput, changesRef, queueRef, readStatus, writeQueueEvent } from "../src/events.ts"
+import { appendOpsCutover, changeInput, changesRef, queueRef, readStatus, writeQueueEvent } from "../src/events.ts"
 import { createEventStore, gitIn, selectionFor } from "../src/git.ts"
 import { ABSENT, appendRecord, legacyStore } from "../src/legacy-records.ts"
 import { changeRef } from "../src/refs.ts"
@@ -117,6 +117,8 @@ it("adopts an old head under a newer live chain, retains its records and deletes
   await expect(adoptLegacy({ store, plan, at: new Date("2026-09-24T11:00:00.000Z") })).rejects.toThrow(
     /requires a paused event queue/,
   )
+  // A queue pauses on its event chain only after the ops cut-over, as live adoption did (25845).
+  await appendOpsCutover(store, git, "main", target, new Date("2026-09-24T10:29:00.000Z"), "@chief")
   await writeQueueEvent(store, "main", {
     type: "paused",
     by: "@chief",
