@@ -843,8 +843,16 @@ export async function eventQueueRun(
       }
       // A lease refusal on the queue tip is an authority change, not a transport
       // failure on this change chain. A lost target lease is the root race the
-      // moved-target branch below records as `verifying` and retries.
-      if (error instanceof Conflict && !error.refs.includes(ref) && !error.refs.includes(targetRef)) throw error
+      // moved-target branch below records as `verifying` and retries. A Conflict
+      // with no named refs has an unknown outcome, so it needs the readback below.
+      if (
+        error instanceof Conflict &&
+        error.refs.length > 0 &&
+        !error.refs.includes(ref) &&
+        !error.refs.includes(targetRef)
+      ) {
+        throw error
+      }
       let after: EventChange
       try {
         const present = (await listRefs(ref, store)).get(ref)
