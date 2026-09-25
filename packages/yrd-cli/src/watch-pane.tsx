@@ -953,14 +953,14 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
       ...(displayTimer === undefined ? {} : { timer: displayTimer }),
     }
   }
+  // A stopped line shows only the stop text it was given (rulings 9d0816692e and 25556); the runner's holds are
+  // detail for a PAUSED line, not for STOPPED.
   const reason =
     snapshot.pause ??
     (word === "STOPPED"
       ? snapshot.runner?.service.kind === "stopped"
         ? snapshot.runner.service.stopReason
-        : runner.holds === ""
-          ? undefined
-          : runner.holds
+        : undefined
       : runner.holds === ""
         ? undefined
         : runner.holds)
