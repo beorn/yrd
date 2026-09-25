@@ -2207,6 +2207,7 @@ export async function coreQueueCommand(
                   repo,
                   selected,
                   journalFor(item, journals),
+                  workdir,
                 )
               }
               return openDetail(git, config, entries, item, config.target.branch, journalFor(item, journals))
@@ -3185,6 +3186,7 @@ export async function openEventDetail(
   repo: string,
   selected: EventChange,
   journal?: JournalRun,
+  workdir?: string,
 ): Promise<ChangeDetail> {
   const { row } = item
   if (
@@ -3201,14 +3203,41 @@ export async function openEventDetail(
     row.branch,
     selected.tip,
   )
+  const opened = events.findLastIndex((event) => event.type === "opened")
+  const segment = (opened === -1 ? events : events.slice(opened)).filter((event) => event.type !== "adopted")
+  const values = (key: string): readonly string[] =>
+    segment.flatMap((event) => event.props.filter(([name]) => name === key).map(([, value]) => value))
+  const packed = values("Check")
+  const source = values("Migrated-From").at(-1)
+  const noMigratedChecks = source !== undefined && packed.length === 0
+  const declared = noMigratedChecks
+    ? undefined
+    : await declarationFor(git, config, values("Base").at(-1) ?? selected.adoptedBase ?? row.base)
+  const decided = row.state === "merged" || row.state === "failed" || row.state === "stuck" || row.state === "cancelled"
+  const views =
+    declared === undefined
+      ? []
+      : checksOf(
+          packed,
+          endingOf(row),
+          declared.checks,
+          row.live === undefined
+            ? undefined
+            : { name: row.live.check, ...(row.live.log === undefined ? {} : { log: row.live.log }) },
+          decided ? undefined : item.run?.checks,
+        )
+  const note =
+    noMigratedChecks && source !== undefined
+      ? `Migrated change has no check-step detail in its event history. Retained legacy record: ${source}. Old check logs: ${join(workdir ?? (await workdirOf(git)), "checks", changeName({ branch: row.branch, head: row.head }))} (if present on this machine).`
+      : declared?.note
   return {
     row,
-    run: runOf(row, label, [], item.run?.id ?? row.run),
-    checks: [],
+    run: runOf(row, label, views, item.run?.id ?? row.run),
+    checks: views.map(readOutput),
     events,
     ...(journal === undefined ? {} : { journal }),
     ...(await headFacts(git, config, row)),
-    note: "Check results are not projected from event history in this detail.",
+    ...(note === undefined ? {} : { note }),
   }
 }
 
