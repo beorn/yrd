@@ -455,8 +455,6 @@ function submitCalls(
         io.stderr(`yrd: submit remote calls: ${remoteCallsLine(traced.end())}\n`)
       } catch (error) {
         io.stderr(`yrd: submit remote calls unknown: ${error instanceof Error ? error.message : String(error)}\n`)
-      } finally {
-        rmSync(directory, { recursive: true, force: true })
       }
     },
   }

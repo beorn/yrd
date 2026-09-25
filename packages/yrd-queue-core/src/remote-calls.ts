@@ -7,7 +7,7 @@
  * environment scrubbers keep GIT_TRACE2_* (yrd's ROUTING_VARIABLES, git-super's repository-pointer clean). So one
  * mechanism counts all three, and the count is git's, not a wrapper's opinion of what it ran.
  */
-import { mkdirSync, readFileSync, readdirSync, statSync } from "node:fs"
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs"
 import { join } from "node:path"
 
 /** A git process's own verb when it talks to a remote. */
@@ -73,8 +73,9 @@ export function readRemoteCalls(directory: string): RemoteCalls {
 }
 
 /**
- * Point every git process this process starts at `directory` until `end()`, which puts GIT_TRACE2_EVENT back and
- * counts what was recorded. The scopes that count, a round and a submit, run one at a time in a process; a caller
+ * Point every git process this process starts at `directory` until `end()`, which puts GIT_TRACE2_EVENT back, counts
+ * what was recorded and removes `directory`, whether or not it could be read: the count is the evidence, and a round
+ * that kept its trace2 log would add some hundreds of KB to the workdir every round for good. The scopes that count, a round and a submit, run one at a time in a process; a caller
  * holding a Git built from an explicit environment adds `env` to it, since that Git never reads process.env again.
  */
 export function traceRemoteCalls(
@@ -88,7 +89,11 @@ export function traceRemoteCalls(
     end() {
       if (previous === undefined) delete process.env.GIT_TRACE2_EVENT
       else process.env.GIT_TRACE2_EVENT = previous
-      return readRemoteCalls(directory)
+      try {
+        return readRemoteCalls(directory)
+      } finally {
+        rmSync(directory, { recursive: true, force: true })
+      }
     },
   }
 }
