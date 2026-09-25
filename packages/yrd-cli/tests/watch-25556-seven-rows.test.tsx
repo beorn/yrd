@@ -68,56 +68,18 @@ function baseSnapshot(overrides: Partial<WatchSnapshot> = {}): WatchSnapshot {
 }
 
 describe("25556: seven rows on yrd watch", () => {
-  it("row 1: queue toggle and filter group each take their own tint, fully bold when selected, not bold when not", async () => {
-    const app = render(
-      <WatchPane
-        snapshot={baseSnapshot({
-          runner: {
-            journalDir: "/w/logs",
-            service: { kind: "beating", state: "healthy" },
-            latest: {
-              id: "run-1",
-              startedAt: new Date(NOW.getTime() - 60_000),
-              lastWriteAt: new Date(NOW.getTime() - 10_000),
-              alive: true,
-            },
-          },
-        })}
-        live={false}
-      />,
-      { cols: 140, rows: 30 },
-    )
+  // 25630's rulings (operator screenshot 2026-09-24, "timers headers") moved the filter toggles to the plain second
+  // line beside STATS and dropped the queue toggles from the inverted top line, so rows 1, 2 and 4 read line 1.
+  it("row 1: the filter group takes the warning tint and bold when selected, muted and not bold when not", async () => {
+    const app = render(<WatchPane snapshot={baseSnapshot()} live={false} />, { cols: 140, rows: 30 })
     await settle(app)
-    app.press("2") // deselect second queue so [1] is active, [2] inactive
     app.press("f") // select only failed
     await settle(app)
 
-    // Queue toggles: active takes accent tint, inactive is muted. Active is bold, inactive not bold.
-    const queueActiveFg = fgAt(app, 0, "[1]")
-    const queueInactiveFg = fgAt(app, 0, "[2]")
-    const queueActiveBold = boldAt(app, 0, "[1]")
-    const queueInactiveBold = boldAt(app, 0, "[2]")
-
-    const expectedQueueActive = fgOf("mix($fg-on-inverse, $fg-accent, 30%)")
-    const expectedMuted = fgOf("$fg-on-inverse-muted")
-
-    expect(queueActiveFg).toBe(expectedQueueActive)
-    expect(queueInactiveFg).toBe(expectedMuted)
-    expect(queueActiveBold).toBe(true)
-    expect(queueInactiveBold).toBe(false)
-
-    // Filter group: active takes warning tint, inactive is muted. Active is bold, inactive not bold.
-    const filterActiveFg = fgAt(app, 0, "[f]ailed")
-    const filterInactiveFg = fgAt(app, 0, "[o]pen")
-    const filterActiveBold = boldAt(app, 0, "[f]ailed")
-    const filterInactiveBold = boldAt(app, 0, "[o]pen")
-
-    const expectedFilterActive = fgOf("mix($fg-on-inverse, $fg-warning, 30%)")
-
-    expect(filterActiveFg).toBe(expectedFilterActive)
-    expect(filterInactiveFg).toBe(expectedMuted)
-    expect(filterActiveBold).toBe(true)
-    expect(filterInactiveBold).toBe(false)
+    expect(fgAt(app, 1, "[f]ailed")).toBe(fgOf("$fg-warning"))
+    expect(boldAt(app, 1, "[f]ailed")).toBe(true)
+    expect(fgAt(app, 1, "[o]pen")).toBe(fgOf("$fg-muted"))
+    expect(boldAt(app, 1, "[o]pen")).toBe(false)
 
     app.unmount()
   })
@@ -126,10 +88,10 @@ describe("25556: seven rows on yrd watch", () => {
     const app = render(<WatchPane snapshot={baseSnapshot()} live={false} />, { cols: 140, rows: 30 })
     await settle(app)
 
-    expect(app.lines[0]).toContain("[o]pen")
-    expect(app.lines[0]).toContain("[r]unning")
-    expect(app.lines[0]).toContain("[d]one")
-    expect(app.lines[0]).toContain("[f]ailed")
+    expect(app.lines[1]).toContain("[o]pen")
+    expect(app.lines[1]).toContain("[r]unning")
+    expect(app.lines[1]).toContain("[d]one")
+    expect(app.lines[1]).toContain("[f]ailed")
 
     app.unmount()
   })
@@ -187,12 +149,12 @@ describe("25556: seven rows on yrd watch", () => {
     stoppedApp.unmount()
   })
 
-  it("row 4: STATS line takes a muted text colour ($fg-on-inverse-muted)", async () => {
+  it("row 4: STATS line takes a muted text colour ($fg-muted, on the plain second line since 25630)", async () => {
     const app = render(<WatchPane snapshot={baseSnapshot()} live={false} />, { cols: 140, rows: 30 })
     await settle(app)
 
     const statsFg = fgAt(app, 1, "STATS")
-    expect(statsFg).toBe(fgOf("$fg-on-inverse-muted"))
+    expect(statsFg).toBe(fgOf("$fg-muted"))
 
     app.unmount()
   })
