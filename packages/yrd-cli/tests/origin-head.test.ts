@@ -58,6 +58,9 @@ describe("originHead (hh 25626)", () => {
     const { root, upstream } = cloned("trunk")
     const outside = mkdtempSync(join(tmpdir(), "yrd-origin-head-outside-"))
     roots.push(outside)
+    // The premise, asserted: under a TMPDIR inside a repository (the yrd service's own is /hh/dev/.git/yrd/tmp)
+    // git discovers that repository, the local read succeeds, and this row would pass over the defect.
+    expect(spawnSync("git", ["rev-parse", "--git-dir"], { cwd: outside, encoding: "utf8" }).status).not.toBe(0)
     const location = await resolveQueueLocation(outside, upstream, {
       ...process.env,
       XDG_STATE_HOME: join(root, "state"),
