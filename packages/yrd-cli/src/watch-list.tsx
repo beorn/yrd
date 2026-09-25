@@ -158,17 +158,18 @@ export function taskExtrasLayout(
   taskWidth: number,
   branch: string,
   suffixText: string | undefined,
+  titleLength?: number,
 ): Readonly<{
   minTitle: number
   displayBranch: string
   displaySuffix?: string
 }> {
-  const minTitle = Math.ceil(taskWidth / 3)
+  const minTitle =
+    titleLength !== undefined ? Math.min(titleLength, Math.ceil(taskWidth / 3)) : Math.ceil(taskWidth / 3)
   const maxAllowedBranch = Math.max(1, Math.floor(taskWidth * 0.5) - 1)
   const maxAllowedSuffix = Math.max(1, Math.floor(taskWidth * 0.5) - 3)
 
-  let displayBranch =
-    branch.length > maxAllowedBranch ? truncateWithEllipsis(branch, maxAllowedBranch) : branch
+  let displayBranch = branch.length > maxAllowedBranch ? truncateWithEllipsis(branch, maxAllowedBranch) : branch
 
   let displaySuffix =
     suffixText === undefined
@@ -186,9 +187,7 @@ export function taskExtrasLayout(
     if (branchWidth <= halfBudget) {
       const suffixBudget = maxExtrasBudget - branchWidth
       displaySuffix =
-        suffixText !== undefined && suffixBudget > 3
-          ? truncateWithEllipsis(suffixText, suffixBudget - 3)
-          : undefined
+        suffixText !== undefined && suffixBudget > 3 ? truncateWithEllipsis(suffixText, suffixBudget - 3) : undefined
     } else if (suffixWidth <= halfBudget) {
       const branchBudget = maxExtrasBudget - suffixWidth
       displayBranch = branchBudget > 1 ? truncateWithEllipsis(branch, branchBudget - 1) : ""
@@ -197,9 +196,7 @@ export function taskExtrasLayout(
       const suffixBudget = maxExtrasBudget - branchBudget
       displayBranch = branchBudget > 1 ? truncateWithEllipsis(branch, branchBudget - 1) : ""
       displaySuffix =
-        suffixText !== undefined && suffixBudget > 3
-          ? truncateWithEllipsis(suffixText, suffixBudget - 3)
-          : undefined
+        suffixText !== undefined && suffixBudget > 3 ? truncateWithEllipsis(suffixText, suffixBudget - 3) : undefined
     }
   }
 
@@ -253,7 +250,7 @@ export function listLayout(
     ...rows.map((item) => ageRunText(item.row, now).length),
   )
   const fixedExceptQ = timeWidth + statusWidth + agentWidth + (separate ? runWidth : 0) + ageRunWidth + 8
-  const maxAvailableForQ = Math.max(16, columns - fixedExceptQ - 56)
+  const maxAvailableForQ = Math.max(16, columns - fixedExceptQ - 60)
   const qWidth = separate
     ? fullQueue
       ? Math.max(16, Math.min(queue.label.length, maxAvailableForQ))
@@ -271,9 +268,7 @@ export function listLayout(
   const fixedNonTask =
     timeWidth +
     1 +
-    (separate
-      ? (qWidth > 0 ? qWidth + 1 : 0) + (runWidth > 0 ? runWidth + 1 : 0)
-      : queueRunWidth + 1) +
+    (separate ? (qWidth > 0 ? qWidth + 1 : 0) + (runWidth > 0 ? runWidth + 1 : 0) : queueRunWidth + 1) +
     1 +
     statusWidth +
     (agentWidth > 0 ? 1 + agentWidth : 0) +
@@ -370,15 +365,12 @@ export function TopLine({
 
   const timerText = typeof status.timer === "string" ? toHms(status.timer) : status.timer
   const timerLen = typeof timerText === "string" ? timerText.length : timerText !== undefined ? 8 : 0
-  const statusParts = [
-    timerLen,
-    status.reason ? status.reason.length : 0,
-  ].filter((n) => n > 0)
+  const statusParts = [timerLen, status.reason ? status.reason.length : 0].filter((n) => n > 0)
   const statusGaps = Math.max(0, statusParts.length - 1)
   const statusRightLen = statusParts.reduce((a, b) => a + b, 0) + statusGaps
 
   const runnerDigitsLen = showRunnerDigits
-    ? (queues ?? []).map((_, i) => 3).reduce((a, b) => a + b, 0) + ((queues?.length ?? 0) - 1) + 1
+    ? (queues ?? []).map(() => 3).reduce((a, b) => a + b, 0) + ((queues?.length ?? 0) - 1) + 1
     : 0
   const leftPrefixLen = 1 + 1 + 1 + runnerDigitsLen + 10
   const availableForAddress =
@@ -411,7 +403,7 @@ export function TopLine({
           )}
         </Box>
         {showRunnerDigits
-          ? queues!.map((_, index) => (
+          ? (queues ?? []).map((_, index) => (
               <Text key={index} color="$fg-on-inverse-muted" flexShrink={0}>
                 [{index + 1}]
               </Text>
@@ -626,9 +618,14 @@ export const ListRow = memo(function ListRow({
     row.state === "stuck" &&
     suffix !== undefined &&
     ((layout.columns ?? 120) < 100 ||
-      taskExtrasLayout(computedTaskWidth, row.branch, suffix.text).displaySuffix !== suffix.text)
+      taskExtrasLayout(computedTaskWidth, row.branch, suffix.text, shownTitle.length).displaySuffix !== suffix.text)
   const inlineSuffix = suffix === undefined || separateLineSuffix ? undefined : suffix.text
-  const { displayBranch, displaySuffix } = taskExtrasLayout(computedTaskWidth, row.branch, inlineSuffix)
+  const { displayBranch, displaySuffix } = taskExtrasLayout(
+    computedTaskWidth,
+    row.branch,
+    inlineSuffix,
+    shownTitle.length,
+  )
   return (
     <Box
       flexDirection="column"
@@ -779,7 +776,7 @@ export function RunnerRow({
   queueDigit?: number
   queueLabel?: string
 }) {
-  const { color, word } = STATE_WORDS[line.state]
+  const { color } = STATE_WORDS[line.state]
   const forced = cursor ? "$fg-on-selected" : undefined
   const timeText = line.at !== undefined ? clock(line.at) : "—"
   const parsed = splitRunnerCure(line.holds)

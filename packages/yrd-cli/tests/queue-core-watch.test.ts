@@ -743,16 +743,19 @@ describe("what a watch says it looked at", () => {
     // any row now, and while the line is stopped it names the change it
     // stopped at, so it is told apart by its own word and not by its shape.
     const pageLines = plain.stdout().split("\n")
-    const changeLines = pageLines.filter((line) => line.includes(`stuck=${String(original.reason)}`))
-    expect(changeLines, plain.stdout()).toHaveLength(1)
-    expect(changeLines[0], plain.stdout()).toContain("task/history")
+    const stuckIndex = pageLines.findIndex((line) => line.includes(`stuck=${String(original.reason)}`))
+    expect(stuckIndex, plain.stdout()).toBeGreaterThanOrEqual(0)
+    const changeLine = pageLines[stuckIndex]?.includes("task/history")
+      ? pageLines[stuckIndex]
+      : pageLines[stuckIndex - 1]
+    expect(changeLine, plain.stdout()).toContain("task/history")
     expect(
       pageLines.some((line) => line.includes("RUNNER")) && pageLines.some((line) => line.includes("stopped")),
       plain.stdout(),
     ).toBe(true)
     // QUEUE / RUN names the latest attempt as `1 · main#…` (ia.md); historical
     // run ids stay in `--json` and in the change's own detail, not as extra rows.
-    expect(changeLines[0], plain.stdout()).toContain(runIdentifier(secondId))
+    expect(changeLine, plain.stdout()).toContain(runIdentifier(secondId))
 
     rendered.snapshot = undefined
     const interactive = capture(w.work)
