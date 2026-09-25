@@ -2674,7 +2674,8 @@ describe("a diverged component the merge composes", () => {
   it("lands a change judged and re-cut in one run, the recheck's logs beside the judge's (24977 P0)", async () => {
     const w = await world()
     const pins = await divergentSubmoduleCommits(w)
-    const check = { on: ["submit"], run: "true" } as const
+    // `true` is the skipped no-op check since 25716 row 5; `:` is a check that runs and passes.
+    const check = { on: ["submit"], run: ":" } as const
     const head = await submitGitlink(w, "task/stale-at-judge", pins.changeSide)
     await gitlinkAroundQueue(w, pins.mainSide)
 

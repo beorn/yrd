@@ -973,10 +973,9 @@ export async function eventQueueRun(
           const checks =
             options.noCheck === true
               ? []
-              : options.checks.filter(
-                  (check) => check.run !== "true" && (check.on ?? ["merge"]).includes(phase),
-                )
-          if (checks.length === 0) continue
+              : options.checks.filter((check) => check.run !== "true" && (check.on ?? ["merge"]).includes(phase))
+          // A declared setup still runs when every check is off or skipped: its failure is the verdict the rows bill.
+          if (checks.length === 0 && options.setup === undefined) continue
           const logDir = join(
             options.workdir,
             "checks",
