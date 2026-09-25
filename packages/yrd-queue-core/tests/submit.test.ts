@@ -9,7 +9,8 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
+import * as verifying from "../src/verifying.ts"
 import {
   changeName,
   changeRef,
@@ -527,6 +528,19 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     const refs = await remoteRefs(w)
     expect(refs).toContain(changeRef("main", { branch: "task/one", head: first }))
     expect(refs).toContain(changeRef("main", { branch: "task/one", head: second }))
+  })
+
+  it("inspects the candidate with noFetch enabled (25626)", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/one", "one.txt")
+    using verifySpy = vi.spyOn(verifying, "verifyCandidate")
+    await submit(w.git, "origin", {
+      branch: "task/one",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+    expect(verifySpy).toHaveBeenCalled()
+    expect(verifySpy.mock.calls[0]?.[0]?.noFetch).toBe(true)
   })
 })
 

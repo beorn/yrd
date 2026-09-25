@@ -307,6 +307,7 @@ export async function inspectSubmitAtHead(
       path: join(scratch, "candidate"),
       message: `verify ${request.branch} at ${head} against ${targetHead}`,
       hooksPath,
+      noFetch: true,
     })
     verifying = composed.verifying
     if (composed.state === "failed") {

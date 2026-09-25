@@ -38,6 +38,7 @@ export type VerificationOptions = Readonly<{
   process?: Process
   env?: NodeJS.ProcessEnv
   hooksPath?: string
+  noFetch?: boolean
   /**
    * Times a named part of the verification into the caller's journal. Only the
    * queue round passes it; without it nothing is timed.
@@ -85,12 +86,18 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
 }
 
 async function superMerge(
-  options: Pick<VerificationOptions, "process" | "env" | "hooksPath">,
+  options: Pick<VerificationOptions, "process" | "env" | "hooksPath" | "noFetch">,
   cwd: string,
   commit: string,
   message: string,
 ): Promise<SuperMergeResult> {
-  const execution = await gitSuperExecution(options, cwd, ["merge", commit, "-m", message])
+  const execution = await gitSuperExecution(options, cwd, [
+    "merge",
+    commit,
+    "-m",
+    message,
+    ...(options.noFetch ? ["--no-fetch"] : []),
+  ])
   let parsed: unknown
   try {
     parsed = JSON.parse(execution.stdout)
