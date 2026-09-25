@@ -7759,6 +7759,27 @@ describe("skipping setup and worktree when every declared check is off (25716 ro
     expect(readFileSync(setupLog, "utf8")).toContain("setup-ran")
   })
 
+  // @i/10-yrd/25936: a round with every declared check off writes its synthesized result records to run.log
+  it("writes synthesized result records to run.log when all checks are declared run 'true', carrying phase merge result records (25936)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/synth", "synth.txt")
+    const opts = await w.options({ exit: 0 })
+    const outcome = await queueRun({
+      ...opts,
+      checks: [{ name: "c1", run: "true" }],
+      notify: [],
+    })
+    expect(outcome.merged).toEqual(["task/synth"])
+    const results = logRecords(outcome).filter((r) => r.kind === "result" && r.phase === "merge")
+    expect(results.length).toBeGreaterThan(0)
+    expect(results[0]).toMatchObject({
+      kind: "result",
+      name: "c1",
+      phase: "merge",
+      result: "pass",
+    })
+  })
+
   it("performs no setup and creates no check worktree on an event queue when all checks are declared run 'true', but performs both with a real check (25716 row 5 event runner)", async () => {
     const w = await world()
     await createWorldEventQueue(w)

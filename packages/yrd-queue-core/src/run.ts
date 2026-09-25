@@ -46,7 +46,7 @@
  * inside the round before it is written, and its record says so.
  */
 
-import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { adaptProcessGit, createProcess, type Process } from "@yrd/process"
 import { readFrozenPushIntent } from "git-super/push-intent"
@@ -2340,12 +2340,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     const wt =
       worktree === undefined
         ? undefined
-        : gitIn(
-            worktree.path,
-            run.options.process,
-            run.options.selection,
-            gitInvocationOptions(run.options, run.log),
-          )
+        : gitIn(worktree.path, run.options.process, run.options.selection, gitInvocationOptions(run.options, run.log))
     // The built-in check at merge (ruling D2): the merged tree's own declaration
     // reads, so no change can land a `.yrd.yml` that breaks the next queue run.
     let unreadable: string | undefined
@@ -2370,9 +2365,28 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     let recheck: readonly CheckResult[] = []
     let phaseResults: readonly CheckResult[] = []
     if (allDeclaredChecksOff(run.options)) {
+      const logDir = checkLogDir(run, entry, "merge")
+      mkdirSync(logDir, { recursive: true })
       phaseResults = run.options.checks
         .filter((c) => (c.on ?? ["merge"]).includes("merge"))
-        .map((c) => ({ durationMs: 0, exit: 0, log: "", name: c.name, result: "pass" as const }))
+        .map((c) => {
+          const log = checkLogPath(logDir, c.name)
+          if (!existsSync(log)) writeFileSync(log, "")
+          const start = new Date().toISOString()
+          const about = {
+            branch: entry.change.branch,
+            head: entry.change.head,
+            name: c.name,
+            phase: "merge",
+            start,
+            end: start,
+            ...(c.scripts === undefined || c.scripts.length === 0 ? {} : { scripts: c.scripts }),
+          }
+          recordProgramStart(run, { ...about, log, start })
+          const result: CheckResult = { durationMs: 0, exit: 0, log, name: c.name, result: "pass" as const }
+          recordProgramResult(run, about, result)
+          return result
+        })
     } else if (worktree !== undefined) {
       // The merge moved this worktree's HEAD, so what a check judges here is
       // read now and not at prepare time: the candidate is the merge commit,

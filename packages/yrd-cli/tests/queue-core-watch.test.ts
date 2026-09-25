@@ -17,6 +17,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   utimesSync,
@@ -1257,5 +1258,38 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
     const prov = stageInfo(queuedDetail, "provisioning")
     expect(prov.state).toBe("not-run")
     expect(prov.said).toBe(" not journaled")
+  })
+
+  // @i/10-yrd/25936: a merge round with every check off writes synthesized result records to run.log
+  it("writes synthesized result records to run.log so yrd list --json carries startedAt and log, and journal has phase merge results (25936)", async () => {
+    const w = await world('"true"')
+    await createWorldEventQueue(w)
+    await change(w, "task/all-checks-off", false)
+    await drain(w)
+
+    // Check yrd list --json carries startedAt and log
+    const run = capture(w.work)
+    expect(await coreQueueCommand(w.work, run.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const json = JSON.parse(run.stdout().trim()) as { changes: readonly Record<string, unknown>[] }
+    const row = json.changes.find((c) => c.branch === "task/all-checks-off")
+    expect(row).toBeDefined()
+    expect(row?.state).toBe("merged")
+    expect(row?.startedAt).toBeDefined()
+    expect(row?.log).toBeDefined()
+
+    // Check journal's result records carry phase "merge"
+    const journalName = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
+    expect(journalName).toBeDefined()
+    const journalRows = readFileSync(join(w.workdir, "logs", journalName!), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    const mergeResults = journalRows.filter((r) => r.kind === "result" && r.phase === "merge")
+    expect(mergeResults.length).toBeGreaterThan(0)
+    expect(mergeResults[0]).toMatchObject({
+      kind: "result",
+      phase: "merge",
+      result: "pass",
+    })
   })
 })

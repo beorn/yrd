@@ -1,5 +1,5 @@
 /** Run a change from the event projection, leasing its merge with the queue. */
-import { mkdirSync, readFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { Conflict } from "./git.ts"
 
@@ -1127,7 +1127,42 @@ export async function eventQueueRun(
       for (let attempt = 1; attempt <= 2; attempt++) {
         const startOfAttempt = results.length
         for (const phase of ["submit", "merge"] as const) {
-          if (allDeclaredChecksOff(options)) continue
+          if (allDeclaredChecksOff(options)) {
+            if (phase === "merge") {
+              const logDir = join(
+                options.workdir,
+                "checks",
+                `${branch}@${head}`,
+                log.id,
+                `attempt-${String(attempt)}`,
+                phase,
+              )
+              mkdirSync(logDir, { recursive: true })
+              for (const check of options.checks.filter((c) => (c.on ?? ["merge"]).includes("merge"))) {
+                const logPath = checkLogPath(logDir, check.name)
+                if (!existsSync(logPath)) writeFileSync(logPath, "")
+                const start = new Date().toISOString()
+                const about = {
+                  branch,
+                  head,
+                  name: check.name,
+                  phase,
+                  start,
+                  end: start,
+                  ...(check.scripts === undefined || check.scripts.length === 0 ? {} : { scripts: check.scripts }),
+                }
+                recordProgramStart({ log }, { ...about, log: logPath, start })
+                const checked: CheckResult = { durationMs: 0, exit: 0, log: logPath, name: check.name, result: "pass" }
+                recordProgramResult({ log }, about, checked)
+                results.push({
+                  run: checked,
+                  attempt,
+                  phase,
+                })
+              }
+            }
+            continue
+          }
           const checks =
             options.noCheck === true
               ? []
