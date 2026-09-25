@@ -51,6 +51,15 @@ export async function originHead(git: Git, remote = "origin"): Promise<string> {
   const recorded = (await git(["for-each-ref", "--format=%(symref)", `refs/remotes/${remote}/HEAD`])).trim()
   const prefix = `refs/remotes/${remote}/`
   if (recorded.startsWith(prefix) && recorded.length > prefix.length) return recorded.slice(prefix.length)
+  return remoteHead(git, remote)
+}
+
+/**
+ * The default branch as `remote` itself answers it: a remote name, a path or a URL. It needs no
+ * repository, so an address outside one resolves; a path or URL is never a remote name, so it is
+ * asked directly rather than looked up in a clone's records (@dev/review2 P3 on ef04e3a459).
+ */
+export async function remoteHead(git: Git, remote: string): Promise<string> {
   const out = await git(["ls-remote", "--symref", remote, "HEAD"])
   const branch = /^ref:\s+refs\/heads\/(.+)\s+HEAD$/mu.exec(out)?.[1]
   if (branch === undefined || branch === "") {
@@ -147,7 +156,7 @@ export async function resolveQueueLocation(
       )
     }
     let selected = value
-    if (!selected.includes("#")) selected = `${selected}#${await originHead(git, selected)}`
+    if (!selected.includes("#")) selected = `${selected}#${await remoteHead(git, selected)}`
     const split = selected.indexOf("#")
     const repository = selected.slice(0, split)
     if (inside !== undefined && (await git(["remote"])).trim().split("\n").includes(repository)) {
