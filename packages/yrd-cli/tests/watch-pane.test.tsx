@@ -2943,7 +2943,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         snapshot={snapshot({
           runner: {
             journalDir: "/w/logs",
-            service: { kind: "stopped", why: "heartbeat overdue", cause: "timeout" },
+            service: { kind: "stopped", graceful: false, why: "heartbeat overdue", cause: "timeout" },
           },
         })}
         live={false}
@@ -3024,7 +3024,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
           rows: [],
           runner: {
             journalDir: "/w/logs",
-            service: { kind: "stopped", why: "heartbeat overdue", cause: "timeout" },
+            service: { kind: "stopped", graceful: false, why: "heartbeat overdue", cause: "timeout" },
           },
         })}
         live={false}
@@ -3384,7 +3384,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         snapshot={snapshot({
           runner: {
             journalDir: "/w/logs",
-            service: { kind: "stopped", why: "heartbeat overdue", cause: "timeout" },
+            service: { kind: "stopped", graceful: false, why: "heartbeat overdue", cause: "timeout" },
           },
           queues: [{ branch: "main", label: "main", path: "/repo" }],
         })}
@@ -3426,6 +3426,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
               journalDir: "/w/logs",
               service: {
                 kind: "stopped",
+                graceful: true,
                 why: "stopped since 07:14: no stop reason was recorded",
                 cause: "graceful stop",
                 ...(stopReason === undefined ? {} : { stopReason }),
@@ -3826,7 +3827,10 @@ describe("the top line (25416)", () => {
     const stopped = render(
       <WatchPane
         snapshot={snapshot({
-          runner: { journalDir: "/w/logs", service: { kind: "stopped", why: "heartbeat overdue", cause: "timeout" } },
+          runner: {
+            journalDir: "/w/logs",
+            service: { kind: "stopped", graceful: false, why: "heartbeat overdue", cause: "timeout" },
+          },
         })}
         live={false}
       />,

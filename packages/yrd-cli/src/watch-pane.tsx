@@ -954,12 +954,15 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
     }
   }
   // A stopped line shows only the stop text it was given (rulings 9d0816692e and 25556); the runner's holds are
-  // detail for a PAUSED line, not for STOPPED.
+  // detail for a PAUSED line, not for STOPPED. A graceful stop with no recorded reason stays bare (25556); a stop
+  // outside a graceful stop has no reason to record, so its own sentence stands — it names where the supervisor's
+  // record is (@cto 8f6721ce).
+  const service = snapshot.runner?.service
   const reason =
     snapshot.pause ??
     (word === "STOPPED"
-      ? snapshot.runner?.service.kind === "stopped"
-        ? snapshot.runner.service.stopReason
+      ? service?.kind === "stopped"
+        ? (service.stopReason ?? (service.graceful ? undefined : service.why))
         : undefined
       : runner.holds === ""
         ? undefined

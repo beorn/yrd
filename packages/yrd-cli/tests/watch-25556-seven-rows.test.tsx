@@ -131,6 +131,7 @@ describe("25556: seven rows on yrd watch", () => {
             journalDir: "/w/logs",
             service: {
               kind: "stopped",
+              graceful: true,
               why: "stopped",
               cause: "cutover",
               since: new Date(NOW.getTime() - 300_000), // 5:00 ago

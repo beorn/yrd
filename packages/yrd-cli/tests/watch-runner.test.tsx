@@ -275,6 +275,7 @@ describe("readRunnerService, the loop's own liveness", () => {
       `stopped outside a graceful stop since ${new Date(NOW.getTime() - 60_000).toISOString()}; ` +
         `hab ps ${SERVICE} has the supervisor's record`,
     )
+    expect(service.graceful, "a stop outside a graceful stop, so the watch shows this sentence").toBe(false)
     expect(service.cause).toContain("no longer a measurement of anything")
     expect(service.since?.getTime()).toBe(NOW.getTime() - 60_000)
   })
@@ -311,6 +312,7 @@ describe("readRunnerService, the loop's own liveness", () => {
     const at = clock(new Date(since))
     expect(service).toMatchObject({
       kind: "stopped",
+      graceful: true,
       why: `stopped by @chief since ${at}: cutover`,
       stopReason: "cutover",
     })
@@ -351,6 +353,7 @@ describe("runnerWord, the one word", () => {
   const STOPPED: RunnerService = {
     cause: "the service last wrote this document at 11:59 and declared it believable until 12:00",
     kind: "stopped",
+    graceful: false,
     why: "the service stopped restating its health document",
     since: new Date(NOW.getTime() - 60_000),
   }
@@ -536,6 +539,7 @@ describe("the runner's row", () => {
       "2026-09-03T11:55:00.000Z; nothing has been written since, so its last verdict (healthy) is no longer " +
       "a measurement of anything",
     kind: "stopped",
+    graceful: false,
     since: new Date(NOW.getTime() - 5 * 60_000),
     why: "the service stopped restating its health document",
   }
