@@ -5379,7 +5379,9 @@ describe("a queue run", () => {
             "authority cannot be parsed\n\nRecord: wedged\nPaused-By: operator\n",
           ])
         ).trim()
-        await rival(["push", "--quiet", "origin", `${malformed}:${PAUSE_REF}`])
+        // Forced: the rival's record replaces whatever the pause ref holds. A plain push was rejected
+        // non-fast-forward once under load, when the ref already existed, and the row then tested the push (25868).
+        await rival(["push", "--quiet", "--force", "origin", `${malformed}:${PAUSE_REF}`])
       },
     )
 
