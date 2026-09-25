@@ -120,6 +120,10 @@ export function defaultTab(checks: readonly CheckPanel[]): string {
 /** The Changes tab's value: never a check's index. */
 export const CHANGES_TAB = "changes"
 
+function isMigratedWithoutCheckDetail(detail: ChangeDetail): boolean {
+  return detail.checks.length === 0 && detail.note?.startsWith("Migrated change has no check-step detail") === true
+}
+
 export function WatchDetail({
   detail,
   joinedRun = false,
@@ -153,6 +157,7 @@ export function WatchDetail({
   const resolved = resolveTab(selected, detail)
   const tab = resolved.tab
   const selectedSubIndex = resolved.selectedSubIndex
+  const migratedWithoutChecks = isMigratedWithoutCheckDetail(detail)
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
       {/* The status box at the VERY top, no identity row above it (items 1, 23). */}
@@ -165,12 +170,16 @@ export function WatchDetail({
           {row.diagnostic}
         </Text>
       )}
-      {detail.note === undefined ? null : (
+      {migratedWithoutChecks ? (
+        <Text color="$fg-warning" wrap="wrap">
+          Migrated change has no check-step detail; open Checking for the retained record and old check logs.
+        </Text>
+      ) : detail.note === undefined ? null : (
         <Text color="$fg-warning" wrap="wrap">
           {detail.note}
         </Text>
       )}
-      {detail.checks.length === 0 ? (
+      {detail.checks.length === 0 && !migratedWithoutChecks ? (
         <Text color="$fg-muted">no check-step detail is recorded for this change</Text>
       ) : null}
       <Tabs
@@ -426,7 +435,13 @@ function StageTabPanel({
             {stage.toUpperCase()} — NOT RUN
           </Text>
           <Box height={1} flexShrink={0} />
-          <Text color="$fg-muted">{stageSkipReason(detail, stage)}</Text>
+          {stage === "checking" && isMigratedWithoutCheckDetail(detail) ? (
+            <Text color="$fg-warning" wrap="wrap">
+              {detail.note}
+            </Text>
+          ) : (
+            <Text color="$fg-muted">{stageSkipReason(detail, stage)}</Text>
+          )}
         </TitledBox>
       </ScrollArea>
     )
