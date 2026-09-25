@@ -1023,6 +1023,8 @@ export async function appendOpsCutover(
   targetSha: string,
   at: Date,
   by: string,
+  expected?: Readonly<{ queueBefore: string; pauseBefore?: string; overrideBefore?: string }>,
+  onStaged?: (oid: string) => void,
 ): Promise<OpsCutoverReceipt> {
   if (Number.isNaN(at.getTime())) throw new TypeError("ops-cutover Time: needs a valid instant")
   if (by.trim() === "") throw new TypeError("ops-cutover needs an actor")
@@ -1033,6 +1035,16 @@ export async function appendOpsCutover(
   const refs = await listRefs(queueRefPrefix(queue), store)
   const pauseBefore = refs.get(pauseRef(queue))
   const overrideBefore = refs.get(overrideRef(queue))
+  if (
+    expected !== undefined &&
+    (expected.queueBefore !== prior.queue.tip ||
+      expected.pauseBefore !== pauseBefore ||
+      expected.overrideBefore !== overrideBefore)
+  ) {
+    throw new Conflict(`${queueRef(queue)}: ops-cutover refs differ from the verified plan`, {
+      refs: [queueRef(queue), pauseRef(queue), overrideRef(queue)],
+    })
+  }
   if (pauseBefore !== prior.pause?.sha || overrideBefore !== prior.overrides.sha) {
     throw new Conflict(`${queueRef(queue)}: legacy refs moved while preparing ops-cutover`, {
       refs: [pauseRef(queue), overrideRef(queue)],
@@ -1052,6 +1064,7 @@ export async function appendOpsCutover(
     ],
   }
   const staged = await (await openEvents({ ...store, ref, writer: by })).stage([input], { expect: prior.queue.tip })
+  onStaged?.(staged.head)
   const also: AlsoRef[] = [
     ...(pauseBefore === undefined ? [] : [{ ref: pauseRef(queue), expect: pauseBefore, oid: null }]),
     ...(overrideBefore === undefined ? [] : [{ ref: overrideRef(queue), expect: overrideBefore, oid: null }]),

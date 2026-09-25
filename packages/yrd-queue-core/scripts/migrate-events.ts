@@ -13,6 +13,7 @@ import { dirname, isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
   createEventStore,
+  createLegacyBackend,
   gitIn,
   openEvents,
   resolveGitSelection,
@@ -24,7 +25,16 @@ import {
 import { readHistories, readQueue } from "../src/remote.ts"
 import { isActive, readOverrides } from "../src/override.ts"
 import { overrideRef, parseChangeRef, pauseRef, queueRefPrefix } from "../src/refs.ts"
-import { changesRef, enumerateChangeSegments, queueFormat, queueRef, readEventQueueWithChanges } from "../src/events.ts"
+import {
+  appendOpsCutover,
+  changesRef,
+  enumerateChangeSegments,
+  queueFormat,
+  queueRef,
+  readEventOps,
+  readEventQueueWithChanges,
+} from "../src/events.ts"
+import { encodeOps } from "../src/ops-state.ts"
 import { readConfig } from "../src/config.ts"
 import { assertPlainEventQueueConfig } from "../src/event-config.ts"
 import { inputsForLegacy, migratedStatus, sourcesForMigration, type LegacyMigrationChange } from "../src/migration.ts"
@@ -33,7 +43,7 @@ import { trailer } from "../src/legacy-records.ts"
 import { subjects } from "../src/table.ts"
 import { directMergeCommits, eventDirectMergeCommits } from "../src/direct.ts"
 
-type Phase = "plan" | "apply" | "rollback"
+type Phase = "plan" | "apply" | "rollback" | "ops-plan" | "ops-apply" | "ops-rollback"
 type Options = Readonly<{ phase: Phase; repo: string; remote: string; queue: string; journal: string }>
 type Ref = Readonly<{ ref: string; oid: string }>
 type Advertisement = Readonly<{ heads: readonly Ref[]; queue: readonly Ref[]; target: string }>
@@ -76,9 +86,25 @@ type Staged = Readonly<{
   sources: readonly Readonly<{ ref: string; oid: string }>[]
   stagedAt: string
 }>
+type OpsPlan = Readonly<{
+  version: 1
+  kind: "ops"
+  options: Pick<Options, "repo" | "remote" | "queue" | "journal">
+  remoteUrl: string
+  runtimePin: string
+  capturedAt: string
+  target: string
+  heads: readonly Ref[]
+  refs: readonly Ref[]
+  effective: string
+  bundle: string
+  bundleSha256: string
+  snapshot: string
+}>
 
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
-const USAGE = "usage: migrate-events.ts plan|apply|rollback --repo ABS --remote NAME --queue BRANCH --journal ABS"
+const USAGE =
+  "usage: migrate-events.ts plan|apply|rollback|ops-plan|ops-apply|ops-rollback --repo ABS --remote NAME --queue BRANCH --journal ABS"
 
 function failure(code: string, subject: string, detail: string): never {
   throw new Error(`yrd-migration-${code}: ${subject}: ${detail}`)
@@ -86,7 +112,7 @@ function failure(code: string, subject: string, detail: string): never {
 
 function optionsOf(argv: readonly string[]): Options {
   const [phase, ...rest] = argv
-  if (phase !== "plan" && phase !== "apply" && phase !== "rollback") {
+  if (!["plan", "apply", "rollback", "ops-plan", "ops-apply", "ops-rollback"].includes(phase ?? "")) {
     failure("usage", String(phase ?? "missing phase"), USAGE)
   }
   const values = new Map<string, string>()
@@ -120,7 +146,7 @@ function optionsOf(argv: readonly string[]): Options {
   if (queue.startsWith("-") || queue.includes("..") || /[\s\0]/u.test(queue)) {
     failure("usage", queue, "queue must be one branch name")
   }
-  return { phase, repo, remote, queue, journal }
+  return { phase: phase as Phase, repo, remote, queue, journal }
 }
 
 function rows(text: string, subject: string): readonly Ref[] {
@@ -251,6 +277,69 @@ async function runtimePin(): Promise<string> {
   return pin
 }
 
+/** Capture the exact queue namespace once for either migration, then verify its bundle and second remote census. */
+async function verifiedBundle(
+  options: Options,
+  git: Git,
+  selection: GitSelection,
+  first: Advertisement,
+  remoteUrl: string,
+): Promise<Readonly<{ snapshot: string; bundle: string; bundleSha256: string }>> {
+  mkdirSync(options.journal)
+  const snapshot = join(options.journal, "old-refs.git")
+  const bundle = join(options.journal, "old-refs.bundle")
+  await git(["init", "--bare", snapshot])
+  const snapshotGit = gitIn(snapshot, undefined, selection)
+  await snapshotGit(["remote", "add", options.remote, remoteUrl])
+  await snapshotGit([
+    "fetch",
+    "--no-tags",
+    options.remote,
+    `+${queueRefPrefix(options.queue)}/*:${queueRefPrefix(options.queue)}/*`,
+  ])
+  const copied = rows(
+    await snapshotGit(["for-each-ref", "--format=%(objectname) %(refname)", `${queueRefPrefix(options.queue)}/`]),
+    snapshot,
+  )
+  if (!equalRefs(first.queue, copied)) {
+    failure("changed-snapshot", snapshot, "fetched ref names or OIDs differ from the remote census")
+  }
+  await snapshotGit(["bundle", "create", bundle, "--all"])
+  await snapshotGit(["bundle", "verify", bundle])
+  const bundled = rows(await snapshotGit(["bundle", "list-heads", bundle]), bundle)
+  if (!equalRefs(first.queue, bundled)) {
+    failure("incomplete-bundle", bundle, "bundle ref listing differs from the old remote census")
+  }
+  const complete = await remoteAdvertisement(git, options.remote, options.queue)
+  if (!equalRefs(first.queue, complete.queue) || !equalRefs(first.heads, complete.heads)) {
+    failure(
+      "changed-census",
+      `${options.remote}#${options.queue}`,
+      "remote moved during the bundle read; do not apply this plan",
+    )
+  }
+  return { snapshot, bundle, bundleSha256: await sha256(bundle) }
+}
+
+/** An apply or rollback trusts only the bundle the plan verified against the remote census. */
+async function requireVerifiedBundle(
+  snapshot: string,
+  bundle: string,
+  digest: string,
+  refs: readonly Ref[],
+  selection: GitSelection,
+): Promise<void> {
+  if (!existsSync(bundle) || (await sha256(bundle)) !== digest) {
+    failure("invalid-bundle", bundle, "bundle is missing or its SHA256 differs from plan")
+  }
+  const snapshotGit = gitIn(snapshot, undefined, selection)
+  await snapshotGit(["bundle", "verify", bundle])
+  const bundled = rows(await snapshotGit(["bundle", "list-heads", bundle]), bundle)
+  if (!equalRefs(bundled, refs)) {
+    failure("invalid-bundle", bundle, "bundle ref listing differs from the original census")
+  }
+}
+
 async function plan(options: Options, git: Git, selection: GitSelection, pin: string): Promise<unknown> {
   if (existsSync(options.journal)) failure("journal-exists", options.journal, "plan requires a new journal directory")
   const first = await remoteAdvertisement(git, options.remote, options.queue)
@@ -299,39 +388,7 @@ async function plan(options: Options, git: Git, selection: GitSelection, pin: st
       "refs/heads or legacy refs moved during the plan read; take a fresh plan",
     )
   }
-  mkdirSync(options.journal)
-  const snapshot = join(options.journal, "old-refs.git")
-  const bundle = join(options.journal, "old-refs.bundle")
-  await git(["init", "--bare", snapshot])
-  const snapshotGit = gitIn(snapshot, undefined, selection)
-  await snapshotGit(["remote", "add", options.remote, remoteUrl])
-  await snapshotGit([
-    "fetch",
-    "--no-tags",
-    options.remote,
-    `+${queueRefPrefix(options.queue)}/*:${queueRefPrefix(options.queue)}/*`,
-  ])
-  const copied = rows(
-    await snapshotGit(["for-each-ref", "--format=%(objectname) %(refname)", `${queueRefPrefix(options.queue)}/`]),
-    snapshot,
-  )
-  if (!equalRefs(first.queue, copied)) {
-    failure("changed-snapshot", snapshot, "fetched old ref names or OIDs differ from the remote census")
-  }
-  await snapshotGit(["bundle", "create", bundle, "--all"])
-  await snapshotGit(["bundle", "verify", bundle])
-  const bundled = rows(await snapshotGit(["bundle", "list-heads", bundle]), bundle)
-  if (!equalRefs(first.queue, bundled)) {
-    failure("incomplete-bundle", bundle, "bundle ref listing differs from the old remote census")
-  }
-  const complete = await remoteAdvertisement(git, options.remote, options.queue)
-  if (!equalRefs(first.queue, complete.queue) || !equalRefs(first.heads, complete.heads)) {
-    failure(
-      "changed-census",
-      `${options.remote}#${options.queue}`,
-      "remote moved during the bundle read; do not apply this plan",
-    )
-  }
+  const { snapshot, bundle, bundleSha256 } = await verifiedBundle(options, git, selection, first, remoteUrl)
   const evidence: Plan = {
     version: 1,
     options: { repo: options.repo, remote: options.remote, queue: options.queue, journal: options.journal },
@@ -348,7 +405,7 @@ async function plan(options: Options, git: Git, selection: GitSelection, pin: st
     pause: classified.pause,
     ...(classified.override === undefined ? {} : { override: classified.override }),
     bundle,
-    bundleSha256: await sha256(bundle),
+    bundleSha256,
     snapshot,
   }
   immutableJson(join(options.journal, "plan.json"), evidence)
@@ -579,10 +636,7 @@ async function apply(options: Options, plan: Plan, git: Git, selection: GitSelec
       "one publication attempt may have happened; inspect the journal and full remote readback, never retry",
     )
   }
-  if (!existsSync(plan.bundle) || (await sha256(plan.bundle)) !== plan.bundleSha256) {
-    failure("invalid-bundle", plan.bundle, "bundle is missing or its SHA256 differs from plan")
-  }
-  await gitIn(plan.snapshot, undefined, selection)(["bundle", "verify", plan.bundle])
+  await requireVerifiedBundle(plan.snapshot, plan.bundle, plan.bundleSha256, plan.oldRefs, selection)
   const first = await remoteAdvertisement(git, options.remote, options.queue)
   assertAdvertised(plan, first, "apply preflight")
   const declared = await readConfig(git, plan.target, { remote: options.remote, branch: options.queue })
@@ -781,15 +835,7 @@ async function rollback(options: Options, plan: Plan, git: Git, selection: GitSe
     failure("invalid-journal", resultPath, "apply receipt did not prove exact committed ref readback")
   }
   const staged = readStaged(options, plan)
-  if (!existsSync(plan.bundle) || (await sha256(plan.bundle)) !== plan.bundleSha256) {
-    failure("invalid-bundle", plan.bundle, "bundle is missing or its SHA256 differs from plan")
-  }
-  const snapshotGit = gitIn(plan.snapshot, undefined, selection)
-  await snapshotGit(["bundle", "verify", plan.bundle])
-  const bundled = rows(await snapshotGit(["bundle", "list-heads", plan.bundle]), plan.bundle)
-  if (!equalRefs(bundled, plan.oldRefs)) {
-    failure("invalid-bundle", plan.bundle, "bundle ref listing differs from the original census")
-  }
+  await requireVerifiedBundle(plan.snapshot, plan.bundle, plan.bundleSha256, plan.oldRefs, selection)
   const lastSource = new Map<string, string>()
   const count = new Map<string, number>()
   for (const source of staged.sources) {
@@ -893,6 +939,242 @@ async function rollback(options: Options, plan: Plan, git: Git, selection: GitSe
   return { ...result, postflight: join(options.journal, "rollback-postflight.json") }
 }
 
+function opsExpected(plan: OpsPlan): Readonly<{ queueBefore: string; pauseBefore?: string; overrideBefore?: string }> {
+  const queueBefore = plan.refs.find(({ ref }) => ref === queueRef(plan.options.queue))?.oid
+  if (queueBefore === undefined) failure("ops-plan", plan.options.queue, "verified plan has no queue event ref")
+  const pauseBefore = plan.refs.find(({ ref }) => ref === pauseRef(plan.options.queue))?.oid
+  const overrideBefore = plan.refs.find(({ ref }) => ref === overrideRef(plan.options.queue))?.oid
+  return {
+    queueBefore,
+    ...(pauseBefore === undefined ? {} : { pauseBefore }),
+    ...(overrideBefore === undefined ? {} : { overrideBefore }),
+  }
+}
+
+function opsReadPlan(options: Options): OpsPlan {
+  const path = join(options.journal, "plan.json")
+  if (!existsSync(path)) failure("missing-journal", path, "ops plan.json is required; run ops-plan first")
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"))
+  if (parsed === null || typeof parsed !== "object" || !("kind" in parsed) || parsed.kind !== "ops") {
+    failure("invalid-journal", path, "expected ops plan version 1")
+  }
+  const value = parsed as OpsPlan
+  if (
+    value.version !== 1 ||
+    JSON.stringify(value.options) !==
+      JSON.stringify({ repo: options.repo, remote: options.remote, queue: options.queue, journal: options.journal }) ||
+    !OID.test(value.target) ||
+    !Array.isArray(value.refs) ||
+    !Array.isArray(value.heads) ||
+    typeof value.effective !== "string"
+  ) {
+    failure("invalid-journal", path, "ops plan scope, target, refs or state is invalid")
+  }
+  opsExpected(value)
+  return value
+}
+
+async function opsPlan(options: Options, git: Git, selection: GitSelection, pin: string): Promise<unknown> {
+  if (existsSync(options.journal)) {
+    failure("journal-exists", options.journal, "ops-plan requires a new journal directory")
+  }
+  const first = await remoteAdvertisement(git, options.remote, options.queue)
+  const store = createEventStore(options.repo, options.remote, selection)
+  if ((await queueFormat(store, options.queue)) !== "event") {
+    failure("ops-format", `${options.remote}#${options.queue}`, "ops cutover requires an event queue")
+  }
+  const state = await readEventOps(store, git, options.queue, first.target)
+  if (state.source !== "legacy") failure("ops-cutover", options.queue, "ops-cutover is already present")
+  const queueOid = first.queue.find(({ ref }) => ref === queueRef(options.queue))?.oid
+  if (queueOid !== state.queue.tip) {
+    failure("ops-census", options.queue, `queue tip ${state.queue.tip} differs from advertised ${queueOid ?? "absent"}`)
+  }
+  const effective = encodeOps({
+    ...(state.stop === undefined ? {} : { pause: state.stop }),
+    overrides: state.overrides.entries,
+  })
+  const remoteUrl = (await git(["remote", "get-url", options.remote])).trim()
+  if (remoteUrl === "") failure("remote-url", options.remote, "configured remote resolved to an empty URL")
+  const { snapshot, bundle, bundleSha256 } = await verifiedBundle(options, git, selection, first, remoteUrl)
+  const evidence: OpsPlan = {
+    version: 1,
+    kind: "ops",
+    options: { repo: options.repo, remote: options.remote, queue: options.queue, journal: options.journal },
+    remoteUrl,
+    runtimePin: pin,
+    capturedAt: new Date().toISOString(),
+    target: first.target,
+    heads: first.heads,
+    refs: first.queue,
+    effective,
+    bundle,
+    bundleSha256,
+    snapshot,
+  }
+  immutableJson(join(options.journal, "plan.json"), evidence)
+  return {
+    phase: "ops-plan",
+    queue: `${options.remote}#${options.queue}`,
+    refs: first.queue.length,
+    bundle,
+    bundleSha256,
+    plan: join(options.journal, "plan.json"),
+  }
+}
+
+async function opsApply(options: Options, plan: OpsPlan, git: Git, selection: GitSelection): Promise<unknown> {
+  const stagedPath = join(options.journal, "staged.json")
+  if (existsSync(stagedPath)) {
+    failure(
+      "already-staged",
+      stagedPath,
+      "one ops publication may have happened; inspect exact remote readback before any retry",
+    )
+  }
+  await requireVerifiedBundle(plan.snapshot, plan.bundle, plan.bundleSha256, plan.refs, selection)
+  const before = await remoteAdvertisement(git, options.remote, options.queue)
+  if (!equalRefs(before.queue, plan.refs) || !equalRefs(before.heads, plan.heads)) {
+    failure("changed-census", options.queue, "refs or branch heads moved after the verified ops plan")
+  }
+  const store = createEventStore(options.repo, options.remote, selection)
+  const current = await readEventOps(store, git, options.queue, plan.target)
+  if (current.source !== "legacy") failure("ops-cutover", options.queue, "ops-cutover already stands")
+  const effective = encodeOps({
+    ...(current.stop === undefined ? {} : { pause: current.stop }),
+    overrides: current.overrides.entries,
+  })
+  if (effective !== plan.effective) {
+    failure("changed-state", options.queue, "effective pause or override state differs from the verified plan")
+  }
+  const expected = opsExpected(plan)
+  let publicationError: string | undefined
+  try {
+    await appendOpsCutover(store, git, options.queue, plan.target, new Date(), "yrd-ops-cutover", expected, (oid) => {
+      immutableJson(stagedPath, {
+        version: 1,
+        kind: "ops",
+        queueBefore: expected.queueBefore,
+        queueAfter: oid,
+        stagedAt: new Date().toISOString(),
+      })
+    })
+  } catch (error) {
+    publicationError = error instanceof Error ? error.message : String(error)
+  }
+  const after = await remoteAdvertisement(git, options.remote, options.queue)
+  const staged: unknown = existsSync(stagedPath) ? JSON.parse(readFileSync(stagedPath, "utf8")) : undefined
+  const queueAfter =
+    staged !== null && typeof staged === "object" && "queueAfter" in staged ? staged.queueAfter : undefined
+  const expectedRefs = plan.refs
+    .filter(({ ref }) => ref !== pauseRef(options.queue) && ref !== overrideRef(options.queue))
+    .map((row) => (row.ref === queueRef(options.queue) ? { ...row, oid: String(queueAfter) } : row))
+  const state =
+    typeof queueAfter === "string" &&
+    OID.test(queueAfter) &&
+    equalRefs(after.queue, expectedRefs) &&
+    equalRefs(after.heads, plan.heads)
+      ? "committed"
+      : equalRefs(after.queue, plan.refs) && equalRefs(after.heads, plan.heads)
+        ? "unchanged"
+        : "divergent"
+  const receipt = {
+    phase: "ops-apply",
+    state,
+    queue: `${options.remote}#${options.queue}`,
+    ...(typeof queueAfter === "string" ? { queueAfter } : {}),
+    ...(publicationError === undefined ? {} : { publicationError }),
+    readback: after.queue,
+    bundle: plan.bundle,
+    bundleSha256: plan.bundleSha256,
+  }
+  immutableJson(join(options.journal, "apply-result.json"), receipt)
+  if (state !== "committed") {
+    failure(
+      "ops-apply-readback",
+      options.queue,
+      `${state}; ${publicationError ?? "push returned success"}; see apply-result.json`,
+    )
+  }
+  return receipt
+}
+
+async function opsRollback(options: Options, plan: OpsPlan, git: Git, selection: GitSelection): Promise<unknown> {
+  const resultPath = join(options.journal, "apply-result.json")
+  const rollbackPath = join(options.journal, "rollback-result.json")
+  if (existsSync(rollbackPath)) failure("already-rolled-back", rollbackPath, "one rollback attempt may have happened")
+  if (!existsSync(resultPath)) failure("missing-journal", resultPath, "committed ops apply receipt is required")
+  const applied: unknown = JSON.parse(readFileSync(resultPath, "utf8"))
+  if (
+    applied === null ||
+    typeof applied !== "object" ||
+    !("state" in applied) ||
+    applied.state !== "committed" ||
+    !("queueAfter" in applied) ||
+    typeof applied.queueAfter !== "string" ||
+    !OID.test(applied.queueAfter)
+  ) {
+    failure("invalid-journal", resultPath, "ops apply receipt lacks an exact committed queue tip")
+  }
+  const queueAfter = (applied as { queueAfter: string }).queueAfter
+  await requireVerifiedBundle(plan.snapshot, plan.bundle, plan.bundleSha256, plan.refs, selection)
+  const expected = opsExpected(plan)
+  const now = await remoteAdvertisement(git, options.remote, options.queue)
+  const afterRefs = plan.refs
+    .filter(({ ref }) => ref !== pauseRef(options.queue) && ref !== overrideRef(options.queue))
+    .map((row) => (row.ref === queueRef(options.queue) ? { ...row, oid: queueAfter } : row))
+  if (!equalRefs(now.queue, afterRefs) || !equalRefs(now.heads, plan.heads)) {
+    failure(
+      "changed-census",
+      options.queue,
+      "post-cutover refs differ from the apply receipt; rollback lease is unsafe",
+    )
+  }
+  const backend = createLegacyBackend("git")
+  if (backend.publish === undefined) failure("backend", plan.snapshot, "Gitomic backend lacks atomic publish")
+  const absent = "0".repeat(40)
+  const updates = [
+    { ref: queueRef(options.queue), expect: queueAfter, oid: expected.queueBefore },
+    ...(expected.pauseBefore === undefined
+      ? []
+      : [{ ref: pauseRef(options.queue), expect: absent, oid: expected.pauseBefore }]),
+    ...(expected.overrideBefore === undefined
+      ? []
+      : [{ ref: overrideRef(options.queue), expect: absent, oid: expected.overrideBefore }]),
+  ]
+  let publicationError: string | undefined
+  try {
+    await backend.publish(plan.snapshot, updates, options.remote)
+  } catch (error) {
+    publicationError = error instanceof Error ? error.message : String(error)
+  }
+  const after = await remoteAdvertisement(git, options.remote, options.queue)
+  const state =
+    equalRefs(after.queue, plan.refs) && equalRefs(after.heads, plan.heads)
+      ? "restored"
+      : equalRefs(after.queue, afterRefs) && equalRefs(after.heads, plan.heads)
+        ? "unchanged"
+        : "divergent"
+  const receipt = {
+    phase: "ops-rollback",
+    state,
+    queue: `${options.remote}#${options.queue}`,
+    refUpdates: updates.length,
+    ...(publicationError === undefined ? {} : { publicationError }),
+    readback: after.queue,
+    bundle: plan.bundle,
+    bundleSha256: plan.bundleSha256,
+  }
+  immutableJson(rollbackPath, receipt)
+  if (state !== "restored") {
+    failure(
+      "ops-rollback-readback",
+      options.queue,
+      `${state}; ${publicationError ?? "push returned success"}; see rollback-result.json`,
+    )
+  }
+  return receipt
+}
+
 async function main(argv: readonly string[]): Promise<void> {
   const options = optionsOf(argv)
   const pin = await runtimePin()
@@ -900,6 +1182,20 @@ async function main(argv: readonly string[]): Promise<void> {
   const git = gitIn(options.repo, undefined, selection)
   const absolute = (await git(["rev-parse", "--show-toplevel"])).trim()
   if (absolute !== options.repo) failure("repo", options.repo, `Git resolved checkout root ${absolute}`)
+  if (options.phase === "ops-plan") {
+    process.stdout.write(`${JSON.stringify(await opsPlan(options, git, selection, pin))}\n`)
+    return
+  }
+  if (options.phase === "ops-apply" || options.phase === "ops-rollback") {
+    const evidence = opsReadPlan(options)
+    if (evidence.runtimePin !== pin) {
+      failure("runtime-pin", pin, `ops plan recorded ${evidence.runtimePin}; run the same reviewed Yrd runtime`)
+    }
+    process.stdout.write(
+      `${JSON.stringify(options.phase === "ops-apply" ? await opsApply(options, evidence, git, selection) : await opsRollback(options, evidence, git, selection))}\n`,
+    )
+    return
+  }
   if (options.phase === "plan") {
     process.stdout.write(`${JSON.stringify(await plan(options, git, selection, pin))}\n`)
     return
