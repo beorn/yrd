@@ -1085,7 +1085,11 @@ async function opsPlan(options: Options, git: Git, selection: GitSelection, pin:
   requireMaintenanceStop(state.stop, options.queue)
   const active = state.overrides.entries.filter((entry) => isActive(entry, Date.now()))
   if (active.length > 0) {
-    failure("active-override", overrideRef(options.queue), `${active.length} active entries; clear them before ops cutover`)
+    failure(
+      "active-override",
+      overrideRef(options.queue),
+      `${active.length} active entries; clear them before ops cutover`,
+    )
   }
   const queueOid = first.queue.find(({ ref }) => ref === queueRef(options.queue))?.oid
   if (queueOid !== state.queue.tip) {
