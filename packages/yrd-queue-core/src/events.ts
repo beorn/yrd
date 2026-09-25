@@ -4,7 +4,7 @@ import { chainsUnder, listRefs, openEvents } from "./git.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
 import { overrideRef, pauseRef, queueRefPrefix } from "./refs.ts"
-import type { PauseRecord } from "./pause.ts"
+import { eventCutoverTip, readPause, type PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
 import { gitIn, refAt } from "./git.ts"
 import type { Git, GitSelection } from "./git.ts"
@@ -880,7 +880,7 @@ type EventQueueProjection = Readonly<{
   opsCutover?: string
   /** Complete operational state from the latest ops event, once cut over. */
   ops?: OpsState
-  pause?: Readonly<{ id: string; at: Date; reason: string; by: string }>
+  pause?: Readonly<{ id: string; at: Date; reason: string; by: string; cause: "operator" | "maintenance" }>
   observed: Readonly<Record<string, Readonly<{ id: string; branch?: string }>>>
   notices: Readonly<
     Record<string, Readonly<{ id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }>>
@@ -904,7 +904,7 @@ export function eventPause(queue: EventQueueProjection): PauseRecord | undefined
     at: queue.pause.at,
     reason: queue.pause.reason,
     by: queue.pause.by,
-    cause: "operator",
+    cause: queue.pause.cause,
   }
 }
 
@@ -995,11 +995,18 @@ export async function readEventOps(
   }
   if (projected.ops === undefined) throw new Error(`${queueRef(queue)}: ops-cutover has no complete state`)
   const refs = await listRefs(queueRefPrefix(queue), store)
-  const leftovers = [pauseRef(queue), overrideRef(queue)].filter((ref) => refs.has(ref))
-  if (leftovers.length > 0) {
+  if (refs.has(overrideRef(queue))) {
     throw new Error(
-      `${store.remote}#${queue}: ops cutover incomplete; ${leftovers.join(", ")} remain after ${projected.opsCutover}`,
+      `${store.remote}#${queue}: ops cutover incomplete; ${overrideRef(queue)} remains after ${projected.opsCutover}`,
     )
+  }
+  if (refs.has(pauseRef(queue))) {
+    const legacy = await readPause(git, store.remote, queue)
+    if (eventCutoverTip(legacy) !== projected.created || legacy?.sha !== refs.get(pauseRef(queue))) {
+      throw new Error(
+        `${store.remote}#${queue}: legacy pause ref is not the permanent maintenance fence for ${projected.created}`,
+      )
+    }
   }
   const stop = await eventLineStop(store, queue, projected.ops.pause)
   return {
@@ -1019,7 +1026,7 @@ export type OpsCutoverReceipt = Readonly<{
   overrideBefore?: string
 }>
 
-/** Stage the complete legacy state, then append and remove both old refs in one leased publish. */
+/** Stage the complete legacy state, then switch ops authority while preserving a cutover intake fence. */
 export async function appendOpsCutover(
   store: QueueLocation,
   git: Git,
@@ -1054,6 +1061,7 @@ export async function appendOpsCutover(
       refs: [pauseRef(queue), overrideRef(queue)],
     })
   }
+  const retainPause = eventCutoverTip(prior.pause) === prior.queue.created
   const state: OpsState = {
     ...(prior.stop === undefined ? {} : { pause: prior.stop }),
     overrides: prior.overrides.entries,
@@ -1070,7 +1078,9 @@ export async function appendOpsCutover(
   const staged = await (await openEvents({ ...store, ref, writer: by })).stage([input], { expect: prior.queue.tip })
   onStaged?.(staged.head)
   const also: AlsoRef[] = [
-    ...(pauseBefore === undefined ? [] : [{ ref: pauseRef(queue), expect: pauseBefore, oid: null }]),
+    ...(pauseBefore === undefined
+      ? []
+      : [{ ref: pauseRef(queue), expect: pauseBefore, oid: retainPause ? pauseBefore : null }]),
     ...(overrideBefore === undefined ? [] : [{ ref: overrideRef(queue), expect: overrideBefore, oid: null }]),
   ]
   await staged.publish({ also })
@@ -1081,8 +1091,8 @@ export async function appendOpsCutover(
     throw new Error(`${ref}: ops-cutover publish returned but readback differs from staged ${staged.head}`)
   }
   const leftovers = await listRefs(queueRefPrefix(queue), store)
-  if (leftovers.has(pauseRef(queue)) || leftovers.has(overrideRef(queue))) {
-    throw new Error(`${ref}: ops-cutover published but legacy refs remain`)
+  if (leftovers.get(pauseRef(queue)) !== (retainPause ? pauseBefore : undefined) || leftovers.has(overrideRef(queue))) {
+    throw new Error(`${ref}: ops-cutover published but legacy refs differ from the retained fence`)
   }
   return {
     event,
@@ -1100,7 +1110,7 @@ async function eventLineStop(
   pause: PauseRecord | undefined,
 ): Promise<PauseRecord | undefined> {
   if (pause?.kind !== "paused") return undefined
-  if (pause.cause === "operator" || pause.change === undefined) return pause
+  if (pause.cause === "operator" || pause.cause === "maintenance" || pause.change === undefined) return pause
   const ref = changesRef(queue, pause.change.branch)
   const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
   if (events.length === 0) return pause
@@ -1134,7 +1144,7 @@ export async function queueResumedAfter(
 }
 
 export type WriteQueueEvent =
-  | Readonly<{ type: "paused" | "resumed"; reason: string; by: string; at: Date }>
+  | Readonly<{ type: "paused" | "resumed"; reason: string; by: string; at: Date; cause?: "operator" | "maintenance" }>
   | Readonly<{ type: "observed"; commit: string; branch?: string; by: string; at: Date }>
   | Readonly<{ type: "notified"; notice: NoticeWrite; by: string; at: Date }>
 
@@ -1191,7 +1201,7 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
                 at: write.at,
                 reason: write.reason,
                 by: write.by,
-                cause: "operator",
+                cause: write.cause ?? "operator",
               },
               overrides: current.ops.overrides,
             }
@@ -1332,13 +1342,20 @@ function createdQueueDetails(event: QueueEventShape, ref: string): Pick<EventQue
     throw new Error(`${ref}: created event ${event.id} cannot name a preceding Queue:`)
   }
   const reason = prop(event, "Start-Paused")
-  if (reason === undefined) return { declaration }
+  const cause = prop(event, "Pause-Cause") ?? "operator"
+  if (cause !== "operator" && cause !== "maintenance") {
+    throw new Error(`${ref}: created event ${event.id} has an unreadable Pause-Cause: ${cause}`)
+  }
+  if (reason === undefined) {
+    if (prop(event, "Pause-Cause") !== undefined) throw new Error(`${ref}: Pause-Cause: needs Start-Paused:`)
+    return { declaration }
+  }
   if (reason.trim() === "" || event.writer === null) {
     throw new Error(`${ref}: created event ${event.id} needs a nonempty Start-Paused: and writer`)
   }
   return {
     declaration,
-    pause: { id: event.id, at: new Date(requiredProp(event, EVENT_TRAILERS.time)), reason, by: event.writer },
+    pause: { id: event.id, at: new Date(requiredProp(event, EVENT_TRAILERS.time)), reason, by: event.writer, cause },
   }
 }
 
@@ -1365,6 +1382,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
       pause = created.pause
     } else {
       if (prop(event, "Start-Paused") !== undefined) throw new Error(`${ref}: Start-Paused: belongs only on created`)
+      if (prop(event, "Pause-Cause") !== undefined) throw new Error(`${ref}: Pause-Cause: belongs only on created`)
       if (prop(event, EVENT_TRAILERS.queue) !== previous) {
         throw new Error(`${ref}: event ${event.id} (${event.type}) needs Queue: ${previous}`)
       }
@@ -1391,7 +1409,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
         if (event.writer === null) throw new Error(`${ref}: paused event ${event.id} needs a writer`)
         if (opsCutover === undefined) {
           if (pause !== undefined) throw new Error(`${ref}: event ${event.id} pauses an already paused queue`)
-          pause = { id: event.id, at: new Date(time), reason, by: event.writer }
+          pause = { id: event.id, at: new Date(time), reason, by: event.writer, cause: "operator" }
         } else {
           if (ops?.pause !== undefined && prop(event, "Replaces") !== ops.pause.sha) {
             throw new Error(
@@ -1405,7 +1423,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
           if (
             next.pause?.kind !== "paused" ||
             next.pause.sha !== event.id ||
-            next.pause.cause !== "operator" ||
+            (next.pause.cause !== "operator" && next.pause.cause !== "maintenance") ||
             next.pause.reason !== reason ||
             next.pause.by !== event.writer ||
             next.pause.at.toISOString() !== time

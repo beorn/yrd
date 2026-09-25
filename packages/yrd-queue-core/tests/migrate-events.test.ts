@@ -14,6 +14,7 @@ import {
   readPlan,
   requireVerifiedBundle,
   remoteAdvertisement,
+  requireMaintenanceStop,
 } from "../scripts/migrate-events.ts"
 
 const HEAD = "a".repeat(40)
@@ -24,6 +25,19 @@ const pause = { ref: "refs/yrd/main/pause", oid: OLD }
 const head = { ref: "refs/heads/main", oid: HEAD }
 
 describe("25041 migration refuses incomplete evidence", () => {
+  /** @failure An ordinary andon pause is mistaken for an intake fence, allowing a live submit to race cutover.
+   * @level l1 @consumer all six migration phases
+   */
+  it("requires a standing maintenance stop and names how to set it", () => {
+    const context = "main"
+    const set = { kind: "paused", cause: "maintenance", by: "@chief", reason: "lab" }
+    expect(() => requireMaintenanceStop(set as Parameters<typeof requireMaintenanceStop>[0], context)).not.toThrow()
+    for (const stop of [undefined, { ...set, cause: "operator" }, { ...set, cause: "stuck" }]) {
+      expect(() => requireMaintenanceStop(stop as Parameters<typeof requireMaintenanceStop>[0], context)).toThrow(
+        "yrd queue pause --queue 'main' --maintenance '<reason>'",
+      )
+    }
+  })
   it("refuses zero remote queue refs, unknown format and a missing plan journal by name", async () => {
     const git = async () => `${HEAD}\trefs/heads/main\n`
     await expect(

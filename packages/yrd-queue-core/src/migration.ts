@@ -461,8 +461,9 @@ export async function adoptLegacy(
       continue
     }
     if (row.branchHead === null && currentBranchHead !== null) {
-      if (backend.fetchRefs === undefined)
-        {throw new Error("old Record adoption needs Gitomic fetchRefs for a newly present branch")}
+      if (backend.fetchRefs === undefined) {
+        throw new Error("old Record adoption needs Gitomic fetchRefs for a newly present branch")
+      }
       let fetchedHead: string | null
       try {
         fetchedHead = (await backend.fetchRefs(store.repo, [branchRef], store.remote)).get(branchRef) ?? null
@@ -628,7 +629,7 @@ function inputForExistingChain(row: LegacyAdoptionRow, queueTip: string, at: Dat
 }
 
 /** A sent notification repeats an ending, but its timestamp is not when that ending happened. */
-function originalEndingRecord(records: readonly ChangeRecord[]): ChangeRecord | undefined {
+export function originalEndingRecord(records: readonly ChangeRecord[]): ChangeRecord | undefined {
   const standing = endingRecord(records)
   if (standing === undefined || standing.kind !== "sent") return standing
   const kind = endedKind(standing)

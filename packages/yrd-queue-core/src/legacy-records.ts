@@ -492,7 +492,7 @@ export async function legacyPauseCommit(
     kind: "paused" | "resumed"
     reason: string
     by: string
-    cause?: "operator" | "stuck"
+    cause?: "operator" | "stuck" | "maintenance"
     change?: Change
     next?: string
   }>,

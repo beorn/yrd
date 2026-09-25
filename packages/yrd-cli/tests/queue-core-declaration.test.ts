@@ -1046,6 +1046,49 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause"])).toContain("refs/yrd/main/pause")
   })
 
+  /** @failure The operator cannot set the intake fence or dry-run claims a fenced submit would open.
+   * @level l2 @consumer yrd queue pause --maintenance and yrd submit --dry-run
+   */
+  it("sets a maintenance intake stop with one reason and refuses dry-run submit", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    await git(["checkout", "--quiet", "-b", "task/fenced"])
+    writeFileSync(join(repo, "fenced.txt"), "change\n")
+    await git(["add", "fenced.txt"])
+    await git(["commit", "--quiet", "-m", "fenced change"])
+    const paused = capture(repo)
+    expect(
+      await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "queue",
+          "pause",
+          "--queue",
+          "main",
+          "--maintenance",
+          "25041 lab",
+          "--notify",
+          "@chief",
+          "--json",
+        ],
+        paused.io,
+      ),
+      paused.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(paused.stdout())).toMatchObject({ cause: "maintenance", by: "@chief", reason: "25041 lab" })
+    const before = await git(["ls-remote", "--refs", "origin"])
+    const attempted = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--dry-run", "--json"], attempted.io),
+      attempted.stderr(),
+    ).toBe(2)
+    expect(attempted.stderr()).toContain("25041 lab")
+    expect(attempted.stderr()).toContain("@chief")
+    expect(attempted.stderr()).toContain("submit after resume")
+    expect(await git(["ls-remote", "--refs", "origin"])).toBe(before)
+  })
+
   it("reports a healthy service after resume without suggesting a restart", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
@@ -1319,6 +1362,61 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect((await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause", "refs/yrd/main/override"])).trim()).toBe(
       "",
     )
+  })
+
+  /** @failure Event-format intake ignores an ops maintenance pause after the cutover.
+   * @level l2 @consumer addressed submit and its dry run after ops-cutover
+   */
+  it("refuses event-format submit under maintenance without opening a change", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const store = createEventStore(repo, "origin", git.selection)
+    await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+    await appendOpsCutover(store, git, "main", target, new Date(), "@chief")
+    await git(["checkout", "--quiet", "-b", "task/event-fenced"])
+    writeFileSync(join(repo, "event-fenced.txt"), "change\n")
+    await git(["add", "event-fenced.txt"])
+    await git(["commit", "--quiet", "-m", "event fenced change"])
+    const paused = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "queue", "pause", "--queue", "main", "--maintenance", "25041 ops cutover", "--notify", "@chief"],
+        paused.io,
+      ),
+      paused.stderr(),
+    ).toBe(0)
+    const before = await git(["ls-remote", "--refs", "origin"])
+    for (const args of [["--dry-run"], []]) {
+      const attempted = capture(repo)
+      expect(
+        await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", ...args], attempted.io),
+        attempted.stderr(),
+      ).toBe(2)
+      expect(attempted.stderr()).toContain("25041 ops cutover")
+      expect(attempted.stderr()).toContain("@chief")
+      expect(attempted.stderr()).toContain("submit after resume")
+    }
+    expect(await git(["ls-remote", "--refs", "origin"])).toBe(before)
+    const resumed = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "queue", "resume", "--queue", "main", "--reason", "lab proved", "--notify", "@chief"],
+        resumed.io,
+      ),
+      resumed.stderr(),
+    ).toBe(0)
+    const operator = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "inspect"], operator.io),
+      operator.stderr(),
+    ).toBe(0)
+    const accepted = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], accepted.io),
+      accepted.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(accepted.stdout())).toMatchObject({ stopped: { cause: "operator" } })
   })
 
   it.each(["open", "close"])("refuses the retired garage %s command without changing local refs", async (verb) => {

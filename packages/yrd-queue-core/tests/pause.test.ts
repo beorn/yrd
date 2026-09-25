@@ -204,6 +204,23 @@ describe("a pause names its cause", () => {
     expect(read).toMatchObject({ by: "yrd", cause: "stuck", change: { branch: "task/one", head: HEAD } })
   })
 
+  /** @failure A migration stop is decoded as an unknown cause or silently lifted.
+   * @level l1 @consumer migration admission and every queue stop reader
+   */
+  it("round-trips a maintenance stop that stands until the person resumes it", async () => {
+    const w = await world()
+    const written = await writePause(w.git, "origin", "main", {
+      by: "@chief",
+      cause: "maintenance",
+      kind: "paused",
+      reason: "25041 fenced lab cutover",
+    } as Parameters<typeof writePause>[3])
+    const read = await readPause(w.other, "origin", "main")
+    expect(read).toEqual(written)
+    expect(read).toMatchObject({ by: "@chief", cause: "maintenance", reason: "25041 fenced lab cutover" })
+    expect(lineStop(read, undefined)).toEqual(read)
+  })
+
   // The merge fence is the one other writer of a stop: an explicit round
   // admitted under a stuck stop carries it forward in its merge's atomic push.
   // A fence that dropped the cause or the change would turn the andon into an
