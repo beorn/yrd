@@ -861,6 +861,8 @@ type EventQueueProjection = Readonly<{
   /** Derived from the created event's kept commit. This is the queue's start, not legacy run.ts's resolved .yrd.yml declaration. */
   declaration: Oid
   tip: string
+  /** The authority switch for pause and override state; absent while their legacy refs remain authoritative. */
+  opsCutover?: string
   pause?: Readonly<{ id: string; at: Date; reason: string; by: string }>
   observed: Readonly<Record<string, Readonly<{ id: string; branch?: string }>>>
   notices: Readonly<
@@ -1053,6 +1055,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   let previous: string | undefined
   let declaration: string | undefined
   let pause: EventQueueProjection["pause"]
+  let opsCutover: string | undefined
   const observed: Record<string, { id: string; branch?: string }> = {}
   const notices: Record<
     string,
@@ -1077,6 +1080,10 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
     switch (event.type) {
       case "created":
         if (index !== 0) throw new Error(`${ref}: event ${event.id} declares a second queue`)
+        break
+      case "ops-cutover":
+        if (opsCutover !== undefined) throw new Error(`${ref}: event ${event.id} declares a second ops cutover`)
+        opsCutover = event.id
         break
       case "paused": {
         if (pause !== undefined) throw new Error(`${ref}: event ${event.id} pauses an already paused queue`)
@@ -1144,7 +1151,15 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   }
   if (previous === undefined) throw new Error(`missing event queue tip ${ref} in ${repo}`)
   if (declaration === undefined) throw new Error(`${ref}: missing declaration commit`)
-  return { created: first.id, declaration, tip: previous, observed, notices, ...(pause === undefined ? {} : { pause }) }
+  return {
+    created: first.id,
+    declaration,
+    tip: previous,
+    observed,
+    notices,
+    ...(pause === undefined ? {} : { pause }),
+    ...(opsCutover === undefined ? {} : { opsCutover }),
+  }
 }
 
 const formatCache = new Map<string, "event" | "legacy">()

@@ -962,29 +962,31 @@ export async function coreQueueCommand(
         const eventStore = createEventStore(repo, config.target.remote, selection)
         if ((await queueFormat(eventStore, config.target.branch)) === "event") {
           const now = await readEventQueue(eventStore, config.target.branch)
-          const standing = eventPause(now)
-          if (request.command === "pause" && standing !== undefined) {
-            throw new QueuePaused(standing, config.target.remote, config.target.branch)
+          if (now.opsCutover !== undefined) {
+            const standing = eventPause(now)
+            if (request.command === "pause" && standing !== undefined) {
+              throw new QueuePaused(standing, config.target.remote, config.target.branch)
+            }
+            if (request.command === "resume" && standing === undefined) throw new QueueNotPaused()
+            const at = new Date()
+            const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
+            const id = await writeQueueEvent(eventStore, config.target.branch, {
+              type: request.command === "pause" ? "paused" : "resumed",
+              reason,
+              by: request.by,
+              at,
+            })
+            const written: PauseRecord = {
+              kind: request.command === "pause" ? "paused" : "resumed",
+              sha: id,
+              at,
+              reason,
+              by: request.by,
+              cause: "operator",
+            }
+            emit(io, options.json, written, pauseLine(written))
+            return 0
           }
-          if (request.command === "resume" && standing === undefined) throw new QueueNotPaused()
-          const at = new Date()
-          const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
-          const id = await writeQueueEvent(eventStore, config.target.branch, {
-            type: request.command === "pause" ? "paused" : "resumed",
-            reason,
-            by: request.by,
-            at,
-          })
-          const written: PauseRecord = {
-            kind: request.command === "pause" ? "paused" : "resumed",
-            sha: id,
-            at,
-            reason,
-            by: request.by,
-            cause: "operator",
-          }
-          emit(io, options.json, written, pauseLine(written))
-          return 0
         }
         // Whether a stop STANDS is the one derivation's answer, never the tip's
         // kind alone: a stuck stop whose change has left the line is over, so a
@@ -1013,15 +1015,15 @@ export async function coreQueueCommand(
       }
     }
     case "override": {
-      // The merge-check override (25296). An event queue has its own merge
-      // selection (event-run.ts) that no override reaches, so it refuses rather
-      // than accept a switch nothing would read (X4).
+      // Until ops-cutover, the existing Record writer remains the authority for
+      // both queue formats. An event writer must not run before the cutover.
+      const overrideStore = createEventStore(repo, config.target.remote, selection)
       if (
-        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
+        (await queueFormat(overrideStore, config.target.branch)) === "event" &&
+        (await readEventQueue(overrideStore, config.target.branch)).opsCutover !== undefined
       ) {
         io.stderr(
-          `yrd: ${config.target.remote}#${config.target.branch} is an event queue; a merge-check override is not ` +
-            "supported there, and nothing would read it\n",
+          `yrd: ${config.target.remote}#${config.target.branch} has ops-cutover; its event override writer is unavailable\n`,
         )
         return 1
       }
