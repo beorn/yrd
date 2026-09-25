@@ -40,7 +40,12 @@ const BEATING: RunnerService = { kind: "beating", state: "healthy", since: NOW }
  * around the reading instant, which is the only thing freshness turns on.
  */
 function healthDocument(
-  options: Readonly<{ staleAfterMs: number; pid?: number; flow?: Readonly<Record<string, unknown>> }>,
+  options: Readonly<{
+    staleAfterMs: number
+    pid?: number
+    flow?: Readonly<Record<string, unknown>>
+    readFailure?: unknown
+  }>,
 ): string {
   return JSON.stringify({
     schema: QUEUE_HEALTH_SCHEMA,
@@ -52,6 +57,7 @@ function healthDocument(
       staleAfter: new Date(NOW.getTime() + options.staleAfterMs).toISOString(),
       runner: { pid: options.pid ?? process.pid, startedAt: NOW.toISOString(), command: "yrd queue up" },
       ...(options.flow === undefined ? {} : { flow: options.flow }),
+      ...(options.readFailure === undefined ? {} : { roundReadFailure: options.readFailure }),
     },
   })
 }
@@ -256,6 +262,17 @@ describe("readRunnerService, the loop's own liveness", () => {
   it("reads a document believable by its OWN deadline as beating", async () => {
     const workdir = workdirWith({ ageMs: 1_000, health: healthDocument({ staleAfterMs: 5 * 60_000 }) })
     expect(await readRunnerService(workdir, NOW)).toEqual(BEATING)
+  })
+
+  it("names a malformed remote-read fact instead of hiding the round failure", async () => {
+    const workdir = workdirWith({
+      ageMs: 1_000,
+      health: healthDocument({ staleAfterMs: 5 * 60_000, readFailure: { ref: "refs/yrd/main/changes/task/a" } }),
+    })
+    expect(await readRunnerService(workdir, NOW)).toEqual({
+      kind: "unreadable",
+      why: `health document in ${workdir} has malformed facts.roundReadFailure`,
+    })
   })
 
   /**

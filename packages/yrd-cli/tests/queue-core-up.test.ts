@@ -22,6 +22,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -32,11 +33,13 @@ import { dirname, join, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
+import * as gitomic from "gitomic"
 import {
   appendRecord,
   changeRef,
   createEventQueue,
   createEventStore,
+  changesRef,
   gitIn,
   parseQueueHealthDocument,
   QUEUE_HEALTH_DOCUMENT,
@@ -60,6 +63,7 @@ import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand, endingCode, openDetail, readListing } from "../src/queue-core-commands.ts"
 import { changesSuffix } from "../src/watch-list.tsx"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
+import { readRunnerFacts } from "../src/watch-runner.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
@@ -2648,6 +2652,124 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       await service.catch(() => undefined)
     }
   }, 30_000)
+
+  /** @failure 25708: three unreadable publication witnesses killed the service while its health stayed stale.
+   * @level l2 @consumer Hab health probe and queue list/watch reader
+   */
+  it("keeps the service alive through repeated failed remote-read rounds, pages once, and clears after recovery", async () => {
+    const w = await world()
+    const commit = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    await createEventQueue(
+      createEventStore(w.work, "origin", gitIn(w.work).selection),
+      "main",
+      commit,
+      config,
+      new Date(),
+    )
+    const branch = "task/read-recovery"
+    await oneChange(w, branch)
+    const ref = changesRef("main", branch)
+    const originalBackend = gitomic.createShellBackend
+    let failures = 0
+    let unreadable = false
+    using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+      const backend = originalBackend(options)
+      const publish = backend.publish
+      const listRefs = backend.listRefs
+      if (publish === undefined || listRefs === undefined) {
+        throw new Error("fixture needs Gitomic remote refs and publish")
+      }
+      return {
+        ...backend,
+        publish: async (repo, updates, remote) => {
+          if (
+            failures < 4 &&
+            updates.some((update) => update.ref === ref) &&
+            updates.some((update) => update.ref === "refs/heads/main")
+          ) {
+            failures++
+            unreadable = true
+            throw new Error("injected publication transport outage")
+          }
+          return publish(repo, updates, remote)
+        },
+        listRefs: async (repo, prefix, remote) => {
+          if (unreadable && prefix === ref) {
+            unreadable = false
+            throw new Error("injected remote reread outage")
+          }
+          return listRefs(repo, prefix, remote)
+        },
+      }
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    const seen: QueueHealthDocument[] = []
+    let listing = ""
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        afterHealth: async (document) => {
+          seen.push(document)
+          if (seen.length === 3) {
+            expect((await readRunnerFacts(w.workdir)).service).toMatchObject({
+              kind: "beating",
+              readFailure: { ref, error: "injected remote reread outage", count: 3 },
+            })
+            const view = capture(w.work)
+            expect(await coreQueueCommand(w.work, view.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+            listing = `${view.stdout()}\n${view.stderr()}`
+          }
+        },
+        afterRound: (outcome) => {
+          expect(outcome.merged).toContain(branch)
+          stop.abort()
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+    expect(exit, run.stderr()).toBe(0)
+    expect(failures).toBe(4)
+    expect(seen.map((document) => (document.facts?.roundReadFailure as { count?: number } | undefined)?.count)).toEqual(
+      [1, 2, 3, 4, undefined],
+    )
+    expect(seen.map((document) => document.state)).toEqual(["healthy", "healthy", "unhealthy", "unhealthy", "healthy"])
+    expect(seen[2]?.error?.cause).toContain(ref)
+    expect(seen[3]?.error?.code).toBe(seen[2]?.error?.code)
+    expect(listing).toContain(ref)
+    expect(listing).toContain("injected remote reread outage")
+    const logs = readdirSync(join(w.workdir, "logs")).filter((name) => name.endsWith(".jsonl"))
+    expect(
+      logs.some((name) =>
+        readFileSync(join(w.workdir, "logs", name), "utf8").includes('"subject":"round-read-failed"'),
+      ),
+    ).toBe(true)
+  }, 60_000)
+
+  /** @failure 25708: the read-failed retry must not turn unrelated runner faults into an endless healthy loop.
+   * @level l2 @consumer Hab supervisor
+   */
+  it("keeps an unrelated thrown round error terminal", async () => {
+    const w = await world()
+    const hooks = join(w.workdir, "hooks-disabled")
+    mkdirSync(hooks, { recursive: true })
+    writeFileSync(join(hooks, "unexpected-hook"), "fixture\n")
+    const run = capture(w.work)
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "up", intervalSeconds: 0 },
+      { json: true, workdir: w.workdir },
+    )
+    expect(exit).toBe(2)
+    expect(run.stdout()).toContain("hooks-disabled")
+  })
 
   // 25669 row 2: an event round held open is named on each beat with the phase
   // its own journal says it is in, so `yrd queue health` says where it is.

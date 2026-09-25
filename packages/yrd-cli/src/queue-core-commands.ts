@@ -70,6 +70,7 @@ import {
   queueName,
   resolveGitSelection,
   queueRun,
+  QueueAuthorityUnreadable,
   readConfig,
   readJournals,
   readHistories,
@@ -568,13 +569,14 @@ export async function coreQueueCommand(
    * cannot be read — is stuck, has no change to stop the line on, and has
    * already said so.
    */
+  type ReadFailedRound = Readonly<{ kind: "read-failed"; ref: string; error: QueueAuthorityUnreadable }>
   const oneRound = async (
     declared: CapturedDeclaration,
     only?: Change,
     tier?: "normal" | "long",
     stopAtMs?: number,
     noCheck?: boolean,
-  ): Promise<QueueRunOutcome | undefined> => {
+  ): Promise<QueueRunOutcome | ReadFailedRound | undefined> => {
     let outcome: QueueRunOutcome
     try {
       const event =
@@ -602,6 +604,12 @@ export async function coreQueueCommand(
         ...(noCheck === undefined ? {} : { noCheck }),
       })
     } catch (error) {
+      if (error instanceof QueueAuthorityUnreadable && error.publicationError !== undefined) {
+        io.stderr(
+          `yrd: round failed reading ${error.authority}: ${error.readError instanceof Error ? error.readError.message : String(error.readError)}; publication failed: ${error.publicationError instanceof Error ? error.publicationError.message : String(error.publicationError)}; the service retries at its next interval\n`,
+        )
+        return { kind: "read-failed", ref: error.authority, error }
+      }
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
       // silent-fallback-allow: stuck() emitted the full run failure; undefined only makes the command exit 2.
       return undefined
@@ -687,7 +695,9 @@ export async function coreQueueCommand(
         onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>) => void
       }>
     }> = {},
-  ): Promise<Readonly<{ declared: CapturedDeclaration; outcome: QueueRunOutcome }> | YrdCliExitCode> => {
+  ): Promise<
+    Readonly<{ declared: CapturedDeclaration; outcome: QueueRunOutcome }> | ReadFailedRound | YrdCliExitCode
+  > => {
     // Read through a call each time: the signal flips while the lock is waited for.
     const stopped = (): boolean => round.stop?.aborted === true
     if (stopped()) return 0
@@ -752,7 +762,7 @@ export async function coreQueueCommand(
       const before = await round.before?.(declared)
       if (before !== undefined) return before
       const outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck)
-      return outcome === undefined ? 2 : { declared, outcome }
+      return outcome === undefined ? 2 : "kind" in outcome ? outcome : { declared, outcome }
     } finally {
       lock.release()
     }
@@ -1209,6 +1219,7 @@ export async function coreQueueCommand(
         while (request.stopAtMs === undefined || Date.now() < request.stopAtMs) {
           const ran = await lockedRound({ tier: request.tier, stopAtMs: request.stopAtMs })
           if (typeof ran === "number") return ran
+          if ("kind" in ran) return 2
           const exitCode = ran.outcome.exitCode
           if (exitCode > worstExitCode) worstExitCode = exitCode
           if (exitCode === 2) return 2
@@ -1227,7 +1238,8 @@ export async function coreQueueCommand(
       // even judge answers 2 from the locked round, that same stuck, already
       // said by `stuck()` above (@i/10-yrd/24141 AC1).
       const ran = await lockedRound()
-      return typeof ran === "number" ? ran : ran.outcome.exitCode
+      if (typeof ran === "number") return ran
+      return "kind" in ran ? 2 : ran.outcome.exitCode
     }
     case "merge": {
       // `yrd merge <branch>`: the branch's change merged NOW, ahead of the line
@@ -1294,7 +1306,7 @@ export async function coreQueueCommand(
       }
 
       const merging = await lockedRound({ only: change, noCheck: request.noCheck })
-      if (typeof merging === "number") return merging
+      if (typeof merging === "number" || "kind" in merging) return 2
       let after = await readChangeNow(change)
       // A stopped line waits on a stuck change, and a change merged past it may
       // be the repair it waited for: its head is judged once more, in a round
@@ -1391,6 +1403,7 @@ export async function coreQueueCommand(
       // Undefined until a round has READ the line: a count nobody took is not
       // zero waiting, and a legacy-format round reads none, so it states none.
       let flow: LineFlow | undefined
+      let readFailure: Readonly<{ ref: string; error: string; count: number }> | undefined
       let threshold = { declared: config.health.declared, ms: config.health.stallAfterMs }
       const flowReading = (): FlowReading | undefined => (flow === undefined ? undefined : { flow, threshold })
       /**
@@ -1497,7 +1510,7 @@ export async function coreQueueCommand(
        * document is read every time anyone asks how this service is.
        */
       const lineDocument = (stop: PauseRecord | undefined, sleepMs: number): QueueHealthDocument => {
-        const base = roundHealthDocument(SERVICE, stop, sleepMs, new Date(), flowReading())
+        const base = roundHealthDocument(SERVICE, stop, sleepMs, new Date(), flowReading(), readFailure)
         return { ...base, facts: { ...base.facts, ...relaunchOff, serviceStarted } }
       }
       /**
@@ -1715,7 +1728,7 @@ export async function coreQueueCommand(
         // the heartbeat's clock instead of waiting for the round to end.
         const reading = flowReading()
         if (stated !== undefined) {
-          writeHealth(reading === undefined ? stated : withLineFlow(stated, lastStop, reading, new Date()))
+          writeHealth(reading === undefined ? stated : withLineFlow(stated, lastStop, reading, new Date(), readFailure))
         }
         void notePhase()
       }, heartbeat.intervalMs)
@@ -1789,6 +1802,25 @@ export async function coreQueueCommand(
             waiting,
           })
           if (typeof ran === "number") return ran
+          if ("kind" in ran) {
+            const message =
+              ran.error.readError instanceof Error ? ran.error.readError.message : String(ran.error.readError)
+            readFailure = {
+              ref: ran.ref,
+              error: message,
+              count: readFailure?.ref === ran.ref ? readFailure.count + 1 : 1,
+            }
+            openedAt = undefined
+            const document = writeHealth(lineDocument(lastStop, interval))
+            await request.afterHealth?.(document)
+            if (stopped()) return 0
+            await delay(interval, undefined, { signal: request.stop }).catch((error) => {
+              if (!stopped()) throw error
+            })
+            if (stopped()) return 0
+            continue
+          }
+          readFailure = undefined
           const { outcome } = ran
 
           // The round derived whether the line is stopped and said so on its

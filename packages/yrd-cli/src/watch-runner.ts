@@ -123,7 +123,13 @@ export type RoundLockHolder = Readonly<{
  */
 export type RunnerService =
   | Readonly<{ kind: "absent"; why: string }>
-  | Readonly<{ kind: "beating"; state: string; since?: Date; flow?: RunnerFlow }>
+  | Readonly<{
+      kind: "beating"
+      state: string
+      since?: Date
+      flow?: RunnerFlow
+      readFailure?: Readonly<{ ref: string; error: string; count: number }>
+    }>
   // `graceful`: the service wrote its own stop (25430). False is a stop outside one — a SIGKILL, a crash, a
   // silent writer — and its `why` names where the supervisor's record is.
   | Readonly<{ kind: "stopped"; graceful: boolean; why: string; cause: string; since?: Date; stopReason?: string }>
@@ -252,11 +258,32 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
   const startedAt = typeof runner?.startedAt === "string" ? new Date(Date.parse(runner.startedAt)) : undefined
   const since = startedAt !== undefined && !Number.isNaN(startedAt.getTime()) ? startedAt : undefined
   const flow = runnerFlow(document)
+  const failureFact = document.facts?.roundReadFailure
+  let readFailure: Readonly<{ ref: string; error: string; count: number }> | undefined
+  if (failureFact !== undefined) {
+    const rawFailure =
+      typeof failureFact === "object" && failureFact !== null
+        ? (failureFact as Readonly<Record<string, unknown>>)
+        : undefined
+    if (
+      rawFailure === undefined ||
+      typeof rawFailure.ref !== "string" ||
+      rawFailure.ref.length === 0 ||
+      typeof rawFailure.error !== "string" ||
+      typeof rawFailure.count !== "number" ||
+      !Number.isSafeInteger(rawFailure.count) ||
+      rawFailure.count < 1
+    ) {
+      return { kind: "unreadable", why: `health document in ${workdir} has malformed facts.roundReadFailure` }
+    }
+    readFailure = { ref: rawFailure.ref, error: rawFailure.error, count: rawFailure.count }
+  }
   return {
     kind: "beating",
     state: document.state,
     ...(since === undefined ? {} : { since }),
     ...(flow === undefined ? {} : { flow }),
+    ...(readFailure === undefined ? {} : { readFailure }),
   }
 }
 
@@ -785,7 +812,11 @@ export function runnerLine(
  * own document, as of its last beat.
  */
 function flowNote(service: RunnerService | undefined): string | undefined {
-  if (service?.kind !== "beating" || service.flow === undefined) return undefined
+  if (service?.kind !== "beating") return undefined
+  if (service.readFailure !== undefined) {
+    return `last round failed reading ${service.readFailure.ref} (${String(service.readFailure.count)} consecutive): ${service.readFailure.error}; queue alive, retrying`
+  }
+  if (service.flow === undefined) return undefined
   const { slow, stallAfterMs, stalledForMs, unjudgedForMs, waiting } = service.flow
   if (service.flow.casRefused !== undefined) {
     return `CAS refused ${String(service.flow.casRefused.count)} consecutive times for ${service.flow.casRefused.ref}; queue alive, retrying`

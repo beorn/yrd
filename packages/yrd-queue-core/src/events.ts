@@ -1292,21 +1292,29 @@ export async function appendPublishedMerge(
   branch: string,
   selectedTip: string,
   request: Readonly<{ at: Date; commit: Oid; targetExpect: Oid; queueTip: Oid; reason?: string }>,
+  onPrepared?: (oid: Oid) => void,
 ): Promise<string> {
   if (request.commit === request.targetExpect) {
     throw new TypeError(`published merge needs the target to move from ${request.targetExpect}`)
   }
-  return appendDecision(store, queue, branch, selectedTip, {
-    type: "merged",
-    at: request.at,
-    commit: request.commit,
-    ...(request.reason === undefined ? {} : { reason: request.reason }),
-    writer: QUEUE_RUN_WRITER,
-    also: [
-      { ref: `refs/heads/${queue}`, expect: request.targetExpect, oid: request.commit },
-      { ref: queueRef(queue), expect: request.queueTip, oid: request.queueTip },
-    ],
-  })
+  return appendDecision(
+    store,
+    queue,
+    branch,
+    selectedTip,
+    {
+      type: "merged",
+      at: request.at,
+      commit: request.commit,
+      ...(request.reason === undefined ? {} : { reason: request.reason }),
+      writer: QUEUE_RUN_WRITER,
+      also: [
+        { ref: `refs/heads/${queue}`, expect: request.targetExpect, oid: request.commit },
+        { ref: queueRef(queue), expect: request.queueTip, oid: request.queueTip },
+      ],
+    },
+    onPrepared,
+  )
 }
 
 async function appendDecision(
@@ -1315,6 +1323,7 @@ async function appendDecision(
   branch: string,
   selectedTip: string,
   write: ChangeWrite,
+  onPrepared?: (oid: Oid) => void,
 ): Promise<string> {
   const queueTip = (await readEventQueue(store, queue)).tip
   const history = await readChangeEvents(store, queue, branch, selectedTip)
@@ -1344,12 +1353,18 @@ async function appendDecision(
     write.type === "stuck"
       ? [{ ref: queueRef(queue), expect: queueTip, oid: queueTip }, ...(write.also ?? [])]
       : write.also
-  const result = await (
-    await openEvents({ ...store, ref, writer: write.writer ?? "yrd" })
-  ).append(planned, {
-    expect: selectedTip,
-    ...(also === undefined ? {} : { also }),
-  })
+  const chain = await openEvents({ ...store, ref, writer: write.writer ?? "yrd" })
+  // A transport error can arrive after the atomic push landed. The merge
+  // publisher needs the exact event OID before that call so its remote read can
+  // distinguish this attempt from another writer with identical trailers.
+  const result =
+    onPrepared === undefined
+      ? await chain.append(planned, { expect: selectedTip, ...(also === undefined ? {} : { also }) })
+      : await (async () => {
+          const staged = await chain.stage(planned, { expect: selectedTip })
+          onPrepared(staged.head)
+          return staged.publish(also === undefined ? {} : { also })
+        })()
   const written = result.events.findLast((event) => event.type === write.type)?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: ${write.type} event was not written`)
   return written

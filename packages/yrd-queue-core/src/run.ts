@@ -483,8 +483,18 @@ class CandidateSetupFailed extends Error {
 
 /** An authority read failed outside any one change's responsibility. */
 export class QueueAuthorityUnreadable extends Error {
-  constructor(authority: string, error: unknown) {
-    super(`${authority} could not be read: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+  constructor(
+    readonly authority: string,
+    readonly readError: unknown,
+    readonly publicationError?: unknown,
+  ) {
+    const cause =
+      publicationError === undefined
+        ? readError
+        : new AggregateError([publicationError, readError], `${authority}: publication and remote reread both failed`)
+    super(`${authority} could not be read: ${readError instanceof Error ? readError.message : String(readError)}`, {
+      cause,
+    })
     this.name = "QueueAuthorityUnreadable"
   }
 }

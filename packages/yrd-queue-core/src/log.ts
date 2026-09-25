@@ -579,7 +579,13 @@ export function recordsMatching(dir: string, matches: (record: LogRecord) => boo
 }
 
 /** Count this marker's latest refused publications, stopping at its successful merge or three refusals. */
-export function recentCasRefusals(dir: string, ref: string, marker: string, openedAt: Date): number {
+function recentPublicationWarnings(
+  dir: string,
+  ref: string,
+  marker: string,
+  openedAt: Date,
+  subject: "cas-refused" | "publication-not-landed",
+): number {
   let names: readonly string[]
   try {
     names = readdirSync(dir)
@@ -599,13 +605,30 @@ export function recentCasRefusals(dir: string, ref: string, marker: string, open
     for (const record of [...readRunLog(dir, id)].reverse()) {
       if (record.ref !== ref || record.marker !== marker) continue
       if (record.kind === "merge") return count
-      if (record.kind === "warning" && record.subject === "cas-refused") {
+      if (
+        record.kind === "warning" &&
+        (record.subject === "cas-refused" || record.subject === "publication-not-landed") &&
+        record.subject !== subject
+      ) {
+        return count
+      }
+      if (record.kind === "warning" && record.subject === subject) {
         count++
         if (count >= 3) return count
       }
     }
   }
   return count
+}
+
+/** Count a marker's typed CAS refusals across run journals. */
+export function recentCasRefusals(dir: string, ref: string, marker: string, openedAt: Date): number {
+  return recentPublicationWarnings(dir, ref, marker, openedAt, "cas-refused")
+}
+
+/** Count a marker's consecutive transport outcomes that definitely did not land. */
+export function recentPublicationNotLanded(dir: string, ref: string, marker: string, openedAt: Date): number {
+  return recentPublicationWarnings(dir, ref, marker, openedAt, "publication-not-landed")
 }
 
 export type ReadJournalsOptions = Readonly<{

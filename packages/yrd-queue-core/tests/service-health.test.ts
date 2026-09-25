@@ -85,6 +85,13 @@ describe("the health document", () => {
     expect(queueHealthExitCode(doc.state)).toBe(2)
   })
 
+  test("a remote read failure remains visible beneath an existing stuck record", () => {
+    const failure = { ref: "refs/yrd/main/changes/task/one", error: "remote read timed out", count: 3 }
+    const doc = roundHealthDocument("yrd", stuckStop, INTERVAL, NOW, undefined, failure)
+    expect(doc.error?.code).toBe("queue-round-stuck")
+    expect(doc.facts?.roundReadFailure).toEqual(failure)
+  })
+
   // A person's pause is deliberate: it stops the line and pages nobody, and
   // the document still says who stopped it.
   test("an operator's pause is healthy, and names who stopped the line", () => {
@@ -234,7 +241,7 @@ describe("a document expires", () => {
 })
 
 // THE CONTRACT TEST THAT USED TO SIT HERE HAS MOVED TO THE ROOT, to
-// `tools/yrd-health-contract.test.ts`, and it is checked on every root run.
+// `tools/yrd-runner-service.test.ts`, and it is checked on every root run.
 //
 // It asserted that every document these builders emit is accepted by hab's
 // `hab-service-health/2` parser — the rule a live probe broke on 2026-09-11,
@@ -382,6 +389,31 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
     )
     expect(cleared.state).toBe("healthy")
     expect(cleared.error).toBeUndefined()
+  })
+
+  /** @failure 25708: a living service could fail every remote reread while its heartbeat claimed health.
+   * @level l2 @consumer queue operator and Hab health probe
+   */
+  test("three failed remote-read rounds page once and a successful round clears the page", () => {
+    const ref = "refs/yrd/main/changes/task/read-failed"
+    const failure = { ref, error: "remote reread: network unavailable", count: 2 }
+    const quiet = roundHealthDocument("yrd", undefined, INTERVAL, at("20:27:00"), undefined, failure)
+    expect(quiet.state).toBe("healthy")
+    expect(quiet.facts?.roundReadFailure).toEqual(failure)
+
+    const paged = roundHealthDocument("yrd", undefined, INTERVAL, at("20:27:00"), undefined, { ...failure, count: 3 })
+    expect(paged.state).toBe("unhealthy")
+    expect(paged.error?.code).toBe(STALLED_LINE_CODE)
+    expect(paged.error?.cause).toContain(ref)
+    expect(paged.error?.cause).toContain(failure.error)
+
+    const stillPaged = roundHealthDocument("yrd", undefined, INTERVAL, at("20:28:00"), undefined, {
+      ...failure,
+      count: 4,
+    })
+    expect(stillPaged.state).toBe("unhealthy")
+    expect(stillPaged.error?.code).toBe(STALLED_LINE_CODE)
+    expect(roundHealthDocument("yrd", undefined, INTERVAL, at("20:29:00")).state).toBe("healthy")
   })
 
   test("past the round budget with no judgement the document says slow, before any page (row 2)", () => {

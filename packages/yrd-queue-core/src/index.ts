@@ -136,7 +136,7 @@ export {
   ReferenceUnpopulated,
 } from "./reference.ts"
 export type { PopulateReference, ReferenceStore } from "./reference.ts"
-export { queueRun, QUEUE_RUN_FAILED_EXIT } from "./run.ts"
+export { queueRun, QueueAuthorityUnreadable, QUEUE_RUN_FAILED_EXIT } from "./run.ts"
 export type { QueueRunOptions, QueueRunOutcome, RoundLine } from "./run.ts"
 export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from "./config.ts"
 export { parseDuration } from "./duration.ts"

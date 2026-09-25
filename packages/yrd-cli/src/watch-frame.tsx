@@ -359,10 +359,16 @@ export function RunnerTitledBox({
   const activeLine = liveDuration !== undefined ? { ...line, duration: liveDuration } : line
   const color = STATE_WORDS[activeLine.state].color
   const queueUrl = snap?.queue
+  const readFailure = snap?.runner?.service.kind === "beating" ? snap.runner.service.readFailure : undefined
   return (
     <Box flexDirection="column" marginTop={1} marginBottom={1}>
       <TitledBox title={STATE_WORDS.runner.word} titleSuffix={queueUrl} flushTop borderColor={color}>
         <RunnerRow line={activeLine} layout={layout} cursor={cursor} queueDigit={queueDigit} queueLabel={queueLabel} />
+        {readFailure === undefined ? null : (
+          <Text color="$fg-error" wrap="wrap" minWidth={0}>
+            {`Last round failed reading ${readFailure.ref} (${String(readFailure.count)} consecutive): ${readFailure.error}; service alive, retrying`}
+          </Text>
+        )}
       </TitledBox>
     </Box>
   )

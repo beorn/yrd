@@ -115,23 +115,31 @@ const RIVAL_STUCK_TRAILERS = [
 function beforeGitomicPublish(
   before: (repo: string, updates: readonly RefUpdate[], remote?: string) => Promise<void>,
   beforeFetchRefs?: (repo: string, refs: string | readonly string[], remote: string) => Promise<void>,
+  after?: (repo: string, updates: readonly RefUpdate[], remote?: string) => Promise<void>,
+  beforeListRefs?: (repo: string, prefix: string, remote?: string) => Promise<ReadonlyMap<string, string> | undefined>,
 ): ReturnType<typeof vi.spyOn> {
   const createBackend = gitomic.createShellBackend
   return vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
     const backend = createBackend(options)
     const publish = backend.publish
     const fetchRefs = backend.fetchRefs
+    const listRefs = backend.listRefs
     if (publish === undefined) throw new Error("Gitomic shell backend has no publish capability")
     if (fetchRefs === undefined) throw new Error("Gitomic shell backend has no fetchRefs capability")
+    if (listRefs === undefined) throw new Error("Gitomic shell backend has no listRefs capability")
     return {
       ...backend,
+      listRefs: async (repo, prefix, remote) =>
+        (await beforeListRefs?.(repo, prefix, remote)) ?? listRefs(repo, prefix, remote),
       fetchRefs: async (repo, refs, remote) => {
         await beforeFetchRefs?.(repo, refs, remote)
         return fetchRefs(repo, refs, remote)
       },
       publish: async (repo, updates, remote) => {
         await before(repo, updates, remote)
-        return publish(repo, updates, remote)
+        const published = await publish(repo, updates, remote)
+        await after?.(repo, updates, remote)
+        return published
       },
     }
   })
@@ -1496,6 +1504,184 @@ it("records a typed merge-publication refusal and judges the next event change",
       ref: refusedRef,
       count: 1,
     }),
+  )
+})
+
+/** @failure 25708: a transport error before the atomic push killed the whole service instead of one row.
+ * @level l3 @consumer queue operator and next submitter
+ */
+it("keeps an unlanded merge publication retryable and judges the next change", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/transport-first", "one.txt")
+  await submitCommit(w, "task/transport-next", "two.txt")
+  const branches = ["task/transport-first", "task/transport-next"] as const
+  let refusedBranch: (typeof branches)[number] | undefined
+  using _publish = beforeGitomicPublish(async (_repo, updates) => {
+    if (refusedBranch !== undefined || !updates.some((update) => update.ref === "refs/heads/main")) return
+    refusedBranch = branches.find((name) => updates.some((update) => update.ref === changesRef("main", name)))
+    if (refusedBranch !== undefined) throw new Error("injected transport failure before atomic push")
+  })
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  if (refusedBranch === undefined) throw new Error("fixture did not reach merge publication")
+  const next = branches.find((name) => name !== refusedBranch)
+  if (next === undefined) throw new Error("fixture has no next change")
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [next] })
+  expect((await readStatus(store, "main", refusedBranch)).status).toBe("merging")
+  expect((await readStatus(store, "main", next)).status).toBe("merged")
+  expect(logRecords(outcome)).toContainEqual(
+    expect.objectContaining({
+      kind: "warning",
+      subject: "publication-not-landed",
+      branch: refusedBranch,
+      ref: changesRef("main", refusedBranch),
+      count: 1,
+    }),
+  )
+})
+
+/** @failure 25708: losing the push acknowledgement after acceptance could replay a merge or stop the service.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("recognizes the exact staged merge event after an accepted push loses its acknowledgement", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/transport-landed", "one.txt")
+  const ref = changesRef("main", "task/transport-landed")
+  let injected = false
+  using _publish = beforeGitomicPublish(
+    async () => {},
+    undefined,
+    async (_repo, updates) => {
+      if (
+        injected ||
+        !updates.some((update) => update.ref === ref) ||
+        !updates.some((update) => update.ref === "refs/heads/main")
+      ) {
+        return
+      }
+      injected = true
+      throw new Error("injected lost acknowledgement after atomic push")
+    },
+  )
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(injected).toBe(true)
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/transport-landed"] })
+  expect((await readStatus(store, "main", "task/transport-landed")).status).toBe("merged")
+  expect(logRecords(outcome)).toContainEqual(
+    expect.objectContaining({
+      kind: "change",
+      branch: "task/transport-landed",
+      decision: "merged",
+      reason: "landed after unknown publication response",
+    }),
+  )
+})
+
+/** @failure 25708: repeated definite non-publication must page a stuck change with the transport cause.
+ * @level l3 @consumer queue operator
+ */
+it("stops one change after three consecutive not-landed publication rounds", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const branch = "task/transport-repeat"
+  await submitCommit(w, branch, "one.txt")
+  const ref = changesRef("main", branch)
+  let refused = 0
+  using _publish = beforeGitomicPublish(async (_repo, updates) => {
+    if (!updates.some((update) => update.ref === ref) || !updates.some((update) => update.ref === "refs/heads/main")) {
+      return
+    }
+    refused++
+    throw new Error("injected transport outage before atomic push")
+  })
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  for (const count of [1, 2, 3]) {
+    const outcome = await queueRun(options)
+    expect(logRecords(outcome)).toContainEqual(
+      expect.objectContaining({ kind: "warning", subject: "publication-not-landed", branch, ref, count }),
+    )
+    expect(outcome.exitCode).toBe(count === 3 ? 2 : 0)
+    expect(outcome.stuck).toEqual(count === 3 ? [branch] : [])
+    expect((await readStatus(store, "main", branch)).status).toBe(count === 3 ? "stuck" : "merging")
+  }
+  expect(refused).toBe(3)
+})
+
+/** @failure 25708: a vanished change ref must not make the runner abandon unrelated rows.
+ * @level l3 @consumer queue operator and next submitter
+ */
+it("names a missing change chain after publication and judges the next row", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/missing-first", "one.txt")
+  await submitCommit(w, "task/missing-next", "two.txt")
+  const ref = changesRef("main", "task/missing-first")
+  let failed = false
+  let omitted = false
+  using _publish = beforeGitomicPublish(
+    async (_repo, updates) => {
+      if (
+        failed ||
+        !updates.some((update) => update.ref === ref) ||
+        !updates.some((update) => update.ref === "refs/heads/main")
+      ) {
+        return
+      }
+      failed = true
+      throw new Error("injected transport failure before atomic push")
+    },
+    undefined,
+    undefined,
+    async (_repo, prefix) => {
+      if (!failed || omitted || prefix !== ref) return undefined
+      omitted = true
+      return new Map()
+    },
+  )
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(omitted).toBe(true)
+  expect(outcome.merged).toContain("task/missing-next")
+  expect(logRecords(outcome)).toContainEqual(
+    expect.objectContaining({ kind: "warning", subject: "inconsistent-missing-chain", ref }),
+  )
+})
+
+/** @failure 25708: a failed remote witness must name the ref instead of pretending the push did not land.
+ * @level l3 @consumer queue operator
+ */
+it("fails a round with the unreadable remote ref named after publication", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/read-failed", "one.txt")
+  const ref = changesRef("main", "task/read-failed")
+  let failed = false
+  using _publish = beforeGitomicPublish(
+    async (_repo, updates) => {
+      if (
+        failed ||
+        !updates.some((update) => update.ref === ref) ||
+        !updates.some((update) => update.ref === "refs/heads/main")
+      ) {
+        return
+      }
+      failed = true
+      throw new Error("injected transport failure before atomic push")
+    },
+    undefined,
+    undefined,
+    async (_repo, prefix) => {
+      if (failed && prefix === ref) throw new Error("injected remote reread outage")
+      return undefined
+    },
+  )
+  await expect(queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })).rejects.toThrow(
+    /refs\/yrd\/main\/changes\/task\/read-failed could not be read: injected remote reread outage/u,
   )
 })
 

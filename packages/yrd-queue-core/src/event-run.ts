@@ -23,13 +23,20 @@ import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
 import { queueName } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
-import { recentCasRefusals, type QueueRunLog } from "./log.ts"
+import { recentCasRefusals, recentPublicationNotLanded, type QueueRunLog } from "./log.ts"
 import { programRootCheck, recordProgramResult, recordProgramStart } from "./program-root.ts"
 import { queueRefPrefix } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { publishCheckedChildren } from "./publication.ts"
 import { prepareWorktree, SETUP, SetupFailed } from "./worktree.ts"
-import { restoreScripts, short, type QueueRunOptions, type QueueRunOutcome, type RoundLine } from "./run.ts"
+import {
+  QueueAuthorityUnreadable,
+  restoreScripts,
+  short,
+  type QueueRunOptions,
+  type QueueRunOutcome,
+  type RoundLine,
+} from "./run.ts"
 import { dispatchNotifications, messageFor } from "./with-notify.ts"
 import { changeName } from "./refs.ts"
 import { transportFaultIn } from "./setup-transport.ts"
@@ -680,19 +687,122 @@ export async function eventQueueRun(
       log.write({ kind: "change", branch, head, decision: "stuck", reason: oneLine, saw: child.evidence })
       return result(2, observedMerged, failed, [branch])
     }
+    let preparedMerge: string | undefined
+    let ended: string | undefined
     try {
-      const ended = await appendOwnedMerge(store, queue, branch, marker, {
-        at: new Date(),
-        commit: candidate,
-        targetExpect: parent,
-        queueTip: queueState.tip,
-        ...(reason === undefined ? {} : { reason }),
-      })
-      await tell(branch, "merged", ended)
+      ended = await appendOwnedMerge(
+        store,
+        queue,
+        branch,
+        marker,
+        {
+          at: new Date(),
+          commit: candidate,
+          targetExpect: parent,
+          queueTip: queueState.tip,
+          ...(reason === undefined ? {} : { reason }),
+        },
+        (oid) => {
+          preparedMerge = oid
+        },
+      )
     } catch (error) {
-      const after = await readStatus(store, queue, branch)
+      const ref = changesRef(queue, branch)
+      // Stage/write failures have no candidate event to reconcile and must
+      // keep their original error. Only a publication attempt can be unknown.
+      if (preparedMerge === undefined && !(error instanceof Conflict)) throw error
+      // A lease refusal on the target or queue tip is an authority change,
+      // not a transport failure on this change chain.
+      if (error instanceof Conflict && !error.refs.includes(ref)) throw error
+      let after: EventChange
+      try {
+        const present = (await listRefs(ref, store)).get(ref)
+        if (present === undefined) {
+          log.write({
+            kind: "warning",
+            subject: "inconsistent-missing-chain",
+            branch,
+            head,
+            ref,
+            marker,
+            reason: `${ref} disappeared after publication of ${branch} at ${marker}: ${error instanceof Error ? error.message : String(error)}`,
+          })
+          return undefined
+        }
+        after = await readStatus(store, queue, branch)
+      } catch (readError) {
+        log.write({
+          kind: "warning",
+          subject: "round-read-failed",
+          branch,
+          head,
+          ref,
+          reason: `publication failed: ${error instanceof Error ? error.message : String(error)}; remote reread failed: ${readError instanceof Error ? readError.message : String(readError)}`,
+        })
+        throw new QueueAuthorityUnreadable(ref, readError, error)
+      }
       if (after.tip !== marker) {
-        await rivalOrThrow(branch, marker, after, error)
+        if (after.tip === undefined) {
+          log.write({
+            kind: "warning",
+            subject: "inconsistent-missing-chain",
+            branch,
+            head,
+            ref,
+            marker,
+            reason: `${ref} has no tip after publication of ${branch} at ${marker}`,
+          })
+          return undefined
+        }
+        let successor: string | undefined
+        try {
+          const history = await readChangeEvents(store, queue, branch, after.tip)
+          const at = history.findIndex((event) => event.id === marker)
+          successor = at < 0 ? undefined : history[at + 1]?.id
+        } catch (readError) {
+          log.write({
+            kind: "warning",
+            subject: "round-read-failed",
+            branch,
+            head,
+            ref,
+            reason: `publication failed: ${error instanceof Error ? error.message : String(error)}; remote reread failed: ${readError instanceof Error ? readError.message : String(readError)}`,
+          })
+          throw new QueueAuthorityUnreadable(ref, readError, error)
+        }
+        if (preparedMerge !== undefined && successor === preparedMerge) {
+          await tell(branch, "merged", preparedMerge)
+          log.write({
+            kind: "merge",
+            branch,
+            head,
+            commit: candidate,
+            ref,
+            marker,
+            reason: "landed after unknown publication response",
+          })
+          log.write({
+            kind: "change",
+            branch,
+            head,
+            decision: "merged",
+            reason: "landed after unknown publication response",
+          })
+          return result(failed.length > 0 ? 1 : 0, [...observedMerged, branch], failed, [], [], undefined, candidate)
+        }
+        if (successor === undefined) {
+          log.write({
+            kind: "warning",
+            subject: "inconsistent-change-chain",
+            branch,
+            head,
+            ref,
+            marker,
+            actual: after.tip,
+            reason: `${ref} advanced to ${after.tip} but its history has no successor after ${marker}; publication error: ${error instanceof Error ? error.message : String(error)}`,
+          })
+          return undefined
+        }
         log.write({
           kind: "discarded",
           branch,
@@ -709,16 +819,19 @@ export async function eventQueueRun(
         throw new Error(`event queue ${url}#${queue}: target disappeared after component publication`, { cause: error })
       }
       if (movedTarget === parent) {
-        const ref = changesRef(queue, branch)
-        if (!(error instanceof Conflict) || !error.refs.includes(ref)) throw error
+        const typedRefusal = error instanceof Conflict && error.refs.includes(ref)
         if (after.since === undefined) throw new Error(`${ref} at ${marker} has no opened time for bounded CAS history`)
-        const count = recentCasRefusals(dirname(log.path), ref, marker, after.since) + 1
+        const count =
+          (typedRefusal
+            ? recentCasRefusals(dirname(log.path), ref, marker, after.since)
+            : recentPublicationNotLanded(dirname(log.path), ref, marker, after.since)) + 1
+        const cause = error instanceof Error ? error.message : String(error)
         const warning =
-          `${branch}: publication CAS refused for ${ref} at ${marker} (${String(count)} consecutive); ` +
-          `target ${targetRef} remains ${parent}; retry after this round: ${error.message}`
+          `${branch}: publication ${typedRefusal ? "CAS refused" : "did not land"} for ${ref} at ${marker} (${String(count)} consecutive); ` +
+          `target ${targetRef} remains ${parent}; retry after this round: ${cause}`
         log.write({
           kind: "warning",
-          subject: "cas-refused",
+          subject: typedRefusal ? "cas-refused" : "publication-not-landed",
           branch,
           head,
           ref,
@@ -729,8 +842,20 @@ export async function eventQueueRun(
           reason: warning,
         })
         if (count >= 3) {
-          if (read.line === undefined) throw new Error(`${ref} refused publication before the line was read`)
-          read.line = { ...read.line, casRefused: { branch, ref, marker, count } }
+          if (typedRefusal) {
+            if (read.line === undefined) throw new Error(`${ref} refused publication before the line was read`)
+            read.line = { ...read.line, casRefused: { branch, ref, marker, count } }
+          } else {
+            const stuckReason = `${branch}: publication did not land for ${ref} at ${marker} in ${String(count)} consecutive rounds: ${cause}`
+            const ended = await appendOwnedChange(store, queue, branch, marker, {
+              type: "stuck",
+              at: new Date(),
+              reason: stuckReason,
+            })
+            await tell(branch, "stuck", ended)
+            log.write({ kind: "change", branch, head, decision: "stuck", reason: stuckReason })
+            return result(2, observedMerged, failed, [branch])
+          }
         }
         return undefined
       }
@@ -749,6 +874,8 @@ export async function eventQueueRun(
       })
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch], undefined, movedTarget)
     }
+    if (ended === undefined) throw new Error(`${changesRef(queue, branch)}: merged publication returned no event`)
+    await tell(branch, "merged", ended)
     log.write({ kind: "merge", branch, head, commit: candidate, ref: changesRef(queue, branch), marker })
     log.write({ kind: "change", branch, head, decision: "merged" })
     return result(failed.length > 0 ? 1 : 0, [...observedMerged, branch], failed, [], [], undefined, candidate)
@@ -1171,6 +1298,7 @@ export async function eventQueueRun(
       const published = await publish(branch, head, candidate, tip, checkReason)
       if (published !== undefined) return published
     } catch (error) {
+      if (error instanceof QueueAuthorityUnreadable) throw error
       let current
       try {
         current = await readStatus(store, queue, branch)

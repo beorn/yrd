@@ -210,6 +210,7 @@ export function roundHealthDocument(
   sleepMs: number,
   now: Date,
   flow?: FlowReading,
+  readFailure?: RoundReadFailure,
 ): QueueHealthDocument {
   const base = { schema: QUEUE_HEALTH_SCHEMA, service, verdict: { kind: "running" } as const }
   const facts = {
@@ -219,27 +220,30 @@ export function roundHealthDocument(
   }
   if (stop?.cause !== "stuck" || stop.change === undefined) {
     const healthy: QueueHealthDocument = { ...base, state: "healthy", facts }
-    return flow === undefined ? healthy : withLineFlow(healthy, stop, flow, now)
+    return withRoundReadFailure(flow === undefined ? healthy : withLineFlow(healthy, stop, flow, now), readFailure)
   }
   const change = changeName(stop.change)
-  return {
-    ...base,
-    state: "unhealthy",
-    error: {
-      code: "queue-round-stuck",
-      cause: `${STUCK_RECORD_CODE}: the line stopped at ${change}: ${stop.reason}`,
-      resolution: [
-        // The stuck record's own next step, carried on the stop rather than
-        // re-worded here: a refusal names its cure (G1), and a page is read by
-        // someone who has not got the journal open.
-        stop.next ?? stuckCures(stop.change.branch),
-        `The stuck record, its evidence and its log: yrd queue show ${stop.change.branch}.`,
-        "No restart is needed or wanted: the service is alive, holds the line stopped, and checks and merges nothing.",
-        `This page clears when the line resumes — ${change} withdrawn or merged, or the queue resumed — and never by itself.`,
-      ],
+  return withRoundReadFailure(
+    {
+      ...base,
+      state: "unhealthy",
+      error: {
+        code: "queue-round-stuck",
+        cause: `${STUCK_RECORD_CODE}: the line stopped at ${change}: ${stop.reason}`,
+        resolution: [
+          // The stuck record's own next step, carried on the stop rather than
+          // re-worded here: a refusal names its cure (G1), and a page is read by
+          // someone who has not got the journal open.
+          stop.next ?? stuckCures(stop.change.branch),
+          `The stuck record, its evidence and its log: yrd queue show ${stop.change.branch}.`,
+          "No restart is needed or wanted: the service is alive, holds the line stopped, and checks and merges nothing.",
+          `This page clears when the line resumes — ${change} withdrawn or merged, or the queue resumed — and never by itself.`,
+        ],
+      },
+      facts,
     },
-    facts,
-  }
+    readFailure,
+  )
 }
 
 /**
@@ -270,6 +274,9 @@ export type StallThreshold = Readonly<{ ms: number; declared: boolean }>
 
 /** A flow reading and the threshold it is judged against, as the loop hands both to a health write. */
 export type FlowReading = Readonly<{ flow: LineFlow; threshold: StallThreshold }>
+
+/** The last remote-read round failure; the service retains and counts it until one round succeeds. */
+export type RoundReadFailure = Readonly<{ ref: string; error: string; count: number }>
 
 /** A stalled line: how long no change has been judged, which of the two shapes it is, and the sentence that says so. */
 export type LineStall = Readonly<{ forMs: number; shape: "slow-round" | "stopped-line" | "cas-refused"; cause: string }>
@@ -361,14 +368,43 @@ export function withLineFlow(
   stop: PauseRecord | undefined,
   reading: FlowReading,
   now: Date,
+  readFailure?: RoundReadFailure,
 ): QueueHealthDocument {
   const foreign = document.error !== undefined && document.error.code !== STALLED_LINE_CODE
   const stall = stop === undefined && !foreign ? lineStall(reading.flow, reading.threshold, now) : undefined
   const facts = { ...document.facts, flow: flowFact(reading, unjudgedFor(reading.flow, now), stall) }
-  if (foreign) return { ...document, facts }
+  if (foreign) return withRoundReadFailure({ ...document, facts }, readFailure)
   const { error: _cleared, ...rest } = document
-  if (stall === undefined) return { ...rest, state: "healthy", facts }
-  return { ...rest, state: "unhealthy", error: stalledFailure(stall, reading.flow), facts }
+  if (stall === undefined) return withRoundReadFailure({ ...rest, state: "healthy", facts }, readFailure)
+  return withRoundReadFailure(
+    { ...rest, state: "unhealthy", error: stalledFailure(stall, reading.flow), facts },
+    readFailure,
+  )
+}
+
+/** One more condition on the existing line-health rail, without claiming an unknown waiting count. */
+function withRoundReadFailure(
+  document: QueueHealthDocument,
+  failure: RoundReadFailure | undefined,
+): QueueHealthDocument {
+  if (failure === undefined) return document
+  const facts = { ...document.facts, roundReadFailure: failure }
+  if (failure.count < 3 || (document.error !== undefined && document.error.code !== STALLED_LINE_CODE)) {
+    return { ...document, facts }
+  }
+  return {
+    ...document,
+    state: "unhealthy",
+    facts,
+    error: {
+      code: STALLED_LINE_CODE,
+      cause: `remote read failed ${String(failure.count)} consecutive rounds for ${failure.ref}: ${failure.error}; the service remains alive and will retry`,
+      resolution: [
+        `Read the failed round journal and repair the remote read of ${failure.ref}: ${failure.error}.`,
+        "The service retries at its next interval and clears this page after one successful round.",
+      ],
+    },
+  }
 }
 
 /**
