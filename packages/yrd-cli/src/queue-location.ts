@@ -41,7 +41,16 @@ export type QueueLocation = Readonly<{
   address?: QueueAddress
 }>
 
+/**
+ * The remote's default branch. A clone records it as refs/remotes/<remote>/HEAD (git clone, or
+ * `git remote set-head <remote> -a` after the remote changes it), so it is read locally: `yrd queue
+ * health` resolves it on every tick, and asking the remote each time was 156 GitHub sessions an hour
+ * (hh 25626). Only a clone that recorded none asks the remote, and that failure stays loud.
+ */
 export async function originHead(git: Git, remote = "origin"): Promise<string> {
+  const recorded = (await git(["for-each-ref", "--format=%(symref)", `refs/remotes/${remote}/HEAD`])).trim()
+  const prefix = `refs/remotes/${remote}/`
+  if (recorded.startsWith(prefix) && recorded.length > prefix.length) return recorded.slice(prefix.length)
   const out = await git(["ls-remote", "--symref", remote, "HEAD"])
   const branch = /^ref:\s+refs\/heads\/(.+)\s+HEAD$/mu.exec(out)?.[1]
   if (branch === undefined || branch === "") {
