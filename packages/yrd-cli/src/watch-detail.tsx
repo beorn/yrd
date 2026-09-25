@@ -126,6 +126,7 @@ function isMigratedWithoutCheckDetail(detail: ChangeDetail): boolean {
 
 export function WatchDetail({
   detail,
+  change,
   joinedRun = false,
   selected,
   onSelect,
@@ -135,6 +136,8 @@ export function WatchDetail({
   outputs = new Map(),
 }: {
   detail: ChangeDetail | undefined
+  /** The selected change's identity, displayed when loading detail (25630 Row 22). */
+  change?: string | Pick<Row, "branch" | "head">
   /** True when the row is one run's view of the change, not the change's current state. */
   joinedRun?: boolean
   /** The open tab: `CHANGES_TAB`, a check's index as a string, a step's `step:<n>`, or `round`. */
@@ -147,6 +150,14 @@ export function WatchDetail({
   outputs?: ReadonlyMap<string, DiffText>
 }) {
   if (detail === undefined) {
+    const changeName = typeof change === "object" ? changeId(change) : change
+    if (changeName !== undefined) {
+      return (
+        <Box flexDirection="column" flexGrow={1} alignItems="center" justifyContent="center" minHeight={0} minWidth={0}>
+          <Text color="$fg-muted">{`Loading ${changeName}…`}</Text>
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column" paddingX={1} minWidth={0}>
         <Text color="$fg-muted">no change selected</Text>

@@ -23,6 +23,7 @@ import {
   submit,
   journalKey,
   watchRows,
+  clocks,
 } from "../src/index.ts"
 import type { Git, Row } from "../src/index.ts"
 import { ABSENT, legacyStore, recordCommit, recordMessage, type WriteRecord } from "../src/legacy-records.ts"
@@ -900,6 +901,63 @@ describe("only one change can hold the line at a time (24972)", () => {
       state: "deferred",
       projectedMs: 3480000,
       boundMs: 1800000,
+    })
+  })
+
+  describe("clocks() rules (25630 rows 28 & 29)", () => {
+    it("pins OLD-UNTIL: a done row read through its notice gets a run end from endedWhen", () => {
+      const startedAt = new Date("2026-09-24T12:00:00Z")
+      const endingAt = new Date("2026-09-24T12:05:00Z")
+      const now = new Date("2026-09-24T13:00:00Z")
+      // A merged row read only through its sent notice: has endingAt (or at), but endedAt is undefined
+      const noticeRow: Row = {
+        branch: "task/notice-only",
+        head: "abc123456789",
+        state: "merged",
+        startedAt,
+        endingAt,
+        at: endingAt,
+        since: startedAt,
+      }
+      const measured = clocks(noticeRow, now)
+      expect(measured.runtimeMs).toBe(5 * 60 * 1000)
+    })
+
+    it("pins DIRECT-NOT-ENDED: direct rows count as ended in clocks()", () => {
+      const commitAt = new Date("2026-09-24T12:00:00Z")
+      const now = new Date("2026-09-24T13:00:00Z")
+      const directRow: Row = {
+        branch: "main",
+        head: "def123456789",
+        state: "direct",
+        at: commitAt,
+      }
+      const measured = clocks(directRow, now)
+      // Clock is ordered by ended instant (commitAt)
+      expect(measured.clockAt).toEqual(commitAt)
+      // A direct row has no queue runtime, age, or took
+      expect(measured.runtimeMs).toBeUndefined()
+      expect(measured.tookMs).toBeUndefined()
+      expect(measured.ageMs).toBeUndefined()
+    })
+
+    it("done row with no opening instant reads undefined for ageMs and tookMs (Row 28)", () => {
+      const startedAt = new Date("2026-09-24T12:00:00Z")
+      const endedAt = new Date("2026-09-24T12:05:00Z")
+      const now = new Date("2026-09-24T13:00:00Z")
+      // Merged row whose Opened line was not read: since is undefined
+      const unreadOpened: Row = {
+        branch: "task/no-since",
+        head: "ghi123456789",
+        state: "merged",
+        startedAt,
+        endedAt,
+        at: endedAt,
+      }
+      const measured = clocks(unreadOpened, now)
+      expect(measured.runtimeMs).toBe(5 * 60 * 1000)
+      expect(measured.ageMs).toBeUndefined()
+      expect(measured.tookMs).toBeUndefined()
     })
   })
 })

@@ -73,12 +73,12 @@ describe("25556: seven rows on yrd watch", () => {
   it("row 1: the filter group takes muted ($fg-muted) when selected and extra-muted ($border-default) when not, with no bold and no yellow (25716 row 31)", async () => {
     const app = render(<WatchPane snapshot={baseSnapshot()} live={false} />, { cols: 140, rows: 30 })
     await settle(app)
-    app.press("f") // select only failed
+    app.press("f") // toggle failed off
     await settle(app)
 
-    expect(fgAt(app, 1, "[f]ailed")).toBe(fgOf("$fg-muted"))
+    expect(fgAt(app, 1, "[f]ailed")).toBe(fgOf("$border-default"))
     expect(boldAt(app, 1, "[f]ailed")).toBe(false)
-    expect(fgAt(app, 1, "[o]pen")).toBe(fgOf("$border-default"))
+    expect(fgAt(app, 1, "[o]pen")).toBe(fgOf("$fg-muted"))
     expect(boldAt(app, 1, "[o]pen")).toBe(false)
 
     app.unmount()
