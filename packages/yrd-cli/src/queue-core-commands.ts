@@ -141,6 +141,7 @@ import {
   type QueueHealthDocument,
   type ServiceIntentFact,
   type QueueRunOutcome,
+  type RoundLine,
   type PauseRecord,
   type RuntimeGitlinkOff,
   type ChangeRecord,
@@ -1300,13 +1301,28 @@ export async function coreQueueCommand(
        * write to state: the heartbeat writes first and never waits on this read.
        * A journal that cannot say is stated with its reason, never left out.
        */
+      //
+      // THE FIRST ROUND AFTER A START has no flow yet, and it is the round the
+      // 09-24 cut-over stood still in for fifty minutes. It journals its own line
+      // before any check, and that reading is the flow until the round ends.
+      let openedAt: string | undefined
       const notePhase = async (): Promise<void> => {
-        const open = flow?.roundOpen
-        if (open === undefined) return
-        const phase = await roundPhase(workdir)
-        // The round ended while the journal was read: its phase is no longer news.
-        if (flow?.roundOpen?.startedAt !== open.startedAt) return
-        flow = { ...flow, roundOpen: { startedAt: open.startedAt, ...phase } }
+        const opened = openedAt
+        if (opened === undefined) return
+        const read = await roundPhase(workdir, new Date(opened))
+        // The round ended while the journal was read: what it says is no longer news.
+        if (openedAt !== opened) return
+        const known =
+          flow ??
+          (read.line === undefined
+            ? undefined
+            : {
+                waiting: read.line.waiting,
+                ...(read.line.oldest === undefined ? {} : { oldestWaiting: read.line.oldest }),
+                ...(read.line.lastJudgedAt === undefined ? {} : { lastJudgedAt: read.line.lastJudgedAt }),
+              })
+        if (known === undefined) return
+        flow = { ...known, roundOpen: { startedAt: opened, ...read.open } }
       }
       /**
        * Leave the document where the declared health probe reads it, stamped
@@ -1663,7 +1679,8 @@ export async function coreQueueCommand(
               // declaration carries, so an edit to health.stallAfter is the next
               // round's, like every other key.
               threshold = { declared: declared.config.health.declared, ms: declared.config.health.stallAfterMs }
-              if (flow !== undefined) flow = { ...flow, roundOpen: { startedAt: new Date().toISOString() } }
+              openedAt = new Date().toISOString()
+              if (flow !== undefined) flow = { ...flow, roundOpen: { startedAt: openedAt } }
               if (lockWaitStated) {
                 lockWaitStated = false
                 writeHealth(lineDocument(lastStop, 0))
@@ -1684,6 +1701,7 @@ export async function coreQueueCommand(
           // nothing awaited between the write and the call.
           const sleepMs = sleepAfter(outcome, interval)
           lastStop = pauseStop(outcome.stopped)
+          openedAt = undefined
           flow = flowAfterRound(flow, outcome, new Date())
           const document = writeHealth(lineDocument(lastStop, sleepMs))
           await request.afterHealth?.(document)
@@ -2952,15 +2970,34 @@ export function flowAfterRound(
 /** What the newest run journal says the open round is doing: its step and change, or why it cannot say. */
 export async function roundPhase(
   workdir: string,
-): Promise<Readonly<{ phase: string; branch?: string } | { phaseUnread: string }>> {
+  since: Date,
+): Promise<
+  Readonly<{ open: Readonly<{ phase: string; branch?: string } | { phaseUnread: string }>; line?: RoundLine }>
+> {
   try {
     const facts = await readRunnerFacts(workdir)
-    const step = facts.latest?.activeStep
-    if (step === undefined) return { phaseUnread: facts.absent ?? "the newest run journal names no open step" }
-    return { phase: `${step.phase} ${step.name}`, ...(step.branch === undefined ? {} : { branch: step.branch }) }
+    const latest = facts.latest
+    // A journal older than the round is a previous run's: it says nothing about this one.
+    const current = latest !== undefined && latest.startedAt.getTime() >= since.getTime() - 1_000 ? latest : undefined
+    const line = current?.line === undefined ? {} : { line: current.line }
+    const step = current?.activeStep
+    if (step === undefined) {
+      const why =
+        facts.absent ??
+        (current === undefined
+          ? `the newest run journal (${latest?.id ?? "none"}) predates this round, which started ${since.toISOString()}`
+          : "the round's journal names no open step")
+      return { open: { phaseUnread: why }, ...line }
+    }
+    return {
+      open: { phase: `${step.phase} ${step.name}`, ...(step.branch === undefined ? {} : { branch: step.branch }) },
+      ...line,
+    }
   } catch (error) {
     return {
-      phaseUnread: `the run journal could not be read: ${error instanceof Error ? error.message : String(error)}`,
+      open: {
+        phaseUnread: `the run journal could not be read: ${error instanceof Error ? error.message : String(error)}`,
+      },
     }
   }
 }
