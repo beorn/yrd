@@ -8,6 +8,7 @@ import {
   appendPublishedMerge,
   changesRef,
   expireQueueOverrides,
+  EVENT_TRAILERS,
   listChangeHistories,
   readChangeEvents,
   queueResumedAfter,
@@ -42,7 +43,13 @@ import {
   type QueueRunOutcome,
   type RoundLine,
 } from "./run.ts"
-import { dispatchNotifications, messageFor, notifyOutsideRound, overrideNotice } from "./with-notify.ts"
+import {
+  dispatchNotifications,
+  isChargedFailure,
+  messageFor,
+  notifyOutsideRound,
+  overrideNotice,
+} from "./with-notify.ts"
 import { changeName } from "./refs.ts"
 import { transportFaultIn } from "./setup-transport.ts"
 import { readRootChanges } from "./legacy-records.ts"
@@ -270,6 +277,15 @@ export async function eventQueueRun(
     if (kind === "merged" && merge === undefined) {
       throw new Error(`event queue ${url}#${queue}: ${branch} merged event ${eventId} has no kept Commit`)
     }
+    // Count branch failures, not failed checks: a verifier refusal before any check still counts.
+    const failures =
+      kind === "failed"
+        ? (await readChangeEvents(store, queue, branch, tip)).filter(
+            (event) =>
+              event.type === "failed" &&
+              isChargedFailure(event.props.find(([key]) => key === EVENT_TRAILERS.reason)?.[1]),
+          ).length
+        : undefined
     const head = change.commit
     const text = messageFor(kind, {
       branch,
@@ -296,6 +312,7 @@ export async function eventQueueRun(
           ...(kind === "merged"
             ? { merge }
             : { reason: kind === "cancelled" ? "branch absent from remote" : (change.reason ?? kind), log: log.path }),
+          ...(kind === "failed" ? { failures } : {}),
           ...(kind === "deferred"
             ? { projectedMs: change.deferred?.projectedMs, boundMs: change.deferred?.boundMs }
             : {}),
@@ -718,22 +735,19 @@ export async function eventQueueRun(
     if (parent === undefined || parent === "") throw new Error(`candidate ${candidate} has no target parent`)
     let child
     try {
-      child = await timedStep(
-        log,
-        { branch, head, name: "publish", phase: "merge" },
-        () =>
-          publishCheckedChildren({
-            git,
-            cwd: options.repo,
-            candidate,
-            remote: options.target.remote,
-            branch: queue,
-            marker: { ref: changesRef(queue, branch), tip: marker },
-            process: options.process,
-            env: options.env,
-            hooksPath,
-            gitOptions,
-          }),
+      child = await timedStep(log, { branch, head, name: "publish", phase: "merge" }, () =>
+        publishCheckedChildren({
+          git,
+          cwd: options.repo,
+          candidate,
+          remote: options.target.remote,
+          branch: queue,
+          marker: { ref: changesRef(queue, branch), tip: marker },
+          process: options.process,
+          env: options.env,
+          hooksPath,
+          gitOptions,
+        }),
       )
     } catch (error) {
       const after = await readStatus(store, queue, branch)
@@ -776,27 +790,24 @@ export async function eventQueueRun(
               ]
             })()
           : undefined
-      ended = await timedStep(
-        log,
-        { branch, head, name: "merge", phase: "merge" },
-        () =>
-          appendOwnedMerge(
-            store,
-            queue,
-            branch,
-            marker,
-            {
-              at: new Date(),
-              commit: candidate,
-              targetExpect: parent,
-              queueTip: queueState.tip,
-              ...(opsFences === undefined ? {} : { opsFences }),
-              ...(reason === undefined ? {} : { reason }),
-            },
-            (oid) => {
-              preparedMerge = oid
-            },
-          ),
+      ended = await timedStep(log, { branch, head, name: "merge", phase: "merge" }, () =>
+        appendOwnedMerge(
+          store,
+          queue,
+          branch,
+          marker,
+          {
+            at: new Date(),
+            commit: candidate,
+            targetExpect: parent,
+            queueTip: queueState.tip,
+            ...(opsFences === undefined ? {} : { opsFences }),
+            ...(reason === undefined ? {} : { reason }),
+          },
+          (oid) => {
+            preparedMerge = oid
+          },
+        ),
       )
     } catch (error) {
       const ref = changesRef(queue, branch)
@@ -1031,36 +1042,33 @@ export async function eventQueueRun(
     log.write({ kind: "change", branch, head })
     const path = join(options.workdir, "worktrees", log.id, branch.replaceAll("/", "_"))
     mkdirSync(join(options.workdir, "worktrees", log.id), { recursive: true })
-    const verified = await timedStep(
-      log,
-      { branch, head, name: "compose", phase: "submit" },
-      () =>
-        verifyCandidate({
-          git,
-          repo: options.repo,
-          targetHead: target,
-          head,
-          path,
-          message: [
-            `merge ${short(branch, head)} into ${queue}`,
-            "",
-            `Change: ${changeName({ branch, head })}`,
-            `Merged-By: ${mergedBy(queue, log.id)}`,
-            ...(selectedChange.issue === undefined ? [] : [`Issue: ${selectedChange.issue}`]),
-            ...(selectedChange.submitter === undefined ? [] : [`Submitter: ${selectedChange.submitter}`]),
-          ].join("\n"),
-          process: options.process,
+    const verified = await timedStep(log, { branch, head, name: "compose", phase: "submit" }, () =>
+      verifyCandidate({
+        git,
+        repo: options.repo,
+        targetHead: target,
+        head,
+        path,
+        message: [
+          `merge ${short(branch, head)} into ${queue}`,
+          "",
+          `Change: ${changeName({ branch, head })}`,
+          `Merged-By: ${mergedBy(queue, log.id)}`,
+          ...(selectedChange.issue === undefined ? [] : [`Issue: ${selectedChange.issue}`]),
+          ...(selectedChange.submitter === undefined ? [] : [`Submitter: ${selectedChange.submitter}`]),
+        ].join("\n"),
+        process: options.process,
+        env: options.env,
+        hooksPath,
+        timed: (name, work) => timedStep(log, { branch, head, phase: "submit", name }, work),
+        worktree: {
           env: options.env,
-          hooksPath,
-          timed: (name, work) => timedStep(log, { branch, head, phase: "submit", name }, work),
-          worktree: {
-            env: options.env,
-            gitOptions,
-            populateReference: options.populateReference,
-            process: options.process,
-            selection: options.selection,
-          },
-        }),
+          gitOptions,
+          populateReference: options.populateReference,
+          process: options.process,
+          selection: options.selection,
+        },
+      }),
     )
     try {
       if (verified.state === "failed") {
@@ -1129,28 +1137,30 @@ export async function eventQueueRun(
           const setupAbout = { branch, head, name: SETUP, phase }
           let worktree
           try {
-            worktree = await timedStep(
-              log,
-              { branch, head, name: "prepare", phase },
-              () =>
-                prepareWorktree(
-                  git,
-                  options.repo,
-                  candidate,
-                  join(options.workdir, "worktrees", log.id, `${branch.replaceAll("/", "_")}-${phase}-${String(attempt)}`),
-                  {
-                    targetSha: target,
-                    populateReference: options.populateReference,
-                    selection: options.selection,
-                    gitOptions,
-                    process: options.process,
-                    env: options.env,
-                    ...(options.setup === undefined ? {} : { setup: { run: options.setup, logDir, tmpdir } }),
-                    starting: ({ log: path, start }) => recordProgramStart({ log }, { ...setupAbout, start, log: path }),
-                    record: ({ result: setupResult, start, end }) =>
-                      recordProgramResult({ log }, { ...setupAbout, start, end }, setupResult),
-                  },
+            worktree = await timedStep(log, { branch, head, name: "prepare", phase }, () =>
+              prepareWorktree(
+                git,
+                options.repo,
+                candidate,
+                join(
+                  options.workdir,
+                  "worktrees",
+                  log.id,
+                  `${branch.replaceAll("/", "_")}-${phase}-${String(attempt)}`,
                 ),
+                {
+                  targetSha: target,
+                  populateReference: options.populateReference,
+                  selection: options.selection,
+                  gitOptions,
+                  process: options.process,
+                  env: options.env,
+                  ...(options.setup === undefined ? {} : { setup: { run: options.setup, logDir, tmpdir } }),
+                  starting: ({ log: path, start }) => recordProgramStart({ log }, { ...setupAbout, start, log: path }),
+                  record: ({ result: setupResult, start, end }) =>
+                    recordProgramResult({ log }, { ...setupAbout, start, end }, setupResult),
+                },
+              ),
             )
           } catch (error) {
             if (!(error instanceof SetupFailed)) throw error
