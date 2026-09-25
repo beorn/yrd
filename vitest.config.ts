@@ -1,6 +1,12 @@
 import { cpus } from "node:os"
 import { defineConfig } from "vitest/config"
+import { pinYrdTestStateHome } from "./tests/support/state-home.ts"
 import { resolveVitestMaxWorkers } from "./vitest-workers.ts"
+
+// Before any worker: XDG_STATE_HOME and the bun install cache point at a
+// throwaway root (25256), so a fixture that sets no yrd.workdir cannot send its
+// queue-owned clone to the operator's ~/.local/state/yrd from any spawn shape.
+pinYrdTestStateHome()
 
 // bun:sqlite (and any other bun:* built-in) must never be transformed/
 // bundled by Vite's resolver — it only exists inside the Bun runtime.
@@ -8,6 +14,8 @@ import { resolveVitestMaxWorkers } from "./vitest-workers.ts"
 export default defineConfig({
   test: {
     include: ["packages/*/tests/**/*.test.{ts,tsx}", "tests/**/*.test.{ts,tsx}"],
+    // Removes the pinned state root after the run (the pin itself is above).
+    globalSetup: ["./tests/support/state-home.ts"],
     // Capped by default, exactly like the root, km and ag configs; the host is
     // shared with the live merge queue. See vitest-workers.ts for the policy.
     maxWorkers: resolveVitestMaxWorkers(process.env, cpus().length),
