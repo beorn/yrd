@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest"
 import type { Event } from "gitomic/events"
-import { evolve, initial } from "../src/events.ts"
+import { evolve, initial, type EventChange } from "../src/events.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
 import { clocks } from "../src/table.ts"
 
@@ -256,5 +256,38 @@ describe("event changes use the shared table row", () => {
       clockAt: endedAt,
       tookMs: 240_000,
     })
+  })
+
+  it("projects the merged event's run trailer onto row.run and guards row.merge to merged status (25716 row 9)", () => {
+    const runId = "2026-09-25T12:00:00.000Z-42"
+    const targetMerge = "c".repeat(40)
+    const candidate = "d".repeat(40)
+    const checking = {
+      status: "checking" as const,
+      commit: HEAD,
+      candidate,
+      since: new Date(TIME),
+      at: new Date(TIME),
+    }
+    const merged = {
+      status: "merged" as const,
+      commit: HEAD,
+      candidate,
+      merge: targetMerge,
+      run: runId,
+      since: new Date(TIME),
+      at: new Date(TIME),
+      endedAt: new Date(TIME),
+    }
+    const rows = eventRows(
+      new Map<string, EventChange>([
+        ["task/checking", checking],
+        ["task/merged", merged],
+      ]),
+    )
+    expect(rows[0]?.merge).toBeUndefined()
+    expect(rows[0]?.run).toBeUndefined()
+    expect(rows[1]?.merge).toBe(targetMerge)
+    expect(rows[1]?.run).toBe(runId)
   })
 })

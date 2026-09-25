@@ -531,6 +531,7 @@ export async function eventQueueRun(
         commit: merge,
         reason: `observed on target at ${merge}`,
         title: `merged ${branch}`,
+        run: log.id,
       })
       const ended = await readStatus(store, queue, branch)
       if (ended.status !== "merged" || ended.tip !== written || ended.ending?.id !== written) {
@@ -801,6 +802,7 @@ export async function eventQueueRun(
             commit: candidate,
             targetExpect: parent,
             queueTip: queueState.tip,
+            run: log.id,
             ...(opsFences === undefined ? {} : { opsFences }),
             ...(reason === undefined ? {} : { reason }),
           },

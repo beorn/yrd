@@ -671,6 +671,31 @@ describe("ADR-0016 event fold", () => {
     )
   })
 
+  it("carries the Run: trailer in merged changeInput and folds it onto state.run (25716 row 9)", () => {
+    const runId = "2026-09-25T12:00:00.000Z-42"
+    const input = changeInput("merged", {
+      at: new Date("2026-09-25T12:05:00.000Z"),
+      commit: A,
+      queueTip: B,
+      run: runId,
+    })
+    expect(input.props).toContainEqual(["Run", runId])
+    const queued = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const merged = evolve(
+      queued,
+      event(
+        "merged",
+        B,
+        [
+          ["Commit", A],
+          ["Run", runId],
+        ],
+        [A],
+      ),
+    )
+    expect(merged.run).toBe(runId)
+  })
+
   it("cancels the prior open change before a second opened event", () => {
     const current = [event("opened", A, [["Commit", A]], [A])]
     const next = decide(current, input("opened", [["Commit", B]], [B]))

@@ -1,23 +1,33 @@
-import { join } from "node:path"
-import { configValue, type Git } from "@yrd/queue-core"
+import { queueName, remoteUrl, type Git } from "@yrd/queue-core"
+import { parseQueueAddress, queueRoot, type QueueAddress } from "./address.ts"
+import { hostWorkdir, originHead } from "./queue-location.ts"
+
+export { hostWorkdir }
 
 /**
- * The queue workdir, where everything it writes goes: whatever
- * `git config yrd.workdir` resolves to in the repository the command runs in —
- * any scope git honours, so a host says it once in `--global` and a single
- * repository can say otherwise — else `<git-common-dir>/yrd`.
- *
- * It is git configuration and not a `.yrd.yml` key because it is about THIS
- * MACHINE, not about the queue: the declaration is one file shared by every
- * clone, and a path on the queue runner's disk means nothing in a seat's
- * checkout.
- *
- * A worktree's `.git` is a file, so the default lives under the common git dir
- * the whole repository shares, never under a path guessed from it.
+ * The queue workdir: the service's own state root, never a watch-side guess.
+ * Resolves to the queue root under hostWorkdir for the repository's queue address.
  */
-export async function workdirOf(git: Git): Promise<string> {
-  const declared = await configValue(git, "yrd.workdir")
-  if (declared !== undefined) return declared
-  const commonDir = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
-  return join(commonDir, "yrd")
+export async function workdirOf(
+  git: Git,
+  options?: { address?: QueueAddress; cwd?: string; env?: NodeJS.ProcessEnv },
+): Promise<string> {
+  const cwd = options?.cwd ?? process.cwd()
+  const env = options?.env ?? process.env
+  let address = options?.address
+  if (address === undefined) {
+    try {
+      const queue = await originHead(git)
+      const remote = "origin"
+      const url = await remoteUrl(git, remote)
+      address = parseQueueAddress(queueName({ branch: queue, remote }, url))
+    } catch {
+      // Unaddressed repository, no remote, or detached HEAD
+    }
+  }
+  const host = await hostWorkdir(cwd, env, git)
+  if (address !== undefined) {
+    return queueRoot(host, address)
+  }
+  return host
 }

@@ -386,6 +386,7 @@ export function WatchPane({
   const statsLine = statsSummary(
     { drafts: draftsSaid(visible, shown.drafts), waiting: lineOf(visible).waiting.length },
     decisions === undefined ? undefined : lastDayBucket(decisions, shown.at),
+    shown.journalAbsent,
   )
 
   const visibleItems: readonly WatchPaneItem[] = useMemo(() => {

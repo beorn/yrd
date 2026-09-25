@@ -232,6 +232,13 @@ describe("the STATS line's summary (25416)", () => {
     expect(statsSummary({ drafts: undefined, waiting: 0 }, undefined)).toBe(
       "current: 0 drafts, 0 waiting · 24h: no run journal read on this machine",
     )
+    expect(
+      statsSummary(
+        { drafts: undefined, waiting: 0 },
+        undefined,
+        "no run journal was read: /logs — there is no such directory",
+      ),
+    ).toBe("current: 0 drafts, 0 waiting · 24h: no run journal was read: /logs — there is no such directory")
   })
 })
 

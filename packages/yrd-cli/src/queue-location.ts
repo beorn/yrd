@@ -8,6 +8,7 @@ import {
   queueName,
   remoteUrl,
   resolveGitSelection,
+  type Git,
   type GitSelection,
   type ReferenceStore,
 } from "@yrd/queue-core"
@@ -40,7 +41,7 @@ export type QueueLocation = Readonly<{
   address?: QueueAddress
 }>
 
-export async function originHead(git: ReturnType<typeof gitIn>, remote = "origin"): Promise<string> {
+export async function originHead(git: Git, remote = "origin"): Promise<string> {
   const out = await git(["ls-remote", "--symref", remote, "HEAD"])
   const branch = /^ref:\s+refs\/heads\/(.+)\s+HEAD$/mu.exec(out)?.[1]
   if (branch === undefined || branch === "") {
@@ -49,8 +50,8 @@ export async function originHead(git: ReturnType<typeof gitIn>, remote = "origin
   return branch
 }
 
-async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: ReturnType<typeof gitIn>): Promise<string> {
-  const declared = await configValue(git, "yrd.workdir")
+export async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git?: Git): Promise<string> {
+  const declared = git !== undefined ? await configValue(git, "yrd.workdir") : undefined
   if (declared !== undefined) return resolve(repositoryHere(cwd) ?? cwd, declared)
   return join(env.XDG_STATE_HOME ?? join(env.HOME ?? homedir(), ".local", "state"), "yrd")
 }

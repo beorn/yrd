@@ -361,9 +361,10 @@ export function lastDayBucket(decisions: readonly RunDecision[], now: Date): Sta
 export function statsSummary(
   current: Readonly<{ drafts: string | undefined; waiting: number }>,
   day: StatsBucket | undefined,
+  journalAbsent?: string,
 ): string {
   const now = `current: ${current.drafts ?? `0 ${STATE_WORDS.draft.word}s`}, ${String(current.waiting)} ${STATE_WORDS.waiting.word}`
-  if (day === undefined) return `${now} · 24h: no run journal read on this machine`
+  if (day === undefined) return `${now} · 24h: ${journalAbsent ?? "no run journal read on this machine"}`
   const span = (ms: number | undefined): string => (ms === undefined ? "—" : runTime(ms))
   return (
     `${now} · 24h: ${span(day.queuedMs)} wait, ${span(day.runMs)} run, ` +

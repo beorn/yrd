@@ -60,6 +60,7 @@ export const EVENT_TRAILERS = {
   to: "To",
   result: "Result",
   key: "Key",
+  run: "Run",
 } as const
 const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 /** Only the run path that atomically publishes the target may write merged with this producer. */
@@ -132,6 +133,7 @@ export type EventChange = Readonly<{
   notices?: Readonly<
     Record<string, Readonly<{ for: string; to: string; result: "delivered" | "refused" | "failed"; reason?: string }>>
   >
+  run?: string
 }>
 
 export const initial: EventChange = Object.freeze({ status: "draft" })
@@ -167,6 +169,7 @@ type ChangeInputDetails = Readonly<{
   retry?: Readonly<{ retried: 1; reason?: string }>
   deferred?: DeferredWrite
   notice?: NoticeWrite
+  run?: string
 }>
 
 /** The bounded decision evidence; legacy causal trailers stay in changeInput. */
@@ -279,6 +282,7 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   if (details.issue !== undefined) props.push([EVENT_TRAILERS.issue, details.issue])
   if (details.by !== undefined) props.push([EVENT_TRAILERS.by, details.by])
   if (details.reason !== undefined) props.push([EVENT_TRAILERS.reason, details.reason])
+  if (details.run !== undefined) props.push([EVENT_TRAILERS.run, details.run])
   props.push(...evidenceProps(type, details))
   return {
     type,
@@ -795,6 +799,11 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         lastNotifiable: { kind: "merged", id: event.id },
         endedAt: at,
         reason: prop(event, "Reason"),
+        ...(prop(event, EVENT_TRAILERS.run) !== undefined
+          ? { run: prop(event, EVENT_TRAILERS.run) }
+          : state.run !== undefined
+            ? { run: state.run }
+            : {}),
       }
     case "ignored": {
       const reason = prop(event, "Reason")
@@ -1732,6 +1741,7 @@ type ChangeWrite = Readonly<{
   retry?: Readonly<{ retried: 1; reason?: string }>
   deferred?: DeferredWrite
   notice?: NoticeWrite
+  run?: string
   writer?: string
   /** A target or branch ref moved in the same CAS publish as this event. */
   also?: readonly AlsoRef[]
@@ -1764,6 +1774,7 @@ export async function appendPublishedMerge(
     targetExpect: Oid
     queueTip: Oid
     reason?: string
+    run?: string
     /** Prepared legacy pause/override fences while those refs remain authoritative. */
     opsFences?: readonly AlsoRef[]
   }>,
@@ -1797,6 +1808,7 @@ export async function appendPublishedMerge(
       at: request.at,
       commit: request.commit,
       ...(request.reason === undefined ? {} : { reason: request.reason }),
+      ...(request.run === undefined ? {} : { run: request.run }),
       writer: QUEUE_RUN_WRITER,
       also: [
         { ref: `refs/heads/${queue}`, expect: request.targetExpect, oid: request.commit },
@@ -1852,6 +1864,7 @@ async function appendDecision(
     ...(write.retry === undefined ? {} : { retry: write.retry }),
     ...(write.deferred === undefined ? {} : { deferred: write.deferred }),
     ...(write.notice === undefined ? {} : { notice: write.notice }),
+    ...(write.run === undefined ? {} : { run: write.run }),
   })
   const planned = decide(history, input)
   if (planned.length !== 1) {

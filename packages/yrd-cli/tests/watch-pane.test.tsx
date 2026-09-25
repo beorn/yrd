@@ -288,7 +288,7 @@ describe("the top line (items 30, 32d, 33)", () => {
   // the empty list, so a STATS line keyed on `decisions` alone printed
   // "0 merges, 0 failed" — zeros nobody measured. The fixture shape above
   // (decisions absent) never reached that branch.
-  it("says no run journal was read in STATS when the live snapshot has an empty decisions list and no journal (25520)", async () => {
+  it("says no run journal was read in STATS when the live snapshot has an empty decisions list and no journal (25520, 25716)", async () => {
     const text = await paint(
       <WatchPane
         snapshot={snapshot({
@@ -300,7 +300,7 @@ describe("the top line (items 30, 32d, 33)", () => {
     )
 
     const stats = text.split("\n").find((line) => line.includes("STATS"))
-    expect(stats).toContain("24h: no run journal read on this machine")
+    expect(stats).toContain("24h: no run journal was read: /w/logs")
     expect(stats).not.toMatch(/\d+ merges?|\d+ failed|decisions/u)
   })
 })
