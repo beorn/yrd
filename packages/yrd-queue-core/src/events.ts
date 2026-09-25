@@ -22,6 +22,7 @@ import {
   type OverrideWrite,
 } from "./override.ts"
 import { readStop } from "./remote.ts"
+import { legacyPauseCommit } from "./legacy-records.ts"
 
 export const CHANGE_STATUSES = [
   "draft",
@@ -1031,9 +1032,19 @@ export type OpsCutoverReceipt = Readonly<{
   event: string
   queueBefore: string
   queueAfter: string
+  pauseAfter: string
   pauseBefore?: string
   overrideBefore?: string
 }>
+
+export type OpsCutoverPausePlan =
+  | Readonly<{ tip: string | null; priorKind: "paused" | "resumed" | null; disposition: "retain" }>
+  | Readonly<{
+      tip: string | null
+      priorKind: "paused" | "resumed" | null
+      disposition: "replace"
+      record: Readonly<{ kind: "paused"; cause: "maintenance"; by: string; reason: string; at: string }>
+    }>
 
 /** Stage the complete legacy state, then switch ops authority while preserving a cutover intake fence. */
 export async function appendOpsCutover(
@@ -1043,8 +1054,13 @@ export async function appendOpsCutover(
   targetSha: string,
   at: Date,
   by: string,
-  expected?: Readonly<{ queueBefore: string; pauseBefore?: string; overrideBefore?: string }>,
-  onStaged?: (oid: string) => void,
+  expected?: Readonly<{
+    queueBefore: string
+    pauseBefore?: string
+    overrideBefore?: string
+    pause?: OpsCutoverPausePlan
+  }>,
+  onStaged?: (queueOid: string, pauseOid: string) => void,
 ): Promise<OpsCutoverReceipt> {
   if (Number.isNaN(at.getTime())) throw new TypeError("ops-cutover Time: needs a valid instant")
   if (by.trim() === "") throw new TypeError("ops-cutover needs an actor")
@@ -1071,6 +1087,29 @@ export async function appendOpsCutover(
     })
   }
   const retainPause = eventCutoverTip(prior.pause) === prior.queue.created
+  const disposition = retainPause ? "retain" : "replace"
+  if (
+    expected?.pause !== undefined &&
+    (expected.pause.tip !== (pauseBefore ?? null) ||
+      expected.pause.priorKind !== (prior.pause?.kind ?? null) ||
+      expected.pause.disposition !== disposition)
+  ) {
+    throw new Conflict(`${queueRef(queue)}: pause disposition differs from the verified plan`, {
+      refs: [pauseRef(queue)],
+    })
+  }
+  const reason = `moved to event format at ${prior.queue.created}`
+  const record = expected?.pause?.disposition === "replace" ? expected.pause.record : undefined
+  if (
+    record !== undefined &&
+    (record.kind !== "paused" ||
+      record.cause !== "maintenance" ||
+      record.reason !== reason ||
+      record.by.trim() === "" ||
+      Number.isNaN(new Date(record.at).getTime()))
+  ) {
+    throw new Error(`${pauseRef(queue)}: planned M2 record is not a valid maintenance fence for ${prior.queue.created}`)
+  }
   const state: OpsState = {
     ...(prior.stop === undefined ? {} : { pause: prior.stop }),
     overrides: prior.overrides.entries,
@@ -1085,11 +1124,18 @@ export async function appendOpsCutover(
     ],
   }
   const staged = await (await openEvents({ ...store, ref, writer: by })).stage([input], { expect: prior.queue.tip })
-  onStaged?.(staged.head)
+  const pauseAfter = retainPause
+    ? pauseBefore
+    : await legacyPauseCommit(
+        git,
+        prior.pause,
+        { kind: "paused", cause: "maintenance", by: record?.by ?? by, reason },
+        record === undefined ? at : new Date(record.at),
+      )
+  if (pauseAfter === undefined) throw new Error(`${pauseRef(queue)}: ops-cutover has no maintenance fence`)
+  onStaged?.(staged.head, pauseAfter)
   const also: AlsoRef[] = [
-    ...(pauseBefore === undefined
-      ? []
-      : [{ ref: pauseRef(queue), expect: pauseBefore, oid: retainPause ? pauseBefore : null }]),
+    { ref: pauseRef(queue), expect: pauseBefore ?? null, oid: pauseAfter },
     ...(overrideBefore === undefined ? [] : [{ ref: overrideRef(queue), expect: overrideBefore, oid: null }]),
   ]
   await staged.publish({ also })
@@ -1100,13 +1146,14 @@ export async function appendOpsCutover(
     throw new Error(`${ref}: ops-cutover publish returned but readback differs from staged ${staged.head}`)
   }
   const leftovers = await listRefs(queueRefPrefix(queue), store)
-  if (leftovers.get(pauseRef(queue)) !== (retainPause ? pauseBefore : undefined) || leftovers.has(overrideRef(queue))) {
+  if (leftovers.get(pauseRef(queue)) !== pauseAfter || leftovers.has(overrideRef(queue))) {
     throw new Error(`${ref}: ops-cutover published but legacy refs differ from the retained fence`)
   }
   return {
     event,
     queueBefore: prior.queue.tip,
     queueAfter: staged.head,
+    pauseAfter,
     ...(pauseBefore === undefined ? {} : { pauseBefore }),
     ...(overrideBefore === undefined ? {} : { overrideBefore }),
   }
