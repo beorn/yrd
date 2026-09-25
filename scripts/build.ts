@@ -9,6 +9,7 @@ const result = await Bun.build({
   outdir: dist,
   naming: "yrd.js",
   target: "bun",
+  define: { "process.env.NODE_ENV": '"production"' },
   // The live watch pane is reached through a dynamic import so it stays a separate
   // chunk: non-watch commands (yrd --version, submit, one-shot queue) never load it, and
   // the core bundle does not top-level-import silvery's TUI-only SplitPane.
