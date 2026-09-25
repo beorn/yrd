@@ -30,6 +30,7 @@ import { verifyCandidate } from "./verifying.ts"
 import { publishCheckedChildren } from "./publication.ts"
 import { prepareWorktree, SETUP, SetupFailed } from "./worktree.ts"
 import {
+  allDeclaredChecksOff,
   QueueAuthorityUnreadable,
   restoreScripts,
   short,
@@ -968,9 +969,14 @@ export async function eventQueueRun(
       for (let attempt = 1; attempt <= 2; attempt++) {
         const startOfAttempt = results.length
         for (const phase of ["submit", "merge"] as const) {
+          if (allDeclaredChecksOff(options)) continue
           const checks =
-            options.noCheck === true ? [] : options.checks.filter((check) => (check.on ?? ["merge"]).includes(phase))
-          if (checks.length === 0 && options.setup === undefined) continue
+            options.noCheck === true
+              ? []
+              : options.checks.filter(
+                  (check) => check.run !== "true" && (check.on ?? ["merge"]).includes(phase),
+                )
+          if (checks.length === 0) continue
           const logDir = join(
             options.workdir,
             "checks",

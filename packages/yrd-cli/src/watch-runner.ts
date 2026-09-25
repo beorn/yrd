@@ -731,10 +731,11 @@ export function runnerWord(
         const step = facts.latest.activeStep
         if (step.phase === "merge") return "merging"
         if (step.kind === "check") return "checking"
-        return "verifying"
+        if (step.name === "remove" || step.name === "retain" || step.name === "deprovision") return "deprovisioning"
+        return "provisioning"
       }
       if (underCheck) return "checking"
-      if (facts.roundLockHolder !== undefined) return "verifying"
+      if (facts.roundLockHolder !== undefined) return "provisioning"
       return "idle"
     }
     default:
@@ -744,16 +745,17 @@ export function runnerWord(
       break
   }
   if (facts?.latest === undefined) {
-    if (facts?.roundLockHolder !== undefined) return "verifying"
+    if (facts?.roundLockHolder !== undefined) return "provisioning"
     return "unpublished"
   }
   if (facts.latest.alive && facts.latest.activeStep !== undefined) {
     const step = facts.latest.activeStep
     if (step.phase === "merge") return "merging"
     if (step.kind === "check") return "checking"
-    return "verifying"
+    if (step.name === "remove" || step.name === "retain" || step.name === "deprovision") return "deprovisioning"
+    return "provisioning"
   }
-  if (facts.roundLockHolder !== undefined) return "verifying"
+  if (facts.roundLockHolder !== undefined) return "provisioning"
   // No document, so the run's own pid is the liveness fact. Nothing is claimed
   // about a SERVICE here, because on this edge there is not one to claim it of.
   if (!underCheck) return "idle"
@@ -867,9 +869,10 @@ function runnerLineOf(
   // it would go unsaid entirely if it were not said here.
   const detail = service?.kind === "unreadable" ? `${service.why} · ${found}` : found
   switch (state) {
-    case "verifying":
+    case "provisioning":
     case "checking":
-    case "merging": {
+    case "merging":
+    case "deprovisioning": {
       const holding = held as HeldChange | undefined
       const activeStep = facts?.latest?.activeStep
 
@@ -887,8 +890,24 @@ function runnerLineOf(
 
         if (activeStep.kind === "check") {
           subphase = activeStep.name
+        } else if (activeStep.name === "compose" || activeStep.name === "worktree") {
+          subphase = "composing"
+        } else if (activeStep.name === "prepare") {
+          subphase = "preparing"
         } else if (activeStep.phase === "merge") {
           step = activeStep.name
+          subphase =
+            activeStep.name === "publish"
+              ? "publishing"
+              : activeStep.name === "merge"
+                ? "merging"
+                : activeStep.name === "push"
+                  ? "notifying"
+                  : activeStep.name
+        } else if (activeStep.name === "remove" || activeStep.name === "retain" || activeStep.name === "deprovision") {
+          subphase = activeStep.name === "retain" ? "retaining" : "removing"
+        } else {
+          subphase = stepName
         }
 
         if (activeStep.phase === "submit") {
@@ -910,7 +929,11 @@ function runnerLineOf(
         }
       } else if (facts?.roundLockHolder !== undefined) {
         const holder = facts.roundLockHolder
-        durationText = `${word} 0:00`
+        const holderDate = holder.since ? new Date(holder.since) : undefined
+        durationText =
+          holderDate && !Number.isNaN(holderDate.getTime())
+            ? `${word} ${since(holderDate)}`
+            : `${word} 0:00`
         holdsText = `round lock held by pid ${String(holder.pid)} (${holder.command})`
       } else if (holding !== undefined) {
         durationText = `${word} ${since(holding.since)}`

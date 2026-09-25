@@ -7356,3 +7356,38 @@ describe("a notify entry that could not run at all", () => {
     expect(said).toContain("spawn failed   at the first frame   at the second frame")
   })
 })
+
+describe("skipping setup and worktree when every declared check is off (25716 row 5)", () => {
+  it("performs no setup and creates no check worktree when all checks are declared run 'true', but performs both with a real check", async () => {
+    const w = await world()
+    const head1 = await submitCommit(w, "task/one", "one.txt")
+    const setupLog = join(w.workdir, "setup-marker.log")
+    const setupCmd = `echo "setup-ran" >> "${setupLog}"`
+
+    // 1. Run with checks declared run "true"
+    const optsTrue = await w.options({ setup: setupCmd })
+    const outcomeTrue = await queueRun({
+      ...optsTrue,
+      checks: [{ name: "c1", run: "true" }],
+      notify: [],
+    })
+    expect(outcomeTrue.merged).toEqual(["task/one"])
+    expect(existsSync(setupLog)).toBe(false)
+    // No check worktree created under worktrees/merge or worktrees/submit
+    const checkWorktrees = existsSync(join(w.workdir, "worktrees", "merge"))
+      ? readdirSync(join(w.workdir, "worktrees", "merge"))
+      : []
+    expect(checkWorktrees).toEqual([])
+
+    // 2. Run with one real check
+    const head2 = await submitCommit(w, "task/two", "two.txt")
+    const optsReal = await w.options({ exit: 0, setup: setupCmd })
+    const outcomeReal = await queueRun({
+      ...optsReal,
+    })
+    expect(outcomeReal.merged).toEqual(["task/two"])
+    // Setup ran
+    expect(existsSync(setupLog)).toBe(true)
+    expect(readFileSync(setupLog, "utf8")).toContain("setup-ran")
+  })
+})

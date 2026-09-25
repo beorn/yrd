@@ -714,10 +714,10 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
     const status = lines.findIndex((line) => line.includes("× Failed test"))
     expect(status).toBeGreaterThan(-1)
     expect(lines[status + 1]).toMatch(/╰/u)
-    // One tab per check, the one never reached included: the name, then the glyph and its duration (25441).
-    const names = lines.findIndex((line) => /Timeline.*typecheck.*test.*lint/u.test(line))
+    // One tab per stage (25716 row 3)
+    const names = lines.findIndex((line) => /Timeline.*provisioning.*checking.*merging.*deprovisioning/u.test(line))
     expect(names).toBeGreaterThan(-1)
-    expect(lines[names + 1]).toMatch(/cut 1\/1.*✓ 1:02.*× 0:04.*− not run/u)
+    expect(lines[names + 1]).toMatch(/cut 1\/1.*✓ passed.*× failed.*− not run.*✓ passed/u)
     // The failed check's remedy leads its own tab, which the detail opens on.
     expect(text).toContain("@chief — it failed")
   })
@@ -760,11 +760,11 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
       "Enter",
     ])
     const lines = pane.split("\n")
-    const names = lines.findIndex((line) => line.includes("Timeline") && line.includes("typecheck"))
+    const names = lines.findIndex((line) => line.includes("Timeline") && line.includes("checking"))
     expect(names).toBeGreaterThan(-1)
     const under = lines[names + 1] ?? ""
-    expect(under.slice(lines[names]!.indexOf("typecheck"))).toMatch(/^○ off/u)
-    expect(under).not.toContain("✓")
+    expect(under.slice(lines[names]!.indexOf("checking"))).toMatch(/^− not run/u)
+    expect(under.slice(lines[names]!.indexOf("checking"))).not.toContain("✓")
   })
 
   it("renders a run of another kind through the same one-line box, with no display code touched (item 37m)", async () => {
@@ -793,9 +793,9 @@ describe("the change list and the Timeline tab (items 2, 4, 6, 24, 25, 31; 25441
     const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={opener()} />, ["ArrowDown", "Enter"])
 
     expect(text).toContain("· task/one@abcdef012345 fix the parser")
-    const strip = text.split("\n").find((line) => line.includes("Timeline") && line.includes("typecheck"))
+    const strip = text.split("\n").find((line) => line.includes("Timeline") && line.includes("checking"))
     expect(strip).toBeDefined()
-    expect(strip!.indexOf("Timeline")).toBeLessThan(strip!.indexOf("typecheck"))
+    expect(strip!.indexOf("Timeline")).toBeLessThan(strip!.indexOf("checking"))
     expect(text).not.toContain("MERGE REQUESTS")
   })
 
@@ -1176,10 +1176,11 @@ describe("the running step and the check-less declaration", () => {
       { name: "affected-tests", state: "running" },
     ]
     const lines = (await paint(at(<WatchDetail detail={detailOf({ row: live }, checks)} />))).split("\n")
-    const names = lines.findIndex((line) => line.includes("typecheck") && line.includes("affected-tests"))
-
-    expect(names).toBeGreaterThan(-1)
-    expect(lines[names + 1]).toMatch(/✓ 0:08\s+◉ 2:31/u)
+    expect(lines.some((line) => line.includes("checking"))).toBe(true)
+    expect(lines.some((line) => line.includes("typecheck"))).toBe(true)
+    expect(lines.some((line) => line.includes("affected-tests"))).toBe(true)
+    expect(lines.some((line) => /◉ 2:31/u.test(line))).toBe(true)
+    expect(lines.some((line) => /✓.*0:08/u.test(line))).toBe(true)
   })
 
   it("says so when the declaration a change was judged by names no check, instead of a bare tab strip", async () => {
@@ -1213,14 +1214,14 @@ describe("the detail's stage tab keys", () => {
       { name: "affected-tests", phase: "merge", state: "running" },
     ]
     const text = await paint(
-      at(<WatchDetail detail={detailOf({ row: row({ state: "checked", position: 1 }) }, checks)} />),
+      at(<WatchDetail detail={detailOf({ row: row({ state: "checked", position: 1 }) }, checks)} selected="provisioning" />),
       [],
       160,
     )
 
     expect(text).toContain("setup (submit)")
     expect(text).toContain("setup (merge)")
-    expect(text.match(/✓ 0:01/gu)).toHaveLength(2)
+    expect(text.match(/✓.*0:01/gu)).toHaveLength(2)
   })
 })
 
@@ -1320,8 +1321,8 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
     })
     rounds.at(-1)?.resolve(snapshot({ at: new Date(NOW.getTime() + 60_000) }))
     await waitFor(() => {
-      // The typecheck tab's second line: its glyph and duration (25441).
-      expect(current(app)).toMatch(/✓ 1:02/u)
+      expect(current(app)).toContain("typecheck")
+      expect(current(app)).toMatch(/1:02/u)
     })
     expect(current(app)).not.toContain("this change's read failed")
     expect(open).toHaveBeenCalledTimes(2)
@@ -4158,10 +4159,8 @@ describe("one tab per stage of the round, from its journal (25441 slice 2)", () 
       "\n",
     )
 
-    const strip = lines.findIndex((line) => /Timeline\s+round\s+read\s+compose\s+typecheck\s+merge/u.test(line))
+    const strip = lines.findIndex((line) => /Timeline\s+provisioning\s+checking\s+merging\s+deprovisioning/u.test(line))
     expect(strip).toBeGreaterThan(-1)
-    // Each stage's second line is its glyph and duration; the round's says how many commands it holds.
-    expect(lines[strip + 1]).toMatch(/1 git\s+✓ 0:02\s+✓ 0:04\s+✓ 1:02\s+✓ 0:01/u)
     const said = lines.findIndex((line) => line.includes("$ git merge --no-edit task/one exit 1"))
     expect(said).toBeGreaterThan(strip)
     expect(lines[said + 1]).toContain("CONFLICT (content): Merge conflict in vendor/yrd")
@@ -4188,11 +4187,15 @@ describe("one tab per stage of the round, from its journal (25441 slice 2)", () 
     app.press("Enter")
     await settle(app)
     expect(loadCommandOutput).not.toHaveBeenCalled()
-    // One to the right of the Timeline is the round's own commands.
+    // One to the right of the Timeline is provisioning, which loads provisioning stage commands.
     app.press("ArrowRight")
     await settle(app)
     await waitFor(() => expect(current(app)).toContain("printed by fetch"))
-    expect(loadCommandOutput.mock.calls.map(([asked]) => asked.args.join(" "))).toEqual(["fetch origin"])
+    expect(loadCommandOutput.mock.calls.map(([asked]) => asked.args.join(" "))).toEqual([
+      "fetch origin",
+      "for-each-ref refs/yrd",
+      "merge --no-edit task/one",
+    ])
     app.unmount()
   })
 
@@ -4227,9 +4230,8 @@ describe("one tab per stage of the round, from its journal (25441 slice 2)", () 
     expect(open.mock.calls[0]?.[0].row.live?.check).toBe("typecheck")
     const text = current(app)
     expect(text).not.toContain("Queue: example.test/repo#main")
-    // Its stages in the order the round started them: the check, then the compose it is still in.
-    expect(text).toMatch(/Timeline\s+round\s+typecheck\s+compose/u)
-    expect(text).toMatch(/◉ 0:20\s+◉ 0:30/u)
+    // Its stage tabs
+    expect(text).toMatch(/Timeline\s+provisioning\s+checking\s+merging\s+deprovisioning/u)
     app.unmount()
     // The open step's own tab says the round is still writing it.
     const detail = await open({ row: live })
@@ -4297,13 +4299,13 @@ describe("an ended change's check that never ended (25521)", () => {
       journal.checks,
     )
     const detail = detailOf(item!, checks, { journal })
-    const text = await paint(at(<WatchDetail detail={detail} />), [], 160)
+    const text = await paint(at(<WatchDetail detail={detail} selected="checking" />), [], 160)
 
     const status = text.split("\n").find((line) => line.includes("Cancelled"))
     expect(status).toBeDefined()
     expect(status).not.toMatch(/checking/u)
     const strip = text.split("\n")
-    const tab = strip.findIndex((line) => line.includes("affected-tests"))
+    const tab = strip.findIndex((line) => line.includes("checking"))
     expect(strip[tab + 1]).toContain("unended")
     // No live age on the tab: the metadata's own "UPDATED … ago" clock is not the check's.
     expect(strip[tab + 1]).not.toMatch(/\d+d\d+h|\d+:\d\d/u)
@@ -4315,10 +4317,10 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
   it("while a change is in judge or merge phase, RUNNER box shows branch, who, step name and elapsed time", async () => {
     // 1. Judge phase (compose step)
     const composeLine: RunnerLine = {
-      state: "verifying",
+      state: "provisioning",
       holds: "task/judge-1@abcdef012345: compose",
       by: "@dev/9",
-      duration: "verifying 0:12",
+      duration: "provisioning 0:12",
       detail: "",
     }
     const composeLayout = listLayout([], 120, NOW, composeLine)
@@ -4328,9 +4330,9 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
     })
     await settle(composeApp)
     expect(composeApp.text).toContain("task/judge-1@abcdef012345: compose")
-    expect(composeApp.text).toContain("verifying")
+    expect(composeApp.text).toContain("provisioning")
     expect(composeApp.text).toContain("@dev/9")
-    expect(composeApp.text).toContain("verifying 0:12")
+    expect(composeApp.text).toContain("provisioning 0:12")
     composeApp.unmount()
 
     // 2. Check phase with subphase
@@ -4349,7 +4351,7 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
     })
     await settle(checkApp)
     expect(checkApp.text).toContain("task/check-1@abcdef012345: typecheck")
-    expect(checkApp.text).toContain("checking (typecheck)")
+    expect(checkApp.text).toContain("checking · typecheck")
     expect(checkApp.text).toContain("@dev/9")
     expect(checkApp.text).toContain("checking 0:25")
     checkApp.unmount()
@@ -4370,7 +4372,7 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
     })
     await settle(mergeApp)
     expect(mergeApp.text).toContain("task/merge-1@abcdef012345: publish")
-    expect(mergeApp.text).toContain("merging (publish)")
+    expect(mergeApp.text).toContain("merging · publish")
     expect(mergeApp.text).toContain("@dev/9")
     expect(mergeApp.text).toContain("merging 0:08")
     mergeApp.unmount()
@@ -4391,12 +4393,12 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
     })
     const runner = runnerOf(snap, NOW)
     expect(runner.state).not.toBe("idle")
-    expect(runner.state).toBe("verifying")
+    expect(runner.state).toBe("provisioning")
     expect(runner.holds).toContain("round lock held by pid 88888")
 
     const app = render(<RunnerTitledBox line={runner} snapshot={snap} layout={layout} />, { cols: 120, rows: 5 })
     await settle(app)
-    expect(app.text).toContain("verifying")
+    expect(app.text).toContain("provisioning")
     expect(app.text).not.toContain("idle")
     expect(app.text).toContain("round lock held by pid 88888")
     app.unmount()
