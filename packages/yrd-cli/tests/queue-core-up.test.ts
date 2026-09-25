@@ -44,6 +44,7 @@ import {
   parseQueueHealthDocument,
   QUEUE_HEALTH_DOCUMENT,
   readConfig,
+  readPause,
   readRecords,
   readRemoteCommit,
   readRunLog,
@@ -316,6 +317,74 @@ async function submitGitlink(w: GitlinkWorld, branch: string, sha: string): Prom
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
+  /** @failure A pause published while an event round judges a change is reported as stuck; Hab does not relaunch exit 2.
+   * @level l2 @consumer Hab's yrd service and its health reader
+   */
+  it("holds an event queue paused while judging without ending the service (25920)", async () => {
+    const w = await world()
+    const pauseCheck = join(w.workdir, "pause-during-check.ts")
+    writeFileSync(
+      pauseCheck,
+      `import { gitIn, readPause, writePause } from ${JSON.stringify(queueCoreEntry)}\n` +
+        `const git = gitIn(${JSON.stringify(w.work)})\n` +
+        `if (await readPause(git, "origin", "main") === undefined) {\n` +
+        `  await writePause(git, "origin", "main", { by: "@chief", kind: "paused", reason: "maintenance" })\n` +
+        `}\n`,
+    )
+    await redeclare(w, `checks:\n  - gate:\n      on: [submit]\n      run: bun ${pauseCheck}\n`)
+    const commit = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    await createEventQueue(
+      createEventStore(w.work, "origin", gitIn(w.work).selection),
+      "main",
+      commit,
+      config,
+      new Date(),
+    )
+    await w.git(["checkout", "--quiet", "-b", "task/pause-during-check", "main"])
+    writeFileSync(join(w.work, "change.txt"), "change\n")
+    await w.git(["add", "change.txt"])
+    await w.git(["commit", "--quiet", "-m", "change"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/pause-during-check",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+
+    const stop = new AbortController()
+    const run = capture(w.work)
+    let roundCount = 0
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        afterRound: async () => {
+          roundCount += 1
+          if (roundCount === 2) stop.abort()
+        },
+      },
+      { workdir: w.workdir, json: true },
+    )
+    expect(exit, JSON.stringify({ stderr: run.stderr(), stdout: run.stdout(), roundCount })).toBe(0)
+    expect(roundCount).toBe(2)
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({ by: "@chief", kind: "paused" })
+    expect(records(run)).toHaveLength(2)
+    for (const round of records(run)) {
+      expect(round).toMatchObject({
+        exitCode: 0,
+        merged: [],
+        stuck: [],
+        stopped: { ring: "pause", what: { by: "@chief" } },
+      })
+    }
+    expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({ facts: { stopped: { by: "@chief" } } })
+  })
+
   it("stays alive through pause and two consecutive merges after resume (24096)", async () => {
     const w = await world()
     const heads = new Map<string, string>()

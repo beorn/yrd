@@ -57,7 +57,7 @@ import { mergedBy } from "./legacy-records.ts"
 import { settledBaseCommit } from "./settled-base.ts"
 import { repairMissingBranchHeads } from "./remote.ts"
 import { expireOverrides, isActive, overrideFence } from "./override.ts"
-import { pauseFence } from "./pause.ts"
+import { pauseFence, QueuePaused } from "./pause.ts"
 import { overrideRef, pauseRef } from "./refs.ts"
 
 function discardedJudgementReason(current: EventChange, error: unknown): string {
@@ -812,6 +812,15 @@ export async function eventQueueRun(
         ),
       )
     } catch (error) {
+      if (error instanceof QueuePaused) {
+        // The operator stopped the line after this round read its authority. Hold it as state, not a stuck run.
+        log.write({ kind: "pause", reason: error.pause.reason, by: error.pause.by, sha: error.pause.sha })
+        return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch], {
+          ring: "pause",
+          says: error.pause.reason,
+          what: error.pause,
+        })
+      }
       const ref = changesRef(queue, branch)
       // Stage/write failures have no candidate event to reconcile and must
       // keep their original error. Only a publication attempt can be unknown.
