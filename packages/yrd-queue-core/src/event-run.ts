@@ -7,6 +7,7 @@ import {
   appendChangeEvent,
   appendPublishedMerge,
   changesRef,
+  expireQueueOverrides,
   listChangeHistories,
   readChangeEvents,
   queueResumedAfter,
@@ -39,7 +40,7 @@ import {
   type QueueRunOutcome,
   type RoundLine,
 } from "./run.ts"
-import { dispatchNotifications, messageFor } from "./with-notify.ts"
+import { dispatchNotifications, messageFor, notifyOutsideRound, overrideNotice } from "./with-notify.ts"
 import { changeName } from "./refs.ts"
 import { transportFaultIn } from "./setup-transport.ts"
 import { readRootChanges } from "./legacy-records.ts"
@@ -349,8 +350,51 @@ export async function eventQueueRun(
   }
 
   let queueState = await readEventQueue(store, queue)
-  if (queueState.opsCutover === undefined) {
-    await expireOverrides(git, options.target.remote, queue, options.now?.() ?? Date.now(), "yrd")
+  const clock =
+    queueState.opsCutover === undefined
+      ? await expireOverrides(git, options.target.remote, queue, options.now?.() ?? Date.now(), "yrd")
+      : await expireQueueOverrides(store, queue, options.now?.() ?? Date.now(), "yrd")
+  for (const [action, entries] of [
+    ["expired", clock.expired],
+    ["reminder", clock.reminded],
+  ] as const) {
+    for (const entry of entries) {
+      const notice = overrideNotice(entry, action, `${queue}@${target}`, log.id)
+      let deliveries: Awaited<ReturnType<typeof notifyOutsideRound>>
+      try {
+        deliveries = await notifyOutsideRound(
+          {
+            git,
+            repo: options.repo,
+            targetSha: target,
+            workdir: options.workdir,
+            notify: options.notify ?? [],
+            ...(options.setup === undefined ? {} : { setup: options.setup }),
+            ...(options.env === undefined ? {} : { env: options.env }),
+            ...(options.populateReference === undefined ? {} : { populateReference: options.populateReference }),
+            ...(options.process === undefined ? {} : { process: options.process }),
+          },
+          notice,
+        )
+      } catch (error) {
+        deliveries = [
+          { name: "notify", delivery: "failed", failure: error instanceof Error ? error.message : String(error) },
+        ]
+      }
+      for (const told of deliveries) {
+        log.write({
+          kind: "message",
+          says: "override",
+          action,
+          check: entry.check,
+          id: entry.record,
+          to: told.name,
+          delivered: told.delivery === "sent",
+          ...(told.failure === undefined ? {} : { error: told.failure }),
+          ...(told.refused === undefined ? {} : { refused: told.refused }),
+        })
+      }
+    }
   }
   let operational = await readEventOps(store, git, queue, target)
   queueState = operational.queue

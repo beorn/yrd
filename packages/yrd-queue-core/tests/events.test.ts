@@ -22,6 +22,7 @@ import {
   changesRef,
   decide,
   enumerateChangeSegments,
+  expireQueueOverrides,
   drop,
   eventPause,
   evolve,
@@ -1164,6 +1165,39 @@ describe("the queue-format boundary", () => {
       { expect: queue.tip },
     )
     await expect(readEventQueue(location, "lab")).rejects.toThrow(/exactly one complete Ops: snapshot/)
+  })
+
+  it("records one reminder and one expiration on the queue event ref", async () => {
+    const { store, location } = remoteMemStore("yrd-event-ops-clock")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    await seedOpsCutover(location, "lab")
+    await writeQueueOverride(
+      location,
+      "lab",
+      {
+        kind: "off",
+        check: "build",
+        until: new Date("2026-09-22T15:00:00.000Z"),
+        reason: "repair",
+        actor: { by: "operator", verified: true },
+      },
+      ["build"],
+      new Date("2026-09-22T14:00:40.000Z"),
+    )
+    const reminded = await expireQueueOverrides(location, "lab", Date.parse("2026-09-22T14:31:00.000Z"), "yrd")
+    expect(reminded.reminded.map((entry) => entry.check)).toEqual(["build"])
+    expect(reminded.expired).toEqual([])
+    expect(
+      (await expireQueueOverrides(location, "lab", Date.parse("2026-09-22T14:32:00.000Z"), "yrd")).reminded,
+    ).toEqual([])
+    const expired = await expireQueueOverrides(location, "lab", Date.parse("2026-09-22T15:01:00.000Z"), "yrd")
+    expect(expired.expired.map((entry) => entry.check)).toEqual(["build"])
+    expect(expired.table.entries[0]?.state).toBe("expired")
+    expect(
+      (await expireQueueOverrides(location, "lab", Date.parse("2026-09-22T15:02:00.000Z"), "yrd")).expired,
+    ).toEqual([])
   })
 
   it("retains one direct landing and its settled notice on the queue chain", async () => {

@@ -42,7 +42,6 @@ import {
   drop,
   pauseLine,
   eventDirectMergeCommits,
-  eventPause,
   eventListRows,
   enumerateChangeSegments,
   createEventStore,
@@ -53,7 +52,6 @@ import {
   queueRefPrefix,
   changesRef,
   readChangeEvents,
-  readEventQueue,
   readEventOps,
   readEventQueueWithChanges,
   setBranchIgnored,
@@ -106,6 +104,7 @@ import {
   writeOverride,
   type OverrideFact,
   type OverrideEntry,
+  type OverrideTable,
   notifyOutsideRound,
   overrideNotice,
   skippedChecks,
@@ -824,7 +823,7 @@ export async function coreQueueCommand(
         io.stderr(`${config.target.remote}#${name}: yrd-adopt-legacy-format: adoption needs an event queue\n`)
         return 1
       }
-      if (request.apply && eventPause(await readEventQueue(eventStore, name)) === undefined) {
+      if (request.apply && (await readEventOps(eventStore, git, name, captured.oid)).stop === undefined) {
         io.stderr(
           `${config.target.remote}#${name}: yrd-adopt-legacy-unpaused: pause with yrd queue pause --reason <text> before --apply\n`,
         )
@@ -1706,7 +1705,11 @@ export async function coreQueueCommand(
       // A stop that cannot be read is what a round that cannot read its queue
       // already is: stuck, exit 2, and no document claiming a state nobody read.
       try {
-        lastStop = (await readStop(git, config.target.remote, config.target.branch, captured.oid)).stop
+        const eventStore = createEventStore(repo, config.target.remote, selection)
+        lastStop =
+          (await queueFormat(eventStore, config.target.branch)) === "event"
+            ? (await readEventOps(eventStore, git, config.target.branch, captured.oid)).stop
+            : (await readStop(git, config.target.remote, config.target.branch, captured.oid)).stop
       } catch (error) {
         return stuck(
           `the line's stop cannot be read at start: ${error instanceof Error ? error.message : String(error)}`,
@@ -1948,11 +1951,10 @@ export async function coreQueueCommand(
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = reading.format === "event" ? reading.pause : reading.queue.stop
-        // The override table beside the stop (25296 C5). An event queue has no
-        // override (the verb refuses there), so it carries none.
+        // The table and stop come from the same authority read as this listing.
         const overrides =
           reading.format === "event"
-            ? []
+            ? overrideFacts(reading.overrides, Date.now())
             : overrideFacts(await readOverrides(git, config.target.remote, config.target.branch), Date.now())
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table. Zero
@@ -3774,6 +3776,7 @@ export type EventListingResult = Readonly<{
   journals: Journals
   drafts: DraftReading
   pause: PauseRecord | undefined
+  overrides: OverrideTable
   changes: ReadonlyMap<string, EventChange>
   invalid: Awaited<ReturnType<typeof readEventQueueWithChanges>>["invalid"]
   observation: GitObservation
@@ -3930,13 +3933,20 @@ export async function readEventListing(
       refs: [...queueRefs, ...branchRefs].map(([ref, oid]) => ({ ref, oid })),
     },
   })
+  const operational = await readEventOps(store, git, config.target.branch, targetOid)
+  if (operational.queue.tip !== queue.tip) {
+    throw new Error(
+      `${queueRef(config.target.branch)} moved from ${queue.tip} to ${operational.queue.tip} during listing; retry the read`,
+    )
+  }
   const reading: EventListingResult = {
     format: "event",
     all,
     document,
     journals: readJournals(join(workdir, "logs")),
     drafts,
-    pause: eventPause(queue),
+    pause: operational.stop,
+    overrides: operational.overrides,
     changes,
     invalid,
     observation,

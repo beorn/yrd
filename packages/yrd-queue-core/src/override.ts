@@ -246,6 +246,28 @@ export function reminderDue(entry: OverrideEntry, now: number): boolean {
   return now >= half
 }
 
+/** The one clock transition used by the legacy and event writers. */
+export function decideOverrideClock(
+  previous: OverrideTable,
+  now: number,
+): Readonly<{
+  entries: readonly OverrideEntry[]
+  expired: readonly OverrideEntry[]
+  reminded: readonly OverrideEntry[]
+}> {
+  const expired = previous.entries.filter((entry) => entry.state === "active" && !isActive(entry, now))
+  const reminded = previous.entries.filter((entry) => reminderDue(entry, now))
+  const at = new Date(now)
+  const entries = previous.entries.map((entry) =>
+    expired.includes(entry)
+      ? { ...entry, expiredAt: at, state: "expired" as const }
+      : reminded.includes(entry)
+        ? { ...entry, remindedAt: at }
+        : entry,
+  )
+  return { entries, expired, reminded }
+}
+
 /**
  * Write the `expired` record for every entry whose window has passed at `now`
  * and has none yet, and mark every entry whose half-window reminder is due, in
@@ -267,17 +289,8 @@ export async function expireOverrides(
   let lastError: unknown
   for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
     const previous = await readOverrides(git, remote, queue)
-    const due = previous.entries.filter((entry) => entry.state === "active" && !isActive(entry, now))
-    const remind = previous.entries.filter((entry) => reminderDue(entry, now))
+    const { entries, expired: due, reminded: remind } = decideOverrideClock(previous, now)
     if (due.length === 0 && remind.length === 0) return { expired: [], reminded: [], table: previous }
-    const at = new Date(now)
-    const entries = previous.entries.map((entry) =>
-      due.includes(entry)
-        ? { ...entry, expiredAt: at, state: "expired" as const }
-        : remind.includes(entry)
-          ? { ...entry, remindedAt: at }
-          : entry,
-    )
     const expiredNames = due.map((entry) => entry.check)
     const remindedNames = remind.map((entry) => entry.check)
     const subject =
