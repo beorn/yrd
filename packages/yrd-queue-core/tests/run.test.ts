@@ -409,6 +409,36 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
 })
 
+/** @failure One malformed change chain ended the service round before healthy changes could merge (25658).
+ * @level l3 @consumer queue operator and submitter
+ * The projection test cannot witness the service continuing through judgement and publication.
+ */
+it("merges a healthy event change beside one malformed change chain", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const queueTip = await createWorldEventQueue(w)
+  const head = await submitCommit(w, "task/healthy", "healthy.txt")
+  const brokenRef = changesRef("main", "task/broken")
+  await (
+    await openEvents({ ...store, ref: brokenRef })
+  ).append([changeInput("failed", { queueTip, at: new Date(), reason: "missing opening" })], { expect: null })
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/healthy"] })
+  expect(await readStatus(store, "main", "task/healthy")).toMatchObject({ status: "merged", commit: head })
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "observation",
+        subject: "invalid-change-chain",
+        branch: "task/broken",
+        ref: brokenRef,
+      }),
+    ]),
+  )
+})
+
 /** @failure A verifier refusal before checks omitted the branch's failures count, so the strict notify entry refused the record and the submitter heard nothing.
  * @level l3 @consumer event queue submitter (@i/10-yrd/25815)
  */
