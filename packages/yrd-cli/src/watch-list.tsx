@@ -101,6 +101,7 @@ export type ListLayout = Readonly<{
   ageRunWidth: number
   isSeparateColumns?: boolean
   isFullQueue?: boolean
+  taskWidth?: number
 }>
 
 /** The CHANGES cell's parenthesized suffix: the running check, else a failure's code — status, never identity. */
@@ -133,6 +134,71 @@ export function changesSuffix(row: Row): Readonly<{ text: string; color: string 
     }
   }
   return undefined
+}
+
+/**
+ * Shortens a string with an ellipsis when it exceeds maxLen (25716).
+ * Anything cut ends with an ellipsis.
+ */
+export function truncateWithEllipsis(str: string, maxLen: number): string {
+  if (maxLen <= 0) return ""
+  if (str.length <= maxLen) return str
+  if (maxLen === 1) return "…"
+  return `${str.slice(0, maxLen - 1)}…`
+}
+
+/**
+ * Allocates display widths for the ISSUE / BRANCH column (25716):
+ * - Branch name and error each take at most 50% of the column width.
+ * - Title keeps the remainder and never less than a third.
+ * - Anything cut ends with an ellipsis.
+ */
+export function taskExtrasLayout(
+  taskWidth: number,
+  branch: string,
+  suffixText: string | undefined,
+): Readonly<{
+  minTitle: number
+  displayBranch: string
+  displaySuffix?: string
+}> {
+  const minTitle = Math.ceil(taskWidth / 3)
+  const maxAllowedBranch = Math.max(1, Math.floor(taskWidth * 0.5) - 1)
+  const maxAllowedSuffix = Math.max(1, Math.floor(taskWidth * 0.5) - 3)
+
+  let displayBranch =
+    branch.length > maxAllowedBranch ? truncateWithEllipsis(branch, maxAllowedBranch) : branch
+
+  let displaySuffix =
+    suffixText === undefined
+      ? undefined
+      : suffixText.length > maxAllowedSuffix
+        ? truncateWithEllipsis(suffixText, maxAllowedSuffix)
+        : suffixText
+
+  const branchWidth = displayBranch.length > 0 ? 1 + displayBranch.length : 0
+  const suffixWidth = displaySuffix !== undefined ? 3 + displaySuffix.length : 0
+  const maxExtrasBudget = Math.max(0, taskWidth - minTitle)
+
+  if (
+    (branch.length > maxAllowedBranch || (suffixText !== undefined && suffixText.length > maxAllowedSuffix)) &&
+    branchWidth + suffixWidth > maxExtrasBudget
+  ) {
+    const halfBudget = Math.floor(maxExtrasBudget / 2)
+    const branchAlloc = Math.min(branchWidth, halfBudget)
+    const suffixAlloc = Math.min(suffixWidth, maxExtrasBudget - branchAlloc)
+    displayBranch = branchAlloc > 1 ? truncateWithEllipsis(branch, branchAlloc - 1) : ""
+    displaySuffix =
+      suffixText !== undefined && suffixAlloc > 3
+        ? truncateWithEllipsis(suffixText, suffixAlloc - 3)
+        : undefined
+  }
+
+  return {
+    minTitle,
+    displayBranch,
+    displaySuffix,
+  }
 }
 
 /**
@@ -176,6 +242,25 @@ export function listLayout(
         ? 0
         : 3
     : 0
+  const queueRunWidth = separate
+    ? 0
+    : Math.max(
+        11,
+        queueRunText(queue.digit, queue.label, undefined).length,
+        ...rows.map((item) => queueRunText(queue.digit, queue.label, runIdOf(item)).length),
+      )
+  const fixedNonTask =
+    timeWidth +
+    1 +
+    (separate
+      ? (qWidth > 0 ? qWidth + 1 : 0) + (runWidth > 0 ? runWidth + 1 : 0)
+      : queueRunWidth + 1) +
+    statusWidth +
+    (agentWidth > 0 ? 1 + agentWidth : 0) +
+    1 +
+    ageRunWidth +
+    1
+  const taskWidth = Math.max(12, columns - fixedNonTask)
   return {
     columns,
     timeWidth,
@@ -183,16 +268,11 @@ export function listLayout(
     agentWidth,
     qWidth,
     runWidth,
-    queueRunWidth: separate
-      ? 0
-      : Math.max(
-          11,
-          queueRunText(queue.digit, queue.label, undefined).length,
-          ...rows.map((item) => queueRunText(queue.digit, queue.label, runIdOf(item)).length),
-        ),
+    queueRunWidth,
     ageRunWidth,
     isSeparateColumns: separate,
     isFullQueue: fullQueue,
+    taskWidth,
   }
 }
 
@@ -512,6 +592,25 @@ export const ListRow = memo(function ListRow({
         : `${row.head.slice(0, 12)} (subject not fetched)`)
   const shownTitle = row.diagnostic === undefined ? title : `${row.diagnostic} · ${title}`
   const separateLineSuffix = (layout.columns ?? 120) < 100 && row.state === "stuck" && suffix !== undefined
+  const inlineSuffix = suffix === undefined || separateLineSuffix ? undefined : suffix.text
+  const computedTaskWidth =
+    layout.taskWidth ??
+    Math.max(
+      12,
+      (layout.columns ?? 120) -
+        ((layout.timeWidth ?? 5) +
+          1 +
+          (layout.isSeparateColumns
+            ? ((layout.qWidth ?? 0) > 0 ? (layout.qWidth ?? 0) + 1 : 0) +
+              ((layout.runWidth ?? 0) > 0 ? (layout.runWidth ?? 0) + 1 : 0)
+            : layout.queueRunWidth + 1) +
+          layout.statusWidth +
+          (layout.agentWidth > 0 ? 1 + layout.agentWidth : 0) +
+          1 +
+          layout.ageRunWidth +
+          1),
+    )
+  const { displayBranch, displaySuffix } = taskExtrasLayout(computedTaskWidth, row.branch, inlineSuffix)
   return (
     <Box
       flexDirection="column"
@@ -543,14 +642,16 @@ export const ListRow = memo(function ListRow({
               <Text color={forced ?? held} wrap="truncate" minWidth={0}>
                 {`${row.diagnostic !== undefined || (row.diagnostics?.length ?? 0) > 0 ? "\u26A0\uFE0E " : ""}${shownTitle}`}
               </Text>
-              <Text color={forced ?? held ?? "$fg-muted"} flexShrink={0}>
-                {" "}
-                {row.branch}
-              </Text>
-              {suffix === undefined || separateLineSuffix ? null : (
+              {displayBranch === "" ? null : (
+                <Text color={forced ?? held ?? "$fg-muted"} flexShrink={0}>
+                  {" "}
+                  {displayBranch}
+                </Text>
+              )}
+              {displaySuffix === undefined || suffix === undefined ? null : (
                 <Text color={forced ?? suffix.color} flexShrink={0} wrap="truncate">
                   {" "}
-                  ({suffix.text})
+                  ({displaySuffix})
                 </Text>
               )}
             </Box>

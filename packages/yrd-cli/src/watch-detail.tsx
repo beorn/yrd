@@ -565,7 +565,7 @@ function ChangeBox({
       {/* The clocks and the table cell's own duration, moved here from the status box (25441). */}
       <TimingRows row={row} />
       <Box height={1} flexShrink={0} />
-      <Text color="$fg-warning" wrap="truncate">
+      <Text color="$fg-warning" wrap="wrap">
         {changeId(row)}
       </Text>
       <Box height={1} flexShrink={0} />

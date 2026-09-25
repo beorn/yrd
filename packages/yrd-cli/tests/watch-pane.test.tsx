@@ -852,6 +852,46 @@ describe("the change list and the Timeline tab (items 2, 4, 6, 24, 25, 31; 25441
     expect(text).not.toMatch(/^\s*(POSITION|WAIT|AGE)\s/mu)
   })
 
+  it("keeps full text for a 150-character branch and 120-character error in the detail pane (25716)", async () => {
+    const longBranch =
+      "task/@i/10-yrd/25041-readers-tolerate-an-unknown-event-kind/25647-advance-pins/25667-readers-tolerate-an-unknown-event-kind-with-extra-padding-to-reach-150-chars-total-length"
+    const longError =
+      "failure in step check with very long diagnostic explanation that extends past normal terminal boundaries and squeezes the row"
+    const item: WatchRow = {
+      row: row({
+        branch: longBranch,
+        state: "failed",
+        reason: longError,
+      }),
+    }
+    const records: readonly ChangeRecord[] = [
+      {
+        at: new Date(NOW.getTime() - 10 * 60 * 1000),
+        kind: "opened",
+        sha: "cafebabe".padEnd(40, "0"),
+        subject: "opened",
+        trailers: [["Submitter", "@dev/9"]],
+      },
+      {
+        at: new Date(NOW.getTime() - 5 * 60 * 1000),
+        kind: "failed",
+        sha: "cafebabe".padEnd(40, "0"),
+        subject: "failed",
+        trailers: [
+          ["Reason", longError],
+          ["Detail", "full error detail that must remain visible"],
+        ],
+      },
+    ]
+    const detail = detailOf(item, CHECKS, { records })
+    const text = await paint(at(<WatchDetail detail={detail} selected={CHANGES_TAB} />), [], 80)
+
+    // In detail pane, branch is wrapped across lines, keeping the full text without truncation
+    const cleanText = text.replace(/[\s│╭╮╰╯─]+/gu, "")
+    expect(cleanText).toContain(longBranch)
+    expect(cleanText).toContain(longError.replace(/\s+/gu, ""))
+  })
+
   it("never renders git's comment lines from a commit body: a hand-resolved merge's `# Conflicts:` is not the queue's (25423)", async () => {
     const item: WatchRow = { row: row({ state: "merged", merge: "3".repeat(40) }) }
     const body =

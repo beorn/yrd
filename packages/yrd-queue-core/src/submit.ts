@@ -23,8 +23,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Event } from "gitomic/events"
-import { createEventStore, listRefs, openEvents, selectionFor } from "./git.ts"
+import { createEventStore, listRefs, openEvents, selectionFor, type Event } from "./git.ts"
 import { targetName, type Target } from "./config.ts"
 import { ABSENT, legacyStore, recordCommit } from "./legacy-records.ts"
 import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, type Git } from "./git.ts"
@@ -191,6 +190,18 @@ export function refuseTarget(branch: string, target: string): void {
   }
 }
 
+/**
+ * Refuse a task/ branch whose name is path-shaped (a slash after task/) (25716).
+ * Names the convention task/<issue-id>-<slug> as the cure.
+ */
+export function refusePathShapedBranch(branch: string): void {
+  if (branch.startsWith("task/") && branch.slice("task/".length).includes("/")) {
+    throw new Error(
+      `cannot submit path-shaped branch "${branch}": a slash after task/ is refused; use the convention task/<issue-id>-<slug>`,
+    )
+  }
+}
+
 export type SubmitInspection = Readonly<{
   head: string
   targetHead: string
@@ -212,7 +223,8 @@ function refuseMergedSubmit(events: readonly Event[], ref: string, root: string,
   const current = project(events, ref, root)
   if (current.status === "merging") {
     throw new Error(
-      `${branch}@${head} collides with the merge of ${branch}@${current.commit ?? "unknown head"} ` +
+      `landing in progress; resubmit after merged/failed/stuck, resume if runner gone: ` +
+        `${branch}@${head} collides with the merge of ${branch}@${current.commit ?? "unknown head"} ` +
         `at ${current.candidate ?? "unknown candidate"} (event ${current.tip ?? "unknown"}); ` +
         `retry after the merge of ${branch}@${current.commit ?? "unknown head"} ends`,
     )
@@ -229,6 +241,7 @@ function refuseMergedSubmit(events: readonly Event[], ref: string, root: string,
 /** The same read-only admission checks serve the action and its preview. */
 export async function inspectSubmit(git: Git, remote: string, request: SubmitRequest): Promise<SubmitInspection> {
   refuseTarget(request.branch, request.target.branch)
+  refusePathShapedBranch(request.branch)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)

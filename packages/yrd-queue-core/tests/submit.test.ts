@@ -24,6 +24,7 @@ import {
   readRecords,
   readQueue,
   readPause,
+  refusePathShapedBranch,
   selectionFor,
   refAt,
   submit,
@@ -761,5 +762,25 @@ describe("the queue read is every submitted change at the remote", () => {
     if (target === undefined || target === "") throw new Error("the remote target is absent")
     const entries = (await readQueue(w.git, "origin", "main", target)).changes
     expect(entries.find((entry) => entry.change.branch === "task/one")?.reading.state).toBe("merged")
+  })
+
+  it("refuses a task/ branch whose name is path-shaped (25716)", async () => {
+    expect(() => refusePathShapedBranch("task/@i/10-yrd/25716-foo")).toThrow(
+      'cannot submit path-shaped branch "task/@i/10-yrd/25716-foo": a slash after task/ is refused; use the convention task/<issue-id>-<slug>',
+    )
+    expect(() => refusePathShapedBranch("task/a/b")).toThrow(
+      'cannot submit path-shaped branch "task/a/b": a slash after task/ is refused; use the convention task/<issue-id>-<slug>',
+    )
+    expect(() => refusePathShapedBranch("task/25716-title-squeeze")).not.toThrow()
+    expect(() => refusePathShapedBranch("feature/nested/branch")).not.toThrow()
+
+    const w = await world()
+    const attempt = inspectSubmit(w.git, "origin", {
+      branch: "task/@i/10-yrd/25716-path",
+      submitter: "@dev/9",
+      target: { branch: "main", remote: "origin" },
+    })
+    await expect(attempt).rejects.toThrow("cannot submit path-shaped branch")
+    await expect(attempt).rejects.toThrow("task/<issue-id>-<slug>")
   })
 })

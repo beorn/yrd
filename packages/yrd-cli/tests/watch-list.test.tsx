@@ -17,7 +17,14 @@ import { act } from "react"
 import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
 import { foldDrafts, type Draft, type Row, type WatchRow } from "@yrd/queue-core"
-import { ListRow, changesSuffix, type ListLayout } from "../src/watch-list.tsx"
+import {
+  ListRow,
+  changesSuffix,
+  listLayout,
+  taskExtrasLayout,
+  truncateWithEllipsis,
+  type ListLayout,
+} from "../src/watch-list.tsx"
 import { draftsSaid } from "../src/watch-frame.tsx"
 import { NowContext, NowProvider } from "../src/watch-clock.ts"
 
@@ -213,4 +220,113 @@ describe("the drafts the home list folds into a count (25424)", () => {
     expect(draftsSaid(rows, { older: 0, unread: 0, window: "all" })).toBe("2 drafts (all)")
     expect(draftsSaid([], { older: 0, unread: 0, window: "7d" })).toBeUndefined()
   })
+})
+
+describe("ISSUE / BRANCH column capping and title preservation (25716)", () => {
+  const longBranch =
+    "task/@i/10-yrd/25041-readers-tolerate-an-unknown-event-kind/25647-advance-pins/25667-readers-tolerate-an-unknown-event-kind-with-extra-padding-to-reach-150-chars-total-length"
+  const longError =
+    "failure in step check with very long diagnostic explanation that extends past normal terminal boundaries and squeezes the row"
+
+  it("truncates with ellipsis when string exceeds maxLen", () => {
+    expect(truncateWithEllipsis("short", 10)).toBe("short")
+    expect(truncateWithEllipsis("exact10len", 10)).toBe("exact10len")
+    expect(truncateWithEllipsis("longer-than-ten", 10)).toBe("longer-th…")
+    expect(truncateWithEllipsis("longer", 1)).toBe("…")
+    expect(truncateWithEllipsis("longer", 0)).toBe("")
+  })
+
+  // Acceptance: in the ISSUE / BRANCH column, an error and a branch name each take at most 50%
+  // of the column's width; the title keeps the remainder and never less than a third;
+  // anything cut ends with an ellipsis; the full text stays in the detail pane.
+  // Witness: a 150-character branch and a 120-character error, each at three terminal widths (80, 120, 160).
+  for (const cols of [80, 120, 160]) {
+    it(`caps a 150-character branch at 50% width and guarantees title keeps >= 1/3 at ${cols} columns`, () => {
+      expect(longBranch.length).toBeGreaterThanOrEqual(150)
+      const layout = listLayout([], cols, NOW)
+      const taskWidth = layout.taskWidth!
+      expect(taskWidth).toBeGreaterThan(0)
+
+      const result = taskExtrasLayout(taskWidth, longBranch, undefined)
+      // Branch takes at most 50% of column width (including leading space: 1 + displayBranch.length <= 0.5 * taskWidth)
+      const branchDisplayWidth = result.displayBranch.length + 1
+      expect(branchDisplayWidth).toBeLessThanOrEqual(Math.floor(taskWidth * 0.5))
+      expect(result.displayBranch.endsWith("…")).toBe(true)
+
+      // Title keeps the remainder and never less than a third
+      const titleRemainder = taskWidth - branchDisplayWidth
+      expect(titleRemainder).toBeGreaterThanOrEqual(Math.ceil(taskWidth / 3))
+      expect(titleRemainder).toBeGreaterThanOrEqual(result.minTitle)
+    })
+
+    it(`caps a 120-character error at 50% width and guarantees title keeps >= 1/3 at ${cols} columns`, () => {
+      expect(longError.length).toBeGreaterThanOrEqual(120)
+      const layout = listLayout([], cols, NOW)
+      const taskWidth = layout.taskWidth!
+      expect(taskWidth).toBeGreaterThan(0)
+
+      const result = taskExtrasLayout(taskWidth, "task/short", `err=${longError}`)
+      // Suffix takes at most 50% of column width (including space and parens: 3 + displaySuffix.length <= 0.5 * taskWidth)
+      const suffixDisplayWidth = (result.displaySuffix?.length ?? 0) + 3
+      expect(suffixDisplayWidth).toBeLessThanOrEqual(Math.floor(taskWidth * 0.5))
+      expect(result.displaySuffix?.endsWith("…")).toBe(true)
+
+      // Title keeps the remainder and never less than a third
+      const totalExtras = result.displayBranch.length + 1 + suffixDisplayWidth
+      const titleRemainder = taskWidth - totalExtras
+      expect(titleRemainder).toBeGreaterThanOrEqual(Math.ceil(taskWidth / 3))
+    })
+
+    it(`renders a 150-char branch without squeezing out title in Silvery terminal at ${cols} columns`, async () => {
+      const row: Row = {
+        branch: longBranch,
+        head: "deadbeef".padEnd(40, "0"),
+        state: "queued",
+        subject: "feat(yrd): preserve the issue title",
+      }
+      const layout = listLayout([{ row }], cols, NOW)
+      const app = render(
+        <NowContext.Provider value={NOW}>
+          <ListRow cursor={false} item={{ row }} layout={layout} />
+        </NowContext.Provider>,
+        { cols, rows: 2 },
+      )
+      await act(async () => {
+        await app.waitForLayoutStable()
+      })
+      const line = app.lines[0] ?? ""
+      // Both title and truncated branch must be visible in the rendered terminal line
+      expect(line).toContain("feat(yrd):")
+      expect(line).toContain("task/@i/10-yrd/")
+      expect(line).toContain("…")
+      app.unmount()
+    })
+
+    it(`renders a 120-char error without squeezing out title in Silvery terminal at ${cols} columns`, async () => {
+      const row: Row = {
+        branch: "task/short-branch",
+        head: "deadbeef".padEnd(40, "0"),
+        state: "failed",
+        reason: longError,
+        subject: "feat(yrd): preserve the issue title",
+      }
+      const layout = listLayout([{ row }], cols, NOW)
+      const app = render(
+        <NowContext.Provider value={NOW}>
+          <ListRow cursor={false} item={{ row }} layout={layout} />
+        </NowContext.Provider>,
+        { cols, rows: 2 },
+      )
+      await act(async () => {
+        await app.waitForLayoutStable()
+      })
+      const line = app.lines[0] ?? ""
+      // Both title, branch, and truncated error must be visible in the rendered terminal line
+      expect(line).toContain("feat(yrd):")
+      expect(line).toContain("task/short")
+      expect(line).toContain("err=")
+      expect(line).toContain("…")
+      app.unmount()
+    })
+  }
 })
