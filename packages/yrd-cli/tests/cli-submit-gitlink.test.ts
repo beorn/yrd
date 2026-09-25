@@ -107,6 +107,7 @@ async function world(): Promise<World> {
     await git(["commit", "--quiet", "-m", `${name}: old`])
     const old = (await git(["rev-parse", "HEAD"])).trim()
     await git(["push", "--quiet", "origin", "main"])
+    await git(["push", "--quiet", "origin", `${old}:refs/git-super/pins/${old}`])
     components.push({
       path: `vendor/${name}`,
       remote: `https://git-super.test/owned/${name}.git`,
@@ -144,6 +145,7 @@ async function world(): Promise<World> {
     await child(["commit", "--quiet", "-am", "held"])
     component.held = (await child(["rev-parse", "HEAD"])).trim()
     await child(["push", "--quiet", "origin", "main"])
+    await child(["push", "--quiet", "origin", `${component.held}:refs/git-super/pins/${component.held}`])
     writeFileSync(join(component.work, component.path.endsWith("one") ? "one.txt" : "two.txt"), "unheld\n")
     await child(["commit", "--quiet", "-am", "unheld"])
     component.unheld = (await child(["rev-parse", "HEAD"])).trim()
@@ -337,15 +339,19 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     expect(await refs(w.remote)).toBe(before)
   }, 90_000)
 
-  it("lands a compatible pin after main advances another component without rebuilding the submitted branch", async () => {
+  it("lands an ahead pin after main advances that component without rebuilding the submitted branch", async () => {
     const w = await world()
-    const [one, two] = w.components as [World["components"][number], World["components"][number]]
-    const branch = `pin/vendor-one/${one.held.slice(0, 12)}`
+    const one = w.components[0]
+    if (one === undefined) throw new Error("fixture has no first component")
+    // The requested commit is held remotely, but component main is only at
+    // `held`. Root main starts at `old` and moves to `held` after submission.
+    await gitIn(one.work)(["push", "--quiet", "origin", `${one.unheld}:refs/git-super/pins/${one.unheld}`])
+    const branch = `pin/vendor-one/${one.unheld.slice(0, 12)}`
     const opened = await yrd(
       w.work,
       "submit",
       "--gitlink",
-      `${one.path}=${one.held}`,
+      `${one.path}=${one.unheld}`,
       "--issue",
       "25804",
       "--notify",
@@ -355,11 +361,11 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     const carrier = await remoteHead(w.remote, branch)
 
     const git = gitIn(w.work)
-    const child = gitIn(join(w.work, two.path))
+    const child = gitIn(join(w.work, one.path))
     await child(["fetch", "--quiet", "origin", "main"])
-    await child(["checkout", "--quiet", two.held])
-    await git(["add", two.path])
-    await git(["commit", "--quiet", "-m", "main advances two"])
+    await child(["checkout", "--quiet", one.held])
+    await git(["add", one.path])
+    await git(["commit", "--quiet", "-m", "main advances one to held"])
     await git(["push", "--quiet", "origin", "main"])
     const advanced = await remoteHead(w.remote, "main")
 
@@ -371,10 +377,9 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     expect(await refs(w.remote)).not.toContain(`refs/heads/${branch} `)
     const merged = await remoteHead(w.remote, "main")
     expect(merged).not.toBe(advanced)
-    for (const component of [one, two]) {
-      expect((await gitIn(w.remote)(["ls-tree", merged, component.path])).trim()).toBe(
-        `160000 commit ${component.held}\t${component.path}`,
-      )
-    }
+    expect((await gitIn(w.remote)(["ls-tree", merged, one.path])).trim()).toBe(
+      `160000 commit ${one.unheld}\t${one.path}`,
+    )
+    expect((await gitIn(join(w.root, "one.git"))(["rev-parse", "refs/heads/main"])).trim()).toBe(one.unheld)
   }, 90_000)
 })
