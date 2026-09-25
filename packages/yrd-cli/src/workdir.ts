@@ -15,19 +15,21 @@ export async function workdirOf(
   const cwd = options?.cwd ?? process.cwd()
   const env = options?.env ?? process.env
   let address = options?.address
-  if (address === undefined) {
-    try {
-      const queue = await originHead(git)
-      const remote = "origin"
-      const url = await remoteUrl(git, remote)
-      address = parseQueueAddress(queueName({ branch: queue, remote }, url))
-    } catch {
-      // Unaddressed repository, no remote, or detached HEAD
-    }
+  // A repository without an origin has no queue address, so its workdir is the host's. Any other failure to read
+  // origin (unreachable, no HEAD branch, a bad url) is an error: guessing would move every environment and log (25843).
+  if (address === undefined && (await hasOrigin(git))) {
+    const queue = await originHead(git)
+    const remote = "origin"
+    const url = await remoteUrl(git, remote)
+    address = parseQueueAddress(queueName({ branch: queue, remote }, url))
   }
   const host = await hostWorkdir(cwd, env, git)
   if (address !== undefined) {
     return queueRoot(host, address)
   }
   return host
+}
+
+async function hasOrigin(git: Git): Promise<boolean> {
+  return (await git(["remote"])).split("\n").some((name) => name.trim() === "origin")
 }
