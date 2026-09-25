@@ -27,6 +27,7 @@ import { DETAIL_BG, WatchPane, watchTier, type WatchSnapshot } from "../src/watc
 import {
   CHANGES_TAB,
   RunStatusBox,
+  StageBoxes,
   WatchDetail,
   commandKey,
   defaultTab,
@@ -42,7 +43,7 @@ import { printListing } from "../src/watch-print.tsx"
 import { runOf, type WatchRun } from "../src/watch-run.ts"
 import { rowLine, watchRowKey, type WatchRow } from "../src/watch-rows.ts"
 import { bandPlan, queueLine, runnerOf, RunnerTitledBox } from "../src/watch-frame.tsx"
-import { RunnerRow, listLayout } from "../src/watch-list.tsx"
+import { RunnerRow, StatusPills, TopLine, listLayout } from "../src/watch-list.tsx"
 import type { RunnerLine } from "../src/watch-runner.ts"
 import { journalRun } from "../../../tests/support/journal-run.ts"
 
@@ -4590,3 +4591,206 @@ describe("watch header styling, runner markers, and timer (25716 row 31)", () =>
     app.unmount()
   })
 })
+
+describe("termless screenshots for rows 3 to 5 (25716)", () => {
+  it("captures termless screenshot for row 3: stage tabs with a grey skipped stage", async () => {
+    const runningRow = row({
+      branch: "task/dev9-25716-check-skipping",
+      format: "event",
+      head: "18c8c19b60ae0123456789abcdef0123456789ab",
+      state: "merged",
+      subject: "feat(yrd): stage tabs, runner states, and check skipping",
+    })
+    const offChecks: readonly CheckPanel[] = [
+      {
+        name: "typecheck",
+        phase: "submit",
+        result: { exit: "0", ms: 0, result: "pass" },
+        spec: { name: "typecheck", run: "true" },
+        state: "off",
+      },
+    ]
+    const journal: JournalRun = {
+      at: NOW,
+      branch: runningRow.branch,
+      head: runningRow.head,
+      id: "run-25716",
+      startedAt: new Date(NOW.getTime() - 40_000),
+      checks: [],
+      steps: [
+        {
+          commands: [],
+          name: "compose",
+          phase: "submit",
+          startedAt: new Date(NOW.getTime() - 40_000),
+          endedAt: new Date(NOW.getTime() - 32_000),
+          ms: 8_000,
+        },
+        {
+          commands: [],
+          name: "publish",
+          phase: "merge",
+          startedAt: new Date(NOW.getTime() - 10_000),
+          endedAt: new Date(NOW.getTime() - 8_000),
+          ms: 2_000,
+        },
+      ],
+      commands: [],
+    }
+    const item: WatchRow = { row: runningRow }
+    const detail = detailOf(item, offChecks, { journal })
+    const app = render(
+      at(
+        <Box width={120} height={20} flexDirection="column" backgroundColor="$bg-surface">
+          <WatchDetail detail={detail} selected="checking" />
+        </Box>,
+      ),
+      { cols: 120, rows: 20 },
+    )
+    await settle(app)
+    const ansi = bufferToStyledText(app.term.buffer)
+    writeFileSync("/tmp/yrd-watch-25716-row3-stage-tabs.ansi", ansi, "utf8")
+    expect(ansi).toContain("Timeline")
+    expect(ansi).toContain("provisioning")
+    expect(ansi).toContain("checking")
+    expect(ansi).toContain("− not run")
+    expect(ansi).toContain("CHECKING — NOT RUN")
+    app.unmount()
+  })
+
+  it("captures termless screenshot for row 4: RUNNER box stage and sub-phase word", async () => {
+    const runnerStart = new Date(NOW.getTime() - 25_000)
+    const checkLine: RunnerLine = {
+      state: "checking",
+      subphase: "affected-tests",
+      holds: "task/dev9-25716-runner-stages@18c8c19b: affected-tests",
+      by: "@dev/9",
+      duration: "checking 0:25",
+      detail: "",
+    }
+    const activeRow = row({
+      branch: "task/dev9-25716-runner-stages",
+      format: "event",
+      head: "18c8c19b60ae0123456789abcdef0123456789ab",
+      live: { check: "affected-tests", phase: "submit", run: "q-20260924T223000-18c8c19b", since: runnerStart },
+      position: 1,
+      state: "checking",
+      subject: "feat(yrd): stage tabs, runner states, and check skipping",
+      submitter: "@dev/9",
+    })
+    const snap = snapshot({
+      at: NOW,
+      queues: [{ branch: "main", label: "main", path: "/hh/dev" }],
+      rows: [{ row: activeRow }],
+      unfiltered: [{ row: activeRow }],
+      runner: {
+        journalDir: "/w/logs",
+        service: { kind: "beating", state: "healthy", since: runnerStart },
+      },
+    })
+    const layout = listLayout([{ row: activeRow }], 120, NOW, checkLine)
+    const app = render(
+      at(
+        <Box width={120} height={12} flexDirection="column" gap={0} backgroundColor="$bg-surface">
+          <TopLine
+            status={{
+              word: "CHECKING",
+              color: "$fg-info",
+              marker: "◉",
+              pulse: true,
+            }}
+            queueAddress="github.com/beorn/hh-dev#main"
+            queues={snap.queues}
+            live={true}
+            columns={120}
+            timerText="00:00:25"
+          />
+          <StatusPills
+            buckets={new Set(["running", "open"])}
+            onSelectOnly={() => {}}
+            onToggle={() => {}}
+            statsOpen={false}
+            onToggleStats={() => {}}
+          />
+          <Box height={1} flexShrink={0} />
+          <RunnerTitledBox line={checkLine} snapshot={snap} layout={layout} />
+        </Box>,
+      ),
+      { cols: 120, rows: 12 },
+    )
+    await settle(app)
+    const ansi = bufferToStyledText(app.term.buffer)
+    writeFileSync("/tmp/yrd-watch-25716-row4-runner-box.ansi", ansi, "utf8")
+    expect(ansi).toContain("checking · affected-tests")
+    expect(ansi).toContain("task/dev9-25716-runner-stages@18c8c19b: affected-tests")
+    app.unmount()
+  })
+
+  it("captures termless screenshot for row 5: a run with every check off showing four boxes", async () => {
+    const runningRow = row({
+      branch: "task/dev9-25716-check-skipping",
+      format: "event",
+      head: "18c8c19b60ae0123456789abcdef0123456789ab",
+      state: "merged",
+      subject: "feat(yrd): stage tabs, runner states, and check skipping",
+    })
+    const offChecks: readonly CheckPanel[] = [
+      {
+        name: "typecheck",
+        phase: "submit",
+        result: { exit: "0", ms: 0, result: "pass" },
+        spec: { name: "typecheck", run: "true" },
+        state: "off",
+      },
+    ]
+    const journal: JournalRun = {
+      at: NOW,
+      branch: runningRow.branch,
+      head: runningRow.head,
+      id: "run-25716",
+      startedAt: new Date(NOW.getTime() - 40_000),
+      checks: [],
+      steps: [
+        {
+          commands: [],
+          name: "compose",
+          phase: "submit",
+          startedAt: new Date(NOW.getTime() - 40_000),
+          endedAt: new Date(NOW.getTime() - 32_000),
+          ms: 8_000,
+        },
+        {
+          commands: [],
+          name: "publish",
+          phase: "merge",
+          startedAt: new Date(NOW.getTime() - 10_000),
+          endedAt: new Date(NOW.getTime() - 8_000),
+          ms: 2_000,
+        },
+      ],
+      commands: [],
+    }
+    const item: WatchRow = { row: runningRow }
+    const detail = detailOf(item, offChecks, { journal })
+    const app = render(
+      at(
+        <Box width={120} height={28} flexDirection="column" backgroundColor="$bg-surface" padding={1}>
+          <StageBoxes detail={detail} />
+        </Box>,
+      ),
+      { cols: 120, rows: 28 },
+    )
+    await settle(app)
+    const ansi = bufferToStyledText(app.term.buffer)
+    writeFileSync("/tmp/yrd-watch-25716-row5-four-boxes.ansi", ansi, "utf8")
+    expect(ansi).toContain("STAGES")
+    expect(ansi).toContain("PROVISIONING")
+    expect(ansi).toContain("CHECKING")
+    expect(ansi).toContain("MERGING")
+    expect(ansi).toContain("DEPROVISIONING")
+    expect(ansi).toContain("every declared check is off")
+    expect(ansi).toContain("skipped: no check worktree was created")
+    app.unmount()
+  })
+})
+
