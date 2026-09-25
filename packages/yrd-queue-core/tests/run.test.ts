@@ -7390,4 +7390,67 @@ describe("skipping setup and worktree when every declared check is off (25716 ro
     expect(existsSync(setupLog)).toBe(true)
     expect(readFileSync(setupLog, "utf8")).toContain("setup-ran")
   })
+
+  it("performs no setup and creates no check worktree on an event queue when all checks are declared run 'true', but performs both with a real check (25716 row 5 event runner)", async () => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    await submitCommit(w, "task/one", "one.txt")
+    const setupLog = join(w.workdir, "setup-marker.log")
+    const setupCmd = `echo "setup-ran" >> "${setupLog}"`
+
+    // 1. Run with checks declared run "true" on event queue
+    const optsTrue = await w.options({ setup: setupCmd })
+    const outcomeTrue = await queueRun({
+      ...optsTrue,
+      checks: [{ name: "c1", run: "true" }],
+      notify: [],
+    })
+    expect(outcomeTrue.merged).toEqual(["task/one"])
+    expect(existsSync(setupLog)).toBe(false)
+
+    // 2. Run with one real check on event queue
+    await submitCommit(w, "task/two", "two.txt")
+    const optsReal = await w.options({ exit: 0, setup: setupCmd })
+    const outcomeReal = await queueRun({
+      ...optsReal,
+      checks: [{ name: "c1", run: "true" }, { name: "c2", run: ":" }],
+      notify: [],
+    })
+    expect(outcomeReal.merged).toEqual(["task/two"])
+    expect(existsSync(setupLog)).toBe(true)
+    expect(readFileSync(setupLog, "utf8")).toContain("setup-ran")
+  })
+
+  it("journals event queue runner stages as step records across judge and merge (25716)", async () => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    await submitCommit(w, "task/event-step", "file.txt")
+    const opts = await w.options({ exit: 0 })
+    const outcome = await queueRun({
+      ...opts,
+      checks: [{ name: "c1", run: ":" }],
+      notify: [],
+    })
+    expect(outcome.merged).toEqual(["task/event-step"])
+    const journal = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
+    if (journal === undefined) throw new Error("queue run left no journal")
+    const rows = readFileSync(join(w.workdir, "logs", journal), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    const steps = rows.filter((row) => row.kind === "step")
+    const stepNames = steps.map((s) => s.name)
+    expect(stepNames).toContain("compose")
+    expect(stepNames).toContain("prepare")
+    expect(stepNames).toContain("remove")
+    expect(stepNames).toContain("publish")
+    expect(stepNames).toContain("merge")
+    expect(stepNames).toContain("notify")
+    for (const step of steps) {
+      expect(step.start).toBeDefined()
+      if (step.end !== undefined) {
+        expect(typeof step.ms).toBe("number")
+      }
+    }
+  })
 })
