@@ -94,6 +94,12 @@ export type Row<Status extends string = ChangeState | ChangeStatus | "direct" | 
   at?: Date
   /** The merge commit on the target, full sha, from the merged record's `Merge:` (carried by the sent record too); absent until merged. */
   merge?: string
+  /**
+   * Later merged endings of this same head, folded into this row (25718): a
+   * re-submit after a merge can merge the head again, and one change is one
+   * row. Each names its ending event and when it ended.
+   */
+  duplicates?: readonly Readonly<{ ending: string; endedAt?: Date }>[]
   /** The target commit the change was merged or judged at, full sha, from the record's `Base:`. */
   base?: string
   /**
@@ -446,11 +452,11 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
   const checkingMs = since(row.live?.since)
   const waitingMs = waitingState && row.live === undefined ? since(row.since) : undefined
   const stuckMs = row.state === "stuck" && row.live === undefined ? since(endedWhen) : undefined
-  const tookMs =
-    ended && (row.since ?? row.at) !== undefined && endedWhen !== undefined
-      ? Math.max(0, endedWhen.getTime() - (row.since ?? row.at)!.getTime())
-      : undefined
   const opened = row.since ?? row.at
+  const tookMs =
+    ended && opened !== undefined && endedWhen !== undefined
+      ? Math.max(0, endedWhen.getTime() - opened.getTime())
+      : undefined
   const ageMs =
     opened === undefined
       ? undefined

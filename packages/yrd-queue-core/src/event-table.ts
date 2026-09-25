@@ -80,26 +80,60 @@ export function eventRows(
 }
 
 /** The current table and the opened-segment document share the legacy seven-day ending window. */
+/**
+ * One change is one row (25718): a segment that merged a head an earlier
+ * segment already merged is the same ending recorded twice (a re-submit after
+ * the merge, 25708), so it folds into that earlier row as a duplicate note
+ * instead of standing as a second merged row with its own `since`.
+ */
+function foldEqualEndings(
+  segments: readonly EventChange[],
+): readonly Readonly<{ segment: EventChange; duplicates?: Row<ChangeStatus>["duplicates"] }>[] {
+  const kept: { segment: EventChange; duplicates?: { ending: string; endedAt?: Date }[] }[] = []
+  for (const segment of segments) {
+    const original =
+      segment.status === "merged" && segment.commit !== undefined
+        ? kept.find((entry) => entry.segment.status === "merged" && entry.segment.commit === segment.commit)
+        : undefined
+    if (original === undefined || segment.ending === undefined) {
+      kept.push({ segment })
+      continue
+    }
+    original.duplicates = [
+      ...(original.duplicates ?? []),
+      { ending: segment.ending.id, ...(segment.endedAt === undefined ? {} : { endedAt: segment.endedAt }) },
+    ]
+  }
+  return kept
+}
+
 export function eventListRows(
   histories: ReadonlyMap<string, readonly EventChange[]>,
   drafts: readonly Draft[],
   options: Readonly<{ now?: Date; all?: boolean; drafts?: boolean }> = {},
 ): Readonly<{ table: readonly Row<ChangeStatus>[]; document: readonly Row<ChangeStatus>[] }> {
   const now = options.now ?? new Date()
+  const folded = new Map([...histories].map(([branch, segments]) => [branch, foldEqualEndings(segments)] as const))
   const current = new Map(
-    [...histories].map(([branch, segments]) => {
+    [...folded].map(([branch, segments]) => {
       const last = segments.at(-1)
       if (last === undefined) throw new Error(`event change ${branch} has no opened segment`)
-      return [branch, last] as const
+      return [branch, last.segment] as const
     }),
   )
-  const active = eventRows(current)
-  const previous = [...histories].flatMap(([branch, segments]) =>
-    segments.slice(0, -1).map((segment) => {
+  const duplicatesOf = (branch: string, index: number): Row<ChangeStatus>["duplicates"] =>
+    folded.get(branch)?.[index]?.duplicates
+  const active = eventRows(current).map((row) => {
+    const duplicates =
+      row.format === "event" ? duplicatesOf(row.branch, (folded.get(row.branch)?.length ?? 0) - 1) : undefined
+    return duplicates === undefined ? row : { ...row, duplicates }
+  })
+  const previous = [...folded].flatMap(([branch, segments]) =>
+    segments.slice(0, -1).map(({ segment, duplicates }) => {
       const single = eventRows(new Map([[branch, segment]]))[0]
       if (single === undefined) throw new Error(`event change ${branch} lost an opened segment`)
       const { position: _position, ...row } = single
-      return row
+      return duplicates === undefined ? row : { ...row, duplicates }
     }),
   )
   const visible = (row: Row): boolean => {

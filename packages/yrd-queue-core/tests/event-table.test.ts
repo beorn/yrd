@@ -40,6 +40,39 @@ describe("event changes use the shared table row", () => {
     expect(expanded.table.map((row) => row.head)).toEqual([HEAD, drafts[0]!.head])
     expect(expanded.document.map((row) => row.head)).toEqual([HEAD, prior.commit, ancient.commit, drafts[0]!.head])
   })
+  it("folds a head merged twice into one row that names the later ending (25718)", () => {
+    // A re-submit after the merge (25708) opened a second segment on the same
+    // head, and the queue merged it again: one change, two equal endings. As
+    // two rows with two `since` values, every strict reader refused the list.
+    const first = new Date("2026-09-24T23:18:31.002Z")
+    const second = new Date("2026-09-24T23:20:49.151Z")
+    const ended = new Date("2026-09-24T23:21:21.000Z")
+    const now = new Date("2026-09-24T23:30:00.000Z")
+    const merged = {
+      status: "merged" as const,
+      commit: HEAD,
+      since: first,
+      at: first,
+      endedAt: first,
+      ending: { kind: "merged" as const, id: "e".repeat(40) },
+    }
+    const again = {
+      status: "merged" as const,
+      commit: HEAD,
+      since: second,
+      at: ended,
+      endedAt: ended,
+      ending: { kind: "merged" as const, id: "f".repeat(40) },
+    }
+    const listed = eventListRows(new Map([["task/twice", [merged, again]]]), [], { now })
+    expect(listed.document.map((row) => [row.head, row.since])).toEqual([[HEAD, first]])
+    expect(listed.document[0]?.duplicates).toEqual([{ ending: "f".repeat(40), endedAt: ended }])
+    expect(listed.table.map((row) => row.since)).toEqual([first])
+
+    // A head that failed and then merged is two endings, not one: both rows stay.
+    const failed = { ...merged, status: "failed" as const, ending: { kind: "failed" as const, id: "e".repeat(40) } }
+    expect(eventListRows(new Map([["task/retry", [failed, again]]]), [], { now }).document).toHaveLength(2)
+  })
   it("projects one row per branch with the fold's current status, submitted head and ending reason", () => {
     const opened = evolve(
       initial,
