@@ -249,6 +249,7 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
             journalDir: "/w/logs",
             service: {
               kind: "stopped",
+              graceful: true,
               cause: "operator-stop",
               why: "operator requested stop",
               stopReason: "maintenance in progress",
@@ -265,6 +266,22 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         const text = await paint(snap)
         expect(text).toContain("■ YRD STOPPED")
         expect(text).toContain("YRD STOPPED maintenance in progress")
+      })
+
+      it("case 6 (stopped outside a graceful stop): queue line carries the service's sentence, never a bare STOPPED", async () => {
+        const why =
+          "stopped outside a graceful stop since 2026-09-24T00:00:00.000Z; hab ps yrd-queue has the supervisor's record"
+        const snap = snapshot({
+          stopped: null,
+          runner: {
+            journalDir: "/w/logs",
+            service: { kind: "stopped", graceful: false, cause: "the writer does not answer", why },
+          },
+        })
+
+        const status = queueLineStatus(snap, NOW)
+        expect(status.word).toBe("STOPPED")
+        expect(status.reason).toBe(why)
       })
     })
   })
