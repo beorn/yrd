@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join, relative } from "node:path"
+import { dirname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, type Git } from "@yrd/queue-core"
@@ -124,7 +124,9 @@ describe("yrd env open prepares the retained environment", () => {
     const run = await command(nested, [process.execPath, cli, "env", "open", selected, "--json"])
     expect(run, run.stderr).toMatchObject({ exit: 0 })
     const { path } = JSON.parse(run.stdout) as { path: string }
-    expect(path.startsWith(join(w.work, "relative-state", "environments") + "/")).toBe(true)
+    // The queue root sits under the configured workdir since 25716 row 9; the root is what resolves (25848).
+    expect(path.startsWith(join(w.work, "relative-state") + "/")).toBe(true)
+    expect(path).toContain(`${sep}environments${sep}`)
     const listed = await command(nested, [process.execPath, cli, "env", "list", "--json"])
     expect(listed, listed.stderr).toMatchObject({ exit: 0 })
     expect(JSON.parse(listed.stdout)).toMatchObject({ environments: [{ path, head: selected }] })
