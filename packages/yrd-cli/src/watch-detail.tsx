@@ -458,6 +458,75 @@ export function RunStatusBox({ run, joinedRun = false }: { run: WatchRun; joined
   )
 }
 
+export type DetailStepEntry = Readonly<{
+  name: string
+  kind: "step" | "check"
+  startedAt: Date
+  endedAt?: Date
+  ms?: number
+}>
+
+/** The change's steps and checks from its journal in chronological order (25716). */
+export function detailSteps(detail: ChangeDetail): readonly DetailStepEntry[] {
+  const steps: DetailStepEntry[] = []
+  if (detail.journal?.steps) {
+    for (const s of detail.journal.steps) {
+      steps.push({ name: s.name, kind: "step", startedAt: s.startedAt, endedAt: s.endedAt, ms: s.ms })
+    }
+  }
+  if (detail.journal?.checks) {
+    for (const c of detail.journal.checks) {
+      steps.push({ name: c.name, kind: "check", startedAt: c.startedAt, endedAt: c.endedAt, ms: c.ms })
+    }
+  }
+  return steps.sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime())
+}
+
+/** Lists a running change's steps with start and end times from the journal (25716). */
+function RunningSteps({ detail }: { detail: ChangeDetail }) {
+  const isRunning =
+    detail.row.live !== undefined ||
+    detail.row.state === "checking" ||
+    detail.row.state === "verifying" ||
+    detail.journal?.running !== undefined
+  if (!isRunning && detail.journal === undefined) return null
+  const steps = detailSteps(detail)
+  if (steps.length === 0) return null
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      <Box height={1} flexShrink={0} />
+      <Text color="$fg-muted" bold>
+        STEPS
+      </Text>
+      {steps.map((step, idx) => {
+        const start = clock(step.startedAt, { seconds: true })
+        const end = step.endedAt !== undefined ? clock(step.endedAt, { seconds: true }) : "running"
+        const elapsed =
+          step.ms !== undefined
+            ? mediaDuration(step.ms)
+            : step.endedAt !== undefined
+              ? mediaDuration(step.endedAt.getTime() - step.startedAt.getTime())
+              : undefined
+        return (
+          <Box key={`${step.name}-${idx}`} flexDirection="row" minWidth={0} gap={1}>
+            <Text color="$fg-muted" flexShrink={0}>
+              {start} – {end}
+            </Text>
+            {elapsed === undefined ? null : (
+              <Text color="$fg-muted" flexShrink={0}>
+                ({elapsed})
+              </Text>
+            )}
+            <Text wrap="truncate">
+              {step.name}
+            </Text>
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
 /** The clocks rows, the one part of the timeline that moves every second: its own leaf on the second clock. */
 function TimingRows({ row }: { row: Row }) {
   const now = useNow()
@@ -564,6 +633,7 @@ function ChangeBox({
       )}
       {/* The clocks and the table cell's own duration, moved here from the status box (25441). */}
       <TimingRows row={row} />
+      <RunningSteps detail={detail} />
       <Box height={1} flexShrink={0} />
       <Text color="$fg-warning" wrap="wrap">
         {changeId(row)}

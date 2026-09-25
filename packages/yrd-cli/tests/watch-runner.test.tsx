@@ -736,10 +736,38 @@ describe("the runner's row", () => {
       })
 
       const line = runnerLine(facts, NOW, { waiting: 5 })
-      expect(line.state).toBe("checking")
+      expect(line.state).toBe("verifying")
       expect(line.holds).toBe("judging task/feat@abcdef012345: compose")
-      expect(line.duration).toBe("checking 0:50")
+      expect(line.duration).toBe("verifying 0:50")
       expect(line.detail).toContain("typecheck, off, off")
+    })
+
+    it("formats checking phase check with subphase", () => {
+      const factsWithCheck = (check: NonNullable<NonNullable<RunnerFacts["latest"]>["activeStep"]>): RunnerFacts => ({
+        journalDir: "/w/logs",
+        service: BEATING,
+        latest: {
+          activeStep: check,
+          alive: true,
+          effectiveChecks: ["vitest", "typecheck"],
+          id: "q-check",
+          lastWriteAt: NOW,
+          startedAt: NOW,
+        },
+      })
+
+      const checkStep = factsWithCheck({
+        branch: "task/check",
+        head: "abcdef0123456789abcdef0123456789abcdef01",
+        kind: "check",
+        name: "vitest",
+        phase: "submit",
+        start: new Date(NOW.getTime() - 25_000),
+      })
+      const checkLine = runnerLine(checkStep, NOW, {})
+      expect(checkLine.state).toBe("checking")
+      expect(checkLine.subphase).toBe("vitest")
+      expect(checkLine.duration).toBe("checking 0:25")
     })
 
     it("formats merge phase steps (merge, publish, push)", () => {
@@ -766,6 +794,7 @@ describe("the runner's row", () => {
       })
       const mergeLine = runnerLine(mergeStep, NOW, {})
       expect(mergeLine.state).toBe("merging")
+      expect(mergeLine.step).toBe("merge")
       expect(mergeLine.holds).toBe("merging task/land@111122223333: merge")
       expect(mergeLine.duration).toBe("merging 0:15")
       expect(mergeLine.detail).toContain("off, off, off")
@@ -780,6 +809,7 @@ describe("the runner's row", () => {
       })
       const publishLine = runnerLine(publishStep, NOW, {})
       expect(publishLine.state).toBe("merging")
+      expect(publishLine.step).toBe("publish")
       expect(publishLine.holds).toBe("merging task/land@111122223333: publish")
       expect(publishLine.duration).toBe("merging 0:05")
 
@@ -790,12 +820,12 @@ describe("the runner's row", () => {
         start: new Date(NOW.getTime() - 2_000),
       })
       const readLine = runnerLine(readStep, NOW, {})
-      expect(readLine.state).toBe("checking")
+      expect(readLine.state).toBe("verifying")
       expect(readLine.holds).toBe("between entries: re-reading main")
-      expect(readLine.duration).toBe("checking 0:02")
+      expect(readLine.duration).toBe("verifying 0:02")
     })
 
-    it("formats round lock holder when runner is idle and queue has waiting items", () => {
+    it("formats round lock holder when runner is idle (never idle while lock is held, 25716)", () => {
       const idleWithLock: RunnerFacts = {
         journalDir: "/w/logs",
         service: BEATING,
@@ -812,7 +842,7 @@ describe("the runner's row", () => {
         },
       }
       const line = runnerLine(idleWithLock, NOW, { waiting: 3 })
-      expect(line.state).toBe("idle")
+      expect(line.state).toBe("verifying")
       expect(line.holds).toBe("round lock held by pid 99999 (bun yrd queue up)")
     })
   })

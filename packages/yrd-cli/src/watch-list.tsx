@@ -208,15 +208,23 @@ export function taskExtrasLayout(
  * measured with them: the runner is a row now, not a box with its own
  * geometry.
  */
+/** The runner's status word with optional sub-phase / step (25716). */
+export function runnerStatusWord(line: RunnerLine): string {
+  const base = STATE_WORDS[line.state].word
+  if (line.state === "checking" && line.subphase) return `${base} (${line.subphase})`
+  if (line.state === "merging" && line.step) return `${base} (${line.step})`
+  return base
+}
+
 export function listLayout(
   rows: readonly WatchRow[],
   columns: number,
   now: Date,
-  runner?: Pick<RunnerLine, "state" | "duration" | "by">,
+  runner?: Pick<RunnerLine, "state" | "duration" | "by" | "subphase" | "step">,
   queue: Readonly<{ digit: number; label: string }> = { digit: 1, label: "main" },
   options?: { singleQueue?: boolean; separateColumns?: boolean; fullQueueRefs?: boolean },
 ): ListLayout {
-  const runnerWord = runner === undefined ? "" : STATE_WORDS[runner.state].word
+  const runnerWord = runner === undefined ? "" : runnerStatusWord(runner as RunnerLine)
   const runIdOf = (item: WatchRow): string | undefined => item.run?.id ?? item.row.run
   const separate = options?.separateColumns ?? false
   const single = options?.singleQueue ?? true
@@ -804,7 +812,7 @@ export function RunnerRow({
               </Text>
               <Text color={forced ?? color} wrap="truncate">
                 {" "}
-                {word}
+                {runnerStatusWord(line)}
               </Text>
             </Box>
           ),

@@ -61,10 +61,8 @@ export const LEGEND_STATES = [
 export const RUNNER_STATES = [
   "idle",
   "verifying",
-  "provisioning",
   "checking",
   "merging",
-  "deprovisioning",
   "stuck",
   "paused",
 ] as const
@@ -103,7 +101,16 @@ export const RUNNER_SIGNALS = ["silent", "stopped", "unpublished"] as const
  * than editing it, and {@link legendLines} says which is which rather than
  * promising a word no reading can reach.
  */
-export const RUNNER_STATES_SAID = ["idle", "checking", "stopped", "stuck", "paused", "unpublished"] as const
+export const RUNNER_STATES_SAID = [
+  "idle",
+  "verifying",
+  "checking",
+  "merging",
+  "stopped",
+  "stuck",
+  "paused",
+  "unpublished",
+] as const
 
 /** A word a change's row can show: one of the nine, or `direct`, which is no change. */
 export type DisplayState =
@@ -185,26 +192,14 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
   verifying: {
     color: "$fg-info",
     means: "the runner is composing the tree that will be judged, where the change meets the target as it is now",
-    next: "provisioning, or stuck",
-    word: "fitting",
+    next: "checking, or stuck",
+    word: "verifying",
   },
   "event-verifying": {
     color: "$fg-info",
     means: "the event queue is composing the candidate it will judge",
     next: "checking or stuck",
     word: "verifying",
-  },
-  provisioning: {
-    color: "$fg-info",
-    means: "the runner is preparing the worktree the checks will run in",
-    next: "checking",
-    word: "provisioning",
-  },
-  deprovisioning: {
-    color: "$fg-info",
-    means: "the runner is clearing the worktree the checks ran in",
-    next: "idle",
-    word: "deprovisioning",
   },
   idle: {
     color: "$fg-muted",
@@ -243,7 +238,7 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
   runner: { color: "$fg-muted", word: "RUNNER" },
 }
 
-/** The legend's word column: the longest word and its gap (`deprovisioning`). */
+/** The legend's word column: the longest word and its gap. */
 const WORD_COLUMN = 16
 
 /**

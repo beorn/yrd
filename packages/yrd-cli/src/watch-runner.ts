@@ -61,6 +61,18 @@ export type ActiveRunnerStep = Readonly<{
   start: Date
 }>
 
+export type RunnerJournalStep = Readonly<{
+  kind: "step" | "check"
+  name: string
+  phase: string
+  branch?: string
+  head?: string
+  target?: string
+  base?: string
+  start: Date
+  end?: Date
+}>
+
 export type RunnerRun = Readonly<{
   id: string
   startedAt: Date
@@ -73,6 +85,7 @@ export type RunnerRun = Readonly<{
   checks?: readonly string[]
   effectiveChecks?: readonly string[]
   activeStep?: ActiveRunnerStep
+  steps?: readonly RunnerJournalStep[]
   /** The line as this run read it, from its own `observation`/`line` record (25669), once it has. */
   line?: RoundLine
   /** The process the run's `.pid` file names, when the file is still there. */
@@ -354,6 +367,8 @@ type JournalHead = Readonly<{
   died: boolean
   /** The step or check currently running, if any. */
   activeStep?: ActiveRunnerStep
+  /** All steps and checks from the journal. */
+  steps?: readonly RunnerJournalStep[]
   /** The line as the run journalled it, when it has. */
   line?: RoundLine
 }>
@@ -402,6 +417,7 @@ function readRunHeader(path: string): JournalHead {
   const records: LogRecord[] = []
   let header: Record<string, unknown> | undefined
   const openSteps: ActiveRunnerStep[] = []
+  const allSteps: RunnerJournalStep[] = []
   for (const [index, line] of lines.entries()) {
     if (header !== undefined) {
       // PAST THE HEADER the journal is the run's ordinary business, which this
@@ -429,7 +445,11 @@ function readRunHeader(path: string): JournalHead {
         const base = typeof record.base === "string" ? record.base : undefined
 
         if (startStr !== undefined) {
+          const start = new Date(startStr)
+          const validStart = Number.isNaN(start.getTime()) ? new Date() : start
           if (endStr !== undefined) {
+            const end = new Date(endStr)
+            const validEnd = Number.isNaN(end.getTime()) ? undefined : end
             const idx = openSteps.findLastIndex(
               (s) =>
                 s.kind === kind &&
@@ -440,8 +460,23 @@ function readRunHeader(path: string): JournalHead {
                 s.target === target,
             )
             if (idx >= 0) openSteps.splice(idx, 1)
+            const allIdx = allSteps.findLastIndex(
+              (s) =>
+                s.kind === kind &&
+                s.name === name &&
+                s.phase === phase &&
+                s.branch === branch &&
+                s.head === head &&
+                s.target === target &&
+                s.end === undefined,
+            )
+            const prev = allIdx >= 0 ? allSteps[allIdx] : undefined
+            if (prev !== undefined) {
+              allSteps[allIdx] = { ...prev, end: validEnd }
+            } else {
+              allSteps.push({ kind, name, phase, branch, head, target, base, start: validStart, end: validEnd })
+            }
           } else {
-            const start = new Date(startStr)
             openSteps.push({
               kind,
               name,
@@ -450,7 +485,17 @@ function readRunHeader(path: string): JournalHead {
               head,
               target,
               base,
-              start: Number.isNaN(start.getTime()) ? new Date() : start,
+              start: validStart,
+            })
+            allSteps.push({
+              kind,
+              name,
+              phase,
+              branch,
+              head,
+              target,
+              base,
+              start: validStart,
             })
           }
         }
@@ -494,6 +539,7 @@ function readRunHeader(path: string): JournalHead {
   const line = lineOf(records)
   return {
     activeStep,
+    ...(allSteps.length === 0 ? {} : { steps: allSteps }),
     ...(line === undefined ? {} : { line }),
     died,
     headed: true,
@@ -528,7 +574,7 @@ function journalVerdict(
   alive: boolean,
 ): Pick<
   RunnerRun,
-  "target" | "gitlink" | "queue" | "checks" | "effectiveChecks" | "activeStep" | "line" | "unstarted"
+  "target" | "gitlink" | "queue" | "checks" | "effectiveChecks" | "activeStep" | "steps" | "line" | "unstarted"
 > {
   const unstarted = !alive && read.died
   if (!read.headed) {
@@ -542,6 +588,7 @@ function journalVerdict(
   return {
     ...read.fields,
     ...(alive && read.activeStep !== undefined ? { activeStep: read.activeStep } : {}),
+    ...(read.steps === undefined ? {} : { steps: read.steps }),
     ...(read.line === undefined ? {} : { line: read.line }),
     ...(unstarted ? { unstarted: true as const } : {}),
   }
@@ -654,9 +701,14 @@ export function runnerWord(
       return "stopped"
     case "beating": {
       if (facts.latest?.activeStep !== undefined) {
-        return facts.latest.activeStep.phase === "merge" ? "merging" : "checking"
+        const step = facts.latest.activeStep
+        if (step.phase === "merge") return "merging"
+        if (step.kind === "check") return "checking"
+        return "verifying"
       }
-      return underCheck ? "checking" : "idle"
+      if (underCheck) return "checking"
+      if (facts.roundLockHolder !== undefined) return "verifying"
+      return "idle"
     }
     default:
       // `absent` and `unreadable` alike: no document to read a word from. The
@@ -664,10 +716,17 @@ export function runnerWord(
       // being dressed up as a claim about the process.
       break
   }
-  if (facts?.latest === undefined) return "unpublished"
-  if (facts.latest.alive && facts.latest.activeStep !== undefined) {
-    return facts.latest.activeStep.phase === "merge" ? "merging" : "checking"
+  if (facts?.latest === undefined) {
+    if (facts?.roundLockHolder !== undefined) return "verifying"
+    return "unpublished"
   }
+  if (facts.latest.alive && facts.latest.activeStep !== undefined) {
+    const step = facts.latest.activeStep
+    if (step.phase === "merge") return "merging"
+    if (step.kind === "check") return "checking"
+    return "verifying"
+  }
+  if (facts.roundLockHolder !== undefined) return "verifying"
   // No document, so the run's own pid is the liveness fact. Nothing is claimed
   // about a SERVICE here, because on this edge there is not one to claim it of.
   if (!underCheck) return "idle"
@@ -699,6 +758,10 @@ export type RunnerLine = Readonly<{
   duration?: string
   /** Host-only detail, and the sentence that says so when there is none. */
   detail: string
+  /** The running check name when state is checking. */
+  subphase?: string
+  /** The running merge step name when state is merging. */
+  step?: string
 }>
 
 /**
@@ -774,22 +837,28 @@ function runnerLineOf(
   const detail = service?.kind === "unreadable" ? `${service.why} · ${found}` : found
   switch (state) {
     case "verifying":
-    case "provisioning":
     case "checking":
-    case "merging":
-    case "deprovisioning": {
+    case "merging": {
       const holding = held as HeldChange | undefined
       const activeStep = facts?.latest?.activeStep
 
       let holdsText: string
       const byText: string | undefined = holding?.submitter
       let durationText: string
+      let subphase: string | undefined
+      let step: string | undefined
 
       if (activeStep !== undefined) {
         const stepName =
           activeStep.kind === "check" ? activeStep.name : activeStep.name === "worktree" ? "compose" : activeStep.name
         const stepElapsed = since(activeStep.start)
         durationText = `${word} ${stepElapsed}`
+
+        if (activeStep.kind === "check") {
+          subphase = activeStep.name
+        } else if (activeStep.phase === "merge") {
+          step = activeStep.name
+        }
 
         if (activeStep.phase === "submit") {
           const entry =
@@ -808,6 +877,10 @@ function runnerLineOf(
         } else {
           holdsText = `${stepName} ${activeStep.branch ?? ""}`.trim()
         }
+      } else if (facts?.roundLockHolder !== undefined) {
+        const holder = facts.roundLockHolder
+        durationText = `${word} 0:00`
+        holdsText = `round lock held by pid ${String(holder.pid)} (${holder.command})`
       } else if (holding !== undefined) {
         durationText = `${word} ${since(holding.since)}`
         holdsText = `${holding.branch}${holding.subject === undefined ? "" : ` ${holding.subject}`}`
@@ -823,6 +896,8 @@ function runnerLineOf(
         holds: holdsText,
         state,
         ...(byText === undefined ? {} : { by: byText }),
+        ...(subphase === undefined ? {} : { subphase }),
+        ...(step === undefined ? {} : { step }),
       }
     }
     case "stuck":

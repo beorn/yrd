@@ -1848,10 +1848,10 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // The colour joined the table in S1 — one word, one colour, one entry, so a
     // column that draws both cannot take them from two places — and is asserted
     // by the colour arms in watch-boxes.test.tsx rather than spelled here.
-    // Operator v3: queued paints submitted, checked paints pending, both warning yellow; verifying paints fitting.
+    // Operator v3: queued paints submitted, checked paints pending, both warning yellow; verifying paints verifying.
     expect(W.submitted).toMatchObject({ word: "submitted", color: "$fg-warning" })
     expect(W.pending).toMatchObject({ word: "pending", color: "$fg-warning" })
-    expect(W.verifying).toMatchObject({ word: "fitting", color: "$fg-info" })
+    expect(W.verifying).toMatchObject({ word: "verifying", color: "$fg-info" })
     const said = ({ color: _color, ...entry }: Entry) => entry
     expect({
       ...Object.fromEntries(STATES.map((key) => [key, said(W[key])])),
@@ -4308,5 +4308,164 @@ describe("an ended change's check that never ended (25521)", () => {
     // No live age on the tab: the metadata's own "UPDATED … ago" clock is not the check's.
     expect(strip[tab + 1]).not.toMatch(/\d+d\d+h|\d+:\d\d/u)
     expect(text).not.toContain("◉")
+  })
+})
+
+describe("runner steps, lock guard, and detail step list (25716)", () => {
+  it("while a change is in judge or merge phase, RUNNER box shows branch, who, step name and elapsed time", async () => {
+    // 1. Judge phase (compose step)
+    const composeLine: RunnerLine = {
+      state: "verifying",
+      holds: "task/judge-1@abcdef012345: compose",
+      by: "@dev/9",
+      duration: "verifying 0:12",
+      detail: "",
+    }
+    const composeLayout = listLayout([], 120, NOW, composeLine)
+    const composeApp = render(<RunnerTitledBox line={composeLine} snapshot={snapshot({})} layout={composeLayout} />, {
+      cols: 120,
+      rows: 5,
+    })
+    await settle(composeApp)
+    expect(composeApp.text).toContain("task/judge-1@abcdef012345: compose")
+    expect(composeApp.text).toContain("verifying")
+    expect(composeApp.text).toContain("@dev/9")
+    expect(composeApp.text).toContain("verifying 0:12")
+    composeApp.unmount()
+
+    // 2. Check phase with subphase
+    const checkLine: RunnerLine = {
+      state: "checking",
+      subphase: "typecheck",
+      holds: "task/check-1@abcdef012345: typecheck",
+      by: "@dev/9",
+      duration: "checking 0:25",
+      detail: "",
+    }
+    const checkLayout = listLayout([], 120, NOW, checkLine)
+    const checkApp = render(<RunnerTitledBox line={checkLine} snapshot={snapshot({})} layout={checkLayout} />, {
+      cols: 120,
+      rows: 5,
+    })
+    await settle(checkApp)
+    expect(checkApp.text).toContain("task/check-1@abcdef012345: typecheck")
+    expect(checkApp.text).toContain("checking (typecheck)")
+    expect(checkApp.text).toContain("@dev/9")
+    expect(checkApp.text).toContain("checking 0:25")
+    checkApp.unmount()
+
+    // 3. Merge phase with step
+    const mergeLine: RunnerLine = {
+      state: "merging",
+      step: "publish",
+      holds: "task/merge-1@abcdef012345: publish",
+      by: "@dev/9",
+      duration: "merging 0:08",
+      detail: "",
+    }
+    const mergeLayout = listLayout([], 120, NOW, mergeLine)
+    const mergeApp = render(<RunnerTitledBox line={mergeLine} snapshot={snapshot({})} layout={mergeLayout} />, {
+      cols: 120,
+      rows: 5,
+    })
+    await settle(mergeApp)
+    expect(mergeApp.text).toContain("task/merge-1@abcdef012345: publish")
+    expect(mergeApp.text).toContain("merging (publish)")
+    expect(mergeApp.text).toContain("@dev/9")
+    expect(mergeApp.text).toContain("merging 0:08")
+    mergeApp.unmount()
+  })
+
+  it("RUNNER box never reads idle while a round lock is held", async () => {
+    const layout = listLayout([], 120, NOW)
+    const snap = snapshot({
+      runner: {
+        journalDir: "/w/logs",
+        service: { kind: "beating", state: "healthy" },
+        roundLockHolder: {
+          command: "bun yrd queue up",
+          pid: 88888,
+          since: NOW.toISOString(),
+        },
+      },
+    })
+    const runner = runnerOf(snap, NOW)
+    expect(runner.state).not.toBe("idle")
+    expect(runner.state).toBe("verifying")
+    expect(runner.holds).toContain("round lock held by pid 88888")
+
+    const app = render(<RunnerTitledBox line={runner} snapshot={snap} layout={layout} />, { cols: 120, rows: 5 })
+    await settle(app)
+    expect(app.text).toContain("verifying")
+    expect(app.text).not.toContain("idle")
+    expect(app.text).toContain("round lock held by pid 88888")
+    app.unmount()
+  })
+
+  it("a running change's detail pane lists its steps with start and end times from the journal", async () => {
+    const t0 = new Date("2026-09-24T18:00:00.000Z")
+    const t1 = new Date("2026-09-24T18:00:03.000Z")
+    const t2 = new Date("2026-09-24T18:00:08.000Z")
+    const t3 = new Date("2026-09-24T18:00:30.000Z")
+
+    const runningRow = row({
+      branch: "task/running-feat",
+      format: "event",
+      head: "abcdef0123456789abcdef0123456789abcdef01",
+      live: { check: "typecheck", phase: "submit", run: "run-001", since: t2 },
+      state: "checking",
+    })
+    const journal: JournalRun = {
+      at: t0,
+      branch: runningRow.branch,
+      head: runningRow.head,
+      id: "run-001",
+      startedAt: t0,
+      checks: [
+        {
+          name: "typecheck",
+          phase: "submit",
+          startedAt: t2,
+          endedAt: t3,
+          ms: 22_000,
+        },
+      ],
+      steps: [
+        {
+          commands: [],
+          name: "compose",
+          phase: "submit",
+          startedAt: t0,
+          endedAt: t1,
+          ms: 3_000,
+        },
+        {
+          commands: [],
+          name: "prepare",
+          phase: "submit",
+          startedAt: t1,
+          endedAt: t2,
+          ms: 5_000,
+        },
+        {
+          commands: [],
+          name: "publish",
+          phase: "merge",
+          startedAt: t3,
+        },
+      ],
+      commands: [],
+    }
+    const item: WatchRow = { row: runningRow }
+    const checks = checksOf([], "open", [{ name: "typecheck", run: "bun typecheck" }], { name: "typecheck" }, journal.checks)
+    const detail = detailOf(item, checks, { journal })
+
+    const text = await paint(at(<WatchDetail detail={detail} />), [], 160)
+    expect(text).toContain("STEPS")
+    expect(text).toContain("compose")
+    expect(text).toContain("prepare")
+    expect(text).toContain("typecheck")
+    expect(text).toContain("publish")
+    expect(text).toContain("running")
   })
 })

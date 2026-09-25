@@ -300,17 +300,31 @@ export function bandHeight(brk: BandBreak | undefined): number {
 /** The runner's line, read from the WHOLE reading: the queue's runner, never the selector's. */
 export function runnerOf(snapshot: WatchSnapshot, now: Date) {
   const { held, waiting } = lineOf(snapshot.unfiltered)
+  const activeBranch = snapshot.runner?.latest?.activeStep?.branch
+  const activeRow =
+    held?.live === undefined && activeBranch !== undefined
+      ? snapshot.unfiltered.find((item) => item.row.branch === activeBranch)?.row
+      : undefined
+
+  const heldChange =
+    held?.live !== undefined
+      ? {
+          branch: held.branch,
+          since: held.live.since,
+          ...(held.subject === undefined ? {} : { subject: held.subject }),
+          ...(held.submitter === undefined ? {} : { submitter: held.submitter }),
+        }
+      : activeRow !== undefined
+        ? {
+            branch: activeRow.branch,
+            since: snapshot.runner?.latest?.activeStep?.start ?? now,
+            ...(activeRow.subject === undefined ? {} : { subject: activeRow.subject }),
+            ...(activeRow.submitter === undefined ? {} : { submitter: activeRow.submitter }),
+          }
+        : undefined
+
   return runnerLine(snapshot.runner, now, {
-    ...(held?.live === undefined
-      ? {}
-      : {
-          held: {
-            branch: held.branch,
-            since: held.live.since,
-            ...(held.subject === undefined ? {} : { subject: held.subject }),
-            ...(held.submitter === undefined ? {} : { submitter: held.submitter }),
-          },
-        }),
+    ...(heldChange === undefined ? {} : { held: heldChange }),
     ...(snapshot.stopped === undefined ? {} : { stopped: snapshot.stopped }),
     waiting: waiting.length,
   })
