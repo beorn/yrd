@@ -319,6 +319,99 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
   }, 15_000)
 
+  // 25656: the event runner stores Check: evidence, and watch detail must give
+  // that evidence to the existing check tabs instead of discarding it.
+  it("projects stored event Check results into watch detail", async () => {
+    const repo = await world('checks:\n  - unit: {run: "bun run unit"}\n')
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture target lost its declaration")
+    const queueTip = await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = "task/judged-event"
+    const log = join(repo, "unit.log")
+    const oldLog = join(repo, "old-unit.log")
+    writeFileSync(log, "unit passed\n")
+    writeFileSync(oldLog, "old attempt failed\n")
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: new Date("2026-09-22T14:00:30.000Z"), commit: head, by: "yrd" }),
+        changeInput("verifying", { queueTip, at: new Date("2026-09-22T14:00:35.000Z"), commit: head }),
+        changeInput("checking", { queueTip, at: new Date("2026-09-22T14:00:40.000Z") }),
+        changeInput("failed", {
+          queueTip,
+          at: new Date("2026-09-22T14:00:45.000Z"),
+          commit: head,
+          base: head,
+          config: config.blob,
+          checks: [
+            { run: { name: "unit", result: "fail", exit: 1, durationMs: 7, log: oldLog }, attempt: 1, phase: "merge" },
+          ],
+        }),
+        changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "yrd" }),
+        changeInput("verifying", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: head }),
+        changeInput("checking", { queueTip, at: new Date("2026-09-22T14:03:00.000Z") }),
+        changeInput("merging", {
+          queueTip,
+          at: new Date("2026-09-22T14:04:00.000Z"),
+          commit: head,
+          base: head,
+          config: config.blob,
+          checks: [{ run: { name: "unit", result: "pass", exit: 0, durationMs: 12, log }, attempt: 1, phase: "merge" }],
+        }),
+        changeInput("merged", { queueTip, at: new Date("2026-09-22T14:05:00.000Z"), commit: head }),
+      ],
+      { expect: null },
+    )
+    const selected = (await listChanges(store, "main")).get(branch)
+    if (selected === undefined) throw new Error("fixture event change is missing")
+    const item = watchRows(eventRows(new Map([[branch, selected]])))[0]
+    if (item === undefined) throw new Error("fixture event row is missing")
+    const detail = await openEventDetail(git, config, item, "main", repo, selected)
+    expect(detail.checks).toEqual([
+      expect.objectContaining({ name: "unit", state: "passed", log, output: "unit passed\n" }),
+    ])
+    expect(detail.note).toBeUndefined()
+  }, 15_000)
+
+  it("names retained evidence and old check logs when a migrated event has no check detail", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture target lost its declaration")
+    const branch = "task/migrated-without-checks"
+    const source = `${changeRef("main", { branch, head })}@${head}`
+    const opened = changeInput("opened", {
+      queueTip,
+      at: new Date("2026-09-22T14:01:00.000Z"),
+      commit: head,
+      by: "yrd-migration",
+    })
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd-migration" })
+    ).append(
+      [
+        { ...opened, props: [...(opened.props ?? []), ["Migrated-From", source]], keeps: [head] },
+        changeInput("merged", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: head }),
+      ],
+      { expect: null },
+    )
+    const selected = (await listChanges(store, "main")).get(branch)
+    if (selected === undefined) throw new Error("fixture event change is missing")
+    const item = watchRows(eventRows(new Map([[branch, selected]])))[0]
+    if (item === undefined) throw new Error("fixture event row is missing")
+    const detail = await openEventDetail(git, config, item, "main", repo, selected)
+    expect(detail.checks).toEqual([])
+    expect(detail.note).toContain(source)
+    expect(detail.note).toContain(join(repo, ".git", "yrd", "checks", `${branch}@${head}`))
+  }, 15_000)
+
   // @failure a malformed event ref took down list/show/watch and hid healthy changes (25658).
   it("lists an invalid chain by name beside healthy and no-opened chains, with show and fence parity", async () => {
     const repo = await world("{}\n")
