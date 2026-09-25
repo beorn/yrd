@@ -89,9 +89,32 @@ describe("the git runner", () => {
     },
   )
 
+  it("retries one dropped SSH session through the runner, with no key trace", async () => {
+    const root = temporaryRoot("session-drop-read")
+    const drop =
+      "Connection to github.com closed by remote host.\nfatal: Could not read from remote repository.\n\n" +
+      "Please make sure you have the correct access rights\nand the repository exists."
+    const executable = publickeyExecutable(root, 1, drop)
+    const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const git = gitIn(root, undefined, { executable, contract: "native", scope: "local", origin: "fixture" })
+      expect(await git(["ls-remote", "origin", "refs/heads/main"])).toContain("refs/heads/main")
+      expect(readFileSync(join(root, "calls"), "utf8").trim().split("\n")).toHaveLength(2)
+      expect(announced).toHaveBeenCalledOnce()
+      expect(announced.mock.calls[0]?.[0]).toContain("SSH session dropped; retry 2/2 after 3000ms")
+      expect(announced.mock.calls[0]?.[0]).not.toContain(" -v")
+    } finally {
+      announced.mockRestore()
+    }
+  })
+
   it.each([
     ["push", "git@github.com: Permission denied (publickey)."],
     ["ls-remote", "fatal: repository not found"],
+    [
+      "ls-remote",
+      "ssh: connect to host github.com port 22: Connection refused\nfatal: Could not read from remote repository.",
+    ],
   ] as const)("never retries %s after %s", async (verb, refusal) => {
     const root = temporaryRoot("nonretry")
     const executable = publickeyExecutable(root, 1, refusal)
@@ -188,6 +211,36 @@ describe("the git runner", () => {
       expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(2)
       expect(announced).toHaveBeenCalledOnce()
       expect(announced.mock.calls[0]?.[0]).toContain("Permission denied (publickey).")
+    } finally {
+      announced.mockRestore()
+      if (previous === undefined) delete process.env.GIT_SSH_COMMAND
+      else process.env.GIT_SSH_COMMAND = previous
+      if (previousVariant === undefined) delete process.env.GIT_SSH_VARIANT
+      else process.env.GIT_SSH_VARIANT = previousVariant
+    }
+  })
+
+  // 25616 row 2: a read whose SSH session dropped mid-read gets the same one announced retry, without the key trace.
+  // The fixture ssh prints the direct connection's close line and exits 255, and real git adds its own fatal lines.
+  it.each(["ls-remote", "fetch"] as const)("retries a Gitomic %s whose SSH session dropped, once", async (verb) => {
+    const { repo, ssh, calls } = legacyPublickeyRepo(1, "Connection to github.com closed by remote host.")
+    const previous = process.env.GIT_SSH_COMMAND
+    const previousVariant = process.env.GIT_SSH_VARIANT
+    process.env.GIT_SSH_COMMAND = ssh
+    process.env.GIT_SSH_VARIANT = "ssh"
+    const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const backend = gitRunner.createLegacyBackend()
+      const read =
+        verb === "fetch"
+          ? backend.fetchRefs!(repo, ["refs/heads/main"], "git@github.com:fixture")
+          : backend.listRefs!(repo, "refs/heads/", "git@github.com:fixture")
+      expect((await read).get("refs/heads/main")).toMatch(/^[a-f0-9]{40}$/u)
+      const attempts = readFileSync(calls, "utf8").trim().split("\n")
+      expect(attempts).toHaveLength(2)
+      expect(attempts[1]).not.toContain(" -v ")
+      expect(announced).toHaveBeenCalledOnce()
+      expect(announced.mock.calls[0]?.[0]).toContain("SSH session dropped; retry 2/2 after 3000ms")
     } finally {
       announced.mockRestore()
       if (previous === undefined) delete process.env.GIT_SSH_COMMAND
