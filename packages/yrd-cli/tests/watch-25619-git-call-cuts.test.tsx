@@ -311,38 +311,38 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     // Case 1: Fresh data (0s old)
     const freshSnap = baseSnapshot({ at: NOW })
     const freshStatus = queueLineStatus(freshSnap, NOW)
-    expect(freshStatus.timer).toBe("0:15")
+    expect(freshStatus.timer).toBe("00:00:15")
     expect(freshStatus.timer).not.toContain("data")
     expect(freshStatus.timer).not.toContain("old")
 
     // Case 2: Data 1 minute old (60s <= 120s threshold) -> Nothing shown!
     const oneMinOldSnap = baseSnapshot({ at: new Date(NOW.getTime() - 60_000) })
     const oneMinStatus = queueLineStatus(oneMinOldSnap, NOW)
-    expect(oneMinStatus.timer).toBe("0:15")
+    expect(oneMinStatus.timer).toBe("00:00:15")
     expect(oneMinStatus.timer).not.toContain("data")
 
     // Case 3: Data exactly 2 minutes old (120s <= 120s threshold) -> Nothing shown!
     const twoMinOldSnap = baseSnapshot({ at: new Date(NOW.getTime() - 120_000) })
     const twoMinStatus = queueLineStatus(twoMinOldSnap, NOW)
-    expect(twoMinStatus.timer).toBe("0:15")
+    expect(twoMinStatus.timer).toBe("00:00:15")
     expect(twoMinStatus.timer).not.toContain("data")
 
     // Case 4: Data 2m 5s old (125s > 120s) -> SHOWN!
     const staleSnap = baseSnapshot({ at: new Date(NOW.getTime() - 125_000) })
     const staleStatus = queueLineStatus(staleSnap, NOW)
-    expect(staleStatus.timer).toContain("0:15")
+    expect(staleStatus.timer).toContain("00:00:15")
     expect(staleStatus.timer).toContain("(data 2:05 old)")
 
     // Case 5: Rendered in WatchPane (live=false with NowProvider):
     const freshApp = render(<WatchPane snapshot={freshSnap} now={NOW} live={false} />, { cols: 120, rows: 30 })
     await settle(20)
-    expect(freshApp.lines[0]).toContain("YRD RUNNING 0:15")
+    expect(freshApp.lines[0]).toContain("00:00:15")
     expect(freshApp.lines[0]).not.toContain("data")
     freshApp.unmount()
 
     const staleApp = render(<WatchPane snapshot={staleSnap} now={NOW} live={false} />, { cols: 120, rows: 30 })
     await settle(20)
-    expect(staleApp.lines[0]).toContain("YRD RUNNING 0:15")
+    expect(staleApp.lines[0]).toContain("00:00:15")
     expect(staleApp.lines[0]).toContain("(data 2:05 old)")
     staleApp.unmount()
   })

@@ -77,10 +77,12 @@ import {
   STATE_WORDS,
   clock,
   firstLine,
+  formatHms,
   legendLines,
   mediaDuration,
   runShortName,
   stateGlyph,
+  toHms,
 } from "./watch-format.ts"
 import { WatchDetail, commandKey, commandsOfTab, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
 import {
@@ -884,31 +886,31 @@ export function statusTimer(snapshot: WatchSnapshot, now: Date): string | undefi
 
   if (word === "STOPPED") {
     if (snapshot.runner?.service.kind === "stopped" && snapshot.runner.service.since) {
-      return mediaDuration(Math.max(0, now.getTime() - snapshot.runner.service.since.getTime()))
+      return formatHms(Math.max(0, now.getTime() - snapshot.runner.service.since.getTime()))
     }
     if (snapshot.stopped?.since) {
       const at = new Date(snapshot.stopped.since)
-      if (!Number.isNaN(at.getTime())) return mediaDuration(Math.max(0, now.getTime() - at.getTime()))
+      if (!Number.isNaN(at.getTime())) return formatHms(Math.max(0, now.getTime() - at.getTime()))
     }
   } else if (word === "PAUSED") {
     if (snapshot.stopped?.since) {
       const at = new Date(snapshot.stopped.since)
-      if (!Number.isNaN(at.getTime())) return mediaDuration(Math.max(0, now.getTime() - at.getTime()))
+      if (!Number.isNaN(at.getTime())) return formatHms(Math.max(0, now.getTime() - at.getTime()))
     }
     if (runner.duration) {
       const match = runner.duration.match(/\b\d+:\d+(?::\d+)?\b/u)
-      if (match) return match[0]
+      if (match) return toHms(match[0])
     }
   } else if (word === "RUNNING") {
     const runnerStart =
       (snapshot.runner?.service.kind === "beating" ? snapshot.runner.service.since : undefined) ??
       snapshot.runner?.latest?.startedAt
     if (runnerStart) {
-      return mediaDuration(Math.max(0, now.getTime() - runnerStart.getTime()))
+      return formatHms(Math.max(0, now.getTime() - runnerStart.getTime()))
     }
     if (runner.duration) {
       const match = runner.duration.match(/\b\d+:\d+(?::\d+)?\b/u)
-      if (match) return match[0]
+      if (match) return toHms(match[0])
     }
   }
   return undefined

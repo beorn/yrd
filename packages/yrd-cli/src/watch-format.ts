@@ -285,6 +285,34 @@ export function mediaDuration(milliseconds: number): string {
 }
 
 /**
+ * Formats a duration in milliseconds to hh:mm:ss with three two-digit fields (25716 row 31).
+ */
+export function formatHms(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1_000))
+  const hours = Math.floor(totalSeconds / 3_600)
+  const minutes = Math.floor((totalSeconds % 3_600) / 60)
+  const seconds = totalSeconds % 60
+  const two = (n: number) => String(n).padStart(2, "0")
+  return `${two(hours)}:${two(minutes)}:${two(seconds)}`
+}
+
+/**
+ * Widens a duration string (M:SS or H:MM:SS) to three two-digit fields hh:mm:ss (25716 row 31).
+ */
+export function toHms(timerStr: string): string {
+  const match = timerStr.match(/\b(?:(\d+):)?(\d+):(\d+)\b/u)
+  if (!match) return timerStr
+  const parts = match[0].split(":")
+  if (parts.length === 2) {
+    return `00:${parts[0]!.padStart(2, "0")}:${parts[1]!.padStart(2, "0")}`
+  }
+  if (parts.length === 3) {
+    return `${parts[0]!.padStart(2, "0")}:${parts[1]!.padStart(2, "0")}:${parts[2]!.padStart(2, "0")}`
+  }
+  return timerStr
+}
+
+/**
  * A row's one duration, its word naming its basis (queue-core `clocks`): how
  * long the check running now has run, how long a stuck change has been stuck,
  * how long a change in line has waited since it was submitted, or how long an

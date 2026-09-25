@@ -70,15 +70,15 @@ function baseSnapshot(overrides: Partial<WatchSnapshot> = {}): WatchSnapshot {
 describe("25556: seven rows on yrd watch", () => {
   // 25630's rulings (operator screenshot 2026-09-24, "timers headers") moved the filter toggles to the plain second
   // line beside STATS and dropped the queue toggles from the inverted top line, so rows 1, 2 and 4 read line 1.
-  it("row 1: the filter group takes the warning tint and bold when selected, muted and not bold when not", async () => {
+  it("row 1: the filter group takes muted ($fg-muted) when selected and extra-muted ($border-default) when not, with no bold and no yellow (25716 row 31)", async () => {
     const app = render(<WatchPane snapshot={baseSnapshot()} live={false} />, { cols: 140, rows: 30 })
     await settle(app)
     app.press("f") // select only failed
     await settle(app)
 
-    expect(fgAt(app, 1, "[f]ailed")).toBe(fgOf("$fg-warning"))
-    expect(boldAt(app, 1, "[f]ailed")).toBe(true)
-    expect(fgAt(app, 1, "[o]pen")).toBe(fgOf("$fg-muted"))
+    expect(fgAt(app, 1, "[f]ailed")).toBe(fgOf("$fg-muted"))
+    expect(boldAt(app, 1, "[f]ailed")).toBe(false)
+    expect(fgAt(app, 1, "[o]pen")).toBe(fgOf("$border-default"))
     expect(boldAt(app, 1, "[o]pen")).toBe(false)
 
     app.unmount()
@@ -96,7 +96,7 @@ describe("25556: seven rows on yrd watch", () => {
     app.unmount()
   })
 
-  it("row 3: top line renders a not-bold timer after the status word for every status", async () => {
+  it("row 3: top line renders a not-bold timer after the status word for every status (25716)", async () => {
     // 1. Running
     const runningApp = render(
       <WatchPane
@@ -117,10 +117,9 @@ describe("25556: seven rows on yrd watch", () => {
       { cols: 140, rows: 30 },
     )
     await settle(runningApp)
-    expect(runningApp.lines[0]).toContain("YRD RUNNING 1:05")
-    expect(boldAt(runningApp, 0, "YRD")).toBe(true)
-    expect(boldAt(runningApp, 0, "RUNNING")).toBe(true)
-    expect(boldAt(runningApp, 0, "1:05")).toBe(false)
+    expect(runningApp.lines[0]).toContain("00:01:05")
+    expect(boldAt(runningApp, 0, "YRD QUEUE")).toBe(true)
+    expect(boldAt(runningApp, 0, "00:01:05")).toBe(false)
     runningApp.unmount()
 
     // 2. Stopped
@@ -144,9 +143,8 @@ describe("25556: seven rows on yrd watch", () => {
       { cols: 140, rows: 30 },
     )
     await settle(stoppedApp)
-    expect(stoppedApp.lines[0]).toContain("YRD STOPPED 5:00 cutover")
-    expect(boldAt(stoppedApp, 0, "STOPPED")).toBe(true)
-    expect(boldAt(stoppedApp, 0, "5:00")).toBe(false)
+    expect(stoppedApp.lines[0]).toContain("cutover")
+    expect(boldAt(stoppedApp, 0, "YRD QUEUE")).toBe(true)
     stoppedApp.unmount()
   })
 

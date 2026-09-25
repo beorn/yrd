@@ -328,5 +328,52 @@ describe("ISSUE / BRANCH column capping and title preservation (25716)", () => {
       expect(line).toContain("…")
       app.unmount()
     })
+
+    it(`renders with both branch and error present and guarantees title keeps >= 1/3 at ${cols} columns (25716 row 33 & 36)`, async () => {
+      const LONG_TITLE = "feat(yrd): the issue title the row exists to show, long enough to be the cell that shrinks"
+      const testCases: Record<string, Row> = {
+        "both over cap (150 + 120)": {
+          branch: longBranch,
+          head: "deadbeef".padEnd(40, "0"),
+          state: "failed",
+          reason: longError,
+          subject: LONG_TITLE,
+        },
+        "both exactly at cap": {
+          branch: "task/".padEnd(Math.max(1, Math.floor(cols * 0.5) - 1), "b"),
+          head: "deadbeef".padEnd(40, "0"),
+          state: "failed",
+          reason: "e".repeat(Math.max(1, Math.floor(cols * 0.5) - 7)),
+          subject: LONG_TITLE,
+        },
+        "medium pair: 34-char branch + 27-char error": {
+          branch: "task/dev4-23135-stale-row-followup",
+          head: "deadbeef".padEnd(40, "0"),
+          state: "failed",
+          reason: "check affected-tests failed",
+          subject: LONG_TITLE,
+        },
+      }
+      for (const [name, r] of Object.entries(testCases)) {
+        const rowLayout = listLayout([{ row: r }], cols, NOW)
+        const suffix = changesSuffix(r)?.text
+        const plan = taskExtrasLayout(rowLayout.taskWidth!, r.branch, suffix)
+        const app = render(
+          <NowContext.Provider value={NOW}>
+            <ListRow cursor={false} item={{ row: r }} layout={rowLayout} />
+          </NowContext.Provider>,
+          { cols, rows: 2 },
+        )
+        await act(async () => {
+          await app.waitForLayoutStable()
+        })
+        const line = app.lines[0] ?? ""
+        const t0 = line.indexOf("feat(yrd)")
+        const b0 = t0 < 0 ? -1 : line.indexOf(" task/", t0) + 1 || -1
+        const titleCells = t0 < 0 ? 0 : b0 < 0 ? -1 : b0 - 1 - t0
+        expect(titleCells, `${name} at ${cols} cols`).toBeGreaterThanOrEqual(plan.minTitle)
+        app.unmount()
+      }
+    })
   }
 })

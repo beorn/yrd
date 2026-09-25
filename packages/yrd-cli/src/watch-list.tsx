@@ -43,6 +43,7 @@ import {
   stateColor,
   stateGlyph,
   stateWord,
+  toHms,
 } from "./watch-format.ts"
 import type { RunnerLine } from "./watch-runner.ts"
 
@@ -180,18 +181,26 @@ export function taskExtrasLayout(
   const suffixWidth = displaySuffix !== undefined ? 3 + displaySuffix.length : 0
   const maxExtrasBudget = Math.max(0, taskWidth - minTitle)
 
-  if (
-    (branch.length > maxAllowedBranch || (suffixText !== undefined && suffixText.length > maxAllowedSuffix)) &&
-    branchWidth + suffixWidth > maxExtrasBudget
-  ) {
+  if (branchWidth + suffixWidth > maxExtrasBudget) {
     const halfBudget = Math.floor(maxExtrasBudget / 2)
-    const branchAlloc = Math.min(branchWidth, halfBudget)
-    const suffixAlloc = Math.min(suffixWidth, maxExtrasBudget - branchAlloc)
-    displayBranch = branchAlloc > 1 ? truncateWithEllipsis(branch, branchAlloc - 1) : ""
-    displaySuffix =
-      suffixText !== undefined && suffixAlloc > 3
-        ? truncateWithEllipsis(suffixText, suffixAlloc - 3)
-        : undefined
+    if (branchWidth <= halfBudget) {
+      const suffixBudget = maxExtrasBudget - branchWidth
+      displaySuffix =
+        suffixText !== undefined && suffixBudget > 3
+          ? truncateWithEllipsis(suffixText, suffixBudget - 3)
+          : undefined
+    } else if (suffixWidth <= halfBudget) {
+      const branchBudget = maxExtrasBudget - suffixWidth
+      displayBranch = branchBudget > 1 ? truncateWithEllipsis(branch, branchBudget - 1) : ""
+    } else {
+      const branchBudget = halfBudget
+      const suffixBudget = maxExtrasBudget - branchBudget
+      displayBranch = branchBudget > 1 ? truncateWithEllipsis(branch, branchBudget - 1) : ""
+      displaySuffix =
+        suffixText !== undefined && suffixBudget > 3
+          ? truncateWithEllipsis(suffixText, suffixBudget - 3)
+          : undefined
+    }
   }
 
   return {
@@ -265,6 +274,7 @@ export function listLayout(
     (separate
       ? (qWidth > 0 ? qWidth + 1 : 0) + (runWidth > 0 ? runWidth + 1 : 0)
       : queueRunWidth + 1) +
+    1 +
     statusWidth +
     (agentWidth > 0 ? 1 + agentWidth : 0) +
     1 +
@@ -329,9 +339,10 @@ export function shortenAddress(address: string, maxLen: number): string {
 }
 
 /**
- * The top line (ia.md, 24196; 25416; 25630): inverted chrome across the whole width.
- * Left: YRD QUEUE and the queue address (shortened with .. when it does not fit).
- * Right: the status word and its timer (RUNNING 0:17), nothing else.
+ * The top line (ia.md, 24196; 25416; 25630; 25716 row 31): inverted chrome across the whole width.
+ * Left: status marker first, pulsing in runner status colour; then [n] muted (only if >1 runner);
+ * then YRD QUEUE in bold; then queue address.
+ * Right: elapsed timer as hh:mm:ss in grey (status word YRD RUNNING leaves line).
  */
 export function TopLine({
   queue,
@@ -354,21 +365,24 @@ export function TopLine({
   live?: boolean
   onStatusClick?: () => void
 }) {
-  const statusInk = `mix($fg-on-inverse, ${status.color}, ${status.color === "$fg-warning" ? "30%" : "50%"})`
   const queueAddress = queue ?? (queues && queues[0]?.label) ?? ""
+  const showRunnerDigits = (queues?.length ?? 0) > 1
 
-  // Right side width: marker + YRD + word + timer + reason + gaps + paddingRight
-  const timerLen = typeof status.timer === "string" ? status.timer.length : status.timer !== undefined ? 10 : 0
+  const timerText = typeof status.timer === "string" ? toHms(status.timer) : status.timer
+  const timerLen = typeof timerText === "string" ? timerText.length : timerText !== undefined ? 8 : 0
   const statusParts = [
-    status.marker ? 1 : 0,
-    3, // YRD
-    status.word.length,
     timerLen,
     status.reason ? status.reason.length : 0,
   ].filter((n) => n > 0)
   const statusGaps = Math.max(0, statusParts.length - 1)
-  const statusRightLen = statusParts.reduce((a, b) => a + b, 0) + statusGaps + 1
-  const availableForAddress = columns !== undefined ? Math.max(0, columns - 1 - 10 - 1 - statusRightLen) : undefined
+  const statusRightLen = statusParts.reduce((a, b) => a + b, 0) + statusGaps
+
+  const runnerDigitsLen = showRunnerDigits
+    ? (queues ?? []).map((_, i) => 3).reduce((a, b) => a + b, 0) + ((queues?.length ?? 0) - 1) + 1
+    : 0
+  const leftPrefixLen = 1 + 1 + 1 + runnerDigitsLen + 10
+  const availableForAddress =
+    columns !== undefined ? Math.max(0, columns - leftPrefixLen - statusRightLen - 2) : undefined
   const displayAddress =
     availableForAddress !== undefined ? shortenAddress(queueAddress, availableForAddress) : queueAddress
 
@@ -384,9 +398,27 @@ export function TopLine({
       justifyContent="space-between"
       backgroundColor="$bg-inverse"
     >
-      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
+      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" gap={1}>
+        <Box onClick={onStatusClick} flexShrink={0}>
+          {live && status.pulse ? (
+            <Pulse synchronized colors={["$fg-on-inverse", status.color]} intervalMs={900} flexShrink={0}>
+              {status.marker}
+            </Pulse>
+          ) : (
+            <Text color={status.color} flexShrink={0}>
+              {status.marker}
+            </Text>
+          )}
+        </Box>
+        {showRunnerDigits
+          ? queues!.map((_, index) => (
+              <Text key={index} color="$fg-on-inverse-muted" flexShrink={0}>
+                [{index + 1}]
+              </Text>
+            ))
+          : null}
         <Text bold color="$fg-on-inverse" flexShrink={0}>
-          YRD QUEUE{" "}
+          YRD QUEUE
         </Text>
         <Text color="$fg-on-inverse" wrap="truncate">
           {displayAddress}
@@ -400,46 +432,30 @@ export function TopLine({
         gap={1}
         onClick={onStatusClick}
       >
-        {live && status.pulse ? (
-          <Pulse synchronized colors={["$fg-on-inverse", statusInk]} intervalMs={900} flexShrink={0}>
-            {status.marker}
-          </Pulse>
-        ) : (
-          <Text color={statusInk} flexShrink={0}>
-            {status.marker}
-          </Text>
-        )}
-        <Text bold color={statusInk} flexShrink={0}>
-          YRD
-        </Text>
-        <Text bold color={statusInk} flexShrink={0}>
-          {status.word}
-        </Text>
-        {status.timer === undefined ? null : (
-          <Text color={statusInk} flexShrink={0}>
-            {status.timer}
-          </Text>
-        )}
         {status.word === "STOPPED" && status.reason !== undefined ? (
-          <Text color={statusInk} wrap="truncate">
+          <Text color="$fg-on-inverse-muted" wrap="truncate">
             {status.reason}
           </Text>
         ) : null}
+        {timerText === undefined ? null : (
+          <Text color="$fg-on-inverse-muted" flexShrink={0}>
+            {timerText}
+          </Text>
+        )}
       </Box>
     </Box>
   )
 }
 
 /**
- * Filter pills on the plain surface (25630). Active uses warning tint and bold,
- * unselected stays muted. First letter is bolded as the keyboard shortcut.
+ * Filter pills on the plain surface (25630, 25716).
+ * Uses muted ($fg-muted) when active, and extra-muted ($border-default) when inactive.
+ * No bold, no yellow (25716 row 31).
  */
 function TopPill({
   label,
   active,
   onToggle,
-  boldFirstLetter = false,
-  activeTreatment: _activeTreatment = "warningText",
 }: {
   label: string
   active: boolean
@@ -447,23 +463,10 @@ function TopPill({
   boldFirstLetter?: boolean
   activeTreatment?: "accentText" | "warningText"
 }) {
-  const color = active ? "$fg-warning" : "$fg-muted"
+  const color = active ? "$fg-muted" : "$border-default"
   return (
     <Box flexShrink={0} onClick={onToggle}>
-      {boldFirstLetter && label.length > 0 ? (
-        <>
-          <Text color={color} bold>
-            {label.slice(0, 1)}
-          </Text>
-          <Text color={color} bold={active}>
-            {label.slice(1)}
-          </Text>
-        </>
-      ) : (
-        <Text color={color} bold={active}>
-          {label}
-        </Text>
-      )}
+      <Text color={color}>{label}</Text>
     </Box>
   )
 }
@@ -601,8 +604,6 @@ export const ListRow = memo(function ListRow({
           : row.head.slice(0, 12)
         : `${row.head.slice(0, 12)} (subject not fetched)`)
   const shownTitle = row.diagnostic === undefined ? title : `${row.diagnostic} · ${title}`
-  const separateLineSuffix = (layout.columns ?? 120) < 100 && row.state === "stuck" && suffix !== undefined
-  const inlineSuffix = suffix === undefined || separateLineSuffix ? undefined : suffix.text
   const computedTaskWidth =
     layout.taskWidth ??
     Math.max(
@@ -614,12 +615,19 @@ export const ListRow = memo(function ListRow({
             ? ((layout.qWidth ?? 0) > 0 ? (layout.qWidth ?? 0) + 1 : 0) +
               ((layout.runWidth ?? 0) > 0 ? (layout.runWidth ?? 0) + 1 : 0)
             : layout.queueRunWidth + 1) +
+          1 +
           layout.statusWidth +
           (layout.agentWidth > 0 ? 1 + layout.agentWidth : 0) +
           1 +
           layout.ageRunWidth +
           1),
     )
+  const separateLineSuffix =
+    row.state === "stuck" &&
+    suffix !== undefined &&
+    ((layout.columns ?? 120) < 100 ||
+      taskExtrasLayout(computedTaskWidth, row.branch, suffix.text).displaySuffix !== suffix.text)
+  const inlineSuffix = suffix === undefined || separateLineSuffix ? undefined : suffix.text
   const { displayBranch, displaySuffix } = taskExtrasLayout(computedTaskWidth, row.branch, inlineSuffix)
   return (
     <Box
@@ -925,7 +933,6 @@ export function StatusPills({
           key={bucket}
           label={`[${bucket.slice(0, 1)}]${bucket.slice(1)}`}
           active={buckets.has(bucket)}
-          activeTreatment="warningText"
           onToggle={() => {
             onSelectOnly(bucket)
           }}
