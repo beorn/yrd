@@ -2480,6 +2480,7 @@ export async function coreQueueCommand(
           workdir,
           captured.oid,
           createEventStore(repo, config.target.remote, selection),
+          { all: true },
         )
         if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
           io.stderr(`${reading.observation.message}\n`)
@@ -3783,7 +3784,7 @@ export async function readEventListing(
   }> = {},
 ): Promise<EventListingResult> {
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
-  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}`
+  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#drafts:${options.drafts === true}`
   const cache = eventListingCaches.get(cacheKey)
   const nowMs =
     typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()

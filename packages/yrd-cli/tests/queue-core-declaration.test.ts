@@ -401,6 +401,42 @@ describe("a queue is the selected origin branch carrying config", () => {
     ])
   }, 20_000)
 
+  // 25655: migrated endings retain their original times. The default list's
+  // seven-day window must not make their full change histories unshowable.
+  it("shows an old ended event change without widening a later default list", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000)
+    const queueTip = await createQueue(repo, "main", head, old)
+    const branch = "task/old-merged"
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: old, commit: head, by: "yrd" }),
+        changeInput("merged", { queueTip, at: old, commit: head }),
+      ],
+      { expect: null },
+    )
+    const list = async () => {
+      const output = capture(repo)
+      expect(await coreQueueCommand(repo, output.io, { command: "list" }, { json: true, queue: "main" })).toBe(0)
+      return (JSON.parse(output.stdout()) as { changes: readonly { branch: string }[] }).changes
+    }
+    expect((await list()).some((row) => row.branch === branch)).toBe(false)
+    const shown = capture(repo)
+    expect(
+      await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" }),
+      shown.stderr(),
+    ).toBe(0)
+    expect((JSON.parse(shown.stdout()) as { changes: readonly { branch: string; state: string }[] }).changes).toEqual([
+      expect.objectContaining({ branch, state: "merged" }),
+    ])
+    expect((await list()).some((row) => row.branch === branch)).toBe(false)
+  }, 15_000)
+
   it("uses every event change status unchanged in JSON, the table, and status filters", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
