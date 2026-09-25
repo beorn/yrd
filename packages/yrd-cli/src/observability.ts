@@ -1,5 +1,5 @@
 import { createFailure, type FailureKind } from "@yrd/process"
-import { createLogger, type ConditionalLogger, type ConfigElement, type LogLevel } from "loggily"
+import { createLogger, setDefaultOutput, type ConditionalLogger, type ConfigElement, type LogLevel } from "loggily"
 import { LOG_LEVEL_PRIORITY, resolveVerbosityLevel } from "loggily"
 import { enableContextPropagation } from "loggily/context"
 
@@ -124,7 +124,10 @@ export function resolveYrdObservability(
 }
 
 /** Create the one host-owned logger fan-out: the operator's stderr stream, plus
- * the structured JSONL file when one is configured. */
+ * the structured JSONL file when one is configured. For its lifetime it is also
+ * the default output of every pipeline-less logger (a library's fallback, such
+ * as `@yrd/process`'s `yrd:process`), so those rows reach the same stream, file
+ * and filters instead of the console (24266). */
 export function createYrdLogger(config: YrdObservability, stderr: (text: string) => unknown): ConditionalLogger {
   enableContextPropagation()
   const scope = {
@@ -143,10 +146,12 @@ export function createYrdLogger(config: YrdObservability, stderr: (text: string)
   }
   const created = createLogger("yrd", pipeline)
   const logger = created
+  const defaultOutput = setDefaultOutput(logger)
   let disposed = false
   const dispose = (): void => {
     if (disposed) return
     disposed = true
+    defaultOutput[Symbol.dispose]()
     logger[Symbol.dispose]()
   }
   return new Proxy(logger, {
