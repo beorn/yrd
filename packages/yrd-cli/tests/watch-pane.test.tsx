@@ -4698,19 +4698,16 @@ describe("termless screenshots for rows 3 to 5 (25716)", () => {
               color: "$fg-info",
               marker: "◉",
               pulse: true,
+              timer: "00:00:25",
             }}
-            queueAddress="github.com/beorn/hh-dev#main"
+            queue="github.com/beorn/hh-dev#main"
             queues={snap.queues}
             live={true}
             columns={120}
-            timerText="00:00:25"
           />
           <StatusPills
-            buckets={new Set(["running", "open"])}
+            buckets={new Set<"done" | "failed" | "open" | "running">(["running", "open"])}
             onSelectOnly={() => {}}
-            onToggle={() => {}}
-            statsOpen={false}
-            onToggleStats={() => {}}
           />
           <Box height={1} flexShrink={0} />
           <RunnerTitledBox line={checkLine} snapshot={snap} layout={layout} />
