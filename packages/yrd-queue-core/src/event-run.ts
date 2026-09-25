@@ -11,6 +11,7 @@ import {
   listChangeHistories,
   readChangeEvents,
   queueResumedAfter,
+  queueRef,
   readEventQueue,
   readEventOps,
   readStatus,
@@ -349,11 +350,15 @@ export async function eventQueueRun(
     return result(observation.outcome === "invalid" ? 2 : 0)
   }
 
-  let queueState = await readEventQueue(store, queue)
+  let operational = await readEventOps(store, git, queue, target)
+  // No override can expire or need a reminder when the table is empty. Keep
+  // the round's injected clock for its stop window until a clock act is due.
   const clock =
-    queueState.opsCutover === undefined
-      ? await expireOverrides(git, options.target.remote, queue, options.now?.() ?? Date.now(), "yrd")
-      : await expireQueueOverrides(store, queue, options.now?.() ?? Date.now(), "yrd")
+    operational.overrides.entries.length === 0
+      ? { expired: [], reminded: [] }
+      : operational.source === "legacy"
+        ? await expireOverrides(git, options.target.remote, queue, options.now?.() ?? Date.now(), "yrd")
+        : await expireQueueOverrides(store, queue, options.now?.() ?? Date.now(), "yrd")
   for (const [action, entries] of [
     ["expired", clock.expired],
     ["reminder", clock.reminded],
@@ -396,8 +401,8 @@ export async function eventQueueRun(
       }
     }
   }
-  let operational = await readEventOps(store, git, queue, target)
-  queueState = operational.queue
+  operational = await readEventOps(store, git, queue, target)
+  let queueState = operational.queue
   for (const [commit, observed] of Object.entries(queueState.observed)) await tellDirect(commit, observed.id)
   const { histories, invalid } = await listChangeHistories(store, queue)
   for (const [branch, defect] of invalid) {
@@ -787,6 +792,31 @@ export async function eventQueueRun(
       // Stage/write failures have no candidate event to reconcile and must
       // keep their original error. Only a publication attempt can be unknown.
       if (preparedMerge === undefined && !(error instanceof Conflict)) throw error
+      if (error instanceof Conflict && error.refs.includes(queueRef(queue)) && !error.refs.includes(ref)) {
+        const fresh = await readEventOps(store, git, queue, target)
+        if (fresh.queue.tip === queueState.tip) throw error
+        log.write({
+          kind: "warning",
+          subject: "queue-lease-lost",
+          branch,
+          head,
+          ref: queueRef(queue),
+          expected: queueState.tip,
+          actual: fresh.queue.tip,
+          reason: `${queueRef(queue)} advanced from ${queueState.tip} to ${fresh.queue.tip} while judging ${branch}: ${error.message}`,
+        })
+        if (fresh.stop !== undefined && options.foreground !== true) {
+          log.write({ kind: "pause", reason: fresh.stop.reason, by: fresh.stop.by, sha: fresh.stop.sha })
+          return result(0, observedMerged, failed, [], [branch], {
+            ring: "pause",
+            says: fresh.stop.reason,
+            what: fresh.stop,
+          })
+        }
+        // A resume or override changes the authority used to judge this candidate.
+        // The next service round rechecks it against the fresh operational state.
+        return result(0, observedMerged, failed, [], [branch])
+      }
       // A lease refusal on the target or queue tip is an authority change,
       // not a transport failure on this change chain.
       if (error instanceof Conflict && !error.refs.includes(ref)) throw error

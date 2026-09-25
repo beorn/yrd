@@ -1918,10 +1918,10 @@ it("discards a resubmitted event check once and continues with the next change",
   expect(logRecords(outcome).filter((row) => row.kind === "discarded" && row.branch === "task/a")).toHaveLength(1)
 })
 
-/** @failure A pause published during composition was replaced by a fresh queue-tip read, so merge crossed the stop.
+/** @failure A pause published during composition killed the service on a normal queue-tip lease race.
  * @level l3 @consumer queue operator
  */
-it("leases the queue tip observed before an event merge", async () => {
+it("re-reads a pause that wins the event merge lease and keeps the service round healthy", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
@@ -1948,10 +1948,91 @@ it("leases the queue tip observed before an event merge", async () => {
   await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "hold", at: new Date() })
   release()
 
-  await expect(running).rejects.toThrow()
+  const outcome = await running
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [], stopped: { ring: "pause" } })
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "warning",
+        subject: "queue-lease-lost",
+        expected: expect.any(String),
+        actual: expect.any(String),
+      }),
+    ]),
+  )
   expect(await remoteTarget(w)).toBe(w.target)
   expect((await readStatus(store, "main", "task/paused-event")).status).not.toBe("merged")
 })
+
+/** @failure A resume or override event on the queue ref was treated as a fatal merge lease loss.
+ * @level l3 @consumer queue operator and service
+ */
+it.each(["resume", "override"] as const)(
+  "defers a merge after a concurrent %s and retries with fresh ops",
+  async (kind) => {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createWorldEventQueue(w)
+    await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
+    await submitCommit(w, `task/${kind}-event`, "one.txt")
+    const verify = verifying.verifyCandidate
+    let entered!: () => void
+    const composing = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    let release!: () => void
+    const continueRun = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    using _held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
+      const outcome = await verify(options)
+      entered()
+      await continueRun
+      return outcome
+    })
+
+    const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+    await composing
+    if (kind === "resume") {
+      await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "brief hold", at: new Date() })
+      await writeQueueEvent(store, "main", { type: "resumed", by: "operator", reason: "release", at: new Date() })
+    } else {
+      await writeQueueOverride(
+        store,
+        "main",
+        {
+          kind: "off",
+          check: "lab-gate",
+          until: new Date(Date.now() + 60_000),
+          reason: "operator changed merge gate",
+          actor: { by: "operator", verified: false },
+        },
+        ["lab-gate"],
+        new Date(),
+      )
+    }
+    release()
+
+    const outcome = await running
+    expect(outcome).toMatchObject({ exitCode: 0, merged: [], deferred: [`task/${kind}-event`] })
+    expect(logRecords(outcome)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "warning",
+          subject: "queue-lease-lost",
+          expected: expect.any(String),
+          actual: expect.any(String),
+        }),
+      ]),
+    )
+    expect(await remoteTarget(w)).toBe(w.target)
+    expect((await readStatus(store, "main", `task/${kind}-event`)).status).not.toBe("merged")
+    if (kind === "resume") {
+      const retry = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+      expect(retry).toMatchObject({ exitCode: 0, merged: ["task/resume-event"] })
+    }
+  },
+)
 
 /** @failure A drop during composition threw from the stale event write and abandoned the next change.
  * @level l3 @consumer queue operator and submitter
