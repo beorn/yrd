@@ -12,6 +12,7 @@ import type { GitomicBackend } from "gitomic"
 import { gitIn } from "../src/git.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
 import { pauseRef } from "../src/refs.ts"
+import { encodeOps, type OpsState } from "../src/ops-state.ts"
 import {
   CHANGE_EVENT_TYPES,
   adoptedChange,
@@ -21,7 +22,9 @@ import {
   changesRef,
   decide,
   enumerateChangeSegments,
+  expireQueueOverrides,
   drop,
+  eventPause,
   evolve,
   initial,
   listChangeHistories,
@@ -35,6 +38,7 @@ import {
   readStatus,
   setBranchIgnored,
   writeQueueEvent,
+  writeQueueOverride,
 } from "../src/events.ts"
 
 const A = "a".repeat(40)
@@ -128,6 +132,32 @@ async function seedEventQueue(
   const created = result.events[0]?.id
   if (created === undefined) throw new Error("fixture created event was not written")
   return created
+}
+
+async function seedOpsCutover(
+  location: Readonly<{ repo: string; remote: string; backend?: GitomicBackend }>,
+  queue: string,
+  state: OpsState = { overrides: [] },
+): Promise<string> {
+  const previous = await readEventQueue(location as Parameters<typeof readEventQueue>[0], queue)
+  const result = await (
+    await openEvents({ ...location, ref: queueRef(queue), writer: "@chief" })
+  ).append(
+    [
+      {
+        type: "ops-cutover",
+        props: [
+          ["Queue", previous.tip],
+          ["Time", "2026-09-22T14:00:30.000Z"],
+          ["Ops", encodeOps(state)],
+        ],
+      },
+    ],
+    { expect: previous.tip },
+  )
+  const id = result.events[0]?.id
+  if (id === undefined) throw new Error("fixture ops-cutover event was not written")
+  return id
 }
 
 function input(type: string, props: readonly (readonly [string, string])[] = [], keeps: string[] = []): EventInput {
@@ -1010,21 +1040,30 @@ describe("the queue-format boundary", () => {
     const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
     const created = await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
     expect((await readEventQueue(location, "lab")).created).toBe(created)
+    await expect(
+      writeQueueEvent(location, "lab", {
+        type: "paused",
+        reason: "repair",
+        by: "operator",
+        at: new Date("2026-09-22T14:00:10.000Z"),
+      }),
+    ).rejects.toThrow(/needs ops-cutover/)
+    await seedOpsCutover(location, "lab")
     await writeQueueEvent(location, "lab", {
       type: "paused",
       reason: "repair",
       by: "operator",
       at: new Date("2026-09-22T14:01:00.000Z"),
     })
-    expect((await readEventQueue(location, "lab")).pause?.reason).toBe("repair")
-    expect((await readEventQueue(location, "lab")).pause?.by).toBe("operator")
+    expect(eventPause(await readEventQueue(location, "lab"))?.reason).toBe("repair")
+    expect(eventPause(await readEventQueue(location, "lab"))?.by).toBe("operator")
     await writeQueueEvent(location, "lab", {
       type: "resumed",
       reason: "repaired",
       by: "operator",
       at: new Date("2026-09-22T14:02:00.000Z"),
     })
-    expect((await readEventQueue(location, "lab")).pause).toBeUndefined()
+    expect(eventPause(await readEventQueue(location, "lab"))).toBeUndefined()
     await expect(
       writeQueueEvent(location, "lab", {
         type: "resumed",
@@ -1032,7 +1071,7 @@ describe("the queue-format boundary", () => {
         by: "operator",
         at: new Date("2026-09-22T14:03:00.000Z"),
       }),
-    ).rejects.toThrow(/resumes a running queue/)
+    ).rejects.toThrow(/queue is not paused/)
   })
 
   it("starts a migrated queue paused on its created event and can resume normally", async () => {
@@ -1061,13 +1100,104 @@ describe("the queue-format boundary", () => {
     if (created === undefined) throw new Error("fixture created event was not staged")
     const queue = await readEventQueue(location, "lab")
     expect(queue.pause).toEqual({ id: created, at, reason: "migration cutover", by: "@dev/2" })
+    await seedOpsCutover(location, "lab", {
+      pause: { kind: "paused", sha: created, at, reason: "migration cutover", by: "@dev/2", cause: "operator" },
+      overrides: [],
+    })
     await writeQueueEvent(location, "lab", {
       type: "resumed",
       reason: "migration verified",
       by: "operator",
       at: new Date("2026-09-22T14:01:00.000Z"),
     })
-    expect((await readEventQueue(location, "lab")).pause).toBeUndefined()
+    expect(eventPause(await readEventQueue(location, "lab"))).toBeUndefined()
+  })
+
+  it("keeps the complete override table on each ops event and refuses a missing snapshot", async () => {
+    const { store, location } = remoteMemStore("yrd-event-ops-override")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    await seedOpsCutover(location, "lab")
+    const actor = { by: "operator", verified: true }
+    const first = await writeQueueOverride(
+      location,
+      "lab",
+      { kind: "off", check: "build", until: new Date("2026-09-22T15:00:00.000Z"), reason: "repair", actor },
+      ["build"],
+      new Date("2026-09-22T14:01:00.000Z"),
+    )
+    expect(first.kind).toBe("set")
+    expect(first.record.entries).toMatchObject([{ check: "build", record: first.record.sha, verified: true }])
+    const second = await writeQueueOverride(
+      location,
+      "lab",
+      { kind: "off", check: "build", until: new Date("2026-09-22T16:00:00.000Z"), reason: "more repair", actor },
+      ["build"],
+      new Date("2026-09-22T14:02:00.000Z"),
+    )
+    expect(second.kind).toBe("replaced")
+    expect(second.replaced?.record).toBe(first.record.sha)
+    const cleared = await writeQueueOverride(
+      location,
+      "lab",
+      { kind: "clear", check: "build", reason: "fixed", actor },
+      ["build"],
+      new Date("2026-09-22T14:03:00.000Z"),
+    )
+    expect(cleared.kind).toBe("clear")
+    expect((await readEventQueue(location, "lab")).ops?.overrides).toEqual([])
+    const queue = await readEventQueue(location, "lab")
+    await (
+      await openEvents({ ...store, ref: queueRef("lab"), writer: "operator" })
+    ).append(
+      [
+        {
+          type: "override-set",
+          props: [
+            ["Queue", queue.tip],
+            ["Time", "2026-09-22T14:04:00.000Z"],
+            ["Check", "build"],
+            ["Reason", "bad"],
+          ],
+        },
+      ],
+      { expect: queue.tip },
+    )
+    await expect(readEventQueue(location, "lab")).rejects.toThrow(/exactly one complete Ops: snapshot/)
+  })
+
+  it("records one reminder and one expiration on the queue event ref", async () => {
+    const { store, location } = remoteMemStore("yrd-event-ops-clock")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    await seedOpsCutover(location, "lab")
+    await writeQueueOverride(
+      location,
+      "lab",
+      {
+        kind: "off",
+        check: "build",
+        until: new Date("2026-09-22T15:00:00.000Z"),
+        reason: "repair",
+        actor: { by: "operator", verified: true },
+      },
+      ["build"],
+      new Date("2026-09-22T14:00:40.000Z"),
+    )
+    const reminded = await expireQueueOverrides(location, "lab", Date.parse("2026-09-22T14:31:00.000Z"), "yrd")
+    expect(reminded.reminded.map((entry) => entry.check)).toEqual(["build"])
+    expect(reminded.expired).toEqual([])
+    expect(
+      (await expireQueueOverrides(location, "lab", Date.parse("2026-09-22T14:32:00.000Z"), "yrd")).reminded,
+    ).toEqual([])
+    const expired = await expireQueueOverrides(location, "lab", Date.parse("2026-09-22T15:01:00.000Z"), "yrd")
+    expect(expired.expired.map((entry) => entry.check)).toEqual(["build"])
+    expect(expired.table.entries[0]?.state).toBe("expired")
+    expect(
+      (await expireQueueOverrides(location, "lab", Date.parse("2026-09-22T15:02:00.000Z"), "yrd")).expired,
+    ).toEqual([])
   })
 
   it("retains one direct landing and its settled notice on the queue chain", async () => {

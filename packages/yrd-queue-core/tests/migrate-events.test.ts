@@ -1,7 +1,10 @@
-// @failure an incomplete or changed remote is treated as an empty migration or a successful cutover.
+// @failure an incomplete remote or stale rollback bundle is treated as a successful cutover.
 // @level l1
 // @consumer 25041 one-shot plan, apply and rollback refusal receipts
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   assertAdvertised,
@@ -9,6 +12,7 @@ import {
   classify,
   readbackStatus,
   readPlan,
+  requireVerifiedBundle,
   remoteAdvertisement,
 } from "../scripts/migrate-events.ts"
 
@@ -62,5 +66,24 @@ describe("25041 migration refuses incomplete evidence", () => {
   it("maps only the created commit out of legacy direct rows and refuses another missing direct commit", () => {
     expect(assertDirectParity([HEAD], [], HEAD)).toEqual({ creationCommit: HEAD, directCommits: [] })
     expect(() => assertDirectParity([OLD, HEAD], [], HEAD)).toThrow(/direct-parity.*outside queue creation/)
+  })
+
+  it("refuses a modified ops rollback bundle before reading its snapshot or publishing refs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-ops-bundle-"))
+    const bundle = join(dir, "old-refs.bundle")
+    try {
+      writeFileSync(bundle, "modified after the verified plan")
+      await expect(
+        requireVerifiedBundle(
+          join(dir, "old-refs.git"),
+          bundle,
+          "a".repeat(64),
+          [],
+          {} as Parameters<typeof requireVerifiedBundle>[4],
+        ),
+      ).rejects.toThrow(/invalid-bundle.*SHA256 differs from plan/u)
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
   })
 })

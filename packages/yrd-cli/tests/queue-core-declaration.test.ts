@@ -11,6 +11,7 @@ import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   CHANGE_STATUSES,
+  appendOpsCutover,
   assertPlainEventQueueConfig,
   changeInput,
   changeRef,
@@ -999,7 +1000,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(exit).toBe(2)
   })
 
-  it("pause and resume an event queue on its queue chain without a legacy pause ref", async () => {
+  it("keeps event-queue pause and resume on the legacy ref before ops-cutover", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
     const head = (await git(["rev-parse", "HEAD"])).trim()
@@ -1014,14 +1015,120 @@ describe("a queue is the selected origin branch carrying config", () => {
       paused.stderr(),
     ).toBe(0)
     expect(JSON.parse(paused.stdout())).toMatchObject({ kind: "paused", reason: "repair" })
-    expect((await readEventQueue(store, "main")).pause?.reason).toBe("repair")
+    expect((await readEventQueue(store, "main")).pause).toBeUndefined()
+    const pausedRef = (await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause"])).trim()
+    expect(pausedRef).toContain("refs/yrd/main/pause")
+    const pausedOid = pausedRef.split(/\s+/u)[0]
+    expect(pausedOid).toBeTruthy()
+    expect(
+      await gitIn(join(dirname(repo), "remote.git"))([
+        "show",
+        "-s",
+        "--format=%(trailers:only,unfold)",
+        pausedOid ?? "",
+      ]),
+    ).toContain("Record: paused\nPaused-By:")
     const resumed = capture(repo)
     expect(
       await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main", "--json"], resumed.io),
       resumed.stderr(),
     ).toBe(0)
     expect((await readEventQueue(store, "main")).pause).toBeUndefined()
-    expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause"])).toBe("")
+    expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause"])).toContain("refs/yrd/main/pause")
+  })
+
+  it("keeps an event-queue override on the legacy ref before ops-cutover", async () => {
+    const repo = await world('checks:\n  - verify: {run: "true", on: [merge]}\n')
+    const git = gitIn(repo)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const store = createEventStore(repo, "origin", git.selection)
+    await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    const before = (await readEventQueue(store, "main")).tip
+    const until = new Date(Date.now() + 3_600_000).toISOString()
+    const set = capture(repo)
+    expect(
+      await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "queue",
+          "override",
+          "--queue",
+          "main",
+          "--check",
+          "verify",
+          "--off",
+          "--until",
+          until,
+          "--reason",
+          "flaky gate",
+          "--json",
+        ],
+        set.io,
+      ),
+      set.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(set.stdout())).toMatchObject({ kind: "set", overrides: [{ check: "verify", state: "active" }] })
+    expect((await readEventQueue(store, "main")).tip).toBe(before)
+    const ref = (await git(["ls-remote", "--refs", "origin", "refs/yrd/main/override"])).trim()
+    expect(ref).toContain("refs/yrd/main/override")
+    const oid = ref.split(/\s+/u)[0]
+    expect(
+      await gitIn(join(dirname(repo), "remote.git"))(["show", "-s", "--format=%(trailers:only,unfold)", oid ?? ""]),
+    ).toContain("Record: set")
+  })
+
+  it("routes pause and override commands to queue events after ops-cutover", async () => {
+    const repo = await world('checks:\n  - verify: {run: "true", on: [merge]}\n')
+    const git = gitIn(repo)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const store = createEventStore(repo, "origin", git.selection)
+    await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    await appendOpsCutover(store, git, "main", head, new Date(), "@chief")
+    const paused = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "repair", "--json"],
+        paused.io,
+      ),
+      paused.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(paused.stdout())).toMatchObject({ kind: "paused", reason: "repair" })
+    const until = new Date(Date.now() + 3_600_000).toISOString()
+    const set = capture(repo)
+    expect(
+      await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "queue",
+          "override",
+          "--queue",
+          "main",
+          "--check",
+          "verify",
+          "--off",
+          "--until",
+          until,
+          "--reason",
+          "flaky gate",
+          "--json",
+        ],
+        set.io,
+      ),
+      set.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(set.stdout())).toMatchObject({ kind: "set", overrides: [{ check: "verify", state: "active" }] })
+    const listed = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "override", "--queue", "main", "--list", "--json"], listed.io),
+      listed.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(listed.stdout())).toMatchObject({ overrides: [{ check: "verify", state: "active" }] })
+    expect((await readEventQueue(store, "main")).ops?.pause?.reason).toBe("repair")
+    expect((await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause", "refs/yrd/main/override"])).trim()).toBe(
+      "",
+    )
   })
 
   it.each(["open", "close"])("refuses the retired garage %s command without changing local refs", async (verb) => {

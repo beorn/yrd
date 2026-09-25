@@ -42,7 +42,6 @@ import {
   drop,
   pauseLine,
   eventDirectMergeCommits,
-  eventPause,
   eventListRows,
   enumerateChangeSegments,
   createEventStore,
@@ -53,10 +52,11 @@ import {
   queueRefPrefix,
   changesRef,
   readChangeEvents,
-  readEventQueue,
+  readEventOps,
   readEventQueueWithChanges,
   setBranchIgnored,
   writeQueueEvent,
+  writeQueueOverride,
   prepareWorktree,
   checkedTree,
   programRootCheck,
@@ -104,6 +104,7 @@ import {
   writeOverride,
   type OverrideFact,
   type OverrideEntry,
+  type OverrideTable,
   notifyOutsideRound,
   overrideNotice,
   skippedChecks,
@@ -822,7 +823,7 @@ export async function coreQueueCommand(
         io.stderr(`${config.target.remote}#${name}: yrd-adopt-legacy-format: adoption needs an event queue\n`)
         return 1
       }
-      if (request.apply && eventPause(await readEventQueue(eventStore, name)) === undefined) {
+      if (request.apply && (await readEventOps(eventStore, git, name, captured.oid)).stop === undefined) {
         io.stderr(
           `${config.target.remote}#${name}: yrd-adopt-legacy-unpaused: pause with yrd queue pause --reason <text> before --apply\n`,
         )
@@ -961,30 +962,32 @@ export async function coreQueueCommand(
       try {
         const eventStore = createEventStore(repo, config.target.remote, selection)
         if ((await queueFormat(eventStore, config.target.branch)) === "event") {
-          const now = await readEventQueue(eventStore, config.target.branch)
-          const standing = eventPause(now)
-          if (request.command === "pause" && standing !== undefined) {
-            throw new QueuePaused(standing, config.target.remote, config.target.branch)
+          const now = await readEventOps(eventStore, git, config.target.branch, captured.oid)
+          if (now.source === "event") {
+            const standing = now.stop
+            if (request.command === "pause" && standing !== undefined) {
+              throw new QueuePaused(standing, config.target.remote, config.target.branch)
+            }
+            if (request.command === "resume" && standing === undefined) throw new QueueNotPaused()
+            const at = new Date()
+            const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
+            const id = await writeQueueEvent(eventStore, config.target.branch, {
+              type: request.command === "pause" ? "paused" : "resumed",
+              reason,
+              by: request.by,
+              at,
+            })
+            const written: PauseRecord = {
+              kind: request.command === "pause" ? "paused" : "resumed",
+              sha: id,
+              at,
+              reason,
+              by: request.by,
+              cause: "operator",
+            }
+            emit(io, options.json, written, pauseLine(written))
+            return 0
           }
-          if (request.command === "resume" && standing === undefined) throw new QueueNotPaused()
-          const at = new Date()
-          const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
-          const id = await writeQueueEvent(eventStore, config.target.branch, {
-            type: request.command === "pause" ? "paused" : "resumed",
-            reason,
-            by: request.by,
-            at,
-          })
-          const written: PauseRecord = {
-            kind: request.command === "pause" ? "paused" : "resumed",
-            sha: id,
-            at,
-            reason,
-            by: request.by,
-            cause: "operator",
-          }
-          emit(io, options.json, written, pauseLine(written))
-          return 0
         }
         // Whether a stop STANDS is the one derivation's answer, never the tip's
         // kind alone: a stuck stop whose change has left the line is over, so a
@@ -1013,21 +1016,16 @@ export async function coreQueueCommand(
       }
     }
     case "override": {
-      // The merge-check override (25296). An event queue has its own merge
-      // selection (event-run.ts) that no override reaches, so it refuses rather
-      // than accept a switch nothing would read (X4).
-      if (
-        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
-      ) {
-        io.stderr(
-          `yrd: ${config.target.remote}#${config.target.branch} is an event queue; a merge-check override is not ` +
-            "supported there, and nothing would read it\n",
-        )
-        return 1
-      }
+      // Until ops-cutover, the existing Record writer remains the authority for
+      // both queue formats. An event writer must not run before the cutover.
+      const overrideStore = createEventStore(repo, config.target.remote, selection)
+      const eventOps =
+        (await queueFormat(overrideStore, config.target.branch)) === "event"
+          ? await readEventOps(overrideStore, git, config.target.branch, captured.oid)
+          : undefined
       const now = Date.now()
       if (request.action === "list") {
-        const table = await readOverrides(git, config.target.remote, config.target.branch)
+        const table = eventOps?.overrides ?? (await readOverrides(git, config.target.remote, config.target.branch))
         emit(
           io,
           options.json,
@@ -1045,21 +1043,20 @@ export async function coreQueueCommand(
           .filter((spec) => (spec.on ?? ["merge"]).includes("merge"))
           .map((spec) => spec.name)
         const actor = { by: request.by, verified: request.verified }
-        const written = await writeOverride(
-          git,
-          config.target.remote,
-          config.target.branch,
+        const write =
           request.action === "off"
-            ? {
+            ? ({
                 actor,
                 check: request.check ?? "",
                 kind: "off",
                 reason: request.reason ?? "",
                 until: parseUntil(request.until ?? "", now),
-              }
-            : { actor, check: request.check ?? "", kind: "clear", reason: request.reason ?? "" },
-          declaredMerge,
-        )
+              } as const)
+            : ({ actor, check: request.check ?? "", kind: "clear", reason: request.reason ?? "" } as const)
+        const written =
+          eventOps?.source === "event"
+            ? await writeQueueOverride(overrideStore, config.target.branch, write, declaredMerge, new Date(now))
+            : await writeOverride(git, config.target.remote, config.target.branch, write, declaredMerge)
         const standing = written.record.entries.find((entry) => entry.check === request.check)
         // The page is the override's side effect, never its condition (@cto
         // ccd8dfa8): a notifier that fails is said on stderr and journaled, and
@@ -1708,7 +1705,11 @@ export async function coreQueueCommand(
       // A stop that cannot be read is what a round that cannot read its queue
       // already is: stuck, exit 2, and no document claiming a state nobody read.
       try {
-        lastStop = (await readStop(git, config.target.remote, config.target.branch, captured.oid)).stop
+        const eventStore = createEventStore(repo, config.target.remote, selection)
+        lastStop =
+          (await queueFormat(eventStore, config.target.branch)) === "event"
+            ? (await readEventOps(eventStore, git, config.target.branch, captured.oid)).stop
+            : (await readStop(git, config.target.remote, config.target.branch, captured.oid)).stop
       } catch (error) {
         return stuck(
           `the line's stop cannot be read at start: ${error instanceof Error ? error.message : String(error)}`,
@@ -1950,11 +1951,10 @@ export async function coreQueueCommand(
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = reading.format === "event" ? reading.pause : reading.queue.stop
-        // The override table beside the stop (25296 C5). An event queue has no
-        // override (the verb refuses there), so it carries none.
+        // The table and stop come from the same authority read as this listing.
         const overrides =
           reading.format === "event"
-            ? []
+            ? overrideFacts(reading.overrides, Date.now())
             : overrideFacts(await readOverrides(git, config.target.remote, config.target.branch), Date.now())
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table. Zero
@@ -3780,6 +3780,7 @@ export type EventListingResult = Readonly<{
   journals: Journals
   drafts: DraftReading
   pause: PauseRecord | undefined
+  overrides: OverrideTable
   changes: ReadonlyMap<string, EventChange>
   invalid: Awaited<ReturnType<typeof readEventQueueWithChanges>>["invalid"]
   observation: GitObservation
@@ -3936,13 +3937,20 @@ export async function readEventListing(
       refs: [...queueRefs, ...branchRefs].map(([ref, oid]) => ({ ref, oid })),
     },
   })
+  const operational = await readEventOps(store, git, config.target.branch, targetOid)
+  if (operational.queue.tip !== queue.tip) {
+    throw new Error(
+      `${queueRef(config.target.branch)} moved from ${queue.tip} to ${operational.queue.tip} during listing; retry the read`,
+    )
+  }
   const reading: EventListingResult = {
     format: "event",
     all,
     document,
     journals: readJournals(join(workdir, "logs")),
     drafts,
-    pause: eventPause(queue),
+    pause: operational.stop,
+    overrides: operational.overrides,
     changes,
     invalid,
     observation,

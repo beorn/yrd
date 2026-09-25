@@ -3,14 +3,25 @@ import { Conflict } from "./git.ts"
 import { chainsUnder, listRefs, openEvents } from "./git.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
-import { queueRefPrefix } from "./refs.ts"
+import { overrideRef, pauseRef, queueRefPrefix } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
 import { gitIn, refAt } from "./git.ts"
-import type { GitSelection } from "./git.ts"
+import type { Git, GitSelection } from "./git.ts"
 import type { QueueConfig } from "./config.ts"
 import { checkTrailer, readCheckTrailer } from "./check.ts"
 import type { CheckResult } from "./check.ts"
+import { decodeOps, encodeOps, OPS_SELF, type OpsState } from "./ops-state.ts"
+import {
+  decideOverride,
+  decideOverrideClock,
+  readOverrides,
+  type OverrideDecision,
+  type OverrideEntry,
+  type OverrideTable,
+  type OverrideWrite,
+} from "./override.ts"
+import { readStop } from "./remote.ts"
 
 export const CHANGE_STATUSES = [
   "draft",
@@ -861,6 +872,10 @@ type EventQueueProjection = Readonly<{
   /** Derived from the created event's kept commit. This is the queue's start, not legacy run.ts's resolved .yrd.yml declaration. */
   declaration: Oid
   tip: string
+  /** The authority switch for pause and override state; absent while their legacy refs remain authoritative. */
+  opsCutover?: string
+  /** Complete operational state from the latest ops event, once cut over. */
+  ops?: OpsState
   pause?: Readonly<{ id: string; at: Date; reason: string; by: string }>
   observed: Readonly<Record<string, Readonly<{ id: string; branch?: string }>>>
   notices: Readonly<
@@ -877,6 +892,7 @@ const queueLocations = new WeakMap<
 
 /** The queue stop in the existing command response shape. */
 export function eventPause(queue: EventQueueProjection): PauseRecord | undefined {
+  if (queue.opsCutover !== undefined) return queue.ops?.pause
   if (queue.pause === undefined) return undefined
   return {
     kind: "paused",
@@ -950,6 +966,149 @@ export async function readEventQueue(store: QueueLocation, queue: string): Promi
   return result
 }
 
+/** Four honest ops reads: pre-cutover legacy; post-cutover events; leftover refs refuse. */
+export async function readEventOps(
+  store: QueueLocation,
+  git: Git,
+  queue: string,
+  targetSha: string,
+): Promise<
+  Readonly<{
+    source: "legacy" | "event"
+    queue: EventQueue
+    pause?: PauseRecord
+    stop?: PauseRecord
+    overrides: OverrideTable
+  }>
+> {
+  const projected = await readEventQueue(store, queue)
+  if (projected.opsCutover === undefined) {
+    const [stop, overrides] = await Promise.all([
+      readStop(git, store.remote, queue, targetSha),
+      readOverrides(git, store.remote, queue),
+    ])
+    return { source: "legacy", queue: projected, ...stop, overrides }
+  }
+  if (projected.ops === undefined) throw new Error(`${queueRef(queue)}: ops-cutover has no complete state`)
+  const refs = await listRefs(queueRefPrefix(queue), store)
+  const leftovers = [pauseRef(queue), overrideRef(queue)].filter((ref) => refs.has(ref))
+  if (leftovers.length > 0) {
+    throw new Error(
+      `${store.remote}#${queue}: ops cutover incomplete; ${leftovers.join(", ")} remain after ${projected.opsCutover}`,
+    )
+  }
+  const stop = await eventLineStop(store, queue, projected.ops.pause)
+  return {
+    source: "event",
+    queue: projected,
+    pause: projected.ops.pause,
+    stop,
+    overrides: { sha: projected.tip, entries: projected.ops.overrides },
+  }
+}
+
+export type OpsCutoverReceipt = Readonly<{
+  event: string
+  queueBefore: string
+  queueAfter: string
+  pauseBefore?: string
+  overrideBefore?: string
+}>
+
+/** Stage the complete legacy state, then append and remove both old refs in one leased publish. */
+export async function appendOpsCutover(
+  store: QueueLocation,
+  git: Git,
+  queue: string,
+  targetSha: string,
+  at: Date,
+  by: string,
+  expected?: Readonly<{ queueBefore: string; pauseBefore?: string; overrideBefore?: string }>,
+  onStaged?: (oid: string) => void,
+): Promise<OpsCutoverReceipt> {
+  if (Number.isNaN(at.getTime())) throw new TypeError("ops-cutover Time: needs a valid instant")
+  if (by.trim() === "") throw new TypeError("ops-cutover needs an actor")
+  const prior = await readEventOps(store, git, queue, targetSha)
+  if (prior.source !== "legacy") {
+    throw new Error(`${queueRef(queue)}: ops-cutover already exists at ${prior.queue.opsCutover}`)
+  }
+  const refs = await listRefs(queueRefPrefix(queue), store)
+  const pauseBefore = refs.get(pauseRef(queue))
+  const overrideBefore = refs.get(overrideRef(queue))
+  if (
+    expected !== undefined &&
+    (expected.queueBefore !== prior.queue.tip ||
+      expected.pauseBefore !== pauseBefore ||
+      expected.overrideBefore !== overrideBefore)
+  ) {
+    throw new Conflict(`${queueRef(queue)}: ops-cutover refs differ from the verified plan`, {
+      refs: [queueRef(queue), pauseRef(queue), overrideRef(queue)],
+    })
+  }
+  if (pauseBefore !== prior.pause?.sha || overrideBefore !== prior.overrides.sha) {
+    throw new Conflict(`${queueRef(queue)}: legacy refs moved while preparing ops-cutover`, {
+      refs: [pauseRef(queue), overrideRef(queue)],
+    })
+  }
+  const state: OpsState = {
+    ...(prior.stop === undefined ? {} : { pause: prior.stop }),
+    overrides: prior.overrides.entries,
+  }
+  const ref = queueRef(queue)
+  const input: EventInput = {
+    type: "ops-cutover",
+    props: [
+      [EVENT_TRAILERS.queue, prior.queue.tip],
+      [EVENT_TRAILERS.time, at.toISOString()],
+      ["Ops", encodeOps(state)],
+    ],
+  }
+  const staged = await (await openEvents({ ...store, ref, writer: by })).stage([input], { expect: prior.queue.tip })
+  onStaged?.(staged.head)
+  const also: AlsoRef[] = [
+    ...(pauseBefore === undefined ? [] : [{ ref: pauseRef(queue), expect: pauseBefore, oid: null }]),
+    ...(overrideBefore === undefined ? [] : [{ ref: overrideRef(queue), expect: overrideBefore, oid: null }]),
+  ]
+  await staged.publish({ also })
+  const event = staged.events[0]?.id
+  if (event === undefined) throw new Error(`${ref}: staged ops-cutover had no event`)
+  const readback = await readEventQueue(store, queue)
+  if (readback.opsCutover !== event || readback.tip !== staged.head) {
+    throw new Error(`${ref}: ops-cutover publish returned but readback differs from staged ${staged.head}`)
+  }
+  const leftovers = await listRefs(queueRefPrefix(queue), store)
+  if (leftovers.has(pauseRef(queue)) || leftovers.has(overrideRef(queue))) {
+    throw new Error(`${ref}: ops-cutover published but legacy refs remain`)
+  }
+  return {
+    event,
+    queueBefore: prior.queue.tip,
+    queueAfter: staged.head,
+    ...(pauseBefore === undefined ? {} : { pauseBefore }),
+    ...(overrideBefore === undefined ? {} : { overrideBefore }),
+  }
+}
+
+/** The event equivalent of the legacy stuck-stop derivation. */
+async function eventLineStop(
+  store: QueueLocation,
+  queue: string,
+  pause: PauseRecord | undefined,
+): Promise<PauseRecord | undefined> {
+  if (pause?.kind !== "paused") return undefined
+  if (pause.cause === "operator" || pause.change === undefined) return pause
+  const ref = changesRef(queue, pause.change.branch)
+  const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
+  if (events.length === 0) return pause
+  const state = project(events, ref, store.repo)
+  if (state.commit !== pause.change.head || !isOpen(state.status)) return undefined
+  const stuckAt = events.findLastIndex((event) => event.type === "stuck")
+  if (stuckAt < 0) throw new Error(`${ref}: stuck queue pause ${pause.sha} has no stuck change event`)
+  return events.slice(stuckAt + 1).some((event) => ["merged", "failed", "cancelled"].includes(event.type))
+    ? undefined
+    : pause
+}
+
 /** Whether the queue was explicitly resumed after this change's latest stuck event. */
 export async function queueResumedAfter(
   store: QueueLocation,
@@ -984,8 +1143,11 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   if (Number.isNaN(write.at.getTime())) throw new TypeError("Time: needs a valid instant")
   const chain = await openEvents({ ...store, ref, writer: write.by })
   let existing: string | undefined
-  const result = await chain.transact((events) => {
+  const result = await chain.transact(async (events) => {
     const current = projectEventQueue(events, ref, store.repo)
+    if ((write.type === "paused" || write.type === "resumed") && current.opsCutover === undefined) {
+      throw new Error(`${ref}: ${write.type} needs ops-cutover; legacy pause Record is still authoritative`)
+    }
     if (write.type === "observed") existing = current.observed[write.commit]?.id
     if (write.type === "notified") existing = current.notices[write.notice.key]?.id
     if (existing !== undefined) return []
@@ -1005,6 +1167,32 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
       if (write.notice.reason !== undefined) details.push([EVENT_TRAILERS.reason, write.notice.reason])
     } else {
       details.push([EVENT_TRAILERS.reason, write.reason])
+      if (current.ops === undefined) throw new Error(`${ref}: ops-cutover has no effective state`)
+      const standing = await eventLineStop(store, queue, current.ops.pause)
+      if (write.type === "paused" && standing !== undefined) {
+        throw new Error(`${ref}: queue is already paused at ${standing.sha}`)
+      }
+      if (write.type === "resumed" && standing === undefined) {
+        throw new Error(`${ref}: queue is not paused`)
+      }
+      if (write.type === "paused" && current.ops.pause !== undefined) {
+        details.push(["Replaces", current.ops.pause.sha])
+      }
+      const next: OpsState =
+        write.type === "paused"
+          ? {
+              pause: {
+                kind: "paused",
+                sha: OPS_SELF,
+                at: write.at,
+                reason: write.reason,
+                by: write.by,
+                cause: "operator",
+              },
+              overrides: current.ops.overrides,
+            }
+          : { overrides: current.ops.overrides }
+      details.push(["Ops", encodeOps(next)])
     }
     const input: EventInput = {
       type: write.type,
@@ -1025,6 +1213,112 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   const written = existing ?? result.events[0]?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: ${write.type} event was not written`)
   return written
+}
+
+/** Write a merge-check override on the queue event ref after ops-cutover. */
+export async function writeQueueOverride(
+  store: QueueLocation,
+  queue: string,
+  write: OverrideWrite,
+  declared: readonly string[],
+  at: Date,
+): Promise<Readonly<{ kind: OverrideDecision["kind"]; record: OverrideTable; replaced?: OverrideEntry }>> {
+  if (Number.isNaN(at.getTime())) throw new TypeError("override Time: needs a valid instant")
+  const ref = queueRef(queue)
+  const chain = await openEvents({ ...store, ref, writer: write.actor.by })
+  let decision: OverrideDecision | undefined
+  const result = await chain.transact((events) => {
+    const current = projectEventQueue(events, ref, store.repo)
+    if (current.opsCutover === undefined || current.ops === undefined) {
+      throw new Error(`${ref}: override event needs ops-cutover; legacy override Record is still authoritative`)
+    }
+    decision = decideOverride(
+      { sha: current.tip, entries: current.ops.overrides },
+      write,
+      declared,
+      at,
+      `${store.remote} ${ref}`,
+    )
+    const next: OpsState = { ...current.ops, overrides: decision.entries }
+    const type = `override-${decision.kind}`
+    const props: [string, string][] = [
+      [EVENT_TRAILERS.queue, current.tip],
+      [EVENT_TRAILERS.time, at.toISOString()],
+      [EVENT_TRAILERS.check, write.check],
+      [EVENT_TRAILERS.reason, decision.reason],
+      ["Ops", encodeOps(next)],
+    ]
+    if (write.kind === "off") props.push(["Until", write.until.toISOString()])
+    const input: EventInput = { type, props }
+    const pending: QueueEventShape = {
+      id: "pending",
+      parent: current.tip,
+      links: [],
+      type,
+      props,
+      writer: decision.by,
+    }
+    // The pending id stands for the event's own record in the prepared state.
+    projectEventQueue([...events, pending], ref, store.repo)
+    return [input]
+  }, `override ${write.check} ${queue}`)
+  const event = result.events[0]
+  if (event === undefined || decision === undefined) throw new Error(`${ref}: override event was not written`)
+  const state = readOpsEvent(event, ref)
+  return {
+    kind: decision.kind,
+    record: { sha: event.id, entries: state.overrides },
+    ...(decision.replaced === undefined ? {} : { replaced: decision.replaced }),
+  }
+}
+
+/** Record due expirations and half-window reminders before a round snapshots ops. */
+export async function expireQueueOverrides(
+  store: QueueLocation,
+  queue: string,
+  now: number,
+  by: string,
+): Promise<Readonly<{ table: OverrideTable; expired: readonly OverrideEntry[]; reminded: readonly OverrideEntry[] }>> {
+  if (!Number.isFinite(now)) throw new TypeError("override clock needs a finite time")
+  if (by.trim() === "") throw new TypeError("override clock needs an actor")
+  const ref = queueRef(queue)
+  const chain = await openEvents({ ...store, ref, writer: by })
+  let planned: ReturnType<typeof decideOverrideClock> | undefined
+  let captured: EventQueueProjection | undefined
+  const result = await chain.transact((events) => {
+    const current = projectEventQueue(events, ref, store.repo)
+    if (current.opsCutover === undefined || current.ops === undefined) {
+      throw new Error(`${ref}: override clock event needs ops-cutover`)
+    }
+    captured = current
+    planned = decideOverrideClock({ sha: current.tip, entries: current.ops.overrides }, now)
+    if (planned.expired.length === 0 && planned.reminded.length === 0) return []
+    const type = planned.expired.length > 0 ? "override-expired" : "override-reminded"
+    const props: [string, string][] = [
+      [EVENT_TRAILERS.queue, current.tip],
+      [EVENT_TRAILERS.time, new Date(now).toISOString()],
+      [EVENT_TRAILERS.reason, "override clock transition"],
+      ...planned.expired.map((entry): [string, string] => [EVENT_TRAILERS.check, entry.check]),
+      ...planned.reminded.map((entry): [string, string] => ["Reminded", entry.check]),
+      ["Ops", encodeOps({ ...current.ops, overrides: planned.entries })],
+    ]
+    const pending: QueueEventShape = {
+      id: "pending",
+      parent: current.tip,
+      links: [],
+      type,
+      props,
+      writer: by,
+    }
+    projectEventQueue([...events, pending], ref, store.repo)
+    return [{ type, props }]
+  }, `override clock ${queue}`)
+  if (planned === undefined || captured?.ops === undefined) throw new Error(`${ref}: override clock made no decision`)
+  const event = result.events[0]
+  const entries = event === undefined ? captured.ops.overrides : readOpsEvent(event, ref).overrides
+  const table: OverrideTable = { sha: event?.id ?? captured.tip, entries }
+  const written = (entry: OverrideEntry): OverrideEntry => entries.find((next) => next.check === entry.check) ?? entry
+  return { table, expired: planned.expired.map(written), reminded: planned.reminded.map(written) }
 }
 
 function createdQueueDetails(event: QueueEventShape, ref: string): Pick<EventQueueProjection, "declaration" | "pause"> {
@@ -1053,6 +1347,8 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   let previous: string | undefined
   let declaration: string | undefined
   let pause: EventQueueProjection["pause"]
+  let opsCutover: string | undefined
+  let ops: OpsState | undefined
   const observed: Record<string, { id: string; branch?: string }> = {}
   const notices: Record<
     string,
@@ -1078,23 +1374,114 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
       case "created":
         if (index !== 0) throw new Error(`${ref}: event ${event.id} declares a second queue`)
         break
+      case "ops-cutover":
+        if (opsCutover !== undefined) throw new Error(`${ref}: event ${event.id} declares a second ops cutover`)
+        ops = readOpsEvent(event, ref)
+        opsCutover = event.id
+        break
       case "paused": {
-        if (pause !== undefined) throw new Error(`${ref}: event ${event.id} pauses an already paused queue`)
         const reason = prop(event, EVENT_TRAILERS.reason)
         if (reason === undefined || reason.length === 0) {
           throw new Error(`${ref}: paused event ${event.id} needs Reason:`)
         }
         if (event.writer === null) throw new Error(`${ref}: paused event ${event.id} needs a writer`)
-        pause = { id: event.id, at: new Date(time), reason, by: event.writer }
+        if (opsCutover === undefined) {
+          if (pause !== undefined) throw new Error(`${ref}: event ${event.id} pauses an already paused queue`)
+          pause = { id: event.id, at: new Date(time), reason, by: event.writer }
+        } else {
+          if (ops?.pause !== undefined && prop(event, "Replaces") !== ops.pause.sha) {
+            throw new Error(
+              `${ref}: event ${event.id} pauses an already paused queue without Replaces: ${ops.pause.sha}`,
+            )
+          }
+          if (ops?.pause === undefined && prop(event, "Replaces") !== undefined) {
+            throw new Error(`${ref}: event ${event.id} names Replaces: without an earlier pause`)
+          }
+          const next = readOpsEvent(event, ref)
+          if (
+            next.pause?.kind !== "paused" ||
+            next.pause.sha !== event.id ||
+            next.pause.cause !== "operator" ||
+            next.pause.reason !== reason ||
+            next.pause.by !== event.writer ||
+            next.pause.at.toISOString() !== time
+          ) {
+            throw new Error(`${ref}: paused event ${event.id} has an inconsistent Ops: snapshot`)
+          }
+          ops = next
+        }
         break
       }
       case "resumed":
-        if (pause === undefined) throw new Error(`${ref}: event ${event.id} resumes a running queue`)
         if (prop(event, EVENT_TRAILERS.reason) === undefined) {
           throw new Error(`${ref}: resumed event ${event.id} needs Reason:`)
         }
-        pause = undefined
+        if (opsCutover === undefined) {
+          if (pause === undefined) throw new Error(`${ref}: event ${event.id} resumes a running queue`)
+          pause = undefined
+        } else {
+          if (ops?.pause === undefined) throw new Error(`${ref}: event ${event.id} resumes a running queue`)
+          const next = readOpsEvent(event, ref)
+          if (next.pause !== undefined) throw new Error(`${ref}: resumed event ${event.id} must clear Ops: pause`)
+          ops = next
+        }
         break
+      case "merge-fenced": {
+        if (opsCutover === undefined || ops === undefined) {
+          throw new Error(`${ref}: merge-fenced event ${event.id} needs ops-cutover`)
+        }
+        const next = readOpsEvent(event, ref)
+        if (encodeOps(next) !== encodeOps(ops)) {
+          throw new Error(`${ref}: merge-fenced event ${event.id} changed effective ops state`)
+        }
+        if (event.writer !== QUEUE_RUN_WRITER) {
+          throw new Error(`${ref}: merge-fenced event ${event.id} needs writer ${QUEUE_RUN_WRITER}`)
+        }
+        const merged = requiredProp(event, EVENT_TRAILERS.for)
+        if (!COMMIT_OID.test(merged) || !event.links.includes(merged)) {
+          throw new Error(`${ref}: merge-fenced event ${event.id} must keep its merged For: event ${merged}`)
+        }
+        requiredProp(event, EVENT_TRAILERS.branch)
+        const commit = requiredProp(event, EVENT_TRAILERS.commit)
+        if (!COMMIT_OID.test(commit)) throw new Error(`${ref}: merge-fenced event ${event.id} has invalid Commit:`)
+        ops = next
+        break
+      }
+      case "override-set":
+      case "override-replaced":
+      case "override-clear": {
+        if (opsCutover === undefined || ops === undefined) {
+          throw new Error(`${ref}: ${event.type} event ${event.id} needs ops-cutover`)
+        }
+        const next = readOpsEvent(event, ref)
+        validateOverrideEvent(event, ops, next, ref)
+        ops = next
+        break
+      }
+      case "override-expired":
+      case "override-reminded": {
+        if (opsCutover === undefined || ops === undefined) {
+          throw new Error(`${ref}: ${event.type} event ${event.id} needs ops-cutover`)
+        }
+        const next = readOpsEvent(event, ref)
+        const planned = decideOverrideClock({ sha: previous, entries: ops.overrides }, new Date(time).getTime())
+        if (
+          (planned.expired.length === 0 && planned.reminded.length === 0) ||
+          (planned.expired.length > 0 ? "override-expired" : "override-reminded") !== event.type ||
+          encodeOps(next) !== encodeOps({ ...ops, overrides: planned.entries })
+        ) {
+          throw new Error(`${ref}: ${event.type} event ${event.id} has an inconsistent Ops: clock snapshot`)
+        }
+        const named = (key: string) => event.props.filter(([name]) => name === key).map(([, value]) => value)
+        if (
+          JSON.stringify(named(EVENT_TRAILERS.check)) !== JSON.stringify(planned.expired.map((entry) => entry.check)) ||
+          JSON.stringify(named("Reminded")) !== JSON.stringify(planned.reminded.map((entry) => entry.check))
+        ) {
+          throw new Error(`${ref}: ${event.type} event ${event.id} names different checks from Ops:`)
+        }
+        ops = next
+        break
+      }
       case "configured":
       case "started":
       case "stopped":
@@ -1144,7 +1531,63 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   }
   if (previous === undefined) throw new Error(`missing event queue tip ${ref} in ${repo}`)
   if (declaration === undefined) throw new Error(`${ref}: missing declaration commit`)
-  return { created: first.id, declaration, tip: previous, observed, notices, ...(pause === undefined ? {} : { pause }) }
+  return {
+    created: first.id,
+    declaration,
+    tip: previous,
+    observed,
+    notices,
+    ...(pause === undefined ? {} : { pause }),
+    ...(opsCutover === undefined ? {} : { opsCutover }),
+    ...(ops === undefined ? {} : { ops }),
+  }
+}
+
+function readOpsEvent(event: QueueEventShape, ref: string): OpsState {
+  const values = event.props.filter(([name]) => name === "Ops").map(([, value]) => value)
+  if (values.length !== 1) {
+    throw new Error(`${ref}: ${event.type} event ${event.id} needs exactly one complete Ops: snapshot`)
+  }
+  return decodeOps(values[0] ?? "", event.id, `${ref}: ${event.type} event ${event.id}`)
+}
+
+function validateOverrideEvent(event: QueueEventShape, before: OpsState, after: OpsState, ref: string): void {
+  const check = requiredProp(event, EVENT_TRAILERS.check)
+  const reason = requiredProp(event, EVENT_TRAILERS.reason)
+  if (event.writer === null) throw new Error(`${ref}: ${event.type} event ${event.id} needs writer`)
+  if (encodeOps({ ...before, overrides: [] }) !== encodeOps({ ...after, overrides: [] })) {
+    throw new Error(`${ref}: ${event.type} event ${event.id} changed the pause`)
+  }
+  const old = before.overrides.find((entry) => entry.check === check)
+  const now = after.overrides.find((entry) => entry.check === check)
+  const others = (entries: readonly OverrideEntry[]) =>
+    encodeOps({ overrides: entries.filter((entry) => entry.check !== check) })
+  if (others(before.overrides) !== others(after.overrides)) {
+    throw new Error(`${ref}: ${event.type} event ${event.id} changed another check`)
+  }
+  if (event.type === "override-clear") {
+    if (old === undefined || now !== undefined) {
+      throw new Error(`${ref}: ${event.type} event ${event.id} has no check to clear`)
+    }
+    return
+  }
+  if (event.type === "override-set" && old !== undefined) {
+    throw new Error(`${ref}: override-set event ${event.id} replaces a standing entry`)
+  }
+  if (event.type === "override-replaced" && old === undefined) {
+    throw new Error(`${ref}: override-replaced event ${event.id} has no standing entry`)
+  }
+  if (
+    now === undefined ||
+    now.record !== event.id ||
+    now.state !== "active" ||
+    now.by !== event.writer ||
+    now.reason !== reason ||
+    now.setAt.toISOString() !== requiredProp(event, EVENT_TRAILERS.time) ||
+    now.until.toISOString() !== requiredProp(event, "Until")
+  ) {
+    throw new Error(`${ref}: ${event.type} event ${event.id} has an inconsistent Ops: snapshot`)
+  }
 }
 
 const formatCache = new Map<string, "event" | "legacy">()
@@ -1270,6 +1713,8 @@ type ChangeWrite = Readonly<{
   writer?: string
   /** A target or branch ref moved in the same CAS publish as this event. */
   also?: readonly AlsoRef[]
+  /** Stage dependent refs after the change event has its exact oid, before one atomic publish. */
+  prepareAlso?: (event: Oid) => Promise<readonly AlsoRef[]>
 }>
 
 export async function appendChangeEvent(
@@ -1291,11 +1736,34 @@ export async function appendPublishedMerge(
   queue: string,
   branch: string,
   selectedTip: string,
-  request: Readonly<{ at: Date; commit: Oid; targetExpect: Oid; queueTip: Oid; reason?: string }>,
+  request: Readonly<{
+    at: Date
+    commit: Oid
+    targetExpect: Oid
+    queueTip: Oid
+    reason?: string
+    /** Prepared legacy pause/override fences while those refs remain authoritative. */
+    opsFences?: readonly AlsoRef[]
+  }>,
   onPrepared?: (oid: Oid) => void,
 ): Promise<string> {
   if (request.commit === request.targetExpect) {
     throw new TypeError(`published merge needs the target to move from ${request.targetExpect}`)
+  }
+  const selectedQueue = await readEventQueue(store, queue)
+  if (selectedQueue.tip !== request.queueTip) {
+    throw new Conflict(
+      `${queueRef(queue)} moved before published merge: expected ${request.queueTip}, read ${selectedQueue.tip}`,
+      {
+        refs: [queueRef(queue)],
+      },
+    )
+  }
+  if (selectedQueue.opsCutover !== undefined && request.opsFences?.length) {
+    throw new Error(`${queueRef(queue)}: legacy ops fences supplied after ops-cutover`)
+  }
+  if (selectedQueue.opsCutover === undefined && request.opsFences === undefined) {
+    throw new Error(`${queueRef(queue)}: published merge lacks legacy pause and override fences before ops-cutover`)
   }
   return appendDecision(
     store,
@@ -1310,8 +1778,29 @@ export async function appendPublishedMerge(
       writer: QUEUE_RUN_WRITER,
       also: [
         { ref: `refs/heads/${queue}`, expect: request.targetExpect, oid: request.commit },
-        { ref: queueRef(queue), expect: request.queueTip, oid: request.queueTip },
+        ...(request.opsFences ?? []),
       ],
+      prepareAlso: async (merged) => {
+        if (selectedQueue.opsCutover === undefined || selectedQueue.ops === undefined) {
+          return [{ ref: queueRef(queue), expect: request.queueTip, oid: request.queueTip }]
+        }
+        const input: EventInput = {
+          type: "merge-fenced",
+          keeps: [merged],
+          props: [
+            [EVENT_TRAILERS.queue, request.queueTip],
+            [EVENT_TRAILERS.time, request.at.toISOString()],
+            [EVENT_TRAILERS.for, merged],
+            [EVENT_TRAILERS.branch, branch],
+            [EVENT_TRAILERS.commit, request.commit],
+            ["Ops", encodeOps(selectedQueue.ops)],
+          ],
+        }
+        const staged = await (
+          await openEvents({ ...store, ref: queueRef(queue), writer: QUEUE_RUN_WRITER })
+        ).stage([input], { expect: request.queueTip })
+        return [{ ref: queueRef(queue), expect: request.queueTip, oid: staged.head }]
+      },
     },
     onPrepared,
   )
@@ -1358,12 +1847,14 @@ async function appendDecision(
   // publisher needs the exact event OID before that call so its remote read can
   // distinguish this attempt from another writer with identical trailers.
   const result =
-    onPrepared === undefined
+    onPrepared === undefined && write.prepareAlso === undefined
       ? await chain.append(planned, { expect: selectedTip, ...(also === undefined ? {} : { also }) })
       : await (async () => {
           const staged = await chain.stage(planned, { expect: selectedTip })
-          onPrepared(staged.head)
-          return staged.publish(also === undefined ? {} : { also })
+          onPrepared?.(staged.head)
+          const prepared = await write.prepareAlso?.(staged.head)
+          const updates = [...(also ?? []), ...(prepared ?? [])]
+          return staged.publish(updates.length === 0 ? {} : { also: updates })
         })()
   const written = result.events.findLast((event) => event.type === write.type)?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: ${write.type} event was not written`)

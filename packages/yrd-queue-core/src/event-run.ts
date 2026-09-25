@@ -7,10 +7,13 @@ import {
   appendChangeEvent,
   appendPublishedMerge,
   changesRef,
+  expireQueueOverrides,
   listChangeHistories,
   readChangeEvents,
   queueResumedAfter,
+  queueRef,
   readEventQueue,
+  readEventOps,
   readStatus,
   writeQueueEvent,
   type EventCheck,
@@ -39,13 +42,16 @@ import {
   type QueueRunOutcome,
   type RoundLine,
 } from "./run.ts"
-import { dispatchNotifications, messageFor } from "./with-notify.ts"
+import { dispatchNotifications, messageFor, notifyOutsideRound, overrideNotice } from "./with-notify.ts"
 import { changeName } from "./refs.ts"
 import { transportFaultIn } from "./setup-transport.ts"
 import { readRootChanges } from "./legacy-records.ts"
 import { mergedBy } from "./legacy-records.ts"
 import { settledBaseCommit } from "./settled-base.ts"
 import { repairMissingBranchHeads } from "./remote.ts"
+import { expireOverrides, isActive, overrideFence } from "./override.ts"
+import { pauseFence } from "./pause.ts"
+import { overrideRef, pauseRef } from "./refs.ts"
 
 function discardedJudgementReason(current: EventChange, error: unknown): string {
   const failed = error instanceof Error ? error.message : String(error)
@@ -345,7 +351,59 @@ export async function eventQueueRun(
     return result(observation.outcome === "invalid" ? 2 : 0)
   }
 
-  let queueState = await readEventQueue(store, queue)
+  let operational = await readEventOps(store, git, queue, target)
+  // No override can expire or need a reminder when the table is empty. Keep
+  // the round's injected clock for its stop window until a clock act is due.
+  const clock =
+    operational.overrides.entries.length === 0
+      ? { expired: [], reminded: [] }
+      : operational.source === "legacy"
+        ? await expireOverrides(git, options.target.remote, queue, options.now?.() ?? Date.now(), "yrd")
+        : await expireQueueOverrides(store, queue, options.now?.() ?? Date.now(), "yrd")
+  for (const [action, entries] of [
+    ["expired", clock.expired],
+    ["reminder", clock.reminded],
+  ] as const) {
+    for (const entry of entries) {
+      const notice = overrideNotice(entry, action, `${queue}@${target}`, log.id)
+      let deliveries: Awaited<ReturnType<typeof notifyOutsideRound>>
+      try {
+        deliveries = await notifyOutsideRound(
+          {
+            git,
+            repo: options.repo,
+            targetSha: target,
+            workdir: options.workdir,
+            notify: options.notify ?? [],
+            ...(options.setup === undefined ? {} : { setup: options.setup }),
+            ...(options.env === undefined ? {} : { env: options.env }),
+            ...(options.populateReference === undefined ? {} : { populateReference: options.populateReference }),
+            ...(options.process === undefined ? {} : { process: options.process }),
+          },
+          notice,
+        )
+      } catch (error) {
+        deliveries = [
+          { name: "notify", delivery: "failed", failure: error instanceof Error ? error.message : String(error) },
+        ]
+      }
+      for (const told of deliveries) {
+        log.write({
+          kind: "message",
+          says: "override",
+          action,
+          check: entry.check,
+          id: entry.record,
+          to: told.name,
+          delivered: told.delivery === "sent",
+          ...(told.failure === undefined ? {} : { error: told.failure }),
+          ...(told.refused === undefined ? {} : { refused: told.refused }),
+        })
+      }
+    }
+  }
+  operational = await readEventOps(store, git, queue, target)
+  let queueState = operational.queue
   for (const [commit, observed] of Object.entries(queueState.observed)) await tellDirect(commit, observed.id)
   const { histories, invalid } = await listChangeHistories(store, queue)
   for (const [branch, defect] of invalid) {
@@ -416,10 +474,13 @@ export async function eventQueueRun(
     })
     await tellDirect(commit.commit, observed)
   }
-  if (direct.length > 0) queueState = await readEventQueue(store, queue)
-  if (queueState.pause !== undefined && options.foreground !== true) {
-    log.write({ kind: "pause", reason: queueState.pause.reason, by: queueState.pause.by, sha: queueState.pause.id })
-    return result(0, [], [], [], [], { ring: "pause", says: queueState.pause.reason, what: queueState.pause })
+  if (direct.length > 0) {
+    operational = await readEventOps(store, git, queue, target)
+    queueState = operational.queue
+  }
+  if (operational.stop !== undefined && options.foreground !== true) {
+    log.write({ kind: "pause", reason: operational.stop.reason, by: operational.stop.by, sha: operational.stop.sha })
+    return result(0, [], [], [], [], { ring: "pause", says: operational.stop.reason, what: operational.stop })
   }
   const observedMerged: string[] = []
   const observable = [...changes].filter(
@@ -697,6 +758,24 @@ export async function eventQueueRun(
     let preparedMerge: string | undefined
     let ended: string | undefined
     try {
+      const opsFences =
+        operational.source === "legacy"
+          ? await (async () => {
+              const pause = await pauseFence(
+                git,
+                options.target.remote,
+                queue,
+                { by: "yrd", reason: `merge ${branch}` },
+                operational.stop,
+                operational.pause?.kind === "paused" && operational.stop === undefined ? operational.pause : undefined,
+              )
+              const override = await overrideFence(git, operational.overrides, "yrd", `merge ${branch}`)
+              return [
+                { ref: pauseRef(queue), expect: pause.expected, oid: pause.sha },
+                { ref: overrideRef(queue), expect: override.expected, oid: override.sha },
+              ]
+            })()
+          : undefined
       ended = await timedStep(
         log,
         { branch, head, name: "merge", phase: "merge" },
@@ -711,6 +790,7 @@ export async function eventQueueRun(
               commit: candidate,
               targetExpect: parent,
               queueTip: queueState.tip,
+              ...(opsFences === undefined ? {} : { opsFences }),
               ...(reason === undefined ? {} : { reason }),
             },
             (oid) => {
@@ -723,6 +803,31 @@ export async function eventQueueRun(
       // Stage/write failures have no candidate event to reconcile and must
       // keep their original error. Only a publication attempt can be unknown.
       if (preparedMerge === undefined && !(error instanceof Conflict)) throw error
+      if (error instanceof Conflict && error.refs.includes(queueRef(queue)) && !error.refs.includes(ref)) {
+        const fresh = await readEventOps(store, git, queue, target)
+        if (fresh.queue.tip === queueState.tip) throw error
+        log.write({
+          kind: "warning",
+          subject: "queue-lease-lost",
+          branch,
+          head,
+          ref: queueRef(queue),
+          expected: queueState.tip,
+          actual: fresh.queue.tip,
+          reason: `${queueRef(queue)} advanced from ${queueState.tip} to ${fresh.queue.tip} while judging ${branch}: ${error.message}`,
+        })
+        if (fresh.stop !== undefined && options.foreground !== true) {
+          log.write({ kind: "pause", reason: fresh.stop.reason, by: fresh.stop.by, sha: fresh.stop.sha })
+          return result(0, observedMerged, failed, [], [branch], {
+            ring: "pause",
+            says: fresh.stop.reason,
+            what: fresh.stop,
+          })
+        }
+        // A resume or override changes the authority used to judge this candidate.
+        // The next service round rechecks it against the fresh operational state.
+        return result(0, observedMerged, failed, [], [branch])
+      }
       // A lease refusal on the queue tip is an authority change, not a transport
       // failure on this change chain. A lost target lease is the root race the
       // moved-target branch below records as `verifying` and retries.
@@ -999,7 +1104,17 @@ export async function eventQueueRun(
           const checks =
             options.noCheck === true
               ? []
-              : options.checks.filter((check) => check.run !== "true" && (check.on ?? ["merge"]).includes(phase))
+              : options.checks.filter(
+                  (check) =>
+                    check.run !== "true" &&
+                    (check.on ?? ["merge"]).includes(phase) &&
+                    !(
+                      phase === "merge" &&
+                      operational.overrides.entries.some(
+                        (entry) => entry.check === check.name && isActive(entry, options.now?.() ?? Date.now()),
+                      )
+                    ),
+                )
           // A declared setup still runs when every check is off or skipped: its failure is the verdict the rows bill.
           if (checks.length === 0 && options.setup === undefined) continue
           const logDir = join(
