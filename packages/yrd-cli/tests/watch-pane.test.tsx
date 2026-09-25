@@ -217,10 +217,12 @@ describe("the top line (items 30, 32d, 33)", () => {
 
     app.press("f")
     await app.waitForLayoutStable()
-    expect(app.text).toContain("1 of 2 change(s)")
+    expect(app.text).toContain("task/queued")
+    expect(app.lines.slice(2).join("\n")).not.toContain("task/one")
     app.press("a")
     await app.waitForLayoutStable()
-    expect(app.text).toContain("2 of 2 change(s)")
+    expect(app.text).toContain("task/queued")
+    expect(app.text).toContain("task/one")
     app.unmount()
   })
 
@@ -672,7 +674,6 @@ describe("the table (items 3, 28, 38)", () => {
     ]
     const app = render(<WatchPane snapshot={snapshot({ rows })} live={false} />, { cols: 120, rows: 40 })
     await app.waitForLayoutStable()
-    expect(app.text).toContain("3 of 3 change(s)")
     const ageRunOf = (painted: readonly string[], branch: string): string | undefined =>
       /\S+ \/ \S+/u.exec(painted.find((line) => line.includes(branch))?.trimEnd() ?? "")?.[0]
     const lines = app.text.split("\n")
@@ -682,7 +683,6 @@ describe("the table (items 3, 28, 38)", () => {
     // f flips failed toggle off
     app.press("f")
     await app.waitForLayoutStable()
-    expect(app.text).toContain("2 of 3 change(s)")
     expect(app.text).not.toContain("task/one")
     expect(app.text).toContain("task/queued")
     expect(app.text).toContain("task/merged")
@@ -690,14 +690,12 @@ describe("the table (items 3, 28, 38)", () => {
     // o flips open toggle off
     app.press("o")
     await app.waitForLayoutStable()
-    expect(app.text).toContain("1 of 3 change(s)")
     expect(app.text).not.toContain("task/one")
     expect(app.text).not.toContain("task/queued")
     expect(app.text).toContain("task/merged")
 
     app.press("a")
     await app.waitForLayoutStable()
-    expect(app.text).toContain("3 of 3 change(s)")
     const restored = app.text.split("\n")
     expect(ageRunOf(restored, "task/queued")).toBe("1h00m / —")
     expect(ageRunOf(restored, "task/merged")).toBe("1h00m / 01:30")
@@ -1318,7 +1316,6 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
     expect(text).not.toContain("git fetch --quiet")
     // The table still shows the last reading.
     expect(text).toContain("task/one")
-    expect(text).toContain("1 of 1 change(s)")
 
     const later = new Date(NOW.getTime() + 60_000)
     rounds[1]?.resolve(
@@ -1330,10 +1327,9 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
         ],
       }),
     )
-    // The new reading is on screen (the list's virtual window grows on the
-    // next paint, so the count is the fact to read here) and the warning is gone.
+    // The new reading is on screen and the warning is gone.
     await waitFor(() => {
-      expect(current(app)).toContain("2 of 2 change(s)")
+      expect(current(app)).toContain("task/fresh")
     })
     expect(current(app)).not.toContain("⚠︎ the queue read failed")
     app.unmount()
@@ -1403,7 +1399,6 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
     await waitFor(() => {
       expect(current(app)).toContain("· task/b@bbbbbbbbbbbb the second")
     })
-    expect(current(app)).toContain("Home follows the newest again")
     await waitFor(() => {
       expect(rounds.length).toBeGreaterThan(0)
     })
@@ -1413,7 +1408,7 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
         snapshot({ at: new Date(NOW.getTime() + 60_000), rows: [{ row: fresh }, { row: a }, { row: b }, { row: c }] }),
       )
     await waitFor(() => {
-      expect(current(app)).toContain("4 of 4 change(s)")
+      expect(current(app)).toContain("task/fresh")
     })
     // Still task/b, not whatever the table moved into row 1.
     expect(current(app)).toContain("· task/b@bbbbbbbbbbbb the second")
@@ -1481,9 +1476,11 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
       .at(-1)
       ?.resolve(snapshot({ at: new Date(NOW.getTime() + 60_000), rows: [{ row: fresh }, { row: a }, { row: b }] }))
     await waitFor(() => {
-      expect(current(app)).toContain("3 of 3 change(s)")
+      expect(current(app)).toContain("task/fresh")
     })
+    await app.waitForLayoutStable()
     app.press("Enter")
+    await app.waitForLayoutStable()
     await waitFor(() => {
       expect(current(app)).toContain("· task/fresh@dddddddddddd the newest")
     })
@@ -1508,7 +1505,7 @@ describe("the RUNNER box's wrapped rails and the height budget", () => {
   }
   const decisions = [{ at: NOW, decision: "merged" as const, duplicate: false, run: RUN_ID }]
 
-  it("keeps the footer on the last row and the pills on screen at 120x30 with a three-row pause", async () => {
+  it("draws no bottom help line and keeps the pills on screen at 120x30 with a three-row pause", async () => {
     const app = render(<WatchPane snapshot={snapshot({ pause, runner, decisions })} live={false} />, {
       cols: 120,
       rows: 30,
@@ -1516,10 +1513,9 @@ describe("the RUNNER box's wrapped rails and the height budget", () => {
     await app.waitForLayoutStable()
     await settle(app)
     const lines = app.text.split("\n")
-    const last = lines.filter((line) => line.trim() !== "").at(-1) ?? ""
-    expect(last).toContain("change(s)")
-    // The footer shares its row with nothing: no box border, no STATS cell.
-    expect(last).not.toMatch(/[╭╰│─╮╯]/u)
+    // The bottom help line does not render (25417)
+    expect(app.text).not.toContain("? for help")
+    expect(app.text).not.toContain("q leaves")
     // The pills are on screen, on line 2 with STATS (25630).
     expect(lines.findIndex((line) => /\[o\]pen.*\[r\]unning.*\[d\]one.*\[f\]ailed/u.test(line))).toBe(1)
     // The pause is on the RUNNER rail, wrapped onto rows under its marker, once.
@@ -2217,7 +2213,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(draftsLine).toContain("STATS")
   })
 
-  it("draws no drafts line in the table, and says the drafts on the STATS line (25417)", async () => {
+  it("draws neither a drafts line in the table nor the bottom help line (25417)", async () => {
     const W = await words()
     const snap = snapshot({
       drafts: { older: 98, unread: 0, window: "7d" },
@@ -2227,6 +2223,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const painted = await lines(snap, 140, 40)
 
     expect(painted.filter((line) => line.includes(`${W.draft.word}`) && line.includes("──"))).toEqual([])
+    expect(painted.some((line) => line.includes("? for help") || line.includes("q leaves"))).toBe(false)
     expect(painted.find((line) => line.includes("STATS"))).toContain(`1 ${W.draft.word} (1d), 98 older`)
   })
 
@@ -2515,22 +2512,17 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     ])
   })
 
-  it("? opens the help as an overlay centred over the pane, which keeps its footer, with the legend unclipped at 160x48 and 100x31: every state's word, what it means and what happens next, and direct apart as not a change", async () => {
+  it("? opens the help as an overlay centred over the pane, with the legend unclipped at 160x48 and 100x31: every state's word, what it means and what happens next, and direct apart as not a change", async () => {
     const W = await words()
     const full = snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER })
     const closed = await lines(full, 160, 48)
     const open = await lines(full, 160, 48, ["?"])
-    // An overlay repaints one band between the top row and the footer and moves nothing else; a dialog in
-    // the pane's flow reflows every row (measured: all 48) and lands under the footer. The band is every
+    // An overlay repaints one band between the top row and the bottom and moves nothing else; a dialog in
+    // the pane's flow reflows every row (measured: all 48). The band is every
     // row the open help changed. Trailing blanks are not a change: an overlay pads the rows it spans.
     const changed = open.flatMap((line, index) => (line.trimEnd() === closed[index]?.trimEnd() ? [] : [index]))
     const first = changed[0] ?? -1
     const last = changed.at(-1) ?? -1
-    const footer = (painted: readonly string[]): string =>
-      painted
-        .filter((line) => line.trim() !== "")
-        .at(-1)
-        ?.trimEnd() ?? ""
     // The legend, read over a pane with nothing else on it, so no table text beside the dialog can answer
     // for it, at the widest and the narrowest size of the tier ladder: the help must not clip at either.
     // Wrapped legend lines are joined back: this reads what the legend says, the overlay's shape is read
@@ -2568,9 +2560,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect({
       centred: first > 0 && last < 48 - 1 && Math.abs((first + last) / 2 - (48 - 1) / 2) <= 2,
       directApart: apart >= 0 && band.indexOf(`${W.direct.word} `, apart) > apart,
-      footerKept: footer(open) === footer(closed),
+      headerKept: open[0] === closed[0],
       legendMissing: { "100x31": missing(narrowBand), "160x48": missing(band) },
-    }).toEqual({ centred: true, directApart: true, footerKept: true, legendMissing: { "100x31": [], "160x48": [] } })
+    }).toEqual({ centred: true, directApart: true, headerKept: true, legendMissing: { "100x31": [], "160x48": [] } })
   })
 
   it("one change to the word table changes every surface that draws a state word, both helps included", async () => {
@@ -2951,34 +2943,34 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const text = current(app)
     const lines = text.split("\n")
 
-    // Terminal is 25 rows tall (0..24). In the 20-row ListView viewport (lines 4..23):
+    // Terminal is 25 rows tall (0..24). In the 21-row ListView viewport (lines 4..24):
     // Runner item has height 5 (1 row marginTop + 3 rows TitledBox + 1 row marginBottom).
     // Center alignment places the runner item in viewport center, placing
-    // runner box at lines 13..15 with the item's marginTop at line 12 and marginBottom at line 16.
+    // runner box at lines 14..16 with the item's marginTop at line 13 and marginBottom at line 17.
     const runnerStart = lines.findIndex((l) => l.includes("╭─ RUNNER"))
     const runnerEnd = lines.findIndex((l) => l.includes("╰─"))
-    expect(runnerStart).toBe(13)
-    expect(runnerEnd).toBe(15)
+    expect(runnerStart).toBe(14)
+    expect(runnerEnd).toBe(16)
 
     // Above runner item: overflow indicator at line 4 (saying more items above, item 9),
-    // and queued items in viewport (lines 5..11: task/queued-6..0).
+    // and queued items in viewport (lines 5..12: task/queued-7..0).
     expect(lines[4]).toContain("▲")
-    expect(lines[5]).toContain("task/queued-6")
-    expect(lines[11]).toContain("task/queued-0")
+    expect(lines[5]).toContain("task/queued-7")
+    expect(lines[12]).toContain("task/queued-0")
     expect(text).not.toContain("task/queued-19")
-    expect(text).not.toContain("task/queued-7")
+    expect(text).not.toContain("task/queued-8")
 
-    // Below runner box: task/done-0..5 (lines 17..22) and bottom overflow indicator at line 23 (saying more items below, item 9).
-    expect(lines[17]).toContain("task/done-0")
-    expect(lines[22]).toContain("task/done-5")
-    expect(lines[23]).toContain("▼")
+    // Below runner box: task/done-0..5 (lines 18..23) and bottom overflow indicator at line 24 (saying more items below, item 9).
+    expect(lines[18]).toContain("task/done-0")
+    expect(lines[23]).toContain("task/done-5")
+    expect(lines[24]).toContain("▼")
     expect(text).not.toContain("task/done-6")
     expect(text).not.toContain("task/done-19")
 
-    // Proves vertical centering of the runner item in the 20-row viewport (lines 4..23):
-    // 8 rows above the runner item (lines 4..11), 7 rows below the runner item (lines 17..23).
-    expect(runnerStart - 1 - 4).toBe(8)
-    expect(23 - (runnerEnd + 1)).toBe(7)
+    // Proves vertical centering of the runner item in the 21-row viewport (lines 4..24):
+    // 9 rows above the runner item (lines 4..12), 7 rows below the runner item (lines 18..24).
+    expect(runnerStart - 1 - 4).toBe(9)
+    expect(24 - (runnerEnd + 1)).toBe(7)
 
     app.unmount()
   })
@@ -3296,13 +3288,13 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(lines[2]?.trim()).toBe("")
     expect(lines[3]).toContain("ISSUE / BRANCH")
 
-    // 2. marginTop: line before runner box (line 12) is blank
-    expect(lines[12]?.replace(/[█▅]/g, "").trim()).toBe("")
-    expect(lines[13]).toContain("╭─ RUNNER")
+    // 2. marginTop: line before runner box (line 13) is blank
+    expect(lines[13]?.replace(/[█▅]/g, "").trim()).toBe("")
+    expect(lines[14]).toContain("╭─ RUNNER")
 
-    // 3. marginBottom: line after runner box (line 16) is blank
-    expect(lines[15]).toContain("╰─")
-    expect(lines[16]?.replace(/[█▅]/g, "").trim()).toBe("")
+    // 3. marginBottom: line after runner box (line 17) is blank
+    expect(lines[16]).toContain("╰─")
+    expect(lines[17]?.replace(/[█▅]/g, "").trim()).toBe("")
 
     app.unmount()
   })
@@ -4809,12 +4801,7 @@ describe("bead 25630 watch rulings", () => {
     startedAt: new Date(NOW.getTime() - 30_000),
     state: "failed",
   })
-  const beadRows: WatchRow[] = [
-    { row: openRow },
-    { row: runningRow },
-    { row: doneRow },
-    { row: failedChange },
-  ]
+  const beadRows: WatchRow[] = [{ row: openRow }, { row: runningRow }, { row: doneRow }, { row: failedChange }]
 
   describe("row 20: filter toggles on line 2 and STATS counting active set", () => {
     it("key path: letter key 'o' flips open toggle and updates STATS to active set", async () => {
@@ -4829,19 +4816,16 @@ describe("bead 25630 watch rulings", () => {
         { cols: 140, rows: 40 },
       )
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-open")
       expect(app.lines[1]).toContain("current: 0 drafts, 1 waiting")
 
       app.press("o")
       await settle(app)
-      expect(app.text).toContain("3 of 4 change(s)")
       expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-open")
       expect(app.lines[1]).toContain("current: 0 drafts, 0 waiting")
 
       app.press("o")
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-open")
       expect(app.lines[1]).toContain("current: 0 drafts, 1 waiting")
       app.unmount()
@@ -4859,17 +4843,14 @@ describe("bead 25630 watch rulings", () => {
         { cols: 140, rows: 40 },
       )
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-running")
 
       app.press("r")
       await settle(app)
-      expect(app.text).toContain("3 of 4 change(s)")
       expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-running")
 
       app.press("r")
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-running")
       app.unmount()
     })
@@ -4886,19 +4867,16 @@ describe("bead 25630 watch rulings", () => {
         { cols: 140, rows: 40 },
       )
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-done")
       expect(app.lines[1]).toContain("1 merge")
 
       app.press("d")
       await settle(app)
-      expect(app.text).toContain("3 of 4 change(s)")
       expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-done")
       expect(app.lines[1]).toContain("0 merges")
 
       app.press("d")
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-done")
       expect(app.lines[1]).toContain("1 merge")
       app.unmount()
@@ -4916,19 +4894,16 @@ describe("bead 25630 watch rulings", () => {
         { cols: 140, rows: 40 },
       )
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-failed")
       expect(app.lines[1]).toContain("1 failed")
 
       app.press("f")
       await settle(app)
-      expect(app.text).toContain("3 of 4 change(s)")
       expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-failed")
       expect(app.lines[1]).not.toContain("1 failed")
 
       app.press("f")
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-failed")
       expect(app.lines[1]).toContain("1 failed")
       app.unmount()
@@ -4952,13 +4927,11 @@ describe("bead 25630 watch rulings", () => {
 
       await app.click(x + 1, 1)
       await settle(app)
-      expect(app.text).toContain("3 of 4 change(s)")
       expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-open")
       expect(app.lines[1]).toContain("current: 0 drafts, 0 waiting")
 
       await app.click(x + 1, 1)
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-open")
       expect(app.lines[1]).toContain("current: 0 drafts, 1 waiting")
       app.unmount()
@@ -4981,12 +4954,10 @@ describe("bead 25630 watch rulings", () => {
 
       await app.click(x + 1, 1)
       await settle(app)
-      expect(app.text).toContain("3 of 4 change(s)")
       expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-running")
 
       await app.click(x + 1, 1)
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-running")
       app.unmount()
     })
@@ -5009,13 +4980,11 @@ describe("bead 25630 watch rulings", () => {
 
       await app.click(x + 1, 1)
       await settle(app)
-      expect(app.text).toContain("3 of 4 change(s)")
       expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-done")
       expect(app.lines[1]).toContain("0 merges")
 
       await app.click(x + 1, 1)
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-done")
       expect(app.lines[1]).toContain("1 merge")
       app.unmount()
@@ -5039,13 +5008,11 @@ describe("bead 25630 watch rulings", () => {
 
       await app.click(x + 1, 1)
       await settle(app)
-      expect(app.text).toContain("3 of 4 change(s)")
       expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-failed")
       expect(app.lines[1]).not.toContain("1 failed")
 
       await app.click(x + 1, 1)
       await settle(app)
-      expect(app.text).toContain("4 of 4 change(s)")
       expect(app.text).toContain("task/bead-failed")
       expect(app.lines[1]).toContain("1 failed")
       app.unmount()
@@ -5165,9 +5132,7 @@ export function assertCaptureTruecolor(ansi: string, options?: { allowAnsi16?: b
   // @dev/2's capture had olive (#808000 = 128,128,0) and dark green (0,128,0).
   const colors = new Set(matches.map((m) => `${m[1]},${m[2]},${m[3]}`))
   if (colors.has("128,128,0")) {
-    throw new Error(
-      "Capture fell back to ANSI 16 colors: detected vterm ANSI16 olive (128,128,0) fallback color",
-    )
+    throw new Error("Capture fell back to ANSI 16 colors: detected vterm ANSI16 olive (128,128,0) fallback color")
   }
 }
 
@@ -5318,5 +5283,3 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
     expect(() => assertCaptureTruecolor("\x1b[38;2;67;76;94mtruecolor\x1b[0m")).not.toThrow()
   })
 })
-
-
