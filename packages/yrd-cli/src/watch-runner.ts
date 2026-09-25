@@ -111,7 +111,9 @@ export type RoundLockHolder = Readonly<{
 export type RunnerService =
   | Readonly<{ kind: "absent"; why: string }>
   | Readonly<{ kind: "beating"; state: string; since?: Date; flow?: RunnerFlow }>
-  | Readonly<{ kind: "stopped"; why: string; cause: string; since?: Date; stopReason?: string }>
+  // `graceful`: the service wrote its own stop (25430). False is a stop outside one — a SIGKILL, a crash, a
+  // silent writer — and its `why` names where the supervisor's record is.
+  | Readonly<{ kind: "stopped"; graceful: boolean; why: string; cause: string; since?: Date; stopReason?: string }>
   | Readonly<{ kind: "unreadable"; why: string }>
 
 /**
@@ -192,6 +194,7 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
     const since = new Date(Date.parse(serviceStopped.since))
     return {
       cause: "the service wrote this as its last document when it was stopped",
+      graceful: true,
       kind: "stopped",
       why: serviceStoppedLine(serviceStopped, Number.isNaN(since.getTime()) ? serviceStopped.since : clock(since)),
       ...(serviceStopped.reason === undefined ? {} : { stopReason: serviceStopped.reason }),
@@ -213,6 +216,7 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
     const since = typeof staleAfter === "string" ? new Date(Date.parse(staleAfter)) : undefined
     return {
       cause: document.error.cause,
+      graceful: false,
       kind: "stopped",
       why: outsideGracefulStop(document),
       ...(since === undefined || Number.isNaN(since.getTime()) ? {} : { since }),
@@ -226,6 +230,7 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
   if (pid !== undefined && !running(pid)) {
     return {
       cause: `the health document names process ${String(pid)} as its writer, and that process does not answer`,
+      graceful: false,
       kind: "stopped",
       why: outsideGracefulStop(document),
     }
