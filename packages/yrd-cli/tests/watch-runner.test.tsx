@@ -784,7 +784,7 @@ describe("the runner's row", () => {
       const line = runnerLine(facts, NOW, { waiting: 5 })
       expect(line.state).toBe("provisioning")
       expect(line.holds).toBe("judging task/feat@abcdef012345: compose")
-      expect(line.duration).toBe("provisioning 0:50")
+      expect(line.duration).toBe("0:50")
       expect(line.detail).toContain("typecheck, off, off")
     })
 
@@ -813,7 +813,7 @@ describe("the runner's row", () => {
       const checkLine = runnerLine(checkStep, NOW, {})
       expect(checkLine.state).toBe("checking")
       expect(checkLine.subphase).toBe("vitest")
-      expect(checkLine.duration).toBe("checking 0:25")
+      expect(checkLine.duration).toBe("0:25")
     })
 
     it("formats merge phase steps (merge, publish, push)", () => {
@@ -844,7 +844,7 @@ describe("the runner's row", () => {
       expect(mergeLine.subphase).toBe("publishing root")
       expect(runnerStatusWord(mergeLine)).toBe("merging · publishing root")
       expect(mergeLine.holds).toBe("merging task/land@111122223333: merge")
-      expect(mergeLine.duration).toBe("merging 0:15")
+      expect(mergeLine.duration).toBe("0:15")
       expect(mergeLine.detail).toContain("off, off, off")
 
       const publishStep = factsWithStep({
@@ -861,7 +861,7 @@ describe("the runner's row", () => {
       expect(publishLine.subphase).toBe("publishing components")
       expect(runnerStatusWord(publishLine)).toBe("merging · publishing components")
       expect(publishLine.holds).toBe("merging task/land@111122223333: publish")
-      expect(publishLine.duration).toBe("merging 0:05")
+      expect(publishLine.duration).toBe("0:05")
 
       const pushStep = factsWithStep({
         branch: "task/land",
@@ -898,7 +898,7 @@ describe("the runner's row", () => {
       const readLine = runnerLine(readStep, NOW, {})
       expect(readLine.state).toBe("provisioning")
       expect(readLine.holds).toBe("between entries: re-reading main")
-      expect(readLine.duration).toBe("provisioning 0:02")
+      expect(readLine.duration).toBe("0:02")
     })
 
     it("formats setup check as provisioning · preparing (25716)", () => {
