@@ -1033,6 +1033,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main", "--json"], resumed.io),
       resumed.stderr(),
     ).toBe(0)
+    expect(JSON.parse(resumed.stdout())).toMatchObject({
+      kind: "resumed",
+      service: { running: false, health: "absent", start: "hab up yrd" },
+    })
     expect((await readEventQueue(store, "main")).pause).toBeUndefined()
     expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause"])).toContain("refs/yrd/main/pause")
   })
@@ -1126,6 +1130,13 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).toBe(0)
     expect(JSON.parse(listed.stdout())).toMatchObject({ overrides: [{ check: "verify", state: "active" }] })
     expect((await readEventQueue(store, "main")).ops?.pause?.reason).toBe("repair")
+    expect((await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause", "refs/yrd/main/override"])).trim()).toBe(
+      "",
+    )
+    const resumed = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main"], resumed.io)).toBe(0)
+    expect(resumed.stdout()).toContain("yrd service is stopped; run hab up yrd")
+    expect((await readEventQueue(store, "main")).ops?.pause).toBeUndefined()
     expect((await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause", "refs/yrd/main/override"])).trim()).toBe(
       "",
     )

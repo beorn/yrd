@@ -190,7 +190,7 @@ import {
   type StatsBy,
 } from "./queue-stats.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
-import { SERVICE } from "./queue-health.ts"
+import { readQueueHealth, SERVICE } from "./queue-health.ts"
 
 import { workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
@@ -959,6 +959,27 @@ export async function coreQueueCommand(
     }
     case "pause":
     case "resume": {
+      const emitPauseResult = async (pause: PauseRecord): Promise<void> => {
+        if (request.command === "pause") {
+          emit(io, options.json, pause, pauseLine(pause))
+          return
+        }
+        const health = await readQueueHealth(workdir, SERVICE)
+        const running = health.verdict.kind === "running" ? true : health.verdict.kind === "stopped" ? false : null
+        const service = {
+          running,
+          health: health.state,
+          ...(running === false ? { start: "hab up yrd" } : {}),
+          ...(running === null ? { check: "hab ps yrd" } : {}),
+        }
+        const line =
+          running === true
+            ? "yrd service is running"
+            : running === false
+              ? "yrd service is stopped; run hab up yrd"
+              : "yrd service status is unknown; inspect with hab ps yrd; if stopped run hab up yrd"
+        emit(io, options.json, { ...pause, service }, `${pauseLine(pause)}; ${line}`)
+      }
       try {
         const eventStore = createEventStore(repo, config.target.remote, selection)
         if ((await queueFormat(eventStore, config.target.branch)) === "event") {
@@ -985,7 +1006,7 @@ export async function coreQueueCommand(
               by: request.by,
               cause: "operator",
             }
-            emit(io, options.json, written, pauseLine(written))
+            await emitPauseResult(written)
             return 0
           }
         }
@@ -1005,7 +1026,7 @@ export async function coreQueueCommand(
           },
           lifted,
         )
-        emit(io, options.json, pause, pauseLine(pause))
+        await emitPauseResult(pause)
         return 0
       } catch (error) {
         if (error instanceof QueuePaused || error instanceof QueueNotPaused) {
