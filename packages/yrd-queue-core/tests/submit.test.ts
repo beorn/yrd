@@ -20,6 +20,7 @@ import {
   parseChangeName,
   parseChangeRef,
   pauseRef,
+  queueRef,
   queueRefPrefix,
   readRecords,
   readQueue,
@@ -29,7 +30,8 @@ import {
   submit,
   writePause,
 } from "../src/index.ts"
-import { legacyStore, recordCommit } from "../src/legacy-records.ts"
+import { ABSENT, legacyPauseCommit, legacyStore, recordCommit } from "../src/legacy-records.ts"
+import { pauseFence } from "../src/pause.ts"
 import { remoteUrl } from "../src/remote.ts"
 import type { Git } from "../src/index.ts"
 
@@ -124,6 +126,123 @@ function withoutGitomicRefs(refs: string): string {
 }
 
 describe("submit is one atomic push of the branch and its opened record", () => {
+  /** @failure A maintenance stop still admits work during a fenced migration.
+   * @level l2 @consumer submit and its dry-run preview on a real remote
+   * Existing operator-pause coverage cannot catch a maintenance-only refusal.
+   */
+  it("refuses a maintenance stop before publishing a branch or change, including preview", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/maintenance", "maintenance.txt")
+    const paused = await writePause(w.git, "origin", "main", {
+      by: "@chief",
+      cause: "maintenance",
+      kind: "paused",
+      reason: "25041 lab cutover",
+    } as Parameters<typeof writePause>[3])
+    const before = await w.git(["ls-remote", "--refs", "origin"])
+    const request = {
+      branch: "task/maintenance",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    }
+    for (const action of [inspectSubmit, submit]) {
+      await expect(action(w.git, "origin", request)).rejects.toThrow("maintenance")
+      await expect(action(w.git, "origin", request)).rejects.toThrow("@chief")
+      await expect(action(w.git, "origin", request)).rejects.toThrow(paused.at.toISOString())
+    }
+    expect(await w.git(["ls-remote", "--refs", "origin"])).toBe(before)
+  })
+
+  /** @failure A legacy submit reads no pause ref, then publishes an unmigrated old record after maintenance starts.
+   * @level l2 @consumer the atomic root publication fence during 25041 cutover
+   * The preflight test cannot catch a stop written after the admission read.
+   */
+  it("loses the absent-pause lease when maintenance starts after preflight", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/racing-stop", "racing.txt")
+    const otherPath = join(dirname(w.remote), "other")
+    await w.git(["clone", "--quiet", w.remote, otherPath])
+    const other = gitIn(otherPath)
+    await other(["config", "user.email", "queue@yrd.test"])
+    await other(["config", "user.name", "yrd"])
+    let injected = false
+    const racing: Git = async (args, input) => {
+      if (args[0] === "mktree" && !injected) {
+        injected = true
+        await writePause(other, "origin", "main", {
+          by: "@chief",
+          cause: "maintenance",
+          kind: "paused",
+          reason: "25041 racing cutover",
+        })
+      }
+      return w.git(args, input)
+    }
+    Object.assign(racing, { selection: selectionFor(w.git) })
+    await expect(
+      submit(racing, "origin", {
+        branch: "task/racing-stop",
+        submitter: "@dev/2",
+        target: { branch: "main", remote: "origin" },
+      }),
+    ).rejects.toThrow("25041 racing cutover")
+    expect(injected).toBe(true)
+    expect(await remoteRefs(w)).not.toContain("refs/heads/task/racing-stop")
+    expect((await remoteRefs(w)).filter((ref) => ref.includes("task/racing-stop"))).toEqual([])
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({ cause: "maintenance", by: "@chief" })
+  })
+
+  /** @failure A submit that read the absent legacy pause before maintenance can publish after the format switch.
+   * @level l2 @consumer 25041 atomic apply and legacy submit publication
+   * A preflight refusal cannot prove the stale expect-ABSENT lease loses to the surviving cutover ref.
+   */
+  it("keeps the legacy pause lease occupied across the event cutover", async () => {
+    const w = await world()
+    const stale = await pauseFence(w.git, "origin", "main", { by: "@dev/2", reason: "submit task/stale" })
+    expect(stale.expected).toBe(ABSENT)
+    const first = await writePause(w.git, "origin", "main", {
+      by: "@chief",
+      cause: "maintenance",
+      kind: "paused",
+      reason: "25041 cutover",
+    })
+    const eventTip = w.target
+    const moved = await legacyPauseCommit(w.git, first, {
+      by: "yrd-migration",
+      cause: "maintenance",
+      kind: "paused",
+      reason: `moved to event format at ${eventTip}`,
+    })
+    const store = await legacyStore(w.git)
+    await store.backend.publish(
+      store.repo,
+      [
+        { ref: queueRef("main"), expect: ABSENT, oid: eventTip },
+        { ref: pauseRef("main"), expect: first.sha, oid: moved },
+      ],
+      "origin",
+    )
+    await expect(
+      store.backend.publish(
+        store.repo,
+        [
+          { ref: "refs/heads/task/stale", expect: ABSENT, oid: w.target },
+          { ref: changeRef("main", { branch: "task/stale", head: w.target }), expect: ABSENT, oid: w.target },
+          { ref: pauseRef("main"), expect: stale.expected, oid: stale.sha },
+        ],
+        "origin",
+      ),
+    ).rejects.toThrow()
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({
+      cause: "maintenance",
+      reason: `moved to event format at ${eventTip}`,
+      sha: moved,
+    })
+    expect(await remoteRefs(w)).not.toContain("refs/heads/task/stale")
+    await expect(
+      writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "wrong side" }),
+    ).rejects.toThrow("moved to event format")
+  })
   /** @failure Later heads/renames lose bindings, or target history assigns unrelated work.
    * @level l2 @consumer Yrd env open and submit
    */

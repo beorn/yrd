@@ -56,7 +56,7 @@ type SubmitOptions = Readonly<{
   gitlink?: string[]
   file?: string
 }>
-type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string }>
+type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string; maintenance?: string }>
 type MergeOptions = Readonly<{
   json?: boolean
   submitter?: string
@@ -367,21 +367,30 @@ function buildProgram(
   queue
     .command("pause")
     .description(
-      "stop checking and merging, while the service keeps the queue visible; the line still accepts new " +
-        "submissions, which wait in line behind the stop and are judged once it is resumed",
+      "stop checking and merging while the service keeps the queue visible; --reason keeps accepting " +
+        "submissions, while --maintenance also stops intake for a fenced migration",
     )
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who paused the queue")
     .option("--queue <value>", QUEUE_HELP)
-    .requiredOption("--reason <text>", "why checking and merging are paused")
+    .option("--reason <text>", "why checking and merging are paused; submissions remain open")
+    .option("--maintenance <reason>", "stop submissions as well for a fenced migration")
     .action(async (options) => {
-      const declared = options as PauseOptions & { reason: string }
+      const declared = options as PauseOptions
+      if ((declared.reason === undefined) === (declared.maintenance === undefined)) {
+        throw new Error("queue pause needs exactly one of --reason <text> or --maintenance <reason>")
+      }
       const location = await resolveQueueLocation(cwd(), declared.queue, env)
       setExit(
         await coreQueueCommand(
           location.repo,
           io,
-          { by: resolveSubmitter(declared.notify, env), command: "pause", reason: declared.reason },
+          {
+            by: resolveSubmitter(declared.notify, env),
+            command: "pause",
+            reason: declared.maintenance ?? declared.reason ?? "",
+            ...(declared.maintenance === undefined ? {} : { cause: "maintenance" as const }),
+          },
           {
             json: declared.json,
             env,

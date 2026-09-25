@@ -1099,7 +1099,7 @@ describe("the queue-format boundary", () => {
     const created = staged.events[0]?.id
     if (created === undefined) throw new Error("fixture created event was not staged")
     const queue = await readEventQueue(location, "lab")
-    expect(queue.pause).toEqual({ id: created, at, reason: "migration cutover", by: "@dev/2" })
+    expect(queue.pause).toEqual({ id: created, at, reason: "migration cutover", by: "@dev/2", cause: "operator" })
     await seedOpsCutover(location, "lab", {
       pause: { kind: "paused", sha: created, at, reason: "migration cutover", by: "@dev/2", cause: "operator" },
       overrides: [],
@@ -1111,6 +1111,87 @@ describe("the queue-format boundary", () => {
       at: new Date("2026-09-22T14:01:00.000Z"),
     })
     expect(eventPause(await readEventQueue(location, "lab"))).toBeUndefined()
+  })
+
+  /** @failure The created event loses the maintenance cause when legacy pause authority is deleted.
+   * @level l1 @consumer migrated event submit and ops cutover
+   */
+  it("preserves a maintenance cause on a created event and rejects an unknown one", async () => {
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    for (const [cause, accepted] of [
+      ["maintenance", true],
+      ["wedged", false],
+    ] as const) {
+      const { store, location } = remoteMemStore(`yrd-created-cause-${cause}`)
+      const target = await open({ ...store, ref: "refs/heads/lab" })
+      const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+      const staging = (await openEvents({ ...store, ref: queueRef("lab"), writer: "@chief" })).stage(
+        [
+          {
+            type: "created",
+            props: [
+              ["Commit", commit],
+              ["Time", at.toISOString()],
+              ["Start-Paused", "25041 lab"],
+              ["Pause-Cause", cause],
+            ],
+            keeps: [commit],
+          },
+        ],
+        { expect: null },
+      )
+      if (accepted) {
+        await (await staging).publish()
+        expect(eventPause(await readEventQueue(location, "lab"))).toMatchObject({
+          cause: "maintenance",
+          by: "@chief",
+          reason: "25041 lab",
+          at,
+        })
+      } else {
+        await (await staging).publish()
+        await expect(readEventQueue(location, "lab")).rejects.toThrow("unreadable Pause-Cause: wedged")
+      }
+    }
+  })
+
+  /** @failure An event submit's stale queue-tip observation can publish beside a new maintenance pause.
+   * @level l1 @consumer the event-format atomic submit lease
+   */
+  it("rejects an unchanged queue-tip lease when maintenance lands before the submit push", async () => {
+    const { store, location, beforeNextPublish } = remoteMemStore("yrd-event-intake-race")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    await seedOpsCutover(location, "lab")
+    const observed = await readEventQueue(location, "lab")
+    const author = await open({ ...store, ref: "refs/heads/author" })
+    const head = (await author.transact(async (map) => map.set("work.txt", "one"), "work")).oid
+    const changeRef = changesRef("lab", "task/fenced")
+    beforeNextPublish(async () => {
+      await writeQueueEvent(location, "lab", {
+        type: "paused",
+        cause: "maintenance",
+        by: "@chief",
+        reason: "25041 lab",
+        at: new Date(),
+      })
+    })
+    await expect(
+      (await openEvents({ ...store, ref: changeRef, writer: "@dev/2" })).transact(
+        () => [changeInput("opened", { queueTip: observed.tip, at: new Date(), commit: head, by: "@dev/2" })],
+        "submit task/fenced",
+        {
+          also: [
+            { ref: "refs/heads/task/fenced", expect: null, oid: head },
+            { ref: queueRef("lab"), expect: observed.tip, oid: observed.tip },
+          ],
+        },
+      ),
+    ).rejects.toBeInstanceOf(Conflict)
+    expect(await (await openEvents({ ...store, ref: changeRef })).head()).toBeNull()
+    expect((await listRefs("refs/heads/task/fenced", store)).size).toBe(0)
+    expect(eventPause(await readEventQueue(location, "lab"))).toMatchObject({ cause: "maintenance", by: "@chief" })
   })
 
   it("keeps the complete override table on each ops event and refuses a missing snapshot", async () => {

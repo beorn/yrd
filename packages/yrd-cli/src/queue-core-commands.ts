@@ -295,7 +295,7 @@ export type CoreQueueCommand =
       dryRun?: boolean
       pins?: readonly PinCarrierPin[]
     }>
-  | Readonly<{ command: "pause"; by: string; reason: string }>
+  | Readonly<{ command: "pause"; by: string; reason: string; cause?: "operator" | "maintenance" }>
   | Readonly<{ command: "resume"; by: string; reason?: string }>
   | Readonly<{
       command: "override"
@@ -1025,6 +1025,7 @@ export async function coreQueueCommand(
               reason,
               by: request.by,
               at,
+              ...(request.command === "pause" ? { cause: request.cause ?? "operator" } : {}),
             })
             const written: PauseRecord = {
               kind: request.command === "pause" ? "paused" : "resumed",
@@ -1032,7 +1033,7 @@ export async function coreQueueCommand(
               at,
               reason,
               by: request.by,
-              cause: "operator",
+              cause: request.command === "pause" ? (request.cause ?? "operator") : "operator",
             }
             await emitPauseResult(written)
             return 0
@@ -1051,6 +1052,7 @@ export async function coreQueueCommand(
             by: request.by,
             kind: request.command === "pause" ? "paused" : "resumed",
             reason: request.command === "pause" ? request.reason : (request.reason ?? "pause lifted"),
+            ...(request.command === "pause" ? { cause: request.cause ?? "operator" } : {}),
           },
           lifted,
         )
@@ -1247,7 +1249,22 @@ export async function coreQueueCommand(
           return 0
         }
         await git(["update-ref", `refs/heads/${prepared.branch}`, prepared.head, "0".repeat(prepared.head.length)])
-        const submitted = await submit(git, config.target.remote, submission)
+        let submitted
+        try {
+          submitted = await submit(git, config.target.remote, submission)
+        } catch (cause) {
+          try {
+            // The create-only update above proves this carrier branch was ours.
+            // Delete only while it still names the exact head we created.
+            await git(["update-ref", "-d", `refs/heads/${prepared.branch}`, prepared.head])
+          } catch (cleanup) {
+            throw new Error(
+              `submit refused and generated carrier ${prepared.branch} could not be removed: ${String(cleanup)}`,
+              { cause },
+            )
+          }
+          throw cause
+        }
         const { stop: acceptedUnder, ...accepted } = submitted
         emit(
           io,
@@ -1268,8 +1285,8 @@ export async function coreQueueCommand(
         target: config.target,
         ...(request.issue === undefined ? {} : { issue: request.issue }),
       }
-      // A stopped line ACCEPTS the submit (the andon, operator 2026-09-16): the
-      // stop is echoed — who, why, and what lifts it — and never refused on.
+      // Operator and stuck stops accept submits (the andon, operator 2026-09-16).
+      // A maintenance stop refuses in the shared inspection before this echo.
       if (request.dryRun === true) {
         const inspected = await inspectSubmit(git, config.target.remote, submission)
         const { head, targetHead, verifying } = inspected

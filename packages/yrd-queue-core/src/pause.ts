@@ -10,11 +10,11 @@
  * person's `yrd queue pause`, and a record that names no cause is one: every
  * record written before causes existed was. `stuck` is the queue pausing
  * ITSELF: a change it could not judge stopped the line, and the record names
- * that change and carries its stuck record's cures. Either way the line stops —
- * nothing is checked or merged automatically — and submits are still accepted,
- * queueing behind the stop.
+ * that change and carries its stuck record's cures. Both stop checking and
+ * merging while submits queue behind them. `maintenance` is a person-set stop
+ * that also closes intake during a fenced migration.
  *
- * An operator's stop lifts only by `yrd queue resume`. A stuck stop also lifts
+ * An operator or maintenance stop lifts only by `yrd queue resume`. A stuck stop also lifts
  * when the change it names leaves the line: withdrawn, merged, or ended by a
  * later judgement. No timer ever lifts either. {@link lineStop} is the ONE
  * derivation of "is the line stopped", and every reader asks it — the run, the
@@ -41,7 +41,7 @@ import { holdsPlaceInLine, type ChangeState } from "./state.ts"
 export type PauseKind = "paused" | "resumed"
 
 /** Who stopped the line: a person, or the queue itself on a change it could not judge. */
-export type PauseCause = "operator" | "stuck"
+export type PauseCause = "operator" | "stuck" | "maintenance"
 
 export type PauseRecord = Readonly<{
   kind: PauseKind
@@ -73,6 +73,12 @@ export type PauseFence = Readonly<{
   expected: string
   previous?: PauseRecord
 }>
+
+/** The permanent legacy intake fence left by a Record -> Event cutover. */
+export function eventCutoverTip(pause: PauseRecord | undefined): string | undefined {
+  if (pause?.kind !== "paused" || pause.cause !== "maintenance") return undefined
+  return /^moved to event format at ([0-9a-f]{40}(?:[0-9a-f]{24})?)$/u.exec(pause.reason)?.[1]
+}
 
 /** A normal operational refusal: the line is intentionally stopped. */
 export class QueuePaused extends Error {
@@ -121,7 +127,7 @@ export function lineStop(
     | undefined,
 ): PauseRecord | undefined {
   if (pause?.kind !== "paused") return undefined
-  if (pause.cause === "operator" || named === undefined) return pause
+  if (pause.cause === "operator" || pause.cause === "maintenance" || named === undefined) return pause
   if (!holdsPlaceInLine(named.reading.state)) return undefined
   const records = named.change.records
   const stuckAt = records.findLastIndex((record) => endedKind(record) === "stuck")
@@ -174,10 +180,13 @@ export async function writePause(
   if (write.kind === "paused" && write.cause === "stuck" && write.change === undefined) {
     throw new Error("a stuck pause names the change it stopped for")
   }
-  if ((write.cause ?? "operator") === "operator" && (write.change !== undefined || write.next !== undefined)) {
-    throw new Error("an operator's pause names no change: only a stuck stop waits on one")
+  if (write.cause !== "stuck" && (write.change !== undefined || write.next !== undefined)) {
+    throw new Error("a person-set pause names no change: only a stuck stop waits on one")
   }
   const previous = await readPause(git, remote, queue)
+  if (eventCutoverTip(previous) !== undefined) {
+    throw new Error(`${remote}#${queue} moved to event format at ${eventCutoverTip(previous)}; use the event queue`)
+  }
   const stands = previous?.kind === "paused" && previous.sha !== lifted?.sha ? previous : undefined
   if (write.kind === "paused" && stands !== undefined) throw new QueuePaused(stands, remote, queue)
   if (write.kind === "resumed" && stands === undefined) {
@@ -210,6 +219,9 @@ export async function pauseFence(
   const reason = oneLine(write.reason, "a pause fence needs a reason")
   const by = oneLine(write.by, "a pause fence needs an actor")
   const previous = await readPause(git, remote, queue)
+  if (previous !== undefined && eventCutoverTip(previous) !== undefined) {
+    throw new QueuePaused(previous, remote, queue)
+  }
   if (previous?.kind === "paused" && previous.sha !== admittedPause?.sha && previous.sha !== liftedPause?.sha) {
     throw new QueuePaused(previous, remote, queue)
   }
@@ -242,6 +254,9 @@ export function pauseLine(record: PauseRecord): string {
 export function liftLine(pause: PauseRecord, remote: string, queue: string): string {
   const selector = (remote === "origin" ? queue : `${remote}#${queue}`).replaceAll("'", "'\\''")
   const resume = `yrd queue resume --queue '${selector}' --reason '<text>'`
+  if (pause.cause === "maintenance") {
+    return `submit after resume; the person who set this maintenance stop lifts it with ${resume}`
+  }
   if (pause.cause === "operator" || pause.change === undefined) return `run ${resume} to check and merge work again`
   return (
     `the line waits on ${changeName(pause.change)}: ${pause.next ?? stuckCures(pause.change.branch)}. ` +
@@ -295,6 +310,12 @@ export function pauseFromMeta(meta: CommitMeta, where: string): PauseRecord {
   if (id === undefined || id === "" || atText === undefined || reason === undefined || reason === "") {
     throw new Error(`${where} at ${sha.slice(0, 12)} is not a readable pause record`)
   }
+  if (
+    reason.startsWith("moved to event format at ") &&
+    !/^moved to event format at [0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(reason)
+  ) {
+    throw new Error(`${where} at ${sha.slice(0, 12)} has an invalid event cutover tip in its pause reason`)
+  }
   // A foreground fence is a new commit, not a new decision to pause. Keep the
   // original pause time while its own commit time records the merge's fence.
   const pauseTimes = parsed.filter(([name]) => name === "Paused-At").map(([, value]) => value)
@@ -308,9 +329,9 @@ export function pauseFromMeta(meta: CommitMeta, where: string): PauseRecord {
   // read as the wrong cause is lifted by the wrong act.
   const causes = parsed.filter(([name]) => name === "Cause").map(([, value]) => value)
   const cause = causes[0] ?? "operator"
-  if (causes.length > 1 || (cause !== "operator" && cause !== "stuck")) {
+  if (causes.length > 1 || (cause !== "operator" && cause !== "stuck" && cause !== "maintenance")) {
     throw new Error(
-      `${where} at ${sha.slice(0, 12)} carries an unreadable Cause: ${causes.join(", ")} (operator or stuck, at most one)`,
+      `${where} at ${sha.slice(0, 12)} carries an unreadable Cause: ${causes.join(", ")} (operator, stuck or maintenance, at most one)`,
     )
   }
   const changes = parsed.filter(([name]) => name === "Change").map(([, value]) => value)
