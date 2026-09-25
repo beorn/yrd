@@ -27,7 +27,7 @@
  */
 
 import React, { memo } from "react"
-import { Box, Pulse, Text } from "silvery"
+import { Box, Pulse, Text, TogglePill } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import { TimeText } from "./watch-primitives.tsx"
@@ -440,27 +440,16 @@ export function TopLine({
 }
 
 /**
- * Filter pills on the plain surface (25630, 25716).
- * Uses muted ($fg-muted) when active, and extra-muted ($border-default) when inactive.
- * No bold, no yellow (25716 row 31).
+ * Wraps text into at most two lines by column width, breaking at spaces when possible,
+ * without truncating the second line (25630 Row 21).
  */
-function TopPill({
-  label,
-  active,
-  onToggle,
-}: {
-  label: string
-  active: boolean
-  onToggle: () => void
-  boldFirstLetter?: boolean
-  activeTreatment?: "accentText" | "warningText"
-}) {
-  const color = active ? "$fg-muted" : "$border-default"
-  return (
-    <Box flexShrink={0} onClick={onToggle}>
-      <Text color={color}>{label}</Text>
-    </Box>
-  )
+export function wrapTwoLines(text: string, width: number): readonly [string, string?] {
+  if (width <= 0 || text.length <= width) return [text]
+  const spaceIdx = text.lastIndexOf(" ", width)
+  const splitIdx = spaceIdx > 0 ? spaceIdx : width
+  const line1 = text.slice(0, splitIdx).trimEnd()
+  const line2 = text.slice(splitIdx).trimStart()
+  return line2.length > 0 ? [line1, line2] : [line1]
 }
 
 /** Which drafts a reading lists: those committed in the last seven days, or every one. */
@@ -797,6 +786,7 @@ export function RunnerRow({
           : parsed.cure.startsWith("to ")
             ? parsed.cure
             : `to ${parsed.cure}`
+  const [taskLine1, taskLine2] = wrapTwoLines(displayText, layout.taskWidth ?? 40)
   return (
     <Box flexDirection="column" minWidth={0} width="100%" backgroundColor={cursor ? "$bg-selected" : undefined}>
       <Cells layout={layout}>
@@ -807,8 +797,8 @@ export function RunnerRow({
           queueRun: null,
           task: (
             <Box flexDirection="row" minWidth={0} overflow="hidden">
-              <Text color={forced ?? color} wrap="truncate" minWidth={0}>
-                {displayText}
+              <Text color={forced ?? color} minWidth={0}>
+                {taskLine1}
               </Text>
             </Box>
           ),
@@ -835,6 +825,24 @@ export function RunnerRow({
           ),
         }}
       </Cells>
+      {taskLine2 === undefined ? null : (
+        <Cells layout={layout}>
+          {{
+            time: null,
+            q: null,
+            run: null,
+            queueRun: null,
+            task: (
+              <Text color={forced ?? color} minWidth={0}>
+                {taskLine2}
+              </Text>
+            ),
+            status: null,
+            agent: null,
+            ageRun: null,
+          }}
+        </Cells>
+      )}
       {cureText === undefined ? null : (
         <Cells layout={layout}>
           {{
@@ -843,7 +851,7 @@ export function RunnerRow({
             run: null,
             queueRun: null,
             task: (
-              <Text color={forced ?? color} wrap="truncate" minWidth={0}>
+              <Text color={forced ?? color} minWidth={0}>
                 {cureText}
               </Text>
             ),
@@ -915,23 +923,26 @@ function Cells({
   )
 }
 
-/** Status pills, right-aligned. Independent toggles; no All pill (ia.md). `a` still shows every status. */
+/** Status pills, right-aligned. Independent toggles on silvery's TogglePill (25630 Row 20). `a` still shows every status. */
 export function StatusPills({
   buckets,
+  onToggle,
   onSelectOnly,
 }: {
   buckets: ReadonlySet<StatusBucket>
-  onSelectOnly: (bucket: StatusBucket) => void
+  onToggle?: (bucket: StatusBucket) => void
+  onSelectOnly?: (bucket: StatusBucket) => void
 }) {
+  const handleToggle = onToggle ?? onSelectOnly ?? (() => {})
   return (
-    <Box height={1} flexDirection="row" justifyContent="flex-end" minWidth={0} overflow="hidden" gap={1}>
+    <Box height={1} flexShrink={0} flexDirection="row" justifyContent="flex-end" minWidth={0} overflow="hidden" gap={1}>
       {BUCKETS.map((bucket) => (
-        <TopPill
+        <TogglePill
           key={bucket}
           label={`[${bucket.slice(0, 1)}]${bucket.slice(1)}`}
           active={buckets.has(bucket)}
           onToggle={() => {
-            onSelectOnly(bucket)
+            handleToggle(bucket)
           }}
         />
       ))}

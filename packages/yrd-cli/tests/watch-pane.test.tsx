@@ -390,15 +390,20 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
       app.lines.some((line) => line.includes("submitted")),
       app.lines.join("\n"),
     ).toBe(true)
+    const openCellBefore = app.cell(openX, pillsY)
+    expect(openCellBefore.bold).toBe(false)
+    expect(JSON.stringify(openCellBefore.fg)).toEqual(fgOf("$fg-muted"))
     app.press("o")
     await settle(app)
     dump("o")
     const openCell = app.cell(openX, pillsY)
     expect(openCell.bold).toBe(false)
-    expect(JSON.stringify(openCell.fg)).toEqual(fgOf("$fg-muted"))
+    expect(JSON.stringify(openCell.fg)).toEqual(fgOf("$border-default"))
     app.press("a")
     await settle(app)
     dump("a")
+    const openCellAfter = app.cell(openX, pillsY)
+    expect(JSON.stringify(openCellAfter.fg)).toEqual(fgOf("$fg-muted"))
     app.unmount()
   })
 
@@ -412,7 +417,11 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     expect(y, app.lines.join("\n")).toBeGreaterThanOrEqual(0)
     expect(x).toBeGreaterThanOrEqual(0)
     expect(app.cell(x, y).bold).toBe(false)
-    expect(JSON.stringify(app.cell(x, y).fg)).toEqual(fgOf("$fg-muted"))
+    expect(JSON.stringify(app.cell(x, y).fg)).toEqual(fgOf("$border-default"))
+    // And an active pill ([r]unning) stays active with muted tint and no bold
+    const rx = (app.lines[y] ?? "").indexOf("[r]unning")
+    expect(app.cell(rx, y).bold).toBe(false)
+    expect(JSON.stringify(app.cell(rx, y).fg)).toEqual(fgOf("$fg-muted"))
     app.unmount()
   })
 
@@ -476,9 +485,10 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
     const pillsY = app.lines.findIndex((line) => line.includes("[o]pen") && line.includes("[f]ailed"))
     const openX = (app.lines[pillsY] ?? "").indexOf("[o]pen")
     expect(app.cell(openX, pillsY).bold).toBe(false)
-    expect(JSON.stringify(app.cell(openX, pillsY).fg)).toEqual(fgOf("$fg-muted"))
+    expect(JSON.stringify(app.cell(openX, pillsY).fg)).toEqual(fgOf("$border-default"))
     app.press("a")
     await settle(app)
+    expect(JSON.stringify(app.cell(openX, pillsY).fg)).toEqual(fgOf("$fg-muted"))
     const afterA = app.lines.join("\n")
     expect(afterA, afterA).not.toMatch(/aRUNNER/)
     expect(
@@ -648,7 +658,16 @@ describe("the table (items 3, 28, 38)", () => {
     const rows: WatchRow[] = [
       { row: row({ branch: "task/queued", startedAt, state: "queued" }) },
       { row: failedRow() },
-      { row: row({ branch: "task/merged", head: "1".repeat(40), merge: "2".repeat(40), startedAt, state: "merged" }) },
+      {
+        row: row({
+          branch: "task/merged",
+          head: "1".repeat(40),
+          merge: "2".repeat(40),
+          startedAt,
+          state: "merged",
+          endedAt: NOW,
+        }),
+      },
     ]
     const app = render(<WatchPane snapshot={snapshot({ rows })} live={false} />, { cols: 120, rows: 40 })
     await app.waitForLayoutStable()
@@ -656,27 +675,31 @@ describe("the table (items 3, 28, 38)", () => {
     const ageRunOf = (painted: readonly string[], branch: string): string | undefined =>
       /\S+ \/ \S+/u.exec(painted.find((line) => line.includes(branch))?.trimEnd() ?? "")?.[0]
     const lines = app.text.split("\n")
-    expect(ageRunOf(lines, "task/merged")).toBe("1h00m / —")
+    expect(ageRunOf(lines, "task/merged")).toBe("1h00m / 01:30")
     expect(ageRunOf(lines, "task/queued")).toBe("1h00m / —")
 
+    // f flips failed toggle off
     app.press("f")
     await app.waitForLayoutStable()
-    expect(app.text).toContain("1 of 3 change(s)")
-    expect(app.text).toContain("task/one")
-    expect(app.text).not.toContain("task/queued")
-    expect(app.text).not.toContain("task/merged")
+    expect(app.text).toContain("2 of 3 change(s)")
+    expect(app.text).not.toContain("task/one")
+    expect(app.text).toContain("task/queued")
+    expect(app.text).toContain("task/merged")
 
+    // o flips open toggle off
     app.press("o")
     await app.waitForLayoutStable()
-    expect(app.text).toContain("task/queued")
-    expect(app.text).not.toContain("task/merged")
+    expect(app.text).toContain("1 of 3 change(s)")
+    expect(app.text).not.toContain("task/one")
+    expect(app.text).not.toContain("task/queued")
+    expect(app.text).toContain("task/merged")
 
     app.press("a")
     await app.waitForLayoutStable()
     expect(app.text).toContain("3 of 3 change(s)")
     const restored = app.text.split("\n")
     expect(ageRunOf(restored, "task/queued")).toBe("1h00m / —")
-    expect(ageRunOf(restored, "task/merged")).toBe("1h00m / —")
+    expect(ageRunOf(restored, "task/merged")).toBe("1h00m / 01:30")
     app.unmount()
   })
 
@@ -686,7 +709,7 @@ describe("the table (items 3, 28, 38)", () => {
     expect(empty).not.toContain("no change matches the filters")
 
     const filtered = await paint(<WatchPane snapshot={snapshot({ rows: [{ row: failedRow() }] })} live={false} />, [
-      "o",
+      "f",
     ])
     expect(filtered).toContain("no change matches the filters")
     expect(filtered).not.toContain("nothing in line")
@@ -1335,7 +1358,8 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
     })
     const text = current(app)
     expect(text).toContain("retrying — fatal: bad object abcdef0123456789")
-    expect(text).toContain("no change selected")
+    expect(text).toContain("Loading task/one@abcdef012345…")
+    expect(text).not.toContain("no change selected")
     // A good round re-runs the read; the warning goes and the detail comes.
     await waitFor(() => {
       expect(rounds.length).toBeGreaterThan(0)
@@ -3819,8 +3843,8 @@ describe("the top line (25416)", () => {
     await settle(app)
     const pair = (needle: string): readonly (string | undefined)[] => [fgAt(app, 1, needle), bgAt(app, 1, needle)]
     const seen = {
-      selectedFilter: pair("[f]ailed"),
-      unselectedFilter: pair("[o]pen"),
+      selectedFilter: pair("[o]pen"),
+      unselectedFilter: pair("[f]ailed"),
     }
     app.unmount()
     const chip = [fgOf("$fg-muted"), "null"]
@@ -4415,13 +4439,14 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
     const runner = runnerOf(snap, NOW)
     expect(runner.state).not.toBe("idle")
     expect(runner.state).toBe("provisioning")
-    expect(runner.holds).toContain("round lock held by pid 88888")
+    expect(runner.holds).not.toContain("round lock held by pid")
+    expect(runner.holds).toContain("provisioning 0:00")
 
     const app = render(<RunnerTitledBox line={runner} snapshot={snap} layout={layout} />, { cols: 120, rows: 5 })
     await settle(app)
     expect(app.text).toContain("provisioning")
     expect(app.text).not.toContain("idle")
-    expect(app.text).toContain("round lock held by pid 88888")
+    expect(app.text).not.toContain("round lock held by pid")
     app.unmount()
   })
 
@@ -4569,18 +4594,18 @@ describe("watch header styling, runner markers, and timer (25716 row 31)", () =>
   it("filter options render in muted and extra-muted only, with no bold and no yellow", async () => {
     const app = render(<WatchPane snapshot={snapshot()} live={false} />, { cols: 140, rows: 30 })
     await settle(app)
-    app.press("f") // select failed only
+    app.press("f") // toggle failed off
     await settle(app)
 
-    // Active filter [f]ailed is $fg-muted, not bold, not yellow
-    expect(fgAt(app, 1, "[f]ailed")).toBe(fgOf("$fg-muted"))
-    expect(boldAt(app, 1, "[f]ailed")).toBe(false)
-    expect(fgAt(app, 1, "[f]ailed")).not.toBe(fgOf("$fg-warning"))
-
-    // Inactive filter [o]pen is $border-default (extra-muted), not bold, not yellow
-    expect(fgAt(app, 1, "[o]pen")).toBe(fgOf("$border-default"))
+    // Active filter [o]pen is $fg-muted, not bold, not yellow
+    expect(fgAt(app, 1, "[o]pen")).toBe(fgOf("$fg-muted"))
     expect(boldAt(app, 1, "[o]pen")).toBe(false)
     expect(fgAt(app, 1, "[o]pen")).not.toBe(fgOf("$fg-warning"))
+
+    // Inactive filter [f]ailed is $border-default (extra-muted), not bold, not yellow
+    expect(fgAt(app, 1, "[f]ailed")).toBe(fgOf("$border-default"))
+    expect(boldAt(app, 1, "[f]ailed")).toBe(false)
+    expect(fgAt(app, 1, "[f]ailed")).not.toBe(fgOf("$fg-warning"))
     app.unmount()
   })
 
@@ -4733,7 +4758,8 @@ describe("termless screenshots for rows 3 to 5 (25716)", () => {
     const ansi = bufferToStyledText(app.term.buffer)
     writeFileSync("/tmp/yrd-watch-25716-row4-runner-box.ansi", ansi, "utf8")
     expect(ansi).toContain("checking · affected-tests")
-    expect(ansi).toContain("task/dev9-25716-runner-stages@18c8c19b: affected-tests")
+    expect(ansi).toContain("task/dev9-25716-runner-stages@18c8c19b:")
+    expect(ansi).toContain("affected-tests")
     app.unmount()
   })
 
@@ -4802,6 +4828,367 @@ describe("termless screenshots for rows 3 to 5 (25716)", () => {
     expect(ansi).toContain("every declared check is off")
     expect(ansi).toContain("skipped: no check worktree was created")
     app.unmount()
+  })
+})
+
+describe("bead 25630 watch rulings", () => {
+  const openRow = row({ branch: "task/bead-open", head: "1".repeat(40), position: 1, state: "queued" })
+  const runningRow = row({
+    branch: "task/bead-running",
+    head: "2".repeat(40),
+    state: "checking",
+    live: { check: "test", phase: "submit", run: RUN_ID, since: NOW },
+  })
+  const doneRow = row({
+    at: NOW,
+    branch: "task/bead-done",
+    head: "3".repeat(40),
+    merge: "4".repeat(40),
+    state: "merged",
+    startedAt: new Date(NOW.getTime() - 60_000),
+    endedAt: NOW,
+    since: new Date(NOW.getTime() - 60_000),
+  })
+  const failedChange = row({
+    at: NOW,
+    branch: "task/bead-failed",
+    endedAt: NOW,
+    head: "5".repeat(40),
+    reason: "test",
+    result: "fail test",
+    run: RUN_ID,
+    startedAt: new Date(NOW.getTime() - 30_000),
+    state: "failed",
+  })
+  const beadRows: WatchRow[] = [
+    { row: openRow },
+    { row: runningRow },
+    { row: doneRow },
+    { row: failedChange },
+  ]
+
+  describe("row 20: filter toggles on line 2 and STATS counting active set", () => {
+    it("key path: letter key 'o' flips open toggle and updates STATS to active set", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            rows: beadRows,
+            decisions: [{ at: NOW, decision: "merged", duplicate: false, run: "r1" }],
+          })}
+          live={false}
+        />,
+        { cols: 140, rows: 40 },
+      )
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-open")
+      expect(app.lines[1]).toContain("current: 0 drafts, 1 waiting")
+
+      app.press("o")
+      await settle(app)
+      expect(app.text).toContain("3 of 4 change(s)")
+      expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-open")
+      expect(app.lines[1]).toContain("current: 0 drafts, 0 waiting")
+
+      app.press("o")
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-open")
+      expect(app.lines[1]).toContain("current: 0 drafts, 1 waiting")
+      app.unmount()
+    })
+
+    it("key path: letter key 'r' flips running toggle and updates STATS to active set", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            rows: beadRows,
+            decisions: [{ at: NOW, decision: "merged", duplicate: false, run: "r1" }],
+          })}
+          live={false}
+        />,
+        { cols: 140, rows: 40 },
+      )
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-running")
+
+      app.press("r")
+      await settle(app)
+      expect(app.text).toContain("3 of 4 change(s)")
+      expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-running")
+
+      app.press("r")
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-running")
+      app.unmount()
+    })
+
+    it("key path: letter key 'd' flips done toggle and updates STATS to active set", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            rows: beadRows,
+            decisions: [{ at: NOW, decision: "merged", duplicate: false, run: "r1" }],
+          })}
+          live={false}
+        />,
+        { cols: 140, rows: 40 },
+      )
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-done")
+      expect(app.lines[1]).toContain("1 merge")
+
+      app.press("d")
+      await settle(app)
+      expect(app.text).toContain("3 of 4 change(s)")
+      expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-done")
+      expect(app.lines[1]).toContain("0 merges")
+
+      app.press("d")
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-done")
+      expect(app.lines[1]).toContain("1 merge")
+      app.unmount()
+    })
+
+    it("key path: letter key 'f' flips failed toggle and updates STATS to active set", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            rows: beadRows,
+            decisions: [{ at: NOW, decision: "merged", duplicate: false, run: "r1" }],
+          })}
+          live={false}
+        />,
+        { cols: 140, rows: 40 },
+      )
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-failed")
+      expect(app.lines[1]).toContain("1 failed")
+
+      app.press("f")
+      await settle(app)
+      expect(app.text).toContain("3 of 4 change(s)")
+      expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-failed")
+      expect(app.lines[1]).not.toContain("1 failed")
+
+      app.press("f")
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-failed")
+      expect(app.lines[1]).toContain("1 failed")
+      app.unmount()
+    })
+
+    it("click path: clicking [o]pen flips toggle and updates STATS", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            rows: beadRows,
+            decisions: [{ at: NOW, decision: "merged", duplicate: false, run: "r1" }],
+          })}
+          live={false}
+        />,
+        { cols: 140, rows: 40 },
+      )
+      await settle(app)
+      const x = app.lines[1]?.indexOf("[o]pen") ?? -1
+      expect(x).toBeGreaterThan(0)
+      expect(app.lines[1]).toContain("current: 0 drafts, 1 waiting")
+
+      await app.click(x + 1, 1)
+      await settle(app)
+      expect(app.text).toContain("3 of 4 change(s)")
+      expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-open")
+      expect(app.lines[1]).toContain("current: 0 drafts, 0 waiting")
+
+      await app.click(x + 1, 1)
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-open")
+      expect(app.lines[1]).toContain("current: 0 drafts, 1 waiting")
+      app.unmount()
+    })
+
+    it("click path: clicking [r]unning flips toggle and updates STATS", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            rows: beadRows,
+            decisions: [{ at: NOW, decision: "merged", duplicate: false, run: "r1" }],
+          })}
+          live={false}
+        />,
+        { cols: 140, rows: 40 },
+      )
+      await settle(app)
+      const x = app.lines[1]?.indexOf("[r]unning") ?? -1
+      expect(x).toBeGreaterThan(0)
+
+      await app.click(x + 1, 1)
+      await settle(app)
+      expect(app.text).toContain("3 of 4 change(s)")
+      expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-running")
+
+      await app.click(x + 1, 1)
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-running")
+      app.unmount()
+    })
+
+    it("click path: clicking [d]one flips toggle and updates STATS", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            rows: beadRows,
+            decisions: [{ at: NOW, decision: "merged", duplicate: false, run: "r1" }],
+          })}
+          live={false}
+        />,
+        { cols: 140, rows: 40 },
+      )
+      await settle(app)
+      const x = app.lines[1]?.indexOf("[d]one") ?? -1
+      expect(x).toBeGreaterThan(0)
+      expect(app.lines[1]).toContain("1 merge")
+
+      await app.click(x + 1, 1)
+      await settle(app)
+      expect(app.text).toContain("3 of 4 change(s)")
+      expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-done")
+      expect(app.lines[1]).toContain("0 merges")
+
+      await app.click(x + 1, 1)
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-done")
+      expect(app.lines[1]).toContain("1 merge")
+      app.unmount()
+    })
+
+    it("click path: clicking [f]ailed flips toggle and updates STATS", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            rows: beadRows,
+            decisions: [{ at: NOW, decision: "merged", duplicate: false, run: "r1" }],
+          })}
+          live={false}
+        />,
+        { cols: 140, rows: 40 },
+      )
+      await settle(app)
+      const x = app.lines[1]?.indexOf("[f]ailed") ?? -1
+      expect(x).toBeGreaterThan(0)
+      expect(app.lines[1]).toContain("1 failed")
+
+      await app.click(x + 1, 1)
+      await settle(app)
+      expect(app.text).toContain("3 of 4 change(s)")
+      expect(app.lines.slice(2, -2).join("\n")).not.toContain("task/bead-failed")
+      expect(app.lines[1]).not.toContain("1 failed")
+
+      await app.click(x + 1, 1)
+      await settle(app)
+      expect(app.text).toContain("4 of 4 change(s)")
+      expect(app.text).toContain("task/bead-failed")
+      expect(app.lines[1]).toContain("1 failed")
+      app.unmount()
+    })
+  })
+
+  describe("row 21: RUNNER line formatting and two-line wrapping", () => {
+    it("formats roundLockHolder without warning language", () => {
+      const snap = snapshot({
+        runner: {
+          journalDir: "/w/logs",
+          service: { kind: "beating", state: "healthy", since: new Date(NOW.getTime() - 120_000) },
+          roundLockHolder: {
+            command: "bun yrd queue up",
+            pid: 12345,
+            since: new Date(NOW.getTime() - 15_000).toISOString(),
+          },
+        },
+      })
+      const runner = runnerOf(snap, NOW)
+      expect(runner.holds).not.toContain("round lock held by pid")
+      expect(runner.holds).toContain("runner since")
+      expect(runner.holds).toContain("provisioning 0:15")
+    })
+
+    it("RunnerRow wraps long task text across two lines without truncation", () => {
+      const line: RunnerLine = {
+        at: NOW,
+        detail: "test",
+        duration: "checking 0:10",
+        holds: "a very long runner task description that will definitely exceed thirty characters width",
+        state: "checking",
+        by: "@dev/9",
+      }
+      const layout = listLayout([], 120, NOW, line)
+      const app = render(
+        <Box width={120} height={4} flexDirection="column">
+          <RunnerRow line={line} layout={layout} cursor={false} />
+        </Box>,
+        { cols: 120, rows: 4 },
+      )
+      const renderedLines = app.lines.filter((l) => l.trim().length > 0)
+      expect(renderedLines.length).toBe(2)
+      expect(app.text).toContain("a very long runner task description that will definitely exceed")
+      expect(app.text).toContain("thirty characters width")
+      app.unmount()
+    })
+  })
+
+  describe("row 22: detail pane 3 states", () => {
+    it("state 1: renders 'no change selected' when nothing selected", () => {
+      const app = render(
+        <Box width={60} height={20}>
+          <WatchDetail change={undefined} detail={undefined} />
+        </Box>,
+        { cols: 60, rows: 20 },
+      )
+      expect(app.text).toContain("no change selected")
+      expect(app.text).not.toContain("Loading")
+      app.unmount()
+    })
+
+    it("state 2: renders 'Loading <change>…' centered both ways while selected change's detail hasn't arrived", () => {
+      const app = render(
+        <Box width={60} height={20}>
+          <WatchDetail change="task/my-branch@123456789abc" detail={undefined} />
+        </Box>,
+        { cols: 60, rows: 20 },
+      )
+      expect(app.text).toContain("Loading task/my-branch@123456789abc…")
+      expect(app.text).not.toContain("no change selected")
+      const lineIdx = app.lines.findIndex((line) => line.includes("Loading task/my-branch@123456789abc…"))
+      expect(lineIdx).toBeGreaterThan(5)
+      expect(lineIdx).toBeLessThan(15)
+      app.unmount()
+    })
+
+    it("state 3: renders detail when loaded", () => {
+      const myRow = row({ branch: "task/my-branch", head: "123456789abcdef0123456789abcdef012345678" })
+      const item: WatchRow = { row: myRow }
+      const detail = detailOf(item, CHECKS)
+      const app = render(
+        <Box width={60} height={20}>
+          <WatchDetail change={myRow} detail={detail} />
+        </Box>,
+        { cols: 60, rows: 20 },
+      )
+      expect(app.text).not.toContain("Loading")
+      expect(app.text).not.toContain("no change selected")
+      expect(app.text).toContain("typecheck")
+      app.unmount()
+    })
   })
 })
 
