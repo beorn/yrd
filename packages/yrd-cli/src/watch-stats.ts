@@ -234,11 +234,7 @@ function median(values: readonly number[]): number | undefined {
   return (lower + upper) / 2
 }
 
-function startOfLocalWeek(today: Date): Date {
-  // Monday-start, as the retired box counted the week.
-  const back = (today.getDay() + 6) % 7
-  return new Date(today.getFullYear(), today.getMonth(), today.getDate() - back)
-}
+const DAY_MS = 24 * 3_600_000
 
 function startOfLocalDay(at: Date): Date {
   return new Date(at.getFullYear(), at.getMonth(), at.getDate())
@@ -251,11 +247,10 @@ function startOfLocalHour(at: Date): Date {
 type StatsWindow = Pick<StatsBucket, "key" | "label" | "kind" | "startMs" | "endMs" | "dayBoundary">
 
 /**
- * TODAY, YSTRDAY, WEEK, MONTH, then `hours` hour buckets ending at the current
+ * TODAY, YSTRDAY, 7DAY, 30DAY, then `hours` hour buckets ending at the current
  * hour, newest first, each with its counts and medians. The day boundary is a
- * fact about the bucket, never a character on its label. WEEK and MONTH are
- * the calendar's (Monday-start week, the first of the month), as the retired
- * box counted them; both end now.
+ * fact about the bucket, never a character on its label. 7DAY and 30DAY are
+ * the last 7 × 24 h and 30 × 24 h ending now; both end now.
  */
 export function statsBuckets(decisions: readonly RunDecision[], now: Date, hours = 24): readonly StatsBucket[] {
   const today = startOfLocalDay(now)
@@ -280,18 +275,18 @@ export function statsBuckets(decisions: readonly RunDecision[], now: Date, hours
     {
       dayBoundary: false,
       endMs: now.getTime() + 1,
-      key: "week",
+      key: "day7",
       kind: "period",
-      label: "WEEK",
-      startMs: startOfLocalWeek(today).getTime(),
+      label: "7DAY",
+      startMs: now.getTime() - 7 * DAY_MS,
     },
     {
       dayBoundary: false,
       endMs: now.getTime() + 1,
-      key: "month",
+      key: "day30",
       kind: "period",
-      label: "MONTH",
-      startMs: new Date(today.getFullYear(), today.getMonth(), 1).getTime(),
+      label: "30DAY",
+      startMs: now.getTime() - 30 * DAY_MS,
     },
   ]
   const hour = startOfLocalHour(now)

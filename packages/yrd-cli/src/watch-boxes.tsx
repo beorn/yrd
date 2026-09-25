@@ -34,7 +34,7 @@ const STATS_LABEL_WIDTH = 8
 /** One hour cell: a count of up to three digits or a duration like `45m`, right-aligned with one cell of air. */
 const STATS_HOUR_WIDTH = 4
 /** The four calendar columns, by bucket key: `YSTRDAY` is the wide one. */
-const STATS_PERIOD_WIDTHS: Readonly<Record<string, number>> = { month: 6, today: 6, week: 6, yesterday: 8 }
+const STATS_PERIOD_WIDTHS: Readonly<Record<string, number>> = { day30: 6, day7: 6, today: 6, yesterday: 8 }
 const STATS_PERIODS_WIDTH = Object.values(STATS_PERIOD_WIDTHS).reduce((sum, width) => sum + width, 0)
 
 /** How many hour buckets fit beside the label and the four calendar columns, filling pane width. */
@@ -57,7 +57,7 @@ const STATS_ROW_COLOR: Readonly<Partial<Record<(typeof STATS_ROWS)[number]["key"
 }
 
 /**
- * The STATS box (items 18–22): `TODAY`, `YSTRDAY`, `WEEK`, `MONTH`, then the
+ * The STATS box (items 18–22): `TODAY`, `YSTRDAY`, `7DAY`, `30DAY`, then the
  * hours of the last day newest first; every number right-aligned (item 19);
  * the local midnight as its own one-character column running through header
  * and rows alike (item 20); DUP muted and just above FAILS (items 21, 22);

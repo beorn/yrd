@@ -70,17 +70,50 @@ describe("statsBuckets", () => {
       decision(20, "stuck", "r3"),
       decision(30, "merged", "r4"),
     ]
-    const [today, yesterday, week, month, ...hours] = statsBuckets(decisions, NOW, 24)
+    const [today, yesterday, day7, day30, ...hours] = statsBuckets(decisions, NOW, 24)
     expect(today).toMatchObject({ duplicates: 1, fails: 1, merges: 1, runs: 2, stuck: 0 })
     // 20 hours before 14:30 is 18:30 yesterday; 30 hours before is 08:30 yesterday.
     expect(yesterday).toMatchObject({ duplicates: 0, fails: 0, merges: 1, runs: 2, stuck: 1 })
-    // Thursday the 3rd: the week began Monday the 31st and the month on Tuesday the 1st; both hold every decision.
-    expect(week).toMatchObject({ duplicates: 1, fails: 1, label: "WEEK", merges: 2, runs: 4, stuck: 1 })
-    expect(month).toMatchObject({ duplicates: 1, fails: 1, label: "MONTH", merges: 2, runs: 4, stuck: 1 })
+    // 7DAY (last 7x24h) and 30DAY (last 30x24h): decisions at 0.5, 2, 20, 30h ago are all inside both windows.
+    expect(day7).toMatchObject({ duplicates: 1, fails: 1, key: "day7", label: "7DAY", merges: 2, runs: 4, stuck: 1 })
+    expect(day30).toMatchObject({ duplicates: 1, fails: 1, key: "day30", label: "30DAY", merges: 2, runs: 4, stuck: 1 })
     expect(hours[0]).toMatchObject({ fails: 1, merges: 1, runs: 1 })
     expect(hours[2]).toMatchObject({ duplicates: 1, merges: 0 })
     expect(countCell(hours[1]!, "merges")).toBe("·")
     expect(countCell(today!, "merges")).toBe("1")
+  })
+
+  it("7DAY and 30DAY read the last 7 and 30 days ending now on the 1st of a month (25716)", () => {
+    // 1st of a month at 09:00
+    const firstOfMonth = new Date(2026, 9, 1, 9, 0, 0)
+    // Decisions on each of the previous 40 days (each at 08:00 of that day)
+    const decisions: RunDecision[] = []
+    for (let day = 0; day < 40; day += 1) {
+      const at = new Date(firstOfMonth.getTime() - day * 24 * 3_600_000 - 3_600_000)
+      decisions.push({
+        at,
+        decision: "merged",
+        duplicate: false,
+        run: `run-${day}`,
+      })
+    }
+    const [today, yesterday, day7, day30] = statsBuckets(decisions, firstOfMonth, 24)
+    expect(day7).toMatchObject({
+      dayBoundary: false,
+      key: "day7",
+      label: "7DAY",
+      merges: 7,
+      runs: 7,
+    })
+    expect(day30).toMatchObject({
+      dayBoundary: false,
+      key: "day30",
+      label: "30DAY",
+      merges: 30,
+      runs: 30,
+    })
+    expect(day7?.endMs).toBe(firstOfMonth.getTime() + 1)
+    expect(day30?.endMs).toBe(firstOfMonth.getTime() + 1)
   })
 
   it("counts a checked verdict as a PASS, and reads the TIME rows as medians of the spans the decisions carry", () => {
@@ -303,7 +336,7 @@ describe("the STATS box", () => {
     return text
   }
 
-  it("prints TODAY YSTRDAY WEEK MONTH, right-aligns every number, keeps DUP just above FAILS, runs the midnight rule as its own column, and draws the TIME rows under the counts", async () => {
+  it("prints TODAY YSTRDAY 7DAY 30DAY, right-aligns every number, keeps DUP just above FAILS, runs the midnight rule as its own column, and draws the TIME rows under the counts", async () => {
     const text = await paint(
       [
         decision(0.5, "merged"),
@@ -318,7 +351,7 @@ describe("the STATS box", () => {
     expect(header).toBeDefined()
     expect(header).toContain("TODAY")
     expect(header).not.toContain("YESTERDAY")
-    expect(header).toMatch(/TODAY\s+YSTRDAY\s+WEEK\s+MONTH/u)
+    expect(header).toMatch(/TODAY\s+YSTRDAY\s+7DAY\s+30DAY/u)
     const rows = [
       "MERGES",
       "PASS",
