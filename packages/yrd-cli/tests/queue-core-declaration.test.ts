@@ -39,6 +39,7 @@ import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import { workdirOf } from "../src/workdir.ts"
 import type { QueueConfig } from "@yrd/queue-core"
 
 const roots: string[] = []
@@ -415,7 +416,8 @@ describe("a queue is the selected origin branch carrying config", () => {
     const detail = await openEventDetail(git, config, item, "main", repo, selected)
     expect(detail.checks).toEqual([])
     expect(detail.note).toContain(source)
-    expect(detail.note).toContain(join(repo, ".git", "yrd", "checks", `${branch}@${head}`))
+    // The old logs sit under the queue's workdir, whose resolution workdir.test.ts owns (25716 row 9).
+    expect(detail.note).toContain(join(await workdirOf(git), "checks", `${branch}@${head}`))
   }, 15_000)
 
   // @failure a malformed event ref took down list/show/watch and hid healthy changes (25658).
