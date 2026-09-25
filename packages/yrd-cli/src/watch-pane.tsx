@@ -826,14 +826,6 @@ export function WatchPane({
             </Text>
           </Box>
         )}
-        <Box height={1} flexShrink={0}>
-          <Text color="$fg-muted" wrap="truncate">
-            {cursorRow === undefined ? "" : "Home follows the newest again · "}
-            {/* A draft is a row and no change: the queue line counts the drafts. */}
-            {String(changesIn(visible))} of {String(changesIn(shown.rows))} change(s) · {String(draftsIn(visible))} of{" "}
-            {String(draftsIn(shown.rows))} draft(s) · ? for help · q leaves
-          </Text>
-        </Box>
         {helpOpen ? (
           // An overlay, so the help covers the pane where it stands and moves nothing under it.
           <ModalOverlay
@@ -857,16 +849,6 @@ export function WatchPane({
       </Box>
     </NowProvider>
   )
-}
-
-/** How many of these rows are changes: every row but a draft's. */
-function changesIn(rows: readonly WatchRow[]): number {
-  return rows.filter((item) => item.row.state !== "draft").length
-}
-
-/** How many of these rows are drafts: the other population the footer must name. */
-function draftsIn(rows: readonly WatchRow[]): number {
-  return rows.filter((item) => item.row.state === "draft").length
 }
 
 /**
