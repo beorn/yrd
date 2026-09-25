@@ -78,9 +78,11 @@ export function decodeOps(value: string, self: string, where: string): OpsState 
   if (root.pause !== null) {
     const raw = object(root.pause, "Ops: pause")
     if (raw.kind !== "paused") throw new Error(`${where}: Ops: only a standing pause belongs in the snapshot`)
-    if (raw.cause !== "operator" && raw.cause !== "stuck") throw new Error(`${where}: Ops: invalid pause cause`)
+    if (raw.cause !== "operator" && raw.cause !== "stuck" && raw.cause !== "maintenance") {
+      throw new Error(`${where}: Ops: invalid pause cause`)
+    }
     const change = raw.change === undefined ? undefined : parseChangeName(text(raw, "change"))
-    if ((raw.cause === "stuck" && change === undefined) || (raw.cause === "operator" && raw.change !== undefined)) {
+    if ((raw.cause === "stuck" && change === undefined) || (raw.cause !== "stuck" && raw.change !== undefined)) {
       throw new Error(`${where}: Ops: pause cause and change disagree`)
     }
     if (raw.next !== undefined && (raw.cause !== "stuck" || typeof raw.next !== "string")) {

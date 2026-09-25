@@ -8,7 +8,7 @@
  * @testonly none
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -185,6 +185,50 @@ async function assertCarrier(
 }
 
 describe("yrd submit --gitlink builds a queue-owned carrier", () => {
+  /** @failure A maintenance stop arriving after carrier creation leaves an unpublished local branch behind.
+   * @level l2 @consumer pin-only submit against a fenced migration
+   */
+  it("removes only its generated local carrier when maintenance races the second admission", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const branch = `pin/vendor-one/${one.held.slice(0, 12)}`
+    const git = gitIn(w.work)
+    const tree = (await git(["mktree"], "")).trim()
+    const pause = (
+      await git([
+        "commit-tree",
+        tree,
+        "-m",
+        "25041 lab cutover\n\nRecord: paused\nPaused-By: @chief\nCause: maintenance\n",
+      ])
+    ).trim()
+    const marker = join(w.root, "maintenance-injected")
+    const wrapper = join(w.root, "git-inject-maintenance.sh")
+    writeFileSync(
+      wrapper,
+      [
+        "#!/bin/sh",
+        'git "$@"',
+        "result=$?",
+        `case " $* " in *" update-ref refs/heads/${branch} "*)`,
+        `  if [ "$result" -eq 0 ] && [ ! -f '${marker}' ]; then`,
+        `    : > '${marker}'`,
+        `    git -C '${w.work}' push --quiet origin '${pause}:refs/yrd/main/pause' || exit $?`,
+        "  fi ;;",
+        "esac",
+        'exit "$result"',
+        "",
+      ].join("\n"),
+    )
+    chmodSync(wrapper, 0o755)
+    await git(["config", "--local", "yrd.git", JSON.stringify({ executable: wrapper, contract: "native" })])
+    const refused = await yrd(w.work, "submit", "--gitlink", `${one.path}=${one.held}`, "--issue", "25804")
+    expect(refused.exitCode, refused.report).toBe(2)
+    expect(refused.stderr, refused.report).toContain("25041 lab cutover")
+    expect(existsSync(marker)).toBe(true)
+    expect(await git(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).toBe("")
+    expect(await refs(w.remote)).not.toContain(`refs/heads/${branch}`)
+  }, 90_000)
   it("previews without refs and refuses branch or file input before building", async () => {
     const w = await world()
     const one = w.components[0]

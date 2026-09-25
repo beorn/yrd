@@ -22,7 +22,7 @@ import {
   type GitomicBackend,
   type GitSelection,
 } from "../src/git.ts"
-import { readHistories, readQueue } from "../src/remote.ts"
+import { readHistories, readQueue, readStop } from "../src/remote.ts"
 import { isActive, readOverrides } from "../src/override.ts"
 import { overrideRef, parseChangeRef, pauseRef, queueRefPrefix } from "../src/refs.ts"
 import {
@@ -37,9 +37,16 @@ import {
 import { encodeOps } from "../src/ops-state.ts"
 import { readConfig } from "../src/config.ts"
 import { assertPlainEventQueueConfig } from "../src/event-config.ts"
-import { inputsForLegacy, migratedStatus, sourcesForMigration, type LegacyMigrationChange } from "../src/migration.ts"
+import {
+  inputsForLegacy,
+  migratedStatus,
+  originalEndingRecord,
+  sourcesForMigration,
+  type LegacyMigrationChange,
+} from "../src/migration.ts"
 import { tipOf } from "../src/state.ts"
-import { trailer } from "../src/legacy-records.ts"
+import { legacyPauseCommit, trailer } from "../src/legacy-records.ts"
+import { eventCutoverTip, type PauseRecord } from "../src/pause.ts"
 import { subjects } from "../src/table.ts"
 import { directMergeCommits, eventDirectMergeCommits } from "../src/direct.ts"
 
@@ -82,6 +89,7 @@ type Plan = Readonly<{
 type Staged = Readonly<{
   version: 1
   queue: Ref
+  pause: Ref
   changes: readonly Ref[]
   sources: readonly Readonly<{ ref: string; oid: string }>[]
   stagedAt: string
@@ -96,6 +104,7 @@ type OpsPlan = Readonly<{
   target: string
   heads: readonly Ref[]
   refs: readonly Ref[]
+  retainedPause?: Ref
   effective: string
   bundle: string
   bundleSha256: string
@@ -108,6 +117,19 @@ const USAGE =
 
 function failure(code: string, subject: string, detail: string): never {
   throw new Error(`yrd-migration-${code}: ${subject}: ${detail}`)
+}
+
+/** Every migration phase needs an intake fence, not an operator andon that still admits submits. */
+export function requireMaintenanceStop(stop: PauseRecord | undefined, queue: string): PauseRecord {
+  if (stop?.kind === "paused" && stop.cause === "maintenance") return stop
+  const found = stop === undefined ? "no standing stop" : `${stop.cause} stop set by ${stop.by}`
+  failure(
+    "maintenance-stop",
+    queue,
+    `${found}; an operator or stuck pause still admits submits. Set the intake fence with ` +
+      `yrd queue pause --queue '${queue}' --maintenance '<reason>' before this phase; ` +
+      "the person who set it resumes only after migration proof",
+  )
 }
 
 function optionsOf(argv: readonly string[]): Options {
@@ -349,13 +371,7 @@ async function plan(options: Options, git: Git, selection: GitSelection, pin: st
     failure("remote-url", options.remote, `configured remote in ${options.repo} resolved to an empty URL`)
   }
   const reading = await readQueue(git, options.remote, options.queue, first.target)
-  if (reading.pause?.kind !== "paused") {
-    failure(
-      "unpaused",
-      `${options.remote}#${options.queue}`,
-      `legacy pause ref ${classified.pause.ref} did not fold to paused`,
-    )
-  }
+  requireMaintenanceStop(reading.stop, options.queue)
   const overrides = await readOverrides(git, options.remote, options.queue)
   const active = overrides.entries.filter((entry) => isActive(entry, Date.now()))
   if (active.length > 0) {
@@ -483,6 +499,7 @@ async function legacyChanges(plan: Plan, git: Git): Promise<readonly LegacyMigra
   if (reading.pause?.kind !== "paused" || reading.pause.sha !== plan.pause.oid) {
     failure("unpaused", `${remote}#${queue}`, `pause is not the planned ${plan.pause.oid}`)
   }
+  requireMaintenanceStop(reading.stop, queue)
   const overrides = await readOverrides(git, remote, queue)
   if (overrides.entries.some((entry) => isActive(entry, Date.now()))) {
     failure("active-override", overrideRef(queue), "a check override is active at apply")
@@ -548,12 +565,18 @@ function assertStagedBranch(
         `old ${source.change.head}/${source.reading.state} maps to ${expectedStatus}, staged ${segment.head}/${segment.state.status}`,
       )
     }
-    const expectedAt = expectedStatus === "queued" ? legacyOpened(source) : tipOf(source.change).at.getTime()
+    const ending = originalEndingRecord(source.change.records)
+    const stuck =
+      expectedStatus === "stuck" ? source.change.records.findLast((record) => record.kind === "stuck") : undefined
+    const expectedAt =
+      expectedStatus === "queued"
+        ? legacyOpened(source)
+        : (ending?.at ?? stuck?.at ?? tipOf(source.change).at).getTime()
     if (segment.state.at?.getTime() !== expectedAt) {
       failure(
         "segment-parity",
         source.ref,
-        `old ${expectedStatus === "queued" ? "Opened" : "tip at"} ${new Date(expectedAt).toISOString()}, staged at ${segment.state.at?.toISOString() ?? "absent"}`,
+        `old ${expectedStatus === "queued" ? "Opened" : "ending at"} ${new Date(expectedAt).toISOString()}, staged at ${segment.state.at?.toISOString() ?? "absent"}`,
       )
     }
     const submitter = trailer(tipOf(source.change), "Submitter")
@@ -643,6 +666,11 @@ async function apply(options: Options, plan: Plan, git: Git, selection: GitSelec
   if (declared === undefined) failure("missing-config", plan.target, "target commit has no .yrd.yml declaration")
   assertPlainEventQueueConfig(declared, "create")
   const sources = await legacyChanges(plan, git)
+  const observedStop = await readStop(git, options.remote, options.queue, plan.target)
+  const maintenance = requireMaintenanceStop(observedStop.stop, options.queue)
+  if (observedStop.pause?.sha !== plan.pause.oid) {
+    failure("changed-census", options.queue, `pause moved from planned ${plan.pause.oid}`)
+  }
   const groups = branchGroups(sources)
   const expectedSources = sourceCounts(sources)
   if ([...expectedSources.values()].some((count) => count !== 1)) {
@@ -657,7 +685,8 @@ async function apply(options: Options, plan: Plan, git: Git, selection: GitSelec
         props: [
           ["Commit", plan.target],
           ["Time", new Date().toISOString()],
-          ["Start-Paused", "25041 event migration cutover"],
+          ["Start-Paused", maintenance.reason],
+          ["Pause-Cause", maintenance.cause],
         ],
         keeps: [plan.target],
       },
@@ -668,6 +697,12 @@ async function apply(options: Options, plan: Plan, git: Git, selection: GitSelec
   if (queueTip === undefined || queueTip !== preparedQueue.head) {
     failure("stage-queue", queueRef(options.queue), "prepared created event has no exact tip")
   }
+  const cutoverPause = await legacyPauseCommit(git, maintenance, {
+    kind: "paused",
+    cause: "maintenance",
+    by: "yrd-migration",
+    reason: `moved to event format at ${queueTip}`,
+  })
   const stagedChanges: Array<
     Readonly<{ ref: string; oid: string; sources: readonly Readonly<{ ref: string; oid: string }>[] }> | undefined
   > = Array.from({ length: groups.length }, () => undefined)
@@ -708,11 +743,13 @@ async function apply(options: Options, plan: Plan, git: Git, selection: GitSelec
   }
   const newRefs: readonly Ref[] = [
     { ref: queueRef(options.queue), oid: preparedQueue.head },
+    { ref: pauseRef(options.queue), oid: cutoverPause },
     ...ready.map(({ ref, oid }) => ({ ref, oid })),
   ].sort((a, b) => a.ref.localeCompare(b.ref))
   const staged: Staged = {
     version: 1,
     queue: { ref: queueRef(options.queue), oid: preparedQueue.head },
+    pause: { ref: pauseRef(options.queue), oid: cutoverPause },
     changes: ready.map(({ ref, oid }) => ({ ref, oid })),
     sources: ready.flatMap(({ sources }) => sources),
     stagedAt: new Date().toISOString(),
@@ -722,7 +759,11 @@ async function apply(options: Options, plan: Plan, git: Git, selection: GitSelec
   assertAdvertised(plan, before, "immediately before atomic publication")
   const also = [
     ...ready.map(({ ref, oid }) => ({ ref, expect: null, oid })),
-    ...plan.oldRefs.map(({ ref, oid }) => ({ ref, expect: oid, oid: null })),
+    ...plan.oldRefs.map(({ ref, oid }) => ({
+      ref,
+      expect: oid,
+      oid: ref === pauseRef(options.queue) ? cutoverPause : null,
+    })),
   ]
   const started = performance.now()
   let publicationError: string | undefined
@@ -738,7 +779,7 @@ async function apply(options: Options, plan: Plan, git: Git, selection: GitSelec
     phase: "apply",
     state,
     queue: `${options.remote}#${options.queue}`,
-    refUpdates: newRefs.length + plan.oldRefs.length,
+    refUpdates: also.length + 1,
     pushSeconds: seconds,
     ...(publicationError === undefined ? {} : { publicationError }),
     paths: {
@@ -814,6 +855,8 @@ function readStaged(options: Options, plan: Plan): Staged {
   if (
     value.queue.ref !== queueRef(options.queue) ||
     !OID.test(value.queue.oid) ||
+    value.pause?.ref !== pauseRef(options.queue) ||
+    !OID.test(value.pause.oid) ||
     value.sources.length !== plan.recordCount
   ) {
     failure("invalid-journal", path, "staged queue or source record count differs from plan")
@@ -836,6 +879,13 @@ async function rollback(options: Options, plan: Plan, git: Git, selection: GitSe
   }
   const staged = readStaged(options, plan)
   await requireVerifiedBundle(plan.snapshot, plan.bundle, plan.bundleSha256, plan.oldRefs, selection)
+  const eventStop = await readEventOps(
+    createEventStore(options.repo, options.remote, selection),
+    git,
+    options.queue,
+    plan.target,
+  )
+  requireMaintenanceStop(eventStop.stop, options.queue)
   const lastSource = new Map<string, string>()
   const count = new Map<string, number>()
   for (const source of staged.sources) {
@@ -855,7 +905,9 @@ async function rollback(options: Options, plan: Plan, git: Git, selection: GitSe
       )
     }
   }
-  const newRefs: readonly Ref[] = [staged.queue, ...staged.changes].sort((a, b) => a.ref.localeCompare(b.ref))
+  const newRefs: readonly Ref[] = [staged.queue, staged.pause, ...staged.changes].sort((a, b) =>
+    a.ref.localeCompare(b.ref),
+  )
   const before = await remoteAdvertisement(git, options.remote, options.queue)
   if (!equalRefs(before.queue, newRefs) || !equalRefs(before.heads, plan.heads)) {
     failure(
@@ -870,8 +922,14 @@ async function rollback(options: Options, plan: Plan, git: Git, selection: GitSe
   }
   const absent = "0".repeat(40)
   const updates = [
-    ...plan.oldRefs.map(({ ref, oid }) => ({ ref, expect: absent, oid })),
-    ...newRefs.map(({ ref, oid }) => ({ ref, expect: oid, oid: null })),
+    ...plan.oldRefs.map(({ ref, oid }) => ({
+      ref,
+      expect: ref === pauseRef(options.queue) ? staged.pause.oid : absent,
+      oid,
+    })),
+    ...newRefs
+      .filter(({ ref }) => ref !== pauseRef(options.queue))
+      .map(({ ref, oid }) => ({ ref, expect: oid, oid: null })),
   ]
   const started = performance.now()
   let publicationError: string | undefined
@@ -985,6 +1043,7 @@ async function opsPlan(options: Options, git: Git, selection: GitSelection, pin:
   }
   const state = await readEventOps(store, git, options.queue, first.target)
   if (state.source !== "legacy") failure("ops-cutover", options.queue, "ops-cutover is already present")
+  requireMaintenanceStop(state.stop, options.queue)
   const queueOid = first.queue.find(({ ref }) => ref === queueRef(options.queue))?.oid
   if (queueOid !== state.queue.tip) {
     failure("ops-census", options.queue, `queue tip ${state.queue.tip} differs from advertised ${queueOid ?? "absent"}`)
@@ -1006,6 +1065,9 @@ async function opsPlan(options: Options, git: Git, selection: GitSelection, pin:
     target: first.target,
     heads: first.heads,
     refs: first.queue,
+    ...(eventCutoverTip(state.pause) === state.queue.created
+      ? { retainedPause: { ref: pauseRef(options.queue), oid: state.pause?.sha ?? "" } }
+      : {}),
     effective,
     bundle,
     bundleSha256,
@@ -1039,6 +1101,10 @@ async function opsApply(options: Options, plan: OpsPlan, git: Git, selection: Gi
   const store = createEventStore(options.repo, options.remote, selection)
   const current = await readEventOps(store, git, options.queue, plan.target)
   if (current.source !== "legacy") failure("ops-cutover", options.queue, "ops-cutover already stands")
+  requireMaintenanceStop(current.stop, options.queue)
+  if ((eventCutoverTip(current.pause) === current.queue.created) !== (plan.retainedPause !== undefined)) {
+    failure("changed-state", options.queue, "retained legacy cutover fence differs from the verified ops plan")
+  }
   const effective = encodeOps({
     ...(current.stop === undefined ? {} : { pause: current.stop }),
     overrides: current.overrides.entries,
@@ -1066,7 +1132,10 @@ async function opsApply(options: Options, plan: OpsPlan, git: Git, selection: Gi
   const queueAfter =
     staged !== null && typeof staged === "object" && "queueAfter" in staged ? staged.queueAfter : undefined
   const expectedRefs = plan.refs
-    .filter(({ ref }) => ref !== pauseRef(options.queue) && ref !== overrideRef(options.queue))
+    .filter(
+      ({ ref }) =>
+        (ref !== pauseRef(options.queue) || plan.retainedPause !== undefined) && ref !== overrideRef(options.queue),
+    )
     .map((row) => (row.ref === queueRef(options.queue) ? { ...row, oid: String(queueAfter) } : row))
   const state =
     typeof queueAfter === "string" &&
@@ -1117,10 +1186,20 @@ async function opsRollback(options: Options, plan: OpsPlan, git: Git, selection:
   }
   const queueAfter = (applied as { queueAfter: string }).queueAfter
   await requireVerifiedBundle(plan.snapshot, plan.bundle, plan.bundleSha256, plan.refs, selection)
+  const current = await readEventOps(
+    createEventStore(options.repo, options.remote, selection),
+    git,
+    options.queue,
+    plan.target,
+  )
+  requireMaintenanceStop(current.stop, options.queue)
   const expected = opsExpected(plan)
   const now = await remoteAdvertisement(git, options.remote, options.queue)
   const afterRefs = plan.refs
-    .filter(({ ref }) => ref !== pauseRef(options.queue) && ref !== overrideRef(options.queue))
+    .filter(
+      ({ ref }) =>
+        (ref !== pauseRef(options.queue) || plan.retainedPause !== undefined) && ref !== overrideRef(options.queue),
+    )
     .map((row) => (row.ref === queueRef(options.queue) ? { ...row, oid: queueAfter } : row))
   if (!equalRefs(now.queue, afterRefs) || !equalRefs(now.heads, plan.heads)) {
     failure(
@@ -1136,7 +1215,13 @@ async function opsRollback(options: Options, plan: OpsPlan, git: Git, selection:
     { ref: queueRef(options.queue), expect: queueAfter, oid: expected.queueBefore },
     ...(expected.pauseBefore === undefined
       ? []
-      : [{ ref: pauseRef(options.queue), expect: absent, oid: expected.pauseBefore }]),
+      : [
+          {
+            ref: pauseRef(options.queue),
+            expect: plan.retainedPause === undefined ? absent : expected.pauseBefore,
+            oid: expected.pauseBefore,
+          },
+        ]),
     ...(expected.overrideBefore === undefined
       ? []
       : [{ ref: overrideRef(options.queue), expect: absent, oid: expected.overrideBefore }]),
