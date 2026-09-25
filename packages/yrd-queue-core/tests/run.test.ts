@@ -409,6 +409,43 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
 })
 
+/** @failure A verifier refusal before checks omitted the branch's failures count, so the strict notify entry refused the record and the submitter heard nothing.
+ * @level l3 @consumer event queue submitter (@i/10-yrd/25815)
+ */
+it("notifies the submitter when an event change fails before any check", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await w.git(["checkout", "--quiet", "-b", "task/precheck-refused", "main"])
+  writeFileSync(join(w.work, "target.txt"), "change side\n")
+  await w.git(["commit", "--quiet", "-am", "change the target line"])
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", {
+    branch: "task/precheck-refused",
+    submitter: "@dev/2",
+    target: { branch: "main", remote: "origin" },
+    issue: "@i/10-yrd/25815",
+  })
+  writeFileSync(join(w.work, "target.txt"), "main side\n")
+  await w.git(["commit", "--quiet", "-am", "move the target before queue verification"])
+  await w.git(["push", "--quiet", "origin", "main"])
+
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    notify: [{ name: "submitter", on: ["failed"], run: w.notifier }],
+  })
+
+  expect(outcome.failed).toEqual(["task/precheck-refused"])
+  expect(existsSync(w.checkLog)).toBe(false)
+  expect(messages(w)).toMatchObject([{ record: "failed", submitter: "@dev/2", failures: 1 }])
+  const status = await readStatus(
+    createEventStore(w.work, "origin", gitIn(w.work).selection),
+    "main",
+    "task/precheck-refused",
+  )
+  expect(status.status).toBe("failed")
+  expect(Object.values(status.notices ?? {})).toMatchObject([{ result: "delivered" }])
+})
+
 /** @failure An ops cutover could drop a standing stop or override, leave an old ref, or silently accept one later.
  * @level l3 @consumer queue operator and merge runner
  */
@@ -7608,7 +7645,10 @@ describe("skipping setup and worktree when every declared check is off (25716 ro
     const optsReal = await w.options({ exit: 0, setup: setupCmd })
     const outcomeReal = await queueRun({
       ...optsReal,
-      checks: [{ name: "c1", run: "true" }, { name: "c2", run: ":" }],
+      checks: [
+        { name: "c1", run: "true" },
+        { name: "c2", run: ":" },
+      ],
       notify: [],
     })
     expect(outcomeReal.merged).toEqual(["task/two"])
