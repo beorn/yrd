@@ -26,12 +26,16 @@ import {
   readConfig,
   readEventQueue,
   readQueue,
+  QUEUE_HEALTH_DOCUMENT,
+  QUEUE_HEALTH_SCHEMA,
   writePause,
   watchRows,
 } from "@yrd/queue-core"
 import { openEvents } from "gitomic/events"
 import { assertEventListingFence, coreQueueCommand, openEventDetail, readListing } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { SERVICE } from "../src/queue-health.ts"
+import { resolveQueueLocation } from "../src/queue-location.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import type { QueueConfig } from "@yrd/queue-core"
@@ -1041,6 +1045,64 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause"])).toContain("refs/yrd/main/pause")
   })
 
+  it("reports a healthy service after resume without suggesting a restart", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    const { workdir } = await resolveQueueLocation(repo, "main", process.env)
+    mkdirSync(workdir, { recursive: true })
+    writeFileSync(
+      join(workdir, QUEUE_HEALTH_DOCUMENT),
+      JSON.stringify({ schema: QUEUE_HEALTH_SCHEMA, service: SERVICE, state: "healthy", verdict: { kind: "running" } }),
+    )
+    const paused = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "repair"], paused.io),
+      paused.stderr(),
+    ).toBe(0)
+    const resumed = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main", "--json"], resumed.io)).toBe(0)
+    expect((JSON.parse(resumed.stdout()) as { service: unknown }).service).toEqual({ running: true, health: "healthy" })
+    const pausedAgain = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "repair"], pausedAgain.io),
+    ).toBe(0)
+    const line = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main"], line.io)).toBe(0)
+    expect(line.stdout()).toContain("yrd service is running")
+  })
+
+  it("reports an unreadable service document as unknown after resume", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    const { workdir } = await resolveQueueLocation(repo, "main", process.env)
+    mkdirSync(workdir, { recursive: true })
+    writeFileSync(join(workdir, QUEUE_HEALTH_DOCUMENT), "not a health document\n")
+    const paused = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "repair"], paused.io),
+      paused.stderr(),
+    ).toBe(0)
+    const resumed = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main", "--json"], resumed.io)).toBe(0)
+    expect((JSON.parse(resumed.stdout()) as { service: unknown }).service).toEqual({
+      running: null,
+      health: "unknown",
+      check: "hab ps yrd",
+    })
+    const pausedAgain = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "repair"], pausedAgain.io),
+    ).toBe(0)
+    const line = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main"], line.io)).toBe(0)
+    expect(line.stdout()).toContain("yrd service status is unknown (unreadable health document)")
+    expect(line.stdout()).toContain("inspect with hab ps yrd")
+  })
+
   it("keeps an event-queue override on the legacy ref before ops-cutover", async () => {
     const repo = await world('checks:\n  - verify: {run: "true", on: [merge]}\n')
     const git = gitIn(repo)
@@ -1135,7 +1197,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
     const resumed = capture(repo)
     expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main"], resumed.io)).toBe(0)
-    expect(resumed.stdout()).toContain("yrd service is stopped; run hab up yrd")
+    expect(resumed.stdout()).toContain("yrd service is stopped (no health document); run hab up yrd")
     expect((await readEventQueue(store, "main")).ops?.pause).toBeUndefined()
     expect((await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause", "refs/yrd/main/override"])).trim()).toBe(
       "",

@@ -192,6 +192,9 @@ import {
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { readQueueHealth, SERVICE } from "./queue-health.ts"
 
+const START_SERVICE_COMMAND = `hab up ${SERVICE}`
+const CHECK_SERVICE_COMMAND = `hab ps ${SERVICE}`
+
 import { workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
 
@@ -966,18 +969,26 @@ export async function coreQueueCommand(
         }
         const health = await readQueueHealth(workdir, SERVICE)
         const running = health.verdict.kind === "running" ? true : health.verdict.kind === "stopped" ? false : null
+        const healthDetail =
+          health.state === "healthy"
+            ? ""
+            : health.state === "absent"
+              ? " (no health document)"
+              : health.state === "unknown"
+                ? " (unreadable health document)"
+                : " (unhealthy)"
         const service = {
           running,
           health: health.state,
-          ...(running === false ? { start: "hab up yrd" } : {}),
-          ...(running === null ? { check: "hab ps yrd" } : {}),
+          ...(running === false ? { start: START_SERVICE_COMMAND } : {}),
+          ...(running === null ? { check: CHECK_SERVICE_COMMAND } : {}),
         }
         const line =
           running === true
-            ? "yrd service is running"
+            ? `${SERVICE} service is running${healthDetail}`
             : running === false
-              ? "yrd service is stopped; run hab up yrd"
-              : "yrd service status is unknown; inspect with hab ps yrd; if stopped run hab up yrd"
+              ? `${SERVICE} service is stopped${healthDetail}; run ${START_SERVICE_COMMAND}`
+              : `${SERVICE} service status is unknown${healthDetail}; inspect with ${CHECK_SERVICE_COMMAND}; if stopped run ${START_SERVICE_COMMAND}`
         emit(io, options.json, { ...pause, service }, `${pauseLine(pause)}; ${line}`)
       }
       try {
