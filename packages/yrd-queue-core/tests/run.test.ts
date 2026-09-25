@@ -509,13 +509,84 @@ it("moves complete operational state in one cutover publish and refuses a leftov
   expect(legacy.overrides.sha).toBe(override.record.sha)
   const cutover = await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
   expect(cutover).toMatchObject({ pauseBefore: pause.sha, overrideBefore: override.record.sha })
-  expect((await w.git(["ls-remote", "--refs", "origin", PAUSE_REF, overrideRef("main")])).trim()).toBe("")
+  const created = (await readEventQueue(store, "main")).created
+  const pauseAfter = await readPause(w.git, "origin", "main")
+  expect(pauseAfter).toMatchObject({
+    kind: "paused",
+    cause: "maintenance",
+    reason: `moved to event format at ${created}`,
+  })
+  expect(pauseAfter?.sha).not.toBe(pause.sha)
+  expect(cutover.pauseAfter).toBe(pauseAfter?.sha)
+  expect((await w.git(["ls-remote", "--refs", "origin", overrideRef("main")])).trim()).toBe("")
   const switched = await readEventOps(store, w.git, "main", w.target)
   expect(switched.source).toBe("event")
   expect(switched.stop?.sha).toBe(pause.sha)
   expect(switched.overrides.entries[0]?.record).toBe(override.record.entries[0]?.record)
-  await writePause(w.git, "origin", "main", { kind: "paused", by: "rival", reason: "stale client" })
-  await expect(readEventOps(store, w.git, "main", w.target)).rejects.toThrow(/ops cutover incomplete/)
+  await expect(
+    writePause(w.git, "origin", "main", { kind: "resumed", by: "rival", reason: "stale client" }),
+  ).rejects.toThrow(/moved to event format/)
+  expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("event")
+})
+
+/** @failure 25041: an already-present maintenance fence must keep its exact oid through ops cutover.
+ * @level l3 @consumer queue operator and rollback
+ */
+it("retains an existing M2 pause tip through ops cutover", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const created = (await readEventQueue(store, "main")).created
+  const m2 = await writePause(w.git, "origin", "main", {
+    kind: "paused",
+    cause: "maintenance",
+    by: "yrd-migration",
+    reason: `moved to event format at ${created}`,
+  })
+  const cutover = await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
+  expect(cutover.pauseAfter).toBe(m2.sha)
+  expect((await readPause(w.git, "origin", "main"))?.sha).toBe(m2.sha)
+  expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("event")
+})
+
+/** @failure 25041: the ops script could restore an absent pause ref instead of the exact pre-apply tip.
+ * @level l3 @consumer queue operator and rollback
+ */
+it("plans M2 replacement and rolls back the exact legacy pause ref", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const previous = await writePause(w.git, "origin", "main", {
+    kind: "paused",
+    cause: "maintenance",
+    by: "@chief",
+    reason: "ops cutover rehearsal",
+  })
+  const before = (await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()
+  const journal = join(dirname(w.work), "ops-migration")
+  const script = resolve(import.meta.dirname, "../scripts/migrate-events.ts")
+  const phase = (name: "ops-plan" | "ops-apply" | "ops-rollback") => {
+    const result = spawnSync(
+      process.execPath,
+      [script, name, "--repo", w.work, "--remote", "origin", "--queue", "main", "--journal", journal],
+      { encoding: "utf8" },
+    )
+    expect(result.status, result.stderr).toBe(0)
+    return JSON.parse(result.stdout) as Record<string, unknown>
+  }
+  phase("ops-plan")
+  const plan = JSON.parse(readFileSync(join(journal, "plan.json"), "utf8")) as {
+    pause: { tip: string; disposition: string; record: { reason: string } }
+  }
+  expect(plan.pause.tip).toBe(previous.sha)
+  expect(plan.pause.disposition).toBe("replace")
+  const created = (await readEventQueue(createEventStore(w.work, "origin", gitIn(w.work).selection), "main")).created
+  expect(plan.pause.record.reason).toBe(`moved to event format at ${created}`)
+  const applied = phase("ops-apply")
+  expect(applied).toMatchObject({ state: "committed", pauseDisposition: "replace", postflight: "clean" })
+  expect((await readPause(w.git, "origin", "main"))?.sha).toBe(applied.pauseAfter)
+  const restored = phase("ops-rollback")
+  expect(restored).toMatchObject({ state: "restored", pauseAfter: previous.sha })
+  expect((await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()).toBe(before)
 })
 
 /** @failure A post-cutover merge could move main while its queue ops lease remained a client-only no-op.
