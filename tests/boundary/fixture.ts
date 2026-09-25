@@ -17,7 +17,7 @@
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { changeRef } from "../../packages/yrd-queue-core/src/index.ts"
+import { changeRef, overrideRef, pauseRef } from "../../packages/yrd-queue-core/src/index.ts"
 import { runYrdProcess } from "../../packages/yrd-cli/src/cli.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../../packages/yrd-cli/src/types.ts"
 import { installDeclaredYrdEntry } from "../../packages/yrd-cli/tests/support/declared-yrd-entry.ts"
@@ -301,7 +301,10 @@ export async function checkAttempts(checkLog: string): Promise<number> {
 /** Every change ref a repository carries, as `<sha> <name>` lines. */
 export async function changeRefs(repo: string): Promise<readonly string[]> {
   const listed = await git(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/yrd/main/**")
-  return listed === "" ? [] : listed.split("\n")
+  // The queue's own control refs share the prefix, and submit now publishes the pause fence (d7fda91051); neither is
+  // a change.
+  const control = new Set([pauseRef("main"), overrideRef("main")])
+  return listed === "" ? [] : listed.split("\n").filter((line) => !control.has(line.slice(line.indexOf(" ") + 1)))
 }
 
 /** Every ref of yrd's own the repository carries — the breadcrumb a missing

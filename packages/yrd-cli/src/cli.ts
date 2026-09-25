@@ -362,7 +362,7 @@ function buildProgram(
   queue
     .command("pause")
     .description(
-      "stop checking and merging while the service keeps the queue visible; --reason keeps accepting " +
+      "stop checking and merging while the service keeps the queue visible; a --reason pause still accepts " +
         "submissions, while --maintenance also stops intake for a fenced migration",
     )
     .option("--json", "emit stable JSON")

@@ -188,7 +188,11 @@ describe("a queue started by address on a host with no checkout", () => {
       .find((call) => call?.name === "push")
     expect(authorPush, "selected author Git saw no push verb").toBeDefined()
     expect(authorPush?.tail).toContain("--atomic")
-    expect(authorPush?.tail.filter((arg) => arg.startsWith("--force-with-lease="))).toHaveLength(2)
+    // Three leases in one atomic push: the task branch, the queue ref, and the pause fence that serializes intake
+    // with queue pause and the format cutover (d7fda91051, 25646).
+    const leases = authorPush?.tail.filter((arg) => arg.startsWith("--force-with-lease=")) ?? []
+    expect(leases).toHaveLength(3)
+    expect(leases.some((arg) => arg.startsWith("--force-with-lease=refs/yrd/main/pause:"))).toBe(true)
     expect(
       selectedCalls.some(
         ({ cwd, args }) =>
