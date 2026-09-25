@@ -778,6 +778,41 @@ export async function coreQueueCommand(
   const readChangeNow = async (change: Change) => {
     const target = await readRemoteCommit(git, config.target.remote, `refs/heads/${config.target.branch}`)
     if (target === undefined) throw new Error(`the target ${targetLabel} is not at ${config.target.remote}`)
+    const isEvent =
+      (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
+    if (isEvent) {
+      const reading = await readEventListing(
+        git,
+        config,
+        repo,
+        workdir,
+        target,
+        createEventStore(repo, config.target.remote, selection),
+        { all: true, forceFresh: true },
+      )
+      const selected = reading.changes.get(change.branch)
+      const row = reading.all.find((candidate) => candidate.branch === change.branch)
+      const state = selected?.status ?? row?.state
+      if (state === undefined) {
+        throw new Error(`${changeName(change)} is not at ${targetLabel} after its round: its change ref is gone`)
+      }
+      const landing = selected?.merge ?? selected?.candidate ?? row?.merge ?? (state === "merged" ? target : undefined)
+      const head = selected?.commit ?? row?.head ?? change.head
+      return {
+        entry: {
+          change: { branch: change.branch, head },
+          reading: {
+            state,
+            trailers: landing === undefined ? [] : [["Merge", landing] as const],
+            kind: state,
+            merge: landing,
+          },
+        },
+        state,
+        stop: reading.pause,
+        landing,
+      }
+    }
     const now = await readQueue(git, config.target.remote, config.target.branch, target)
     const entry = now.changes.find(
       (candidate) => candidate.change.branch === change.branch && candidate.change.head === change.head,
@@ -785,7 +820,11 @@ export async function coreQueueCommand(
     if (entry === undefined) {
       throw new Error(`${changeName(change)} is not at ${targetLabel} after its round: its change ref is gone`)
     }
-    return { entry, stop: now.stop }
+    const state = entry.reading.state
+    const lastRecord = entry.change.records.at(-1)
+    const landing =
+      (lastRecord === undefined ? undefined : trailer(lastRecord, "Merge")) ?? (state === "merged" ? target : undefined)
+    return { entry, state, stop: now.stop, landing }
   }
 
   /**
@@ -1353,19 +1392,71 @@ export async function coreQueueCommand(
           ? undefined
           : gitIn(request.author.repo, undefined, request.author.selection, { env: options.env })
       const local = author === undefined ? undefined : await refAt(author, `refs/heads/${branch}`)
-      const read = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
-      const own = read.changes.filter((entry) => entry.change.branch === branch)
-      // A local branch names its head's change; with none, the change of this
-      // branch that holds a place in line is the one.
-      const standing =
-        local === undefined
-          ? own.find((entry) => inLineState(entry.reading.state))
-          : own.find((entry) => entry.change.head === local)
+      const isEventQueue =
+        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
+      let standing:
+        | {
+            change: Change
+            reading: { state: Row["state"] }
+            landing?: string
+          }
+        | undefined
+      if (isEventQueue) {
+        const reading = await readEventListing(
+          git,
+          config,
+          repo,
+          workdir,
+          captured.oid,
+          createEventStore(repo, config.target.remote, selection),
+          { all: true },
+        )
+        const selected = reading.changes.get(branch)
+        const row = reading.all.find((candidate) => candidate.branch === branch)
+        const head = selected?.commit ?? row?.head
+        const state = selected?.status ?? row?.state
+        if (head !== undefined && state !== undefined) {
+          const landing =
+            selected?.merge ?? selected?.candidate ?? row?.merge ?? (state === "merged" ? captured.oid : undefined)
+          if (local === undefined ? inLineState(state) || state === "merged" : head === local) {
+            standing = {
+              change: { branch, head },
+              reading: { state },
+              landing,
+            }
+          }
+        }
+      } else {
+        const read = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
+        const own = read.changes.filter((entry) => entry.change.branch === branch)
+        // A local branch names its head's change; with none, the change of this
+        // branch that holds a place in line is the one.
+        const entry =
+          local === undefined
+            ? own.find((entry) => inLineState(entry.reading.state))
+            : own.find((entry) => entry.change.head === local)
+        if (entry !== undefined) {
+          const lastRecord = entry.change.records.at(-1)
+          standing = {
+            change: entry.change,
+            reading: entry.reading,
+            landing:
+              (lastRecord === undefined ? undefined : trailer(lastRecord, "Merge")) ??
+              (entry.reading.state === "merged" ? captured.oid : undefined),
+          }
+        }
+      }
       if (standing?.reading.state === "merged") {
         emit(
           io,
           options.json,
-          { branch, change: changeName(standing.change), exitCode: 0, state: "merged" },
+          {
+            branch,
+            change: changeName(standing.change),
+            exitCode: 0,
+            state: "merged",
+            ...(standing.landing === undefined ? {} : { landing: standing.landing }),
+          },
           `${changeName(standing.change)} is already merged into ${targetName(config.target)}; nothing to merge`,
         )
         return 0
@@ -1426,6 +1517,7 @@ export async function coreQueueCommand(
       }
       const state = after.entry.reading.state
       const ending = endingCode([state])
+      const landing = after.landing
       emit(
         io,
         options.json,
@@ -1435,9 +1527,10 @@ export async function coreQueueCommand(
           exitCode: ending ?? 2,
           state,
           stopped: stopFact(after.stop),
+          ...(landing === undefined ? {} : { landing }),
           ...(request.noCheck === true ? { noCheck: true } : {}),
         },
-        `${changeName(change)} ${state}${request.noCheck === true ? " (checks skipped: --no-check)" : ""}`,
+        `${changeName(change)} ${state}${state === "merged" && landing !== undefined ? ` at ${landing.slice(0, 12)}` : ""}${request.noCheck === true ? " (checks skipped: --no-check)" : ""}`,
       )
       if (ending !== undefined) return ending
       // Still in line: checked and not merged, or never reached. Exit 2 and no
@@ -3628,7 +3721,14 @@ function readOutput(check: CheckView): CheckPanel {
 
 /** Whether a change in this state holds a place in line: queued, checked or stuck. */
 function inLineState(state: Row["state"]): boolean {
-  return state === "queued" || state === "checked" || state === "stuck"
+  return (
+    state === "queued" ||
+    state === "checked" ||
+    state === "stuck" ||
+    state === "verifying" ||
+    state === "checking" ||
+    state === "merging"
+  )
 }
 
 /** How often a waiter tries the round lock again: well inside the service's shortest sleep, so a waiter wins the gap between two rounds. */

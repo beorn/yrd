@@ -3845,6 +3845,36 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     expect(merged.stderr, merged.report).toContain("or run yrd merge task/moved again")
     expect(merged.exitCode, merged.report).toBe(2)
   })
+
+  // 25687. On an event queue, yrd merge's postcondition reads the event chain
+  // through the same reader as queue show (readEventListing), and a merged round
+  // exits 0 naming the landing sha.
+  it("on an event queue, yrd merge merges the change, exits 0, and names the landing sha in the output line (#25687)", async () => {
+    const w = await verbWorld()
+    const commit = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    await createEventQueue(
+      createEventStore(w.work, "origin", gitIn(w.work).selection),
+      "main",
+      commit,
+      config,
+      new Date(),
+    )
+    const head = await submitted(w, "task/event-merge", "event.txt")
+    const merged = await yrd(w, "merge", "task/event-merge")
+
+    expect(merged.exitCode, merged.report).toBe(0)
+    const tip = await mainAt(w)
+    expect(await onMain(w, head)).toBe(true)
+    expect(merged.stdout, merged.report).toContain(`task/event-merge@${head} merged at ${tip.slice(0, 12)}`)
+
+    const again = await yrd(w, "merge", "task/event-merge")
+    expect(again.exitCode, again.report).toBe(0)
+    expect(again.stdout, again.report).toContain(
+      `task/event-merge@${head} is already merged into origin#main; nothing to merge`,
+    )
+  })
 })
 
 /**

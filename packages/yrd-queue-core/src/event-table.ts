@@ -51,7 +51,9 @@ export function eventRows(
       ...(change.since === undefined ? {} : { since: change.since }),
       ...(change.at === undefined ? {} : { at: change.at }),
       ...(change.endedAt === undefined ? {} : { endedAt: change.endedAt }),
-      ...(change.adoptedMerge === undefined ? {} : { merge: change.adoptedMerge }),
+      ...((change.merge ?? change.candidate ?? change.adoptedMerge) === undefined
+        ? {}
+        : { merge: change.merge ?? change.candidate ?? change.adoptedMerge }),
       ...(startedAt === undefined ? {} : { startedAt }),
       ...(adoptedTimes !== undefined && startedAt === undefined ? { adoptedPhaseMissing: true } : {}),
       ...(change.deferred === undefined

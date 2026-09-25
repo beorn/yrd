@@ -94,6 +94,8 @@ export type EventChange = Readonly<{
   status: ChangeStatus
   /** The submitted commit, or the last head when a branch was dropped before any submit. */
   commit?: string
+  /** The landing commit on target when merged. */
+  merge?: string
   /** The last verified composition, kept by its verifying event. */
   candidate?: string
   issue?: string
@@ -787,6 +789,8 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       return {
         ...next,
         status: "merged",
+        merge: kept,
+        candidate: state.candidate ?? kept,
         ending: { kind: "merged", id: event.id },
         lastNotifiable: { kind: "merged", id: event.id },
         endedAt: at,
@@ -2152,7 +2156,7 @@ export function adoptedChange(event: EventShape): ChangeSegment {
     tip: event.id,
     adoptedPhases: phases,
     adoptedChecks: checks,
-    ...(merge === undefined ? {} : { adoptedMerge: merge }),
+    ...(merge === undefined ? {} : { merge, adoptedMerge: merge }),
     ...(base === undefined ? {} : { adoptedBase: base }),
     ...(config === undefined ? {} : { adoptedConfig: config }),
     ...(issue === undefined ? {} : { issue }),
