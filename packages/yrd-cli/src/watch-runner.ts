@@ -38,6 +38,7 @@ import {
   runStartedAt,
   serviceStoppedLine,
   type LogRecord,
+  type RoundLine,
   type QueueHealthDocument,
   type ServiceIntentFact,
   type StopFact,
@@ -72,6 +73,8 @@ export type RunnerRun = Readonly<{
   checks?: readonly string[]
   effectiveChecks?: readonly string[]
   activeStep?: ActiveRunnerStep
+  /** The line as this run read it, from its own `observation`/`line` record (25669), once it has. */
+  line?: RoundLine
   /** The process the run's `.pid` file names, when the file is still there. */
   pid?: number
   /** True when that process answers `kill -0`: the run is executing right now. */
@@ -333,7 +336,25 @@ type JournalHead = Readonly<{
   died: boolean
   /** The step or check currently running, if any. */
   activeStep?: ActiveRunnerStep
+  /** The line as the run journalled it, when it has. */
+  line?: RoundLine
 }>
+
+/** The run's own reading of its line: the last `observation` record with subject `line` (25669). */
+function lineOf(records: readonly LogRecord[]): RoundLine | undefined {
+  const record = records.findLast((r) => r.kind === "observation" && r.subject === "line") as
+    | Readonly<Record<string, unknown>>
+    | undefined
+  if (record === undefined || typeof record.waiting !== "number") return undefined
+  const { oldestBranch, oldestOpenedAt, lastJudgedAt } = record
+  return {
+    waiting: record.waiting,
+    ...(typeof oldestBranch === "string" && typeof oldestOpenedAt === "string"
+      ? { oldest: { branch: oldestBranch, openedAt: oldestOpenedAt } }
+      : {}),
+    ...(typeof lastJudgedAt === "string" ? { lastJudgedAt } : {}),
+  }
+}
 
 /**
  * Read the run header, and the queue record that says its Git preamble finished.
@@ -452,8 +473,10 @@ function readRunHeader(path: string): JournalHead {
   const resolved = records.find((record) => record.kind === "queue")?.queue ?? header.queue
   const pid = header.pid
   const activeStep = openSteps.at(-1)
+  const line = lineOf(records)
   return {
     activeStep,
+    ...(line === undefined ? {} : { line }),
     died,
     headed: true,
     ...(typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? { pid } : {}),
@@ -485,7 +508,10 @@ function journalVerdict(
   path: string,
   read: JournalHead,
   alive: boolean,
-): Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks" | "effectiveChecks" | "activeStep" | "unstarted"> {
+): Pick<
+  RunnerRun,
+  "target" | "gitlink" | "queue" | "checks" | "effectiveChecks" | "activeStep" | "line" | "unstarted"
+> {
   const unstarted = !alive && read.died
   if (!read.headed) {
     if (alive) return {}
@@ -498,6 +524,7 @@ function journalVerdict(
   return {
     ...read.fields,
     ...(alive && read.activeStep !== undefined ? { activeStep: read.activeStep } : {}),
+    ...(read.line === undefined ? {} : { line: read.line }),
     ...(unstarted ? { unstarted: true as const } : {}),
   }
 }

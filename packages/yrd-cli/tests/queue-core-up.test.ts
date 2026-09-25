@@ -2710,6 +2710,56 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     }
   }, 30_000)
 
+  // 25669: the FIRST round after a start has no flow in the loop yet, and it is
+  // the round the 09-24 cut-over stood still in. Its own journalled line makes
+  // it judgeable: the beats state the waiting count and the phase it is in.
+  it("the first round after a start is judged from its own journal's line", async () => {
+    const w = await world()
+    const held = heldSetup(w.workdir)
+    await redeclare(w, `setup: ${held.command}\n`)
+    const commit = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    await createEventQueue(
+      createEventStore(w.work, "origin", gitIn(w.work).selection),
+      "main",
+      commit,
+      config,
+      new Date(),
+    )
+    await oneChange(w, "task/first")
+    using published = await publishedHealth(w.workdir)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "up", intervalSeconds: 0, stop: stop.signal, ...HEARTBEAT, afterHealth: async () => stop.abort() },
+      { json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(() => expect(existsSync(held.started), run.stderr()).toBe(true), { timeout: 20_000 })
+      const heldSince = Date.now()
+      await vi.waitFor(
+        () => {
+          const last = published.writes.filter((write) => write.at >= heldSince).at(-1)
+          expect(last?.document.facts?.flow, run.stderr()).toMatchObject({
+            oldestWaiting: { branch: "task/first" },
+            roundOpen: { phase: expect.stringContaining("setup") },
+            waiting: 1,
+          })
+        },
+        { timeout: 10_000 },
+      )
+      held.release()
+      expect(await service, run.stderr()).toBe(0)
+    } finally {
+      held.release()
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 30_000)
+
   // T2 (F4). ONE freshness rule for every write, event-driven and heartbeat
   // alike, so overdue means exactly one thing: the writer stopped writing.
   it("a writer that stops writing reads overdue only after interval plus grace, never before", async () => {

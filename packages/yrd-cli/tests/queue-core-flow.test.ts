@@ -106,23 +106,63 @@ describe("the line's flow after one service round", () => {
 
 // 25669 row 2: queue health names the phase an open round is in, from that
 // round's own journal, and says why when the journal cannot say.
-describe("the open round's phase", () => {
-  it("is the newest journal's open step and the change it works", async () => {
+describe("the open round's phase and line, from its own journal", () => {
+  /** A workdir holding one run journal started at `started`, with these records after its header. */
+  const journal = (started: Date, records: readonly Readonly<Record<string, unknown>>[]): string => {
     const workdir = mkdtempSync(join(tmpdir(), "yrd-round-phase-"))
     mkdirSync(join(workdir, "logs"))
-    const started = new Date()
     const id = runId(started)
-    const records = [
-      { at: started.toISOString(), kind: "run", pid: process.pid, queue: "main", run: id, target: "main" },
+    const header = { at: started.toISOString(), kind: "run", pid: process.pid, queue: "main", run: id, target: "main" }
+    const text = [header, ...records].map((r) => `${JSON.stringify(r)}\n`).join("")
+    writeFileSync(join(workdir, "logs", `${id}.jsonl`), text)
+    return workdir
+  }
+
+  it("is the round's open step and the change it works", async () => {
+    const started = new Date()
+    const workdir = journal(started, [
       { branch: "task/a", kind: "check", name: "typecheck", phase: "submit", start: started.toISOString() },
-    ]
-    writeFileSync(join(workdir, "logs", `${id}.jsonl`), records.map((r) => `${JSON.stringify(r)}\n`).join(""))
-    expect(await roundPhase(workdir)).toEqual({ branch: "task/a", phase: "submit typecheck" })
+    ])
+    expect(await roundPhase(workdir, started)).toEqual({ open: { branch: "task/a", phase: "submit typecheck" } })
+  })
+
+  // The first round after a start has no flow in the loop; its own journalled
+  // line is what lets it be judged at all (the 09-24 cut-over's shape).
+  it("carries the line the round journalled, before any check", async () => {
+    const started = new Date()
+    const workdir = journal(started, [
+      {
+        kind: "observation",
+        lastJudgedAt: "2026-09-24T19:40:00.000Z",
+        oldestBranch: "task/a",
+        oldestOpenedAt: "2026-09-24T19:00:00.000Z",
+        subject: "line",
+        waiting: 11,
+      },
+      { branch: "task/a", kind: "step", name: "setup", phase: "submit", start: started.toISOString() },
+    ])
+    expect(await roundPhase(workdir, started)).toEqual({
+      line: {
+        lastJudgedAt: "2026-09-24T19:40:00.000Z",
+        oldest: { branch: "task/a", openedAt: "2026-09-24T19:00:00.000Z" },
+        waiting: 11,
+      },
+      open: { branch: "task/a", phase: "submit setup" },
+    })
+  })
+
+  it("reads nothing from a journal older than the round, and says so", async () => {
+    const before = new Date(Date.now() - 60_000)
+    const workdir = journal(before, [{ kind: "observation", subject: "line", waiting: 3 }])
+    const read = await roundPhase(workdir, new Date())
+    expect(read.line).toBeUndefined()
+    expect(read.open).toEqual({ phaseUnread: expect.stringContaining("predates this round") })
   })
 
   it("says where it looked when there is no journal to read", async () => {
     const workdir = mkdtempSync(join(tmpdir(), "yrd-round-phase-"))
-    const phase = await roundPhase(workdir)
-    expect(phase).toEqual({ phaseUnread: expect.stringContaining(`no run journal was read: ${join(workdir, "logs")}`) })
+    expect(await roundPhase(workdir, new Date())).toEqual({
+      open: { phaseUnread: expect.stringContaining(`no run journal was read: ${join(workdir, "logs")}`) },
+    })
   })
 })
