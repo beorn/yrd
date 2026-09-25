@@ -239,6 +239,17 @@ function refuseMergedSubmit(events: readonly Event[], ref: string, root: string,
 export async function inspectSubmit(git: Git, remote: string, request: SubmitRequest): Promise<SubmitInspection> {
   refuseTarget(request.branch, request.target.branch)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
+  return inspectSubmitAtHead(git, remote, request, head)
+}
+
+/** Admission for a generated carrier before any local branch ref is written. */
+export async function inspectSubmitAtHead(
+  git: Git,
+  remote: string,
+  request: SubmitRequest,
+  head: string,
+): Promise<SubmitInspection> {
+  refuseTarget(request.branch, request.target.branch)
   const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
   const bound = freshnessLine(targetHead)

@@ -82,6 +82,8 @@ import {
   runCheck,
   show,
   inspectSubmit,
+  inspectSubmitAtHead,
+  preparePinCarrier,
   freshnessLine,
   readRemoteCommit,
   refAt,
@@ -105,6 +107,7 @@ import {
   type OverrideFact,
   type OverrideEntry,
   type OverrideTable,
+  type PinCarrierPin,
   notifyOutsideRound,
   overrideNotice,
   skippedChecks,
@@ -290,6 +293,7 @@ export type CoreQueueCommand =
       submitter: string
       issue?: string
       dryRun?: boolean
+      pins?: readonly PinCarrierPin[]
     }>
   | Readonly<{ command: "pause"; by: string; reason: string }>
   | Readonly<{ command: "resume"; by: string; reason?: string }>
@@ -1191,6 +1195,58 @@ export async function coreQueueCommand(
         (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
       ) {
         assertPlainEventQueueConfig(config, "submit")
+      }
+      if (request.pins !== undefined) {
+        if (request.branch !== undefined) throw new Error("--gitlink does not take a branch operand")
+        if (request.issue === undefined) throw new Error("--gitlink needs --issue <id>")
+        if (options.populateReference !== true) throw new Error("--gitlink needs the queue-owned clone")
+        const prepared = await preparePinCarrier({
+          git,
+          repo,
+          target: config.target,
+          issue: request.issue,
+          pins: request.pins,
+          env: env ?? process.env,
+        })
+        const submission = {
+          branch: prepared.branch,
+          submitter: request.submitter,
+          target: config.target,
+          issue: request.issue,
+        }
+        const inspected = await inspectSubmitAtHead(git, config.target.remote, submission, prepared.head)
+        if (request.dryRun === true) {
+          emit(
+            io,
+            options.json,
+            {
+              branch: prepared.branch,
+              head: prepared.head,
+              targetHead: prepared.targetHead,
+              dryRun: true,
+              verifying: inspected.verifying,
+              freshness: freshnessLine(inspected.targetHead),
+              stopped: stopFact(inspected.stop),
+            },
+            `would open ${changeName({ branch: prepared.branch, head: prepared.head })} on ${targetName(config.target)}; nothing was pushed; ${freshnessLine(inspected.targetHead)}`,
+          )
+          echoStop(inspected.stop)
+          return 0
+        }
+        await git(["update-ref", `refs/heads/${prepared.branch}`, prepared.head, "0".repeat(prepared.head.length)])
+        const submitted = await submit(git, config.target.remote, submission)
+        const { stop: acceptedUnder, ...accepted } = submitted
+        emit(
+          io,
+          options.json,
+          { ...accepted, stopped: stopFact(acceptedUnder), ...issueOutput(io, prepared.branch, submitted.issue) },
+          `${submitted.retry ? "retried" : "submitted"} ${prepared.branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}; ${freshnessLine(submitted.targetHead)}` +
+            submitted.published
+              .map((row) => `\n${row.state} ${row.path}@${row.sha.slice(0, 12)} at ${row.remote} ${row.ref}`)
+              .join(""),
+        )
+        echoStop(acceptedUnder)
+        return 0
       }
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
       const submission = {

@@ -53,6 +53,8 @@ type SubmitOptions = Readonly<{
   issue?: string
   dryRun?: boolean
   queue?: string
+  gitlink?: string[]
+  file?: string
 }>
 type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string }>
 type MergeOptions = Readonly<{
@@ -88,6 +90,10 @@ const DRY_RUN_HELP = "preview admission and push nothing; fetches the queue tip 
 const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to origin/HEAD inside a clone"
 
 const SUBMIT_HELP: [string, string][] = [
+  [
+    "Pin-only",
+    "repeat --gitlink <path>=<full-sha> with --issue <id> to build an exact-target-parent carrier in the queue-owned clone; a remote-unheld pin, branch operand or --file refuses",
+  ],
   [
     "1. Inspect",
     "read this branch and fetch the configured target's advertised commit objects without pulling or integrating; refuse the target branch; a stopped line still accepts the change, and says who stopped it and what lifts it",
@@ -250,7 +256,23 @@ function buildProgram(
   }
 
   const queueSubmit = async (branch: string | undefined, options: SubmitOptions): Promise<void> => {
-    const location = await resolveQueueLocation(cwd(), options.queue, env, "submit")
+    if (options.file !== undefined) {
+      throw new Error("--file is not supported for gitlink carriers; use --gitlink <path>=<full-sha>")
+    }
+    const pins = (options.gitlink ?? []).map((value) => {
+      const separator = value.indexOf("=")
+      if (separator <= 0 || separator === value.length - 1) {
+        throw new Error(`--gitlink needs <path>=<full-sha>, got ${value}`)
+      }
+      return { path: value.slice(0, separator), sha: value.slice(separator + 1) }
+    })
+    if (pins.length > 0 && branch !== undefined) {
+      throw new Error("--gitlink builds its own carrier branch; omit the branch operand")
+    }
+    if (pins.length > 0 && options.issue === undefined) {
+      throw new Error("--gitlink needs --issue <id> for the carrier's Refs binding")
+    }
+    const location = await resolveQueueLocation(cwd(), options.queue, env, pins.length > 0 ? "queue" : "submit")
     const taken = await coreQueueCommand(
       location.repo,
       io,
@@ -260,6 +282,7 @@ function buildProgram(
         ...(branch === undefined ? {} : { branch }),
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.dryRun === true ? { dryRun: true } : {}),
+        ...(pins.length === 0 ? {} : { pins }),
       },
       {
         json: options.json,
@@ -312,6 +335,13 @@ function buildProgram(
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
     .option("--queue <value>", QUEUE_HELP)
+    .option(
+      "--gitlink <path=sha>",
+      "pin an existing component commit; repeat for multiple gitlinks",
+      (value: string, previous: string[]) => [...previous, value],
+      [],
+    )
+    .option("--file <path>", "unsupported with gitlink carriers; use --gitlink")
     .addHelpSection("On submit:", SUBMIT_HELP)
     .addHelpSection(
       "Before submitting:",
@@ -789,6 +819,13 @@ function buildProgram(
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
     .option("--queue <value>", QUEUE_HELP)
+    .option(
+      "--gitlink <path=sha>",
+      "pin an existing component commit; repeat for multiple gitlinks",
+      (value: string, previous: string[]) => [...previous, value],
+      [],
+    )
+    .option("--file <path>", "unsupported with gitlink carriers; use --gitlink")
     .addHelpSection("On submit:", SUBMIT_HELP)
     .addHelpSection(
       "Before submitting:",
