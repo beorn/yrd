@@ -1724,6 +1724,39 @@ it("keeps an unlanded merge publication retryable and judges the next change", a
   )
 })
 
+/** @failure 25789: an empty-ref Conflict after merge publication skipped readback and stopped the whole round.
+ * @level l3 @consumer queue operator and next submitter
+ */
+it("reconciles a merge Conflict with no named refs and judges the next change", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/unknown-conflict", "one.txt")
+  await submitCommit(w, "task/after-unknown-conflict", "two.txt")
+  const firstRef = changesRef("main", "task/unknown-conflict")
+  let refused = false
+  using _publish = beforeGitomicPublish(async (_repo, updates) => {
+    if (refused || !updates.some((update) => update.ref === firstRef)) return
+    if (!updates.some((update) => update.ref === "refs/heads/main")) return
+    refused = true
+    throw new gitomic.Conflict("injected publication outcome unknown with no named refs")
+  })
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(refused).toBe(true)
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/after-unknown-conflict"] })
+  expect((await readStatus(store, "main", "task/unknown-conflict")).status).toBe("merging")
+  expect(logRecords(outcome)).toContainEqual(
+    expect.objectContaining({
+      kind: "warning",
+      subject: "publication-not-landed",
+      branch: "task/unknown-conflict",
+      ref: firstRef,
+      count: 1,
+    }),
+  )
+})
+
 /** @failure 25708: losing the push acknowledgement after acceptance could replay a merge or stop the service.
  * @level l3 @consumer queue operator and submitter
  */
