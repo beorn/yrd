@@ -1296,6 +1296,19 @@ export async function coreQueueCommand(
       let threshold = { declared: config.health.declared, ms: config.health.stallAfterMs }
       const flowReading = (): FlowReading | undefined => (flow === undefined ? undefined : { flow, threshold })
       /**
+       * The open round's phase, from its own journal (25669 row 2), for the next
+       * write to state: the heartbeat writes first and never waits on this read.
+       * A journal that cannot say is stated with its reason, never left out.
+       */
+      const notePhase = async (): Promise<void> => {
+        const open = flow?.roundOpen
+        if (open === undefined) return
+        const phase = await roundPhase(workdir)
+        // The round ended while the journal was read: its phase is no longer news.
+        if (flow?.roundOpen?.startedAt !== open.startedAt) return
+        flow = { ...flow, roundOpen: { startedAt: open.startedAt, ...phase } }
+      }
+      /**
        * Leave the document where the declared health probe reads it, stamped
        * with this write's instant, its deadline and its writer, and answer with
        * the document as written.
@@ -1591,6 +1604,7 @@ export async function coreQueueCommand(
         if (stated !== undefined) {
           writeHealth(reading === undefined ? stated : withLineFlow(stated, lastStop, reading, new Date()))
         }
+        void notePhase()
       }, heartbeat.intervalMs)
       // THE GRACEFUL STOP (25430). A signal carries no reason, so the supervisor
       // wrote its stop intent before sending it; this reads it and leaves ONE
@@ -2932,6 +2946,22 @@ export function flowAfterRound(
       : previous?.casRefused !== undefined && !outcome.merged.includes(previous.casRefused.branch)
         ? { casRefused: previous.casRefused }
         : {}),
+  }
+}
+
+/** What the newest run journal says the open round is doing: its step and change, or why it cannot say. */
+export async function roundPhase(
+  workdir: string,
+): Promise<Readonly<{ phase: string; branch?: string } | { phaseUnread: string }>> {
+  try {
+    const facts = await readRunnerFacts(workdir)
+    const step = facts.latest?.activeStep
+    if (step === undefined) return { phaseUnread: facts.absent ?? "the newest run journal names no open step" }
+    return { phase: `${step.phase} ${step.name}`, ...(step.branch === undefined ? {} : { branch: step.branch }) }
+  } catch (error) {
+    return {
+      phaseUnread: `the run journal could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    }
   }
 }
 

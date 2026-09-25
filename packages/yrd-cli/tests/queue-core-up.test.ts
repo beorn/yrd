@@ -35,6 +35,8 @@ import { tryAcquireFlock } from "@bearly/flock"
 import {
   appendRecord,
   changeRef,
+  createEventQueue,
+  createEventStore,
   gitIn,
   parseQueueHealthDocument,
   QUEUE_HEALTH_DOCUMENT,
@@ -2640,6 +2642,67 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       held.release()
       expect(await service, run.stderr()).toBe(0)
       expect(seen).toHaveLength(2)
+    } finally {
+      held.release()
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 30_000)
+
+  // 25669 row 2: an event round held open is named on each beat with the phase
+  // its own journal says it is in, so `yrd queue health` says where it is.
+  it("the beats of an open event round name its phase, from the round's own journal", async () => {
+    const w = await world()
+    const held = heldSetup(w.workdir)
+    await redeclare(w, `setup: ${held.command}\n`)
+    const commit = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    await createEventQueue(
+      createEventStore(w.work, "origin", gitIn(w.work).selection),
+      "main",
+      commit,
+      config,
+      new Date(),
+    )
+    using published = await publishedHealth(w.workdir)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        ...HEARTBEAT,
+        afterHealth: async (document) => {
+          seen.push(document)
+          if (seen.length === 1) await oneChange(w, "task/long")
+          else stop.abort()
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(() => expect(existsSync(held.started), run.stderr()).toBe(true), { timeout: 20_000 })
+      const heldSince = Date.now()
+      const openOf = (document: QueueHealthDocument): unknown =>
+        (document.facts?.flow as { roundOpen?: unknown } | undefined)?.roundOpen
+      await vi.waitFor(
+        () => {
+          const beats = published.writes.filter((write) => write.at >= heldSince)
+          expect(beats.map((beat) => openOf(beat.document)).at(-1), run.stderr()).toMatchObject({
+            phase: expect.stringContaining("setup"),
+          })
+        },
+        { timeout: 10_000 },
+      )
+      held.release()
+      expect(await service, run.stderr()).toBe(0)
+      // The round's end clears it: a closed round has no phase.
+      expect(openOf(seen.at(-1) as QueueHealthDocument)).toBeUndefined()
     } finally {
       held.release()
       stop.abort()

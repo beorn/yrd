@@ -295,6 +295,20 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
     )
   })
 
+  test("the slow-round page names the phase the round is in, or why its journal could not say", () => {
+    const flow = {
+      lastJudgedAt: "2026-09-24T19:40:00.000Z",
+      oldestWaiting: oldest,
+      roundOpen: { branch: "task/slow", phase: "merge test", startedAt: "2026-09-24T19:35:00.000Z" },
+      waiting: 3,
+    }
+    expect(lineStall(flow, threshold, at("20:30:00"))?.cause).toContain(
+      "a round has been running its checks for 55m on task/slow, at merge test; ",
+    )
+    const unread = { ...flow, roundOpen: { phaseUnread: "no journal", startedAt: "2026-09-24T19:35:00.000Z" } }
+    expect(lineStall(unread, threshold, at("20:30:00"))?.cause).toContain("for 55m (phase unread: no journal); ")
+  })
+
   test("idle is not stalled: nothing waiting never reads stalled, however long since the last judgement", () => {
     const flow = { lastJudgedAt: "2026-09-24T09:00:00.000Z", waiting: 0 }
     expect(lineStall(flow, threshold, at("20:00:00"))).toBeUndefined()
