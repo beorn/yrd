@@ -54,7 +54,6 @@ type SubmitOptions = Readonly<{
   dryRun?: boolean
   queue?: string
   gitlink?: string[]
-  file?: string
 }>
 type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string; maintenance?: string }>
 type MergeOptions = Readonly<{
@@ -92,7 +91,7 @@ const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to o
 const SUBMIT_HELP: [string, string][] = [
   [
     "Pin-only",
-    "repeat --gitlink <path>=<full-sha> with --issue <id> to build an exact-target-parent carrier in the queue-owned clone; a remote-unheld pin, branch operand or --file refuses",
+    "repeat --gitlink <path>=<full-sha> with --issue <id> to build an exact-target-parent carrier in the queue-owned clone; a remote-unheld pin or branch operand refuses",
   ],
   [
     "1. Inspect",
@@ -256,9 +255,6 @@ function buildProgram(
   }
 
   const queueSubmit = async (branch: string | undefined, options: SubmitOptions): Promise<void> => {
-    if (options.file !== undefined) {
-      throw new Error("--file is not supported for gitlink carriers; use --gitlink <path>=<full-sha>")
-    }
     const pins = (options.gitlink ?? []).map((value) => {
       const separator = value.indexOf("=")
       if (separator <= 0 || separator === value.length - 1) {
@@ -341,7 +337,6 @@ function buildProgram(
       (value: string, previous: string[]) => [...previous, value],
       [],
     )
-    .option("--file <path>", "unsupported with gitlink carriers; use --gitlink")
     .addHelpSection("On submit:", SUBMIT_HELP)
     .addHelpSection(
       "Before submitting:",
@@ -834,7 +829,6 @@ function buildProgram(
       (value: string, previous: string[]) => [...previous, value],
       [],
     )
-    .option("--file <path>", "unsupported with gitlink carriers; use --gitlink")
     .addHelpSection("On submit:", SUBMIT_HELP)
     .addHelpSection(
       "Before submitting:",

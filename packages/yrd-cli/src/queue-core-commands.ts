@@ -1304,6 +1304,16 @@ export async function coreQueueCommand(
           }
           throw cause
         }
+        try {
+          // The carrier was pushed to the remote; remove the temporary local ref from
+          // the queue clone so subsequent submissions or re-cuts do not collide on it.
+          await git(["update-ref", "-d", `refs/heads/${prepared.branch}`, prepared.head])
+        } catch (cleanup) {
+          throw new Error(
+            `submitted ${prepared.branch} successfully, but local carrier ref could not be removed: ${String(cleanup)}`,
+            { cause: cleanup },
+          )
+        }
         const { stop: acceptedUnder, ...accepted } = submitted
         emit(
           io,

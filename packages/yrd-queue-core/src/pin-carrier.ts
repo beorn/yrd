@@ -3,7 +3,16 @@ import { join } from "node:path"
 import { composeGitlinkCarrier, type GitlinkCarrierPin } from "git-super/gitlink-carrier"
 import { createLocalGitProcess } from "git-super/process"
 import type { Target } from "./config.ts"
-import { createEventStore, gitIn, gitlinkRows, isAncestor, readRemoteCommit, selectionFor, type Git } from "./git.ts"
+import {
+  createEventStore,
+  gitIn,
+  gitlinkRows,
+  isAncestor,
+  mergeBase,
+  readRemoteCommit,
+  selectionFor,
+  type Git,
+} from "./git.ts"
 import { isOpen, listChanges, queueFormat } from "./events.ts"
 import { populateReferenceStores } from "./reference.ts"
 import { readQueue, remoteUrl } from "./remote.ts"
@@ -115,7 +124,13 @@ export async function preparePinCarrier(
   }
   for (const change of changes) {
     if (!change.open) continue
-    const base = (await git(["rev-parse", `${change.head}^`])).trim()
+    // Compare merge-base..head so multi-commit changes expose gitlinks moved in
+    // any commit across their branch history, not only in change.head^.
+    // For single-commit pin carriers, merge-base with targetHead is targetHead (== head^).
+    const base =
+      (await mergeBase(git, change.head, targetHead)) ??
+      (await git(["rev-parse", `${change.head}^`]).catch(() => "")).trim()
+    if (base === "" || base === change.head) continue
     const moved = (await gitlinkRows(git, base, change.head))
       .filter((row) => row.newMode === "160000")
       .map((row) => ({ path: row.path, sha: row.sha }))

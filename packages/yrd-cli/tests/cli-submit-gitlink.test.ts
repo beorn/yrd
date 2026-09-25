@@ -14,6 +14,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
+import { resolveQueueLocation } from "../src/queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -246,7 +247,10 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     expect(operand.stderr, operand.report).toContain("omit the branch operand")
     const file = await yrd(w.work, "submit", "--gitlink", pin, "--issue", "25804", "--file", "root.txt")
     expect(file.exitCode, file.report).toBe(2)
-    expect(file.stderr, file.report).toContain("--file is not supported")
+    expect(file.stderr, file.report).toContain("unknown option '--file'")
+    const ordinary = await yrd(w.work, "submit", "--file", "root.txt")
+    expect(ordinary.exitCode, ordinary.report).toBe(2)
+    expect(ordinary.stderr, ordinary.report).toContain("unknown option '--file'")
     expect(await refs(w.remote)).toBe(before)
   }, 90_000)
 
@@ -285,6 +289,8 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     )
     expect(ran.exitCode, ran.report).toBe(0)
     await assertCarrier(w, branch, [{ path: one.path, sha: one.held }])
+    const location = await resolveQueueLocation(w.work, undefined, process.env, "queue")
+    expect(await gitIn(location.repo)(["for-each-ref", "--format=%(refname)", "refs/heads/pin/"])).toBe("")
   }, 60_000)
 
   it("uses one order-independent multi-pin name, refuses its open identity, then re-cuts an ended identity as -r2", async () => {
@@ -380,6 +386,39 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     )
     expect(duplicate.exitCode, duplicate.report).toBe(2)
     expect(duplicate.stderr, duplicate.report).toContain("task/manual-pin")
+    expect(await refs(w.remote)).toBe(before)
+  }, 90_000)
+
+  it("refuses an already-open pin when the pin was moved in a multi-commit ordinary change", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const git = gitIn(w.work)
+    await git(["checkout", "--quiet", "-b", "task/multi-commit-pin", "main"])
+    const child = gitIn(join(w.work, one.path))
+    await child(["fetch", "--quiet", "origin", "main"])
+    await child(["checkout", "--quiet", one.held])
+    await git(["add", one.path])
+    await git(["commit", "--quiet", "-m", "pin one in first commit\n\nRefs: 25804"])
+    writeFileSync(join(w.work, "other.txt"), "second commit\n")
+    await git(["add", "other.txt"])
+    await git(["commit", "--quiet", "-m", "second commit\n\nRefs: 25804"])
+    await git(["checkout", "--quiet", "main"])
+    const opened = await yrd(w.work, "submit", "task/multi-commit-pin", "--issue", "25804", "--notify", "@dev/2")
+    expect(opened.exitCode, opened.report).toBe(0)
+
+    const before = await refs(w.remote)
+    const duplicate = await yrd(
+      w.work,
+      "submit",
+      "--gitlink",
+      `${one.path}=${one.held}`,
+      "--issue",
+      "25804",
+      "--notify",
+      "@dev/2",
+    )
+    expect(duplicate.exitCode, duplicate.report).toBe(2)
+    expect(duplicate.stderr, duplicate.report).toContain("task/multi-commit-pin")
     expect(await refs(w.remote)).toBe(before)
   }, 90_000)
 
