@@ -194,6 +194,7 @@ export function WatchDetail({
         <Text color="$fg-muted">no check-step detail is recorded for this change</Text>
       ) : null}
       <Tabs
+        variant="filled"
         value={tab}
         onChange={(value: string) => {
           onSelect?.(value)

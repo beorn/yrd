@@ -45,6 +45,8 @@ import { bandPlan, queueLine, runnerOf, RunnerTitledBox } from "../src/watch-fra
 import { RunnerRow, StatusPills, TopLine, listLayout } from "../src/watch-list.tsx"
 import type { RunnerLine } from "../src/watch-runner.ts"
 import { journalRun } from "../../../tests/support/journal-run.ts"
+import { createTerminal } from "@termless/core"
+import { createGhosttyBackend, initGhostty } from "@termless/ghostty"
 
 async function waitFor<T>(callback: () => T | Promise<T>, options?: number | { timeout?: number }): Promise<T> {
   const timeout = typeof options === "number" ? options : (options?.timeout ?? 1000)
@@ -5130,4 +5132,183 @@ describe("bead 25630 watch rulings", () => {
     })
   })
 })
+
+/**
+ * Asserts that an ANSI capture renders in truecolor (24-bit color) and does not
+ * fall back to the 16-color ANSI palette (such as @dev/2's capture which was affected
+ * by vterm's 16-color mapping: olive #808000, pure black #000000 detail pane, etc.).
+ *
+ * Per acceptance criteria for bead 25779:
+ * "make every watch screenshot sent to the operator render at truecolor; a row fails
+ * if a capture falls back to 16 colors without saying so"
+ */
+export function assertCaptureTruecolor(ansi: string, options?: { allowAnsi16?: boolean }): void {
+  if (options?.allowAnsi16) return
+
+  const truecolorRegex = /\x1b\[(?:38|48);2;(\d+);(\d+);(\d+)m/g
+  const matches = [...ansi.matchAll(truecolorRegex)]
+  if (matches.length === 0) {
+    throw new Error(
+      "Capture fell back to ANSI 16 colors: no 24-bit truecolor (38;2;r;g;b / 48;2;r;g;b) escape sequences found",
+    )
+  }
+
+  // Check for the 16-color palette signature that made @dev/2's capture render in ANSI16:
+  // @dev/2's capture had olive (#808000 = 128,128,0) and dark green (0,128,0).
+  const colors = new Set(matches.map((m) => `${m[1]},${m[2]},${m[3]}`))
+  if (colors.has("128,128,0")) {
+    throw new Error(
+      "Capture fell back to ANSI 16 colors: detected vterm ANSI16 olive (128,128,0) fallback color",
+    )
+  }
+}
+
+export async function renderAnsiScreenshot(ansi: string, opts: { cols: number; rows: number }): Promise<Uint8Array> {
+  assertCaptureTruecolor(ansi)
+  await initGhostty()
+  const backend = createGhosttyBackend()
+  const term = createTerminal({ backend, cols: opts.cols, rows: opts.rows })
+  term.feed(ansi.replace(/\r?\n/g, "\r\n"))
+  return term.screenshot()
+}
+
+describe("bead 25779: watch tabs background and truecolor capture", () => {
+  it("restores background around each tab in watch detail with selected tab distinct at 120 columns (25779)", async () => {
+    const runningRow = row({
+      branch: "task/dev9-25779-watch-tabs-bg",
+      format: "event",
+      head: "25779a1b2c3d4e5f60718293a4b5c6d7e8f90123",
+      state: "checking",
+      subject: "feat(watch): tabs background and truecolor capture",
+      submitter: "@dev/9",
+      startedAt: new Date(NOW.getTime() - 25_000),
+    })
+
+    const checks: readonly CheckPanel[] = [
+      {
+        name: "typecheck",
+        phase: "submit",
+        result: { exit: "0", ms: 8_000, result: "pass" },
+        spec: { name: "typecheck", run: "bun run typecheck" },
+        state: "passed",
+      },
+      {
+        name: "test",
+        phase: "submit",
+        result: { exit: "0", ms: 14_000, result: "pass" },
+        spec: { name: "test", run: "bun run test" },
+        state: "passed",
+      },
+    ]
+
+    const journal: JournalRun = {
+      at: NOW,
+      branch: runningRow.branch,
+      head: runningRow.head,
+      id: "run-25779",
+      startedAt: new Date(NOW.getTime() - 35_000),
+      checks: [],
+      steps: [
+        {
+          commands: [],
+          name: "compose",
+          phase: "submit",
+          startedAt: new Date(NOW.getTime() - 35_000),
+          endedAt: new Date(NOW.getTime() - 25_000),
+          ms: 10_000,
+        },
+      ],
+      commands: [],
+    }
+
+    const item: WatchRow = { row: runningRow }
+    const detail = detailOf(item, checks, { journal })
+
+    const app = render(
+      at(
+        <Box width={120} height={20} flexDirection="column" backgroundColor={DETAIL_BG} paddingX={1}>
+          <WatchDetail change={runningRow} detail={detail} selected="checking" />
+        </Box>,
+      ),
+      { cols: 120, rows: 20 },
+    )
+    await settle(app)
+
+    const ansi = bufferToStyledText(app.term.buffer)
+    writeFileSync("/tmp/yrd-watch-25779-tabs-filled.ansi", ansi, "utf8")
+
+    // 1. All tabs present
+    expect(ansi).toContain("Timeline")
+    expect(ansi).toContain("provisioning")
+    expect(ansi).toContain("checking")
+    expect(ansi).toContain("merging")
+    expect(ansi).toContain("deprovisioning")
+
+    // 2. Tabs background layout check
+    const tabsY = app.lines.findIndex((l) => l.includes("Timeline") && l.includes("checking"))
+    expect(tabsY).toBeGreaterThanOrEqual(0)
+
+    const timelineCol = app.lines[tabsY]!.indexOf("Timeline")
+    const provCol = app.lines[tabsY]!.indexOf("provisioning")
+    const checkingCol = app.lines[tabsY]!.indexOf("checking")
+    const mergingCol = app.lines[tabsY]!.indexOf("merging")
+    const deprovCol = app.lines[tabsY]!.indexOf("deprovisioning")
+
+    // Every tab must have a non-null background in filled variant
+    const timelineBg = app.cell(timelineCol, tabsY).bg
+    const provBg = app.cell(provCol, tabsY).bg
+    const checkingBg = app.cell(checkingCol, tabsY).bg
+    const mergingBg = app.cell(mergingCol, tabsY).bg
+    const deprovBg = app.cell(deprovCol, tabsY).bg
+
+    expect(timelineBg).not.toBeNull()
+    expect(provBg).not.toBeNull()
+    expect(checkingBg).not.toBeNull()
+    expect(mergingBg).not.toBeNull()
+    expect(deprovBg).not.toBeNull()
+
+    // Active tab (checking) background must be distinct from inactive tabs
+    expect(checkingBg).not.toStrictEqual(timelineBg)
+    expect(checkingBg).not.toStrictEqual(provBg)
+    expect(checkingBg).not.toStrictEqual(mergingBg)
+
+    // 3. Gap check: between provisioning and checking there must be a 1-column gap without tab bg
+    const provEnd = provCol + "provisioning".length
+    // Col at provEnd is padding inside provisioning tab
+    expect(app.cell(provEnd, tabsY).bg).toStrictEqual(provBg)
+    // Next col is the blank gap between tabs (distinct from tab bgs)
+    expect(app.cell(provEnd + 1, tabsY).bg).not.toStrictEqual(provBg)
+    expect(app.cell(provEnd + 1, tabsY).bg).not.toStrictEqual(checkingBg)
+
+    // 4. Truecolor assertion: must have 24-bit truecolor escapes and no 16-color fallback
+    assertCaptureTruecolor(ansi)
+
+    // 5. Render PNG screenshot for operator evidence
+    const png = await renderAnsiScreenshot(ansi, { cols: 120, rows: 20 })
+    expect(png.length).toBeGreaterThan(1000)
+    // Check PNG signature: 0x89 0x50 0x4E 0x47
+    expect(png[0]).toBe(0x89)
+    expect(png[1]).toBe(0x50)
+    expect(png[2]).toBe(0x4e)
+    expect(png[3]).toBe(0x47)
+
+    writeFileSync("/hh/file/260925-yrd-watch-tabs-filled.png", png)
+    app.unmount()
+  })
+
+  it("assertCaptureTruecolor enforces truecolor and throws if capture falls back to 16 colors without saying so (25779)", () => {
+    // 16-color ANSI code without 24-bit escapes
+    expect(() => assertCaptureTruecolor("\x1b[32mhello\x1b[0m")).toThrow("Capture fell back to ANSI 16 colors")
+
+    // vterm ANSI 16 olive (128,128,0) fallback
+    expect(() => assertCaptureTruecolor("\x1b[38;2;128;128;0mhello\x1b[0m")).toThrow("detected vterm ANSI16 olive")
+
+    // Explicit opt-in to 16-color allows it
+    expect(() => assertCaptureTruecolor("\x1b[32mhello\x1b[0m", { allowAnsi16: true })).not.toThrow()
+
+    // Valid truecolor passes
+    expect(() => assertCaptureTruecolor("\x1b[38;2;67;76;94mtruecolor\x1b[0m")).not.toThrow()
+  })
+})
+
 
