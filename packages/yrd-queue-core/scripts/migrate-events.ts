@@ -322,7 +322,7 @@ async function verifiedBundle(
 }
 
 /** An apply or rollback trusts only the bundle the plan verified against the remote census. */
-async function requireVerifiedBundle(
+export async function requireVerifiedBundle(
   snapshot: string,
   bundle: string,
   digest: string,
