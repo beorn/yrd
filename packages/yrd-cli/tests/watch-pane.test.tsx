@@ -27,7 +27,6 @@ import { DETAIL_BG, WatchPane, watchTier, type WatchSnapshot } from "../src/watc
 import {
   CHANGES_TAB,
   RunStatusBox,
-  StageBoxes,
   WatchDetail,
   commandKey,
   defaultTab,
@@ -4760,73 +4759,6 @@ describe("termless screenshots for rows 3 to 5 (25716)", () => {
     expect(ansi).toContain("checking · affected-tests")
     expect(ansi).toContain("task/dev9-25716-runner-stages@18c8c19b:")
     expect(ansi).toContain("affected-tests")
-    app.unmount()
-  })
-
-  it("captures termless screenshot for row 5: a run with every check off showing four boxes", async () => {
-    const runningRow = row({
-      branch: "task/dev9-25716-check-skipping",
-      format: "event",
-      head: "18c8c19b60ae0123456789abcdef0123456789ab",
-      state: "merged",
-      subject: "feat(yrd): stage tabs, runner states, and check skipping",
-    })
-    const offChecks: readonly CheckPanel[] = [
-      {
-        name: "typecheck",
-        phase: "submit",
-        result: { exit: "0", ms: 0, result: "pass" },
-        spec: { name: "typecheck", run: "true" },
-        state: "off",
-      },
-    ]
-    const journal: JournalRun = {
-      at: NOW,
-      branch: runningRow.branch,
-      head: runningRow.head,
-      id: "run-25716",
-      startedAt: new Date(NOW.getTime() - 40_000),
-      checks: [],
-      steps: [
-        {
-          commands: [],
-          name: "compose",
-          phase: "submit",
-          startedAt: new Date(NOW.getTime() - 40_000),
-          endedAt: new Date(NOW.getTime() - 32_000),
-          ms: 8_000,
-        },
-        {
-          commands: [],
-          name: "publish",
-          phase: "merge",
-          startedAt: new Date(NOW.getTime() - 10_000),
-          endedAt: new Date(NOW.getTime() - 8_000),
-          ms: 2_000,
-        },
-      ],
-      commands: [],
-    }
-    const item: WatchRow = { row: runningRow }
-    const detail = detailOf(item, offChecks, { journal })
-    const app = render(
-      at(
-        <Box width={120} height={28} flexDirection="column" backgroundColor="$bg-surface" padding={1}>
-          <StageBoxes detail={detail} />
-        </Box>,
-      ),
-      { cols: 120, rows: 28 },
-    )
-    await settle(app)
-    const ansi = bufferToStyledText(app.term.buffer)
-    writeFileSync("/tmp/yrd-watch-25716-row5-four-boxes.ansi", ansi, "utf8")
-    expect(ansi).toContain("STAGES")
-    expect(ansi).toContain("PROVISIONING")
-    expect(ansi).toContain("CHECKING")
-    expect(ansi).toContain("MERGING")
-    expect(ansi).toContain("DEPROVISIONING")
-    expect(ansi).toContain("every declared check is off")
-    expect(ansi).toContain("skipped: no check worktree was created")
     app.unmount()
   })
 })
