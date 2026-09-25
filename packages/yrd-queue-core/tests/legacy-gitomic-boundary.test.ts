@@ -74,7 +74,7 @@ describe("the legacy Gitomic boundary", () => {
       .map(({ path }) => path)
     expect(imports).toEqual(["yrd-queue-core/git.ts"])
     expect(source("git.ts").match(/createShellBackend\(/gu)).toHaveLength(1)
-    expect(source("git.ts")).toContain("backend: createLegacyBackend(selection.executable)")
+    expect(source("git.ts")).toContain("backend: GitomicBackend = createLegacyBackend(selection.executable)")
   })
 
   it("selects Yrd's scrubbed environment and five-minute bound for both production paths", () => {

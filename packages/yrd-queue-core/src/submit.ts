@@ -190,18 +190,6 @@ export function refuseTarget(branch: string, target: string): void {
   }
 }
 
-/**
- * Refuse a task/ branch whose name is path-shaped (a slash after task/) (25716).
- * Names the convention task/<issue-id>-<slug> as the cure.
- */
-export function refusePathShapedBranch(branch: string): void {
-  if (branch.startsWith("task/") && branch.slice("task/".length).includes("/")) {
-    throw new Error(
-      `cannot submit path-shaped branch "${branch}": a slash after task/ is refused; use the convention task/<issue-id>-<slug>`,
-    )
-  }
-}
-
 export type SubmitInspection = Readonly<{
   head: string
   targetHead: string
@@ -241,7 +229,6 @@ function refuseMergedSubmit(events: readonly Event[], ref: string, root: string,
 /** The same read-only admission checks serve the action and its preview. */
 export async function inspectSubmit(git: Git, remote: string, request: SubmitRequest): Promise<SubmitInspection> {
   refuseTarget(request.branch, request.target.branch)
-  refusePathShapedBranch(request.branch)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
