@@ -131,6 +131,7 @@ describe("yrd queue adopt-legacy entry", () => {
     await git(["add", "old.txt"])
     await git(["commit", "--quiet", "-m", "old change"])
     const head = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", "HEAD:task/old"])
     const oldRef = changeRef("main", { branch: "task/old", head })
     const record = await appendRecord(git, "main", {
       change: { branch: "task/old", head },
