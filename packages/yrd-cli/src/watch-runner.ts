@@ -928,13 +928,17 @@ function runnerLineOf(
           holdsText = `${stepName} ${activeStep.branch ?? ""}`.trim()
         }
       } else if (facts?.roundLockHolder !== undefined) {
+        const runnerStart = (service && "since" in service ? service.since : undefined) ?? latest?.startedAt
         const holder = facts.roundLockHolder
         const holderDate = holder.since ? new Date(holder.since) : undefined
         durationText =
           holderDate && !Number.isNaN(holderDate.getTime())
             ? `${word} ${since(holderDate)}`
             : `${word} 0:00`
-        holdsText = `round lock held by pid ${String(holder.pid)} (${holder.command})`
+        holdsText =
+          runnerStart !== undefined
+            ? `runner since ${clock(runnerStart)} · ${durationText}`
+            : durationText
       } else if (holding !== undefined) {
         durationText = `${word} ${since(holding.since)}`
         holdsText = `${holding.branch}${holding.subject === undefined ? "" : ` ${holding.subject}`}`
@@ -998,11 +1002,12 @@ function runnerLineOf(
     }
     default: {
       let holdsText: string
-      if (waiting === 0) {
+      if (facts?.roundLockHolder !== undefined) {
+        const runnerStart = (service && "since" in service ? service.since : undefined) ?? latest?.startedAt
+        const startText = runnerStart !== undefined ? `runner since ${clock(runnerStart)}` : "runner"
+        holdsText = `${startText} · ${word} ${beat ?? "0:00"}`
+      } else if (waiting === 0) {
         holdsText = "nothing in line"
-      } else if (facts?.roundLockHolder !== undefined) {
-        const holder = facts.roundLockHolder
-        holdsText = `round lock held by pid ${String(holder.pid)} (${holder.command})`
       } else {
         holdsText = `nothing under a check, and ${String(waiting)} in line`
       }

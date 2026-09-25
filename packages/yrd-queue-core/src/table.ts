@@ -454,17 +454,17 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
   const checkingMs = since(row.live?.since)
   const waitingMs = waitingState && row.live === undefined ? since(row.since) : undefined
   const stuckMs = row.state === "stuck" && row.live === undefined ? since(endedWhen) : undefined
-  const opened = row.since ?? row.at
   const tookMs =
-    ended && opened !== undefined && endedWhen !== undefined
-      ? Math.max(0, endedWhen.getTime() - opened.getTime())
+    ended && row.state !== "direct" && row.since !== undefined && endedWhen !== undefined
+      ? Math.max(0, endedWhen.getTime() - row.since.getTime())
       : undefined
-  const ageMs =
-    opened === undefined
+  const ageMs = ended
+    ? row.since !== undefined && endedWhen !== undefined
+      ? Math.max(0, endedWhen.getTime() - row.since.getTime())
+      : undefined
+    : (row.since ?? row.at) === undefined
       ? undefined
-      : ended && endedWhen !== undefined
-        ? Math.max(0, endedWhen.getTime() - opened.getTime())
-        : Math.max(0, now.getTime() - opened.getTime())
+      : Math.max(0, now.getTime() - (row.since ?? row.at)!.getTime())
   return {
     ...(runtimeMs === undefined ? {} : { runtimeMs }),
     ...(clockAt === undefined ? {} : { clockAt }),

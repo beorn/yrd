@@ -842,7 +842,7 @@ describe("the runner's row", () => {
       expect(readLine.duration).toBe("provisioning 0:02")
     })
 
-    it("formats round lock holder when runner is idle (never idle while lock is held, 25716)", () => {
+    it("formats runner line when round lock is held between rounds (never warning, 25630)", () => {
       const idleWithLock: RunnerFacts = {
         journalDir: "/w/logs",
         service: BEATING,
@@ -861,7 +861,7 @@ describe("the runner's row", () => {
       const line = runnerLine(idleWithLock, NOW, { waiting: 3 })
       expect(line.state).toBe("provisioning")
       expect(line.duration).toBe("provisioning 10:00")
-      expect(line.holds).toBe("round lock held by pid 99999 (bun yrd queue up)")
+      expect(line.holds).toBe(`runner since ${clock(NOW)} · provisioning 10:00`)
     })
   })
 })
