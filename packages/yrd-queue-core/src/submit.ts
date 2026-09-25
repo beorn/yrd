@@ -5,8 +5,8 @@
  * One atomic push of the branch and of its change's opened record. Either both
  * arrive at the remote or neither does, so a reader never sees a submitted
  * branch without its change or a change without its branch. A submit at an
- * unchanged head appends a new opened record to the existing change: that is a
- * retry, and the change keeps its place in line from its first opened record.
+ * unchanged open head is a retry, and the change keeps its place in line from
+ * its first opened record. A head already merging or merged is refused.
  * Verification composes the submitted head with the observed target without
  * rewriting that head. A lease keeps the branch push from clobbering a remote
  * head the submitter never saw.
@@ -23,6 +23,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import type { Event } from "gitomic/events"
 import { createEventStore, listRefs, openEvents, selectionFor } from "./git.ts"
 import { targetName, type Target } from "./config.ts"
 import { ABSENT, legacyStore, recordCommit } from "./legacy-records.ts"
@@ -205,6 +206,26 @@ export function freshnessLine(targetHead: string): string {
   return `freshness checked at ${targetHead}; the queue revalidates at merge`
 }
 
+/** A terminal or landing chain refuses inside the submit transaction, with the merge it names. */
+function refuseMergedSubmit(events: readonly Event[], ref: string, root: string, branch: string, head: string): void {
+  if (events.length === 0) return
+  const current = project(events, ref, root)
+  if (current.status === "merging") {
+    throw new Error(
+      `${branch}@${head} collides with the merge of ${branch}@${current.commit ?? "unknown head"} ` +
+        `at ${current.candidate ?? "unknown candidate"} (event ${current.tip ?? "unknown"}); ` +
+        `retry after the merge of ${branch}@${current.commit ?? "unknown head"} ends`,
+    )
+  }
+  if (current.status === "merged" && current.commit === head) {
+    const ending = events.findLast((event) => event.id === current.ending?.id)
+    throw new Error(
+      `${branch}@${head} already merged at ${ending?.links[0] ?? "unknown root"} ` +
+        `(event ${current.ending?.id ?? "unknown"}); push a new head or nothing`,
+    )
+  }
+}
+
 /** The same read-only admission checks serve the action and its preview. */
 export async function inspectSubmit(git: Git, remote: string, request: SubmitRequest): Promise<SubmitInspection> {
   refuseTarget(request.branch, request.target.branch)
@@ -213,6 +234,17 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
   const bound = freshnessLine(targetHead)
   if (await isAncestor(git, head, targetHead)) {
+    // The target may have advanced past this branch's exact landing. Consult
+    // its retained event chain so the refusal names the merge and the cure.
+    const root = (await git(["rev-parse", "--show-toplevel"])).trim()
+    const store = createEventStore(root, remote, selectionFor(git))
+    if ((await queueFormat(store, request.target.branch)) === "event") {
+      const ref = changesRef(request.target.branch, request.branch)
+      const chain = await openEvents({ ...store, ref })
+      if ((await chain.head()) !== null) {
+        refuseMergedSubmit(await chain.events({ limit: 1024 }), ref, root, request.branch, head)
+      }
+    }
     throw new Error(
       `nothing new to submit: ${targetName(request.target)} at ${targetHead} already contains ${request.branch} at ${head}; ${bound}`,
     )
@@ -317,6 +349,7 @@ async function submitEvent(
           { cause: error },
         )
       }
+      refuseMergedSubmit(events, ref, root, request.branch, head)
       retry =
         current.commit === head &&
         (current.status === "queued" ||

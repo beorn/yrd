@@ -259,6 +259,7 @@ export type LineFlow = Readonly<{
   lastRoundEndedAt?: string
   /** The round running now, when one is, and the change it works when the loop knows it. */
   roundOpen?: Readonly<{ startedAt: string; branch?: string }>
+  casRefused?: Readonly<{ branch: string; ref: string; marker: string; count: number }>
 }>
 
 /** The declared stall threshold and whether the declaration named it or the default applies. */
@@ -268,7 +269,7 @@ export type StallThreshold = Readonly<{ ms: number; declared: boolean }>
 export type FlowReading = Readonly<{ flow: LineFlow; threshold: StallThreshold }>
 
 /** A stalled line: how long no change has been judged, which of the two shapes it is, and the sentence that says so. */
-export type LineStall = Readonly<{ forMs: number; shape: "slow-round" | "stopped-line"; cause: string }>
+export type LineStall = Readonly<{ forMs: number; shape: "slow-round" | "stopped-line" | "cas-refused"; cause: string }>
 
 /** The code a stalled line pages with, beside `queue-round-stuck`. */
 export const STALLED_LINE_CODE = "queue-line-stalled"
@@ -288,6 +289,13 @@ export const STALLED_LINE_CODE = "queue-line-stalled"
  * reads as itself.
  */
 export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date): LineStall | undefined {
+  if (flow.casRefused !== undefined && flow.casRefused.count >= 3) {
+    return {
+      forMs: 0,
+      shape: "cas-refused",
+      cause: `publication CAS refused ${String(flow.casRefused.count)} consecutive times for ${flow.casRefused.ref} at ${flow.casRefused.marker}; the queue remains alive and will retry`,
+    }
+  }
   const forMs = unjudgedFor(flow, now)
   if (forMs === undefined || flow.oldestWaiting === undefined || forMs < threshold.ms) return undefined
   const opened = Date.parse(flow.oldestWaiting.openedAt)
@@ -383,14 +391,18 @@ function stalledFailure(stall: LineStall, flow: LineFlow): QueueHealthFailure {
     code: STALLED_LINE_CODE,
     cause: stall.cause,
     resolution: [
-      stall.shape === "slow-round"
-        ? "A round is running: read its journal (yrd queue list shows the RUNNER line and the round's log) to see which check it is in and whether that check is making progress."
-        : "No round is judging anything: read the last round's journal and the service's own log for why rounds complete without taking a change.",
+      stall.shape === "cas-refused"
+        ? `Read the refused publication rows in the last round journals for ${flow.casRefused?.ref ?? "the change"}; repair persistent ref contention, then let the queue retry.`
+        : stall.shape === "slow-round"
+          ? "A round is running: read its journal (yrd queue list shows the RUNNER line and the round's log) to see which check it is in and whether that check is making progress."
+          : "No round is judging anything: read the last round's journal and the service's own log for why rounds complete without taking a change.",
       ...(oldest === undefined
         ? []
         : [`The oldest waiting change, its records and its log: yrd queue show ${oldest}.`]),
       "The service is alive and heartbeating: no restart is needed to read this, and a restart alone does not cure a line that judges nothing.",
-      "This page clears on the next judgement — a change merged, failed or recorded stuck — and never by itself.",
+      stall.shape === "cas-refused"
+        ? "This page clears when this change publishes successfully."
+        : "This page clears on the next judgement — a change merged, failed or recorded stuck — and never by itself.",
     ],
   }
 }

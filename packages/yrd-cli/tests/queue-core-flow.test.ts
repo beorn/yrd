@@ -99,4 +99,17 @@ describe("the line's flow after one service round", () => {
     expect(flow?.waiting).toBe(0)
     expect(flow?.oldestWaiting).toBeUndefined()
   })
+
+  /** @failure 25708: the CAS page vanished on a quiet round or persisted after this change published. */
+  it("holds a CAS refusal until the same change publishes, then clears it in that success path", () => {
+    const casRefused = { branch: "task/cas", ref: "refs/yrd/main/changes/task/cas", marker: "a".repeat(40), count: 3 }
+    const previous = { waiting: 2, oldestWaiting: oldest, casRefused }
+    expect(flowAfterRound(previous, round({}, { waiting: 2, oldest }), now)?.casRefused).toEqual(casRefused)
+    expect(
+      flowAfterRound(previous, round({ merged: ["task/other"] }, { waiting: 1, oldest }), now)?.casRefused,
+    ).toEqual(casRefused)
+    expect(
+      flowAfterRound(previous, round({ merged: ["task/cas"] }, { waiting: 1, oldest }), now)?.casRefused,
+    ).toBeUndefined()
+  })
 })

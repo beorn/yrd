@@ -342,6 +342,34 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
     expect(flowing.facts?.flow).not.toHaveProperty("stalledForMs")
   })
 
+  /** @failure 25708: repeated refused CAS attempts stayed invisible while the service kept heartbeating. */
+  test("three confirmed CAS refusals page through the existing line health and two do not", () => {
+    const refusal = { branch: "task/cas", ref: "refs/yrd/main/changes/task/cas", marker: HEAD, count: 3 }
+    const flow = {
+      waiting: 1,
+      oldestWaiting: { branch: "task/cas", openedAt: "2026-09-24T20:20:00.000Z" },
+      casRefused: refusal,
+    }
+    const quiet = roundHealthDocument("yrd", undefined, INTERVAL, at("20:27:00"), {
+      flow: { ...flow, casRefused: { ...refusal, count: 2 } },
+      threshold,
+    })
+    expect(quiet.state).toBe("healthy")
+    const paged = roundHealthDocument("yrd", undefined, INTERVAL, at("20:27:00"), { flow, threshold })
+    expect(paged.state).toBe("unhealthy")
+    expect(paged.error?.code).toBe(STALLED_LINE_CODE)
+    expect(paged.error?.cause).toContain(refusal.ref)
+    expect(paged.facts?.flow).toMatchObject({ stalledShape: "cas-refused", casRefused: refusal })
+    const cleared = withLineFlow(
+      paged,
+      undefined,
+      { flow: { waiting: 1, oldestWaiting: flow.oldestWaiting }, threshold },
+      at("20:28:00"),
+    )
+    expect(cleared.state).toBe("healthy")
+    expect(cleared.error).toBeUndefined()
+  })
+
   test("past the round budget with no judgement the document says slow, before any page (row 2)", () => {
     const flow = { lastJudgedAt: "2026-09-24T20:00:00.000Z", oldestWaiting: oldest, waiting: 5 }
     const early = roundHealthDocument("yrd", undefined, INTERVAL, at("20:10:00"), { flow, threshold })

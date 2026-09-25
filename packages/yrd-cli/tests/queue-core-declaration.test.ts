@@ -627,6 +627,85 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(repeated.stdout()).toContain(head.slice(0, 12))
   })
 
+  /** @failure 25708: a same-head submit reopened a merged chain while the service published against its old tip. */
+  it.each(["merging", "merged"] as const)("refuses a same-head submit when its change is %s", async (status) => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const queueTip = await createQueue(
+      repo,
+      "main",
+      (await git(["rev-parse", "HEAD"])).trim(),
+      new Date("2026-09-24T23:00:00.000Z"),
+    )
+    const branch = `task/event-${status}`
+    await git(["checkout", "--quiet", "-b", branch])
+    writeFileSync(join(repo, "work.txt"), `${status}\n`)
+    await git(["add", "work.txt"])
+    await git(["commit", "--quiet", "-m", status])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const first = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], first.io)).toBe(0)
+    const chain = await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+    const at = new Date("2026-09-24T23:01:00.000Z")
+    const inputs =
+      status === "merging"
+        ? [
+            changeInput("verifying", { queueTip, at, commit: head }),
+            changeInput("checking", { queueTip, at }),
+            changeInput("merging", { queueTip, at, commit: head }),
+          ]
+        : [changeInput("merged", { queueTip, at, commit: head, reason: `observed on target at ${head}` })]
+    await chain.append(inputs, { expect: await chain.head() })
+    const before = await chain.events()
+    const refused = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], refused.io)).toBe(2)
+    expect(refused.stderr()).toContain(branch)
+    expect(refused.stderr()).toContain(status === "merging" ? "retry after the merge" : "push a new head or nothing")
+    expect(await chain.events()).toEqual(before)
+    expect((await git(["ls-remote", "--refs", "origin", `refs/heads/${branch}`])).split("\t")[0]).toBe(head)
+  })
+
+  it("names the retained merge when the target already contains the submitted head", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const base = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", base, new Date("2026-09-24T23:00:00.000Z"))
+    const branch = "task/landed-head"
+    await git(["checkout", "--quiet", "-b", branch])
+    writeFileSync(join(repo, "landed.txt"), "landed\n")
+    await git(["add", "landed.txt"])
+    await git(["commit", "--quiet", "-m", "landed"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const first = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], first.io)).toBe(0)
+    await git(["checkout", "--quiet", "main"])
+    await git(["merge", "--quiet", "--no-ff", "-m", "land change", branch])
+    const landing = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", "main"])
+    const chain = await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+    await chain.append(
+      [
+        changeInput("merged", {
+          queueTip,
+          at: new Date(),
+          commit: landing,
+          reason: `observed on target at ${landing}`,
+        }),
+      ],
+      { expect: await chain.head() },
+    )
+    const before = await chain.events()
+    await git(["checkout", "--quiet", branch])
+    const refused = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], refused.io)).toBe(2)
+    expect(refused.stderr()).toContain(`already merged at ${landing}`)
+    expect(refused.stderr()).toContain("push a new head or nothing")
+    expect(await chain.events()).toEqual(before)
+    expect(head).not.toBe(landing)
+  })
+
   it.each(["legacy", "event"] as const)(
     "hides only matching draft heads in a %s listing",
     async (format) => {

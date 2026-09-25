@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { isAbsolute, join, resolve } from "node:path"
+import { dirname, isAbsolute, join, resolve } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import * as gitomic from "gitomic"
@@ -26,6 +26,7 @@ import { openEvents } from "gitomic/events"
 import type { RefUpdate } from "gitomic"
 import { gitEnvironment } from "../src/git.ts"
 import { incidentTrailers } from "../src/incident.ts"
+import { recentCasRefusals } from "../src/log.ts"
 import { QUEUE_RUN_FAILED_EXIT } from "../src/run.ts"
 import { reminderDue } from "../src/override.ts"
 import { CapturedQueueObjectsUnavailable } from "../src/remote.ts"
@@ -1452,6 +1453,84 @@ it("ends a failed configured event check and continues with the next change", as
   expect(await remoteTarget(w)).not.toBe(w.target)
   expect((await readStatus(store, "main", "task/a")).status).toBe("failed")
   expect((await readStatus(store, "main", "task/b")).status).toBe("merged")
+})
+
+/** @failure 25708: a confirmed change-ref CAS refusal killed the service's round and hid the next change. */
+it("records a typed merge-publication refusal and judges the next event change", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/cas-first", "one.txt")
+  await submitCommit(w, "task/cas-next", "two.txt")
+  const branches = ["task/cas-first", "task/cas-next"] as const
+  let refusedBranch: (typeof branches)[number] | undefined
+  let refusedRef: string | undefined
+  using _publish = beforeGitomicPublish(async (_repo, updates) => {
+    if (refusedRef !== undefined || !updates.some((update) => update.ref === "refs/heads/main")) return
+    const branch = branches.find((name) => updates.some((update) => update.ref === changesRef("main", name)))
+    if (branch === undefined) return
+    const ref = changesRef("main", branch)
+    const marker = updates.find((update) => update.ref === ref)?.expect
+    if (marker === undefined) return
+    refusedBranch = branch
+    refusedRef = ref
+    throw new gitomic.Conflict(`lease lost, nothing published: ${ref} expected ${marker}, observed locked`, {
+      refs: [ref],
+    })
+  })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  if (refusedBranch === undefined || refusedRef === undefined) throw new Error("fixture did not reach publication")
+  const next = branches.find((name) => name !== refusedBranch)
+  if (next === undefined) throw new Error("fixture has no next change")
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [next] })
+  expect((await readStatus(store, "main", refusedBranch)).status).toBe("merging")
+  expect((await readStatus(store, "main", next)).status).toBe("merged")
+  expect(logRecords(outcome)).toContainEqual(
+    expect.objectContaining({
+      kind: "warning",
+      subject: "cas-refused",
+      branch: refusedBranch,
+      ref: refusedRef,
+      count: 1,
+    }),
+  )
+})
+
+/** @failure 25708: the service lost its repeated-refusal count across rounds and could not clear the page. */
+it("counts repeated CAS refusals in round journals and resets after publication", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const branch = "task/cas-repeat"
+  await submitCommit(w, branch, "one.txt")
+  const ref = changesRef("main", branch)
+  let refused = 0
+  using _publish = beforeGitomicPublish(async (_repo, updates) => {
+    if (refused >= 3 || !updates.some((update) => update.ref === "refs/heads/main")) return
+    const marker = updates.find((update) => update.ref === ref)?.expect
+    if (marker === undefined) return
+    refused++
+    throw new gitomic.Conflict(`lease lost, nothing published: ${ref} expected ${marker}, observed locked`, {
+      refs: [ref],
+    })
+  })
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  for (const count of [1, 2, 3]) {
+    const outcome = await queueRun(options)
+    expect(outcome).toMatchObject({ exitCode: 0, merged: [] })
+    expect(logRecords(outcome)).toContainEqual(
+      expect.objectContaining({ kind: "warning", subject: "cas-refused", ref, count }),
+    )
+    expect(outcome.line?.casRefused?.count).toBe(count === 3 ? 3 : undefined)
+    expect((await readStatus(store, "main", branch)).status).toBe("merging")
+  }
+  const before = await readStatus(store, "main", branch)
+  if (before.tip === undefined || before.since === undefined) throw new Error("fixture lost its open marker")
+  const published = await queueRun(options)
+  expect(published.merged).toEqual([branch])
+  expect(published.line?.casRefused).toBeUndefined()
+  expect(logRecords(published)).toContainEqual(expect.objectContaining({ kind: "merge", ref }))
+  expect(recentCasRefusals(dirname(published.log), ref, before.tip, before.since)).toBe(0)
 })
 
 /** @failure A queue-owned configured event check failure could be billed as failed or let the next change pass.

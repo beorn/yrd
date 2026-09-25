@@ -1,6 +1,6 @@
 /** Run a change from the event projection, leasing its merge with the queue. */
 import { mkdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { Conflict } from "./git.ts"
 
 import {
@@ -23,7 +23,7 @@ import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
 import { queueName } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
-import type { QueueRunLog } from "./log.ts"
+import { recentCasRefusals, type QueueRunLog } from "./log.ts"
 import { programRootCheck, recordProgramResult, recordProgramStart } from "./program-root.ts"
 import { queueRefPrefix } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
@@ -622,7 +622,7 @@ export async function eventQueueRun(
     candidate: string,
     marker: string,
     reason?: string,
-  ): Promise<QueueRunOutcome> => {
+  ): Promise<QueueRunOutcome | undefined> => {
     const current = await readStatus(store, queue, branch)
     if (current.tip !== marker) {
       log.write({
@@ -682,14 +682,47 @@ export async function eventQueueRun(
       const after = await readStatus(store, queue, branch)
       if (after.tip !== marker) {
         await rivalOrThrow(branch, marker, after, error)
-        log.write({ kind: "discarded", branch, head, reason: discardedJudgementReason(after, error) })
-        return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
+        log.write({
+          kind: "discarded",
+          branch,
+          head,
+          ref: changesRef(queue, branch),
+          expected: marker,
+          actual: after.tip,
+          reason: discardedJudgementReason(after, error),
+        })
+        return undefined
       }
       const movedTarget = (await listRefs(targetRef, store)).get(targetRef)
       if (movedTarget === undefined) {
         throw new Error(`event queue ${url}#${queue}: target disappeared after component publication`, { cause: error })
       }
-      if (movedTarget === parent) throw error
+      if (movedTarget === parent) {
+        const ref = changesRef(queue, branch)
+        if (!(error instanceof Conflict) || !error.refs.includes(ref)) throw error
+        if (after.since === undefined) throw new Error(`${ref} at ${marker} has no opened time for bounded CAS history`)
+        const count = recentCasRefusals(dirname(log.path), ref, marker, after.since) + 1
+        const warning =
+          `${branch}: publication CAS refused for ${ref} at ${marker} (${String(count)} consecutive); ` +
+          `target ${targetRef} remains ${parent}; retry after this round: ${error.message}`
+        log.write({
+          kind: "warning",
+          subject: "cas-refused",
+          branch,
+          head,
+          ref,
+          marker,
+          expected: marker,
+          actual: after.tip,
+          count,
+          reason: warning,
+        })
+        if (count >= 3) {
+          if (read.line === undefined) throw new Error(`${ref} refused publication before the line was read`)
+          read.line = { ...read.line, casRefused: { branch, ref, marker, count } }
+        }
+        return undefined
+      }
       await appendOwnedChange(store, queue, branch, marker, {
         type: "verifying",
         at: new Date(),
@@ -705,7 +738,7 @@ export async function eventQueueRun(
       })
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch], undefined, movedTarget)
     }
-    log.write({ kind: "merge", branch, head, commit: candidate })
+    log.write({ kind: "merge", branch, head, commit: candidate, ref: changesRef(queue, branch), marker })
     log.write({ kind: "change", branch, head, decision: "merged" })
     return result(failed.length > 0 ? 1 : 0, [...observedMerged, branch], failed, [], [], undefined, candidate)
   }
@@ -729,7 +762,9 @@ export async function eventQueueRun(
       if (candidate === undefined) {
         throw new Error(`event queue ${url}#${queue}: merging ${branch} lost its checked candidate`)
       }
-      return publish(branch, head, candidate, tip, selectedChange.reason)
+      const published = await publish(branch, head, candidate, tip, selectedChange.reason)
+      if (published !== undefined) return published
+      continue
     }
     log.write({ kind: "change", branch, head })
     const path = join(options.workdir, "worktrees", log.id, branch.replaceAll("/", "_"))
@@ -1122,7 +1157,8 @@ export async function eventQueueRun(
         ...evidence,
         ...(checkReason === undefined ? {} : { reason: checkReason }),
       })
-      return await publish(branch, head, candidate, tip, checkReason)
+      const published = await publish(branch, head, candidate, tip, checkReason)
+      if (published !== undefined) return published
     } catch (error) {
       let current
       try {

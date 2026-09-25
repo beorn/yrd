@@ -212,6 +212,8 @@ export type RoundLine = Readonly<{
   waiting: number
   oldest?: Readonly<{ branch: string; openedAt: string }>
   lastJudgedAt?: string
+  /** A repeatedly refused publication, from this round's durable journal. */
+  casRefused?: Readonly<{ branch: string; ref: string; marker: string; count: number }>
 }>
 
 export type QueueRunOutcome = Readonly<{

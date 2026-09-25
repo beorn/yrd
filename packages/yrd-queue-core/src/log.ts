@@ -578,6 +578,36 @@ export function recordsMatching(dir: string, matches: (record: LogRecord) => boo
   return found
 }
 
+/** Count this marker's latest refused publications, stopping at its successful merge or three refusals. */
+export function recentCasRefusals(dir: string, ref: string, marker: string, openedAt: Date): number {
+  let names: readonly string[]
+  try {
+    names = readdirSync(dir)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0
+    throw error
+  }
+  const firstRun = `q-${openedAt.toISOString().replace(/[-:.]/gu, "")}`
+  const ids = names
+    .filter((name) => name.startsWith("q-") && name.endsWith(".jsonl"))
+    .map((name) => name.slice(0, -".jsonl".length))
+    .filter((id) => id.slice(0, firstRun.length) >= firstRun)
+    .sort()
+    .reverse()
+  let count = 0
+  for (const id of ids) {
+    for (const record of [...readRunLog(dir, id)].reverse()) {
+      if (record.ref !== ref || record.marker !== marker) continue
+      if (record.kind === "merge") return count
+      if (record.kind === "warning" && record.subject === "cas-refused") {
+        count++
+        if (count >= 3) return count
+      }
+    }
+  }
+  return count
+}
+
 export type ReadJournalsOptions = Readonly<{
   now?: Date
   /** How far back the runs read reach; the same seven days `list` windows its ended rows by. */

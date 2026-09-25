@@ -123,6 +123,7 @@ export type RunnerFlow = Readonly<{
   slow: boolean
   stallAfterMs: number
   stalledForMs?: number
+  casRefused?: Readonly<{ ref: string; count: number }>
 }>
 
 export type RunnerFacts = Readonly<{
@@ -142,10 +143,22 @@ export type RunnerFacts = Readonly<{
 function runnerFlow(document: QueueHealthDocument): RunnerFlow | undefined {
   const flow = document.facts?.flow
   if (typeof flow !== "object" || flow === null) return undefined
-  const { waiting, unjudgedForMs, slow, stallAfterMs, stalledForMs } = flow as Readonly<Record<string, unknown>>
+  const { waiting, unjudgedForMs, slow, stallAfterMs, stalledForMs, casRefused } = flow as Readonly<
+    Record<string, unknown>
+  >
   if (typeof waiting !== "number" || typeof unjudgedForMs !== "number" || typeof slow !== "boolean") return undefined
   if (typeof stallAfterMs !== "number") return undefined
-  return { slow, stallAfterMs, unjudgedForMs, waiting, ...(typeof stalledForMs === "number" ? { stalledForMs } : {}) }
+  const refusal = casRefused as Readonly<Record<string, unknown>> | undefined
+  return {
+    slow,
+    stallAfterMs,
+    unjudgedForMs,
+    waiting,
+    ...(typeof stalledForMs === "number" ? { stalledForMs } : {}),
+    ...(refusal !== undefined && typeof refusal.ref === "string" && typeof refusal.count === "number"
+      ? { casRefused: { ref: refusal.ref, count: refusal.count } }
+      : {}),
+  }
 }
 
 /** The pid the health document names as its writer, when it names one. */
@@ -679,6 +692,9 @@ export function runnerLine(
 function flowNote(service: RunnerService | undefined): string | undefined {
   if (service?.kind !== "beating" || service.flow === undefined) return undefined
   const { slow, stallAfterMs, stalledForMs, unjudgedForMs, waiting } = service.flow
+  if (service.flow.casRefused !== undefined) {
+    return `CAS refused ${String(service.flow.casRefused.count)} consecutive times for ${service.flow.casRefused.ref}; queue alive, retrying`
+  }
   if (stalledForMs !== undefined) {
     return `stalled ${mediaDuration(stalledForMs)}: no change judged while ${String(waiting)} waited (threshold ${mediaDuration(stallAfterMs)})`
   }

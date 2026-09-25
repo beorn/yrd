@@ -2927,6 +2927,11 @@ export function flowAfterRound(
     lastRoundEndedAt: ended,
     ...(oldestWaiting === undefined ? {} : { oldestWaiting }),
     ...(lastJudgedAt === undefined ? {} : { lastJudgedAt }),
+    ...(outcome.line?.casRefused !== undefined
+      ? { casRefused: outcome.line.casRefused }
+      : previous?.casRefused !== undefined && !outcome.merged.includes(previous.casRefused.branch)
+        ? { casRefused: previous.casRefused }
+        : {}),
   }
 }
 
