@@ -37,7 +37,13 @@ import {
 import { encodeOps } from "../src/ops-state.ts"
 import { readConfig } from "../src/config.ts"
 import { assertPlainEventQueueConfig } from "../src/event-config.ts"
-import { inputsForLegacy, migratedStatus, sourcesForMigration, type LegacyMigrationChange } from "../src/migration.ts"
+import {
+  inputsForLegacy,
+  migratedStatus,
+  originalEndingRecord,
+  sourcesForMigration,
+  type LegacyMigrationChange,
+} from "../src/migration.ts"
 import { tipOf } from "../src/state.ts"
 import { legacyPauseCommit, trailer } from "../src/legacy-records.ts"
 import { eventCutoverTip, type PauseRecord } from "../src/pause.ts"
@@ -559,12 +565,18 @@ function assertStagedBranch(
         `old ${source.change.head}/${source.reading.state} maps to ${expectedStatus}, staged ${segment.head}/${segment.state.status}`,
       )
     }
-    const expectedAt = expectedStatus === "queued" ? legacyOpened(source) : tipOf(source.change).at.getTime()
+    const ending = originalEndingRecord(source.change.records)
+    const stuck =
+      expectedStatus === "stuck" ? source.change.records.findLast((record) => record.kind === "stuck") : undefined
+    const expectedAt =
+      expectedStatus === "queued"
+        ? legacyOpened(source)
+        : (ending?.at ?? stuck?.at ?? tipOf(source.change).at).getTime()
     if (segment.state.at?.getTime() !== expectedAt) {
       failure(
         "segment-parity",
         source.ref,
-        `old ${expectedStatus === "queued" ? "Opened" : "tip at"} ${new Date(expectedAt).toISOString()}, staged at ${segment.state.at?.toISOString() ?? "absent"}`,
+        `old ${expectedStatus === "queued" ? "Opened" : "ending at"} ${new Date(expectedAt).toISOString()}, staged at ${segment.state.at?.toISOString() ?? "absent"}`,
       )
     }
     const submitter = trailer(tipOf(source.change), "Submitter")
