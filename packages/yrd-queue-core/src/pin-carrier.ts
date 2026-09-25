@@ -4,7 +4,7 @@ import { composeGitlinkCarrier, type GitlinkCarrierPin } from "git-super/gitlink
 import { createLocalGitProcess } from "git-super/process"
 import type { Target } from "./config.ts"
 import { createEventStore, gitIn, gitlinkRows, isAncestor, readRemoteCommit, selectionFor, type Git } from "./git.ts"
-import { listChanges, queueFormat } from "./events.ts"
+import { isOpen, listChanges, queueFormat } from "./events.ts"
 import { populateReferenceStores } from "./reference.ts"
 import { readQueue, remoteUrl } from "./remote.ts"
 import { holdsPlaceInLine, readChange } from "./state.ts"
@@ -13,7 +13,6 @@ export type PinCarrierPin = Readonly<{ path: string; sha: string }>
 export type PreparedPinCarrier = Readonly<{ branch: string; head: string; targetHead: string }>
 
 const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu
-const OPEN_EVENT = new Set(["queued", "verifying", "checking", "merging", "stuck"])
 
 function orderedPins(pins: readonly PinCarrierPin[]): readonly PinCarrierPin[] {
   if (pins.length === 0) throw new Error("--gitlink needs at least one path=full-sha pin")
@@ -101,7 +100,7 @@ export async function preparePinCarrier(
   if ((await queueFormat(store, target.branch)) === "event") {
     for (const [branch, change] of await listChanges(store, target.branch)) {
       if (change.commit !== undefined) {
-        changes.push({ branch, head: change.commit, open: OPEN_EVENT.has(change.status) })
+        changes.push({ branch, head: change.commit, open: isOpen(change.status) })
       }
     }
   } else {
