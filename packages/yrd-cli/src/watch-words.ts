@@ -60,9 +60,10 @@ export const LEGEND_STATES = [
  */
 export const RUNNER_STATES = [
   "idle",
-  "verifying",
+  "provisioning",
   "checking",
   "merging",
+  "deprovisioning",
   "stuck",
   "paused",
 ] as const
@@ -103,9 +104,10 @@ export const RUNNER_SIGNALS = ["silent", "stopped", "unpublished"] as const
  */
 export const RUNNER_STATES_SAID = [
   "idle",
-  "verifying",
+  "provisioning",
   "checking",
   "merging",
+  "deprovisioning",
   "stopped",
   "stuck",
   "paused",
@@ -189,6 +191,18 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
     word: "direct",
   },
   // The runner's own, drawn on its row in the same column.
+  provisioning: {
+    color: "$fg-info",
+    means: "the runner is composing or preparing the candidate",
+    next: "checking, or merging",
+    word: "provisioning",
+  },
+  deprovisioning: {
+    color: "$fg-muted",
+    means: "the runner is removing or retaining the worktree",
+    next: "idle",
+    word: "deprovisioning",
+  },
   verifying: {
     color: "$fg-info",
     means: "the runner is composing the tree that will be judged, where the change meets the target as it is now",

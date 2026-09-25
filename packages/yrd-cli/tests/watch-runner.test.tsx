@@ -753,9 +753,9 @@ describe("the runner's row", () => {
       })
 
       const line = runnerLine(facts, NOW, { waiting: 5 })
-      expect(line.state).toBe("verifying")
+      expect(line.state).toBe("provisioning")
       expect(line.holds).toBe("judging task/feat@abcdef012345: compose")
-      expect(line.duration).toBe("verifying 0:50")
+      expect(line.duration).toBe("provisioning 0:50")
       expect(line.detail).toContain("typecheck, off, off")
     })
 
@@ -837,9 +837,9 @@ describe("the runner's row", () => {
         start: new Date(NOW.getTime() - 2_000),
       })
       const readLine = runnerLine(readStep, NOW, {})
-      expect(readLine.state).toBe("verifying")
+      expect(readLine.state).toBe("provisioning")
       expect(readLine.holds).toBe("between entries: re-reading main")
-      expect(readLine.duration).toBe("verifying 0:02")
+      expect(readLine.duration).toBe("provisioning 0:02")
     })
 
     it("formats round lock holder when runner is idle (never idle while lock is held, 25716)", () => {
@@ -849,7 +849,7 @@ describe("the runner's row", () => {
         roundLockHolder: {
           command: "bun yrd queue up",
           pid: 99999,
-          since: NOW.toISOString(),
+          since: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
         },
         latest: {
           alive: true,
@@ -859,7 +859,8 @@ describe("the runner's row", () => {
         },
       }
       const line = runnerLine(idleWithLock, NOW, { waiting: 3 })
-      expect(line.state).toBe("verifying")
+      expect(line.state).toBe("provisioning")
+      expect(line.duration).toBe("provisioning 10:00")
       expect(line.holds).toBe("round lock held by pid 99999 (bun yrd queue up)")
     })
   })

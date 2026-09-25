@@ -150,7 +150,9 @@ export function WatchDetail({
     )
   }
   const { row } = detail
-  const tab = selected ?? defaultTab(detail.checks)
+  const resolved = resolveTab(selected, detail)
+  const tab = resolved.tab
+  const selectedSubIndex = resolved.selectedSubIndex
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
       {/* The status box at the VERY top, no identity row above it (items 1, 23). */}
@@ -183,18 +185,9 @@ export function WatchDetail({
             {"\n"}
             <Text color="$fg-muted">{cutCounter(detail)}</Text>
           </Tab>
-          {stagesOf(detail).map((stage) => (
-            <Tab key={stage.value} value={stage.value}>
-              {stage.kind === "check" ? (
-                <CheckLabel detail={detail} at={stage.at} />
-              ) : stage.kind === "round" ? (
-                <>
-                  round{"\n"}
-                  <Text color="$fg-muted">{String(stage.commands.length)} git</Text>
-                </>
-              ) : (
-                <StageLabel name={stage.step.name} state={stepState(stage.step)} {...stepSaid(stage.step)} />
-              )}
+          {STAGE_TABS.map((stage) => (
+            <Tab key={stage} value={stage}>
+              <StageTabLabel detail={detail} stage={stage} />
             </Tab>
           ))}
         </TabList>
@@ -208,17 +201,14 @@ export function WatchDetail({
             <ChangeBox detail={detail} diffOpen={diffOpen} diff={diff} onToggleDiff={onToggleDiff} />
           </ScrollArea>
         </TabPanel>
-        {stagesOf(detail).map((stage) => (
-          <TabPanel key={stage.value} value={stage.value}>
-            {stage.kind === "check" ? (
-              <CheckTab detail={detail} at={stage.at} />
-            ) : (
-              <CommandsBody
-                commands={stage.kind === "round" ? stage.commands : stage.step.commands}
-                {...(stage.kind === "step" ? { step: stage.step } : {})}
-                outputs={outputs}
-              />
-            )}
+        {STAGE_TABS.map((stage) => (
+          <TabPanel key={stage} value={stage}>
+            <StageTabPanel
+              detail={detail}
+              stage={stage}
+              outputs={outputs}
+              selectedSubIndex={selectedSubIndex}
+            />
           </TabPanel>
         ))}
       </Tabs>
@@ -226,8 +216,620 @@ export function WatchDetail({
   )
 }
 
-/** One tab of the detail after the Timeline: a check, a step of the round, or the round's own commands. */
+export const STAGE_TABS = ["provisioning", "checking", "merging", "deprovisioning"] as const
+export type StageTabName = (typeof STAGE_TABS)[number]
+
+export function areDeclaredChecksOff(detail: ChangeDetail): boolean {
+  if (detail.checks.length === 0) return true
+  return detail.checks.every(
+    (check) => check.state === "off" || check.spec?.run === "true",
+  )
+}
+
+export function isStageSkipped(detail: ChangeDetail, stage: StageTabName): boolean {
+  const { row } = detail
+  if (stage === "provisioning") {
+    return ((row.state === "queued" || row.state === "draft") && (detail.journal?.steps.length ?? 0) === 0) || row.state === "direct"
+  }
+  if (stage === "checking") {
+    const unmeasured = detail.checks.find((c) => c.state === "unmeasured" && c.result === undefined)
+    if (unmeasured) return false
+    return areDeclaredChecksOff(detail)
+  }
+  if (stage === "merging") {
+    return (
+      row.state === "failed" ||
+      row.state === "stuck" ||
+      row.state === "cancelled" ||
+      row.state === "queued" ||
+      row.state === "draft" ||
+      row.state === "direct"
+    )
+  }
+  if (stage === "deprovisioning") {
+    return areDeclaredChecksOff(detail) || row.state === "queued" || row.state === "draft" || row.state === "direct"
+  }
+  return false
+}
+
+export function stageSkipReason(detail: ChangeDetail, stage: StageTabName): string {
+  if (stage === "checking") {
+    return "every declared check is off"
+  }
+  if (stage === "deprovisioning") {
+    return "skipped: no check worktree was created (all declared checks off)"
+  }
+  if (stage === "merging") {
+    return "not reached: candidate ended before merge"
+  }
+  if (stage === "provisioning") {
+    return "skipped: candidate not yet formed"
+  }
+  return "skipped"
+}
+
+export function stageInfo(
+  detail: ChangeDetail,
+  stage: StageTabName,
+): {
+  state: CheckView["state"]
+  said?: string
+  since?: Date
+  ms?: number
+} {
+  const steps = detail.journal?.steps ?? []
+  if (stage === "provisioning") {
+    const compose = steps.find((s) => s.name === "compose")
+    const prepare = steps.find((s) => s.name === "prepare")
+    const threw = compose?.threw === true || prepare?.threw === true
+    const running =
+      (compose !== undefined && compose.endedAt === undefined) ||
+      (prepare !== undefined && prepare.endedAt === undefined)
+    const ms = (compose?.ms ?? 0) + (prepare?.ms ?? 0)
+    const state: CheckView["state"] = threw ? "failed" : running ? "running" : "passed"
+    return {
+      ms: ms > 0 ? ms : undefined,
+      said: running ? undefined : ms > 0 ? ` ${mediaDuration(ms)}` : " passed",
+      since: running ? compose?.startedAt ?? prepare?.startedAt : undefined,
+      state,
+    }
+  }
+  if (stage === "checking") {
+    const unmeasured = detail.checks.find((c) => c.state === "unmeasured" && c.result === undefined)
+    if (unmeasured) return { said: " unended", state: "unmeasured" }
+    const checks = detail.checks.filter((c) => c.phase !== "base" && c.name !== "setup")
+    if (checks.length === 0) return { said: " not run", state: "not-run" }
+    if (checks.every((c) => c.state === "not-run")) return { said: " not run", state: "not-run" }
+    const failed = checks.find((c) => c.state === "failed" || c.state === "stuck")
+    if (failed) return { said: " failed", state: failed.state }
+    const running = checks.find((c) => c.state === "running")
+    if (running) {
+      const since = detail.row.live?.since
+      return { since, state: "running" }
+    }
+    const totalMs = checks.reduce((acc, c) => acc + (c.result?.ms ?? 0), 0)
+    return {
+      ms: totalMs > 0 ? totalMs : undefined,
+      said: totalMs > 0 ? ` ${mediaDuration(totalMs)}` : " passed",
+      state: "passed",
+    }
+  }
+  if (stage === "merging") {
+    const publish = steps.find((s) => s.name === "publish" || s.name === "components")
+    const merge = steps.find((s) => s.name === "merge" || s.name === "push")
+    const notify = steps.find((s) => s.name === "notify")
+    const running =
+      (publish !== undefined && publish.endedAt === undefined) ||
+      (merge !== undefined && merge.endedAt === undefined) ||
+      (notify !== undefined && notify.endedAt === undefined)
+    const ms = (publish?.ms ?? 0) + (merge?.ms ?? 0) + (notify?.ms ?? 0)
+    if (running) return { since: merge?.startedAt ?? publish?.startedAt, state: "running" }
+    if (detail.row.state === "merged") {
+      return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
+    }
+    return { said: " not run", state: "not-run" }
+  }
+  if (stage === "deprovisioning") {
+    const remove = steps.find((s) => s.name === "remove" || s.name === "retain")
+    const retire = steps.find((s) => s.name === "retire")
+    const running =
+      (remove !== undefined && remove.endedAt === undefined) ||
+      (retire !== undefined && retire.endedAt === undefined)
+    const ms = (remove?.ms ?? 0) + (retire?.ms ?? 0)
+    if (running) return { since: remove?.startedAt, state: "running" }
+    if (detail.row.state === "merged" || detail.row.state === "failed") {
+      return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
+    }
+    return { said: " not run", state: "not-run" }
+  }
+  return { said: " not run", state: "not-run" }
+}
+
+export function resolveTab(
+  selected: string | undefined,
+  detail: ChangeDetail,
+): { tab: string; selectedSubIndex?: number } {
+  const target = selected ?? defaultTab(detail.checks)
+  if (target === CHANGES_TAB || target === "timeline") {
+    return { tab: CHANGES_TAB }
+  }
+  if (STAGE_TABS.includes(target as StageTabName)) {
+    return { tab: target }
+  }
+  const num = parseInt(target, 10)
+  if (!Number.isNaN(num)) {
+    return { selectedSubIndex: num, tab: "checking" }
+  }
+  if (target.startsWith("step:")) {
+    const stepIdx = parseInt(target.slice(5), 10)
+    const step = detail.journal?.steps[stepIdx]
+    if (step) {
+      if (["compose", "prepare", "read", "worktree"].includes(step.name)) {
+        return { tab: "provisioning" }
+      }
+      if (["merge", "push", "publish", "notify"].includes(step.name)) {
+        return { tab: "merging" }
+      }
+      if (["remove", "retain", "retire"].includes(step.name)) {
+        return { tab: "deprovisioning" }
+      }
+    }
+    return { tab: "provisioning" }
+  }
+  if (target === ROUND_TAB) {
+    return { tab: "provisioning" }
+  }
+  return { tab: target }
+}
+
+function StageTabLabel({
+  detail,
+  stage,
+}: {
+  detail: ChangeDetail
+  stage: StageTabName
+}) {
+  const skipped = isStageSkipped(detail, stage)
+  if (skipped) {
+    return (
+      <>
+        <Text color="$fg-muted">{stage}</Text>
+        {"\n"}
+        <Text color="$fg-muted">− not run</Text>
+      </>
+    )
+  }
+  const info = stageInfo(detail, stage)
+  const isRunning = info.state === "running"
+  return (
+    <>
+      {stage}
+      {"\n"}
+      <Text color={CHECK_COLOR[info.state]}>{CHECK_GLYPH[info.state]}</Text>
+      {isRunning && info.since !== undefined ? (
+        <RunningFor since={info.since} />
+      ) : info.ms !== undefined ? (
+        <Text> {mediaDuration(info.ms)}</Text>
+      ) : (
+        <Text>{info.said ?? ""}</Text>
+      )}
+    </>
+  )
+}
+
+function StageTabPanel({
+  detail,
+  stage,
+  outputs,
+  selectedSubIndex,
+}: {
+  detail: ChangeDetail
+  stage: StageTabName
+  outputs: ReadonlyMap<string, DiffText>
+  selectedSubIndex?: number
+}) {
+  const skipped = isStageSkipped(detail, stage)
+  if (skipped) {
+    return (
+      <ScrollArea>
+        <TitledBox borderColor="$border-muted">
+          <Text color="$fg-muted" bold>
+            {stage.toUpperCase()} — NOT RUN
+          </Text>
+          <Box height={1} flexShrink={0} />
+          <Text color="$fg-muted">{stageSkipReason(detail, stage)}</Text>
+        </TitledBox>
+      </ScrollArea>
+    )
+  }
+
+  const info = stageInfo(detail, stage)
+  const borderColor = CHECK_COLOR[info.state]
+
+  return (
+    <ScrollArea>
+      <TitledBox borderColor={borderColor} titleRight={stage}>
+        {stage === "provisioning" && <ProvisioningStageBody detail={detail} outputs={outputs} />}
+        {stage === "checking" && <CheckingStageBody detail={detail} selectedSubIndex={selectedSubIndex} />}
+        {stage === "merging" && <MergingStageBody detail={detail} outputs={outputs} />}
+        {stage === "deprovisioning" && <DeprovisioningStageBody detail={detail} outputs={outputs} />}
+      </TitledBox>
+    </ScrollArea>
+  )
+}
+
+function ProvisioningStageBody({
+  detail,
+  outputs,
+}: {
+  detail: ChangeDetail
+  outputs: ReadonlyMap<string, DiffText>
+}) {
+  const steps = detail.journal?.steps ?? []
+  const roundCommands = detail.journal?.commands ?? []
+  const readStep = steps.find((s) => s.name === "read")
+  const composeStep = steps.find((s) => s.name === "compose")
+  const prepareStep = steps.find((s) => s.name === "prepare")
+  const checksOff = areDeclaredChecksOff(detail)
+  const setupChecks = detail.checks.filter((c) => c.name === "setup")
+
+  const composingCommands = [
+    ...roundCommands,
+    ...(readStep?.commands ?? []),
+    ...(composeStep?.commands ?? []),
+  ]
+
+  return (
+    <Box flexDirection="column" minWidth={0} gap={1}>
+      {/* Subphase 1: composing (the scratch worktree and the git-super merge result) */}
+      <Box flexDirection="column" minWidth={0}>
+        <Text bold color="$fg-info">
+          COMPOSING
+          {composeStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(composeStep.ms)}</Text> : null}
+        </Text>
+        <Text color="$fg-muted">scratch worktree and git-super merge result</Text>
+        {composingCommands.length > 0 ? (
+          <CommandsList commands={composingCommands} step={composeStep} outputs={outputs} />
+        ) : null}
+        {(composeStep?.parts ?? []).map((part) => (
+          <Text key={part.name} color="$fg-muted">
+            {part.name} {mediaDuration(part.ms)}
+          </Text>
+        ))}
+        {composeStep !== undefined && composeStep.endedAt === undefined && composeStep.unended !== true ? (
+          <Text color="$fg-info">still writing</Text>
+        ) : null}
+      </Box>
+
+      <Box height={1} flexShrink={0} />
+
+      {/* Subphase 2: preparing (the check worktree and its setup log) */}
+      <Box flexDirection="column" minWidth={0}>
+        <Text bold color={checksOff ? "$fg-muted" : "$fg-info"}>
+          PREPARING
+          {checksOff ? (
+            <Text color="$fg-muted"> — skipped (all declared checks off)</Text>
+          ) : prepareStep?.ms !== undefined ? (
+            <Text color="$fg-muted"> · {mediaDuration(prepareStep.ms)}</Text>
+          ) : null}
+        </Text>
+        <Text color="$fg-muted">check worktree and setup log</Text>
+        {!checksOff && prepareStep?.commands !== undefined && prepareStep.commands.length > 0 ? (
+          <CommandsList commands={prepareStep.commands} step={prepareStep} outputs={outputs} />
+        ) : null}
+        {!checksOff && setupChecks.length > 0 ? (
+          setupChecks.map((setupCheck, idx) => (
+            <Box key={`setup-${setupCheck.phase ?? idx}`} flexDirection="column" minWidth={0}>
+              <Box flexDirection="row" minWidth={0} gap={1}>
+                <Text color={CHECK_COLOR[setupCheck.state]} bold>
+                  {CHECK_GLYPH[setupCheck.state]}
+                </Text>
+                <Text bold>
+                  {setupCheck.phase !== undefined && setupChecks.length > 1
+                    ? `${setupCheck.name} (${String(setupCheck.phase)})`
+                    : setupCheck.name}
+                </Text>
+                {setupCheck.result?.ms !== undefined ? (
+                  <Text color="$fg-muted"> · {mediaDuration(setupCheck.result.ms)}</Text>
+                ) : null}
+              </Box>
+              <CheckBody check={setupCheck} />
+            </Box>
+          ))
+        ) : null}
+      </Box>
+    </Box>
+  )
+}
+
+function CheckingStageBody({
+  detail,
+  selectedSubIndex,
+}: {
+  detail: ChangeDetail
+  selectedSubIndex?: number
+}) {
+  const declaredChecks = detail.checks.filter((c) => c.phase !== "base" && c.name !== "setup")
+  const baseChecks = detail.checks.filter((c) => c.phase === "base")
+  const deferredChecks = detail.checks.filter((c) => c.state === "unmeasured" || c.result?.result === "deferred")
+
+  if (selectedSubIndex !== undefined && detail.checks[selectedSubIndex] !== undefined) {
+    const selectedCheck = detail.checks[selectedSubIndex]
+    const remedy = detail.run.steps[selectedSubIndex]?.remedy
+    return (
+      <Box flexDirection="column" minWidth={0}>
+        {detail.checks.length > 1 ? (
+          <Box flexDirection="column" minWidth={0}>
+            {detail.checks.map((c, idx) => (
+              <Box key={`summary-${c.name}-${c.phase ?? idx}`} flexDirection="row" minWidth={0} gap={1}>
+                <Text color={CHECK_COLOR[c.state]} bold>
+                  {CHECK_GLYPH[c.state]}
+                </Text>
+                <Text bold={idx === selectedSubIndex}>
+                  {c.phase !== undefined && detail.checks.filter((o) => o.name === c.name).length > 1
+                    ? `${c.name} (${String(c.phase)})`
+                    : c.name}
+                </Text>
+                {c.result?.ms !== undefined ? (
+                  <Text color="$fg-muted"> · {mediaDuration(c.result.ms)}</Text>
+                ) : null}
+              </Box>
+            ))}
+            <Box height={1} flexShrink={0} />
+          </Box>
+        ) : null}
+        <Box flexDirection="row" minWidth={0} gap={1}>
+          <Text color={CHECK_COLOR[selectedCheck.state]} bold>
+            {CHECK_GLYPH[selectedCheck.state]}
+          </Text>
+          <Text bold>
+            {selectedCheck.phase !== undefined && detail.checks.filter((o) => o.name === selectedCheck.name).length > 1
+              ? `${selectedCheck.name} (${String(selectedCheck.phase)})`
+              : selectedCheck.name}
+          </Text>
+          {selectedCheck.result?.ms !== undefined ? (
+            <Text color="$fg-muted"> · {mediaDuration(selectedCheck.result.ms)}</Text>
+          ) : null}
+        </Box>
+        {remedy !== undefined ? (
+          <Text color={CHECK_COLOR[selectedCheck.state]} wrap="wrap">
+            {remedy}
+          </Text>
+        ) : null}
+        <CheckBody check={selectedCheck} />
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {declaredChecks.length === 0 ? (
+        <Text color="$fg-muted">no declared checks</Text>
+      ) : (
+        declaredChecks.map((check, at) => {
+          const remedy = detail.run.steps[at]?.remedy
+          return (
+            <Box key={`${check.name}-${check.phase ?? ""}-${at}`} flexDirection="column" minWidth={0}>
+              <Box flexDirection="row" minWidth={0} gap={1}>
+                <Text color={CHECK_COLOR[check.state]} bold>
+                  {CHECK_GLYPH[check.state]}
+                </Text>
+                <Text bold>
+                  {check.phase !== undefined && detail.checks.filter((o) => o.name === check.name).length > 1
+                    ? `${check.name} (${String(check.phase)})`
+                    : check.name}
+                </Text>
+                {check.result?.ms !== undefined ? (
+                  <Text color="$fg-muted"> · {mediaDuration(check.result.ms)}</Text>
+                ) : null}
+              </Box>
+              {remedy !== undefined ? (
+                <Text color={CHECK_COLOR[check.state]} wrap="wrap">
+                  {remedy}
+                </Text>
+              ) : null}
+              <CheckBody check={check} />
+            </Box>
+          )
+        })
+      )}
+
+      {/* Subphase 2: attributing (the base re-run after a failure) */}
+      {baseChecks.length > 0 ? (
+        <Box flexDirection="column" minWidth={0}>
+          <Box height={1} flexShrink={0} />
+          <Text bold color="$fg-info">
+            ATTRIBUTING (base re-run after failure)
+          </Text>
+          {baseChecks.map((check, idx) => (
+            <Box key={`base-${check.name}-${idx}`} flexDirection="column" minWidth={0}>
+              <Box flexDirection="row" minWidth={0} gap={1}>
+                <Text color={CHECK_COLOR[check.state]} bold>
+                  {CHECK_GLYPH[check.state]}
+                </Text>
+                <Text bold>
+                  {check.name} (base)
+                </Text>
+                {check.result?.ms !== undefined ? (
+                  <Text color="$fg-muted"> · {mediaDuration(check.result.ms)}</Text>
+                ) : null}
+              </Box>
+              <CheckBody check={check} />
+            </Box>
+          ))}
+        </Box>
+      ) : null}
+
+      {/* Subphase 3: deferring (handed to the long tier) */}
+      {deferredChecks.length > 0 ? (
+        <Box flexDirection="column" minWidth={0}>
+          <Box height={1} flexShrink={0} />
+          <Text bold color="$fg-warning">
+            DEFERRING
+          </Text>
+          <Text color="$fg-muted">handed to the long tier</Text>
+        </Box>
+      ) : null}
+    </Box>
+  )
+}
+
+function MergingStageBody({
+  detail,
+  outputs,
+}: {
+  detail: ChangeDetail
+  outputs: ReadonlyMap<string, DiffText>
+}) {
+  const steps = detail.journal?.steps ?? []
+  const publishStep = steps.find((s) => s.name === "publish" || s.name === "components")
+  const mergeStep = steps.find((s) => s.name === "merge" || s.name === "push")
+  const notifyStep = steps.find((s) => s.name === "notify")
+  const mergeCommit = detail.row.merge ?? detail.journal?.merge
+
+  return (
+    <Box flexDirection="column" minWidth={0} gap={1}>
+      {/* Subphase 1: publishing components */}
+      <Box flexDirection="column" minWidth={0}>
+        <Text bold color="$fg-info">
+          PUBLISHING COMPONENTS
+          {publishStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(publishStep.ms)}</Text> : null}
+        </Text>
+        {publishStep?.commands !== undefined && publishStep.commands.length > 0 ? (
+          <CommandsList commands={publishStep.commands} step={publishStep} outputs={outputs} />
+        ) : (
+          <Text color="$fg-muted">component pins published</Text>
+        )}
+      </Box>
+
+      <Box height={1} flexShrink={0} />
+
+      {/* Subphase 2: publishing root (the CAS; a moved root retries) */}
+      <Box flexDirection="column" minWidth={0}>
+        <Text bold color="$fg-info">
+          PUBLISHING ROOT
+          {mergeStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(mergeStep.ms)}</Text> : null}
+        </Text>
+        {mergeCommit !== undefined ? <Text color="$fg-success">CAS merge commit: {mergeCommit}</Text> : null}
+        {mergeStep?.commands !== undefined && mergeStep.commands.length > 0 ? (
+          <CommandsList commands={mergeStep.commands} step={mergeStep} outputs={outputs} />
+        ) : null}
+      </Box>
+
+      <Box height={1} flexShrink={0} />
+
+      {/* Subphase 3: notifying */}
+      <Box flexDirection="column" minWidth={0}>
+        <Text bold color="$fg-info">
+          NOTIFYING
+          {notifyStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(notifyStep.ms)}</Text> : null}
+        </Text>
+        {notifyStep?.commands !== undefined && notifyStep.commands.length > 0 ? (
+          <CommandsList commands={notifyStep.commands} step={notifyStep} outputs={outputs} />
+        ) : (
+          <Text color="$fg-muted">receipts sent</Text>
+        )}
+      </Box>
+    </Box>
+  )
+}
+
+function DeprovisioningStageBody({
+  detail,
+  outputs,
+}: {
+  detail: ChangeDetail
+  outputs: ReadonlyMap<string, DiffText>
+}) {
+  const steps = detail.journal?.steps ?? []
+  const removeStep = steps.find((s) => s.name === "remove" || s.name === "retain")
+  const retireStep = steps.find((s) => s.name === "retire")
+
+  return (
+    <Box flexDirection="column" minWidth={0} gap={1}>
+      {/* Subphase 1: removing or retaining (path shown) */}
+      <Box flexDirection="column" minWidth={0}>
+        <Text bold color="$fg-info">
+          REMOVING OR RETAINING
+          {removeStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(removeStep.ms)}</Text> : null}
+        </Text>
+        {removeStep?.commands !== undefined && removeStep.commands.length > 0 ? (
+          <CommandsList commands={removeStep.commands} step={removeStep} outputs={outputs} />
+        ) : (
+          <Text color="$fg-muted">worktree deprovisioned</Text>
+        )}
+      </Box>
+
+      <Box height={1} flexShrink={0} />
+
+      {/* Subphase 2: retiring */}
+      <Box flexDirection="column" minWidth={0}>
+        <Text bold color="$fg-info">
+          RETIRING
+          {retireStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(retireStep.ms)}</Text> : null}
+        </Text>
+        {retireStep?.commands !== undefined && retireStep.commands.length > 0 ? (
+          <CommandsList commands={retireStep.commands} step={retireStep} outputs={outputs} />
+        ) : (
+          <Text color="$fg-muted">branch retired</Text>
+        )}
+      </Box>
+    </Box>
+  )
+}
+
+function CommandsList({
+  commands,
+  step,
+  outputs,
+}: {
+  commands: readonly JournalCommand[]
+  step?: JournalStep
+  outputs: ReadonlyMap<string, DiffText>
+}) {
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {commands.map((command, index) => {
+        const output = outputs.get(commandKey(command))
+        return (
+          <Box key={`${String(index)}:${commandKey(command)}`} flexDirection="column" minWidth={0}>
+            <Text wrap="wrap">
+              <Text bold>$ git {command.args.join(" ")}</Text>
+              {command.exit === undefined || command.exit === 0 ? null : (
+                <Text color="$fg-error"> exit {String(command.exit)}</Text>
+              )}
+            </Text>
+            {command.failure !== undefined ? (
+              <Text color="$fg-muted" wrap="wrap">
+                it failed before writing output: {command.failure}
+              </Text>
+            ) : output === undefined ? (
+              <Text color="$fg-muted">reading its output…</Text>
+            ) : output.text === undefined ? (
+              <Text color="$fg-muted" wrap="wrap">
+                {output.why ?? "no output was read"}
+              </Text>
+            ) : output.text === "" ? null : (
+              <Text wrap="wrap">{output.text}</Text>
+            )}
+          </Box>
+        )
+      })}
+      {(step?.parts ?? []).map((part) => (
+        <Text key={part.name} color="$fg-muted">
+          {part.name} {mediaDuration(part.ms)}
+        </Text>
+      ))}
+      {step !== undefined && step.endedAt === undefined && step.unended !== true ? (
+        <Text color="$fg-info">still writing</Text>
+      ) : null}
+    </Box>
+  )
+}
+
+/** One tab of the detail after the Timeline: a stage, a check, a step of the round, or the round's own commands. */
 export type StageTab =
+  | Readonly<{ kind: "stage"; value: StageTabName; stage: StageTabName }>
   | Readonly<{ kind: "check"; value: string; at: number }>
   | Readonly<{ kind: "step"; value: string; step: JournalStep }>
   | Readonly<{ kind: "round"; value: typeof ROUND_TAB; commands: readonly JournalCommand[] }>
@@ -235,43 +837,56 @@ export type StageTab =
 /** The tab of the git commands the round ran outside any step: shown only when there are some. */
 export const ROUND_TAB = "round"
 
-/**
- * The stage tabs in the order the round ran them (25441): the round's own
- * commands first when there are any, then its steps and the change's checks
- * by when each started. A check that never ran has no start and keeps its
- * declared place after the ones that did.
- */
 export function stagesOf(detail: ChangeDetail): readonly StageTab[] {
-  const journal = detail.journal
-  const started = (name: string, phase: string | undefined): number | undefined =>
-    journal?.checks
-      .find((check) => check.name === name && (phase === undefined || check.phase === phase))
-      ?.startedAt.getTime()
-  const timed: { at: number; tab: StageTab }[] = [
-    ...detail.checks.map((check, at) => ({
-      at: started(check.name, check.phase) ?? Number.POSITIVE_INFINITY,
-      tab: { at, kind: "check" as const, value: String(at) },
-    })),
-    ...(journal?.steps ?? []).map((step, index) => ({
-      at: step.startedAt.getTime(),
-      tab: { kind: "step" as const, step, value: `step:${String(index)}` },
-    })),
-  ]
-  const round: StageTab[] =
-    (journal?.commands?.length ?? 0) === 0
-      ? []
-      : [{ commands: journal?.commands ?? [], kind: "round", value: ROUND_TAB }]
-  return [...round, ...timed.sort((left, right) => left.at - right.at).map(({ tab }) => tab)]
+  return STAGE_TABS.map((stage) => ({
+    kind: "stage" as const,
+    stage,
+    value: stage,
+  }))
 }
 
 /** The git commands a tab shows, for the pane to read their output when it opens. */
 export function commandsOfTab(detail: ChangeDetail, tab: string | undefined): readonly JournalCommand[] {
-  const stage = stagesOf(detail).find((candidate) => candidate.value === tab)
-  return stage === undefined || stage.kind === "check"
-    ? []
-    : stage.kind === "round"
-      ? stage.commands
-      : stage.step.commands
+  const resolved = resolveTab(tab, detail).tab
+  const steps = detail.journal?.steps ?? []
+  if (resolved === "provisioning") {
+    const round = detail.journal?.commands ?? []
+    const read = steps.find((s) => s.name === "read")?.commands ?? []
+    const compose = steps.find((s) => s.name === "compose")?.commands ?? []
+    const prepare = steps.find((s) => s.name === "prepare")?.commands ?? []
+    return [...round, ...read, ...compose, ...prepare]
+  }
+  if (resolved === "merging") {
+    const publish = steps.find((s) => s.name === "publish" || s.name === "components")?.commands ?? []
+    const merge = steps.find((s) => s.name === "merge" || s.name === "push")?.commands ?? []
+    const notify = steps.find((s) => s.name === "notify")?.commands ?? []
+    return [...publish, ...merge, ...notify]
+  }
+  if (resolved === "deprovisioning") {
+    const remove = steps.find((s) => s.name === "remove" || s.name === "retain")?.commands ?? []
+    const retire = steps.find((s) => s.name === "retire")?.commands ?? []
+    return [...remove, ...retire]
+  }
+  if (resolved === "checking") {
+    const checkSteps = steps.filter(
+      (s) =>
+        ![
+          "compose",
+          "prepare",
+          "read",
+          "worktree",
+          "publish",
+          "merge",
+          "push",
+          "notify",
+          "remove",
+          "retain",
+          "retire",
+        ].includes(s.name),
+    )
+    return checkSteps.flatMap((s) => s.commands)
+  }
+  return []
 }
 
 /** A command's key in the outputs map: its own stdout file, which no other command shares. */
@@ -525,6 +1140,94 @@ function RunningSteps({ detail }: { detail: ChangeDetail }) {
       })}
     </Box>
   )
+}
+
+export function StageBoxes({ detail }: { detail: ChangeDetail }) {
+  return (
+    <Box flexDirection="column" minWidth={0} gap={1}>
+      <Box height={1} flexShrink={0} />
+      <Text bold color="$fg-muted">
+        STAGES
+      </Text>
+      {STAGE_TABS.map((stage) => {
+        const skipped = isStageSkipped(detail, stage)
+        const info = stageInfo(detail, stage)
+        const borderColor = skipped ? "$border-muted" : CHECK_COLOR[info.state]
+        return (
+          <TitledBox key={stage} borderColor={borderColor} titleRight={stage}>
+            <Box flexDirection="column" minWidth={0}>
+              <Box flexDirection="row" minWidth={0} gap={1}>
+                <Text color={skipped ? "$fg-muted" : CHECK_COLOR[info.state]} bold>
+                  {skipped ? "−" : CHECK_GLYPH[info.state]}
+                </Text>
+                <Text color={skipped ? "$fg-muted" : undefined} bold>
+                  {stage.toUpperCase()}
+                </Text>
+                <Text color="$fg-muted">
+                  {skipped ? `(${stageSkipReason(detail, stage)})` : info.said ? info.said : ""}
+                </Text>
+              </Box>
+              <StageSubphaseSummary detail={detail} stage={stage} skipped={skipped} />
+            </Box>
+          </TitledBox>
+        )
+      })}
+    </Box>
+  )
+}
+
+function StageSubphaseSummary({
+  detail,
+  stage,
+  skipped,
+}: {
+  detail: ChangeDetail
+  stage: StageTabName
+  skipped: boolean
+}) {
+  if (skipped) {
+    return <Text color="$fg-muted">stage did not run</Text>
+  }
+  if (stage === "provisioning") {
+    const checksOff = areDeclaredChecksOff(detail)
+    return (
+      <Box flexDirection="column" minWidth={0}>
+        <Text color="$fg-muted">· composing (scratch worktree and git-super merge)</Text>
+        <Text color="$fg-muted">
+          · preparing {checksOff ? "− skipped (all declared checks off)" : "(check worktree and setup log)"}
+        </Text>
+      </Box>
+    )
+  }
+  if (stage === "checking") {
+    const declaredChecks = detail.checks.filter((c) => c.phase !== "base" && c.name !== "setup")
+    const baseChecks = detail.checks.filter((c) => c.phase === "base")
+    return (
+      <Box flexDirection="column" minWidth={0}>
+        {declaredChecks.map((c) => (
+          <Text key={c.name} color="$fg-muted">
+            · {c.name} ({c.state})
+          </Text>
+        ))}
+        {baseChecks.length > 0 ? <Text color="$fg-muted">· attributing (base re-run)</Text> : null}
+      </Box>
+    )
+  }
+  if (stage === "merging") {
+    return (
+      <Box flexDirection="column" minWidth={0}>
+        <Text color="$fg-muted">· publishing components · publishing root · notifying</Text>
+      </Box>
+    )
+  }
+  if (stage === "deprovisioning") {
+    return (
+      <Box flexDirection="column" minWidth={0}>
+        <Text color="$fg-muted">· removing/retaining · retiring</Text>
+      </Box>
+    )
+  }
+  return null
 }
 
 /** The clocks rows, the one part of the timeline that moves every second: its own leaf on the second clock. */

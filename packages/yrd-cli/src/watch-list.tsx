@@ -208,11 +208,13 @@ export function taskExtrasLayout(
  * measured with them: the runner is a row now, not a box with its own
  * geometry.
  */
-/** The runner's status word with optional sub-phase / step (25716). */
+/** The runner's status word with optional sub-phase / step (25716): "checking · affected-tests". */
 export function runnerStatusWord(line: RunnerLine): string {
   const base = STATE_WORDS[line.state].word
-  if (line.state === "checking" && line.subphase) return `${base} (${line.subphase})`
-  if (line.state === "merging" && line.step) return `${base} (${line.step})`
+  const sub = line.subphase ?? line.step
+  if (sub !== undefined && sub !== "") {
+    return `${base} · ${sub}`
+  }
   return base
 }
 

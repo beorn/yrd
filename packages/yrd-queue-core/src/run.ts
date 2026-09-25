@@ -256,6 +256,13 @@ export type QueueRunOutcome = Readonly<{
   noCheck?: boolean
 }>
 
+/** True when every declared check is off (--no-check, checks declared run "true", or no checks) (25716 row 5). */
+export function allDeclaredChecksOff(options: QueueRunOptions): boolean {
+  if (options.noCheck === true) return true
+  if (options.checks.length === 0) return false
+  return options.checks.every((check) => check.run === "true")
+}
+
 /** Everything one run's steps share. */
 export type Run = Readonly<{
   observation: GitObservation
@@ -1432,6 +1439,20 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
   const composed = await composeCandidate(run, entry, "submit")
   if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
   const { worktree } = composed
+  if (worktree === undefined) {
+    const results: CheckResult[] = []
+    await writeRecord(
+      run,
+      {
+        change,
+        kind: "checked",
+        subject: `${branch} passed the on-submit checks at ${run.options.target.branch} ${run.targetSha.slice(0, 12)}`,
+        trailers: [["Config", run.options.configBlob], ["Base", run.targetSha], ...checkTrailers(results)],
+      },
+      tipOf(entry.change).sha,
+    )
+    return "checked"
+  }
   try {
     const results = await runPhase(run, entry, "submit", worktree.path, worktree.tree)
     const stuckOne = results.find((result) => result.result === "stuck")
@@ -1499,7 +1520,9 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     )
     return "checked"
   } finally {
-    await worktree.remove()
+    if (worktree !== undefined) {
+      await worktree.remove()
+    }
   }
 }
 
@@ -1508,7 +1531,7 @@ type ComposedCandidate =
       kind: "ready"
       mergeCommit: string
       rootChanges?: RootChanges
-      worktree: PreparedWorktree
+      worktree?: PreparedWorktree
       /** Pins the settling merge kept AHEAD of their submodule main: the land publishes these, children first (24454). */
       publishing: readonly SettledGitlink[]
       /** Gitlinks this candidate composed itself: a re-cut no submit check has read yet (24977). */
@@ -1754,22 +1777,24 @@ async function readyCandidate(
       phase,
     })
   }
-  let worktree: PreparedWorktree
-  try {
-    worktree = await timedStep(run.log, { ...step, name: "prepare" }, () =>
-      run.steps.prepare(run, entry, mergeCommit, join(run.worktrees, phase, head.slice(0, 12)), phase),
-    )
-  } catch (error) {
-    // The one place that knows both facts the attribution needs: which phase's
-    // candidate this was, and what composition settled into it.
-    if (!(error instanceof SetupFailed)) throw error
-    throw new CandidateSetupFailed(error, phase, rootChanges?.changes ?? [])
+  let worktree: PreparedWorktree | undefined
+  if (!allDeclaredChecksOff(run.options)) {
+    try {
+      worktree = await timedStep(run.log, { ...step, name: "prepare" }, () =>
+        run.steps.prepare(run, entry, mergeCommit, join(run.worktrees, phase, head.slice(0, 12)), phase),
+      )
+    } catch (error) {
+      // The one place that knows both facts the attribution needs: which phase's
+      // candidate this was, and what composition settled into it.
+      if (!(error instanceof SetupFailed)) throw error
+      throw new CandidateSetupFailed(error, phase, rootChanges?.changes ?? [])
+    }
   }
   return {
     kind: "ready",
     mergeCommit,
     ...(rootChanges === undefined ? {} : { rootChanges }),
-    worktree,
+    ...(worktree === undefined ? {} : { worktree }),
     // A COMPOSED PIN PUBLISHES EXACTLY AS AN AHEAD ONE DOES, and by the same
     // proof: the component main tip is the composition's FIRST parent, so
     // advancing main to it is a plain fast-forward, leased on the value
@@ -2312,17 +2337,24 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
   // from a wrong test. Success still tears down: nothing is pooled or reused.
   let retained: string | undefined
   try {
-    const wt = gitIn(
-      worktree.path,
-      run.options.process,
-      run.options.selection,
-      gitInvocationOptions(run.options, run.log),
-    )
+    const wt =
+      worktree === undefined
+        ? undefined
+        : gitIn(
+            worktree.path,
+            run.options.process,
+            run.options.selection,
+            gitInvocationOptions(run.options, run.log),
+          )
     // The built-in check at merge (ruling D2): the merged tree's own declaration
     // reads, so no change can land a `.yrd.yml` that breaks the next queue run.
     let unreadable: string | undefined
     try {
-      if ((await readConfig(wt, "HEAD", run.options.target)) === undefined) {
+      const config =
+        wt === undefined
+          ? await readConfig(run.git, mergeCommit, run.options.target)
+          : await readConfig(wt, "HEAD", run.options.target)
+      if (config === undefined) {
         unreadable = "the merged tree has no .yrd.yml"
       }
     } catch (error) {
@@ -2335,96 +2367,103 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
         trailers: [["Reason", "config-invalid"]],
       })
     }
-    // The merge moved this worktree's HEAD, so what a check judges here is
-    // read now and not at prepare time: the candidate is the merge commit,
-    // and its merge base with the target is the target itself.
-    const merged = await checkedTree(
-      worktree.path,
-      run.targetSha,
-      run.options.process,
-      run.options.selection,
-      gitInvocationOptions(run.options, run.log),
-    )
-    // 24573: BEFORE anything is judged, say what is about to be read. One row
-    // per path the candidate changed, carrying the blob the merge commit
-    // records and the hash of the bytes actually on disk. The comparison is
-    // self-referential on purpose — it asks whether this root contains the
-    // commit it claims to be and takes no candidate sha as input, so it cannot
-    // be fooled by being handed the wrong one. A disagreement names root
-    // construction; agreement leaves resolution, and until this row existed
-    // nobody could tell those apart once the root was torn down.
-    const judged = await judgedTreeDigest(
-      worktree.path,
-      merged,
-      run.options.process,
-      run.options.selection,
-      gitInvocationOptions(run.options, run.log),
-    )
-    for (const file of judged) {
-      run.log.write({
-        branch,
-        committed: file.committed,
-        head,
-        kind: "judged",
-        ondisk: file.ondisk,
-        path: file.path,
-        phase: "merge",
-        same: file.same,
-      })
-    }
-    const divergent = judged.filter((file) => !file.same)
-    if (divergent.length > 0) {
-      // NOT a check failure and deliberately not fatal: the queue's own ground
-      // is wrong, which is nobody's submission, and a change must not be
-      // attributed to a submitter for it. It is loud, named, and retained.
-      retained = worktree.path
-      run.log.write({
-        branch,
-        head,
-        kind: "observation",
-        paths: divergent.map((file) => `${file.path} committed=${file.committed} ondisk=${file.ondisk}`),
-        phase: "merge",
-        why: `the merge root does not contain ${mergeCommit.slice(0, 12)} at ${divergent.length} path(s) the candidate changed`,
-      })
-    }
-    // 24977 (@cto e8368e85 constraint 2): a candidate this phase composed is a
-    // tree no submit check has read -- the change was judged before the
-    // component main moved -- and since 25092 nothing else runs at merge. The
-    // submit checks run again on it first, and a failure there is the re-cut's.
     let recheck: readonly CheckResult[] = []
-    if (recuts.length > 0) {
-      run.recutting.set(name, mergeCommit)
-      try {
-        recheck = await runPhase(run, entry, "submit", worktree.path, merged)
-      } finally {
-        run.recutting.delete(name)
-      }
-    }
-    const recutFailing = recheck.filter((result) => result.result === "fail")
-    if (recutFailing.length > 0) {
-      retained = worktree.path
-      return await recutFailure(run, entry, recheck, recutFailing, recuts, mergeCommit)
-    }
-    // A re-run the stop window cut short is not a pass: the judge and merge
-    // phases defer on a short list, and so does this one, or a composed
-    // candidate lands with submit checks never run on it (review2 de5a4c01).
-    const declaredForSubmit = run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes("submit"))
-    if (
-      recuts.length > 0 &&
-      recheck.every((result) => result.result === "pass") &&
-      recheck.length < declaredForSubmit.length
-    ) {
-      return await writeDeferredRecord(
-        run,
-        entry,
-        "merge",
-        { name: "stop-time", result: "deferred", why: "stop-time", exit: 0, durationMs: 0, log: "" },
-        recheck,
+    let phaseResults: readonly CheckResult[] = []
+    if (allDeclaredChecksOff(run.options)) {
+      phaseResults = run.options.checks
+        .filter((c) => (c.on ?? ["merge"]).includes("merge"))
+        .map((c) => ({ durationMs: 0, exit: 0, log: "", name: c.name, result: "pass" as const }))
+    } else if (worktree !== undefined) {
+      // The merge moved this worktree's HEAD, so what a check judges here is
+      // read now and not at prepare time: the candidate is the merge commit,
+      // and its merge base with the target is the target itself.
+      const merged = await checkedTree(
+        worktree.path,
+        run.targetSha,
+        run.options.process,
+        run.options.selection,
+        gitInvocationOptions(run.options, run.log),
       )
+      // 24573: BEFORE anything is judged, say what is about to be read. One row
+      // per path the candidate changed, carrying the blob the merge commit
+      // records and the hash of the bytes actually on disk. The comparison is
+      // self-referential on purpose — it asks whether this root contains the
+      // commit it claims to be and takes no candidate sha as input, so it cannot
+      // be fooled by being handed the wrong one. A disagreement names root
+      // construction; agreement leaves resolution, and until this row existed
+      // nobody could tell those apart once the root was torn down.
+      const judged = await judgedTreeDigest(
+        worktree.path,
+        merged,
+        run.options.process,
+        run.options.selection,
+        gitInvocationOptions(run.options, run.log),
+      )
+      for (const file of judged) {
+        run.log.write({
+          branch,
+          committed: file.committed,
+          head,
+          kind: "judged",
+          ondisk: file.ondisk,
+          path: file.path,
+          phase: "merge",
+          same: file.same,
+        })
+      }
+      const divergent = judged.filter((file) => !file.same)
+      if (divergent.length > 0) {
+        // NOT a check failure and deliberately not fatal: the queue's own ground
+        // is wrong, which is nobody's submission, and a change must not be
+        // attributed to a submitter for it. It is loud, named, and retained.
+        retained = worktree.path
+        run.log.write({
+          branch,
+          head,
+          kind: "observation",
+          paths: divergent.map((file) => `${file.path} committed=${file.committed} ondisk=${file.ondisk}`),
+          phase: "merge",
+          why: `the merge root does not contain ${mergeCommit.slice(0, 12)} at ${divergent.length} path(s) the candidate changed`,
+        })
+      }
+      // 24977 (@cto e8368e85 constraint 2): a candidate this phase composed is a
+      // tree no submit check has read -- the change was judged before the
+      // component main moved -- and since 25092 nothing else runs at merge. The
+      // submit checks run again on it first, and a failure there is the re-cut's.
+      if (recuts.length > 0) {
+        run.recutting.set(name, mergeCommit)
+        try {
+          recheck = await runPhase(run, entry, "submit", worktree.path, merged)
+        } finally {
+          run.recutting.delete(name)
+        }
+      }
+      const recutFailing = recheck.filter((result) => result.result === "fail")
+      if (recutFailing.length > 0) {
+        retained = worktree.path
+        return await recutFailure(run, entry, recheck, recutFailing, recuts, mergeCommit)
+      }
+      // A re-run the stop window cut short is not a pass: the judge and merge
+      // phases defer on a short list, and so does this one, or a composed
+      // candidate lands with submit checks never run on it (review2 de5a4c01).
+      const declaredForSubmit = run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes("submit"))
+      if (
+        recuts.length > 0 &&
+        recheck.every((result) => result.result === "pass") &&
+        recheck.length < declaredForSubmit.length
+      ) {
+        return await writeDeferredRecord(
+          run,
+          entry,
+          "merge",
+          { name: "stop-time", result: "deferred", why: "stop-time", exit: 0, durationMs: 0, log: "" },
+          recheck,
+        )
+      }
+      phaseResults = recheck.every((result) => result.result === "pass")
+        ? await runPhase(run, entry, "merge", worktree.path, merged)
+        : []
     }
-    const phaseResults = recheck.every((result) => result.result === "pass")
-      ? await runPhase(run, entry, "merge", worktree.path, merged)
-      : []
     const results = [...recheck, ...phaseResults]
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
@@ -2462,7 +2501,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     const failing = phaseResults.filter((result) => result.result === "fail")
     if (failing.length > 0) {
-      retained = worktree.path
+      retained = worktree?.path
       return await attributedFailure(run, entry, results, failing, "merge", rootChanges?.changes ?? [])
     }
     // The merge checks this round runs: the declared ones less those an
@@ -2506,7 +2545,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     // accepts, and the next run composes on it as an Equal pin.
     if (publishing.length > 0) {
       const landing = await timedStep(run.log, { branch, head, name: "publish", phase: "merge" }, () =>
-        publishChildren(run, entry, worktree.path, mergeCommit, publishing, rootChanges, results),
+        publishChildren(run, entry, worktree?.path ?? run.options.repo, mergeCommit, publishing, rootChanges, results),
       )
       if (landing.kind === "kept") return landing.ended
       expectedTip = landing.record
@@ -2578,12 +2617,14 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     await deleteMergedBranch(run, entry)
     return "merged"
   } finally {
-    if (retained === undefined) {
-      await worktree.remove()
-    } else {
-      // Say where it is, in the journal that is always written, or a retained
-      // root is just disk nobody knows to read.
-      run.log.write({ branch, head, kind: "retained", path: retained, phase: "merge" })
+    if (worktree !== undefined) {
+      if (retained === undefined) {
+        await worktree.remove()
+      } else {
+        // Say where it is, in the journal that is always written, or a retained
+        // root is just disk nobody knows to read.
+        run.log.write({ branch, head, kind: "retained", path: retained, phase: "merge" })
+      }
     }
   }
 }
