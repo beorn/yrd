@@ -171,7 +171,7 @@ export function WatchDetail({
         </Text>
       )}
       {detail.checks.length === 0 ? (
-        <Text color="$fg-muted">the declaration this change was judged by names no check</Text>
+        <Text color="$fg-muted">no check-step detail is recorded for this change</Text>
       ) : null}
       <Tabs
         value={tab}
@@ -203,12 +203,7 @@ export function WatchDetail({
         </TabPanel>
         {STAGE_TABS.map((stage) => (
           <TabPanel key={stage} value={stage}>
-            <StageTabPanel
-              detail={detail}
-              stage={stage}
-              outputs={outputs}
-              selectedSubIndex={selectedSubIndex}
-            />
+            <StageTabPanel detail={detail} stage={stage} outputs={outputs} selectedSubIndex={selectedSubIndex} />
           </TabPanel>
         ))}
       </Tabs>
@@ -221,15 +216,16 @@ export type StageTabName = (typeof STAGE_TABS)[number]
 
 export function areDeclaredChecksOff(detail: ChangeDetail): boolean {
   if (detail.checks.length === 0) return true
-  return detail.checks.every(
-    (check) => check.state === "off" || check.spec?.run === "true",
-  )
+  return detail.checks.every((check) => check.state === "off" || check.spec?.run === "true")
 }
 
 export function isStageSkipped(detail: ChangeDetail, stage: StageTabName): boolean {
   const { row } = detail
   if (stage === "provisioning") {
-    return ((row.state === "queued" || row.state === "draft") && (detail.journal?.steps.length ?? 0) === 0) || row.state === "direct"
+    return (
+      ((row.state === "queued" || row.state === "draft") && (detail.journal?.steps.length ?? 0) === 0) ||
+      row.state === "direct"
+    )
   }
   if (stage === "checking") {
     const unmeasured = detail.checks.find((c) => c.state === "unmeasured" && c.result === undefined)
@@ -290,7 +286,7 @@ export function stageInfo(
     return {
       ms: ms > 0 ? ms : undefined,
       said: running ? undefined : ms > 0 ? ` ${mediaDuration(ms)}` : " passed",
-      since: running ? compose?.startedAt ?? prepare?.startedAt : undefined,
+      since: running ? (compose?.startedAt ?? prepare?.startedAt) : undefined,
       state,
     }
   }
@@ -333,8 +329,7 @@ export function stageInfo(
     const remove = steps.find((s) => s.name === "remove" || s.name === "retain")
     const retire = steps.find((s) => s.name === "retire")
     const running =
-      (remove !== undefined && remove.endedAt === undefined) ||
-      (retire !== undefined && retire.endedAt === undefined)
+      (remove !== undefined && remove.endedAt === undefined) || (retire !== undefined && retire.endedAt === undefined)
     const ms = (remove?.ms ?? 0) + (retire?.ms ?? 0)
     if (running) return { since: remove?.startedAt, state: "running" }
     if (detail.row.state === "merged" || detail.row.state === "failed") {
@@ -382,13 +377,7 @@ export function resolveTab(
   return { tab: target }
 }
 
-function StageTabLabel({
-  detail,
-  stage,
-}: {
-  detail: ChangeDetail
-  stage: StageTabName
-}) {
+function StageTabLabel({ detail, stage }: { detail: ChangeDetail; stage: StageTabName }) {
   const skipped = isStageSkipped(detail, stage)
   if (skipped) {
     return (
@@ -458,13 +447,7 @@ function StageTabPanel({
   )
 }
 
-function ProvisioningStageBody({
-  detail,
-  outputs,
-}: {
-  detail: ChangeDetail
-  outputs: ReadonlyMap<string, DiffText>
-}) {
+function ProvisioningStageBody({ detail, outputs }: { detail: ChangeDetail; outputs: ReadonlyMap<string, DiffText> }) {
   const steps = detail.journal?.steps ?? []
   const roundCommands = detail.journal?.commands ?? []
   const readStep = steps.find((s) => s.name === "read")
@@ -473,11 +456,7 @@ function ProvisioningStageBody({
   const checksOff = areDeclaredChecksOff(detail)
   const setupChecks = detail.checks.filter((c) => c.name === "setup")
 
-  const composingCommands = [
-    ...roundCommands,
-    ...(readStep?.commands ?? []),
-    ...(composeStep?.commands ?? []),
-  ]
+  const composingCommands = [...roundCommands, ...(readStep?.commands ?? []), ...(composeStep?.commands ?? [])]
 
   return (
     <Box flexDirection="column" minWidth={0} gap={1}>
@@ -517,38 +496,32 @@ function ProvisioningStageBody({
         {!checksOff && prepareStep?.commands !== undefined && prepareStep.commands.length > 0 ? (
           <CommandsList commands={prepareStep.commands} step={prepareStep} outputs={outputs} />
         ) : null}
-        {!checksOff && setupChecks.length > 0 ? (
-          setupChecks.map((setupCheck, idx) => (
-            <Box key={`setup-${setupCheck.phase ?? idx}`} flexDirection="column" minWidth={0}>
-              <Box flexDirection="row" minWidth={0} gap={1}>
-                <Text color={CHECK_COLOR[setupCheck.state]} bold>
-                  {CHECK_GLYPH[setupCheck.state]}
-                </Text>
-                <Text bold>
-                  {setupCheck.phase !== undefined && setupChecks.length > 1
-                    ? `${setupCheck.name} (${String(setupCheck.phase)})`
-                    : setupCheck.name}
-                </Text>
-                {setupCheck.result?.ms !== undefined ? (
-                  <Text color="$fg-muted"> · {mediaDuration(setupCheck.result.ms)}</Text>
-                ) : null}
+        {!checksOff && setupChecks.length > 0
+          ? setupChecks.map((setupCheck, idx) => (
+              <Box key={`setup-${setupCheck.phase ?? idx}`} flexDirection="column" minWidth={0}>
+                <Box flexDirection="row" minWidth={0} gap={1}>
+                  <Text color={CHECK_COLOR[setupCheck.state]} bold>
+                    {CHECK_GLYPH[setupCheck.state]}
+                  </Text>
+                  <Text bold>
+                    {setupCheck.phase !== undefined && setupChecks.length > 1
+                      ? `${setupCheck.name} (${String(setupCheck.phase)})`
+                      : setupCheck.name}
+                  </Text>
+                  {setupCheck.result?.ms !== undefined ? (
+                    <Text color="$fg-muted"> · {mediaDuration(setupCheck.result.ms)}</Text>
+                  ) : null}
+                </Box>
+                <CheckBody check={setupCheck} />
               </Box>
-              <CheckBody check={setupCheck} />
-            </Box>
-          ))
-        ) : null}
+            ))
+          : null}
       </Box>
     </Box>
   )
 }
 
-function CheckingStageBody({
-  detail,
-  selectedSubIndex,
-}: {
-  detail: ChangeDetail
-  selectedSubIndex?: number
-}) {
+function CheckingStageBody({ detail, selectedSubIndex }: { detail: ChangeDetail; selectedSubIndex?: number }) {
   const declaredChecks = detail.checks.filter((c) => c.phase !== "base" && c.name !== "setup")
   const baseChecks = detail.checks.filter((c) => c.phase === "base")
   const deferredChecks = detail.checks.filter((c) => c.state === "unmeasured" || c.result?.result === "deferred")
@@ -570,9 +543,7 @@ function CheckingStageBody({
                     ? `${c.name} (${String(c.phase)})`
                     : c.name}
                 </Text>
-                {c.result?.ms !== undefined ? (
-                  <Text color="$fg-muted"> · {mediaDuration(c.result.ms)}</Text>
-                ) : null}
+                {c.result?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(c.result.ms)}</Text> : null}
               </Box>
             ))}
             <Box height={1} flexShrink={0} />
@@ -647,9 +618,7 @@ function CheckingStageBody({
                 <Text color={CHECK_COLOR[check.state]} bold>
                   {CHECK_GLYPH[check.state]}
                 </Text>
-                <Text bold>
-                  {check.name} (base)
-                </Text>
+                <Text bold>{check.name} (base)</Text>
                 {check.result?.ms !== undefined ? (
                   <Text color="$fg-muted"> · {mediaDuration(check.result.ms)}</Text>
                 ) : null}
@@ -674,13 +643,7 @@ function CheckingStageBody({
   )
 }
 
-function MergingStageBody({
-  detail,
-  outputs,
-}: {
-  detail: ChangeDetail
-  outputs: ReadonlyMap<string, DiffText>
-}) {
+function MergingStageBody({ detail, outputs }: { detail: ChangeDetail; outputs: ReadonlyMap<string, DiffText> }) {
   const steps = detail.journal?.steps ?? []
   const publishStep = steps.find((s) => s.name === "publish" || s.name === "components")
   const mergeStep = steps.find((s) => s.name === "merge" || s.name === "push")
@@ -837,7 +800,7 @@ export type StageTab =
 /** The tab of the git commands the round ran outside any step: shown only when there are some. */
 export const ROUND_TAB = "round"
 
-export function stagesOf(detail: ChangeDetail): readonly StageTab[] {
+export function stagesOf(_detail: ChangeDetail): readonly StageTab[] {
   return STAGE_TABS.map((stage) => ({
     kind: "stage" as const,
     stage,
@@ -892,147 +855,6 @@ export function commandsOfTab(detail: ChangeDetail, tab: string | undefined): re
 /** A command's key in the outputs map: its own stdout file, which no other command shares. */
 export function commandKey(command: JournalCommand): string {
   return command.stdout ?? `${command.cwd}\u0000${command.args.join("\u0000")}`
-}
-
-/** A step's state in the check vocabulary, for its glyph: running while open, failed when it threw. */
-function stepState(step: JournalStep): CheckView["state"] {
-  if (step.unended === true) return "unmeasured"
-  if (step.endedAt === undefined) return "running"
-  return step.threw === true ? "failed" : "passed"
-}
-
-/** What a step's second line says after its glyph: its duration, or why there is none. */
-function stepSaid(step: JournalStep): Readonly<{ said?: string; since?: Date }> {
-  if (step.unended === true) return { said: " unended" }
-  if (step.endedAt === undefined) return { since: step.startedAt }
-  return step.ms === undefined ? {} : { said: ` ${mediaDuration(step.ms)}` }
-}
-
-/** A check's tab: its remedy when it failed (it rode the status box's step line before 25441), then its log. */
-function CheckTab({ detail, at }: { detail: ChangeDetail; at: number }) {
-  const check = detail.checks[at]
-  if (check === undefined) return null
-  const remedy = detail.run.steps[at]?.remedy
-  return (
-    <>
-      {remedy === undefined ? null : (
-        <Text color={CHECK_COLOR[check.state]} wrap="wrap">
-          {remedy}
-        </Text>
-      )}
-      <CheckBody check={check} />
-    </>
-  )
-}
-
-/** A check's tab label, named by its phase when the change ran it in more than one. */
-function CheckLabel({ detail, at }: { detail: ChangeDetail; at: number }) {
-  const check = detail.checks[at]
-  if (check === undefined) return null
-  const { row } = detail
-  const twice = check.phase !== undefined && detail.checks.filter((other) => other.name === check.name).length > 1
-  const step = detail.run.steps[at]
-  const said =
-    check.state === "off"
-      ? " off"
-      : check.state === "not-run"
-        ? " not run"
-        : // Started and never ended: the step tabs' own word for it (25521), never a blank beside `?`.
-          check.state === "unmeasured" && check.result === undefined
-          ? " unended"
-          : step?.ms === undefined
-            ? ""
-            : ` ${mediaDuration(step.ms)}`
-  return (
-    <StageLabel
-      name={twice ? `${check.name} (${String(check.phase)})` : check.name}
-      state={check.state}
-      said={said}
-      {...(check.state === "running" && row.live?.check === check.name ? { since: row.live.since } : {})}
-    />
-  )
-}
-
-/**
- * A step's or the round's commands (25441): each as `$ git <args>` above what
- * it printed, read by the pane when the tab opened. A step still open says it
- * is still writing; a compose lists git-super's own timed parts under it.
- */
-function CommandsBody({
-  commands,
-  step,
-  outputs,
-}: {
-  commands: readonly JournalCommand[]
-  step?: JournalStep
-  outputs: ReadonlyMap<string, DiffText>
-}) {
-  return (
-    <ScrollArea>
-      {commands.length === 0 ? <Text color="$fg-muted">this step ran no git command</Text> : null}
-      {commands.map((command, index) => {
-        const output = outputs.get(commandKey(command))
-        return (
-          <Box key={`${String(index)}:${commandKey(command)}`} flexDirection="column" minWidth={0}>
-            <Text wrap="wrap">
-              <Text bold>$ git {command.args.join(" ")}</Text>
-              {command.exit === undefined || command.exit === 0 ? null : (
-                <Text color="$fg-error"> exit {String(command.exit)}</Text>
-              )}
-            </Text>
-            {command.failure !== undefined ? (
-              <Text color="$fg-muted" wrap="wrap">
-                it failed before writing output: {command.failure}
-              </Text>
-            ) : output === undefined ? (
-              <Text color="$fg-muted">reading its output…</Text>
-            ) : output.text === undefined ? (
-              <Text color="$fg-muted" wrap="wrap">
-                {output.why ?? "no output was read"}
-              </Text>
-            ) : output.text === "" ? null : (
-              <Text wrap="wrap">{output.text}</Text>
-            )}
-          </Box>
-        )
-      })}
-      {(step?.parts ?? []).map((part) => (
-        <Text key={part.name} color="$fg-muted">
-          {part.name} {mediaDuration(part.ms)}
-        </Text>
-      ))}
-      {step !== undefined && step.endedAt === undefined && step.unended !== true ? (
-        <Text color="$fg-info">still writing</Text>
-      ) : null}
-    </ScrollArea>
-  )
-}
-
-/**
- * A stage tab's two lines (25441, the operator's Sep 4 sketch): the stage name,
- * then its glyph and how long it took. The status colour sits on the glyph
- * only, so the tab's name keeps silvery `Tab`'s own active and idle colour.
- * An off check reads `off` and a check that never ran `not run`, never a tick.
- */
-function StageLabel({
-  name,
-  state,
-  said = "",
-  since,
-}: {
-  name: string
-  state: CheckView["state"]
-  said?: string
-  since?: Date
-}) {
-  return (
-    <>
-      {name}
-      {"\n"}
-      <Text color={CHECK_COLOR[state]}>{CHECK_GLYPH[state]}</Text>
-      {since === undefined ? said : <RunningFor since={since} />}
-    </>
-  )
 }
 
 /** The running stage's own clock: its own leaf on the second, so the tab strip does not re-render for it. */
@@ -1132,9 +954,7 @@ function RunningSteps({ detail }: { detail: ChangeDetail }) {
                 ({elapsed})
               </Text>
             )}
-            <Text wrap="truncate">
-              {step.name}
-            </Text>
+            <Text wrap="truncate">{step.name}</Text>
           </Box>
         )
       })}

@@ -1183,11 +1183,11 @@ describe("the running step and the check-less declaration", () => {
     expect(lines.some((line) => /✓.*0:08/u.test(line))).toBe(true)
   })
 
-  it("says so when the declaration a change was judged by names no check, instead of a bare tab strip", async () => {
+  it("says when no check-step detail was recorded, instead of a bare tab strip", async () => {
     const detail = detailOf({ row: row() }, [])
     const text = await paint(at(<WatchDetail detail={detail} />))
 
-    expect(text).toContain("names no check")
+    expect(text).toContain("no check-step detail is recorded")
     expect(text).toContain("Timeline")
   })
 
@@ -1214,7 +1214,12 @@ describe("the detail's stage tab keys", () => {
       { name: "affected-tests", phase: "merge", state: "running" },
     ]
     const text = await paint(
-      at(<WatchDetail detail={detailOf({ row: row({ state: "checked", position: 1 }) }, checks)} selected="provisioning" />),
+      at(
+        <WatchDetail
+          detail={detailOf({ row: row({ state: "checked", position: 1 }) }, checks)}
+          selected="provisioning"
+        />,
+      ),
       [],
       160,
     )
@@ -4459,7 +4464,13 @@ describe("runner steps, lock guard, and detail step list (25716)", () => {
       commands: [],
     }
     const item: WatchRow = { row: runningRow }
-    const checks = checksOf([], "open", [{ name: "typecheck", run: "bun typecheck" }], { name: "typecheck" }, journal.checks)
+    const checks = checksOf(
+      [],
+      "open",
+      [{ name: "typecheck", run: "bun typecheck" }],
+      { name: "typecheck" },
+      journal.checks,
+    )
     const detail = detailOf(item, checks, { journal })
 
     const text = await paint(at(<WatchDetail detail={detail} />), [], 160)
