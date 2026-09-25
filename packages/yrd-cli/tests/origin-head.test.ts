@@ -11,7 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { gitIn } from "@yrd/queue-core"
-import { originHead } from "../src/queue-location.ts"
+import { originHead, resolveQueueLocation } from "../src/queue-location.ts"
 
 function git(cwd: string, ...args: string[]): string {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" })
@@ -50,5 +50,18 @@ describe("originHead (hh 25626)", () => {
     await expect(originHead(gitIn(clone))).resolves.toBe("main")
     renameSync(upstream, join(root, "gone"))
     await expect(originHead(gitIn(clone))).rejects.toThrow(/ls-remote/u)
+  })
+
+  it("an address without # outside any repository asks that address for its default branch (@dev/review2 P3)", async () => {
+    // A path or URL can never be a remote name, so there is no recorded HEAD to read, and outside a
+    // repository a local read cannot even run: this address resolves as it did before 25626.
+    const { root, upstream } = cloned("trunk")
+    const outside = mkdtempSync(join(tmpdir(), "yrd-origin-head-outside-"))
+    roots.push(outside)
+    const location = await resolveQueueLocation(outside, upstream, {
+      ...process.env,
+      XDG_STATE_HOME: join(root, "state"),
+    })
+    expect(location.address?.queue ?? location.queue).toBe("trunk")
   })
 })
