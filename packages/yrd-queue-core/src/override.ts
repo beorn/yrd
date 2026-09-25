@@ -63,6 +63,14 @@ export type OverrideWrite =
   | Readonly<{ kind: "off"; check: string; until: Date; reason: string; actor: OverrideActor }>
   | Readonly<{ kind: "clear"; check: string; reason: string; actor: OverrideActor }>
 
+export type OverrideDecision = Readonly<{
+  kind: "set" | "replaced" | "clear"
+  entries: readonly OverrideEntry[]
+  replaced?: OverrideEntry
+  by: string
+  reason: string
+}>
+
 /** The table a merge's atomic push must carry forward, and the tip it leases. */
 export type OverrideFence = Readonly<{ sha: string; expected: string }>
 
@@ -147,48 +155,15 @@ export async function writeOverride(
   declared: readonly string[],
 ): Promise<Readonly<{ kind: OverrideRecordKind; record: OverrideTable; replaced?: OverrideEntry }>> {
   const ref = overrideRef(queue)
-  const reason = oneLine(write.reason, "an override needs a --reason")
-  const by = oneLine(write.actor.by, "an override needs an actor")
-  if (!declared.includes(write.check)) {
-    throw new OverrideRefused(
-      `no merge check named '${write.check}' is declared; the declared merge checks are: ` +
-        (declared.length === 0 ? "(none)" : declared.join(", ")),
-    )
-  }
   let lastError: unknown
   for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
     const previous = await readOverrides(git, remote, queue)
-    const standing = previous.entries.find((entry) => entry.check === write.check)
-    const others = previous.entries.filter((entry) => entry.check !== write.check)
-    let kind: OverrideRecordKind
-    let entries: readonly OverrideEntryDraft[]
+    const decision = decideOverride(previous, write, declared, new Date(), `${remote} ${ref}`)
+    const { kind, entries, replaced: standing, by, reason } = decision
     const trailers: string[] = [`Check: ${write.check}`]
     if (write.kind === "off") {
-      kind = standing === undefined ? "set" : "replaced"
-      entries = [
-        ...others,
-        {
-          by,
-          check: write.check,
-          reason,
-          record: SELF,
-          setAt: new Date(),
-          state: "active",
-          until: write.until,
-          verified: write.actor.verified,
-        },
-      ]
       trailers.push(`Until: ${write.until.toISOString()}`)
       if (standing !== undefined) trailers.push(`Replaces: ${standing.record}`)
-    } else {
-      if (standing === undefined) {
-        throw new OverrideRefused(
-          `no override stands on '${write.check}' to clear; ${remote} ${ref} holds ` +
-            (previous.entries.length === 0 ? "no entries" : previous.entries.map((entry) => entry.check).join(", ")),
-        )
-      }
-      kind = "clear"
-      entries = others
     }
     const subject =
       write.kind === "off"
@@ -214,6 +189,54 @@ export async function writeOverride(
       String(lastError),
     { cause: lastError },
   )
+}
+
+/** One decision for both the legacy Record writer and the queue event writer. */
+export function decideOverride(
+  previous: OverrideTable,
+  write: OverrideWrite,
+  declared: readonly string[],
+  at: Date,
+  where: string,
+): OverrideDecision {
+  const reason = oneLine(write.reason, "an override needs a --reason")
+  const by = oneLine(write.actor.by, "an override needs an actor")
+  if (!declared.includes(write.check)) {
+    throw new OverrideRefused(
+      `no merge check named '${write.check}' is declared; the declared merge checks are: ` +
+        (declared.length === 0 ? "(none)" : declared.join(", ")),
+    )
+  }
+  const standing = previous.entries.find((entry) => entry.check === write.check)
+  const others = previous.entries.filter((entry) => entry.check !== write.check)
+  if (write.kind === "off") {
+    return {
+      kind: standing === undefined ? "set" : "replaced",
+      entries: [
+        ...others,
+        {
+          by,
+          check: write.check,
+          reason,
+          record: SELF,
+          setAt: at,
+          state: "active",
+          until: write.until,
+          verified: write.actor.verified,
+        },
+      ],
+      ...(standing === undefined ? {} : { replaced: standing }),
+      by,
+      reason,
+    }
+  }
+  if (standing === undefined) {
+    throw new OverrideRefused(
+      `no override stands on '${write.check}' to clear; ${where} holds ` +
+        (previous.entries.length === 0 ? "no entries" : previous.entries.map((entry) => entry.check).join(", ")),
+    )
+  }
+  return { kind: "clear", entries: others, replaced: standing, by, reason }
 }
 
 /** Whether an active entry is past halfway to its `until` and has not been reminded: the half-window reminder. */

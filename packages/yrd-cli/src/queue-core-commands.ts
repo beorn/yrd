@@ -54,9 +54,11 @@ import {
   changesRef,
   readChangeEvents,
   readEventQueue,
+  readEventOps,
   readEventQueueWithChanges,
   setBranchIgnored,
   writeQueueEvent,
+  writeQueueOverride,
   prepareWorktree,
   checkedTree,
   programRootCheck,
@@ -961,9 +963,9 @@ export async function coreQueueCommand(
       try {
         const eventStore = createEventStore(repo, config.target.remote, selection)
         if ((await queueFormat(eventStore, config.target.branch)) === "event") {
-          const now = await readEventQueue(eventStore, config.target.branch)
-          if (now.opsCutover !== undefined) {
-            const standing = eventPause(now)
+          const now = await readEventOps(eventStore, git, config.target.branch, captured.oid)
+          if (now.source === "event") {
+            const standing = now.stop
             if (request.command === "pause" && standing !== undefined) {
               throw new QueuePaused(standing, config.target.remote, config.target.branch)
             }
@@ -1018,18 +1020,13 @@ export async function coreQueueCommand(
       // Until ops-cutover, the existing Record writer remains the authority for
       // both queue formats. An event writer must not run before the cutover.
       const overrideStore = createEventStore(repo, config.target.remote, selection)
-      if (
-        (await queueFormat(overrideStore, config.target.branch)) === "event" &&
-        (await readEventQueue(overrideStore, config.target.branch)).opsCutover !== undefined
-      ) {
-        io.stderr(
-          `yrd: ${config.target.remote}#${config.target.branch} has ops-cutover; its event override writer is unavailable\n`,
-        )
-        return 1
-      }
+      const eventOps =
+        (await queueFormat(overrideStore, config.target.branch)) === "event"
+          ? await readEventOps(overrideStore, git, config.target.branch, captured.oid)
+          : undefined
       const now = Date.now()
       if (request.action === "list") {
-        const table = await readOverrides(git, config.target.remote, config.target.branch)
+        const table = eventOps?.overrides ?? (await readOverrides(git, config.target.remote, config.target.branch))
         emit(
           io,
           options.json,
@@ -1047,21 +1044,20 @@ export async function coreQueueCommand(
           .filter((spec) => (spec.on ?? ["merge"]).includes("merge"))
           .map((spec) => spec.name)
         const actor = { by: request.by, verified: request.verified }
-        const written = await writeOverride(
-          git,
-          config.target.remote,
-          config.target.branch,
+        const write =
           request.action === "off"
-            ? {
+            ? ({
                 actor,
                 check: request.check ?? "",
                 kind: "off",
                 reason: request.reason ?? "",
                 until: parseUntil(request.until ?? "", now),
-              }
-            : { actor, check: request.check ?? "", kind: "clear", reason: request.reason ?? "" },
-          declaredMerge,
-        )
+              } as const)
+            : ({ actor, check: request.check ?? "", kind: "clear", reason: request.reason ?? "" } as const)
+        const written =
+          eventOps?.source === "event"
+            ? await writeQueueOverride(overrideStore, config.target.branch, write, declaredMerge, new Date(now))
+            : await writeOverride(git, config.target.remote, config.target.branch, write, declaredMerge)
         const standing = written.record.entries.find((entry) => entry.check === request.check)
         // The page is the override's side effect, never its condition (@cto
         // ccd8dfa8): a notifier that fails is said on stderr and journaled, and

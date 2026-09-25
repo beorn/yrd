@@ -54,11 +54,13 @@ export {
   queueRef,
   readChangeEvents,
   readEventQueue,
+  readEventOps,
   readEventQueueWithChanges,
   readStatus,
   resetQueueFormatCache,
   setBranchIgnored,
   writeQueueEvent,
+  writeQueueOverride,
 } from "./events.ts"
 export type { Event } from "./git.ts"
 export type {
