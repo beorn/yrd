@@ -20,6 +20,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, readJournals, type Git, type LogRecord } from "@yrd/queue-core"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import { workdirOf } from "../src/workdir.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
@@ -77,17 +78,21 @@ async function check(w: World): Promise<Readonly<{ exit: number | undefined; out
 }
 
 describe("the queue workdir is git configuration, never a declaration key", () => {
-  it("is <git-common-dir>/yrd when the repository configures none", async () => {
+  // 25716 row 9: the workdir is the queue's root under the host state dir, never beside the repository (25848).
+  it("is the queue root under the host state dir when the repository configures none", async () => {
     const w = await world()
 
     const run = capture(w.work)
     expect(await coreQueueCommand(w.work, run.io, { command: "check", names: ["no-marker"] })).toBe(0)
 
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    expect(workdir.startsWith(join(process.env.XDG_STATE_HOME ?? "", "yrd") + "/")).toBe(true)
+    expect(existsSync(join(workdir, "checks"))).toBe(true)
     const common = (await w.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
-    expect(existsSync(join(common, "yrd", "checks"))).toBe(true)
+    expect(existsSync(join(common, "yrd"))).toBe(false)
   })
 
-  it("is `git config yrd.workdir` when the repository sets one, in whatever scope git resolves it", async () => {
+  it("is the queue root under `git config yrd.workdir` when the repository sets one, in whatever scope git resolves it", async () => {
     const w = await world()
     const elsewhere = join(w.workdir, "declared")
     await w.git(["config", "yrd.workdir", elsewhere])
@@ -95,7 +100,9 @@ describe("the queue workdir is git configuration, never a declaration key", () =
     const run = capture(w.work)
     expect(await coreQueueCommand(w.work, run.io, { command: "check", names: ["no-marker"] })).toBe(0)
 
-    expect(existsSync(join(elsewhere, "checks"))).toBe(true)
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    expect(workdir.startsWith(elsewhere + "/")).toBe(true)
+    expect(existsSync(join(workdir, "checks"))).toBe(true)
     const common = (await w.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
     expect(existsSync(join(common, "yrd"))).toBe(false)
   })

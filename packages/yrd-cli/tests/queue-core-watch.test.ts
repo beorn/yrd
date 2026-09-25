@@ -1170,17 +1170,20 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
     // An active merge step in an event run reports merging · publishing root, not provisioning
     const mergeFacts: typeof facts = {
       ...facts,
-      latest: facts.latest === undefined ? undefined : {
-        ...facts.latest,
-        alive: true,
-        activeStep: {
-          branch: "task/event-step",
-          kind: "step",
-          name: "merge",
-          phase: "merge",
-          start: new Date(snapshot.at.getTime() - 5_000),
-        },
-      },
+      latest:
+        facts.latest === undefined
+          ? undefined
+          : {
+              ...facts.latest,
+              alive: true,
+              activeStep: {
+                branch: "task/event-step",
+                kind: "step",
+                name: "merge",
+                phase: "merge",
+                start: new Date(snapshot.at.getTime() - 5_000),
+              },
+            },
     }
     const mergeLine = runnerLine(mergeFacts, snapshot.at)
     expect(mergeLine.state).toBe("merging")
@@ -1213,5 +1216,46 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
     expect(deprov.state).toBe("passed")
     expect(deprov.said).not.toContain("not journaled")
   })
-})
 
+  it("shows no stages from a previous run for a newly queued change re-submitted at the same head (25716 P4)", async () => {
+    const w = await world("test -f pass.txt")
+    await createWorldEventQueue(w)
+    await change(w, "task/resubmit-step", false)
+    await drain(w)
+
+    // Verify a journal exists from the first run
+    const journals = readJournals(join(w.workdir, "logs"))
+    expect([...journals.runs.values()][0]?.length).toBeGreaterThan(0)
+
+    // Re-submit the branch at the same head; it enters the queue anew without a run id
+    await submit(w.git, "origin", {
+      branch: "task/resubmit-step",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+
+    const run = capture(w.work)
+    await coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "list", terms: ["task/resubmit-step"], watch: true },
+      { interactive: true, workdir: w.workdir },
+    )
+
+    const snapshot = renderedSnapshot()
+    expect(snapshot).toBeDefined()
+    if (snapshot === undefined) throw new Error("watch did not render a snapshot")
+
+    const details = await renderedDetails(snapshot)
+    // Find the queued row (the new submission that has not yet run)
+    const queuedDetail = details.find((d) => d.row.branch === "task/resubmit-step" && d.row.state === "queued")
+    expect(queuedDetail).toBeDefined()
+    if (queuedDetail === undefined) throw new Error("queued detail not found")
+
+    // The queued change does not inherit the previous run's journal or passed stages
+    expect(queuedDetail.journal).toBeUndefined()
+    const prov = stageInfo(queuedDetail, "provisioning")
+    expect(prov.state).toBe("not-run")
+    expect(prov.said).toBe(" not journaled")
+  })
+})
