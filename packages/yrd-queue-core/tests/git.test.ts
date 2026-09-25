@@ -138,12 +138,15 @@ describe("the git runner", () => {
         { mode: 0o700 },
       )
       const announced = vi.spyOn(console, "error").mockImplementation(() => {})
+      // The config lookup runs only when GIT_SSH_COMMAND is unset, and every seat now exports it (25616), so the row
+      // removes it to reach the path it names.
+      const { GIT_SSH_COMMAND: _seatSsh, ...inherited } = process.env
       try {
         const git = gitIn(
           root,
           undefined,
           { executable, contract: "native", scope: "local", origin: "fixture" },
-          { env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } },
+          { env: { ...inherited, PATH: `${bin}:${process.env.PATH ?? ""}` } },
         )
         await expect(git(["ls-remote", "origin"])).rejects.toThrow("Permission denied (publickey).")
         expect(readFileSync(join(root, "calls"), "utf8").trim().split("\n")).toHaveLength(1)
