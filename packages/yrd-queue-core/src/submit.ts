@@ -30,7 +30,16 @@ import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, type Git }
 import { changeRef } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
 import { readStop, remoteUrl } from "./remote.ts"
-import { changeInput, changesRef, decide, eventPause, initial, project, queueFormat, readEventQueue } from "./events.ts"
+import {
+  changeInput,
+  changesRef,
+  decide,
+  initial,
+  project,
+  queueFormat,
+  readEventOps,
+  readEventQueue,
+} from "./events.ts"
 import { verifyCandidate, type Verification } from "./verifying.ts"
 
 export type SubmitRequest = Readonly<{
@@ -264,7 +273,7 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
   const store = createEventStore(root, remote, selectionFor(git))
   const stop =
     (await queueFormat(store, request.target.branch)) === "event"
-      ? eventPause(await readEventQueue(store, request.target.branch))
+      ? (await readEventOps(store, git, request.target.branch, targetHead)).stop
       : (await readStop(git, remote, request.target.branch, targetHead)).stop
   const scratch = mkdtempSync(join(tmpdir(), "yrd-submit-verifying-"))
   const hooksPath = join(scratch, "hooks-disabled")

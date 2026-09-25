@@ -32,6 +32,7 @@ import { reminderDue } from "../src/override.ts"
 import { CapturedQueueObjectsUnavailable } from "../src/remote.ts"
 import {
   appendRecord,
+  appendOpsCutover,
   changeName,
   changeRef,
   checkLogPath,
@@ -49,6 +50,7 @@ import {
   queueRefPrefix,
   queueRun,
   readEventQueue,
+  readEventOps,
   readConfig,
   readStatus,
   readRecords,
@@ -70,6 +72,7 @@ import {
   parseUntil,
   readOverrides,
   writeOverride,
+  writeQueueOverride,
 } from "../src/index.ts"
 import type {
   ChangeRecord,
@@ -404,6 +407,114 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(message).toContain("Issue: @i/10-yrd/1")
   expect(message).toContain("Submitter: @dev/2")
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
+})
+
+/** @failure An ops cutover could drop a standing stop or override, leave an old ref, or silently accept one later.
+ * @level l3 @consumer queue operator and merge runner
+ */
+it("moves complete operational state in one cutover publish and refuses a leftover legacy ref", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const fresh = await readEventOps(store, w.git, "main", w.target)
+  expect(fresh).toMatchObject({ source: "legacy", stop: undefined, overrides: { entries: [] } })
+  const pause = await writePause(w.git, "origin", "main", {
+    kind: "paused",
+    by: "operator",
+    reason: "maintenance",
+  })
+  const override = await writeOverride(
+    w.git,
+    "origin",
+    "main",
+    {
+      kind: "off",
+      check: "build",
+      until: new Date(Date.now() + 3_600_000),
+      actor: { by: "operator", verified: true },
+      reason: "repair",
+    },
+    ["build"],
+  )
+  const legacy = await readEventOps(store, w.git, "main", w.target)
+  expect(legacy.source).toBe("legacy")
+  expect(legacy.stop?.sha).toBe(pause.sha)
+  expect(legacy.overrides.sha).toBe(override.record.sha)
+  const cutover = await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
+  expect(cutover).toMatchObject({ pauseBefore: pause.sha, overrideBefore: override.record.sha })
+  expect((await w.git(["ls-remote", "--refs", "origin", PAUSE_REF, overrideRef("main")])).trim()).toBe("")
+  const switched = await readEventOps(store, w.git, "main", w.target)
+  expect(switched.source).toBe("event")
+  expect(switched.stop?.sha).toBe(pause.sha)
+  expect(switched.overrides.entries[0]?.record).toBe(override.record.entries[0]?.record)
+  await writePause(w.git, "origin", "main", { kind: "paused", by: "rival", reason: "stale client" })
+  await expect(readEventOps(store, w.git, "main", w.target)).rejects.toThrow(/ops cutover incomplete/)
+})
+
+/** @failure A post-cutover merge could move main while its queue ops lease remained a client-only no-op.
+ * @level l3 @consumer merge runner and queue operator
+ */
+it("publishes a named merge-fenced queue event with the target and merged change", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const cutover = await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
+  const head = await submitCommit(w, "task/ops-fence", "fenced.txt")
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/ops-fence"] })
+  const change = await readStatus(store, "main", "task/ops-fence")
+  const queue = await readEventQueue(store, "main")
+  expect(queue.tip).not.toBe(cutover.queueAfter)
+  expect(queue.ops).toEqual({ overrides: [] })
+  const events = await (await openEvents({ ...store, ref: queueRef("main") })).events()
+  const fence = events.at(-1)
+  expect(fence?.type).toBe("merge-fenced")
+  expect(fence?.props).toEqual(
+    expect.arrayContaining([
+      ["For", change.ending?.id],
+      ["Branch", "task/ops-fence"],
+      ["Commit", change.candidate],
+    ]),
+  )
+  expect(change.commit).toBe(head)
+})
+
+/** @failure An event merge ran a check whose active override held it off, or ignored the later clear.
+ * @level l3 @consumer queue operator and merge runner
+ */
+it("applies an event override to merge checks and runs the check after clear", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
+  await submitCommit(w, "task/override-off", "off.txt")
+  await writeQueueOverride(
+    store,
+    "main",
+    {
+      kind: "off",
+      check: "verify",
+      until: new Date(Date.now() + 3_600_000),
+      reason: "repair",
+      actor: { by: "operator", verified: true },
+    },
+    ["verify"],
+    new Date(),
+  )
+  const off = await queueRun(await w.options({ exit: 0, on: ["merge"] }))
+  expect(off).toMatchObject({ exitCode: 0, merged: ["task/override-off"] })
+  expect(existsSync(w.checkLog) ? readFileSync(w.checkLog, "utf8").trim() : "").toBe("")
+  await writeQueueOverride(
+    store,
+    "main",
+    { kind: "clear", check: "verify", reason: "fixed", actor: { by: "operator", verified: true } },
+    ["verify"],
+    new Date(),
+  )
+  await submitCommit(w, "task/override-on", "on.txt")
+  const on = await queueRun(await w.options({ exit: 0, on: ["merge"] }))
+  expect(on).toMatchObject({ exitCode: 0, merged: ["task/override-on"] })
+  expect(readFileSync(w.checkLog, "utf8")).toContain("check cwd=")
 })
 
 /**
@@ -745,6 +856,7 @@ it("stops an event queue at a stuck change", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
+  await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
   await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "earlier repair", at: new Date() })
@@ -776,6 +888,7 @@ it("retries a stuck event change after an operator resumes the queue", async () 
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
+  await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
   await submitCommit(w, "task/stuck-first", "one.txt")
   await submitCommit(w, "task/behind", "two.txt")
   const first = await readStatus(store, "main", "task/stuck-first")
@@ -1805,13 +1918,14 @@ it("discards a resubmitted event check once and continues with the next change",
   expect(logRecords(outcome).filter((row) => row.kind === "discarded" && row.branch === "task/a")).toHaveLength(1)
 })
 
-/** @failure A pause published during composition was replaced by a fresh queue-tip read, so merge crossed the stop.
+/** @failure A pause published during composition killed the service on a normal queue-tip lease race.
  * @level l3 @consumer queue operator
  */
-it("leases the queue tip observed before an event merge", async () => {
+it("re-reads a pause that wins the event merge lease and keeps the service round healthy", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
+  await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
   await submitCommit(w, "task/paused-event", "one.txt")
   const verify = verifying.verifyCandidate
   let entered!: () => void
@@ -1834,10 +1948,91 @@ it("leases the queue tip observed before an event merge", async () => {
   await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "hold", at: new Date() })
   release()
 
-  await expect(running).rejects.toThrow()
+  const outcome = await running
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [], stopped: { ring: "pause" } })
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "warning",
+        subject: "queue-lease-lost",
+        expected: expect.any(String),
+        actual: expect.any(String),
+      }),
+    ]),
+  )
   expect(await remoteTarget(w)).toBe(w.target)
   expect((await readStatus(store, "main", "task/paused-event")).status).not.toBe("merged")
 })
+
+/** @failure A resume or override event on the queue ref was treated as a fatal merge lease loss.
+ * @level l3 @consumer queue operator and service
+ */
+it.each(["resume", "override"] as const)(
+  "defers a merge after a concurrent %s and retries with fresh ops",
+  async (kind) => {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createWorldEventQueue(w)
+    await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
+    await submitCommit(w, `task/${kind}-event`, "one.txt")
+    const verify = verifying.verifyCandidate
+    let entered!: () => void
+    const composing = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    let release!: () => void
+    const continueRun = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    using _held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
+      const outcome = await verify(options)
+      entered()
+      await continueRun
+      return outcome
+    })
+
+    const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+    await composing
+    if (kind === "resume") {
+      await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "brief hold", at: new Date() })
+      await writeQueueEvent(store, "main", { type: "resumed", by: "operator", reason: "release", at: new Date() })
+    } else {
+      await writeQueueOverride(
+        store,
+        "main",
+        {
+          kind: "off",
+          check: "lab-gate",
+          until: new Date(Date.now() + 60_000),
+          reason: "operator changed merge gate",
+          actor: { by: "operator", verified: false },
+        },
+        ["lab-gate"],
+        new Date(),
+      )
+    }
+    release()
+
+    const outcome = await running
+    expect(outcome).toMatchObject({ exitCode: 0, merged: [], deferred: [`task/${kind}-event`] })
+    expect(logRecords(outcome)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "warning",
+          subject: "queue-lease-lost",
+          expected: expect.any(String),
+          actual: expect.any(String),
+        }),
+      ]),
+    )
+    expect(await remoteTarget(w)).toBe(w.target)
+    expect((await readStatus(store, "main", `task/${kind}-event`)).status).not.toBe("merged")
+    if (kind === "resume") {
+      const retry = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+      expect(retry).toMatchObject({ exitCode: 0, merged: ["task/resume-event"] })
+    }
+  },
+)
 
 /** @failure A drop during composition threw from the stale event write and abandoned the next change.
  * @level l3 @consumer queue operator and submitter
