@@ -1313,6 +1313,11 @@ describe("a queue is the selected origin branch carrying config", () => {
     const store = createEventStore(repo, "origin", git.selection)
     await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
     await appendOpsCutover(store, git, "main", head, new Date(), "@chief")
+    const legacyRefs = async () =>
+      (await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause", "refs/yrd/main/override"])).trim()
+    // The cutover leaves its maintenance pause fence on the legacy ref (b5d9e94fe5, 25041); what this row pins is that
+    // pause and override after the cutover write events and never move a legacy ref.
+    const legacyAtCutover = await legacyRefs()
     const paused = capture(repo)
     expect(
       await runYrdProcess(
@@ -1354,16 +1359,12 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).toBe(0)
     expect(JSON.parse(listed.stdout())).toMatchObject({ overrides: [{ check: "verify", state: "active" }] })
     expect((await readEventQueue(store, "main")).ops?.pause?.reason).toBe("repair")
-    expect((await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause", "refs/yrd/main/override"])).trim()).toBe(
-      "",
-    )
+    expect(await legacyRefs()).toBe(legacyAtCutover)
     const resumed = capture(repo)
     expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main"], resumed.io)).toBe(0)
     expect(resumed.stdout()).toContain("yrd service is stopped (no health document); run hab up yrd")
     expect((await readEventQueue(store, "main")).ops?.pause).toBeUndefined()
-    expect((await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause", "refs/yrd/main/override"])).trim()).toBe(
-      "",
-    )
+    expect(await legacyRefs()).toBe(legacyAtCutover)
   })
 
   /** @failure Event-format intake ignores an ops maintenance pause after the cutover.
