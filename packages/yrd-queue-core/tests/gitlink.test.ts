@@ -649,8 +649,10 @@ it("refuses cancellation after the marker before child publication", async () =>
   expect(await remoteTip(w.git, "refs/heads/main")).not.toBe(rootBefore)
   expect(await submoduleMain(w)).toBe(ahead)
   expect((await readStatus(eventStore(w), "main", "task/event-rival")).status).toBe("merged")
+  // Since 35b3d713fa a drop of an ended change keeps its ending and deletes only the branch name (25658 P3).
   await drop(eventStore(w), { queue: "main", branch: "task/event-rival", by: "@dev/2" })
-  expect((await readStatus(eventStore(w), "main", "task/event-rival")).reason).toBe("dropped")
+  expect((await readStatus(eventStore(w), "main", "task/event-rival")).status).toBe("merged")
+  await expect(remoteTip(w.git, "refs/heads/task/event-rival")).rejects.toThrow(/is absent/u)
 })
 
 /** @failure Marker read-back can become stale before Git-super starts its child write.
