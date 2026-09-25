@@ -104,6 +104,21 @@ async function addMaterializedDependency(w: World): Promise<void> {
 }
 
 describe("yrd env open prepares the retained environment", () => {
+  // A bead nested under another opens task/<parent>/<leaf> beside task/<parent>, and git stores a branch as a path,
+  // so the raw refusal named neither cause nor way out (@dev/fixer, 25850 beside 25843, 2026-09-25).
+  it("refuses a branch beneath an existing branch and names --bay", async () => {
+    const w = await world(":")
+    await w.git(["branch", "task/parent"])
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "parent/child"], run.io)).not.toBe(0)
+
+    expect(run.stderr()).toContain("task/parent/child")
+    expect(run.stderr()).toContain("task/parent")
+    expect(run.stderr()).toContain("--bay <name> --issue parent/child")
+    expect(existsSync(join(w.work, ".bays", "parent/child"))).toBe(false)
+  })
+
   it("runs the target's declared setup after materialization", async () => {
     const w = await world("test -f vendor/dependency/READY && printf '%s\\n' \"$YRD_REPO\" > setup-ready.txt")
     await addMaterializedDependency(w)
