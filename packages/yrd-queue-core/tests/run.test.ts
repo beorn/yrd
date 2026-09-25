@@ -1952,6 +1952,30 @@ it("keeps the direct merge commit when an observed submitted head landed by no-f
   expect((await queueRun(options)).directMerges).toEqual([])
 })
 
+/** @failure A merged notice used the last failed candidate rather than the later observed merge.
+ * @level l3 @consumer submitter and queue operator
+ */
+it("names an observed merge after a failed candidate in its notice", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/observed-after-failure", "one.txt")
+  const failed = await queueRun({ ...(await w.options({ exit: 1 })), notify: [] })
+  expect(failed.failed).toEqual(["task/observed-after-failure"])
+  const candidate = (await readStatus(store, "main", "task/observed-after-failure")).candidate
+  expect(candidate).toMatch(/^[0-9a-f]{40}$/u)
+
+  await w.git(["checkout", "--quiet", "main"])
+  await w.git(["merge", "--quiet", "--no-ff", "-m", "merge after failed queue check", "task/observed-after-failure"])
+  const merge = (await w.git(["rev-parse", "HEAD"])).trim()
+  expect(merge).not.toBe(candidate)
+  await w.git(["push", "--quiet", "origin", "main"])
+
+  const observed = await queueRun({ ...(await w.options({ exit: 0 })), checks: [] })
+  expect(observed.merged).toEqual(["task/observed-after-failure"])
+  expect(messages(w).filter((message) => message.record === "merged")).toEqual([expect.objectContaining({ merge })])
+})
+
 /** One commit on the target, pushed around the queue: the thing only the queue may do. */
 async function pushAroundQueue(w: World, file: string): Promise<string> {
   await w.git(["checkout", "--quiet", "main"])

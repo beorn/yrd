@@ -231,7 +231,7 @@ export async function eventQueueRun(
     branch: string,
     kind: "merged" | "failed" | "stuck" | "deferred" | "cancelled",
     eventId: string,
-    existingEnding?: Pick<Event, "id" | "props">,
+    existingEnding?: Event,
   ): Promise<void> => {
     if ((options.notify?.length ?? 0) === 0) return
     const change = await readStatus(store, queue, branch)
@@ -241,19 +241,30 @@ export async function eventQueueRun(
     if (change.lastNotifiable?.id !== eventId || change.lastNotifiable.kind !== kind) {
       throw new Error(`event queue ${url}#${queue}: ${branch} notice lost its ${kind} event ${eventId}`)
     }
+    let tip = change.tip
+    if (tip === undefined) throw new Error(`event queue ${url}#${queue}: ${branch} notice has no chain tip`)
+    const ending =
+      existingEnding ??
+      (kind === "merged"
+        ? (await readChangeEvents(store, queue, branch, tip)).find((event) => event.id === eventId)
+        : { id: eventId, props: [] })
+    if (ending === undefined) {
+      throw new Error(`event queue ${url}#${queue}: ${branch} notice has no ${kind} event ${eventId}`)
+    }
+    const merge = kind === "merged" ? ending.props.find(([key]) => key === "Commit")?.[1] : undefined
+    if (kind === "merged" && merge === undefined) {
+      throw new Error(`event queue ${url}#${queue}: ${branch} merged event ${eventId} has no kept Commit`)
+    }
     const head = change.commit
     const text = messageFor(kind, {
       branch,
       head,
       subject: change.reason ?? kind,
-      ...(kind === "merged" ? { merge: change.candidate ?? "" } : {}),
+      ...(kind === "merged" ? { merge } : {}),
       ...(kind === "deferred" ? { projectedMs: change.deferred?.projectedMs, boundMs: change.deferred?.boundMs } : {}),
     })
-    let tip = change.tip
-    if (tip === undefined) throw new Error(`event queue ${url}#${queue}: ${branch} notice has no chain tip`)
-    // Endings written by this round cannot carry migration provenance. The
-    // existing-ending pass supplies the actual event so old delivery is settled.
-    const ending = existingEnding ?? { id: eventId, props: [] }
+    // Non-merged endings written by this round cannot carry migration provenance.
+    // Existing endings and merged notices use the actual event.
     for (const entry of options.notify ?? []) {
       if (!entry.on.includes(kind)) continue
       if (!eventNoticeOwed(ending, change.notices, entry.name)) continue
@@ -268,7 +279,7 @@ export async function eventQueueRun(
           ...(change.issue === undefined ? {} : { issue: change.issue }),
           ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
           ...(kind === "merged"
-            ? { merge: change.candidate ?? "" }
+            ? { merge }
             : { reason: kind === "cancelled" ? "branch absent from remote" : (change.reason ?? kind), log: log.path }),
           ...(kind === "deferred"
             ? { projectedMs: change.deferred?.projectedMs, boundMs: change.deferred?.boundMs }
