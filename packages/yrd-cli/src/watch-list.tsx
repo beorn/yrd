@@ -372,8 +372,8 @@ export function TopLine({
   const runnerDigitsLen = showRunnerDigits
     ? (queues ?? []).map(() => 3).reduce((a, b) => a + b, 0) + ((queues?.length ?? 0) - 1) + 1
     : 0
-  // Left side prefix: marker (1) + gap (1) + runner digits + YRD (3) + gap (1) + status word + gap (1)
-  const leftPrefixLen = 1 + 1 + runnerDigitsLen + 3 + 1 + status.word.length + 1
+  // Left side prefix: marker (1) + gap (1) + runner digits + YRD (3) + gap (1) + status word + gap (1) + separator before right group (1)
+  const leftPrefixLen = 1 + 1 + runnerDigitsLen + 3 + 1 + status.word.length + 1 + 1
   const availableForAddress =
     columns !== undefined ? Math.max(0, columns - leftPrefixLen - statusRightLen - 2) : undefined
   const displayAddress =
