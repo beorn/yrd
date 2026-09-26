@@ -1077,6 +1077,11 @@ export async function appendOpsCutover(
   if (prior.source !== "legacy") {
     throw new Error(`${queueRef(queue)}: ops-cutover already exists at ${prior.queue.opsCutover}`)
   }
+  if (prior.queue.release !== undefined) {
+    throw new Error(
+      `${queueRef(queue)}: unfinished stuck release at ${prior.queue.release.id}; complete it before ops-cutover`,
+    )
+  }
   const refs = await listRefs(queueRefPrefix(queue), store)
   const pauseBefore = refs.get(pauseRef(queue))
   const overrideBefore = refs.get(overrideRef(queue))
@@ -1504,6 +1509,9 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
         break
       case "ops-cutover":
         if (opsCutover !== undefined) throw new Error(`${ref}: event ${event.id} declares a second ops cutover`)
+        if (release !== undefined) {
+          throw new Error(`${ref}: event ${event.id} cuts over during unfinished stuck release ${release.id}`)
+        }
         ops = readOpsEvent(event, ref)
         opsCutover = event.id
         break

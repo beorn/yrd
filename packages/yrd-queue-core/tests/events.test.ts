@@ -1157,6 +1157,21 @@ describe("the queue-format boundary", () => {
     expect(await queueResumedAfter(location, "lab", branch, history)).toBe(true)
   })
 
+  it("refuses ops cutover while a stuck release is unfinished", async () => {
+    const { store, location } = remoteMemStore("yrd-unfinished-release-cutover")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date())
+    await writeQueueEvent(location, "lab", {
+      type: "paused",
+      by: "@chief",
+      reason: stuckReleaseReason(A, "repair"),
+      at: new Date(),
+    })
+    await seedOpsCutover(location, "lab")
+    await expect(readEventQueue(location, "lab")).rejects.toThrow(/cuts over during unfinished stuck release/)
+  })
+
   it("starts a migrated queue paused on its created event and can resume normally", async () => {
     const { store, location } = remoteMemStore("yrd-event-start-paused")
     const target = await open({ ...store, ref: "refs/heads/lab" })
