@@ -20,12 +20,12 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 /**
- * The caller's environment with every network transport refused, so "offline" is proved rather than assumed: a seat's
+ * The caller's environment with every Git transport refused, so "offline" is proved rather than assumed: a seat's
  * GIT_SSH_COMMAND or a url.insteadOf rewrite could otherwise let a remote read reach GitHub and pass (@dev/review2 on
  * bea4683cef). yrd's gitEnvironment keeps both variables; only its routing variables are dropped.
  */
 function offlineEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  return { ...process.env, GIT_ALLOW_PROTOCOL: "file", GIT_SSH_COMMAND: "false", ...extra }
+  return { ...process.env, GIT_ALLOW_PROTOCOL: "none", GIT_SSH_COMMAND: "false", ...extra }
 }
 
 const roots: string[] = []
