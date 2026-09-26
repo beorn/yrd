@@ -142,6 +142,7 @@ import {
   type Worktree,
   judgedTreeDigest,
 } from "./worktree.ts"
+import { deleteCandidateRefsForShas } from "./candidate-refs.ts"
 
 export type QueueRunOptions = Readonly<{
   /** The declaration resolved once by the command/service entry. */
@@ -2824,6 +2825,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
 async function deleteMergedBranch(run: Run, entry: QueueEntry): Promise<void> {
   const { branch, head } = entry.change
   const ref = `refs/heads/${branch}`
+  const candidateShas = [head]
   try {
     const store = await legacyStore(run.git)
     await store.backend.publish(store.repo, [{ ref, expect: head, oid: null }], run.options.target.remote)
@@ -2845,10 +2847,12 @@ async function deleteMergedBranch(run: Run, entry: QueueEntry): Promise<void> {
             : `moved to ${saw.slice(0, 12)}`
     run.log.write({ branch, head, kind: "branch-kept", saw, ...(saw === "absent" ? {} : { error: message }) })
     run.branches.push(`kept ${branch} (merged at ${head.slice(0, 12)}): ${why}`)
+    await deleteCandidateRefsForShas(run.git, run.options.repo, run.options.target.remote, candidateShas)
     return
   }
   run.log.write({ branch, head, kind: "branch-deleted" })
   run.branches.push(`deleted ${branch} at ${head.slice(0, 12)}, merged`)
+  await deleteCandidateRefsForShas(run.git, run.options.repo, run.options.target.remote, candidateShas)
 }
 
 /**
@@ -3260,6 +3264,10 @@ async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended:
   // No record, no message: the message's id IS that record's sha, and the next
   // run's reading of the remote is what repairs the ending (24096).
   if (record !== undefined) await run.steps.ended(run, entry, kind, record, record)
+  if (kind === "failed") {
+    const candidateShas = [entry.change.head]
+    await deleteCandidateRefsForShas(run.git, run.options.repo, run.options.target.remote, candidateShas)
+  }
   return kind
 }
 

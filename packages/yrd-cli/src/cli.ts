@@ -223,6 +223,48 @@ function buildProgram(
     )
   }
 
+  type SweepCandidatesOptions = Readonly<{
+    json?: boolean
+    dryRun?: boolean
+    remote?: string
+    batchSize?: number
+    queue?: string
+  }>
+  const SWEEP_CANDIDATES_DESCRIPTION =
+    "sweep stranded candidate refs (refs/heads/yrd/candidates/* and refs/yrd/candidates/*) using leased push deletes"
+  const sweepCandidatesOptions = (command: CliCommand): CliCommand =>
+    command
+      .option("--dry-run", "list candidate refs without deleting")
+      .option("--remote <name>", "git remote to sweep (defaults to target remote)")
+      .option("--batch-size <count>", "number of refs to delete in each leased push batch (default: 50)", int)
+      .option("--queue <value>", QUEUE_HELP)
+      .option("--json", "emit stable JSON")
+
+  const queueSweepCandidates = async (options: SweepCandidatesOptions): Promise<void> => {
+    const location = await resolveQueueLocation(cwd(), options.queue, env)
+    setExit(
+      await coreQueueCommand(
+        location.repo,
+        io,
+        {
+          command: "sweep-candidates",
+          dryRun: options.dryRun,
+          remote: options.remote,
+          batchSize: options.batchSize,
+        },
+        {
+          json: options.json,
+          env,
+          log: log(),
+          selection: location.selection,
+          populateReference: location.owned,
+          queue: location.queue,
+          workdir: location.workdir,
+        },
+      ),
+    )
+  }
+
   const queueIgnore = async (branch: string, options: PauseOptions, ignored: boolean): Promise<void> => {
     let action: Parameters<typeof coreQueueCommand>[2]
     if (ignored) {
@@ -476,6 +518,9 @@ function buildProgram(
   withdrawOptions(queue.command("withdraw <branch>").description(WITHDRAW_DESCRIPTION))
     .addHelpSection("On withdraw:", WITHDRAW_HELP)
     .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "withdraw"))
+  sweepCandidatesOptions(queue.command("sweep-candidates").description(SWEEP_CANDIDATES_DESCRIPTION)).action(
+    async (options) => queueSweepCandidates(options as SweepCandidatesOptions),
+  )
   queue
     .command("resume")
     .description(
@@ -901,6 +946,12 @@ function buildProgram(
   )
     .addHelpSection("On withdraw:", WITHDRAW_HELP)
     .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "withdraw"))
+
+  sweepCandidatesOptions(
+    program
+      .command("sweep-candidates")
+      .description(`${SWEEP_CANDIDATES_DESCRIPTION} (the same as ${name} queue sweep-candidates)`),
+  ).action(async (options) => queueSweepCandidates(options as SweepCandidatesOptions))
 
   program
     .command("drop <branch>")

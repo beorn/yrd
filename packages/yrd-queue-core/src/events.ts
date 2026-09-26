@@ -23,6 +23,7 @@ import {
 } from "./override.ts"
 import { readStop } from "./remote.ts"
 import { legacyPauseCommit } from "./legacy-records.ts"
+import { deleteCandidateRefsForShas } from "./candidate-refs.ts"
 
 export const CHANGE_STATUSES = [
   "draft",
@@ -2077,6 +2078,7 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
       ],
       store.remote,
     )
+    await deleteCandidateRefsForShas(gitIn(store.repo), store.repo, store.remote, [head])
     return { queue, branch, event: state.ending.id, head }
   }
   const at = new Date()
@@ -2100,6 +2102,7 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   })
   const written = result.events.findLast((event) => event.type === "cancelled")?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: dropped event was not written`)
+  await deleteCandidateRefsForShas(gitIn(store.repo), store.repo, store.remote, [head])
   return { queue, branch, event: written, head }
 }
 

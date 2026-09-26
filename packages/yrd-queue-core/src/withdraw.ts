@@ -30,6 +30,7 @@ import {
   type WriteRecord,
 } from "./legacy-records.ts"
 import { parseChangeRef, queueRefPrefix, type Change } from "./refs.ts"
+import { deleteCandidateRefsForShas } from "./candidate-refs.ts"
 
 export type WithdrawRequest = Readonly<{
   /** The branch whose change leaves the line. */
@@ -158,6 +159,7 @@ async function withdrawOne(
     const record = await recordCommit(git, write, onto)
     try {
       await store.backend.publish(store.repo, [{ ref, expect: onto, oid: record }], remote)
+      await deleteCandidateRefsForShas(git, store.repo, remote, [change.head])
       return { record }
     } catch (error) {
       // The remote moved between the read and the push: take the winner's tip

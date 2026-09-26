@@ -273,3 +273,20 @@ export type {
   RefreshDeclaredOptions,
   RefreshMirrorOptions,
 } from "./mirror.ts"
+
+export {
+  CANDIDATE_REF_NAMESPACE,
+  SOURCE_CANDIDATE_REF_NAMESPACE,
+  candidateRefFor,
+  candidateRefsFor,
+  deleteCandidateRefsForShas,
+  isCandidateRef,
+  sourceCandidateRefFor,
+  sweepCandidateRefs,
+} from "./candidate-refs.ts"
+export type {
+  CandidateRefDiscovered,
+  CandidateRefSweepResult,
+  DeleteCandidateRefResult,
+  SweepCandidateRefsOptions,
+} from "./candidate-refs.ts"

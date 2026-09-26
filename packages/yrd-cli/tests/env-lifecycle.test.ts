@@ -483,6 +483,9 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     await command(borrower, ["git", "commit", "-m", "update dependency pin in borrower"])
 
     const closeBorrower = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "close", borrower, "--json"], closeBorrower.io), closeBorrower.stderr()).toBe(0)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", borrower, "--json"], closeBorrower.io),
+      closeBorrower.stderr(),
+    ).toBe(0)
   })
 })

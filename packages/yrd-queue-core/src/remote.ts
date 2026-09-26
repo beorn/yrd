@@ -108,8 +108,9 @@ export async function repairMissingBranchHeads(
     if (listed.has(ref) || checked.has(ref)) continue
     checked.add(ref)
     checkedAt ??= now()
-    if (!Number.isFinite(checkedAt))
-      {throw new Error(`${remote} ${ref}: branch deletion confirmation clock is not finite`)}
+    if (!Number.isFinite(checkedAt)) {
+      throw new Error(`${remote} ${ref}: branch deletion confirmation clock is not finite`)
+    }
     const started = Date.now()
     let answer: BranchOmission["answer"]
     let error: string | undefined

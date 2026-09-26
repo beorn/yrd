@@ -98,6 +98,7 @@ import {
   submit,
   withdraw,
   NothingToWithdraw,
+  sweepCandidateRefs,
   liftLine,
   pauseStop,
   STOPPED_BY,
@@ -316,6 +317,12 @@ export type CoreQueueCommand =
   | Readonly<{ command: "unignore"; branch: string; by: string }>
   | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
   | Readonly<{
+      command: "sweep-candidates"
+      remote?: string
+      dryRun?: boolean
+      batchSize?: number
+    }>
+  | Readonly<{
       command: "merge"
       branch: string
       submitter: string
@@ -445,6 +452,7 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   submit: "submit",
   unignore: "unignore",
   resume: "queue resume",
+  "sweep-candidates": "queue sweep-candidates",
   up: "queue up",
   withdraw: "queue withdraw",
 }
@@ -1308,6 +1316,58 @@ export async function coreQueueCommand(
         }
         throw error
       }
+    }
+    case "sweep-candidates": {
+      const remote = request.remote ?? config.target.remote
+      const activeShas = new Set<string>()
+      try {
+        const eventStore = createEventStore(repo, remote, selection)
+        if ((await queueFormat(eventStore, config.target.branch)) === "event") {
+          const events = await readEventQueueWithChanges(eventStore, config.target.branch)
+          for (const [_, history] of events.histories) {
+            if (
+              history.state.status !== "merged" &&
+              history.state.status !== "failed" &&
+              history.state.status !== "cancelled" &&
+              history.state.commit !== undefined
+            ) {
+              activeShas.add(history.state.commit)
+            }
+          }
+        } else {
+          const read = await readQueue(git, remote, config.target.branch, captured.oid)
+          for (const entry of read.changes) {
+            if (
+              entry.reading.state !== "merged" &&
+              entry.reading.state !== "failed" &&
+              entry.reading.state !== "withdrawn"
+            ) {
+              activeShas.add(entry.change.head)
+            }
+          }
+        }
+      } catch (error) {
+        // silent-fallback-allow: active queue inspection is advisory during candidate sweep; failure leaves activeShas empty
+        io.stderr(
+          `yrd: notice: could not inspect active queue changes: ${error instanceof Error ? error.message : String(error)}\n`,
+        )
+      }
+      const result = await sweepCandidateRefs(git, {
+        repo,
+        remote,
+        dryRun: request.dryRun,
+        batchSize: request.batchSize,
+        activeShas,
+      })
+      emit(
+        io,
+        options.json,
+        result,
+        request.dryRun
+          ? `scanned ${result.scanned} candidate refs (${result.live} active, ${result.reclaimable} reclaimable; dry run)`
+          : `scanned ${result.scanned} candidate refs: deleted ${result.deleted.length} (${result.live} active, ${result.failed.length} failed)`,
+      )
+      return result.failed.length > 0 ? 1 : 0
     }
     case "submit": {
       if (

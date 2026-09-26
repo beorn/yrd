@@ -132,7 +132,7 @@ export async function refreshMirror(options: RefreshMirrorOptions): Promise<Mirr
   })
   const before = mirrorRefreshedAt(path)
   if (options.maxAgeMs !== undefined && before !== undefined && asked.getTime() - before.getTime() < options.maxAgeMs) {
-    return  result("fresh", before)
+    return result("fresh", before)
   }
   using _lock = await lockMirror(options.url, path, options.lockWaitMs ?? MIRROR_LOCK_WAIT_MS)
   const meanwhile = mirrorRefreshedAt(path)
