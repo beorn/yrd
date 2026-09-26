@@ -185,18 +185,41 @@ export async function eventQueueRun(
     selectedTip: string,
     current: EventChange,
     error: unknown,
-  ): Promise<void> => {
+  ): Promise<EventChange> => {
     if (current.tip === selectedTip) throw error
     if (current.tip === undefined) {
       throw new Error(`event queue ${url}#${queue}: publication-unknown for ${branch}: current chain has no tip`, {
         cause: error,
       })
     }
-    const history = await readChangeEvents(store, queue, branch, current.tip)
+    let latest = current
+    let history: readonly Event[]
+    try {
+      history = await readChangeEvents(store, queue, branch, current.tip)
+    } catch (readError) {
+      const ref = changesRef(queue, branch)
+      if (!(readError instanceof Conflict) || readError.refs.length !== 1 || readError.refs[0] !== ref) {
+        throw readError
+      }
+      // A rival may advance again between our status and its selected history.
+      // Re-read once inside this round; a second move is still a loud error.
+      latest = await readStatus(store, queue, branch)
+      if (latest.tip === undefined || latest.tip === current.tip) throw readError
+      log.write({
+        kind: "warning",
+        subject: "change-ref-moved-during-history-read",
+        branch,
+        ref,
+        expected: current.tip,
+        actual: latest.tip,
+        reason: readError.message,
+      })
+      history = await readChangeEvents(store, queue, branch, latest.tip)
+    }
     const at = history.findIndex((event) => event.id === selectedTip)
     const successor = at < 0 ? undefined : history[at + 1]?.id
     if (successor !== undefined && owned.has(successor)) throw error
-    if (successor !== undefined && error instanceof Conflict) return
+    if (successor !== undefined && error instanceof Conflict) return latest
     throw new Error(
       `event queue ${url}#${queue}: publication-unknown for ${branch} after ${selectedTip}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
@@ -564,7 +587,7 @@ export async function eventQueueRun(
           `event queue ${url}#${queue}: ${branch} observed-merge decision failed and its current chain could not be read`,
         )
       }
-      await rivalOrThrow(branch, selectedTip, current, error)
+      current = await rivalOrThrow(branch, selectedTip, current, error)
       changes.set(branch, current)
       log.write({
         kind: "discarded",
@@ -635,7 +658,7 @@ export async function eventQueueRun(
           `event queue ${url}#${queue}: ${branch} deletion decision failed and its current chain could not be read`,
         )
       }
-      await rivalOrThrow(branch, tip, current, error)
+      current = await rivalOrThrow(branch, tip, current, error)
       log.write({
         kind: "discarded",
         branch,
@@ -757,8 +780,8 @@ export async function eventQueueRun(
       )
     } catch (error) {
       const after = await readStatus(store, queue, branch)
-      await rivalOrThrow(branch, marker, after, error)
-      log.write({ kind: "discarded", branch, head, reason: discardedJudgementReason(after, error) })
+      const rival = await rivalOrThrow(branch, marker, after, error)
+      log.write({ kind: "discarded", branch, head, reason: discardedJudgementReason(rival, error) })
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
     }
     if (child.state === "refused") {
@@ -1522,7 +1545,7 @@ export async function eventQueueRun(
           `event queue ${url}#${queue}: ${branch} decision failed and its current chain could not be read`,
         )
       }
-      await rivalOrThrow(branch, tip, current, error)
+      current = await rivalOrThrow(branch, tip, current, error)
       changes.set(branch, current)
       log.write({
         kind: "discarded",

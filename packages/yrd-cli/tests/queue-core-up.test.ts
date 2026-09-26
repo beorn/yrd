@@ -48,8 +48,10 @@ import {
   readRecords,
   readRemoteCommit,
   readRunLog,
+  readStatus,
   ROUND_LOCK,
   runId,
+  setBranchIgnored,
   submit,
   trailer,
   watchRows,
@@ -2839,6 +2841,77 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     expect(exit).toBe(2)
     expect(run.stdout()).toContain("hooks-disabled")
   })
+
+  /** @failure 25946: a second change-ref write between the rival status and its selected history read
+   * escaped as an unexpected round error and ended the supervised service with exit 2.
+   * @level l2 @consumer Hab's yrd service
+   */
+  it("keeps up alive when a rival advances the change after its status read", async () => {
+    const w = await world()
+    const commit = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    await createEventQueue(
+      createEventStore(w.work, "origin", gitIn(w.work).selection),
+      "main",
+      commit,
+      config,
+      new Date(),
+    )
+    const branch = "task/rival-after-status"
+    await oneChange(w, branch)
+    const ref = changesRef("main", branch)
+    const rivalStore = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const originalBackend = gitomic.createShellBackend
+    let firstWrite = false
+    let secondWrite = false
+    let ignoredTip: string | undefined
+    using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+      const backend = originalBackend(options)
+      const publish = backend.publish
+      const readHistory = backend.readHistory
+      if (publish === undefined || readHistory === undefined) {
+        throw new Error("fixture needs Gitomic history and publish")
+      }
+      return {
+        ...backend,
+        publish: async (repo, updates, remote) => {
+          if (!firstWrite && remote === "origin" && updates.some((update) => update.ref === ref)) {
+            firstWrite = true
+            await setBranchIgnored(rivalStore, { queue: "main", branch, by: "@chief", ignored: true, reason: "rival" })
+            ignoredTip = (await readStatus(rivalStore, "main", branch)).tip
+          }
+          return publish(repo, updates, remote)
+        },
+        readHistory: async (repo, tips, options) => {
+          const history = await readHistory(repo, tips, options)
+          if (!secondWrite && ignoredTip !== undefined && tips.length === 1 && tips[0] === ignoredTip) {
+            // The selected status still describes ignoredTip; the rival moves it before the next read.
+            secondWrite = true
+            await setBranchIgnored(rivalStore, { queue: "main", branch, by: "@chief", ignored: false })
+          }
+          return history
+        },
+      }
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+      { json: true, workdir: w.workdir },
+    )
+    expect(firstWrite).toBe(true)
+    expect(secondWrite).toBe(true)
+    expect((await readStatus(rivalStore, "main", branch)).ignored).toBeUndefined()
+    expect(exit, `${run.stderr()}\n${run.stdout()}`).toBe(0)
+    expect(records(run)).toHaveLength(1)
+    expect(records(run)[0]).toMatchObject({ exitCode: 0, merged: [], stuck: [] })
+    expect(readRunLog(join(w.workdir, "logs"), String(records(run)[0]?.run))).toContainEqual(
+      expect.objectContaining({ kind: "warning", subject: "change-ref-moved-during-history-read", branch, ref }),
+    )
+  }, 60_000)
 
   // 25669 row 2: an event round held open is named on each beat with the phase
   // its own journal says it is in, so `yrd queue health` says where it is.
