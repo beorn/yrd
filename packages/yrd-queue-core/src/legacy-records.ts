@@ -266,9 +266,16 @@ export async function recordCommit(git: Git, write: WriteRecord, parent: string 
   const carried =
     parent === undefined ? [["Opened", new Date().toISOString()] as const] : await carriedFrom(git, parent)
   const named = new Set((write.trailers ?? []).map(([name]) => name))
+  const ending =
+    write.kind === "merged" || write.kind === "failed" || write.kind === "stuck" || write.kind === RECORD_KIND_DEFERRED
+  if (ending && named.has("Ended-At")) throw new Error(`${write.kind} record must not supply its own Ended-At`)
   const message = recordMessage({
     ...write,
-    trailers: [...carried.filter(([name]) => !named.has(name)), ...(write.trailers ?? [])],
+    trailers: [
+      ...carried.filter(([name]) => !named.has(name)),
+      ...(ending ? [["Ended-At", new Date().toISOString()] as const] : []),
+      ...(write.trailers ?? []),
+    ],
   })
   const args = ["commit-tree", EMPTY_TREE]
   for (const on of parents) args.push("-p", on)

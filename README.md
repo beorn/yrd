@@ -186,7 +186,7 @@ The submitter and the queue share only the selected remote. The submitter pushes
 4. **Decide whose fault a failure is.** A command failure normally fails the change. If the queue raised a gitlink while preparing the candidate, it also runs that phase's checks on the queue branch with those exact raises but without the candidate's own content. A passing base attributes the failure to the change; a failing or unjudgeable base leaves the change stuck. Crashes, missing scripts, timeouts, exit 2 and unreachable submodule remotes also make it stuck. Stuck stops the line: the run ends at that change, judges and merges nothing behind it, exits 2, and pauses the queue naming the change, so the line stops until the change is withdrawn with `yrd queue withdraw` or merged. `yrd merge` lands a repair past it and then judges the stuck change once more. A stuck the remote caused, a setup that could not fetch or a submodule remote that did not answer, is taken once more inside the run before it is written, and its record then carries `Retried: 1`.
 5. **Notify.** Every ending runs the `notify` entries whose `on:` lists it, with the record as one JSON object on stdin.
 
-   `record` names the ending (merged, failed, stuck or merged-direct). The object also carries `change`, `submitter`, and `issue` when given.
+   `record` names the ending (merged, failed, stuck or merged-direct). `endingId` identifies this particular ending: its event ID in the event queue, or its ending record OID in the legacy queue. `endedAt` is that ending's ISO time with a zone, taken from the event's `Time` or the legacy ending record's millisecond `Ended-At` trailer. Legacy records written before that trailer retain their Git commit time. The object also carries `change`, `submitter`, and `issue` when given.
 
    A failed record adds `reason`, `log`, and the branch's `failures` count; a merged record adds `merge`. Notify commands choose recipients and compose delivery text.
 
@@ -204,7 +204,7 @@ The submitter and the queue share only the selected remote. The submitter pushes
 
    The next round finds no receipt and runs the command again. Every `notify:` command must accept a repeat for the same change and ending.
 
-   The supplied `tools/yrd-notify.ts` uses a stable message ID from the change, ending, and message part, so Tribe returns the first delivery instead of opening a second ball.
+   The supplied `tools/yrd-notify.ts` uses a stable message ID from the change, ending, `endingId`, and message part, so Tribe returns the first delivery instead of opening a second ball. During migration, a record without `endingId` retains the legacy message ID; an upgraded retry reuses a previously delivered legacy ID only when its daemon timestamp is at or after `endedAt`.
 
 **Child observations.** When the machine selects Git Super with the `root-v1` contract, every run and list/watch reading asks that same executable for a current child observation. Idle and paused queues still observe. Native Git reports that child observation is not configured, in `--json`; the list and the watch draw nothing for it, nor for a clean reading with no notice, and draw a failed reading loudly. A changed reading or unavailable transport clears the notices and defers candidate work; an invalid observation ends the command with exit 2.
 
