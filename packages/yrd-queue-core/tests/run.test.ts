@@ -1716,7 +1716,9 @@ it("ends a failed configured event check and continues with the next change", as
   expect((await readStatus(store, "main", "task/b")).status).toBe("merged")
 })
 
-/** @failure 25708: a confirmed change-ref CAS refusal killed the service's round and hid the next change. */
+/** @failure 25708/25736: a confirmed change-ref CAS refusal killed the service's round, or a
+ * staged merge retried blindly instead of leaving its judgement for the next round.
+ */
 it("records a typed merge-publication refusal and judges the next event change", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
@@ -1726,15 +1728,19 @@ it("records a typed merge-publication refusal and judges the next event change",
   const branches = ["task/cas-first", "task/cas-next"] as const
   let refusedBranch: (typeof branches)[number] | undefined
   let refusedRef: string | undefined
+  let refusedPublishes = 0
   using _publish = beforeGitomicPublish(async (_repo, updates) => {
-    if (refusedRef !== undefined || !updates.some((update) => update.ref === "refs/heads/main")) return
+    if (!updates.some((update) => update.ref === "refs/heads/main")) return
     const branch = branches.find((name) => updates.some((update) => update.ref === changesRef("main", name)))
     if (branch === undefined) return
+    if (branch === refusedBranch) refusedPublishes++
+    if (refusedRef !== undefined) return
     const ref = changesRef("main", branch)
     const marker = updates.find((update) => update.ref === ref)?.expect
     if (marker === undefined) return
     refusedBranch = branch
     refusedRef = ref
+    refusedPublishes++
     // A rival moved the target beside the change ref: after @cto a8b9146d a
     // chain-only refusal is retried inside transact, and a lost `also` lease
     // is what reaches the cas-refused path on the first attempt.
@@ -1744,6 +1750,7 @@ it("records a typed merge-publication refusal and judges the next event change",
   })
   const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
   if (refusedBranch === undefined || refusedRef === undefined) throw new Error("fixture did not reach publication")
+  expect(refusedPublishes).toBe(1)
   const next = branches.find((name) => name !== refusedBranch)
   if (next === undefined) throw new Error("fixture has no next change")
   expect(outcome).toMatchObject({ exitCode: 0, merged: [next] })
@@ -2345,6 +2352,48 @@ it("observes a direct-only commit once on the queue chain", async () => {
     ]),
   })
 })
+
+/** @failure 25736: an exhausted queue-event CAS retry ended the supervised round as an unknown error.
+ * @level l2 @consumer Hab's yrd service
+ */
+it("bounds the queue observation retry and leaves it for the next round", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const direct = await pushAroundQueue(w, "direct-retry.txt")
+  const ref = queueRef("main")
+  let refusals = 0
+  using publication = beforeGitomicPublish(async (_repo, updates, remote) => {
+    if (remote !== "origin" || !updates.some((update) => update.ref === ref)) return
+    refusals++
+    // A definite chain-only refusal with no rival progress exhausts Gitomic's elapsed budget.
+    throw new gitomic.Conflict(`lease lost on ${ref}`, { refs: [ref] })
+  })
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [], retryBudgetMs: 1 }
+
+  await expect(queueRun(options)).rejects.toMatchObject({
+    name: "QueueRunEventRetryExhausted",
+    site: "observed",
+    budgetMs: 1,
+    cause: { name: "RetriesExhausted", budgetMs: 1 },
+  })
+  expect(refusals).toBeGreaterThan(0)
+  expect((await readEventQueue(store, "main")).observed[direct]).toBeUndefined()
+  const journal = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
+  if (journal === undefined) throw new Error("exhausted round left no journal")
+  const rows = readFileSync(join(w.workdir, "logs", journal), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+  expect(rows).toContainEqual(
+    expect.objectContaining({ kind: "warning", subject: "cas-refused", site: "observed", ref, budgetMs: 1 }),
+  )
+
+  publication.mockRestore()
+  const next = await queueRun({ ...options, retryBudgetMs: 5_000 })
+  expect(next.directMerges).toEqual([direct])
+  expect((await readEventQueue(store, "main")).observed[direct]?.id).toMatch(/^[0-9a-f]{40}$/u)
+}, 60_000)
 
 /** @failure A direct notice was kept only in the local journal and sent again after a restart.
  * @level l3 @consumer merge queue notification recipient

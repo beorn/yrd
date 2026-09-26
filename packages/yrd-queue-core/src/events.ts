@@ -874,7 +874,14 @@ export function decide(events: readonly Event[], input: EventInput): readonly Ev
   return [input]
 }
 
-export type QueueLocation = Readonly<{ repo: string; remote: string; selection: GitSelection; backend: GitomicBackend }>
+export type QueueLocation = Readonly<{
+  repo: string
+  remote: string
+  selection: GitSelection
+  backend: GitomicBackend
+  /** Passed through to Gitomic's event-chain retry loop; a run chooses its own default. */
+  retryBudgetMs?: number
+}>
 export type DropRequest = Readonly<{ queue: string; branch: string; by: string; note?: string }>
 export type Dropped = Readonly<{ queue: string; branch: string; head: string; event: string }>
 export type SetBranchIgnoredRequest = Readonly<

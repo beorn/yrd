@@ -578,19 +578,19 @@ export function recordsMatching(dir: string, matches: (record: LogRecord) => boo
   return found
 }
 
-/** Count this marker's latest refused publications, stopping at its successful merge or three refusals. */
+/** Read this marker's consecutive refused publications, capped at three, and retain the first journal time. */
 function recentPublicationWarnings(
   dir: string,
   ref: string,
   marker: string,
   openedAt: Date,
   subject: "cas-refused" | "publication-not-landed",
-): number {
+): Readonly<{ count: number; firstAt?: string }> {
   let names: readonly string[]
   try {
     names = readdirSync(dir)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { count: 0 }
     throw error
   }
   const firstRun = `q-${openedAt.toISOString().replace(/[-:.]/gu, "")}`
@@ -601,34 +601,45 @@ function recentPublicationWarnings(
     .sort()
     .reverse()
   let count = 0
+  let firstAt: string | undefined
   for (const id of ids) {
     for (const record of [...readRunLog(dir, id)].reverse()) {
       if (record.ref !== ref || record.marker !== marker) continue
-      if (record.kind === "merge") return count
+      if (record.kind === "merge") return { count, firstAt }
       if (
         record.kind === "warning" &&
         (record.subject === "cas-refused" || record.subject === "publication-not-landed") &&
         record.subject !== subject
       ) {
-        return count
+        return { count, firstAt }
       }
       if (record.kind === "warning" && record.subject === subject) {
-        count++
-        if (count >= 3) return count
+        count = Math.min(3, count + 1)
+        firstAt = record.at
       }
     }
   }
-  return count
+  return { count, firstAt }
 }
 
 /** Count a marker's typed CAS refusals across run journals. */
 export function recentCasRefusals(dir: string, ref: string, marker: string, openedAt: Date): number {
+  return recentPublicationWarnings(dir, ref, marker, openedAt, "cas-refused").count
+}
+
+/** The existing CAS streak, including its earliest journaled refusal. */
+export function recentCasRefusalStreak(
+  dir: string,
+  ref: string,
+  marker: string,
+  openedAt: Date,
+): Readonly<{ count: number; firstAt?: string }> {
   return recentPublicationWarnings(dir, ref, marker, openedAt, "cas-refused")
 }
 
 /** Count a marker's consecutive transport outcomes that definitely did not land. */
 export function recentPublicationNotLanded(dir: string, ref: string, marker: string, openedAt: Date): number {
-  return recentPublicationWarnings(dir, ref, marker, openedAt, "publication-not-landed")
+  return recentPublicationWarnings(dir, ref, marker, openedAt, "publication-not-landed").count
 }
 
 export type ReadJournalsOptions = Readonly<{

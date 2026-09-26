@@ -71,6 +71,7 @@ import {
   resolveGitSelection,
   queueRun,
   QueueAuthorityUnreadable,
+  QueueRunEventRetryExhausted,
   readConfig,
   readJournals,
   readHistories,
@@ -576,13 +577,14 @@ export async function coreQueueCommand(
    * already said so.
    */
   type ReadFailedRound = Readonly<{ kind: "read-failed"; ref: string; error: QueueAuthorityUnreadable }>
+  type RetryExhaustedRound = Readonly<{ kind: "retry-exhausted"; error: QueueRunEventRetryExhausted }>
   const oneRound = async (
     declared: CapturedDeclaration,
     only?: Change,
     tier?: "normal" | "long",
     stopAtMs?: number,
     noCheck?: boolean,
-  ): Promise<QueueRunOutcome | ReadFailedRound | undefined> => {
+  ): Promise<QueueRunOutcome | ReadFailedRound | RetryExhaustedRound | undefined> => {
     let outcome: QueueRunOutcome
     try {
       const event =
@@ -610,6 +612,10 @@ export async function coreQueueCommand(
         ...(noCheck === undefined ? {} : { noCheck }),
       })
     } catch (error) {
+      if (error instanceof QueueRunEventRetryExhausted && request.command === "up") {
+        io.stderr(`yrd: ${error.message}; the service retries at its next interval\n`)
+        return { kind: "retry-exhausted", error }
+      }
       if (error instanceof QueueAuthorityUnreadable && error.publicationError !== undefined) {
         io.stderr(
           `yrd: round failed reading ${error.authority}: ${error.readError instanceof Error ? error.readError.message : String(error.readError)}; publication failed: ${error.publicationError instanceof Error ? error.publicationError.message : String(error.publicationError)}; the service retries at its next interval\n`,
@@ -702,7 +708,10 @@ export async function coreQueueCommand(
       }>
     }> = {},
   ): Promise<
-    Readonly<{ declared: CapturedDeclaration; outcome: QueueRunOutcome }> | ReadFailedRound | YrdCliExitCode
+    | Readonly<{ declared: CapturedDeclaration; outcome: QueueRunOutcome }>
+    | ReadFailedRound
+    | RetryExhaustedRound
+    | YrdCliExitCode
   > => {
     // Read through a call each time: the signal flips while the lock is waited for.
     const stopped = (): boolean => round.stop?.aborted === true
@@ -2023,6 +2032,19 @@ export async function coreQueueCommand(
           })
           if (typeof ran === "number") return ran
           if ("kind" in ran) {
+            if (ran.kind === "retry-exhausted") {
+              readFailure = undefined
+              openedAt = undefined
+              flow = flowAfterRetryExhaustion(flow, ran.error, new Date())
+              const document = writeHealth(lineDocument(lastStop, interval))
+              await request.afterHealth?.(document)
+              if (stopped()) return 0
+              await delay(interval, undefined, { signal: request.stop }).catch((error) => {
+                if (!stopped()) throw error
+              })
+              if (stopped()) return 0
+              continue
+            }
             const message =
               ran.error.readError instanceof Error ? ran.error.readError.message : String(ran.error.readError)
             readFailure = {
@@ -3326,9 +3348,35 @@ export function flowAfterRound(
     ...(lastJudgedAt === undefined ? {} : { lastJudgedAt }),
     ...(outcome.line?.casRefused !== undefined
       ? { casRefused: outcome.line.casRefused }
-      : previous?.casRefused !== undefined && !outcome.merged.includes(previous.casRefused.branch)
+      : previous?.casRefused !== undefined &&
+          previous.casRefused.site === undefined &&
+          !outcome.merged.includes(previous.casRefused.branch)
         ? { casRefused: previous.casRefused }
         : {}),
+  }
+}
+
+/** A pre-line event transaction failed; preserve only facts the service actually read. */
+export function flowAfterRetryExhaustion(
+  previous: LineFlow | undefined,
+  error: QueueRunEventRetryExhausted,
+  now: Date,
+): LineFlow {
+  const same = previous?.casRefused?.ref === error.ref && previous.casRefused.marker === error.marker
+  return {
+    ...(previous?.waiting === undefined ? {} : { waiting: previous.waiting }),
+    ...(previous?.oldestWaiting === undefined ? {} : { oldestWaiting: previous.oldestWaiting }),
+    ...(previous?.lastJudgedAt === undefined ? {} : { lastJudgedAt: previous.lastJudgedAt }),
+    lastRoundEndedAt: now.toISOString(),
+    casRefused: {
+      branch: error.site,
+      ref: error.ref,
+      marker: error.marker,
+      count: error.count,
+      site: error.site,
+      budgetMs: error.budgetMs,
+      firstAt: same ? (previous.casRefused.firstAt ?? error.firstAt) : error.firstAt,
+    },
   }
 }
 

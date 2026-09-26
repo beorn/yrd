@@ -254,7 +254,7 @@ export function roundHealthDocument(
  */
 export type LineFlow = Readonly<{
   /** Changes in line: submitted and not yet ended. */
-  waiting: number
+  waiting?: number
   /** The longest-waiting of them, by when its change opened. */
   oldestWaiting?: Readonly<{ branch: string; openedAt: string }>
   /** When the queue last JUDGED a change: merged, failed or recorded stuck. */
@@ -266,7 +266,15 @@ export type LineFlow = Readonly<{
    * in, as its own journal last named them, or why the journal could not say.
    */
   roundOpen?: Readonly<{ startedAt: string; branch?: string; phase?: string; phaseUnread?: string }>
-  casRefused?: Readonly<{ branch: string; ref: string; marker: string; count: number }>
+  casRefused?: Readonly<{
+    branch: string
+    ref: string
+    marker: string
+    count: number
+    site?: string
+    budgetMs?: number
+    firstAt?: string
+  }>
 }>
 
 /** The declared stall threshold and whether the declaration named it or the default applies. */
@@ -300,10 +308,14 @@ export const STALLED_LINE_CODE = "queue-line-stalled"
  */
 export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date): LineStall | undefined {
   if (flow.casRefused !== undefined && flow.casRefused.count >= 3) {
+    const refusal = flow.casRefused
+    const first = refusal.firstAt === undefined ? 0 : Math.max(0, now.getTime() - Date.parse(refusal.firstAt))
+    const detail = refusal.site === undefined ? "" : ` at ${refusal.site} (${String(refusal.budgetMs)}ms budget)`
+    const unread = flow.waiting === undefined ? "; line not read this round" : ""
     return {
-      forMs: 0,
+      forMs: first,
       shape: "cas-refused",
-      cause: `publication CAS refused ${String(flow.casRefused.count)} consecutive times for ${flow.casRefused.ref} at ${flow.casRefused.marker}; the queue remains alive and will retry`,
+      cause: `publication CAS refused ${String(refusal.count)} consecutive times${detail} for ${refusal.ref} at ${refusal.marker}${unread}; the queue remains alive and will retry`,
     }
   }
   const forMs = unjudgedFor(flow, now)
@@ -345,7 +357,7 @@ export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date):
  * Undefined when nothing waits, because idle is not waiting on anything.
  */
 function unjudgedFor(flow: LineFlow, now: Date): number | undefined {
-  if (flow.waiting <= 0 || flow.oldestWaiting === undefined) return undefined
+  if (flow.waiting === undefined || flow.waiting <= 0 || flow.oldestWaiting === undefined) return undefined
   const opened = Date.parse(flow.oldestWaiting.openedAt)
   const judged = flow.lastJudgedAt === undefined ? Number.NEGATIVE_INFINITY : Date.parse(flow.lastJudgedAt)
   return now.getTime() - Math.max(opened, judged)

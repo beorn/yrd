@@ -185,6 +185,8 @@ export type QueueRunOptions = Readonly<{
   tier?: "normal" | "long"
   /** Stop starting new checks after this epoch timestamp in ms (Condition 5). */
   stopAtMs?: number
+  /** No-progress event-chain CAS budget. Defaults to 5,000ms in a queue run instead of Gitomic's 30,000ms: five seconds without a landed writer is a retryable round, not a healthy burst. */
+  retryBudgetMs?: number
   /** Service round interval plus 60 seconds; defaults to 75 seconds for one-shot runs. */
   branchDeletionGraceMs?: number
   /** Injected clock for testing stop windows; defaults to Date.now. */

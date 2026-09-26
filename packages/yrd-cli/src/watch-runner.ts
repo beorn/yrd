@@ -144,12 +144,12 @@ export type RunnerService =
  * loop is the one home for the stall clock, and this is its last statement.
  */
 export type RunnerFlow = Readonly<{
-  waiting: number
-  unjudgedForMs: number
-  slow: boolean
+  waiting?: number
+  unjudgedForMs?: number
+  slow?: boolean
   stallAfterMs: number
   stalledForMs?: number
-  casRefused?: Readonly<{ ref: string; count: number }>
+  casRefused?: Readonly<{ ref: string; count: number; site?: string; budgetMs?: number; firstAt?: string }>
 }>
 
 export type RunnerFacts = Readonly<{
@@ -172,17 +172,31 @@ function runnerFlow(document: QueueHealthDocument): RunnerFlow | undefined {
   const { waiting, unjudgedForMs, slow, stallAfterMs, stalledForMs, casRefused } = flow as Readonly<
     Record<string, unknown>
   >
-  if (typeof waiting !== "number" || typeof unjudgedForMs !== "number" || typeof slow !== "boolean") return undefined
+  if (waiting !== undefined && typeof waiting !== "number") return undefined
+  if (unjudgedForMs !== undefined && typeof unjudgedForMs !== "number") return undefined
+  if (slow !== undefined && typeof slow !== "boolean") return undefined
+  if (typeof waiting === "number" && (typeof unjudgedForMs !== "number" || typeof slow !== "boolean")) {
+    return undefined
+  }
   if (typeof stallAfterMs !== "number") return undefined
   const refusal = casRefused as Readonly<Record<string, unknown>> | undefined
+  if (waiting === undefined && (typeof refusal?.ref !== "string" || typeof refusal.count !== "number")) return undefined
   return {
-    slow,
     stallAfterMs,
-    unjudgedForMs,
-    waiting,
+    ...(typeof slow === "boolean" ? { slow } : {}),
+    ...(typeof unjudgedForMs === "number" ? { unjudgedForMs } : {}),
+    ...(typeof waiting === "number" ? { waiting } : {}),
     ...(typeof stalledForMs === "number" ? { stalledForMs } : {}),
     ...(refusal !== undefined && typeof refusal.ref === "string" && typeof refusal.count === "number"
-      ? { casRefused: { ref: refusal.ref, count: refusal.count } }
+      ? {
+          casRefused: {
+            ref: refusal.ref,
+            count: refusal.count,
+            ...(typeof refusal.site === "string" ? { site: refusal.site } : {}),
+            ...(typeof refusal.budgetMs === "number" ? { budgetMs: refusal.budgetMs } : {}),
+            ...(typeof refusal.firstAt === "string" ? { firstAt: refusal.firstAt } : {}),
+          },
+        }
       : {}),
   }
 }
@@ -839,12 +853,18 @@ function flowNote(service: RunnerService | undefined): string | undefined {
   if (service.flow === undefined) return undefined
   const { slow, stallAfterMs, stalledForMs, unjudgedForMs, waiting } = service.flow
   if (service.flow.casRefused !== undefined) {
-    return `CAS refused ${String(service.flow.casRefused.count)} consecutive times for ${service.flow.casRefused.ref}; queue alive, retrying`
+    const refusal = service.flow.casRefused
+    const site =
+      refusal.site === undefined
+        ? ""
+        : ` at ${refusal.site}${refusal.budgetMs === undefined ? "" : ` (${String(refusal.budgetMs)}ms budget)`}`
+    const unread = waiting === undefined ? "; line not read this round" : ""
+    return `CAS refused ${String(refusal.count)} consecutive times${site} for ${refusal.ref}${unread}; queue alive, retrying`
   }
   if (stalledForMs !== undefined) {
     return `stalled ${mediaDuration(stalledForMs)}: no change judged while ${String(waiting)} waited (threshold ${mediaDuration(stallAfterMs)})`
   }
-  if (!slow) return undefined
+  if (!slow || unjudgedForMs === undefined) return undefined
   return `no change judged for ${mediaDuration(unjudgedForMs)} while ${String(waiting)} waited`
 }
 

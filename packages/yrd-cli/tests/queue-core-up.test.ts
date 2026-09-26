@@ -35,6 +35,7 @@ import { afterAll, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as gitomic from "gitomic"
 import {
+  appendOpsCutover,
   appendRecord,
   changeRef,
   createEventQueue,
@@ -42,6 +43,7 @@ import {
   changesRef,
   gitIn,
   parseQueueHealthDocument,
+  queueRef,
   QUEUE_HEALTH_DOCUMENT,
   readConfig,
   readPause,
@@ -55,6 +57,7 @@ import {
   submit,
   trailer,
   watchRows,
+  writeQueueOverride,
   type ChangeRecord,
   type Git,
   type QueueHealthDocument,
@@ -2826,6 +2829,90 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
         readFileSync(join(w.workdir, "logs", name), "utf8").includes('"subject":"round-read-failed"'),
       ),
     ).toBe(true)
+  }, 60_000)
+
+  /** @failure 25736: the first three event-chain retry exhaustions killed up before it read the line.
+   * @level l2 @consumer Hab health probe and queue watch
+   */
+  it("keeps up alive and pages repeated event retry exhaustion before its first line reading", async () => {
+    const w = await world()
+    const commit = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createEventQueue(store, "main", commit, config, new Date())
+    await appendOpsCutover(store, w.git, "main", commit, new Date(), "@chief")
+    const earlier = new Date(Date.now() - 3_600_000)
+    await writeQueueOverride(
+      store,
+      "main",
+      {
+        kind: "off",
+        check: "verify",
+        until: new Date(Date.now() - 1_000),
+        reason: "expired fixture",
+        actor: { by: "operator", verified: true },
+      },
+      ["verify"],
+      earlier,
+    )
+    const ref = queueRef("main")
+    const originalBackend = gitomic.createShellBackend
+    let refused = 0
+    let hold = true
+    using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+      const backend = originalBackend(options)
+      const publish = backend.publish
+      if (publish === undefined) throw new Error("fixture needs Gitomic publish")
+      return {
+        ...backend,
+        publish: async (repo, updates, remote) => {
+          if (hold && updates.some((update) => update.ref === ref)) {
+            refused++
+            throw new gitomic.Conflict(`injected unchanged-tip refusal for ${ref}`, { refs: [ref] })
+          }
+          return publish(repo, updates, remote)
+        },
+      }
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    const seen: QueueHealthDocument[] = []
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        afterHealth: async (document) => {
+          seen.push(document)
+          if (seen.length === 3) {
+            expect((await readRunnerFacts(w.workdir)).service).toMatchObject({
+              kind: "beating",
+              flow: { casRefused: { ref, site: "expire-overrides", count: 3, budgetMs: 5_000 } },
+            })
+            hold = false
+          }
+        },
+        afterRound: () => stop.abort(),
+      },
+      { json: true, workdir: w.workdir },
+    )
+    expect(exit, run.stderr()).toBe(0)
+    expect(refused).toBeGreaterThanOrEqual(3)
+    expect(seen).toHaveLength(4)
+    expect(seen.map((document) => document.state)).toEqual(["healthy", "healthy", "unhealthy", "healthy"])
+    expect(seen[2]?.error?.code).toBe("queue-line-stalled")
+    expect(seen[2]?.error?.cause).toContain("line not read this round")
+    const firstRefusal = (seen[0]?.facts?.flow as { casRefused?: { firstAt?: string } } | undefined)?.casRefused
+    const thirdRefusal = (seen[2]?.facts?.flow as { casRefused?: { firstAt?: string } } | undefined)?.casRefused
+    expect(firstRefusal?.firstAt).toBeDefined()
+    expect(thirdRefusal?.firstAt).toBe(firstRefusal?.firstAt)
+    expect(seen[2]?.facts?.flow).not.toHaveProperty("waiting")
+    expect(seen[3]?.facts?.flow).toHaveProperty("waiting")
+    expect(seen[3]?.facts?.flow).not.toHaveProperty("casRefused")
+    expect(run.stderr()).toContain("the service retries at its next interval")
   }, 60_000)
 
   /** @failure 25708: the read-failed retry must not turn unrelated runner faults into an endless healthy loop.

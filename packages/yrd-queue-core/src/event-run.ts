@@ -1,6 +1,7 @@
 /** Run a change from the event projection, leasing its merge with the queue. */
 import { mkdirSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { RetriesExhausted } from "gitomic"
 import { Conflict } from "./git.ts"
 
 import {
@@ -27,7 +28,7 @@ import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
 import { queueName } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
-import { recentCasRefusals, recentPublicationNotLanded, type QueueRunLog } from "./log.ts"
+import { recentCasRefusalStreak, recentCasRefusals, recentPublicationNotLanded, type QueueRunLog } from "./log.ts"
 import {
   programRootCheck,
   recordProgramResult,
@@ -64,6 +65,25 @@ import { repairMissingBranchHeads } from "./remote.ts"
 import { expireOverrides, isActive, overrideFence } from "./override.ts"
 import { pauseFence, QueuePaused } from "./pause.ts"
 import { overrideRef, pauseRef } from "./refs.ts"
+
+const DEFAULT_QUEUE_RUN_RETRY_BUDGET_MS = 5_000
+
+/** A definite no-progress event-chain refusal at one of the run's own transaction sites. */
+export class QueueRunEventRetryExhausted extends Error {
+  override readonly name = "QueueRunEventRetryExhausted"
+
+  constructor(
+    readonly site: "notified" | "expire-overrides" | "observed",
+    readonly ref: string,
+    readonly marker: string,
+    readonly count: number,
+    readonly budgetMs: number,
+    readonly firstAt: string,
+    cause: RetriesExhausted,
+  ) {
+    super(`${site}: ${ref} at ${marker} did not land within ${budgetMs}ms (${count} consecutive rounds)`, { cause })
+  }
+}
 
 function discardedJudgementReason(current: EventChange, error: unknown): string {
   const failed = error instanceof Error ? error.message : String(error)
@@ -162,13 +182,38 @@ export async function eventQueueRun(
   }>,
 ): Promise<QueueRunOutcome> {
   assertPlainEventQueueRun(options, options)
-  const store = createEventStore(
-    options.repo,
-    options.target.remote,
-    options.selection ?? selectionFor(prepared.selected),
-  )
+  const store = {
+    ...createEventStore(options.repo, options.target.remote, options.selection ?? selectionFor(prepared.selected)),
+    retryBudgetMs: options.retryBudgetMs ?? DEFAULT_QUEUE_RUN_RETRY_BUDGET_MS,
+  }
   const queue = options.target.branch
   const { git, gitOptions, hooksPath, log, selected, url } = prepared
+  const runTransaction = async <T>(
+    site: QueueRunEventRetryExhausted["site"],
+    marker: string,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await operation()
+    } catch (error) {
+      if (!(error instanceof RetriesExhausted)) throw error
+      const ref = queueRef(queue)
+      const count = recentCasRefusals(dirname(log.path), ref, marker, new Date(0)) + 1
+      log.write({
+        kind: "warning",
+        subject: "cas-refused",
+        site,
+        ref,
+        marker,
+        count,
+        budgetMs: error.budgetMs,
+        reason: `${site}: ${ref} at ${marker} made no progress within its ${error.budgetMs}ms CAS retry budget; the next service interval retries`,
+      })
+      const firstAt = recentCasRefusalStreak(dirname(log.path), ref, marker, new Date(0)).firstAt
+      if (firstAt === undefined) throw new Error(`journaled CAS refusal for ${ref} at ${marker} was not readable`)
+      throw new QueueRunEventRetryExhausted(site, ref, marker, count, error.budgetMs, firstAt, error)
+    }
+  }
   const owned = new Set<string>()
   const appendOwnedChange = async (...args: Parameters<typeof appendChangeEvent>): Promise<string> => {
     const oid = await appendChangeEvent(...args)
@@ -378,18 +423,20 @@ export async function eventQueueRun(
         { record: "merged-direct", change: commit },
         { about: queue, branch: queue, head: commit, id: eventId, text: `direct merge ${commit} observed on ${queue}` },
       )
-      await writeQueueEvent(store, queue, {
-        type: "notified",
-        by: "yrd-run",
-        at: new Date(),
-        notice: {
-          for: eventId,
-          to: entry.name,
-          key,
-          result: final.result,
-          ...(final.reason === undefined ? {} : { reason: final.reason }),
-        },
-      })
+      await runTransaction("notified", state.tip, () =>
+        writeQueueEvent(store, queue, {
+          type: "notified",
+          by: "yrd-run",
+          at: new Date(),
+          notice: {
+            for: eventId,
+            to: entry.name,
+            key,
+            result: final.result,
+            ...(final.reason === undefined ? {} : { reason: final.reason }),
+          },
+        }),
+      )
     }
   }
   if (observation.contract === "root-v1" && observation.outcome !== "observed") {
@@ -404,7 +451,9 @@ export async function eventQueueRun(
       ? { expired: [], reminded: [] }
       : operational.source === "legacy"
         ? await expireOverrides(git, options.target.remote, queue, options.now?.() ?? Date.now(), "yrd")
-        : await expireQueueOverrides(store, queue, options.now?.() ?? Date.now(), "yrd")
+        : await runTransaction("expire-overrides", operational.queue.tip, () =>
+            expireQueueOverrides(store, queue, options.now?.() ?? Date.now(), "yrd"),
+          )
   for (const [action, entries] of [
     ["expired", clock.expired],
     ["reminder", clock.reminded],
@@ -500,14 +549,18 @@ export async function eventQueueRun(
     new Set(Object.keys(queueState.observed)),
   )
   directMerges = direct.map((commit) => commit.commit)
+  let directMarker = queueState.tip
   for (const commit of direct) {
-    const observed = await writeQueueEvent(store, queue, {
-      type: "observed",
-      commit: commit.commit,
-      ...(commit.branch === undefined ? {} : { branch: commit.branch }),
-      by: "yrd-run",
-      at: new Date(),
-    })
+    const observed = await runTransaction("observed", directMarker, () =>
+      writeQueueEvent(store, queue, {
+        type: "observed",
+        commit: commit.commit,
+        ...(commit.branch === undefined ? {} : { branch: commit.branch }),
+        by: "yrd-run",
+        at: new Date(),
+      }),
+    )
+    directMarker = observed
     log.write({
       kind: "merged-direct",
       branch: queue,
