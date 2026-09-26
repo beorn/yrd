@@ -448,7 +448,9 @@ const ref = changeRef("main", change)
 const oid = (await git(["rev-parse", "--verify", ref + "^{commit}"])).trim()
 const tip = (await readRecords(git, oid)).at(-1)
 if (!tip || tip.kind !== "merged") throw new Error("notifier ran before the merge record landed")
-await appendRecord(git, "main", { change, kind: "merged", subject: "another observer recorded the merge", trailers: tip.trailers })
+// Like any writer, the rival leaves Ended-At to recordCommit, which refuses an ending that brings its own (25995).
+const trailers = tip.trailers.filter(([name]) => name !== "Ended-At")
+await appendRecord(git, "main", { change, kind: "merged", subject: "another observer recorded the merge", trailers })
 `,
     )
     await redeclare(w, `notify:\n  - rival:\n      on: [merged]\n      run: ${JSON.stringify(`bun '${rival}'`)}\n`)
