@@ -1,11 +1,14 @@
 import { spawnSync } from "node:child_process"
 import { resolve } from "node:path"
+import { cleanGitEnvironment } from "@yrd/process"
 
 const submoduleRoot = resolve(import.meta.dirname, "..")
 const rootCommand =
   'cd "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" && bun run typecheck'
+// yrd's one scrubber: a leaked GIT_DIR (a git hook's) must not answer for another repository (hh 26003).
 const topology = spawnSync("git", ["-C", submoduleRoot, "rev-parse", "--show-superproject-working-tree"], {
   encoding: "utf8",
+  env: cleanGitEnvironment(process.env),
 })
 const superprojectRoot = topology.status === 0 ? topology.stdout.trim() : ""
 

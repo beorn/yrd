@@ -21,6 +21,7 @@ import { isAbsolute } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createShellBackend, type GitomicBackend } from "gitomic"
+import { GIT_REPOSITORY_LOCAL_ENV_VARS } from "removely"
 export { chainsUnder, listRefs, openEvents } from "gitomic/events"
 export type { AlsoRef, Event, EventInput } from "gitomic/events"
 export type { CommitMeta, GitomicBackend, Oid } from "gitomic"
@@ -683,18 +684,14 @@ class GitProtocol {
 }
 
 /**
- * The variables git honours ahead of `cwd` when choosing a repository. A
- * `git yrd` subcommand inherits them from git itself; a caller's shell may
- * carry them by accident. Everything else passes: a user's `GIT_SSH_COMMAND`,
- * a test's `GIT_CONFIG_*`.
+ * The variables git honours ahead of `cwd` when choosing a repository: git's
+ * repository-local variables (removely's one list, hh 26003) plus the discovery
+ * and namespace variables that also route a read. A `git yrd` subcommand
+ * inherits them from git itself; a caller's shell may carry them by accident.
+ * Everything else passes: a user's `GIT_SSH_COMMAND`, a test's `GIT_CONFIG_*`.
  */
-const ROUTING_VARIABLES = new Set([
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_COMMON_DIR",
+const ROUTING_VARIABLES = new Set<string>([
+  ...GIT_REPOSITORY_LOCAL_ENV_VARS,
   "GIT_NAMESPACE",
   "GIT_CEILING_DIRECTORIES",
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
