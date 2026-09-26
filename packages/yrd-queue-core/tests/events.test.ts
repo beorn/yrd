@@ -16,6 +16,7 @@ import { encodeOps, type OpsState } from "../src/ops-state.ts"
 import { queueResumedAfter, stuckReleaseReason } from "../src/index.ts"
 import {
   CHANGE_EVENT_TYPES,
+  QUEUE_RUN_WRITER,
   adoptedChange,
   adoptedInput,
   appendChangeEvent,
@@ -1344,6 +1345,51 @@ describe("the queue-format boundary", () => {
       { expect: queue.tip },
     )
     await expect(readEventQueue(location, "lab")).rejects.toThrow(/exactly one complete Ops: snapshot/)
+  })
+
+  /** @failure A merge fence changed the queue's effective ops without an operator action (25041 A4).
+   * @level l1 @consumer queue operator and merge runner
+   */
+  it("refuses a merge fence that introduces a pause", async () => {
+    const { store, location } = remoteMemStore("yrd-event-merge-fence-ops")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const created = await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const cutover = await seedOpsCutover(location, "lab")
+    await (
+      await openEvents({ ...store, ref: queueRef("lab"), writer: QUEUE_RUN_WRITER })
+    ).append(
+      [
+        {
+          type: "merge-fenced",
+          keeps: [created],
+          props: [
+            ["Queue", cutover],
+            ["Time", "2026-09-22T14:01:00.000Z"],
+            ["For", created],
+            ["Branch", "task/fenced"],
+            ["Commit", commit],
+            [
+              "Ops",
+              encodeOps({
+                pause: {
+                  kind: "paused",
+                  sha: "self",
+                  at: new Date("2026-09-22T14:01:00.000Z"),
+                  reason: "inserted by merge fence",
+                  by: "operator",
+                  cause: "operator",
+                },
+                overrides: [],
+              }),
+            ],
+          ],
+        },
+      ],
+      { expect: cutover },
+    )
+
+    await expect(readEventQueue(location, "lab")).rejects.toThrow(/merge-fenced.*changed effective ops state/)
   })
 
   it("records one reminder and one expiration on the queue event ref", async () => {
