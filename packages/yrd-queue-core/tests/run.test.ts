@@ -945,6 +945,81 @@ it("stamps the ops cutover event with the plan capture time", async () => {
   expect(events.find((event) => event.type === "ops-cutover")?.props).toContainEqual(["Time", plan.capturedAt])
 })
 
+/** @failure Ops apply reports success when its committed event-side state differs from the verified legacy state (25041 B7).
+ * @level l3 @consumer queue operator and migration audit
+ */
+it("fails ops postflight when the published event reads back with different state", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await writePause(w.git, "origin", "main", {
+    kind: "paused",
+    cause: "maintenance",
+    by: "@chief",
+    reason: "ops cutover rehearsal",
+  })
+  const journal = join(dirname(w.work), "ops-postflight")
+  const script = resolve(import.meta.dirname, "../scripts/migrate-events.ts")
+  const args = (phase: "ops-plan" | "ops-apply") => [
+    script,
+    phase,
+    "--repo",
+    w.work,
+    "--remote",
+    "origin",
+    "--queue",
+    "main",
+    "--journal",
+    journal,
+  ]
+  const planned = spawnSync(process.execPath, args("ops-plan"), { encoding: "utf8" })
+  expect(planned.status, planned.stderr).toBe(0)
+
+  // The remote changes the clone's local Git view only after the cutover push.
+  // The advertised ref OID and publication lease remain the real published OID.
+  const marker = join(dirname(w.work), "postflight-replacement.json")
+  const hook = join(w.remote, "hooks", "post-receive")
+  writeFileSync(
+    hook,
+    `#!${process.execPath}
+import { spawnSync } from "node:child_process"
+import { readFileSync, writeFileSync } from "node:fs"
+const input = readFileSync(0, "utf8")
+const update = input.trim().split("\\n").map((line) => line.trim().split(" ")).find((row) => row[2] === ${JSON.stringify(queueRef("main"))})
+if (update === undefined) process.exit(0)
+const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")))
+const git = (args, input) => {
+  const result = spawnSync("git", ["-C", ${JSON.stringify(w.work)}, ...args], { env, encoding: "utf8", input })
+  if (result.status !== 0) throw new Error("hook git " + args.join(" ") + ": " + result.stderr)
+  return result.stdout
+}
+const head = update[1]
+const raw = git(["cat-file", "-p", head])
+const changed = raw.replace(/^Ops: .*$/m, 'Ops: {"version":1,"pause":null,"overrides":[]}')
+if (changed === raw) throw new Error("cutover commit has no Ops trailer")
+const replacement = git(["hash-object", "-t", "commit", "-w", "--stdin"], changed).trim()
+git(["update-ref", "refs/replace/" + head, replacement])
+writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ head, replacement }))
+`,
+  )
+  chmodSync(hook, 0o755)
+
+  const applied = spawnSync(process.execPath, args("ops-apply"), { encoding: "utf8" })
+  expect(existsSync(marker), applied.stderr).toBe(true)
+  const replacement = JSON.parse(readFileSync(marker, "utf8")) as { head: string; replacement: string }
+  const receipt = JSON.parse(readFileSync(join(journal, "apply-result.json"), "utf8")) as {
+    state: string
+    postflight: string
+    postflightError?: string
+    queueAfter: string
+  }
+  expect(replacement.head).toBe(receipt.queueAfter)
+  expect(receipt).toMatchObject({ state: "committed", postflight: "failed" })
+  expect(receipt.postflightError).toContain("event-side pause or override state differs")
+  expect(applied.status).toBe(1)
+  expect(applied.stderr).toContain("yrd-migration-ops-postflight")
+  expect((await w.git(["ls-remote", "--refs", "origin", queueRef("main")])).trim()).toContain(receipt.queueAfter)
+})
+
 /** @failure Ops planning accepts an unrecognized advertised ref under the queue prefix (25041 B5).
  * @level l3 @consumer queue operator and migration audit
  */
