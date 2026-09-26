@@ -3349,6 +3349,7 @@ export function flowAfterRound(
       ? { casRefused: outcome.line.casRefused }
       : previous?.casRefused !== undefined &&
           previous.casRefused.site === undefined &&
+          previous.casRefused.branch !== undefined &&
           !outcome.merged.includes(previous.casRefused.branch)
         ? { casRefused: previous.casRefused }
         : {}),
@@ -3368,7 +3369,6 @@ export function flowAfterRetryExhaustion(
     ...(previous?.lastJudgedAt === undefined ? {} : { lastJudgedAt: previous.lastJudgedAt }),
     lastRoundEndedAt: now.toISOString(),
     casRefused: {
-      branch: error.site,
       ref: error.ref,
       marker: error.marker,
       count: error.count,

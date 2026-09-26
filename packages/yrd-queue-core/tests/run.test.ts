@@ -2424,6 +2424,50 @@ it("settles a direct-merge notice on the queue chain across an empty journal", a
   expect(messages(w)).toEqual([{ change: direct, record: "merged-direct" }])
 })
 
+/** @failure 25736: an exhausted direct-notice queue transaction escaped as an unknown round error.
+ * @level l2 @consumer Hab's yrd service and direct-merge notification recipient
+ */
+it("bounds the direct-notice retry and settles it in the next round", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const direct = await pushAroundQueue(w, "direct-notice-retry.txt")
+  const base = { ...(await w.options({ exit: 0 })), checks: [] }
+  expect((await queueRun({ ...base, notify: [] })).directMerges).toEqual([direct])
+  const observed = (await readEventQueue(store, "main")).observed[direct]
+  if (observed === undefined) throw new Error("fixture did not record the direct merge")
+  const ref = queueRef("main")
+  let refusals = 0
+  using publication = beforeGitomicPublish(async (_repo, updates, remote) => {
+    if (remote !== "origin" || !updates.some((update) => update.ref === ref)) return
+    refusals++
+    throw new gitomic.Conflict(`lease lost on ${ref}`, { refs: [ref] })
+  })
+  const options = {
+    ...base,
+    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+    retryBudgetMs: 1,
+  } satisfies QueueRunOptions
+
+  await expect(queueRun(options)).rejects.toMatchObject({
+    name: "QueueRunEventRetryExhausted",
+    site: "notified",
+    budgetMs: 1,
+    cause: { name: "RetriesExhausted", budgetMs: 1 },
+  })
+  expect(refusals).toBeGreaterThan(0)
+  expect((await readEventQueue(store, "main")).notices[`${observed.id}:recorder`]).toBeUndefined()
+
+  publication.mockRestore()
+  const next = await queueRun({ ...options, retryBudgetMs: 5_000 })
+  expect(next.directMerges).toEqual([])
+  expect((await readEventQueue(store, "main")).notices[`${observed.id}:recorder`]).toMatchObject({
+    for: observed.id,
+    to: "recorder",
+    result: "delivered",
+  })
+}, 60_000)
+
 it("retains a failed direct-merge delivery with a reason and does not retry it next round", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)

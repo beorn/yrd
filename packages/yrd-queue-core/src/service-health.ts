@@ -267,7 +267,8 @@ export type LineFlow = Readonly<{
    */
   roundOpen?: Readonly<{ startedAt: string; branch?: string; phase?: string; phaseUnread?: string }>
   casRefused?: Readonly<{
-    branch: string
+    /** Present only when a change was selected before its publication failed. */
+    branch?: string
     ref: string
     marker: string
     count: number
