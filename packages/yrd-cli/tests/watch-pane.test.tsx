@@ -63,6 +63,17 @@ async function waitFor<T>(callback: () => T | Promise<T>, options?: number | { t
   throw last
 }
 
+/**
+ * Write visual capture artifacts only when explicitly requested via YRD_CAPTURE_DIR.
+ * Prevents side-effect writes to host paths (/hh/file, /tmp) during standard test execution (24196).
+ */
+function writeCaptureIfConfigured(name: string, content: string | Uint8Array): void {
+  const dir = process.env.YRD_CAPTURE_DIR
+  if (!dir) return
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, name), content)
+}
+
 /** The service's own health document, believable by the deadline its writer declared: the runner is up. */
 const BEATING = { kind: "beating", state: "healthy" } as const
 
@@ -4139,7 +4150,7 @@ describe("the top line (25416)", () => {
       app.press("f")
       await settle(app)
       const ansi = bufferToStyledText(app.term.buffer)
-      writeFileSync("/tmp/yrd-watch-25630.ansi", ansi, "utf8")
+      writeCaptureIfConfigured("yrd-watch-25630.ansi", ansi)
       assertCaptureTruecolor(ansi)
       const png = await renderAnsiScreenshot(ansi, { cols: 120, rows: 20 })
       expect(png.length).toBeGreaterThan(1000)
@@ -4147,8 +4158,7 @@ describe("the top line (25416)", () => {
       expect(png[1]).toBe(0x50)
       expect(png[2]).toBe(0x4e)
       expect(png[3]).toBe(0x47)
-      if (existsSync("/hh/file")) writeFileSync("/hh/file/260925-yrd-watch-25630.png", png)
-      else writeFileSync("/tmp/260925-yrd-watch-25630.png", png)
+      writeCaptureIfConfigured("260925-yrd-watch-25630.png", png)
       expect(ansi).toContain("YRD QUEUE")
       expect(ansi).toContain("RUNNING")
       expect(ansi).toContain("0:17")
@@ -4708,7 +4718,7 @@ describe("termless screenshots for rows 3 to 5 (25716)", () => {
     )
     await settle(app)
     const ansi = bufferToStyledText(app.term.buffer)
-    writeFileSync("/tmp/yrd-watch-25716-row3-stage-tabs.ansi", ansi, "utf8")
+    writeCaptureIfConfigured("yrd-watch-25716-row3-stage-tabs.ansi", ansi)
     expect(ansi).toContain("Timeline")
     expect(ansi).toContain("provisioning")
     expect(ansi).toContain("checking")
@@ -4776,7 +4786,7 @@ describe("termless screenshots for rows 3 to 5 (25716)", () => {
     )
     await settle(app)
     const ansi = bufferToStyledText(app.term.buffer)
-    writeFileSync("/tmp/yrd-watch-25716-row4-runner-box.ansi", ansi, "utf8")
+    writeCaptureIfConfigured("yrd-watch-25716-row4-runner-box.ansi", ansi)
     expect(ansi).toContain("checking · affected-tests")
     expect(ansi).toContain("task/dev9-25716-runner-stages@18c8c19b:")
     expect(ansi).toContain("affected-tests")
@@ -5220,7 +5230,7 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
     await settle(app)
 
     const ansi = bufferToStyledText(app.term.buffer)
-    writeFileSync("/tmp/yrd-watch-25779-tabs-filled.ansi", ansi, "utf8")
+    writeCaptureIfConfigured("yrd-watch-25779-tabs-filled.ansi", ansi)
 
     // 1. All tabs present
     expect(ansi).toContain("Timeline")
@@ -5277,8 +5287,7 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
     expect(png[2]).toBe(0x4e)
     expect(png[3]).toBe(0x47)
 
-    if (existsSync("/hh/file")) writeFileSync("/hh/file/260925-yrd-watch-tabs-filled.png", png)
-    else writeFileSync("/tmp/260925-yrd-watch-tabs-filled.png", png)
+    writeCaptureIfConfigured("260925-yrd-watch-tabs-filled.png", png)
     app.unmount()
   })
 
@@ -5294,5 +5303,24 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
 
     // Valid truecolor passes
     expect(() => assertCaptureTruecolor("\x1b[38;2;67;76;94mtruecolor\x1b[0m")).not.toThrow()
+  })
+
+  it("writeCaptureIfConfigured writes only when YRD_CAPTURE_DIR is set and skips by default (24196)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-capture-test-"))
+    try {
+      const prev = process.env.YRD_CAPTURE_DIR
+      delete process.env.YRD_CAPTURE_DIR
+      writeCaptureIfConfigured("unwritten.txt", "skip")
+      expect(existsSync(join(dir, "unwritten.txt"))).toBe(false)
+
+      process.env.YRD_CAPTURE_DIR = dir
+      writeCaptureIfConfigured("written.txt", "captured")
+      expect(existsSync(join(dir, "written.txt"))).toBe(true)
+
+      if (prev === undefined) delete process.env.YRD_CAPTURE_DIR
+      else process.env.YRD_CAPTURE_DIR = prev
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
