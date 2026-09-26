@@ -3701,13 +3701,14 @@ describe("a queue run", () => {
       change: changeName({ branch: "task/one", head }),
       record: "failed",
       endingId: records[2]?.sha,
-      endedAt: expect.any(String),
+      endedAt: trailer(records[2]!, "Ended-At"),
       failures: 1,
       issue: "@i/10-yrd/1",
       log: expect.stringContaining("verify.log"),
       reason: "verify",
       submitter: "@dev/2",
     })
+    expect(messages(w)[0]?.endedAt).toMatch(/\.\d{3}Z$/u)
   })
 
   // @i/10-yrd/25301 A1 (@cto c7115f0f): the head merges before the rest of the line is judged,

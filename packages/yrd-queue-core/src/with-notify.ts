@@ -355,7 +355,8 @@ async function told(
       change: changeName(entry.change),
       record: kind,
       endingId: endedRecord,
-      endedAt: written.at.toISOString(),
+      // New records retain milliseconds; old records have only Git's whole-second timestamp.
+      endedAt: trailer(written, "Ended-At") ?? written.at.toISOString(),
       ...(issue === undefined ? {} : { issue }),
       ...(known ? { submitter } : {}),
       ...(kind === "merged" ? { merge: trailer(written, "Merge") ?? "" } : { log, reason: reasonFor(kind, written) }),
