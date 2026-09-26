@@ -115,7 +115,9 @@ async function previousQueueReader(): Promise<typeof import("../../yrd-queue-cor
   cpSync(join(yrdRoot, "packages/yrd-queue-core/src"), join(directory, "src"), { recursive: true })
   symlinkSync(join(yrdRoot, "../../node_modules"), join(directory, "node_modules"), "dir")
   writeFileSync(join(directory, "src/events.ts"), oldEvents)
-  return (await import(pathToFileURL(join(directory, "src/events.ts")).href)) as typeof import("../../yrd-queue-core/src/events.ts")
+  return (await import(
+    pathToFileURL(join(directory, "src/events.ts")).href
+  )) as typeof import("../../yrd-queue-core/src/events.ts")
 }
 
 // A selected event change must keep the watch open through every working phase;
@@ -2533,15 +2535,31 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       }
       const resumed = capture(w.work)
       expect(
-        await coreQueueCommand(w.work, resumed.io, { by: "@chief", command: "resume", reason: "repaired" }, { workdir: w.workdir }),
+        await coreQueueCommand(
+          w.work,
+          resumed.io,
+          { by: "@chief", command: "resume", reason: "repaired" },
+          { workdir: w.workdir },
+        ),
         resumed.stderr(),
       ).toBe(0)
       expect((await old.readEventQueue(store, "main")).pause).toBeUndefined()
       expect((await old.readEventQueueWithChanges(store, "main")).queue.pause).toBeUndefined()
       if (!legacyPause) {
         const queue = await readEventQueue(store, "main")
-        await (await openEvents({ ...store, ref: queueRef("main"), writer: "@chief" })).append(
-          [{ type: "resumed", props: [["Queue", queue.tip], ["Time", new Date().toISOString()], ["Reason", "unpaired red arm"]] }],
+        await (
+          await openEvents({ ...store, ref: queueRef("main"), writer: "@chief" })
+        ).append(
+          [
+            {
+              type: "resumed",
+              props: [
+                ["Queue", queue.tip],
+                ["Time", new Date().toISOString()],
+                ["Reason", "unpaired red arm"],
+              ],
+            },
+          ],
           { expect: queue.tip },
         )
         await expect(old.readEventQueue(store, "main")).rejects.toThrow(/resumes a running queue/)
@@ -2568,7 +2586,12 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     })
     const paused = capture(w.work)
     expect(
-      await coreQueueCommand(w.work, paused.io, { by: "@chief", command: "pause", reason: "repair" }, { workdir: w.workdir }),
+      await coreQueueCommand(
+        w.work,
+        paused.io,
+        { by: "@chief", command: "pause", reason: "repair" },
+        { workdir: w.workdir },
+      ),
       paused.stderr(),
     ).toBe(0)
     const firstOnly = await writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "repaired" })
@@ -2581,7 +2604,15 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       await coreQueueCommand(
         w.work,
         service.io,
-        { command: "up", intervalSeconds: 0, stop: stop.signal, afterHealth: (doc) => { health.push(doc); stop.abort() } },
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterHealth: (doc) => {
+            health.push(doc)
+            stop.abort()
+          },
+        },
         { json: true, workdir: w.workdir },
       ),
       service.stderr(),
@@ -2590,7 +2621,12 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(health[0]?.error?.resolution.join(" ")).toContain("yrd queue resume")
     const resumed = capture(w.work)
     expect(
-      await coreQueueCommand(w.work, resumed.io, { by: "@chief", command: "resume", reason: "repaired" }, { workdir: w.workdir }),
+      await coreQueueCommand(
+        w.work,
+        resumed.io,
+        { by: "@chief", command: "resume", reason: "repaired" },
+        { workdir: w.workdir },
+      ),
       resumed.stderr(),
     ).toBe(0)
     expect((await readPause(w.git, "origin", "main"))?.sha).toBe(firstOnly.sha)
