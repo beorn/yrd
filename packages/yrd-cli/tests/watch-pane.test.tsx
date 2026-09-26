@@ -11,7 +11,7 @@
  * @consumer the operator reading `yrd watch`
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type React from "react"
@@ -4147,7 +4147,8 @@ describe("the top line (25416)", () => {
       expect(png[1]).toBe(0x50)
       expect(png[2]).toBe(0x4e)
       expect(png[3]).toBe(0x47)
-      writeFileSync("/hh/file/260925-yrd-watch-25630.png", png)
+      if (existsSync("/hh/file")) writeFileSync("/hh/file/260925-yrd-watch-25630.png", png)
+      else writeFileSync("/tmp/260925-yrd-watch-25630.png", png)
       expect(ansi).toContain("YRD QUEUE")
       expect(ansi).toContain("RUNNING")
       expect(ansi).toContain("0:17")
@@ -5276,7 +5277,8 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
     expect(png[2]).toBe(0x4e)
     expect(png[3]).toBe(0x47)
 
-    writeFileSync("/hh/file/260925-yrd-watch-tabs-filled.png", png)
+    if (existsSync("/hh/file")) writeFileSync("/hh/file/260925-yrd-watch-tabs-filled.png", png)
+    else writeFileSync("/tmp/260925-yrd-watch-tabs-filled.png", png)
     app.unmount()
   })
 
