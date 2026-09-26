@@ -202,7 +202,13 @@ describe("event queue observation refusals", () => {
     const head = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, head, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("fixture main lost .yrd.yml")
-    await createEventQueue(createEventStore(w.work, "origin", w.git.selection), "main", head, config, new Date())
+    await createEventQueue(
+      createEventStore(w.work, "origin", gitIn(w.work).selection),
+      "main",
+      head,
+      config,
+      new Date(),
+    )
 
     const executable = join(w.workdir, "invalid-observer.sh")
     const selected = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin/git-super")
@@ -227,7 +233,8 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
     }
     const listed = capture(w.work)
     expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, options)).toBe(2)
-    expect(JSON.parse(listed.stdout()).observation).toMatchObject({ outcome: "invalid" })
+    const listedDocument = JSON.parse(listed.stdout()) as { observation: { outcome: string } }
+    expect(listedDocument.observation).toMatchObject({ outcome: "invalid" })
 
     const stats = capture(w.work)
     expect(await coreQueueCommand(w.work, stats.io, { command: "stats" }, options)).toBe(2)
