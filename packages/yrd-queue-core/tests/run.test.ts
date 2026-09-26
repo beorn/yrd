@@ -912,6 +912,39 @@ it("plans M2 replacement and rolls back the exact legacy pause ref", async () =>
   expect((await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()).toBe(before)
 })
 
+/** @failure Ops apply stamps cutover with apply time instead of the verified plan's capture time (25041 B4).
+ * @level l3 @consumer queue operator and migration audit
+ */
+it("stamps the ops cutover event with the plan capture time", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await writePause(w.git, "origin", "main", {
+    kind: "paused",
+    cause: "maintenance",
+    by: "@chief",
+    reason: "ops cutover rehearsal",
+  })
+  const journal = join(dirname(w.work), "ops-clock")
+  const script = resolve(import.meta.dirname, "../scripts/migrate-events.ts")
+  const phase = (name: "ops-plan" | "ops-apply") => {
+    const result = spawnSync(
+      process.execPath,
+      [script, name, "--repo", w.work, "--remote", "origin", "--queue", "main", "--journal", journal],
+      { encoding: "utf8" },
+    )
+    expect(result.status, result.stderr).toBe(0)
+  }
+  phase("ops-plan")
+  const plan = JSON.parse(readFileSync(join(journal, "plan.json"), "utf8")) as { capturedAt: string }
+  expect(Number.isFinite(new Date(plan.capturedAt).getTime())).toBe(true)
+  await new Promise((resolve) => setTimeout(resolve, 25))
+
+  phase("ops-apply")
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const events = await (await openEvents({ ...store, ref: queueRef("main") })).events()
+  expect(events.find((event) => event.type === "ops-cutover")?.props).toContainEqual(["Time", plan.capturedAt])
+})
+
 /** @failure 25041 A3: before cutover, a pause or override written mid-merge must win its legacy ref lease.
  * @level l3 @consumer queue operator and merge runner
  */
