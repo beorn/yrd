@@ -482,6 +482,7 @@ it("notifies the submitter when an event change fails before any check", async (
 it("refuses a standing event pause before ops cutover", async () => {
   const w = await world()
   const created = await createWorldEventQueue(w)
+  await submitCommit(w, "task/paused-old-writer", "one.txt")
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await (
     await openEvents({ ...store, ref: queueRef("main"), writer: "old-yrd" })
@@ -499,6 +500,9 @@ it("refuses a standing event pause before ops cutover", async () => {
     { expect: created },
   )
   expect((await readEventQueue(store, "main")).pause?.reason).toBe("operator hold")
+  await expect(queueRun(await w.options({ exit: 0 }))).rejects.toThrow(/pre-cutover.*pause/u)
+  expect(await remoteTarget(w)).toBe(w.target)
+  expect((await readStatus(store, "main", "task/paused-old-writer")).status).toBe("queued")
   await expect(readEventOps(store, w.git, "main", w.target)).rejects.toThrow(/pre-cutover.*pause/u)
 })
 
