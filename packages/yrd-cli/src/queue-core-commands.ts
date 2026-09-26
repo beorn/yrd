@@ -2766,19 +2766,47 @@ export async function coreQueueCommand(
           window = { since: committed, sinceFrom: { asked: request.since, kind: "commit" } }
         }
       }
-      const { journals, all, queue } = await readListing(git, config, workdir, captured.oid)
+      const store = createEventStore(repo, config.target.remote, selection)
+      const reading =
+        (await queueFormat(store, config.target.branch)) === "event"
+          ? await readEventListing(git, config, repo, workdir, captured.oid, store, { all: true })
+          : { format: "legacy" as const, ...(await readListing(git, config, workdir, captured.oid)) }
+      if (
+        reading.format === "event" &&
+        reading.observation.contract === "root-v1" &&
+        reading.observation.outcome === "invalid"
+      ) {
+        io.stderr(`${reading.observation.message}\n`)
+        return 2
+      }
+      const { journals } = reading
       // The counts below are read from the same rows; a row the journal could
       // not be read for must not make an understated stat look measured.
       if (options.json !== true) narrateMalformed(io, journals, new Set())
       // Per RUN: `queue stats` counts decisions, and one change can carry several.
-      const rows = watchRows(all, { journals, perRun: true })
+      const rows = watchRows(reading.format === "event" ? reading.document : reading.all, {
+        journals,
+        perRun: true,
+      })
       // Pushed, never submitted: the drafts (the KPI ruling on 24163), from the
       // one derivation over this same reading and the same window. Nothing is
       // fetched, so a head never read here counts as undated.
-      const drafts = await readDrafts(git, withoutIgnoredDraftHeads(queue, config.ignore), {
-        since: window?.since ?? new Date(now.getTime() - DEFAULT_WINDOW_MS),
-        targetSha: captured.oid,
-      })
+      const draftSince = window?.since ?? new Date(now.getTime() - DEFAULT_WINDOW_MS)
+      const drafts =
+        reading.format === "event"
+          ? {
+              dated: reading.drafts.dated.filter((draft) => {
+                if (draft.committedAt === undefined) {
+                  throw new Error(`event draft ${draft.branch}@${draft.head} has no committer date`)
+                }
+                return draft.committedAt >= draftSince
+              }),
+              undated: reading.drafts.undated,
+            }
+          : await readDrafts(git, withoutIgnoredDraftHeads(reading.queue, config.ignore), {
+              since: draftSince,
+              targetSha: captured.oid,
+            })
       const stats = queueStats(rows, [...drafts.dated, ...drafts.undated], {
         now,
         ...window,

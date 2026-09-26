@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, submit } from "@yrd/queue-core"
+import { createEventQueue, createEventStore, gitIn, readConfig, submit } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -49,7 +49,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
  * from it, and one branch pushed without a submit (plan E2): the smallest
  * queue with every number the stats command counts.
  */
-async function queueWithOneChangeAndOnePush(): Promise<string> {
+async function queueWithOneChangeAndOnePush(eventFormat = false): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-stats-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -65,6 +65,18 @@ async function queueWithOneChangeAndOnePush(): Promise<string> {
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
+  if (eventFormat) {
+    const head = (await git(["rev-parse", "main"])).trim()
+    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture main lost .yrd.yml")
+    await createEventQueue(
+      createEventStore(work, "origin", git.selection),
+      "main",
+      head,
+      config,
+      new Date("2026-09-26T15:00:00.000Z"),
+    )
+  }
   await git(["checkout", "--quiet", "-b", "task/one", "main"])
   writeFileSync(join(work, "pass.txt"), "pass\n")
   await git(["add", "."])
@@ -87,6 +99,24 @@ async function queueWithOneChangeAndOnePush(): Promise<string> {
 }
 
 describe("yrd queue stats through the process entry", () => {
+  it("counts the change rows of an event-format queue", async () => {
+    const work = await queueWithOneChangeAndOnePush(true)
+    const listed = await yrd(work, "queue", "list", "--json")
+    expect(listed.exitCode, listed.report).toBe(0)
+    const changes = (JSON.parse(listed.stdout) as { changes: readonly { branch: string }[] }).changes
+    const ran = await yrd(work, "queue", "stats", "--json")
+    expect(ran.exitCode, ran.report).toBe(0)
+    const stats = JSON.parse(ran.stdout) as {
+      total: { changes: number; branches: number }
+      pushedNeverSubmitted: { count: number }
+    }
+    expect(changes.map((change) => change.branch)).toContain("task/one")
+    expect(stats.total.changes).toBe(changes.length)
+    expect(stats.total.branches).toBe(1)
+    expect(stats.pushedNeverSubmitted.count).toBe(1)
+    expect(ran.stderr).not.toContain("changed to event format during legacy read")
+  })
+
   it("prints the table with the queue line, the submitter line and the pushed-never-submitted count", async () => {
     const work = await queueWithOneChangeAndOnePush()
     const ran = await yrd(work, "queue", "stats")
