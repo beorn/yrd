@@ -41,6 +41,7 @@ import {
   appendChangeEvent,
   appendOpsCutover,
   appendRecord,
+  changeInput,
   changeRef,
   createEventQueue,
   createEventStore,
@@ -2433,6 +2434,57 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
   }, 60_000)
 
+  // @failure 25041: waiting for a moved checkout can hide a stuck change from the service health reader.
+  it("keeps pending stuck changes in health while waiting for a checkout", async () => {
+    const w = await gitlinkWorld()
+    const target = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createEventQueue(store, "main", target, config, new Date())
+    const branch = "task/stuck-before-checkout"
+    await oneChange(w, branch)
+    const submitted = await readStatus(store, "main", branch)
+    if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
+    await appendChangeEvent(store, "main", branch, submitted.tip, {
+      type: "stuck",
+      at: new Date(),
+      reason: "repair needed",
+    })
+    await writePause(w.git, "origin", "main", { by: "@chief", kind: "paused", reason: "repair" })
+    const run = capture(w.work)
+    const stop = new AbortController()
+    let rounds = 0
+    const service = w.command(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        afterHealth: async (document) => {
+          rounds += 1
+          if (rounds !== 1) return
+          expect(document.facts?.stuckChanges).toEqual([branch])
+          await w.git(["update-index", "--cacheinfo", "160000", w.b, "submodule"])
+          await w.git(["commit", "--quiet", "-m", "target moves while the line is stuck"])
+          await w.git(["push", "--quiet", "origin", "main"])
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(() => expect(run.stdout()).toContain("waiting for checkout"), { timeout: 20_000 })
+      const waiting = JSON.parse(readFileSync(join(w.workdir, "service-health.json"), "utf8")) as QueueHealthDocument
+      expect(rounds).toBe(1)
+      expect(waiting.facts?.waitingForCheckout).toBe("submodule")
+      expect(waiting.facts?.stuckChanges).toEqual([branch])
+    } finally {
+      stop.abort()
+      await service
+    }
+  }, 60_000)
+
   /** @failure 25041: a stuck event change can have no legacy pause to resume.
    * @level l2 @consumer queue operator and Hab's yrd service
    */
@@ -2531,6 +2583,40 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     ).toBe(0)
     expect((await readEventQueue(store, "main")).release).toBeUndefined()
     expect((await readStatus(store, "main", branch)).status).toBe("merged")
+  }, 60_000)
+
+  // @failure 25041: resume can release a readable stuck change while another change history is unreadable.
+  it("refuses stuck resume until every event change history can be judged", async () => {
+    const w = await world()
+    const target = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createEventQueue(store, "main", target, config, new Date())
+    const queueTip = (await readEventQueue(store, "main")).tip
+    const branch = "task/readable-stuck"
+    await oneChange(w, branch)
+    const submitted = await readStatus(store, "main", branch)
+    if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
+    await appendChangeEvent(store, "main", branch, submitted.tip, {
+      type: "stuck",
+      at: new Date(),
+      reason: "repair needed",
+    })
+    await (
+      await openEvents({ ...store, ref: changesRef("main", "task/unreadable"), writer: "yrd" })
+    ).append([changeInput("failed", { queueTip, at: new Date(), reason: "no opened event" })], { expect: null })
+    const queueBefore = (await w.git(["ls-remote", "origin", queueRef("main")])).trim()
+    const resumed = capture(w.work)
+    const resume = coreQueueCommand(
+      w.work,
+      resumed.io,
+      { by: "@chief", command: "resume", reason: "repaired" },
+      { workdir: w.workdir },
+    )
+    await expect(resume).rejects.toThrow(changesRef("main", "task/unreadable"))
+    await expect(resume).rejects.toThrow(/cannot judge stuck resume/)
+    expect((await w.git(["ls-remote", "origin", queueRef("main")])).trim()).toBe(queueBefore)
   }, 60_000)
 
   // @failure 25041: the previous Yrd pin threw on a pre-cutover resumed-only queue chain.
