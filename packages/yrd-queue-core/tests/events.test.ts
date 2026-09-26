@@ -1347,6 +1347,30 @@ describe("the queue-format boundary", () => {
     await expect(readEventQueue(location, "lab")).rejects.toThrow(/exactly one complete Ops: snapshot/)
   })
 
+  /** @failure A snapshot names one check twice, making its override ambiguous (25041 A9).
+   * @level l1 @consumer queue operator and merge runner
+   */
+  it("refuses duplicate override checks in an ops snapshot", async () => {
+    const { store, location } = remoteMemStore("yrd-event-duplicate-override-check")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const at = new Date("2026-09-22T14:01:00.000Z")
+    const entry: OpsState["overrides"][number] = {
+      check: "build",
+      state: "active",
+      until: new Date("2026-09-22T15:00:00.000Z"),
+      by: "operator",
+      verified: true,
+      reason: "repair",
+      record: A,
+      setAt: at,
+    }
+    await seedOpsCutover(location, "lab", { overrides: [entry, entry] })
+
+    await expect(readEventQueue(location, "lab")).rejects.toThrow(/duplicate override check/)
+  })
+
   /** @failure An override for one check silently changes another check's standing decision (25041 A8).
    * @level l1 @consumer queue operator and merge runner
    */
