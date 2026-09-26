@@ -1,5 +1,5 @@
 /** One protected P/C lifecycle for queue phases and the non-publishing check command. */
-import { lstatSync, readlinkSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, readlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import { gitIn, refAt, type Git } from "./git.ts"
@@ -473,4 +473,41 @@ export function recordProgramVerdict(
         ? undefined
         : (whose ?? (result.result === "stuck" || about.name === SETUP ? "queue" : "submitter")),
   })
+}
+
+export type SynthesizePassRecordsOptions = Readonly<{
+  log: Pick<QueueRunLog, "write">
+  branch: string
+  head: string
+  phase: "submit" | "merge"
+  logDir: string
+  checks: readonly CheckSpec[]
+}>
+
+/**
+ * Synthesizes result records to the run log when declared checks are run 'true' (25936, 25936 P3).
+ * Synthesizes pass records only for checks whose run === "true".
+ */
+export function recordSynthesizedPassResults(options: SynthesizePassRecordsOptions): readonly CheckResult[] {
+  mkdirSync(options.logDir, { recursive: true })
+  return options.checks
+    .filter((c) => (c.on ?? ["merge"]).includes(options.phase) && c.run === "true")
+    .map((check) => {
+      const log = checkLogPath(options.logDir, check.name)
+      if (!existsSync(log)) writeFileSync(log, "")
+      const start = new Date().toISOString()
+      const about = {
+        branch: options.branch,
+        head: options.head,
+        name: check.name,
+        phase: options.phase,
+        start,
+        end: start,
+        ...(check.scripts === undefined || check.scripts.length === 0 ? {} : { scripts: check.scripts }),
+      }
+      recordProgramStart({ log: options.log }, { ...about, log, start })
+      const result: CheckResult = { durationMs: 0, exit: 0, log, name: check.name, result: "pass" as const }
+      recordProgramResult({ log: options.log }, about, result)
+      return result
+    })
 }

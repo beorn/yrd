@@ -7780,6 +7780,38 @@ describe("skipping setup and worktree when every declared check is off (25716 ro
     })
   })
 
+  // @i/10-yrd/25936 P2: under noCheck, allDeclaredChecksOff must not write result pass, exit 0 for real checks that never ran
+  it("writes no pass result records under noCheck when a check has a real program (25936 P2)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/nocheck", "nocheck.txt")
+    const opts = await w.options({ exit: 0 })
+    const outcome = await queueRun({
+      ...opts,
+      checks: [{ name: "real-check", run: "exit 1" }],
+      noCheck: true,
+      notify: [],
+    })
+    expect(outcome.merged).toEqual(["task/nocheck"])
+    const results = logRecords(outcome).filter((r) => r.kind === "result" && r.name === "real-check")
+    expect(results).toEqual([])
+  })
+
+  it("writes no pass result records on an event queue under noCheck when a check has a real program (25936 P2)", async () => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    await submitCommit(w, "task/nocheck-event", "nocheck-event.txt")
+    const opts = await w.options({ exit: 0 })
+    const outcome = await queueRun({
+      ...opts,
+      checks: [{ name: "real-check", run: "exit 1" }],
+      noCheck: true,
+      notify: [],
+    })
+    expect(outcome.merged).toEqual(["task/nocheck-event"])
+    const results = logRecords(outcome).filter((r) => r.kind === "result" && r.name === "real-check")
+    expect(results).toEqual([])
+  })
+
   it("performs no setup and creates no check worktree on an event queue when all checks are declared run 'true', but performs both with a real check (25716 row 5 event runner)", async () => {
     const w = await world()
     await createWorldEventQueue(w)

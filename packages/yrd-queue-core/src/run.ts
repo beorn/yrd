@@ -46,7 +46,7 @@
  * inside the round before it is written, and its record says so.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { adaptProcessGit, createProcess, type Process } from "@yrd/process"
 import { readFrozenPushIntent } from "git-super/push-intent"
@@ -58,8 +58,9 @@ import {
   recordProgramResult,
   recordProgramEnd,
   recordProgramVerdict,
+  recordSynthesizedPassResults,
 } from "./program-root.ts"
-export { recordProgramStart, recordProgramResult } from "./program-root.ts"
+export { recordProgramStart, recordProgramResult, recordSynthesizedPassResults } from "./program-root.ts"
 
 import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import {
@@ -2364,29 +2365,17 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     let recheck: readonly CheckResult[] = []
     let phaseResults: readonly CheckResult[] = []
-    if (allDeclaredChecksOff(run.options)) {
-      const logDir = checkLogDir(run, entry, "merge")
-      mkdirSync(logDir, { recursive: true })
-      phaseResults = run.options.checks
-        .filter((c) => (c.on ?? ["merge"]).includes("merge"))
-        .map((c) => {
-          const log = checkLogPath(logDir, c.name)
-          if (!existsSync(log)) writeFileSync(log, "")
-          const start = new Date().toISOString()
-          const about = {
-            branch: entry.change.branch,
-            head: entry.change.head,
-            name: c.name,
-            phase: "merge",
-            start,
-            end: start,
-            ...(c.scripts === undefined || c.scripts.length === 0 ? {} : { scripts: c.scripts }),
-          }
-          recordProgramStart(run, { ...about, log, start })
-          const result: CheckResult = { durationMs: 0, exit: 0, log, name: c.name, result: "pass" as const }
-          recordProgramResult(run, about, result)
-          return result
-        })
+    if (run.options.noCheck === true) {
+      phaseResults = []
+    } else if (allDeclaredChecksOff(run.options)) {
+      phaseResults = recordSynthesizedPassResults({
+        log: run.log,
+        branch: entry.change.branch,
+        head: entry.change.head,
+        phase: "merge",
+        logDir: checkLogDir(run, entry, "merge"),
+        checks: run.options.checks,
+      })
     } else if (worktree !== undefined) {
       // The merge moved this worktree's HEAD, so what a check judges here is
       // read now and not at prepare time: the candidate is the merge commit,

@@ -1,5 +1,5 @@
 /** Run a change from the event projection, leasing its merge with the queue. */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { Conflict } from "./git.ts"
 
@@ -28,7 +28,12 @@ import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from
 import { queueName } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
 import { recentCasRefusals, recentPublicationNotLanded, type QueueRunLog } from "./log.ts"
-import { programRootCheck, recordProgramResult, recordProgramStart } from "./program-root.ts"
+import {
+  programRootCheck,
+  recordProgramResult,
+  recordProgramStart,
+  recordSynthesizedPassResults,
+} from "./program-root.ts"
 import { queueRefPrefix } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { publishCheckedChildren } from "./publication.ts"
@@ -1127,6 +1132,9 @@ export async function eventQueueRun(
       for (let attempt = 1; attempt <= 2; attempt++) {
         const startOfAttempt = results.length
         for (const phase of ["submit", "merge"] as const) {
+          if (options.noCheck === true) {
+            continue
+          }
           if (allDeclaredChecksOff(options)) {
             if (phase === "merge") {
               const logDir = join(
@@ -1137,23 +1145,15 @@ export async function eventQueueRun(
                 `attempt-${String(attempt)}`,
                 phase,
               )
-              mkdirSync(logDir, { recursive: true })
-              for (const check of options.checks.filter((c) => (c.on ?? ["merge"]).includes("merge"))) {
-                const logPath = checkLogPath(logDir, check.name)
-                if (!existsSync(logPath)) writeFileSync(logPath, "")
-                const start = new Date().toISOString()
-                const about = {
-                  branch,
-                  head,
-                  name: check.name,
-                  phase,
-                  start,
-                  end: start,
-                  ...(check.scripts === undefined || check.scripts.length === 0 ? {} : { scripts: check.scripts }),
-                }
-                recordProgramStart({ log }, { ...about, log: logPath, start })
-                const checked: CheckResult = { durationMs: 0, exit: 0, log: logPath, name: check.name, result: "pass" }
-                recordProgramResult({ log }, about, checked)
+              const synthesized = recordSynthesizedPassResults({
+                log,
+                branch,
+                head,
+                phase,
+                logDir,
+                checks: options.checks,
+              })
+              for (const checked of synthesized) {
                 results.push({
                   run: checked,
                   attempt,
@@ -1163,20 +1163,17 @@ export async function eventQueueRun(
             }
             continue
           }
-          const checks =
-            options.noCheck === true
-              ? []
-              : options.checks.filter(
-                  (check) =>
-                    check.run !== "true" &&
-                    (check.on ?? ["merge"]).includes(phase) &&
-                    !(
-                      phase === "merge" &&
-                      operational.overrides.entries.some(
-                        (entry) => entry.check === check.name && isActive(entry, options.now?.() ?? Date.now()),
-                      )
-                    ),
+          const checks = options.checks.filter(
+            (check) =>
+              check.run !== "true" &&
+              (check.on ?? ["merge"]).includes(phase) &&
+              !(
+                phase === "merge" &&
+                operational.overrides.entries.some(
+                  (entry) => entry.check === check.name && isActive(entry, options.now?.() ?? Date.now()),
                 )
+              ),
+          )
           // A declared setup still runs when this phase has no check to run, unless every declared check is off (then the phase was skipped above).
           if (checks.length === 0 && options.setup === undefined) continue
           const logDir = join(
