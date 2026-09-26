@@ -616,6 +616,22 @@ it("moves complete operational state in one cutover publish and refuses a leftov
   expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("event")
 })
 
+/** @failure Ops apply ignores changed refs since its verified plan (25041 A10).
+ * @level l3 @consumer queue operator and cutover runner
+ */
+it("refuses ops cutover when the verified plan names a different queue tip", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const before = (await readEventQueue(store, "main")).tip
+
+  await expect(
+    appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief", { queueBefore: "0".repeat(40) }),
+  ).rejects.toThrow(/ops-cutover refs differ from the verified plan/)
+  expect((await readEventQueue(store, "main")).tip).toBe(before)
+  expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("legacy")
+})
+
 /** @failure 25041: an already-present maintenance fence must keep its exact oid through ops cutover.
  * @level l3 @consumer queue operator and rollback
  */
