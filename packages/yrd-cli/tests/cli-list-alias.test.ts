@@ -198,6 +198,21 @@ describe("`yrd list` is `yrd queue list`", () => {
 
     const help = await yrd(work, "submit", "--help")
     expect(help.stdout).toContain("--submitter <agent>")
+    expect(help.stdout).toContain("deprecated alias for --submitter")
+    expect(help.stdout.replace(/\s+/gu, " ")).toContain("yrd queue show <branch>")
     expect(help.stdout).not.toContain("--rebase")
+
+    const conflicting = await yrd(
+      work,
+      "submit",
+      "task/one",
+      "--dry-run",
+      "--submitter",
+      "@dev/7",
+      "--notify",
+      "@chief",
+    )
+    expect(conflicting.exitCode).toBe(2)
+    expect(conflicting.stderr).toContain("--submitter and --notify name different submitters")
   })
 })
