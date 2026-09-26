@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@bearly/flock": "^0.1.1",
+    "@bearly/flock": "workspace:*",
     "@yrd/process": "workspace:*",
     "git-super": "^0.1.0",
     "gitomic": "^0.4.0"
