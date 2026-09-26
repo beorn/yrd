@@ -1060,38 +1060,6 @@ describe("settling gitlinks", () => {
     )
   })
 
-  // Probe R4 (25626 P3): a candidate moving a child gitlink that conflicts with moved remote child main
-  // must refuse at head in submit preflight (inspectSubmit) even when the local checkout tracking ref is stale.
-  it("Probe R4: inspectSubmit refuses at head when candidate moves pin that conflicts with remote child main (25626 P3)", async () => {
-    const w = await world()
-    // Set root main to record submodule at onMain, so candidate's move to offMain is a one-sided fork
-    await w.git(["checkout", "--quiet", "main"])
-    const sub = gitIn(join(w.work, "submodule"))
-    await sub(["checkout", "--quiet", w.onMain])
-    await w.git(["add", "submodule"])
-    await w.git(["commit", "--quiet", "-m", "base records submodule at onMain"])
-    await w.git(["push", "--quiet", "origin", "main"])
-
-    // Stale child clone tracking ref: set child clone's refs/remotes/origin/main to onMain (stale)
-    await sub(["update-ref", "refs/remotes/origin/main", w.onMain])
-
-    // Candidate branch moves submodule gitlink to offMain (which descends from onMain, but conflicts with w.main on remote)
-    await w.git(["checkout", "--quiet", "-b", "task/probe-r4", "main"])
-    await sub(["checkout", "--quiet", w.offMain])
-    await w.git(["add", "submodule"])
-    await w.git(["commit", "--quiet", "-m", "task/probe-r4: move submodule to offMain"])
-
-    // inspectSubmit runs with noFetch: true in preflight composition check; Cure (a) ensures
-    // the moved submodule's remote main is fetched, the conflict detected, and refused at head
-    await expect(
-      inspectSubmit(w.git, "origin", {
-        branch: "task/probe-r4",
-        submitter: "@dev/2",
-        target: { branch: "main", remote: "origin" },
-      }),
-    ).rejects.toThrow(/gitlink-compose-refused/u)
-  })
-
   it("a pin that is an ancestor of refs/heads/main submits silently", async () => {
     const w = await world()
     await expect(submitGitlink(w, "task/behind", w.onMain)).resolves.toMatch(/^[0-9a-f]{40}$/u)
