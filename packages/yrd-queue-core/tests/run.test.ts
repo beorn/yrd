@@ -973,6 +973,45 @@ it("refuses ops planning when the queue prefix contains an unknown ref", async (
   expect((await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()).toBe(before)
 })
 
+/** @failure Ops planning accepts a live check override during the migration freeze (25041 B6).
+ * @level l3 @consumer queue operator and migration audit
+ */
+it("refuses ops planning while a check override is active", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await writePause(w.git, "origin", "main", {
+    kind: "paused",
+    cause: "maintenance",
+    by: "@chief",
+    reason: "ops cutover rehearsal",
+  })
+  await writeOverride(
+    w.git,
+    "origin",
+    "main",
+    {
+      kind: "off",
+      check: "build",
+      until: new Date(Date.now() + 3_600_000),
+      actor: { by: "@chief", verified: true },
+      reason: "active during cutover",
+    },
+    ["build"],
+  )
+  const before = (await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()
+  const journal = join(dirname(w.work), "ops-active-override")
+  const script = resolve(import.meta.dirname, "../scripts/migrate-events.ts")
+  const result = spawnSync(
+    process.execPath,
+    [script, "ops-plan", "--repo", w.work, "--remote", "origin", "--queue", "main", "--journal", journal],
+    { encoding: "utf8" },
+  )
+  expect(result.status).toBe(1)
+  expect(result.stderr).toContain(`yrd-migration-active-override: ${overrideRef("main")}: 1 active entries`)
+  expect(existsSync(journal)).toBe(false)
+  expect((await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()).toBe(before)
+})
+
 /** @failure 25041 A3: before cutover, a pause or override written mid-merge must win its legacy ref lease.
  * @level l3 @consumer queue operator and merge runner
  */
