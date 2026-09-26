@@ -10,6 +10,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
+import { createProcess, type Process } from "@yrd/process"
 import * as verifying from "../src/verifying.ts"
 import {
   changeName,
@@ -541,6 +542,43 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     })
     expect(verifySpy).toHaveBeenCalled()
     expect(verifySpy.mock.calls[0]?.[0]?.noFetch).toBe(true)
+  })
+
+  it("verifyCandidate passes --no-fetch in argv to git-super (25626 Arm Y2)", async () => {
+    const w = await world()
+    const head = await branchWithCommit(w, "task/arm-y2", "y2.txt")
+    const targetHead = (await w.git(["rev-parse", "refs/heads/main"])).trim()
+    await using real = createProcess({ cwd: w.work })
+    const recordedArgvs: (readonly string[])[] = []
+    const recording: Process = {
+      ...real,
+      async run(request) {
+        if (request.argv.includes("super") && request.argv.includes("merge")) {
+          recordedArgvs.push(request.argv)
+        }
+        return real.run(request)
+      },
+    }
+    const scratch = mkdtempSync(join(tmpdir(), "arm-y2-"))
+    roots.push(scratch)
+    try {
+      await verifying.verifyCandidate({
+        git: w.git,
+        repo: w.work,
+        targetHead,
+        head,
+        path: join(scratch, "candidate"),
+        message: "verify candidate with noFetch",
+        noFetch: true,
+        process: recording,
+      })
+    } finally {
+      rmSync(scratch, { recursive: true, force: true })
+    }
+    expect(recordedArgvs.length).toBeGreaterThan(0)
+    for (const argv of recordedArgvs) {
+      expect(argv).toContain("--no-fetch")
+    }
   })
 })
 
