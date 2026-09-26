@@ -2849,6 +2849,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
 
   /** @failure 25946: a second change-ref write between the rival status and its selected history read
    * escaped as an unexpected round error and ended the supervised service with exit 2.
+   * The discard must carry the second tip, not the stale status read before that write.
    * @level l2 @consumer Hab's yrd service
    */
   it("keeps up alive when a rival advances the change after its status read", async () => {
@@ -2871,6 +2872,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     let firstWrite = false
     let secondWrite = false
     let ignoredTip: string | undefined
+    let resumedTip: string | undefined
     using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
       const backend = originalBackend(options)
       const publish = backend.publish
@@ -2894,6 +2896,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
             // The selected status still describes ignoredTip; the rival moves it before the next read.
             secondWrite = true
             await setBranchIgnored(rivalStore, { queue: "main", branch, by: "@chief", ignored: false })
+            resumedTip = (await readStatus(rivalStore, "main", branch)).tip
           }
           return history
         },
@@ -2909,12 +2912,17 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     )
     expect(firstWrite).toBe(true)
     expect(secondWrite).toBe(true)
+    expect(resumedTip).toBeDefined()
+    expect(resumedTip).not.toBe(ignoredTip)
     expect((await readStatus(rivalStore, "main", branch)).ignored).toBeUndefined()
     expect(exit, `${run.stderr()}\n${run.stdout()}`).toBe(0)
     expect(records(run)).toHaveLength(1)
     expect(records(run)[0]).toMatchObject({ exitCode: 0, merged: [], stuck: [] })
     expect(readRunLog(join(w.workdir, "logs"), String(records(run)[0]?.run))).toContainEqual(
       expect.objectContaining({ kind: "warning", subject: "change-ref-moved-during-history-read", branch, ref }),
+    )
+    expect(readRunLog(join(w.workdir, "logs"), String(records(run)[0]?.run))).toContainEqual(
+      expect.objectContaining({ kind: "discarded", branch, reason: expect.stringContaining(`at ${resumedTip} while`) }),
     )
   }, 60_000)
 
