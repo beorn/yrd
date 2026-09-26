@@ -2493,7 +2493,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
   }, 60_000)
 
-  // @failure 25041: a crash between the two old-reader-compatible release writes left a pause forever.
+  // @failure 25041: an interrupted stuck release can leave a pause forever or let ops cutover corrupt the queue.
   it("completes an unfinished pre-cutover stuck release on the next service round", async () => {
     const w = await world()
     const target = (await w.git(["rev-parse", "main"])).trim()
@@ -2513,6 +2513,11 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     const reason = stuckReleaseReason(stuck, "repaired")
     const paused = await writeQueueEvent(store, "main", { type: "paused", by: "@chief", reason, at: new Date() })
     expect((await readEventQueue(store, "main")).release?.id).toBe(paused)
+    const queueBefore = (await w.git(["ls-remote", "origin", queueRef("main")])).trim()
+    await expect(appendOpsCutover(store, w.git, "main", target, new Date(), "@chief")).rejects.toThrow(
+      /unfinished stuck release.*complete it before ops-cutover/,
+    )
+    expect((await w.git(["ls-remote", "origin", queueRef("main")])).trim()).toBe(queueBefore)
     const stop = new AbortController()
     const service = capture(w.work)
     expect(
