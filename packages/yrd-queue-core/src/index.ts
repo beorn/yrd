@@ -39,6 +39,7 @@ export {
   EVENT_TRAILERS,
   adoptedChange,
   adoptedInput,
+  appendChangeEvent,
   appendOpsCutover,
   changeInput,
   changesRef,

@@ -279,15 +279,25 @@ describe("event changes use the shared table row", () => {
       at: new Date(TIME),
       endedAt: new Date(TIME),
     }
+    const mergedWithoutMerge = {
+      status: "merged" as const,
+      commit: HEAD,
+      candidate,
+      since: new Date(TIME),
+      at: new Date(TIME),
+      endedAt: new Date(TIME),
+    }
     const rows = eventRows(
       new Map<string, EventChange>([
         ["task/checking", checking],
         ["task/merged", merged],
+        ["task/merged-without-merge", mergedWithoutMerge],
       ]),
     )
-    expect(rows[0]?.merge).toBeUndefined()
-    expect(rows[0]?.run).toBeUndefined()
-    expect(rows[1]?.merge).toBe(targetMerge)
-    expect(rows[1]?.run).toBe(runId)
+    expect(rows.find((r) => r.branch === "task/checking")?.merge).toBeUndefined()
+    expect(rows.find((r) => r.branch === "task/checking")?.run).toBeUndefined()
+    expect(rows.find((r) => r.branch === "task/merged")?.merge).toBe(targetMerge)
+    expect(rows.find((r) => r.branch === "task/merged")?.run).toBe(runId)
+    expect(rows.find((r) => r.branch === "task/merged-without-merge")?.merge).toBeUndefined()
   })
 })
