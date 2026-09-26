@@ -1662,7 +1662,7 @@ it("settles refused and finally failed event recipients once", async () => {
   expect(logRecords(second).filter((row) => row.kind === "message")).toHaveLength(0)
 })
 
-/** @failure A crash between an event ending and its notice left the recipient silent forever.
+/** @failure An untold ending stayed silent after a crash, or its retry replaced immutable Time with the retry clock.
  * @level l3 @consumer notified recipient
  */
 it("repairs an ending whose event notice was not yet recorded", async () => {
@@ -1674,19 +1674,35 @@ it("repairs an ending whose event notice was not yet recorded", async () => {
   if (opened.tip === undefined) throw new Error("submitted event has no tip")
   const ending = await appendChangeEvent(store, "main", "task/notice-repair", opened.tip, {
     type: "failed",
-    at: new Date(),
+    at: new Date(Date.now() - 60_000),
     reason: "check failed before notice",
   })
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/notice-repair") })).events()
+  const endingTime = events.find((event) => event.id === ending)?.props.find(([key]) => key === "Time")?.[1]
+  if (endingTime === undefined) throw new Error(`ending ${ending} has no Time`)
+  const options = { ...(await w.options({ exit: 0 })), checks: [] }
+  const firstAttempt = join(dirname(w.notifyLog), "first-notice-failed")
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [] })
+  const outcome = await queueRun({
+    ...options,
+    notify: [
+      {
+        name: "recorder",
+        on: ["failed" as const],
+        run: `${w.notifier}; if [ ! -e "${firstAttempt}" ]; then : > "${firstAttempt}"; exit 1; fi`,
+      },
+    ],
+  })
 
   expect(outcome.merged).toEqual([])
   expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"failed"')
-  expect(messages(w)[0]?.endingId).toEqual(expect.any(String))
+  expect(messages(w)).toHaveLength(2)
+  expect(messages(w)[0]).toMatchObject({ endingId: ending, endedAt: endingTime })
+  expect(messages(w)[1]).toMatchObject({ endingId: ending, endedAt: endingTime })
   const change = await readStatus(store, "main", "task/notice-repair")
   expect(change.notices?.[`${ending}:recorder`]).toMatchObject({ for: ending, result: "delivered" })
-  await queueRun({ ...(await w.options({ exit: 0 })), checks: [] })
-  expect(readFileSync(w.notifyLog, "utf8").split("\n").filter(Boolean)).toHaveLength(1)
+  await queueRun(options)
+  expect(messages(w)).toHaveLength(2)
 })
 
 /** @failure An event queue could accept teardown while no executor exists for it.
