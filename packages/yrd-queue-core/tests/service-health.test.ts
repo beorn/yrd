@@ -116,6 +116,15 @@ describe("the health document", () => {
     })
   })
 
+  test("an unfinished release names its event and automatic completion", () => {
+    const event = "b".repeat(40)
+    const doc = roundHealthDocument("yrd", undefined, INTERVAL, NOW, undefined, undefined, [], event)
+    expect(doc.state).toBe("unhealthy")
+    expect(doc.error?.cause).toBe(`unfinished stuck release at ${event}, completing`)
+    expect(doc.error?.resolution.join(" ")).toContain("no operator resume is needed")
+    expect(doc.facts).toMatchObject({ unfinishedStuckRelease: event })
+  })
+
   // absent + stopped, never unhealthy: nothing claimed this service. Reporting
   // unhealthy here would page for a service nobody started.
   test("no document at all is absent and stopped, not unhealthy", () => {

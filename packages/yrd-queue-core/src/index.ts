@@ -55,6 +55,7 @@ export {
   listChanges,
   queueFormat,
   queueRef,
+  queueResumedAfter,
   readChangeEvents,
   readEventQueue,
   readEventOps,
@@ -62,6 +63,7 @@ export {
   readStatus,
   resetQueueFormatCache,
   setBranchIgnored,
+  stuckReleaseReason,
   writeQueueEvent,
   writeQueueOverride,
 } from "./events.ts"

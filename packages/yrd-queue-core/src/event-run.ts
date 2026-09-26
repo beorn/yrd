@@ -73,7 +73,7 @@ export class QueueRunEventRetryExhausted extends Error {
   override readonly name = "QueueRunEventRetryExhausted"
 
   constructor(
-    readonly site: "notified" | "expire-overrides" | "observed",
+    readonly site: "notified" | "expire-overrides" | "observed" | "stuck-release",
     readonly ref: string,
     readonly marker: string,
     readonly count: number,
@@ -444,6 +444,21 @@ export async function eventQueueRun(
   }
 
   let operational = await readEventOps(store, git, queue, target)
+  if (operational.queue.release !== undefined) {
+    const release = operational.queue.release
+    if (operational.source !== "legacy") {
+      throw new Error(`event queue ${url}#${queue}: unfinished pre-cutover release ${release.id} after ops cutover`)
+    }
+    await runTransaction("stuck-release", release.id, () =>
+      writeQueueEvent(store, queue, {
+        type: "resumed",
+        reason: release.reason,
+        by: "yrd-run",
+        at: new Date(),
+      }),
+    )
+    operational = await readEventOps(store, git, queue, target)
+  }
   // No override can expire or need a reminder when the table is empty. Keep
   // the round's injected clock for its stop window until a clock act is due.
   const clock =

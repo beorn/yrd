@@ -34,6 +34,7 @@ import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as gitomic from "gitomic"
+import { openEvents } from "gitomic/events"
 import {
   appendChangeEvent,
   appendOpsCutover,
@@ -45,6 +46,7 @@ import {
   gitIn,
   parseQueueHealthDocument,
   queueRef,
+  readEventQueue,
   QUEUE_HEALTH_DOCUMENT,
   readConfig,
   readPause,
@@ -55,6 +57,7 @@ import {
   ROUND_LOCK,
   runId,
   setBranchIgnored,
+  stuckReleaseReason,
   submit,
   trailer,
   watchRows,
@@ -2287,11 +2290,13 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
     const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
     await createEventQueue(store, "main", target, config, new Date())
+    const earlier = stuckReleaseReason("a".repeat(40), "an earlier resume cannot release a later stuck change")
+    await writeQueueEvent(store, "main", { type: "paused", at: new Date(), by: "@chief", reason: earlier })
     await writeQueueEvent(store, "main", {
       type: "resumed",
       at: new Date(),
       by: "@chief",
-      reason: "an earlier resume cannot release a later stuck change",
+      reason: earlier,
     })
     const branch = "task/pre-cutover-stuck"
     await oneChange(w, branch)
@@ -2352,6 +2357,11 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       ),
       resumed.stderr(),
     ).toBe(0)
+    const releaseEvents = await (await openEvents({ ...store, ref: queueRef("main") })).events({ limit: 1024 })
+    expect(releaseEvents.slice(-2).map((event) => event.type)).toEqual(["paused", "resumed"])
+    expect(releaseEvents.at(-1)?.props.find(([key]) => key === "Reason")?.[1]).toMatch(
+      /^yrd-stuck-release:[0-9a-f]{40} repaired$/u,
+    )
     const after = capture(w.work)
     expect(await coreQueueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
     expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
@@ -2410,9 +2420,46 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       ),
       resumed.stderr(),
     ).toBe(0)
+    const releaseEvents = await (await openEvents({ ...store, ref: queueRef("main") })).events({ limit: 1024 })
+    expect(releaseEvents.slice(-2).map((event) => event.type)).toEqual(["paused", "resumed"])
     const after = capture(w.work)
     expect(await coreQueueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
     expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
+  }, 60_000)
+
+  // @failure 25041: a crash between the two old-reader-compatible release writes left a pause forever.
+  it("completes an unfinished pre-cutover stuck release on the next service round", async () => {
+    const w = await world()
+    const target = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createEventQueue(store, "main", target, config, new Date())
+    const branch = "task/unfinished-release"
+    await oneChange(w, branch)
+    const submitted = await readStatus(store, "main", branch)
+    if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
+    const stuck = await appendChangeEvent(store, "main", branch, submitted.tip, {
+      type: "stuck",
+      at: new Date(),
+      reason: "repair needed",
+    })
+    const reason = stuckReleaseReason(stuck, "repaired")
+    const paused = await writeQueueEvent(store, "main", { type: "paused", by: "@chief", reason, at: new Date() })
+    expect((await readEventQueue(store, "main")).release?.id).toBe(paused)
+    const stop = new AbortController()
+    const service = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        service.io,
+        { command: "up", intervalSeconds: 0, stop: stop.signal, afterHealth: () => stop.abort() },
+        { json: true, workdir: w.workdir },
+      ),
+      service.stderr(),
+    ).toBe(0)
+    expect((await readEventQueue(store, "main")).release).toBeUndefined()
+    expect((await readStatus(store, "main", branch)).status).toBe("merged")
   }, 60_000)
 
   // What no round can fix still ends the service: a round that cannot even

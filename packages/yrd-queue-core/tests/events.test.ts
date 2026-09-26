@@ -13,6 +13,7 @@ import { gitIn } from "../src/git.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
 import { pauseRef } from "../src/refs.ts"
 import { encodeOps, type OpsState } from "../src/ops-state.ts"
+import { queueResumedAfter, stuckReleaseReason } from "../src/index.ts"
 import {
   CHANGE_EVENT_TYPES,
   adoptedChange,
@@ -1045,8 +1046,9 @@ describe("the queue-format boundary", () => {
     )
     if (opened.head === null) throw new Error("fixture opened event has no tip")
     beforeNextPublish(async () => {
-      await writeQueueEvent(location, "lab", { type: "paused", by: "operator", reason: "repair", at: new Date() })
-      await writeQueueEvent(location, "lab", { type: "resumed", by: "operator", reason: "repaired", at: new Date() })
+      const reason = stuckReleaseReason(A, "raced repair")
+      await writeQueueEvent(location, "lab", { type: "paused", by: "operator", reason, at: new Date() })
+      await writeQueueEvent(location, "lab", { type: "resumed", by: "operator", reason, at: new Date() })
     })
 
     await expect(
@@ -1068,19 +1070,38 @@ describe("the queue-format boundary", () => {
     await expect(
       writeQueueEvent(location, "lab", {
         type: "paused",
-        reason: "repair",
+        reason: `yrd stuck release ${A} repair`,
         by: "operator",
         at: new Date("2026-09-22T14:00:10.000Z"),
       }),
     ).rejects.toThrow(/needs ops-cutover/)
-    const stuckResume = await writeQueueEvent(location, "lab", {
-      type: "resumed",
-      reason: "retry a stuck change",
+    await expect(
+      writeQueueEvent(location, "lab", {
+        type: "resumed",
+        reason: "retry a stuck change",
+        by: "operator",
+        at: new Date("2026-09-22T14:00:15.000Z"),
+      }),
+    ).rejects.toThrow(/needs a preceding pause/)
+    const releaseReason = stuckReleaseReason(A, "repaired")
+    const releasePause = await writeQueueEvent(location, "lab", {
+      type: "paused",
+      reason: releaseReason,
       by: "operator",
       at: new Date("2026-09-22T14:00:20.000Z"),
     })
+    const halfRelease = await readEventQueue(location, "lab")
+    expect(halfRelease.release).toMatchObject({ id: releasePause, reason: releaseReason })
+    expect(eventPause(halfRelease)).toBeUndefined()
+    const stuckResume = await writeQueueEvent(location, "lab", {
+      type: "resumed",
+      reason: releaseReason,
+      by: "operator",
+      at: new Date("2026-09-22T14:00:21.000Z"),
+    })
     const beforeCutover = await readEventQueue(location, "lab")
     expect(beforeCutover.tip).toBe(stuckResume)
+    expect(beforeCutover.release).toBeUndefined()
     expect(eventPause(beforeCutover)).toBeUndefined()
     await seedOpsCutover(location, "lab")
     await writeQueueEvent(location, "lab", {
@@ -1106,6 +1127,34 @@ describe("the queue-format boundary", () => {
         at: new Date("2026-09-22T14:03:00.000Z"),
       }),
     ).rejects.toThrow(/queue is not paused/)
+  })
+
+  // @failure 25041: a caller could mistake any earlier resume for a release of the latest stuck change.
+  it("exports the stuck Queue anchor read used by pre-cutover resume", async () => {
+    const { store, location } = remoteMemStore("yrd-stuck-release-anchor")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const queueTip = await seedEventQueue(location, "lab", commit, new Date())
+    const branch = "task/stuck-anchor"
+    const opened = await (
+      await openEvents({ ...store, ref: changesRef("lab", branch) })
+    ).append([changeInput("opened", { queueTip, at: new Date(), commit, by: "@dev/2" })], { expect: null })
+    if (opened.head === null) throw new Error("fixture opened event has no tip")
+    const earlier = stuckReleaseReason(A, "earlier repair")
+    await writeQueueEvent(location, "lab", { type: "paused", by: "@chief", reason: earlier, at: new Date() })
+    await writeQueueEvent(location, "lab", { type: "resumed", by: "@chief", reason: earlier, at: new Date() })
+    const stuck = await appendChangeEvent(location, "lab", branch, opened.head, {
+      type: "stuck",
+      at: new Date(),
+      reason: "repair needed",
+    })
+    const history = (await readEventQueueWithChanges(location, "lab")).histories.get(branch)
+    expect(await queueResumedAfter(location, "lab", branch, history)).toBe(false)
+    const reason = stuckReleaseReason(stuck, "repaired")
+    await writeQueueEvent(location, "lab", { type: "paused", by: "@chief", reason, at: new Date() })
+    expect(await queueResumedAfter(location, "lab", branch, history)).toBe(false)
+    await writeQueueEvent(location, "lab", { type: "resumed", by: "@chief", reason, at: new Date() })
+    expect(await queueResumedAfter(location, "lab", branch, history)).toBe(true)
   })
 
   it("starts a migrated queue paused on its created event and can resume normally", async () => {

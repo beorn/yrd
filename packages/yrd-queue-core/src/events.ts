@@ -898,6 +898,8 @@ type EventQueueProjection = Readonly<{
   /** Complete operational state from the latest ops event, once cut over. */
   ops?: OpsState
   pause?: Readonly<{ id: string; at: Date; reason: string; by: string; cause: "operator" | "maintenance" }>
+  /** A synthetic pre-cutover pause awaiting its matching stuck-release resume. It is not an operator stop. */
+  release?: Readonly<{ id: string; at: Date; reason: string; by: string }>
   observed: Readonly<Record<string, Readonly<{ id: string; branch?: string }>>>
   notices: Readonly<
     Record<string, Readonly<{ id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }>>
@@ -1186,7 +1188,7 @@ async function eventLineStop(
     : pause
 }
 
-/** Whether the queue was explicitly resumed after this change's latest stuck event. */
+/** Whether the queue was resumed after the latest stuck event's Queue: trailer anchor. */
 export async function queueResumedAfter(
   store: QueueLocation,
   queue: string,
@@ -1211,6 +1213,21 @@ export type WriteQueueEvent =
   | Readonly<{ type: "observed"; commit: string; branch?: string; by: string; at: Date }>
   | Readonly<{ type: "notified"; notice: NoticeWrite; by: string; at: Date }>
 
+const STUCK_RELEASE_PREFIX = "yrd-stuck-release:"
+
+export function stuckReleaseReason(stuckEvent: string, reason: string): string {
+  if (!COMMIT_OID.test(stuckEvent)) throw new TypeError(`stuck release needs an event id, got ${stuckEvent}`)
+  if (reason.trim() === "") throw new TypeError("stuck release needs Reason:")
+  return `${STUCK_RELEASE_PREFIX}${stuckEvent} ${reason}`
+}
+
+function isStuckReleaseReason(reason: string): boolean {
+  return (
+    reason.startsWith(STUCK_RELEASE_PREFIX) &&
+    /^[0-9a-f]{40}(?:[0-9a-f]{24})? .+/u.test(reason.slice(STUCK_RELEASE_PREFIX.length))
+  )
+}
+
 /** Append a queue stop under Gitomic's CAS; retries fold the current chain again. */
 export async function writeQueueEvent(store: QueueLocation, queue: string, write: WriteQueueEvent): Promise<string> {
   const ref = queueRef(queue)
@@ -1222,8 +1239,31 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   let existing: string | undefined
   const result = await chain.transact(async (events) => {
     const current = projectEventQueue(events, ref, store.repo)
-    if (write.type === "paused" && current.opsCutover === undefined) {
+    const releaseWrite = (write.type === "paused" || write.type === "resumed") && isStuckReleaseReason(write.reason)
+    if (write.type === "paused" && current.opsCutover === undefined && !releaseWrite) {
       throw new Error(`${ref}: paused needs ops-cutover; legacy pause Record is still authoritative`)
+    }
+    if (write.type === "resumed" && current.opsCutover === undefined && !releaseWrite && current.pause === undefined) {
+      throw new Error(`${ref}: pre-cutover resume needs a preceding pause`)
+    }
+    if (current.opsCutover === undefined && releaseWrite) {
+      if (current.release !== undefined && current.release.reason !== write.reason) {
+        throw new Error(`${ref}: unfinished stuck release at ${current.release.id} must complete first`)
+      }
+      const completed = events.findLast(
+        (event) => event.type === "resumed" && prop(event, EVENT_TRAILERS.reason) === write.reason,
+      )
+      if (completed !== undefined) {
+        existing = completed.id
+        return []
+      }
+      if (write.type === "paused" && current.release !== undefined) {
+        existing = current.release.id
+        return []
+      }
+      if (write.type === "resumed" && current.release === undefined && current.pause === undefined) {
+        throw new Error(`${ref}: stuck release resume needs a preceding pause`)
+      }
     }
     if (write.type === "observed") existing = current.observed[write.commit]?.id
     if (write.type === "notified") existing = current.notices[write.notice.key]?.id
@@ -1433,6 +1473,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   let previous: string | undefined
   let declaration: string | undefined
   let pause: EventQueueProjection["pause"]
+  let release: EventQueueProjection["release"]
   let opsCutover: string | undefined
   let ops: OpsState | undefined
   const observed: Record<string, { id: string; branch?: string }> = {}
@@ -1474,7 +1515,14 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
         if (event.writer === null) throw new Error(`${ref}: paused event ${event.id} needs a writer`)
         if (opsCutover === undefined) {
           if (pause !== undefined) throw new Error(`${ref}: event ${event.id} pauses an already paused queue`)
-          pause = { id: event.id, at: new Date(time), reason, by: event.writer, cause: "operator" }
+          if (release !== undefined) {
+            throw new Error(`${ref}: event ${event.id} pauses during unfinished stuck release ${release.id}`)
+          }
+          if (isStuckReleaseReason(reason)) {
+            release = { id: event.id, at: new Date(time), reason, by: event.writer }
+          } else {
+            pause = { id: event.id, at: new Date(time), reason, by: event.writer, cause: "operator" }
+          }
         } else {
           if (ops?.pause !== undefined && prop(event, "Replaces") !== ops.pause.sha) {
             throw new Error(
@@ -1504,8 +1552,13 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
           throw new Error(`${ref}: resumed event ${event.id} needs Reason:`)
         }
         if (opsCutover === undefined) {
-          // Before cutover, legacy owns pause. This event releases a stuck
-          // change; it need not have a preceding queue pause event.
+          // Before cutover, legacy owns pause. Earlier writers could emit a
+          // lone resume, so the reader still accepts it; this writer requires
+          // an older-reader-compatible preceding pause.
+          if (release !== undefined && prop(event, EVENT_TRAILERS.reason) !== release.reason) {
+            throw new Error(`${ref}: resumed event ${event.id} does not complete stuck release ${release.id}`)
+          }
+          release = undefined
           pause = undefined
         } else {
           if (ops?.pause === undefined) throw new Error(`${ref}: event ${event.id} resumes a running queue`)
@@ -1626,6 +1679,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
     observed,
     notices,
     ...(pause === undefined ? {} : { pause }),
+    ...(release === undefined ? {} : { release }),
     ...(opsCutover === undefined ? {} : { opsCutover }),
     ...(ops === undefined ? {} : { ops }),
   }
