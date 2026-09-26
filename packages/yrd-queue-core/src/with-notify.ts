@@ -161,7 +161,7 @@ async function toldDirect(run: Run, commit: DirectMerge): Promise<void> {
   for (const { name, delivery, failure, refused } of await notifyAll(
     run,
     DIRECT,
-    { change: commit.commit, record: DIRECT },
+    { change: commit.commit, record: DIRECT, endingId: commit.commit, endedAt: commit.at.toISOString() },
     owed,
   )) {
     run.log.write({
@@ -354,6 +354,8 @@ async function told(
     {
       change: changeName(entry.change),
       record: kind,
+      endingId: endedRecord,
+      endedAt: written.at.toISOString(),
       ...(issue === undefined ? {} : { issue }),
       ...(known ? { submitter } : {}),
       ...(kind === "merged" ? { merge: trailer(written, "Merge") ?? "" } : { log, reason: reasonFor(kind, written) }),
@@ -437,9 +439,8 @@ async function told(
  * and `stuck` carry why and where to read it, and `failed` how many times this
  * branch has been sent back, the number the root's notifier raises an andon on.
  *
- * No id, no subject, no remedy, no prose: an entry composes what it says, and
- * the identity of a message is its change and its record — a resend after a
- * crash hands over the same object.
+ * `endingId` identifies the ending instance, including a later ending of the
+ * same kind at the same head. A resend after a crash hands over the same ID.
  */
 export type NotifyRecord =
   | Readonly<{ record: "observed"; notice: ObservationNotice }>
@@ -447,6 +448,8 @@ export type NotifyRecord =
   | Readonly<{
       record: Exclude<Ending, "observed" | "override">
       change: string
+      endingId: string
+      endedAt: string
       submitter?: string
       issue?: string
       merge?: string

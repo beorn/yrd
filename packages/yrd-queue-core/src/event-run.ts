@@ -1,6 +1,7 @@
 /** Run a change from the event projection, leasing its merge with the queue. */
 import { mkdirSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { openEvents } from "gitomic/events"
 import { Conflict, RetriesExhausted } from "./git.ts"
 
 import {
@@ -60,6 +61,14 @@ import { transportFaultIn } from "./setup-transport.ts"
 import { readRootChanges } from "./legacy-records.ts"
 import { mergedBy } from "./legacy-records.ts"
 import { settledBaseCommit } from "./settled-base.ts"
+
+function endingTime(event: Event, context: string): string {
+  const time = event.props.find(([key]) => key === EVENT_TRAILERS.time)?.[1]
+  if (time === undefined || !Number.isFinite(Date.parse(time))) {
+    throw new Error(`${context}: ending event ${event.id} has no valid Time`)
+  }
+  return time
+}
 import { repairMissingBranchHeads } from "./remote.ts"
 import { expireOverrides, isActive, overrideFence } from "./override.ts"
 import { pauseFence, QueuePaused } from "./pause.ts"
@@ -382,10 +391,7 @@ export async function eventQueueRun(
     let tip = change.tip
     if (tip === undefined) throw new Error(`event queue ${url}#${queue}: ${branch} notice has no chain tip`)
     const ending =
-      existingEnding ??
-      (kind === "merged"
-        ? (await readChangeEvents(store, queue, branch, tip)).find((event) => event.id === eventId)
-        : { id: eventId, props: [] })
+      existingEnding ?? (await readChangeEvents(store, queue, branch, tip)).find((event) => event.id === eventId)
     if (ending === undefined) {
       throw new Error(`event queue ${url}#${queue}: ${branch} notice has no ${kind} event ${eventId}`)
     }
@@ -423,6 +429,8 @@ export async function eventQueueRun(
         {
           record: kind,
           change: changeName({ branch, head }),
+          endingId: eventId,
+          endedAt: endingTime(ending, `event queue ${url}#${queue}: ${branch}`),
           ...(change.issue === undefined ? {} : { issue: change.issue }),
           ...(change.submitter === undefined ? {} : { submitter: change.submitter }),
           ...(kind === "merged"
@@ -450,7 +458,11 @@ export async function eventQueueRun(
     }
   }
   const tellDirect = async (commit: string, eventId: string): Promise<void> => {
-    if ((options.notify?.length ?? 0) === 0) return
+    if (!options.notify?.some((entry) => entry.on.includes("merged-direct"))) return
+    const observed = (await (await openEvents({ ...store, ref: queueRef(queue) })).events()).find(
+      (event) => event.id === eventId,
+    )
+    if (observed === undefined) throw new Error(`event queue ${url}#${queue}: direct notice has no event ${eventId}`)
     for (const entry of options.notify ?? []) {
       if (!entry.on.includes("merged-direct")) continue
       const state = await readEventQueue(store, queue)
@@ -463,7 +475,12 @@ export async function eventQueueRun(
         { options, git, target, log, url, queue },
         entry,
         "merged-direct",
-        { record: "merged-direct", change: commit },
+        {
+          record: "merged-direct",
+          change: commit,
+          endingId: eventId,
+          endedAt: endingTime(observed, `event queue ${url}#${queue}`),
+        },
         { about: queue, branch: queue, head: commit, id: eventId, text: `direct merge ${commit} observed on ${queue}` },
       )
       await runTransaction("notified", state.tip, () =>

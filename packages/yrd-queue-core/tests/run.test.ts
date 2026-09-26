@@ -499,6 +499,38 @@ it("sends two failed endings when the same head is resubmitted", async () => {
     { record: "failed", change: `task/same-head-failed@${head}`, failures: 1 },
     { record: "failed", change: `task/same-head-failed@${head}`, failures: 2 },
   ])
+  expect(messages(w).map((message) => message.endingId)).toEqual([expect.any(String), expect.any(String)])
+  expect(messages(w)[0]?.endingId).not.toBe(messages(w)[1]?.endingId)
+})
+
+/** @failure 25041: a second stuck event for the same branch@head reused the first notice identity.
+ * @level l3 @consumer queue operator and notified recipient
+ */
+it("gives distinct IDs to stuck, drop, resubmit, stuck at one head", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const head = await submitCommit(w, "task/repeated-stuck", "one.txt")
+  const first = await queueRun(await w.options({ exit: 2, on: ["submit"] }))
+  expect(first.stuck).toEqual(["task/repeated-stuck"])
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await drop(store, { queue: "main", branch: "task/repeated-stuck", by: "@chief" })
+  const resubmitted = await submit(w.git, "origin", {
+    branch: "task/repeated-stuck",
+    submitter: "@dev/2",
+    target: { branch: "main", remote: "origin" },
+    issue: "@i/10-yrd/25041",
+  })
+  expect(resubmitted).toMatchObject({ head, retry: false })
+  const second = await queueRun(await w.options({ exit: 2, on: ["submit"] }))
+  expect(second.stuck).toEqual(["task/repeated-stuck"])
+  const sent = messages(w)
+  expect(sent).toMatchObject([
+    { record: "stuck", change: `task/repeated-stuck@${head}` },
+    { record: "stuck", change: `task/repeated-stuck@${head}` },
+  ])
+  expect(sent[0]?.endingId).toEqual(expect.any(String))
+  expect(sent[1]?.endingId).toEqual(expect.any(String))
+  expect(sent[0]?.endingId).not.toBe(sent[1]?.endingId)
 })
 
 /** @failure A pre-cutover queue event pause is ignored while the legacy pause ref still owns the stop.
@@ -877,6 +909,7 @@ it("ends a deleted event branch with its last commit kept, then continues the li
   expect(ending).toMatchObject({ type: "cancelled", links: [deleted] })
   expect(state.notices?.[`${state.ending?.id}:recorder`]).toMatchObject({ result: "delivered" })
   expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"cancelled"')
+  expect(messages(w)[0]?.endingId).toEqual(expect.any(String))
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/heads/task/deleted-event"])).toBe("")
 })
 
@@ -902,6 +935,7 @@ it("tells the submitter when the legacy queue withdraws a confirmed absent branc
     )?.reading,
   ).toMatchObject({ state: "withdrawn", reason: "deleted" })
   expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"cancelled"')
+  expect(messages(w)[0]?.endingId).toEqual(expect.any(String))
   expect(readFileSync(w.notifyLog, "utf8")).toContain('"reason":"branch absent from remote"')
   await queueRun(options)
   expect(readFileSync(w.notifyLog, "utf8").split("\n").filter(Boolean)).toHaveLength(1)
@@ -1512,6 +1546,7 @@ it("delivers an event ending and settles its recipient on the branch chain", asy
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/notified-event"] })
   expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"merged"')
+  expect(messages(w)[0]?.endingId).toEqual(expect.any(String))
   const events = await (await openEvents({ ...store, ref: changesRef("main", "task/notified-event") })).events()
   const merged = events.find((event) => event.type === "merged")
   expect(merged).toBeDefined()
@@ -1586,6 +1621,7 @@ it("records a final notice for a stuck event while leaving the line stopped", as
 
   expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/stuck-notice"] })
   expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"stuck"')
+  expect(messages(w)[0]?.endingId).toEqual(expect.any(String))
   const change = await readStatus(store, "main", "task/stuck-notice")
   expect(change.status).toBe("stuck")
   expect(Object.values(change.notices ?? {})).toContainEqual(
@@ -1646,6 +1682,7 @@ it("repairs an ending whose event notice was not yet recorded", async () => {
 
   expect(outcome.merged).toEqual([])
   expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"failed"')
+  expect(messages(w)[0]?.endingId).toEqual(expect.any(String))
   const change = await readStatus(store, "main", "task/notice-repair")
   expect(change.notices?.[`${ending}:recorder`]).toMatchObject({ for: ending, result: "delivered" })
   await queueRun({ ...(await w.options({ exit: 0 })), checks: [] })
@@ -2592,11 +2629,15 @@ it("settles a direct-merge notice on the queue chain across an empty journal", a
     to: "recorder",
     result: "delivered",
   })
-  expect(messages(w)).toEqual([{ change: direct, record: "merged-direct" }])
+  expect(messages(w)).toEqual([
+    { change: direct, record: "merged-direct", endingId: observed?.id, endedAt: expect.any(String) },
+  ])
 
   const restarted = await queueRun({ ...options, workdir: join(w.workdir, "fresh-journal") })
   expect(restarted.directMerges).toEqual([])
-  expect(messages(w)).toEqual([{ change: direct, record: "merged-direct" }])
+  expect(messages(w)).toEqual([
+    { change: direct, record: "merged-direct", endingId: observed?.id, endedAt: expect.any(String) },
+  ])
 })
 
 /** @failure 25736: an exhausted direct-notice queue transaction escaped as an unknown round error.
@@ -3383,12 +3424,13 @@ describe("a queue run", () => {
     const sent = messages(w)
     expect(sent).toHaveLength(1)
     // The record a notify entry reads names the ending: which record, which change,
-    // who submitted it, what it is for, and the merge it made. No id, because
-    // the change and the ending are the message's identity; no prose, because
-    // the entry composes what it says.
+    // who submitted it, what it is for, the merge it made, and the ending's
+    // stable record ID. The entry composes the prose.
     expect(sent[0]).toEqual({
       change: changeName({ branch: "task/one", head }),
       record: "merged",
+      endingId: records.find((record) => record.kind === "merged")?.sha,
+      endedAt: expect.any(String),
       issue: "@i/10-yrd/1",
       merge: await remoteTarget(w),
       submitter: "@dev/2",
@@ -3658,6 +3700,8 @@ describe("a queue run", () => {
     expect(messages(w)[0]).toEqual({
       change: changeName({ branch: "task/one", head }),
       record: "failed",
+      endingId: records[2]?.sha,
+      endedAt: expect.any(String),
       failures: 1,
       issue: "@i/10-yrd/1",
       log: expect.stringContaining("verify.log"),
@@ -4758,6 +4802,7 @@ describe("a queue run", () => {
     expect(msgs[0]).toMatchObject({
       change: `task/deferred-notify@${head}`,
       record: "deferred",
+      endingId: expect.any(String),
       reason: "projection-exceeded",
       projectedMs: 3480000,
       boundMs: 1800000,
@@ -5580,7 +5625,9 @@ describe("a queue run", () => {
         (record) => record.kind,
       ),
     ).toEqual(["opened", "failed"])
-    expect(messages(w)).toEqual([{ change: direct, record: "merged-direct" }])
+    expect(messages(w)).toEqual([
+      { change: direct, record: "merged-direct", endingId: direct, endedAt: expect.any(String) },
+    ])
   })
 
   it("a pause placed after the last read but before the atomic merge push blocks every ref advance", async () => {
@@ -6011,7 +6058,7 @@ describe("a queue run", () => {
     // second with the merge commit as its id.
     expect(messages(w).filter((message) => message.record === "merged")).toMatchObject([{ submitter: "@dev/2" }])
     const broken = messages(w).filter((message) => message.record === "merged-direct")
-    expect(broken).toEqual([{ change: merge, record: "merged-direct" }])
+    expect(broken).toEqual([{ change: merge, record: "merged-direct", endingId: merge, endedAt: expect.any(String) }])
     const told = logRecords(outcome).find((record) => record.kind === "message" && record.says === "merged-direct")
     expect(String(told?.text)).toContain(`main moved around the queue at ${merge.slice(0, 12)}`)
     expect(String(told?.text)).toContain("it carries no Change: trailer")
@@ -6287,7 +6334,7 @@ describe("a queue run", () => {
       { commit: direct, gitlinks: [], parents: [base], subject: "direct.txt around the queue" },
     ])
     const broken = messages(w).filter((message) => message.record === "merged-direct")
-    expect(broken).toEqual([{ change: direct, record: "merged-direct" }])
+    expect(broken).toEqual([{ change: direct, record: "merged-direct", endingId: direct, endedAt: expect.any(String) }])
     const told = logRecords(first).find((record) => record.kind === "message" && record.says === "merged-direct")
     expect(String(told?.text)).toContain(`main moved around the queue at ${direct.slice(0, 12)}`)
     expect(String(told?.text)).toContain("it is one commit, not a merge of a change")
