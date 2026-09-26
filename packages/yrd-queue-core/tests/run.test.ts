@@ -632,6 +632,92 @@ it("refuses ops cutover when the verified plan names a different queue tip", asy
   expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("legacy")
 })
 
+/** @failure Ops apply ignores a pause ref changed since its verified plan (25041 A10).
+ * @level l3 @consumer queue operator and cutover runner
+ */
+it("refuses ops cutover when the verified plan names a different pause tip", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const pause = await writePause(w.git, "origin", "main", { kind: "paused", by: "operator", reason: "hold" })
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const before = (await readEventQueue(store, "main")).tip
+
+  await expect(
+    appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief", {
+      queueBefore: before,
+      pauseBefore: "0".repeat(40),
+    }),
+  ).rejects.toThrow(/ops-cutover refs differ from the verified plan/)
+  expect((await readEventQueue(store, "main")).tip).toBe(before)
+  expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("legacy")
+  expect((await readPause(w.git, "origin", "main"))?.sha).toBe(pause.sha)
+})
+
+/** @failure Ops apply ignores an override ref changed since its verified plan (25041 A10).
+ * @level l3 @consumer queue operator and cutover runner
+ */
+it("refuses ops cutover when the verified plan names a different override tip", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const override = await writeOverride(
+    w.git,
+    "origin",
+    "main",
+    {
+      kind: "off",
+      check: "build",
+      until: new Date(Date.now() + 3_600_000),
+      actor: { by: "operator", verified: true },
+      reason: "repair",
+    },
+    ["build"],
+  )
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const before = (await readEventQueue(store, "main")).tip
+
+  await expect(
+    appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief", {
+      queueBefore: before,
+      overrideBefore: "0".repeat(40),
+    }),
+  ).rejects.toThrow(/ops-cutover refs differ from the verified plan/)
+  expect((await readEventQueue(store, "main")).tip).toBe(before)
+  expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("legacy")
+  expect((await w.git(["ls-remote", "--refs", "origin", overrideRef("main")])).trim()).toContain(override.record.sha)
+})
+
+/** @failure Ops apply refuses a plan whose queue, pause and override refs still match (25041 A10).
+ * @level l3 @consumer queue operator and cutover runner
+ */
+it("accepts ops cutover when every verified plan ref still matches", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const pause = await writePause(w.git, "origin", "main", { kind: "paused", by: "operator", reason: "hold" })
+  const override = await writeOverride(
+    w.git,
+    "origin",
+    "main",
+    {
+      kind: "off",
+      check: "build",
+      until: new Date(Date.now() + 3_600_000),
+      actor: { by: "operator", verified: true },
+      reason: "repair",
+    },
+    ["build"],
+  )
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const queueBefore = (await readEventQueue(store, "main")).tip
+
+  const cutover = await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief", {
+    queueBefore,
+    pauseBefore: pause.sha,
+    overrideBefore: override.record.sha,
+  })
+  expect(cutover).toMatchObject({ queueBefore, pauseBefore: pause.sha, overrideBefore: override.record.sha })
+  expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("event")
+})
+
 /** @failure Cutover snapshots a raw stuck pause after its change ended (25041 A11).
  * @level l3 @consumer queue operator and merge runner
  */
