@@ -11,7 +11,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn } from "@yrd/queue-core"
+import { freshWorktree, gitIn } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -168,5 +168,41 @@ describe("yrd submit refusal when git super worktree add fails (25979)", () => {
     expect(fatalIndex, res.report).toBeGreaterThan(-1)
 
     expect(res.stderr, res.report).not.toContain("\\n")
+  })
+
+  it("prints exit code none and error message without synthesized command on non-git spawn failure (25979 P3)", async () => {
+    async function said(thrown: unknown): Promise<string> {
+      const git = (async (args: readonly string[]) => {
+        if (args[0] === "ls-tree") return "100644 blob 0123456789abcdef0123456789abcdef01234567\t.gitmodules\n"
+        if (args[0] === "super") throw thrown
+        return ""
+      }) as never
+      try {
+        await freshWorktree(git, "/repo", "c0ffee", "/work/bay")
+        return "(no error)"
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error)
+      }
+    }
+
+    const resolution = await said(new Error("not found on the selected environment's PATH"))
+    const resLines = resolution.split("\n").filter((l) => l.trim().length > 0)
+    expect(resLines[0]).toContain(
+      "worktree /work/bay at c0ffee requires git-super because that commit records .gitmodules; git super worktree add failed:",
+    )
+    expect(resLines[1]).toBe("exit code: none (the command did not run)")
+    expect(resLines.some((l) => l.startsWith("command:"))).toBe(false)
+    expect(resLines).toContain("not found on the selected environment's PATH")
+    expect(resLines).not.toContain("exit code: 2")
+
+    const enoent = await said(new Error("spawn git-super ENOENT"))
+    const enoentLines = enoent.split("\n").filter((l) => l.trim().length > 0)
+    expect(enoentLines[0]).toContain(
+      "worktree /work/bay at c0ffee requires git-super because that commit records .gitmodules; git super worktree add failed:",
+    )
+    expect(enoentLines[1]).toBe("exit code: none (the command did not run)")
+    expect(enoentLines.some((l) => l.startsWith("command:"))).toBe(false)
+    expect(enoentLines).toContain("spawn git-super ENOENT")
+    expect(enoentLines).not.toContain("exit code: 2")
   })
 })

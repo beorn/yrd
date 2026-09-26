@@ -776,8 +776,8 @@ export async function worktreeWithoutSubmodules(
   return mutate(["worktree", ...argv])
 }
 
-function formatGitSuperWorktreeRefusal(error: unknown, path: string, commit: string, repo: string): string {
-  let command: string
+function formatGitSuperWorktreeRefusal(error: unknown, path: string, commit: string, _repo: string): string {
+  let command: string | undefined
   let exitCode: string
   let stderrDetail: string
 
@@ -799,8 +799,8 @@ function formatGitSuperWorktreeRefusal(error: unknown, path: string, commit: str
       exitCode = match[3]
       stderrDetail = match[4]
     } else {
-      command = `git super --json worktree add ${path} ${commit} --reference ${repo} in ${repo}`
-      exitCode = "2"
+      command = undefined
+      exitCode = "none (the command did not run)"
       stderrDetail = said
     }
   }
@@ -816,6 +816,10 @@ function formatGitSuperWorktreeRefusal(error: unknown, path: string, commit: str
       typeof detailObj === "object" && detailObj !== null && "message" in detailObj
         ? (detailObj as Record<string, unknown>).message
         : undefined
+    const detailRemedy =
+      typeof detailObj === "object" && detailObj !== null && "remedy" in detailObj
+        ? (detailObj as Record<string, unknown>).remedy
+        : undefined
     const topMsg =
       typeof parsed === "object" && parsed !== null && "message" in parsed
         ? (parsed as Record<string, unknown>).message
@@ -823,15 +827,16 @@ function formatGitSuperWorktreeRefusal(error: unknown, path: string, commit: str
 
     if (typeof detailMsg === "string") {
       text = detailMsg
+      if (typeof detailRemedy === "string" && !detailMsg.includes(detailRemedy)) {
+        text = `${text}\nremedy: ${detailRemedy}`
+      }
     } else if (typeof topMsg === "string") {
       text = topMsg
     }
   } catch {
     // silent-fallback-allow: git-super output is plain text rather than JSON when it crashes before emitting structured output
   }
-  if (text.includes("\\n")) {
-    text = text.replaceAll("\\n", "\n")
-  }
+
   const rawLines = text
     .split("\n")
     .map((line) => line.trim())
@@ -850,7 +855,7 @@ function formatGitSuperWorktreeRefusal(error: unknown, path: string, commit: str
 
   const lines = [
     `worktree ${path} at ${commit} requires git-super because that commit records .gitmodules; git super worktree add failed:`,
-    `command: ${command}`,
+    ...(command !== undefined ? [`command: ${command}`] : []),
     `exit code: ${exitCode}`,
     ...orderedStderrLines,
     "Ensure git-super is available on PATH and resolve the reported condition before retrying; no plain-git fallback was attempted",
