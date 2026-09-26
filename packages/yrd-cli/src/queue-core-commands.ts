@@ -3407,6 +3407,7 @@ export function flowAfterRetryExhaustion(
       site: error.site,
       budgetMs: error.budgetMs,
       firstAt: same ? (previous.casRefused.firstAt ?? error.firstAt) : error.firstAt,
+      ...(error.windowExhausted === undefined ? {} : { windowExhausted: error.windowExhausted }),
     },
   }
 }
