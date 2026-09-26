@@ -201,7 +201,7 @@ function bgOf(token: string): string {
 }
 
 describe("the top line (items 30, 32d, 33)", () => {
-  it("25630: top line shows YRD QUEUE and queue address at left, and YRD status at right", async () => {
+  it("25630, 24196: top line shows YRD and status word and queue address at left, and timer at right", async () => {
     const text = await paint(
       <WatchPane
         snapshot={snapshot({
@@ -3939,6 +3939,34 @@ describe("the top line (25416)", () => {
       app.unmount()
     })
 
+    it("line 1 separated: shortened queue address never abuts timer (24196 P3)", () => {
+      const address = "github.com/beorn/hh#main-with-a-rather-long-branch-name"
+      const queues = [{ branch: "main", label: address, path: "/repo" }]
+      const statuses = [
+        { marker: "◉", word: "RUNNING", color: "$fg-info", pulse: false },
+        { marker: "■", word: "PAUSED", color: "$fg-warning", pulse: false },
+        { marker: "■", word: "STOPPED", color: "$fg-error", pulse: false },
+      ]
+      for (const status of statuses) {
+        for (const cols of [45, 48, 60]) {
+          const app = render(
+            <TopLine
+              queue={address}
+              queues={queues}
+              status={{ ...status, timer: <Text>00:00:17</Text> }}
+              columns={cols}
+            />,
+            { cols, rows: 1 },
+          )
+          const line = (app.lines[0] ?? "").trimEnd()
+          app.unmount()
+          const at = line.lastIndexOf("00:00:17")
+          expect(at, `timer present at ${cols} cols`).toBeGreaterThan(0)
+          expect(line[at - 1], `TopLine at ${cols} cols abuts timer: ${JSON.stringify(line)}`).toBe(" ")
+        }
+      }
+    })
+
     it("the timer after YRD RUNNING counts from when the runner started (25630)", async () => {
       const RUNNER_START = new Date(NOW.getTime() - 17_000)
       const app1 = render(
@@ -4561,7 +4589,7 @@ describe("watch header styling, runner markers, and timer (25716 row 31)", () =>
     return x < 0 ? undefined : app.cell(x + offset, y).bold
   }
 
-  it("a one-runner header shows no [n], marker first in status color, bold YRD QUEUE, and hh:mm:ss timer in grey", async () => {
+  it("a one-runner header shows no [n], marker first in status color, bold YRD and status word, and hh:mm:ss timer in grey", async () => {
     const RUNNER_START = new Date(NOW.getTime() - 17_000)
     const app = render(
       <WatchPane

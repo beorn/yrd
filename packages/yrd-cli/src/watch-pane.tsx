@@ -744,7 +744,7 @@ export function WatchPane({
   return (
     <NowProvider readAt={nowProp ?? shown.at} live={live}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {/* Line 1 (inverted): YRD QUEUE and the queue address left, status word and timer right (25630). */}
+        {/* Line 1 (inverted): YRD, status word and the queue address left, timer right (25630, 24196). */}
         <TopLine
           queue={shown.queue}
           queues={shown.queues}
@@ -788,7 +788,7 @@ export function WatchPane({
               </Text>
             </Box>
             {terminalRows < PILLS_MIN_ROWS ? null : (
-              <StatusPills buckets={buckets} onToggle={toggleBucket} onSelectOnly={toggleBucket} />
+              <StatusPills buckets={buckets} onToggle={toggleBucket} onSelectOnly={selectOnly} />
             )}
           </Box>
           {statsOpen && decisions !== undefined ? (
