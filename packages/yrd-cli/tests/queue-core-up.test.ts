@@ -99,7 +99,7 @@ const roots: string[] = []
 /** Run the previous pin's actual queue projection, with an explicit shallow-clone refusal. */
 async function previousQueueReader(): Promise<typeof import("../../yrd-queue-core/src/events.ts")> {
   const yrdRoot = resolve(import.meta.dirname, "../../..")
-  const oldPin = "14f772a124"
+  const oldPin = "14f772a1244f1b9d2bfd199364f099186a126767"
   let oldEvents: string
   try {
     oldEvents = execFileSync("git", ["-C", yrdRoot, "show", `${oldPin}:packages/yrd-queue-core/src/events.ts`], {
