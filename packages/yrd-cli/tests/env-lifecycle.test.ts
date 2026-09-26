@@ -412,4 +412,30 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toContain(path)
     if (kind === "dirty") expect(readFileSync(join(path, "teardown-left.txt"), "utf8")).toBe("changed")
   })
+
+  it("closes a lender environment with live borrowers and leaves the borrower clean (25908)", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path: lender } = await openEnvironment(w.work, selected)
+
+    const openBorrower = capture(lender)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "borrower", "--json"], openBorrower.io),
+      openBorrower.stderr(),
+    ).toBe(0)
+    const { path: borrower } = JSON.parse(openBorrower.stdout()) as { path: string }
+
+    const closed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", lender, "--json"], closed.io), closed.stderr()).toBe(0)
+    expect(JSON.parse(closed.stdout())).toEqual({ closed: lender })
+    expect(existsSync(lender)).toBe(false)
+
+    const fsckSub = await command(join(borrower, "vendor/dependency"), ["git", "fsck", "--full"])
+    expect(fsckSub.exit).toBe(0)
+    expect(fsckSub.stderr).toBe("")
+
+    const closeBorrower = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", borrower, "--json"], closeBorrower.io)).toBe(0)
+  })
 })
