@@ -67,6 +67,12 @@ import { pauseFence, QueuePaused } from "./pause.ts"
 import { overrideRef, pauseRef } from "./refs.ts"
 
 const DEFAULT_QUEUE_RUN_RETRY_BUDGET_MS = 5_000
+// If all journals are live service rounds at its 120s interval, 128 cover
+// 4h16m, over 42 times the three-refusal page threshold. Manual runs and check
+// journals can shorten the span, so exhaustion is named, never a clean reset.
+const CAS_HISTORY_BUDGET_NAME = "cas-history-journals"
+const CAS_HISTORY_JOURNAL_BUDGET = 128
+type ExhaustedCasHistory = NonNullable<ReturnType<typeof recentCasRefusalStreak>["windowExhausted"]>
 
 /** A definite no-progress event-chain refusal at one of the run's own transaction sites. */
 export class QueueRunEventRetryExhausted extends Error {
@@ -80,8 +86,14 @@ export class QueueRunEventRetryExhausted extends Error {
     readonly budgetMs: number,
     readonly firstAt: string,
     cause: RetriesExhausted,
+    readonly windowExhausted?: ExhaustedCasHistory,
   ) {
-    super(`${site}: ${ref} at ${marker} did not land within ${budgetMs}ms (${count} consecutive rounds)`, { cause })
+    const history =
+      windowExhausted === undefined
+        ? `${count} consecutive rounds`
+        : `at least ${count} consecutive rounds; first observed at ${firstAt}; earlier refusals may lie beyond ` +
+          `the ${windowExhausted.name} budget (${windowExhausted.journals} journals), oldest read ${windowExhausted.oldestFile}`
+    super(`${ref} at ${marker}: ${site} did not land within ${budgetMs}ms (${history})`, { cause })
   }
 }
 
@@ -192,14 +204,26 @@ export async function eventQueueRun(
     site: QueueRunEventRetryExhausted["site"],
     marker: string,
     operation: () => Promise<T>,
+    runnerMarkerAt?: Date,
   ): Promise<T> => {
     try {
       return await operation()
     } catch (error) {
       if (!(error instanceof RetriesExhausted)) throw error
       const ref = queueRef(queue)
-      const count = recentCasRefusals(dirname(log.path), ref, marker, new Date(0)) + 1
-      log.write({
+      // Only an event this runner wrote shares the journal clock. A queue tip
+      // from another writer has no safe Time: bound, so scan a named file budget.
+      const prior = recentCasRefusalStreak(
+        dirname(log.path),
+        ref,
+        marker,
+        runnerMarkerAt ?? new Date(0),
+        runnerMarkerAt === undefined
+          ? { name: CAS_HISTORY_BUDGET_NAME, journals: CAS_HISTORY_JOURNAL_BUDGET }
+          : undefined,
+      )
+      const count = prior.count + 1
+      const written = log.write({
         kind: "warning",
         subject: "cas-refused",
         site,
@@ -207,11 +231,31 @@ export async function eventQueueRun(
         marker,
         count,
         budgetMs: error.budgetMs,
-        reason: `${site}: ${ref} at ${marker} made no progress within its ${error.budgetMs}ms CAS retry budget; the next service interval retries`,
+        ...(prior.windowExhausted === undefined
+          ? {}
+          : {
+              windowExhausted: prior.windowExhausted.oldestFile,
+              windowBudget: prior.windowExhausted.name,
+              windowBudgetJournals: prior.windowExhausted.journals,
+            }),
+        reason:
+          `${ref} at ${marker}: ${site} made no progress within its ${error.budgetMs}ms CAS retry budget; the next service interval retries` +
+          (prior.windowExhausted === undefined
+            ? ""
+            : `; ${prior.windowExhausted.name} budget (${prior.windowExhausted.journals} journals) exhausted at ` +
+              `${prior.windowExhausted.oldestFile}; count is at least ${String(count)}`),
       })
-      const firstAt = recentCasRefusalStreak(dirname(log.path), ref, marker, new Date(0)).firstAt
-      if (firstAt === undefined) throw new Error(`journaled CAS refusal for ${ref} at ${marker} was not readable`)
-      throw new QueueRunEventRetryExhausted(site, ref, marker, count, error.budgetMs, firstAt, error)
+      const firstAt = prior.firstAt ?? written.at
+      throw new QueueRunEventRetryExhausted(
+        site,
+        ref,
+        marker,
+        count,
+        error.budgetMs,
+        firstAt,
+        error,
+        prior.windowExhausted,
+      )
     }
   }
   const owned = new Set<string>()
@@ -565,17 +609,24 @@ export async function eventQueueRun(
   )
   directMerges = direct.map((commit) => commit.commit)
   let directMarker = queueState.tip
+  let directMarkerAt: Date | undefined
   for (const commit of direct) {
-    const observed = await runTransaction("observed", directMarker, () =>
-      writeQueueEvent(store, queue, {
-        type: "observed",
-        commit: commit.commit,
-        ...(commit.branch === undefined ? {} : { branch: commit.branch }),
-        by: "yrd-run",
-        at: new Date(),
-      }),
+    const observedAt = new Date()
+    const observed = await runTransaction(
+      "observed",
+      directMarker,
+      () =>
+        writeQueueEvent(store, queue, {
+          type: "observed",
+          commit: commit.commit,
+          ...(commit.branch === undefined ? {} : { branch: commit.branch }),
+          by: "yrd-run",
+          at: observedAt,
+        }),
+      directMarkerAt,
     )
     directMarker = observed
+    directMarkerAt = observedAt
     log.write({
       kind: "merged-direct",
       branch: queue,

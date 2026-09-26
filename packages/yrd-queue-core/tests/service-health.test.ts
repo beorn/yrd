@@ -405,6 +405,23 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
     expect(paged.error?.code).toBe(STALLED_LINE_CODE)
     expect(paged.error?.cause).toContain(refusal.ref)
     expect(paged.facts?.flow).toMatchObject({ stalledShape: "cas-refused", casRefused: refusal })
+    const uncertain = roundHealthDocument("yrd", undefined, INTERVAL, at("20:27:00"), {
+      flow: {
+        ...flow,
+        casRefused: {
+          ...refusal,
+          firstAt: "2026-09-24T20:25:00.000Z",
+          windowExhausted: {
+            name: "cas-history-journals",
+            journals: 128,
+            oldestFile: "q-20260924T200000000Z-old",
+          },
+        },
+      },
+      threshold,
+    })
+    expect(uncertain.error?.cause).toContain("first observed at 2026-09-24T20:25:00.000Z")
+    expect(uncertain.error?.cause).toContain("earlier refusals may lie beyond the cas-history-journals 128 files scan")
     const cleared = withLineFlow(
       paged,
       undefined,

@@ -49,6 +49,7 @@ import {
   readEventQueue,
   QUEUE_HEALTH_DOCUMENT,
   readConfig,
+  readEventQueue,
   readPause,
   readRecords,
   readRemoteCommit,
@@ -794,18 +795,21 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     await w.git(["push", "--quiet", "origin", `${b}:refs/testing/target-b`])
     const wrapper = join(w.workdir, "upload-pack-target-race.sh")
     const calls = join(w.workdir, "upload-pack-target-race.count")
+    const moved = join(w.workdir, "upload-pack-target-race.moved")
     writeFileSync(
       wrapper,
       [
         "#!/bin/sh",
         `test -e "${join(w.workdir, ROUND_LOCK)}" || exec git-upload-pack "$@"`,
-        `count=0; test ! -f "${calls}" || count=$(cat "${calls}")`,
-        "count=$((count + 1))",
-        `printf '%s\\n' "$count" > "${calls}"`,
+        // yrd runs some ls-remotes concurrently, so the count is one appended line per invocation (an append is
+        // atomic; a read-then-rewrite counter can read a truncated file and fire twice), and the move is one-shot:
+        // mkdir succeeds for exactly one invocation (@dev/review2 8035e6b3).
+        `printf 'x\\n' >> "${calls}"`,
+        `count=$(wc -l < "${calls}")`,
         // An exact fetch may be skipped when A is already local. Invocation
         // two is therefore either that fetch or the queue advertisement; in
         // both cases A has already been declared and B precedes the queue read.
-        `if test "$count" -eq 2; then git --git-dir="$1" update-ref refs/heads/main ${b} ${a} || exit $?; fi`,
+        `if test "$count" -ge 2 && mkdir "${moved}" 2>/dev/null; then git --git-dir="$1" update-ref refs/heads/main ${b} ${a} || exit $?; fi`,
         'exec git-upload-pack "$@"',
         "",
       ].join("\n"),
@@ -838,7 +842,11 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
 
     expect(exit, run.stdout()).toBe(2)
     expect(rounds).toBe(2)
-    expect(Number(readFileSync(calls, "utf8").trim())).toBeGreaterThanOrEqual(2)
+    expect(
+      readFileSync(calls, "utf8")
+        .split("\n")
+        .filter((line) => line !== "").length,
+    ).toBeGreaterThanOrEqual(2)
     const written = records(run)
     expect(written).toHaveLength(3)
     expect(written[0]).toMatchObject({ base: a, config: configA, exitCode: 0, merged: [], target: a })
@@ -3044,6 +3052,21 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       earlier,
     )
     const ref = queueRef("main")
+    // An older refusal is real, but lies beyond the bounded journal window.
+    // The service must name that uncertainty and still page after three new rounds.
+    const marker = (await readEventQueue(store, "main")).tip
+    const logs = join(w.workdir, "logs")
+    mkdirSync(logs, { recursive: true })
+    const oldAt = new Date(Date.now() - 3_600_000)
+    const oldRun = runId(oldAt)
+    writeFileSync(
+      join(logs, `${oldRun}.jsonl`),
+      `${JSON.stringify({ kind: "warning", run: oldRun, at: oldAt.toISOString(), subject: "cas-refused", ref, marker })}\n`,
+    )
+    const newer = Date.now() - 1_800_000
+    for (let index = 0; index < 129; index++) {
+      writeFileSync(join(logs, `${runId(new Date(newer + index * 1_000))}.jsonl`), "")
+    }
     const originalBackend = gitomic.createShellBackend
     let refused = 0
     let hold = true
@@ -3074,6 +3097,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
         stop: stop.signal,
         afterHealth: async (document) => {
           seen.push(document)
+          if (seen.length === 1) await delay(100)
           if (seen.length === 3) {
             expect((await readRunnerFacts(w.workdir)).service).toMatchObject({
               kind: "beating",
@@ -3091,11 +3115,30 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     expect(seen).toHaveLength(4)
     expect(seen.map((document) => document.state)).toEqual(["healthy", "healthy", "unhealthy", "healthy"])
     expect(seen[2]?.error?.code).toBe("queue-line-stalled")
+    expect((seen[2]?.facts?.flow as { stalledForMs?: number } | undefined)?.stalledForMs).toBeGreaterThanOrEqual(75)
     expect(seen[2]?.error?.cause).toContain("line not read this round")
     const firstRefusal = (seen[0]?.facts?.flow as { casRefused?: { firstAt?: string } } | undefined)?.casRefused
     const thirdRefusal = (seen[2]?.facts?.flow as { casRefused?: { firstAt?: string } } | undefined)?.casRefused
     expect(firstRefusal?.firstAt).toBeDefined()
     expect(thirdRefusal?.firstAt).toBe(firstRefusal?.firstAt)
+    const refusalRows = readdirSync(logs)
+      .filter((name) => name.startsWith("q-") && name.endsWith(".jsonl"))
+      .flatMap((name) => readRunLog(logs, name.slice(0, -".jsonl".length)))
+      .filter((row) => row.kind === "warning" && row.subject === "cas-refused" && row.site === "expire-overrides")
+      .sort((a, b) => a.at.localeCompare(b.at))
+    expect(refusalRows.map((row) => row.count)).toEqual([1, 2, 3])
+    expect(refusalRows[0]).toMatchObject({
+      windowBudget: "cas-history-journals",
+      windowBudgetJournals: 128,
+      windowExhausted: expect.stringMatching(/^q-/u),
+    })
+    expect(refusalRows[2]).toMatchObject({
+      windowBudget: "cas-history-journals",
+      windowBudgetJournals: 128,
+      windowExhausted: expect.stringMatching(/^q-/u),
+    })
+    expect(run.stderr()).toContain("cas-history-journals budget (128 journals)")
+    expect(seen[2]?.error?.cause).toContain("earlier refusals may lie beyond the cas-history-journals 128 files scan")
     expect(seen[2]?.facts?.flow).not.toHaveProperty("waiting")
     expect((seen[2]?.facts?.flow as { casRefused?: object } | undefined)?.casRefused).not.toHaveProperty("branch")
     expect(seen[3]?.facts?.flow).toHaveProperty("waiting")
