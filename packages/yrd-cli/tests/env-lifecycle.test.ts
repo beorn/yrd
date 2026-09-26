@@ -438,4 +438,51 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     const closeBorrower = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", borrower, "--json"], closeBorrower.io)).toBe(0)
   })
+
+  it("closes a packed lender environment with a unique commit and leaves the borrower clean (25908 cure)", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path: lender } = await openEnvironment(w.work, selected)
+
+    const openBorrower = capture(lender)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "borrower", "--json"], openBorrower.io),
+      openBorrower.stderr(),
+    ).toBe(0)
+    const { path: borrower } = JSON.parse(openBorrower.stdout()) as { path: string }
+
+    const lenderSub = join(lender, "vendor/dependency")
+    const borrowerSub = join(borrower, "vendor/dependency")
+
+    await command(lenderSub, ["git", "commit", "--allow-empty", "-m", "lender unique"])
+    const uniqueSha = (await command(lenderSub, ["git", "rev-parse", "HEAD"])).stdout.trim()
+
+    await command(lenderSub, ["git", "repack", "-a", "-d"])
+
+    await command(lender, ["git", "add", "vendor/dependency"])
+    await command(lender, ["git", "commit", "-m", "update dependency pin"])
+
+    await command(borrowerSub, ["git", "update-ref", "refs/heads/main", uniqueSha])
+    await command(borrowerSub, ["git", "symbolic-ref", "HEAD", "refs/heads/main"])
+
+    const closed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", lender, "--json"], closed.io), closed.stderr()).toBe(0)
+    expect(JSON.parse(closed.stdout())).toEqual({ closed: lender })
+    expect(existsSync(lender)).toBe(false)
+
+    const fsckSub = await command(borrowerSub, ["git", "fsck", "--full"])
+    expect(fsckSub.exit).toBe(0)
+    expect(fsckSub.stderr).toBe("")
+
+    const catSub = await command(borrowerSub, ["git", "cat-file", "-t", uniqueSha])
+    expect(catSub.exit).toBe(0)
+    expect(catSub.stdout.trim()).toBe("commit")
+
+    await command(borrower, ["git", "add", "vendor/dependency"])
+    await command(borrower, ["git", "commit", "-m", "update dependency pin in borrower"])
+
+    const closeBorrower = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", borrower, "--json"], closeBorrower.io), closeBorrower.stderr()).toBe(0)
+  })
 })
