@@ -1319,8 +1319,9 @@ export async function coreQueueCommand(
     }
     case "sweep-candidates": {
       const remote = request.remote ?? config.target.remote
-      const activeShas = new Set<string>()
+      let activeShas: Set<string>
       try {
+        activeShas = new Set<string>()
         const eventStore = createEventStore(repo, remote, selection)
         if ((await queueFormat(eventStore, config.target.branch)) === "event") {
           const events = await readEventQueueWithChanges(eventStore, config.target.branch)
@@ -1328,10 +1329,14 @@ export async function coreQueueCommand(
             if (
               history.state.status !== "merged" &&
               history.state.status !== "failed" &&
-              history.state.status !== "cancelled" &&
-              history.state.commit !== undefined
+              history.state.status !== "cancelled"
             ) {
-              activeShas.add(history.state.commit)
+              if (history.state.commit !== undefined) {
+                activeShas.add(history.state.commit)
+              }
+              if (history.state.candidate !== undefined) {
+                activeShas.add(history.state.candidate)
+              }
             }
           }
         } else {
@@ -1343,14 +1348,17 @@ export async function coreQueueCommand(
               entry.reading.state !== "withdrawn"
             ) {
               activeShas.add(entry.change.head)
+              if (entry.change.branchHead !== undefined) {
+                activeShas.add(entry.change.branchHead)
+              }
             }
           }
         }
       } catch (error) {
-        // silent-fallback-allow: active queue inspection is advisory during candidate sweep; failure leaves activeShas empty
         io.stderr(
-          `yrd: notice: could not inspect active queue changes: ${error instanceof Error ? error.message : String(error)}\n`,
+          `yrd: sweep refused: could not inspect active queue changes: ${error instanceof Error ? error.message : String(error)}\n`,
         )
+        return 1
       }
       const result = await sweepCandidateRefs(git, {
         repo,

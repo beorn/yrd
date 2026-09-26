@@ -139,7 +139,7 @@ export type SweepCandidateRefsOptions = Readonly<{
   remote?: string
   dryRun?: boolean
   batchSize?: number
-  activeShas?: ReadonlySet<string>
+  activeShas: ReadonlySet<string>
 }>
 
 const DEFAULT_SWEEP_BATCH_SIZE = 50
@@ -156,7 +156,7 @@ export async function sweepCandidateRefs(
 ): Promise<CandidateRefSweepResult> {
   const remote = options.remote ?? "origin"
   const batchSize = Math.max(1, options.batchSize ?? DEFAULT_SWEEP_BATCH_SIZE)
-  const activeShas = options.activeShas ?? new Set<string>()
+  const activeShas = options.activeShas
 
   let listing: string
   try {

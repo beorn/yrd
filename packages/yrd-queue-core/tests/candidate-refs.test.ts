@@ -103,6 +103,7 @@ describe("sweepCandidateRefs", () => {
       repo: work,
       remote: "origin",
       dryRun: true,
+      activeShas: new Set(),
     })
 
     expect(sweepResult.scanned).toBe(2)
@@ -130,6 +131,7 @@ describe("sweepCandidateRefs", () => {
       remote: "origin",
       dryRun: false,
       batchSize: 2, // test chunking
+      activeShas: new Set(),
     })
 
     expect(sweepResult.scanned).toBe(3)
