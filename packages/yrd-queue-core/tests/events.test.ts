@@ -1347,6 +1347,71 @@ describe("the queue-format boundary", () => {
     await expect(readEventQueue(location, "lab")).rejects.toThrow(/exactly one complete Ops: snapshot/)
   })
 
+  /** @failure An override for one check silently changes another check's standing decision (25041 A8).
+   * @level l1 @consumer queue operator and merge runner
+   */
+  it("refuses an override event that changes another check", async () => {
+    const { store, location } = remoteMemStore("yrd-event-override-other-check")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    await seedOpsCutover(location, "lab")
+    await writeQueueOverride(
+      location,
+      "lab",
+      {
+        kind: "off",
+        check: "lint",
+        until: new Date("2026-09-22T15:00:00.000Z"),
+        reason: "lint repair",
+        actor: { by: "operator", verified: true },
+      },
+      ["lint", "build"],
+      new Date("2026-09-22T14:01:00.000Z"),
+    )
+    const queue = await readEventQueue(location, "lab")
+    const lint = queue.ops?.overrides.find((entry) => entry.check === "lint")
+    if (lint === undefined) throw new Error("fixture lint override was not written")
+    const at = new Date("2026-09-22T14:02:00.000Z")
+    const until = new Date("2026-09-22T16:00:00.000Z")
+    await (
+      await openEvents({ ...store, ref: queueRef("lab"), writer: "operator" })
+    ).append(
+      [
+        {
+          type: "override-set",
+          props: [
+            ["Queue", queue.tip],
+            ["Time", at.toISOString()],
+            ["Check", "build"],
+            ["Reason", "build repair"],
+            ["Until", until.toISOString()],
+            [
+              "Ops",
+              encodeOps({
+                overrides: [
+                  { ...lint, reason: "silently changed" },
+                  {
+                    check: "build",
+                    state: "active",
+                    until,
+                    by: "operator",
+                    verified: true,
+                    reason: "build repair",
+                    record: "self",
+                    setAt: at,
+                  },
+                ],
+              }),
+            ],
+          ],
+        },
+      ],
+      { expect: queue.tip },
+    )
+    await expect(readEventQueue(location, "lab")).rejects.toThrow(/changed another check/)
+  })
+
   /** @failure A merge fence changed the queue's effective ops without an operator action (25041 A4).
    * @level l1 @consumer queue operator and merge runner
    */
