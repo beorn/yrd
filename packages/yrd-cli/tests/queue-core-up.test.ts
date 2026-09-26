@@ -372,8 +372,13 @@ describe("yrd queue up, the service", () => {
     )
     expect(exit, JSON.stringify({ stderr: run.stderr(), stdout: run.stdout(), roundCount })).toBe(0)
     expect(roundCount).toBe(2)
-    expect(await readPause(w.git, "origin", "main")).toMatchObject({ by: "@chief", kind: "paused" })
+    const pause = await readPause(w.git, "origin", "main")
+    if (pause === undefined) throw new Error("the fixture's pause was not published")
+    expect(pause).toMatchObject({ by: "@chief", kind: "paused" })
     expect(records(run)).toHaveLength(2)
+    expect(readRunLog(join(w.workdir, "logs"), String(records(run)[0]?.run))).toContainEqual(
+      expect.objectContaining({ kind: "pause", by: "@chief", reason: "maintenance", sha: pause.sha }),
+    )
     for (const round of records(run)) {
       expect(round).toMatchObject({
         exitCode: 0,
