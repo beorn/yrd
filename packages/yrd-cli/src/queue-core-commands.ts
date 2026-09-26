@@ -796,7 +796,7 @@ export async function coreQueueCommand(
       if (state === undefined) {
         throw new Error(`${changeName(change)} is not at ${targetLabel} after its round: its change ref is gone`)
       }
-      const landing = selected?.merge ?? selected?.candidate ?? row?.merge ?? (state === "merged" ? target : undefined)
+      const landing = state === "merged" ? (selected?.merge ?? row?.merge) : undefined
       const head = selected?.commit ?? row?.head ?? change.head
       return {
         entry: {
@@ -1443,8 +1443,7 @@ export async function coreQueueCommand(
         const head = selected?.commit ?? row?.head
         const state = selected?.status ?? row?.state
         if (head !== undefined && state !== undefined) {
-          const landing =
-            selected?.merge ?? selected?.candidate ?? row?.merge ?? (state === "merged" ? captured.oid : undefined)
+          const landing = state === "merged" ? (selected?.merge ?? row?.merge) : undefined
           if (local === undefined ? inLineState(state) || state === "merged" : head === local) {
             standing = {
               change: { branch, head },
