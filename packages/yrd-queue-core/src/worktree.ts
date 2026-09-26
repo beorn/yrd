@@ -28,7 +28,7 @@ import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type 
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
 import { GIT_SUPER_ABSENT_STORE, populateReferenceStores, ReferenceUnpopulated } from "./reference.ts"
-import { gitIn, mergeBase, refAt, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
+import { GitExit, gitIn, mergeBase, refAt, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
 
 /**
  * What the worktree plumbing narrates to.
@@ -141,12 +141,7 @@ export async function freshWorktree(
           `git super worktree add refused for ${commit} after the reference was populated:\n${said}`,
         )
       }
-      throw new Error(
-        `worktree ${path} at ${commit} requires git-super because that commit records .gitmodules; ` +
-          `git super worktree add failed: ${said}. ` +
-          "Ensure git-super is available on PATH and resolve the reported condition before retrying; no plain-git fallback was attempted",
-        { cause: error },
-      )
+      throw new Error(formatGitSuperWorktreeRefusal(error, path, commit, repo), { cause: error })
     }
     let result: unknown
     try {
@@ -779,4 +774,86 @@ export async function worktreeWithoutSubmodules(
     )
   }
   return mutate(["worktree", ...argv])
+}
+
+function formatGitSuperWorktreeRefusal(error: unknown, path: string, commit: string, repo: string): string {
+  let command: string
+  let exitCode: string
+  let stderrDetail: string
+
+  if (error instanceof GitExit) {
+    command = `git ${error.args.join(" ")} in ${error.cwd}`
+    exitCode = String(error.exitCode)
+    stderrDetail = error.detail
+  } else {
+    const said = error instanceof Error ? error.message : String(error)
+    const match = said.match(/^git (.*) in (.*) exited (\d+): (.*)$/s)
+    if (
+      match !== null &&
+      match[1] !== undefined &&
+      match[2] !== undefined &&
+      match[3] !== undefined &&
+      match[4] !== undefined
+    ) {
+      command = `git ${match[1]} in ${match[2]}`
+      exitCode = match[3]
+      stderrDetail = match[4]
+    } else {
+      command = `git super --json worktree add ${path} ${commit} --reference ${repo} in ${repo}`
+      exitCode = "2"
+      stderrDetail = said
+    }
+  }
+
+  let text = stderrDetail
+  try {
+    const parsed: unknown = JSON.parse(stderrDetail)
+    const detailObj =
+      typeof parsed === "object" && parsed !== null && "detail" in parsed
+        ? (parsed as Record<string, unknown>).detail
+        : undefined
+    const detailMsg =
+      typeof detailObj === "object" && detailObj !== null && "message" in detailObj
+        ? (detailObj as Record<string, unknown>).message
+        : undefined
+    const topMsg =
+      typeof parsed === "object" && parsed !== null && "message" in parsed
+        ? (parsed as Record<string, unknown>).message
+        : undefined
+
+    if (typeof detailMsg === "string") {
+      text = detailMsg
+    } else if (typeof topMsg === "string") {
+      text = topMsg
+    }
+  } catch {
+    // silent-fallback-allow: git-super output is plain text rather than JSON when it crashes before emitting structured output
+  }
+  if (text.includes("\\n")) {
+    text = text.replaceAll("\\n", "\n")
+  }
+  const rawLines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+
+  const fatalLines: string[] = []
+  const otherLines: string[] = []
+  for (const line of rawLines) {
+    if (/^fatal:/i.test(line)) {
+      fatalLines.push(line)
+    } else {
+      otherLines.push(line)
+    }
+  }
+  const orderedStderrLines = [...fatalLines, ...otherLines]
+
+  const lines = [
+    `worktree ${path} at ${commit} requires git-super because that commit records .gitmodules; git super worktree add failed:`,
+    `command: ${command}`,
+    `exit code: ${exitCode}`,
+    ...orderedStderrLines,
+    "Ensure git-super is available on PATH and resolve the reported condition before retrying; no plain-git fallback was attempted",
+  ]
+  return lines.join("\n")
 }
