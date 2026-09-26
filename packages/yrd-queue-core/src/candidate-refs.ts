@@ -95,7 +95,7 @@ export async function deleteCandidateRefsForShas(
   }
 
   try {
-    await git(["push", "--porcelain", ...leases, remote, ...deletions])
+    await git(["push", "--atomic", "--porcelain", ...leases, remote, ...deletions])
     for (const { ref } of targets) {
       deleted.push(ref)
     }
@@ -224,7 +224,7 @@ export async function sweepCandidateRefs(
     const deletes = chunk.map(({ ref }) => `:${ref}`)
 
     try {
-      await git(["push", "--porcelain", ...leases, remote, ...deletes])
+      await git(["push", "--atomic", "--porcelain", ...leases, remote, ...deletes])
       for (const { ref } of chunk) {
         deleted.push(ref)
       }

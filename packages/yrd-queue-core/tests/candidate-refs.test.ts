@@ -168,4 +168,43 @@ describe("sweepCandidateRefs", () => {
     expect(remoteRefs).toContain(`refs/heads/yrd/candidates/${activeSha}`)
     expect(remoteRefs).not.toContain(`refs/heads/yrd/candidates/${idleSha}`)
   })
+
+  it("uses --atomic in batch deletion so a stale lease reports truthfully without misreporting deleted refs", async () => {
+    const { work, git, createCommit } = await createFixture()
+    const sha1 = await createCommit("c1")
+    const sha2 = await createCommit("c2")
+    const sha3 = await createCommit("c3")
+
+    await git(["push", "--quiet", "origin", `${sha1}:refs/heads/yrd/candidates/${sha1}`])
+    await git(["push", "--quiet", "origin", `${sha2}:refs/heads/yrd/candidates/${sha2}`])
+    await git(["push", "--quiet", "origin", `${sha3}:refs/heads/yrd/candidates/${sha3}`])
+
+    let moved = false
+    const racing = (async (args: readonly string[], input?: string) => {
+      if (!moved && args[0] === "push" && args.some((a) => a.startsWith(":refs/heads/yrd/candidates/"))) {
+        moved = true
+        // Interleaved modification: change sha2's target before the push lands
+        await git(["push", "--quiet", "--force", "origin", `${sha1}:refs/heads/yrd/candidates/${sha2}`])
+      }
+      return git(args, input)
+    }) as unknown as Git
+
+    const sweepResult = await sweepCandidateRefs(racing, {
+      repo: work,
+      remote: "origin",
+      dryRun: false,
+      batchSize: 50,
+      activeShas: new Set(),
+    })
+
+    const remaining = await git(["ls-remote", "--refs", "origin", "refs/heads/yrd/candidates/*"])
+    expect(remaining).not.toContain(`candidates/${sha1}`)
+    expect(remaining).not.toContain(`candidates/${sha3}`)
+    expect(remaining).toContain(`candidates/${sha2}`)
+
+    expect([...sweepResult.deleted].sort()).toEqual(
+      [`refs/heads/yrd/candidates/${sha1}`, `refs/heads/yrd/candidates/${sha3}`].sort(),
+    )
+    expect(sweepResult.failed.map((f) => f.ref)).toEqual([`refs/heads/yrd/candidates/${sha2}`])
+  })
 })

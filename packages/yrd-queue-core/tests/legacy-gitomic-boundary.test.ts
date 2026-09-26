@@ -22,6 +22,10 @@ describe("the legacy Gitomic boundary", () => {
         .filter(([, commands]) => commands.length > 0),
     )
     expect(sites).toEqual({
+      // The candidate-refs backlog sweep and terminal-state deletion (26022):
+      // scans and prunes candidate mirror refs (refs/heads/yrd/candidates/* and refs/yrd/candidates/*),
+      // which are not queue refs and use --force-with-lease CAS deletions.
+      "candidate-refs.ts": ["ls-remote", "push", "push", "ls-remote", "push", "push"],
       // The host mirror's own `fetch --prune` (25570 row 1): it refreshes a store of hosted repositories and reads
       // or writes no queue ref.
       "mirror.ts": ["fetch"],
