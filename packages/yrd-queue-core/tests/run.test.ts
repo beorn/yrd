@@ -2408,7 +2408,8 @@ it("observes a direct-only commit once on the queue chain", async () => {
   })
 })
 
-/** @failure 25736: an exhausted queue-event CAS retry ended the supervised round as an unknown error.
+/** @failure 25736: an exhausted queue-event CAS retry ended the supervised round as an unknown error,
+ * and a second observation could report the round's original marker instead of the first observed event.
  * @level l2 @consumer Hab's yrd service
  */
 it("bounds the queue observation retry and leaves it for the next round", async () => {
@@ -2416,24 +2417,39 @@ it("bounds the queue observation retry and leaves it for the next round", async 
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   const direct = await pushAroundQueue(w, "direct-retry.txt")
+  const secondDirect = await pushAroundQueue(w, "second-direct-retry.txt")
   const ref = queueRef("main")
   let refusals = 0
+  let allowedFirst = false
   using publication = beforeGitomicPublish(async (_repo, updates, remote) => {
     if (remote !== "origin" || !updates.some((update) => update.ref === ref)) return
+    if (!allowedFirst) {
+      allowedFirst = true
+      return
+    }
     refusals++
-    // A definite chain-only refusal with no rival progress exhausts Gitomic's elapsed budget.
+    // The second observation refuses without rival progress after the first landed.
     throw new gitomic.Conflict(`lease lost on ${ref}`, { refs: [ref] })
   })
   const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [], retryBudgetMs: 1 }
 
-  await expect(queueRun(options)).rejects.toMatchObject({
+  let exhausted: unknown
+  try {
+    await queueRun(options)
+  } catch (error) {
+    exhausted = error
+  }
+  const firstObserved = (await readEventQueue(store, "main")).observed[direct]?.id
+  expect(firstObserved).toMatch(/^[0-9a-f]{40}$/u)
+  expect(exhausted).toMatchObject({
     name: "QueueRunEventRetryExhausted",
     site: "observed",
+    marker: firstObserved,
     budgetMs: 1,
     cause: { name: "RetriesExhausted", budgetMs: 1 },
   })
   expect(refusals).toBeGreaterThan(0)
-  expect((await readEventQueue(store, "main")).observed[direct]).toBeUndefined()
+  expect((await readEventQueue(store, "main")).observed[secondDirect]).toBeUndefined()
   const journal = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
   if (journal === undefined) throw new Error("exhausted round left no journal")
   const rows = readFileSync(join(w.workdir, "logs", journal), "utf8")
@@ -2441,13 +2457,20 @@ it("bounds the queue observation retry and leaves it for the next round", async 
     .filter(Boolean)
     .map((line) => JSON.parse(line) as Record<string, unknown>)
   expect(rows).toContainEqual(
-    expect.objectContaining({ kind: "warning", subject: "cas-refused", site: "observed", ref, budgetMs: 1 }),
+    expect.objectContaining({
+      kind: "warning",
+      subject: "cas-refused",
+      site: "observed",
+      ref,
+      marker: firstObserved,
+      budgetMs: 1,
+    }),
   )
 
   publication.mockRestore()
   const next = await queueRun({ ...options, retryBudgetMs: 5_000 })
-  expect(next.directMerges).toEqual([direct])
-  expect((await readEventQueue(store, "main")).observed[direct]?.id).toMatch(/^[0-9a-f]{40}$/u)
+  expect(next.directMerges).toEqual([secondDirect])
+  expect((await readEventQueue(store, "main")).observed[secondDirect]?.id).toMatch(/^[0-9a-f]{40}$/u)
 }, 60_000)
 
 /** @failure A direct notice was kept only in the local journal and sent again after a restart.
