@@ -81,14 +81,15 @@ const queueHealthCommand = async (workdir: string, io: YrdCliIO): Promise<YrdCli
   return health.queueHealthCommand(workdir, health.SERVICE, io)
 }
 
-const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
-const SUBMITTER_HELP = `the agent submitting this change, who hears its result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
+const NOTIFY_HELP = "deprecated alias for --submitter; both flags must name the same submitter"
+const SUBMITTER_HELP = `the submitter and result recipient; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP =
   "the issue, checked against the branch's first Refs/Resolves binding; unbound legacy name fallback is reported"
 const DRY_RUN_HELP = "preview admission and push nothing; fetches the queue tip into refs/gitomic/fetched/"
 const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to origin/HEAD inside a clone"
 
 const SUBMIT_HELP: [string, string][] = [
+  ["Result", "one recipient: --submitter; another seat can read yrd queue show <branch> after submission"],
   [
     "Pin-only",
     "repeat --gitlink <path>=<full-sha> with --issue <id> to build an exact-target-parent carrier in the queue-owned clone; a remote-unheld pin or branch operand refuses",
