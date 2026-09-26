@@ -945,6 +945,34 @@ it("stamps the ops cutover event with the plan capture time", async () => {
   expect(events.find((event) => event.type === "ops-cutover")?.props).toContainEqual(["Time", plan.capturedAt])
 })
 
+/** @failure Ops planning accepts an unrecognized advertised ref under the queue prefix (25041 B5).
+ * @level l3 @consumer queue operator and migration audit
+ */
+it("refuses ops planning when the queue prefix contains an unknown ref", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await writePause(w.git, "origin", "main", {
+    kind: "paused",
+    cause: "maintenance",
+    by: "@chief",
+    reason: "ops cutover rehearsal",
+  })
+  const unknown = `${queueRefPrefix("main")}/unexpected`
+  await w.git(["push", "origin", `HEAD:${unknown}`])
+  const before = (await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()
+  const journal = join(dirname(w.work), "ops-unknown-ref")
+  const script = resolve(import.meta.dirname, "../scripts/migrate-events.ts")
+  const result = spawnSync(
+    process.execPath,
+    [script, "ops-plan", "--repo", w.work, "--remote", "origin", "--queue", "main", "--journal", journal],
+    { encoding: "utf8" },
+  )
+  expect(result.status).toBe(1)
+  expect(result.stderr).toContain(`yrd-migration-ops-census: ${unknown}: unknown name`)
+  expect(existsSync(journal)).toBe(false)
+  expect((await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()).toBe(before)
+})
+
 /** @failure 25041 A3: before cutover, a pause or override written mid-merge must win its legacy ref lease.
  * @level l3 @consumer queue operator and merge runner
  */
