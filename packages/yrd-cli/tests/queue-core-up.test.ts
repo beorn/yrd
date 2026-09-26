@@ -35,6 +35,7 @@ import { afterAll, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as gitomic from "gitomic"
 import {
+  appendChangeEvent,
   appendRecord,
   changeRef,
   createEventQueue,
@@ -4001,19 +4002,33 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     const commit = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
-    await createEventQueue(
-      createEventStore(w.work, "origin", gitIn(w.work).selection),
-      "main",
-      commit,
-      config,
-      new Date(),
-    )
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createEventQueue(store, "main", commit, config, new Date())
     const head = await submitted(w, "task/event-merge", "event.txt")
+    const queued = await readStatus(store, "main", "task/event-merge")
+    const verifying = await appendChangeEvent(store, "main", "task/event-merge", queued.tip!, {
+      type: "verifying",
+      at: new Date(),
+      commit: head,
+    })
+    await appendChangeEvent(store, "main", "task/event-merge", verifying, {
+      type: "checking",
+      at: new Date(),
+    })
+    // Advance main so the landing merge commit differs from the verified candidate head
+    writeFileSync(join(w.work, "prior.txt"), "prior\n")
+    await w.git(["add", "prior.txt"])
+    await w.git(["commit", "--quiet", "-m", "prior"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    // Delete local branch so inLineState must locate the standing change in checking
+    await w.git(["branch", "-D", "task/event-merge"])
+
     const merged = await yrd(w, "merge", "task/event-merge")
 
     expect(merged.exitCode, merged.report).toBe(0)
     const tip = await mainAt(w)
     expect(await onMain(w, head)).toBe(true)
+    expect(tip).not.toBe(head)
     expect(merged.stdout, merged.report).toContain(`task/event-merge@${head} merged at ${tip.slice(0, 12)}`)
 
     const again = await yrd(w, "merge", "task/event-merge")
@@ -4021,6 +4036,51 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     expect(again.stdout, again.report).toContain(
       `task/event-merge@${head} is already merged into origin#main; nothing to merge`,
     )
+
+    const jsonAgain = await yrd(w, "merge", "--json", "task/event-merge")
+    expect(jsonAgain.exitCode, jsonAgain.report).toBe(0)
+    const parsedAgain = JSON.parse(jsonAgain.stdout) as Record<string, unknown>
+    expect(parsedAgain.landing).toBe(tip)
+  })
+
+  // 25937 (P3). On an event queue, yrd merge --json for a stuck change must not report
+  // a candidate commit as its landing, and the Merge trailer must not be emitted.
+  it("on an event queue, yrd merge --json on a stuck change does not report a landing (#25937)", async () => {
+    const w = await verbWorld()
+    const commit = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    await createEventQueue(
+      createEventStore(w.work, "origin", gitIn(w.work).selection),
+      "main",
+      commit,
+      config,
+      new Date(),
+    )
+    const script = join(dirname(w.workdir), "verdict.sh")
+    writeFileSync(
+      script,
+      [
+        "#!/bin/sh",
+        "if [ -f cannot-judge.txt ]; then echo 'the verdict cannot judge this change' >&2; exit 2; fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(script, 0o755)
+    await redeclare(w, `checks:\n  - verdict:\n      on: [submit]\n      run: ${script}\n`)
+    const head = await branchWith(w, "task/event-stuck", "cannot-judge.txt")
+    const merged = await yrd(w, "merge", "--json", "task/event-stuck")
+
+    expect(merged.exitCode, merged.report).toBe(2)
+    const lines = merged.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    const parsed = lines.at(-1)!
+    expect(parsed.state, merged.report).toBe("stuck")
+    expect(parsed.landing, merged.report).toBeUndefined()
+    expect("landing" in parsed, merged.report).toBe(false)
   })
 })
 
