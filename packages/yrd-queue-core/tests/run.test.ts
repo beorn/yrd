@@ -632,6 +632,33 @@ it("refuses ops cutover when the verified plan names a different queue tip", asy
   expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("legacy")
 })
 
+/** @failure Cutover snapshots a raw stuck pause after its change ended (25041 A11).
+ * @level l3 @consumer queue operator and merge runner
+ */
+it("carries only the derived standing stop through ops cutover", async () => {
+  const w = await world()
+  const head = await submitCommit(w, "task/lifted", "one.txt")
+  const pause = await writePause(w.git, "origin", "main", {
+    kind: "paused",
+    cause: "stuck",
+    change: { branch: "task/lifted", head },
+    by: "yrd",
+    reason: "unjudged",
+  })
+  await withdraw(w.git, "origin", { branch: "task/lifted", by: "@chief", target: { branch: "main", remote: "origin" } })
+  await createWorldEventQueue(w)
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const before = await readEventOps(store, w.git, "main", w.target)
+  expect(before.pause?.sha).toBe(pause.sha)
+  expect(before.stop).toBeUndefined()
+
+  await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
+  const after = await readEventOps(store, w.git, "main", w.target)
+  expect(after.source).toBe("event")
+  expect(after.pause).toBeUndefined()
+  expect(after.stop).toBeUndefined()
+})
+
 /** @failure 25041: an already-present maintenance fence must keep its exact oid through ops cutover.
  * @level l3 @consumer queue operator and rollback
  */
