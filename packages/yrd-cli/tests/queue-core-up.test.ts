@@ -2315,7 +2315,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(rounds.indexOf(merged[0]!)).toBeGreaterThanOrEqual(3)
   })
 
-  /** @failure 25041: before ops cutover, resume wrote only the legacy pause ref, leaving a stuck event change held.
+  /** @failure 25041: before ops cutover, resume left a stuck change held or a later pause paged it again.
    * @level l2 @consumer queue operator and Hab's yrd service
    */
   it("retries a pre-cutover stuck event change after queue resume", async () => {
@@ -2403,6 +2403,31 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(releaseEvents.at(-1)?.props.find(([key]) => key === "Reason")?.[1]).toMatch(
       /^yrd-stuck-release:[0-9a-f]{40} repaired$/u,
     )
+    // A later operator hold must not page the stuck change whose release already stands.
+    await writePause(w.git, "origin", "main", { by: "@chief", kind: "paused", reason: "later hold" })
+    const heldAfterResume = capture(w.work)
+    const hold = new AbortController()
+    const healthAfterResume: QueueHealthDocument[] = []
+    expect(
+      await coreQueueCommand(
+        w.work,
+        heldAfterResume.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: hold.signal,
+          afterHealth: (document) => {
+            healthAfterResume.push(document)
+            hold.abort()
+          },
+        },
+        { json: true, workdir: w.workdir },
+      ),
+      heldAfterResume.stderr(),
+    ).toBe(0)
+    expect(records(heldAfterResume)[0]).toMatchObject({ exitCode: 0, pendingStuck: [] })
+    expect(healthAfterResume[0]?.facts?.stuckChanges).toBeUndefined()
+    await writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "later hold lifted" })
     const after = capture(w.work)
     expect(await coreQueueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
     expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
