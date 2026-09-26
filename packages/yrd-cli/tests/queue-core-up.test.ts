@@ -800,13 +800,14 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
         `test -e "${join(w.workdir, ROUND_LOCK)}" || exec git-upload-pack "$@"`,
         // yrd runs some ls-remotes concurrently, so the count is one appended line per invocation (an append is
         // atomic; a read-then-rewrite counter can read a truncated file and fire twice), and the move is one-shot:
-        // mkdir succeeds for exactly one invocation (@dev/review2 8035e6b3).
+        // a noclobber create (O_EXCL) succeeds for exactly one invocation. Not mkdir: this host's uutils mkdir let
+        // several concurrent callers win (@dev/review2 8035e6b3, 47be3aaf44 verdict).
         `printf 'x\\n' >> "${calls}"`,
         `count=$(wc -l < "${calls}")`,
         // An exact fetch may be skipped when A is already local. Invocation
         // two is therefore either that fetch or the queue advertisement; in
         // both cases A has already been declared and B precedes the queue read.
-        `if test "$count" -ge 2 && mkdir "${moved}" 2>/dev/null; then git --git-dir="$1" update-ref refs/heads/main ${b} ${a} || exit $?; fi`,
+        `if test "$count" -ge 2 && (set -C; : > "${moved}") 2>/dev/null; then git --git-dir="$1" update-ref refs/heads/main ${b} ${a} || exit $?; fi`,
         'exec git-upload-pack "$@"',
         "",
       ].join("\n"),
@@ -4386,14 +4387,16 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
     writeFileSync(overlaps, "")
     // A merge-phase check that holds its round for a while and records any other
     // round's check that arrives while it is inside.
+    // The mark is a noclobber create (O_EXCL), not mkdir: this host's uutils mkdir let
+    // two concurrent callers both succeed, so a real overlap could go unrecorded.
     writeFileSync(
       hold,
       [
         "#!/bin/sh",
         `pwd >> "${holds}"`,
-        `if ! mkdir "${inside}" 2>/dev/null; then pwd >> "${overlaps}"; exit 0; fi`,
+        `if ! (set -C; : > "${inside}") 2>/dev/null; then pwd >> "${overlaps}"; exit 0; fi`,
         "sleep 3",
-        `rmdir "${inside}"`,
+        `rm -f "${inside}"`,
         "exit 0",
         "",
       ].join("\n"),
