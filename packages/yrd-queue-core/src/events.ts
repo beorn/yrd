@@ -36,7 +36,8 @@ export const CHANGE_STATUSES = [
   "cancelled",
 ] as const
 export type ChangeStatus = (typeof CHANGE_STATUSES)[number]
-export type ChangeEnding = "merged" | "failed" | "cancelled"
+const CHANGE_ENDINGS = ["merged", "failed", "cancelled"] as const satisfies readonly ChangeStatus[]
+export type ChangeEnding = (typeof CHANGE_ENDINGS)[number]
 export type CancellationReason = "resubmitted" | "dropped" | "deleted" | "unrecorded"
 const LANDING_IN_PROGRESS = "landing in progress; resubmit after merged/failed/stuck, resume if runner gone"
 
@@ -1193,7 +1194,7 @@ async function eventLineStop(
   if (state.commit !== pause.change.head || !isOpen(state.status)) return undefined
   const stuckAt = events.findLastIndex((event) => event.type === "stuck")
   if (stuckAt < 0) throw new Error(`${ref}: stuck queue pause ${pause.sha} has no stuck change event`)
-  return events.slice(stuckAt + 1).some((event) => ["merged", "failed", "cancelled"].includes(event.type))
+  return events.slice(stuckAt + 1).some((event) => CHANGE_ENDINGS.some((ending) => ending === event.type))
     ? undefined
     : pause
 }
