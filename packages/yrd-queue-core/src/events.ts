@@ -1006,6 +1006,11 @@ export async function readEventOps(
 > {
   const projected = await readEventQueue(store, queue)
   if (projected.opsCutover === undefined) {
+    if (projected.pause !== undefined) {
+      throw new Error(
+        `${queueRef(queue)}: pre-cutover pause event ${projected.pause.id} still stands while ${pauseRef(queue)} owns the stop; ops cutover is incomplete`,
+      )
+    }
     const [stop, overrides] = await Promise.all([
       readStop(git, store.remote, queue, targetSha),
       readOverrides(git, store.remote, queue),

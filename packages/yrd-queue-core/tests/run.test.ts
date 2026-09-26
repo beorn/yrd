@@ -476,6 +476,32 @@ it("notifies the submitter when an event change fails before any check", async (
   expect(Object.values(status.notices ?? {})).toMatchObject([{ result: "delivered" }])
 })
 
+/** @failure A pre-cutover queue event pause is ignored while the legacy pause ref still owns the stop.
+ * @level l2 @consumer queue runner and submitter
+ */
+it("refuses a standing event pause before ops cutover", async () => {
+  const w = await world()
+  const created = await createWorldEventQueue(w)
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await (
+    await openEvents({ ...store, ref: queueRef("main"), writer: "old-yrd" })
+  ).append(
+    [
+      {
+        type: "paused",
+        props: [
+          ["Queue", created],
+          ["Time", new Date().toISOString()],
+          ["Reason", "operator hold"],
+        ],
+      },
+    ],
+    { expect: created },
+  )
+  expect((await readEventQueue(store, "main")).pause?.reason).toBe("operator hold")
+  await expect(readEventOps(store, w.git, "main", w.target)).rejects.toThrow(/pre-cutover.*pause/u)
+})
+
 /** @failure An ops cutover could drop a standing stop or override, leave an old ref, or silently accept one later.
  * @level l3 @consumer queue operator and merge runner
  */
