@@ -18,8 +18,12 @@ function failure(code: string, cause: unknown): WorkspaceResult<never> {
   return {
     status: "completed",
     conclusion: "failure",
-    error: { code, message: cause instanceof Error ? cause.message : String(cause) },
+    error: { code, message: messageOf(cause) },
   }
+}
+
+function messageOf(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause)
 }
 
 function rethrowWorktreeOwnershipConflict(cause: unknown): never {
@@ -64,6 +68,10 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
   return {
     async provision(input: ProvisionBayInput): Promise<WorkspaceResult<ProvisionedBay>> {
       const path = safeBayPath(baysRoot, input.bay)
+      // What this call made, so a failure removes exactly that and nothing it found (hh 25976): a half-made
+      // worktree without its submodules refused the next open as "already exists" and looked usable.
+      let madeWorktree = false
+      let madeBranch: Readonly<{ ref: string; at: string }> | undefined
       try {
         const baseSha = await git.commit(repo, input.base)
         await worktrees.prepareRoot(baysRoot, false)
@@ -82,6 +90,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           } catch (cause) {
             rethrowWorktreeOwnershipConflict(cause)
           }
+          madeWorktree = true
         } else {
           const remoteHead = tracking.code === 0 ? undefined : await remoteBranchHead(git, repo, input.branch)
           if (remoteHead !== undefined) {
@@ -96,6 +105,8 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
             branch: input.branch,
             ref: tracking.code === 0 ? remoteRef : (remoteHead ?? baseSha),
           })
+          madeWorktree = true
+          madeBranch = { ref: localRef, at: await git.commit(repo, localRef) }
           if (tracking.code === 0) {
             await git.run(path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
           }
@@ -104,7 +115,24 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         const headSha = await git.commit(path, "HEAD")
         return { status: "completed", conclusion: "success", output: { path, headSha, baseSha } }
       } catch (cause) {
-        return failure("provision-failed", cause)
+        if (!madeWorktree) return failure("provision-failed", cause)
+        const undone: string[] = []
+        try {
+          await worktrees.remove(path, { operation: `remove half-made environment ${path}` })
+          undone.push(`removed the half-made environment ${path}`)
+        } catch (removal) {
+          undone.push(`could not remove the half-made environment ${path}: ${messageOf(removal)}`)
+        }
+        if (madeBranch !== undefined) {
+          // Compare-and-delete: only the branch this call created, and only while it still points where it was made.
+          const deleted = await git.run(repo, ["update-ref", "-d", madeBranch.ref, madeBranch.at], true)
+          undone.push(
+            deleted.code === 0
+              ? `deleted ${madeBranch.ref} (${madeBranch.at.slice(0, 12)})`
+              : `could not delete ${madeBranch.ref}: ${deleted.stderr.trim()}`,
+          )
+        }
+        return failure("provision-failed", `${messageOf(cause)}; ${undone.join("; ")}`)
       }
     },
   }

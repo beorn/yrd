@@ -329,6 +329,28 @@ describe("yrd env open prepares the retained environment", () => {
     expect((await gitIn(occupied)(["rev-parse", "HEAD"])).trim()).toBe(head)
   })
 
+  it("removes a half-made environment whose submodules could not be materialized, and says so (hh 25976)", async () => {
+    // A failed materialization left the worktree and its branch behind, so the same open refused next time with
+    // "workspace path already exists" and the half-made tree (no submodules, no dependencies) looked usable.
+    const w = await world("true")
+    await addMaterializedDependency(w)
+    // Pin the dependency to a commit no store and no remote has: materialization must fail.
+    const missing = "0123456789abcdef0123456789abcdef01234567"
+    await w.git(["update-index", "--cacheinfo", `160000,${missing},vendor/dependency`])
+    await w.git(["commit", "--quiet", "-m", "pin a commit that exists nowhere"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "half-made"], run.io)).not.toBe(0)
+
+    const bay = join(w.work, ".bays", "half-made")
+    expect(existsSync(bay), `the half-made bay is removed:\n${run.stderr()}`).toBe(false)
+    expect(await w.git(["worktree", "list", "--porcelain"])).not.toContain(bay)
+    expect((await w.git(["branch", "--list", "task/half-made"])).trim()).toBe("")
+    expect(run.stderr()).toContain("could not open environment 'half-made'")
+    expect(run.stderr()).toContain(`removed the half-made environment ${bay}`)
+  })
+
   it("keeps a failed environment and reports its command and output", async () => {
     const command = "printf 'setup exploded\\n' >&2; exit 23"
     const w = await world(command)
