@@ -2392,6 +2392,12 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       ),
       resumed.stderr(),
     ).toBe(0)
+    // A foreground run ignores a standing pause, so read the durable stop before retrying.
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({
+      kind: "resumed",
+      by: "@chief",
+      reason: "repaired",
+    })
     const releaseEvents = await (await openEvents({ ...store, ref: queueRef("main") })).events({ limit: 1024 })
     expect(releaseEvents.slice(-2).map((event) => event.type)).toEqual(["paused", "resumed"])
     expect(releaseEvents.at(-1)?.props.find(([key]) => key === "Reason")?.[1]).toMatch(
