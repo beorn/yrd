@@ -19,6 +19,15 @@ function git(cwd: string, ...args: string[]): string {
   return result.stdout.trim()
 }
 
+/**
+ * The caller's environment with every network transport refused, so "offline" is proved rather than assumed: a seat's
+ * GIT_SSH_COMMAND or a url.insteadOf rewrite could otherwise let a remote read reach GitHub and pass (@dev/review2 on
+ * bea4683cef). yrd's gitEnvironment keeps both variables; only its routing variables are dropped.
+ */
+function offlineEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_ALLOW_PROTOCOL: "file", GIT_SSH_COMMAND: "false", ...extra }
+}
+
 const roots: string[] = []
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
@@ -41,7 +50,7 @@ function offlineClone(): { root: string; clone: string; state: string } {
 describe("ownedQueueClone (hh 25626)", () => {
   it("names the queue-owned clone from local records alone, as the queue resolves it", async () => {
     const { clone, state } = offlineClone()
-    const env = { ...process.env, XDG_STATE_HOME: state }
+    const env = offlineEnv({ XDG_STATE_HOME: state })
 
     const owned = await ownedQueueClone(clone, env)
 
@@ -56,7 +65,7 @@ describe("ownedQueueClone (hh 25626)", () => {
     const workdir = join(root, "declared-workdir")
     git(clone, "config", "yrd.workdir", workdir)
 
-    await expect(ownedQueueClone(clone, { ...process.env })).resolves.toBe(
+    await expect(ownedQueueClone(clone, offlineEnv())).resolves.toBe(
       join(workdir, "github.com", "beorn", "hh-dev%23main", "repo"),
     )
   })
@@ -65,7 +74,7 @@ describe("ownedQueueClone (hh 25626)", () => {
     const { clone, state } = offlineClone()
     git(clone, "remote", "set-head", "origin", "-d")
 
-    await expect(ownedQueueClone(clone, { ...process.env, XDG_STATE_HOME: state })).rejects.toThrow(
+    await expect(ownedQueueClone(clone, offlineEnv({ XDG_STATE_HOME: state }))).rejects.toThrow(
       /records no refs\/remotes\/origin\/HEAD; run `git remote set-head origin --auto`/u,
     )
   })
