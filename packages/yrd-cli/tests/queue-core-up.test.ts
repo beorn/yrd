@@ -16,6 +16,7 @@
  */
 
 import * as fs from "node:fs"
+import { execFileSync } from "node:child_process"
 import {
   chmodSync,
   cpSync,
@@ -30,10 +31,12 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as gitomic from "gitomic"
+import { openEvents } from "gitomic/events"
 import {
   appendChangeEvent,
   appendOpsCutover,
@@ -56,11 +59,13 @@ import {
   ROUND_LOCK,
   runId,
   setBranchIgnored,
+  stuckReleaseReason,
   submit,
   trailer,
   watchRows,
   writeQueueEvent,
   writeQueueOverride,
+  writePause,
   type ChangeRecord,
   type Git,
   type QueueHealthDocument,
@@ -90,6 +95,30 @@ process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
 process.env.GIT_CONFIG_VALUE_0 = "always"
 
 const roots: string[] = []
+
+/** Run the previous pin's actual queue projection, with an explicit shallow-clone refusal. */
+async function previousQueueReader(): Promise<typeof import("../../yrd-queue-core/src/events.ts")> {
+  const yrdRoot = resolve(import.meta.dirname, "../../..")
+  const oldPin = "14f772a1244f1b9d2bfd199364f099186a126767"
+  let oldEvents: string
+  try {
+    oldEvents = execFileSync("git", ["-C", yrdRoot, "show", `${oldPin}:packages/yrd-queue-core/src/events.ts`], {
+      encoding: "utf8",
+    })
+  } catch (error) {
+    throw new Error(`historical Yrd reader ${oldPin} is absent; run git fetch --unshallow origin main in vendor/yrd`, {
+      cause: error,
+    })
+  }
+  const directory = mkdtempSync(join(tmpdir(), "yrd-old-reader-"))
+  roots.push(directory)
+  cpSync(join(yrdRoot, "packages/yrd-queue-core/src"), join(directory, "src"), { recursive: true })
+  symlinkSync(join(yrdRoot, "../../node_modules"), join(directory, "node_modules"), "dir")
+  writeFileSync(join(directory, "src/events.ts"), oldEvents)
+  return (await import(
+    pathToFileURL(join(directory, "src/events.ts")).href
+  )) as typeof import("../../yrd-queue-core/src/events.ts")
+}
 
 // A selected event change must keep the watch open through every working phase;
 // the legacy watch tests only exercise queued and checked.
@@ -2295,11 +2324,13 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
     const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
     await createEventQueue(store, "main", target, config, new Date())
+    const earlier = stuckReleaseReason("a".repeat(40), "an earlier resume cannot release a later stuck change")
+    await writeQueueEvent(store, "main", { type: "paused", at: new Date(), by: "@chief", reason: earlier })
     await writeQueueEvent(store, "main", {
       type: "resumed",
       at: new Date(),
       by: "@chief",
-      reason: "an earlier resume cannot release a later stuck change",
+      reason: earlier,
     })
     const branch = "task/pre-cutover-stuck"
     await oneChange(w, branch)
@@ -2360,6 +2391,11 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       ),
       resumed.stderr(),
     ).toBe(0)
+    const releaseEvents = await (await openEvents({ ...store, ref: queueRef("main") })).events({ limit: 1024 })
+    expect(releaseEvents.slice(-2).map((event) => event.type)).toEqual(["paused", "resumed"])
+    expect(releaseEvents.at(-1)?.props.find(([key]) => key === "Reason")?.[1]).toMatch(
+      /^yrd-stuck-release:[0-9a-f]{40} repaired$/u,
+    )
     const after = capture(w.work)
     expect(await coreQueueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
     expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
@@ -2418,10 +2454,185 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       ),
       resumed.stderr(),
     ).toBe(0)
+    const releaseEvents = await (await openEvents({ ...store, ref: queueRef("main") })).events({ limit: 1024 })
+    expect(releaseEvents.slice(-2).map((event) => event.type)).toEqual(["paused", "resumed"])
     const after = capture(w.work)
     expect(await coreQueueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
     expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
   }, 60_000)
+
+  // @failure 25041: a crash between the two old-reader-compatible release writes left a pause forever.
+  it("completes an unfinished pre-cutover stuck release on the next service round", async () => {
+    const w = await world()
+    const target = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createEventQueue(store, "main", target, config, new Date())
+    const branch = "task/unfinished-release"
+    await oneChange(w, branch)
+    const submitted = await readStatus(store, "main", branch)
+    if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
+    const stuck = await appendChangeEvent(store, "main", branch, submitted.tip, {
+      type: "stuck",
+      at: new Date(),
+      reason: "repair needed",
+    })
+    const reason = stuckReleaseReason(stuck, "repaired")
+    const paused = await writeQueueEvent(store, "main", { type: "paused", by: "@chief", reason, at: new Date() })
+    expect((await readEventQueue(store, "main")).release?.id).toBe(paused)
+    const stop = new AbortController()
+    const service = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        service.io,
+        { command: "up", intervalSeconds: 0, stop: stop.signal, afterHealth: () => stop.abort() },
+        { json: true, workdir: w.workdir },
+      ),
+      service.stderr(),
+    ).toBe(0)
+    expect((await readEventQueue(store, "main")).release).toBeUndefined()
+    expect((await readStatus(store, "main", branch)).status).toBe("merged")
+  }, 60_000)
+
+  // @failure 25041: the previous Yrd pin threw on a pre-cutover resumed-only queue chain.
+  it("keeps pre-cutover stuck releases readable by the previous Yrd pin", async () => {
+    const old = await previousQueueReader()
+    for (const legacyPause of [false, true]) {
+      const w = await world()
+      const target = (await w.git(["rev-parse", "main"])).trim()
+      const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
+      if (config === undefined) throw new Error("the fixture's target lost its declaration")
+      const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+      await createEventQueue(store, "main", target, config, new Date())
+      const branch = `task/old-reader-${legacyPause ? "legacy" : "plain"}`
+      await oneChange(w, branch)
+      const submitted = await readStatus(store, "main", branch)
+      if (submitted.tip === undefined) throw new Error(`${branch} has no event tip`)
+      const stuck = await appendChangeEvent(store, "main", branch, submitted.tip, {
+        type: "stuck",
+        at: new Date(),
+        reason: "repair needed",
+      })
+      if (legacyPause) {
+        const paused = capture(w.work)
+        expect(
+          await coreQueueCommand(
+            w.work,
+            paused.io,
+            { by: "@chief", command: "pause", reason: "repair" },
+            { workdir: w.workdir },
+          ),
+          paused.stderr(),
+        ).toBe(0)
+      } else {
+        const reason = stuckReleaseReason(stuck, "repaired")
+        const first = await writeQueueEvent(store, "main", { type: "paused", by: "@chief", reason, at: new Date() })
+        expect((await readEventQueue(store, "main")).release?.id).toBe(first)
+        expect((await old.readEventQueue(store, "main")).pause?.id).toBe(first)
+        expect((await old.readEventQueueWithChanges(store, "main")).queue.pause?.id).toBe(first)
+      }
+      const resumed = capture(w.work)
+      expect(
+        await coreQueueCommand(
+          w.work,
+          resumed.io,
+          { by: "@chief", command: "resume", reason: "repaired" },
+          { workdir: w.workdir },
+        ),
+        resumed.stderr(),
+      ).toBe(0)
+      expect((await old.readEventQueue(store, "main")).pause).toBeUndefined()
+      expect((await old.readEventQueueWithChanges(store, "main")).queue.pause).toBeUndefined()
+      if (!legacyPause) {
+        const queue = await readEventQueue(store, "main")
+        await (
+          await openEvents({ ...store, ref: queueRef("main"), writer: "@chief" })
+        ).append(
+          [
+            {
+              type: "resumed",
+              props: [
+                ["Queue", queue.tip],
+                ["Time", new Date().toISOString()],
+                ["Reason", "unpaired red arm"],
+              ],
+            },
+          ],
+          { expect: queue.tip },
+        )
+        await expect(old.readEventQueue(store, "main")).rejects.toThrow(/resumes a running queue/)
+        await expect(old.readEventQueueWithChanges(store, "main")).rejects.toThrow(/resumes a running queue/)
+      }
+    }
+  }, 90_000)
+
+  it("retries a stuck release after only its legacy pause was resumed", async () => {
+    const w = await world()
+    const target = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createEventQueue(store, "main", target, config, new Date())
+    const branch = "task/legacy-first-only"
+    await oneChange(w, branch)
+    const submitted = await readStatus(store, "main", branch)
+    if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
+    await appendChangeEvent(store, "main", branch, submitted.tip, {
+      type: "stuck",
+      at: new Date(),
+      reason: "repair needed",
+    })
+    const paused = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        paused.io,
+        { by: "@chief", command: "pause", reason: "repair" },
+        { workdir: w.workdir },
+      ),
+      paused.stderr(),
+    ).toBe(0)
+    const firstOnly = await writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "repaired" })
+    expect((await readEventQueue(store, "main")).pause).toBeUndefined()
+    expect((await readStatus(store, "main", branch)).status).toBe("stuck")
+    const stop = new AbortController()
+    const health: QueueHealthDocument[] = []
+    const service = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        service.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterHealth: (doc) => {
+            health.push(doc)
+            stop.abort()
+          },
+        },
+        { json: true, workdir: w.workdir },
+      ),
+      service.stderr(),
+    ).toBe(0)
+    expect(health[0]?.facts?.stopped).toBeNull()
+    expect(health[0]?.error?.resolution.join(" ")).toContain("yrd queue resume")
+    const resumed = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        resumed.io,
+        { by: "@chief", command: "resume", reason: "repaired" },
+        { workdir: w.workdir },
+      ),
+      resumed.stderr(),
+    ).toBe(0)
+    expect((await readPause(w.git, "origin", "main"))?.sha).toBe(firstOnly.sha)
+    const events = await (await openEvents({ ...store, ref: queueRef("main") })).events({ limit: 1024 })
+    expect(events.slice(-2).map((event) => event.type)).toEqual(["paused", "resumed"])
+  }, 90_000)
 
   // What no round can fix still ends the service: a round that cannot even
   // read its queue has no change to stop the line on, so the loop has nothing

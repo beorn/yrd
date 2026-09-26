@@ -49,12 +49,15 @@ import {
   listRefs,
   queueFormat,
   queueRef,
+  queueResumedAfter,
   queueRefPrefix,
   changesRef,
   readChangeEvents,
+  readEventQueue,
   readEventOps,
   readEventQueueWithChanges,
   setBranchIgnored,
+  stuckReleaseReason,
   writeQueueEvent,
   writeQueueOverride,
   prepareWorktree,
@@ -1059,6 +1062,9 @@ export async function coreQueueCommand(
       try {
         const eventStore = createEventStore(repo, config.target.remote, selection)
         let resumeStuck = false
+        let releaseReason: string | undefined
+        let releaseNeedsPause = false
+        const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
         if ((await queueFormat(eventStore, config.target.branch)) === "event") {
           const now = await readEventOps(eventStore, git, config.target.branch, captured.oid)
           if (now.source === "event") {
@@ -1088,15 +1094,27 @@ export async function coreQueueCommand(
             return 0
           }
           if (request.command === "resume") {
-            const { histories, invalid } = await readEventQueueWithChanges(eventStore, config.target.branch)
+            const { queue, histories, invalid } = await readEventQueueWithChanges(eventStore, config.target.branch)
             const defect = invalid.values().next().value
             if (defect !== undefined) {
               throw new Error(`${defect.ref} at ${defect.tip}: cannot judge stuck resume: ${defect.error}`)
             }
-            for (const history of histories.values()) {
-              if (history.state.status === "stuck") {
-                resumeStuck = true
-                break
+            if (queue.release !== undefined) {
+              resumeStuck = true
+              releaseReason = queue.release.reason
+            } else {
+              for (const [branch, history] of histories) {
+                if (
+                  history.state.status === "stuck" &&
+                  !(await queueResumedAfter(eventStore, config.target.branch, branch, history))
+                ) {
+                  const stuck = history.events.findLast((event) => event.type === "stuck")
+                  if (stuck === undefined) throw new Error(`${branch}: stuck change has no stuck event`)
+                  resumeStuck = true
+                  releaseReason = stuckReleaseReason(stuck.id, reason)
+                  releaseNeedsPause = queue.pause === undefined
+                  break
+                }
               }
             }
           }
@@ -1106,7 +1124,6 @@ export async function coreQueueCommand(
         // pause may follow it and there is nothing for a resume to end.
         const { pause: tip, stop } = await readStop(git, config.target.remote, config.target.branch, captured.oid)
         const lifted = tip?.kind === "paused" && stop === undefined ? tip : undefined
-        const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
         const pause =
           request.command === "resume" && stop === undefined && resumeStuck
             ? undefined
@@ -1124,9 +1141,18 @@ export async function coreQueueCommand(
               )
         if (resumeStuck) {
           const at = new Date()
+          if (releaseReason === undefined) throw new Error("stuck resume has no release reason")
+          if (releaseNeedsPause) {
+            await writeQueueEvent(eventStore, config.target.branch, {
+              type: "paused",
+              reason: releaseReason,
+              by: request.by,
+              at,
+            })
+          }
           const event = await writeQueueEvent(eventStore, config.target.branch, {
             type: "resumed",
-            reason,
+            reason: releaseReason,
             by: request.by,
             at,
           })
@@ -1763,8 +1789,18 @@ export async function coreQueueCommand(
        * read once, at the moment nobody is watching; a fact in the health
        * document is read every time anyone asks how this service is.
        */
+      let lastRelease: string | undefined
       const lineDocument = (stop: PauseRecord | undefined, sleepMs: number): QueueHealthDocument => {
-        const base = roundHealthDocument(SERVICE, stop, sleepMs, new Date(), flowReading(), readFailure, lastStuck)
+        const base = roundHealthDocument(
+          SERVICE,
+          stop,
+          sleepMs,
+          new Date(),
+          flowReading(),
+          readFailure,
+          lastStuck,
+          lastRelease,
+        )
         return { ...base, facts: { ...base.facts, ...relaunchOff, serviceStarted } }
       }
       /**
@@ -1966,10 +2002,13 @@ export async function coreQueueCommand(
       // already is: stuck, exit 2, and no document claiming a state nobody read.
       try {
         const eventStore = createEventStore(repo, config.target.remote, selection)
-        lastStop =
-          (await queueFormat(eventStore, config.target.branch)) === "event"
-            ? (await readEventOps(eventStore, git, config.target.branch, captured.oid)).stop
-            : (await readStop(git, config.target.remote, config.target.branch, captured.oid)).stop
+        if ((await queueFormat(eventStore, config.target.branch)) === "event") {
+          const operational = await readEventOps(eventStore, git, config.target.branch, captured.oid)
+          lastStop = operational.stop
+          lastRelease = operational.queue.release?.id
+        } else {
+          lastStop = (await readStop(git, config.target.remote, config.target.branch, captured.oid)).stop
+        }
       } catch (error) {
         return stuck(
           `the line's stop cannot be read at start: ${error instanceof Error ? error.message : String(error)}`,
@@ -2102,6 +2141,11 @@ export async function coreQueueCommand(
           // nothing awaited between the write and the call.
           const sleepMs = sleepAfter(outcome, interval)
           lastStop = pauseStop(outcome.stopped)
+          if (lastRelease !== undefined) {
+            lastRelease = (
+              await readEventQueue(createEventStore(repo, config.target.remote, selection), config.target.branch)
+            ).release?.id
+          }
           lastStuck = outcome.pendingStuck ?? outcome.stuck
           openedAt = undefined
           flow = flowAfterRound(flow, outcome, new Date())
