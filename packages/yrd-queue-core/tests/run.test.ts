@@ -2859,6 +2859,9 @@ it("names an observed merge after a failed candidate in its notice", async () =>
   const observed = await queueRun({ ...(await w.options({ exit: 0 })), checks: [] })
   expect(observed.merged).toEqual(["task/observed-after-failure"])
   expect(messages(w).filter((message) => message.record === "merged")).toEqual([expect.objectContaining({ merge })])
+  expect(logRecords(observed).find((record) => record.kind === "message" && record.says === "merged")?.text).toContain(
+    `merged as ${merge.slice(0, 12)}`,
+  )
 })
 
 /** One commit on the target, pushed around the queue: the thing only the queue may do. */
