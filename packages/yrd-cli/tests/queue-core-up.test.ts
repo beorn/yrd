@@ -2426,7 +2426,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       heldAfterResume.stderr(),
     ).toBe(0)
     expect(records(heldAfterResume)[0]).toMatchObject({ exitCode: 0, pendingStuck: [] })
-    expect(healthAfterResume[0]?.facts.stuckChanges).toBeUndefined()
+    expect(healthAfterResume[0]?.facts?.stuckChanges).toBeUndefined()
     await writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "later hold lifted" })
     const after = capture(w.work)
     expect(await coreQueueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
