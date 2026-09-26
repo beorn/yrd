@@ -52,6 +52,7 @@ import {
   QUEUE_HEALTH_DOCUMENT,
   readConfig,
   readEventQueue,
+  readEventOps,
   readPause,
   readRecords,
   readRemoteCommit,
@@ -2315,6 +2316,82 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     // Only after the resume: the three rounds before it held the line.
     expect(rounds.indexOf(merged[0]!)).toBeGreaterThanOrEqual(3)
   })
+
+  /** @failure 25041 F1: the pre-cutover reader rejected the migration's own Start-Paused fence.
+   * @level l2 @consumer queue operator and Hab's yrd service
+   */
+  it("resumes, runs and cuts over a migrated Start-Paused queue", async () => {
+    const migrated = async (withLegacyPause = true) => {
+      const w = await world()
+      const target = (await w.git(["rev-parse", "main"])).trim()
+      const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+      const staged = await (
+        await openEvents({ ...store, ref: queueRef("main"), writer: "yrd-migration" })
+      ).stage(
+        [
+          {
+            type: "created",
+            props: [
+              ["Commit", target],
+              ["Time", new Date().toISOString()],
+              ["Start-Paused", "25041 event migration cutover"],
+              ["Pause-Cause", "maintenance"],
+            ],
+            keeps: [target],
+          },
+        ],
+        { expect: null },
+      )
+      await staged.publish()
+      if (withLegacyPause) {
+        await writePause(w.git, "origin", "main", {
+          by: "yrd-migration",
+          kind: "paused",
+          reason: "25041 event migration cutover",
+          cause: "maintenance",
+        })
+      }
+      const queue = await readEventQueue(store, "main")
+      expect(queue.pause?.id).toBe(queue.created)
+      return { w, target, store, created: queue.created }
+    }
+
+    {
+      const { w, target, store, created } = await migrated()
+      const output = capture(w.work)
+      expect(
+        await coreQueueCommand(
+          w.work,
+          output.io,
+          { by: "@chief", command: "resume", reason: "migration completed" },
+          { workdir: w.workdir },
+        ),
+      ).toBe(0)
+      expect(await readPause(w.git, "origin", "main")).toMatchObject({ kind: "resumed" })
+      expect((await readEventQueue(store, "main")).pause?.id).toBe(created)
+      expect(await readEventOps(store, w.git, "main", target)).toMatchObject({
+        source: "legacy",
+        pause: { kind: "resumed" },
+        stop: undefined,
+      })
+    }
+    {
+      const { w } = await migrated()
+      const output = capture(w.work)
+      expect(await coreQueueCommand(w.work, output.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
+      expect(records(output)[0]).toMatchObject({ exitCode: 0, merged: [] })
+      expect(await readPause(w.git, "origin", "main")).toMatchObject({ kind: "paused", cause: "maintenance" })
+    }
+    {
+      const { w, target, store } = await migrated()
+      const cutover = await appendOpsCutover(store, w.git, "main", target, new Date(), "@chief")
+      expect(await readEventQueue(store, "main")).toMatchObject({ tip: cutover.queueAfter, opsCutover: cutover.event })
+    }
+    {
+      const { w, target, store } = await migrated(false)
+      await expect(readEventOps(store, w.git, "main", target)).rejects.toThrow(/missing legacy pause ref/u)
+    }
+  }, 120_000)
 
   /** @failure 25041: before ops cutover, resume left a stuck change held or a later pause paged it again.
    * @level l2 @consumer queue operator and Hab's yrd service

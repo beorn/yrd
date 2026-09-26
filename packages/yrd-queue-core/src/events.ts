@@ -1007,7 +1007,7 @@ export async function readEventOps(
 > {
   const projected = await readEventQueue(store, queue)
   if (projected.opsCutover === undefined) {
-    if (projected.pause !== undefined) {
+    if (projected.pause !== undefined && projected.pause.id !== projected.created) {
       throw new Error(
         `${queueRef(queue)}: pre-cutover pause event ${projected.pause.id} still stands while ${pauseRef(queue)} owns the stop; ops cutover is incomplete`,
       )
@@ -1016,6 +1016,9 @@ export async function readEventOps(
       readStop(git, store.remote, queue, targetSha),
       readOverrides(git, store.remote, queue),
     ])
+    if (projected.pause?.id === projected.created && stop.pause === undefined) {
+      throw new Error(`${queueRef(queue)}: missing legacy pause ref ${pauseRef(queue)} for Start-Paused migration`)
+    }
     return { source: "legacy", queue: projected, ...stop, overrides }
   }
   if (projected.ops === undefined) throw new Error(`${queueRef(queue)}: ops-cutover has no complete state`)
