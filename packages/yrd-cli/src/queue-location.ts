@@ -128,10 +128,19 @@ async function ensureOwnedClone(
 }
 
 /**
+ * The address of the queue `branch` names on the clone's `origin`: the one composition both the queue's default
+ * selector and `ownedQueueClone` use (@cto on hh 25626).
+ */
+async function originQueueAddress(git: Git, branch: string): Promise<QueueAddress> {
+  return parseQueueAddress(queueName({ branch, remote: "origin" }, await remoteUrl(git, "origin")))
+}
+
+/**
  * The queue-owned clone that a `yrd queue up` run inside `cwd` serves, from local records only: the origin URL and
- * `refs/remotes/origin/HEAD`, never a fetch or ls-remote. The merging round composes in worktrees of this clone, so
- * its git common dir is where gitomic journals the round's lease rejections (hh 25626). Throws naming the record it
- * could not read; it never guesses a queue.
+ * `refs/remotes/origin/HEAD`, never a fetch or ls-remote. It names the origin/HEAD queue only, never one passed with
+ * `--queue`. The merging round composes in worktrees of this clone, so its git common dir is where gitomic journals
+ * the round's lease rejections (hh 25626). Throws naming the record it could not read; it never guesses a queue, and
+ * so, unlike the queue's own default, it does not fall back to asking the remote (`originHead`).
  */
 export async function ownedQueueClone(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
   const inside = repositoryHere(cwd)
@@ -141,12 +150,11 @@ export async function ownedQueueClone(cwd: string, env: NodeJS.ProcessEnv): Prom
   const recorded = (await git(["for-each-ref", "--format=%(symref)", "refs/remotes/origin/HEAD"])).trim()
   const prefix = "refs/remotes/origin/"
   if (!recorded.startsWith(prefix) || recorded.length === prefix.length) {
-    throw new Error(`${inside} records no refs/remotes/origin/HEAD; run \`git remote set-head origin --auto\` to name its queue`)
+    throw new Error(
+      `${inside} records no refs/remotes/origin/HEAD; run \`git remote set-head origin --auto\` to name its queue`,
+    )
   }
-  const address = parseQueueAddress(
-    queueName({ branch: recorded.slice(prefix.length), remote: "origin" }, await remoteUrl(git, "origin")),
-  )
-  return queueDirectory(await hostWorkdir(cwd, env, git), address)
+  return queueDirectory(await hostWorkdir(cwd, env, git), await originQueueAddress(git, recorded.slice(prefix.length)))
 }
 
 /** Resolve the one queue selector; only submission retains the author's checkout. */
@@ -169,8 +177,7 @@ export async function resolveQueueLocation(
     (value.includes("#") || value.startsWith("/") || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value))
   let address: QueueAddress
   if (inside !== undefined && !addressed) {
-    const queue = value ?? (await originHead(git))
-    address = parseQueueAddress(queueName({ branch: queue, remote: "origin" }, await remoteUrl(git, "origin")))
+    address = await originQueueAddress(git, value ?? (await originHead(git)))
   } else {
     if (value === undefined || !addressed) {
       throw new Error(
