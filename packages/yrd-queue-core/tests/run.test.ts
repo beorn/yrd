@@ -718,6 +718,71 @@ it("accepts ops cutover when every verified plan ref still matches", async () =>
   expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("event")
 })
 
+/** @failure Ops cutover publishes despite a pause disposition different from its verified plan (25041 B2).
+ * @level l3 @consumer queue operator and cutover runner
+ */
+it("refuses ops cutover when the planned pause disposition differs", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const before = (await readEventQueue(store, "main")).tip
+  const created = (await readEventQueue(store, "main")).created
+  const reason = `moved to event format at ${created}`
+  const pause = await writePause(w.git, "origin", "main", {
+    kind: "paused",
+    cause: "maintenance",
+    by: "yrd-migration",
+    reason,
+  })
+
+  await expect(
+    appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief", {
+      queueBefore: before,
+      pauseBefore: pause.sha,
+      pause: {
+        tip: pause.sha,
+        priorKind: "paused",
+        disposition: "replace",
+        record: { kind: "paused", cause: "maintenance", by: "yrd-migration", reason, at: new Date().toISOString() },
+      },
+    }),
+  ).rejects.toThrow(/pause disposition differs from the verified plan/)
+  expect((await readEventQueue(store, "main")).tip).toBe(before)
+  expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("legacy")
+  expect((await readPause(w.git, "origin", "main"))?.sha).toBe(pause.sha)
+})
+
+/** @failure Ops cutover accepts an invalid planned maintenance-fence record (25041 B3).
+ * @level l3 @consumer queue operator and cutover runner
+ */
+it("refuses ops cutover when the planned M2 record is invalid", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const before = (await readEventQueue(store, "main")).tip
+
+  await expect(
+    appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief", {
+      queueBefore: before,
+      pause: {
+        tip: null,
+        priorKind: null,
+        disposition: "replace",
+        record: {
+          kind: "paused",
+          cause: "maintenance",
+          by: "yrd-migration",
+          reason: "wrong fence",
+          at: new Date().toISOString(),
+        },
+      },
+    }),
+  ).rejects.toThrow(/planned M2 record is not a valid maintenance fence/)
+  expect((await readEventQueue(store, "main")).tip).toBe(before)
+  expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("legacy")
+  expect(await readPause(w.git, "origin", "main")).toBeUndefined()
+})
+
 /** @failure Cutover snapshots a raw stuck pause after its change ended (25041 A11).
  * @level l3 @consumer queue operator and merge runner
  */
