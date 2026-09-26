@@ -351,6 +351,44 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).toContain(`removed the half-made environment ${bay}`)
   })
 
+  // The undo removes only what the failed open made. Each guard below protects work from deletion, and without
+  // these rows either could be removed with every other row still green (review2 600c75f0, probes 1 and 2).
+  it("a failed open of an existing branch keeps the branch and its unpushed commit (hh 25976)", async () => {
+    const w = await world("true")
+    await addMaterializedDependency(w)
+    const missing = "0123456789abcdef0123456789abcdef01234567"
+    await w.git(["update-index", "--cacheinfo", `160000,${missing},vendor/dependency`])
+    await w.git(["commit", "--quiet", "-m", "pin a commit that exists nowhere"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await w.git(["checkout", "--quiet", "-b", "task/kept"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "unpushed work on an existing branch"])
+    const kept = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "kept"], run.io)).not.toBe(0)
+
+    const bay = join(w.work, ".bays", "kept")
+    expect(existsSync(bay), `the half-made bay is removed:\n${run.stderr()}`).toBe(false)
+    expect((await w.git(["rev-parse", "--verify", "refs/heads/task/kept"])).trim(), run.stderr()).toBe(kept)
+    expect(run.stderr()).not.toContain("deleted refs/heads/task/kept")
+  })
+
+  it("a second open of a live bay is refused and leaves the environment and its uncommitted file (hh 25976)", async () => {
+    const w = await world("true")
+    const first = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "live"], first.io), first.stderr()).toBe(0)
+    const bay = join(w.work, ".bays", "live")
+    writeFileSync(join(bay, "uncommitted.txt"), "work in progress\n")
+    const second = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "live"], second.io)).not.toBe(0)
+
+    expect(existsSync(join(bay, "uncommitted.txt")), second.stderr()).toBe(true)
+    expect(await w.git(["worktree", "list", "--porcelain"])).toContain(bay)
+    expect(second.stderr()).not.toContain("removed the half-made environment")
+  })
+
   it("keeps a failed environment and reports its command and output", async () => {
     const command = "printf 'setup exploded\\n' >&2; exit 23"
     const w = await world(command)
