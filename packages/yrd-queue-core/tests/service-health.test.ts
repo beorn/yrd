@@ -101,6 +101,21 @@ describe("the health document", () => {
     expect(doc.facts).toMatchObject({ stopped: { by: "@chief", cause: "operator", change: null } })
   })
 
+  /** @failure 25041: a pre-cutover stuck event has no legacy stuck pause; both facts may also stand together.
+   * @level l1 @consumer Hab's yrd health page
+   */
+  test("a stuck event pages with its resume action beside a standing operator pause", () => {
+    const doc = roundHealthDocument("yrd", operatorStop, INTERVAL, NOW, undefined, undefined, ["task/one"])
+    expect(doc.state).toBe("unhealthy")
+    expect(doc.error?.cause).toContain("stuck change task/one")
+    expect(doc.error?.cause).toContain("operator pause also stands")
+    expect(doc.error?.resolution.join(" ")).toContain("yrd queue resume")
+    expect(doc.facts).toMatchObject({
+      stopped: { by: "@chief", cause: "operator" },
+      stuckChanges: ["task/one"],
+    })
+  })
+
   // absent + stopped, never unhealthy: nothing claimed this service. Reporting
   // unhealthy here would page for a service nobody started.
   test("no document at all is absent and stopped, not unhealthy", () => {

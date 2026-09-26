@@ -1058,6 +1058,7 @@ export async function coreQueueCommand(
       }
       try {
         const eventStore = createEventStore(repo, config.target.remote, selection)
+        let resumeStuck = false
         if ((await queueFormat(eventStore, config.target.branch)) === "event") {
           const now = await readEventOps(eventStore, git, config.target.branch, captured.oid)
           if (now.source === "event") {
@@ -1086,24 +1087,53 @@ export async function coreQueueCommand(
             await emitPauseResult(written)
             return 0
           }
+          if (request.command === "resume") {
+            const { histories, invalid } = await readEventQueueWithChanges(eventStore, config.target.branch)
+            const defect = invalid.values().next().value
+            if (defect !== undefined) {
+              throw new Error(`${defect.ref} at ${defect.tip}: cannot judge stuck resume: ${defect.error}`)
+            }
+            for (const history of histories.values()) {
+              if (history.state.status === "stuck") {
+                resumeStuck = true
+                break
+              }
+            }
+          }
         }
         // Whether a stop STANDS is the one derivation's answer, never the tip's
         // kind alone: a stuck stop whose change has left the line is over, so a
         // pause may follow it and there is nothing for a resume to end.
         const { pause: tip, stop } = await readStop(git, config.target.remote, config.target.branch, captured.oid)
         const lifted = tip?.kind === "paused" && stop === undefined ? tip : undefined
-        const pause = await writePause(
-          git,
-          config.target.remote,
-          config.target.branch,
-          {
+        const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
+        const pause =
+          request.command === "resume" && stop === undefined && resumeStuck
+            ? undefined
+            : await writePause(
+                git,
+                config.target.remote,
+                config.target.branch,
+                {
+                  by: request.by,
+                  kind: request.command === "pause" ? "paused" : "resumed",
+                  reason,
+                  ...(request.command === "pause" ? { cause: request.cause ?? "operator" } : {}),
+                },
+                lifted,
+              )
+        if (resumeStuck) {
+          const at = new Date()
+          const event = await writeQueueEvent(eventStore, config.target.branch, {
+            type: "resumed",
+            reason,
             by: request.by,
-            kind: request.command === "pause" ? "paused" : "resumed",
-            reason: request.command === "pause" ? request.reason : (request.reason ?? "pause lifted"),
-            ...(request.command === "pause" ? { cause: request.cause ?? "operator" } : {}),
-          },
-          lifted,
-        )
+            at,
+          })
+          await emitPauseResult(pause ?? { kind: "resumed", sha: event, at, reason, by: request.by, cause: "operator" })
+          return 0
+        }
+        if (pause === undefined) throw new Error("resume had neither a standing pause nor a stuck change")
         await emitPauseResult(pause)
         return 0
       } catch (error) {
@@ -1734,7 +1764,7 @@ export async function coreQueueCommand(
        * document is read every time anyone asks how this service is.
        */
       const lineDocument = (stop: PauseRecord | undefined, sleepMs: number): QueueHealthDocument => {
-        const base = roundHealthDocument(SERVICE, stop, sleepMs, new Date(), flowReading(), readFailure)
+        const base = roundHealthDocument(SERVICE, stop, sleepMs, new Date(), flowReading(), readFailure, lastStuck)
         return { ...base, facts: { ...base.facts, ...relaunchOff, serviceStarted } }
       }
       /**
@@ -1743,6 +1773,7 @@ export async function coreQueueCommand(
        * is always present and its absence can never be read as a running line.
        */
       let lastStop: PauseRecord | undefined
+      let lastStuck: readonly string[] = []
       // A relaunch can beat the checkout updater. Do not run an old round or
       // spend the supervisor's restart budget repeatedly loading the old gitlink.
       const reload = async (targetOid: string): Promise<YrdCliExitCode | undefined> => {
@@ -1817,7 +1848,7 @@ export async function coreQueueCommand(
               waitingCheckout: gitlink.checkout,
               waitingCheckoutHead: checkout,
             }
-            const alive = roundHealthDocument(SERVICE, lastStop, waitCapMs, new Date())
+            const alive = roundHealthDocument(SERVICE, lastStop, waitCapMs, new Date(), undefined, undefined, lastStuck)
             writeHealth({ ...alive, facts: { ...alive.facts, ...waitingFacts } })
             emit(
               io,
@@ -2071,6 +2102,7 @@ export async function coreQueueCommand(
           // nothing awaited between the write and the call.
           const sleepMs = sleepAfter(outcome, interval)
           lastStop = pauseStop(outcome.stopped)
+          lastStuck = outcome.pendingStuck ?? outcome.stuck
           openedAt = undefined
           flow = flowAfterRound(flow, outcome, new Date())
           const document = writeHealth(lineDocument(lastStop, sleepMs))

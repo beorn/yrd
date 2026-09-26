@@ -58,6 +58,7 @@ import {
   submit,
   trailer,
   watchRows,
+  writeQueueEvent,
   writeQueueOverride,
   type ChangeRecord,
   type Git,
@@ -2275,6 +2276,144 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     // Only after the resume: the three rounds before it held the line.
     expect(rounds.indexOf(merged[0]!)).toBeGreaterThanOrEqual(3)
   })
+
+  /** @failure 25041: before ops cutover, resume wrote only the legacy pause ref, leaving a stuck event change held.
+   * @level l2 @consumer queue operator and Hab's yrd service
+   */
+  it("retries a pre-cutover stuck event change after queue resume", async () => {
+    const w = await world()
+    const target = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createEventQueue(store, "main", target, config, new Date())
+    await writeQueueEvent(store, "main", {
+      type: "resumed",
+      at: new Date(),
+      by: "@chief",
+      reason: "an earlier resume cannot release a later stuck change",
+    })
+    const branch = "task/pre-cutover-stuck"
+    await oneChange(w, branch)
+    const submitted = await readStatus(store, "main", branch)
+    if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
+    await appendChangeEvent(store, "main", branch, submitted.tip, {
+      type: "stuck",
+      at: new Date(),
+      reason: "repair needed",
+    })
+
+    const first = capture(w.work)
+    expect(await coreQueueCommand(w.work, first.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(2)
+    expect(records(first)[0]).toMatchObject({ exitCode: 2, stuck: [branch] })
+
+    const paused = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        paused.io,
+        { by: "@chief", command: "pause", reason: "repair the stuck change" },
+        { workdir: w.workdir },
+      ),
+      paused.stderr(),
+    ).toBe(0)
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({ kind: "paused", by: "@chief" })
+    const held = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    expect(
+      await coreQueueCommand(
+        w.work,
+        held.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterHealth: (document) => {
+            seen.push(document)
+            stop.abort()
+          },
+        },
+        { json: true, workdir: w.workdir },
+      ),
+      held.stderr(),
+    ).toBe(0)
+    expect(records(held)[0]).toMatchObject({ exitCode: 0, stuck: [], pendingStuck: [branch] })
+    expect(seen[0]?.facts).toMatchObject({ stopped: { by: "@chief" }, stuckChanges: [branch] })
+    expect(seen[0]?.error?.resolution.join(" ")).toContain("yrd queue resume")
+
+    const resumed = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        resumed.io,
+        { by: "@chief", command: "resume", reason: "repaired" },
+        { workdir: w.workdir },
+      ),
+      resumed.stderr(),
+    ).toBe(0)
+    const after = capture(w.work)
+    expect(await coreQueueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
+  }, 60_000)
+
+  /** @failure 25041: a stuck event change can have no legacy pause to resume.
+   * @level l2 @consumer queue operator and Hab's yrd service
+   */
+  it("resumes a pre-cutover stuck event change without a legacy pause", async () => {
+    const w = await world()
+    const target = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createEventQueue(store, "main", target, config, new Date())
+    const branch = "task/stuck-without-pause"
+    await oneChange(w, branch)
+    const submitted = await readStatus(store, "main", branch)
+    if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
+    await appendChangeEvent(store, "main", branch, submitted.tip, {
+      type: "stuck",
+      at: new Date(),
+      reason: "repair needed",
+    })
+    expect(await readPause(w.git, "origin", "main")).toBeUndefined()
+
+    const service = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    expect(
+      await coreQueueCommand(
+        w.work,
+        service.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterHealth: (document) => {
+            seen.push(document)
+            stop.abort()
+          },
+        },
+        { json: true, workdir: w.workdir },
+      ),
+      service.stderr(),
+    ).toBe(0)
+    expect(seen[0]?.error?.resolution.join(" ")).toContain("yrd queue resume")
+
+    const resumed = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        resumed.io,
+        { by: "@chief", command: "resume", reason: "repaired" },
+        { workdir: w.workdir },
+      ),
+      resumed.stderr(),
+    ).toBe(0)
+    const after = capture(w.work)
+    expect(await coreQueueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
+  }, 60_000)
 
   // What no round can fix still ends the service: a round that cannot even
   // read its queue has no change to stop the line on, so the loop has nothing

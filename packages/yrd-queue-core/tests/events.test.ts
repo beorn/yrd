@@ -1073,6 +1073,15 @@ describe("the queue-format boundary", () => {
         at: new Date("2026-09-22T14:00:10.000Z"),
       }),
     ).rejects.toThrow(/needs ops-cutover/)
+    const stuckResume = await writeQueueEvent(location, "lab", {
+      type: "resumed",
+      reason: "retry a stuck change",
+      by: "operator",
+      at: new Date("2026-09-22T14:00:20.000Z"),
+    })
+    const beforeCutover = await readEventQueue(location, "lab")
+    expect(beforeCutover.tip).toBe(stuckResume)
+    expect(eventPause(beforeCutover)).toBeUndefined()
     await seedOpsCutover(location, "lab")
     await writeQueueEvent(location, "lab", {
       type: "paused",

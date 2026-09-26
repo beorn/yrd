@@ -211,12 +211,34 @@ export function roundHealthDocument(
   now: Date,
   flow?: FlowReading,
   readFailure?: RoundReadFailure,
+  stuck: readonly string[] = [],
 ): QueueHealthDocument {
   const base = { schema: QUEUE_HEALTH_SCHEMA, service, verdict: { kind: "running" } as const }
   const facts = {
     ...freshness(SERVICE_HEARTBEAT, now),
     nextRoundInMs: sleepMs,
     stopped: stopFact(stop),
+    ...(stuck.length === 0 ? {} : { stuckChanges: stuck }),
+  }
+  if (stuck.length > 0 && stop?.cause !== "stuck") {
+    const branch = stuck[0]
+    if (branch === undefined) throw new Error("stuck health needs a branch")
+    const paused = stop === undefined ? "" : `; a ${stop.cause} pause also stands`
+    const paged: QueueHealthDocument = {
+      ...base,
+      state: "unhealthy",
+      error: {
+        code: "queue-round-stuck",
+        cause: `${STUCK_RECORD_CODE}: the line stopped at stuck change ${branch}${paused}`,
+        resolution: [
+          `Repair ${branch}, then run yrd queue resume to retry it; or withdraw or merge the change.`,
+          `The stuck event and its evidence: yrd queue show ${branch}.`,
+          "The service remains alive and holds the line; this page does not clear by itself.",
+        ],
+      },
+      facts,
+    }
+    return withRoundReadFailure(flow === undefined ? paged : withLineFlow(paged, stop, flow, now), readFailure)
   }
   if (stop?.cause !== "stuck" || stop.change === undefined) {
     const healthy: QueueHealthDocument = { ...base, state: "healthy", facts }

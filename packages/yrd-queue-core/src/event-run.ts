@@ -578,7 +578,16 @@ export async function eventQueueRun(
   }
   if (operational.stop !== undefined && options.foreground !== true) {
     log.write({ kind: "pause", reason: operational.stop.reason, by: operational.stop.by, sha: operational.stop.sha })
-    return result(0, [], [], [], [], { ring: "pause", says: operational.stop.reason, what: operational.stop })
+    const pendingStuck: string[] = []
+    for (const [branch, history] of histories) {
+      if (history.state.status === "stuck" && !(await queueResumedAfter(store, queue, branch, history))) {
+        pendingStuck.push(branch)
+      }
+    }
+    return {
+      ...result(0, [], [], [], [], { ring: "pause", says: operational.stop.reason, what: operational.stop }),
+      pendingStuck,
+    }
   }
   const observedMerged: string[] = []
   const observable = [...changes].filter(

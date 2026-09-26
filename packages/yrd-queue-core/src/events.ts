@@ -1222,8 +1222,8 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   let existing: string | undefined
   const result = await chain.transact(async (events) => {
     const current = projectEventQueue(events, ref, store.repo)
-    if ((write.type === "paused" || write.type === "resumed") && current.opsCutover === undefined) {
-      throw new Error(`${ref}: ${write.type} needs ops-cutover; legacy pause Record is still authoritative`)
+    if (write.type === "paused" && current.opsCutover === undefined) {
+      throw new Error(`${ref}: paused needs ops-cutover; legacy pause Record is still authoritative`)
     }
     if (write.type === "observed") existing = current.observed[write.commit]?.id
     if (write.type === "notified") existing = current.notices[write.notice.key]?.id
@@ -1244,32 +1244,34 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
       if (write.notice.reason !== undefined) details.push([EVENT_TRAILERS.reason, write.notice.reason])
     } else {
       details.push([EVENT_TRAILERS.reason, write.reason])
-      if (current.ops === undefined) throw new Error(`${ref}: ops-cutover has no effective state`)
-      const standing = await eventLineStop(store, queue, current.ops.pause)
-      if (write.type === "paused" && standing !== undefined) {
-        throw new Error(`${ref}: queue is already paused at ${standing.sha}`)
+      if (current.opsCutover !== undefined) {
+        if (current.ops === undefined) throw new Error(`${ref}: ops-cutover has no effective state`)
+        const standing = await eventLineStop(store, queue, current.ops.pause)
+        if (write.type === "paused" && standing !== undefined) {
+          throw new Error(`${ref}: queue is already paused at ${standing.sha}`)
+        }
+        if (write.type === "resumed" && standing === undefined) {
+          throw new Error(`${ref}: queue is not paused`)
+        }
+        if (write.type === "paused" && current.ops.pause !== undefined) {
+          details.push(["Replaces", current.ops.pause.sha])
+        }
+        const next: OpsState =
+          write.type === "paused"
+            ? {
+                pause: {
+                  kind: "paused",
+                  sha: OPS_SELF,
+                  at: write.at,
+                  reason: write.reason,
+                  by: write.by,
+                  cause: write.cause ?? "operator",
+                },
+                overrides: current.ops.overrides,
+              }
+            : { overrides: current.ops.overrides }
+        details.push(["Ops", encodeOps(next)])
       }
-      if (write.type === "resumed" && standing === undefined) {
-        throw new Error(`${ref}: queue is not paused`)
-      }
-      if (write.type === "paused" && current.ops.pause !== undefined) {
-        details.push(["Replaces", current.ops.pause.sha])
-      }
-      const next: OpsState =
-        write.type === "paused"
-          ? {
-              pause: {
-                kind: "paused",
-                sha: OPS_SELF,
-                at: write.at,
-                reason: write.reason,
-                by: write.by,
-                cause: write.cause ?? "operator",
-              },
-              overrides: current.ops.overrides,
-            }
-          : { overrides: current.ops.overrides }
-      details.push(["Ops", encodeOps(next)])
     }
     const input: EventInput = {
       type: write.type,
@@ -1502,7 +1504,8 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
           throw new Error(`${ref}: resumed event ${event.id} needs Reason:`)
         }
         if (opsCutover === undefined) {
-          if (pause === undefined) throw new Error(`${ref}: event ${event.id} resumes a running queue`)
+          // Before cutover, legacy owns pause. This event releases a stuck
+          // change; it need not have a preceding queue pause event.
           pause = undefined
         } else {
           if (ops?.pause === undefined) throw new Error(`${ref}: event ${event.id} resumes a running queue`)

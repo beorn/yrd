@@ -236,6 +236,8 @@ export type QueueRunOutcome = Readonly<{
   branches?: readonly string[]
   failed: readonly string[]
   stuck: readonly string[]
+  /** Stuck changes still holding while an operator pause stopped this round; no new judgement occurred. */
+  pendingStuck?: readonly string[]
   deferred: readonly string[]
   /** The commits on the target's first-parent line that the queue did not put there, reported this run (E5). */
   directMerges: readonly string[]
