@@ -476,6 +476,31 @@ it("notifies the submitter when an event change fails before any check", async (
   expect(Object.values(status.notices ?? {})).toMatchObject([{ result: "delivered" }])
 })
 
+/** @failure A second failed ending from the same branch HEAD could be hidden by the notifier's stable message id.
+ * @level l3 @consumer event queue submitter (#25041)
+ */
+it("sends two failed endings when the same head is resubmitted", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const head = await submitCommit(w, "task/same-head-failed", "one.txt")
+  const failing = await w.options({ exit: 1, on: ["submit"] })
+
+  expect((await queueRun(failing)).failed).toEqual(["task/same-head-failed"])
+  const submitted = await submit(w.git, "origin", {
+    branch: "task/same-head-failed",
+    submitter: "@dev/2",
+    target: { branch: "main", remote: "origin" },
+    issue: "@i/10-yrd/25041",
+  })
+  expect(submitted).toMatchObject({ head, retry: false })
+  expect((await queueRun(failing)).failed).toEqual(["task/same-head-failed"])
+
+  expect(messages(w)).toMatchObject([
+    { record: "failed", change: `task/same-head-failed@${head}`, failures: 1 },
+    { record: "failed", change: `task/same-head-failed@${head}`, failures: 2 },
+  ])
+})
+
 /** @failure A pre-cutover queue event pause is ignored while the legacy pause ref still owns the stop.
  * @level l2 @consumer queue runner and submitter
  */
