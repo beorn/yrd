@@ -1012,6 +1012,42 @@ it("refuses ops planning while a check override is active", async () => {
   expect((await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()).toBe(before)
 })
 
+/** @failure Ops apply trusts a planned pause kind that contradicts its unchanged advertised ref (25041 B9).
+ * @level l3 @consumer queue operator and migration audit
+ */
+it("refuses ops apply when the plan's pause kind disagrees with the remote", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await writePause(w.git, "origin", "main", {
+    kind: "paused",
+    cause: "maintenance",
+    by: "@chief",
+    reason: "ops cutover rehearsal",
+  })
+  const before = (await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()
+  const journal = join(dirname(w.work), "ops-state-mismatch")
+  const script = resolve(import.meta.dirname, "../scripts/migrate-events.ts")
+  const run = (phase: "ops-plan" | "ops-apply") =>
+    spawnSync(
+      process.execPath,
+      [script, phase, "--repo", w.work, "--remote", "origin", "--queue", "main", "--journal", journal],
+      { encoding: "utf8" },
+    )
+  const planned = run("ops-plan")
+  expect(planned.status, planned.stderr).toBe(0)
+  const planPath = join(journal, "plan.json")
+  const plan = JSON.parse(readFileSync(planPath, "utf8")) as { pause: { priorKind: string } }
+  expect(plan.pause.priorKind).toBe("paused")
+  plan.pause.priorKind = "resumed"
+  writeFileSync(planPath, `${JSON.stringify(plan, null, 2)}\n`)
+
+  const applied = run("ops-apply")
+  expect(applied.status).toBe(1)
+  expect(applied.stderr).toContain("yrd-migration-changed-state: main: maintenance pause tip or disposition")
+  expect(existsSync(join(journal, "staged.json"))).toBe(false)
+  expect((await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()).toBe(before)
+})
+
 /** @failure 25041 A3: before cutover, a pause or override written mid-merge must win its legacy ref lease.
  * @level l3 @consumer queue operator and merge runner
  */
