@@ -1186,6 +1186,17 @@ describe("the layout tier", () => {
   it("drills in to one pane when there is room for neither split", () => {
     expect(watchTier(60, 10)).toBe("full")
   })
+
+  it("resolves the tier ladder at exact boundary sizes: 213x50 right, 212x50 below, 100x31 full (24196)", () => {
+    expect(watchTier(213, 50)).toBe("right")
+    expect(watchTier(212, 50)).toBe("below")
+    expect(watchTier(100, 31)).toBe("full")
+  })
+
+  it("transitions between below and full at the row boundary 32 vs 31 when width is under 213", () => {
+    expect(watchTier(100, 32)).toBe("below")
+    expect(watchTier(100, 31)).toBe("full")
+  })
 })
 
 describe("the running step and the check-less declaration", () => {
