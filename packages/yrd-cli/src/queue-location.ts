@@ -127,6 +127,28 @@ async function ensureOwnedClone(
   return { referenceStores, repo }
 }
 
+/**
+ * The queue-owned clone that a `yrd queue up` run inside `cwd` serves, from local records only: the origin URL and
+ * `refs/remotes/origin/HEAD`, never a fetch or ls-remote. The merging round composes in worktrees of this clone, so
+ * its git common dir is where gitomic journals the round's lease rejections (hh 25626). Throws naming the record it
+ * could not read; it never guesses a queue.
+ */
+export async function ownedQueueClone(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const inside = repositoryHere(cwd)
+  if (inside === undefined) throw new Error(`${cwd} is not inside a repository, so the queue it serves has no name`)
+  const selection = await resolveGitSelection(cwd, { env })
+  const git = gitIn(inside, undefined, selection, { env })
+  const recorded = (await git(["for-each-ref", "--format=%(symref)", "refs/remotes/origin/HEAD"])).trim()
+  const prefix = "refs/remotes/origin/"
+  if (!recorded.startsWith(prefix) || recorded.length === prefix.length) {
+    throw new Error(`${inside} records no refs/remotes/origin/HEAD; run \`git remote set-head origin --auto\` to name its queue`)
+  }
+  const address = parseQueueAddress(
+    queueName({ branch: recorded.slice(prefix.length), remote: "origin" }, await remoteUrl(git, "origin")),
+  )
+  return queueDirectory(await hostWorkdir(cwd, env, git), address)
+}
+
 /** Resolve the one queue selector; only submission retains the author's checkout. */
 export async function resolveQueueLocation(
   cwd: string,
