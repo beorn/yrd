@@ -604,6 +604,48 @@ it("retains an existing M2 pause tip through ops cutover", async () => {
   expect((await readEventOps(store, w.git, "main", w.target)).source).toBe("event")
 })
 
+/** @failure 25041 A7: skipping the runner's override clock leaves an expired check held off without a notice.
+ * @level l3 @consumer event queue operator and merge runner
+ */
+it("expires an event override on the round's clock and tells its operator", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
+  await submitCommit(w, "task/override-clock", "clock.txt")
+  const now = Date.now()
+  await writeQueueOverride(
+    store,
+    "main",
+    {
+      kind: "off",
+      check: "verify",
+      until: new Date(now + 3_600_000),
+      reason: "window",
+      actor: { by: "@chief", verified: true },
+    },
+    ["verify"],
+    new Date(now),
+  )
+  const paged = join(w.workdir, "override-clock.jsonl")
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0, on: ["submit", "merge"] })),
+    now: () => now + 2 * 3_600_000,
+    notify: [{ name: "pager", on: ["override"], run: `cat >> ${paged}` }],
+  })
+  expect(outcome.merged).toEqual(["task/override-clock"])
+  expect((await readEventOps(store, w.git, "main", await remoteTarget(w))).overrides.entries).toMatchObject([
+    { check: "verify", state: "expired" },
+  ])
+  expect(existsSync(paged)).toBe(true)
+  expect(JSON.parse(readFileSync(paged, "utf8")) as Record<string, unknown>).toMatchObject({
+    action: "expired",
+    check: "verify",
+    owner: "@chief",
+  })
+  expect(readFileSync(w.checkLog, "utf8").trim().split("\n")).toHaveLength(2)
+})
+
 /** @failure 25041: the ops script could restore an absent pause ref instead of the exact pre-apply tip.
  * @level l3 @consumer queue operator and rollback
  */
