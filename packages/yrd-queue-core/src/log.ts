@@ -221,7 +221,7 @@ export type QueueRunLog = Readonly<{
   id: string
   /** The file every record of this run is appended to. */
   path: string
-  write(record: LogWrite): void
+  write(record: LogWrite): LogRecord
   openGitOutput: NonNullable<GitInvocationOptions["openOutput"]>
   writeGitInvocation(invocation: GitInvocation): void
 }>
@@ -241,11 +241,12 @@ export function openLog(
   const path = join(directory, `${id}.jsonl`)
   const gitDirectory = join(directory, id, "git")
   let invocationCount = 0
-  const write = (record: LogWrite): void => {
+  const write = (record: LogWrite): LogRecord => {
     const kind: LogKind = record.kind
     const full: LogRecord = { ...record, at: now().toISOString(), kind, run: id }
     appendFileSync(path, `${JSON.stringify(full)}\n`)
     render?.(full)
+    return full
   }
   return {
     id,
@@ -578,14 +579,27 @@ export function recordsMatching(dir: string, matches: (record: LogRecord) => boo
   return found
 }
 
-/** Read this marker's consecutive refused publications, capped at three, and retain the first journal time. */
+/** The service pages after this many consecutive publication refusals. */
+const PUBLICATION_REFUSAL_THRESHOLD = 3
+
+type JournalBudget = Readonly<{ name: string; journals: number }>
+type ExhaustedJournalWindow = JournalBudget & Readonly<{ oldestFile: string }>
+
+/** Read this marker's consecutive refused publications and retain the oldest observed journal time. */
 function recentPublicationWarnings(
   dir: string,
   ref: string,
   marker: string,
   openedAt: Date,
   subject: "cas-refused" | "publication-not-landed",
-): Readonly<{ count: number; firstAt?: string }> {
+  budget?: JournalBudget,
+): Readonly<{ count: number; firstAt?: string; windowExhausted?: ExhaustedJournalWindow }> {
+  if (
+    budget !== undefined &&
+    (budget.name.trim() === "" || !Number.isSafeInteger(budget.journals) || budget.journals < 1)
+  ) {
+    throw new Error(`publication warning scan needs a named positive journal budget, got ${JSON.stringify(budget)}`)
+  }
   let names: readonly string[]
   try {
     names = readdirSync(dir)
@@ -597,12 +611,27 @@ function recentPublicationWarnings(
   const ids = names
     .filter((name) => name.startsWith("q-") && name.endsWith(".jsonl"))
     .map((name) => name.slice(0, -".jsonl".length))
-    .filter((id) => id.slice(0, firstRun.length) >= firstRun)
     .sort()
     .reverse()
+  // A runner-written marker may be born after its run journal opened. Include
+  // that run and all timestamp ties. The CLI's ROUND_LOCK serializes rounds in
+  // one workdir, so the runner's clock gives this exact bound. A foreign writer
+  // can supply Time: from another clock: callers must use epoch with an explicit
+  // journal budget for those markers, never use that Time: to exclude journals.
+  const birthRun = ids.findIndex((id) => id.slice(0, firstRun.length) <= firstRun)
+  const birthTime = ids[birthRun]?.slice(0, firstRun.length)
+  let end = birthRun
+  while (birthTime !== undefined && ids[end + 1]?.slice(0, firstRun.length) === birthTime) end++
+  const candidates = birthRun === -1 ? ids : ids.slice(0, end + 1)
   let count = 0
   let firstAt: string | undefined
-  for (const id of ids) {
+  let windowExhausted: ExhaustedJournalWindow | undefined
+  for (const [index, id] of candidates.entries()) {
+    if (budget !== undefined && index === budget.journals) {
+      const oldestFile = candidates[index - 1]
+      if (oldestFile === undefined) throw new Error(`${budget.name}: exhausted scan has no oldest journal`)
+      return { count, firstAt, windowExhausted: { ...budget, oldestFile } }
+    }
     for (const record of [...readRunLog(dir, id)].reverse()) {
       if (record.ref !== ref || record.marker !== marker) continue
       if (record.kind === "merge") return { count, firstAt }
@@ -614,12 +643,31 @@ function recentPublicationWarnings(
         return { count, firstAt }
       }
       if (record.kind === "warning" && record.subject === subject) {
-        count = Math.min(3, count + 1)
+        if (record.windowExhausted !== undefined) {
+          if (
+            typeof record.windowExhausted !== "string" ||
+            typeof record.windowBudget !== "string" ||
+            typeof record.windowBudgetJournals !== "number" ||
+            !Number.isSafeInteger(record.windowBudgetJournals) ||
+            record.windowBudgetJournals < 1
+          ) {
+            throw new Error(`${id}: unreadable exhausted publication warning budget`)
+          }
+          windowExhausted ??= {
+            oldestFile: record.windowExhausted,
+            name: record.windowBudget,
+            journals: record.windowBudgetJournals,
+          }
+        }
+        count = Math.min(PUBLICATION_REFUSAL_THRESHOLD, count + 1)
         firstAt = record.at
+        if (count === PUBLICATION_REFUSAL_THRESHOLD) {
+          return { count, firstAt, ...(windowExhausted === undefined ? {} : { windowExhausted }) }
+        }
       }
     }
   }
-  return { count, firstAt }
+  return { count, firstAt, ...(windowExhausted === undefined ? {} : { windowExhausted }) }
 }
 
 /** Count a marker's typed CAS refusals across run journals. */
@@ -633,8 +681,9 @@ export function recentCasRefusalStreak(
   ref: string,
   marker: string,
   openedAt: Date,
-): Readonly<{ count: number; firstAt?: string }> {
-  return recentPublicationWarnings(dir, ref, marker, openedAt, "cas-refused")
+  budget?: JournalBudget,
+): Readonly<{ count: number; firstAt?: string; windowExhausted?: ExhaustedJournalWindow }> {
+  return recentPublicationWarnings(dir, ref, marker, openedAt, "cas-refused", budget)
 }
 
 /** Count a marker's consecutive transport outcomes that definitely did not land. */

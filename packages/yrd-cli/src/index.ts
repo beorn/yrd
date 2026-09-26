@@ -4,3 +4,4 @@ export { closeEnvironment, listEnvironments, openEnvironment, type EnvRow } from
 export { declarationHere } from "./declaration.ts"
 export { YRD_VERSION, formatYrdRuntimeVersion } from "./version.ts"
 export type { YrdCliExitCode, YrdCliIO } from "./types.ts"
+export { ownedQueueClone } from "./queue-location.ts"

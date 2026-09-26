@@ -33,7 +33,7 @@ import type { ChangeRecord, CheckSpec, Git, Row } from "../src/index.ts"
 import type { QueueEntry } from "../src/remote.ts"
 // `openLog` is the writer, and index.ts lists only what a consumer outside the
 // package imports. A test that writes a journal is inside it.
-import { openLog } from "../src/log.ts"
+import { openLog, readRunLog, recentCasRefusalStreak } from "../src/log.ts"
 import { journalRun } from "../../../tests/support/journal-run.ts"
 
 const roots: string[] = []
@@ -58,6 +58,121 @@ function journalDir(
   for (const record of records) log.write(record as never)
   return { dir, run: log.id }
 }
+
+/** @failure 25736: a capped refusal streak still walked to the epoch after it had enough evidence to page. */
+describe("event publication refusal history", () => {
+  it("returns the exact warning record that was appended", () => {
+    const dir = join(scratch("warning-time"), "logs")
+    const log = openLog(dir, () => new Date("2026-09-25T19:06:00.000Z"))
+    const written = log.write({ kind: "warning", subject: "cas-refused", ref: "refs/yrd/main/queue" })
+    expect(written).toEqual(readRunLog(dir, log.id).at(-1))
+    expect(written.at).toBe("2026-09-25T19:06:00.000Z")
+  })
+
+  it("includes a refusal written after a marker was born in an already-open run", () => {
+    const dir = join(scratch("marker-birth"), "logs")
+    const ref = "refs/yrd/main/queue"
+    const marker = "b".repeat(40)
+    const born = new Date("2026-09-25T19:05:00.000Z")
+    let clock = new Date("2026-09-25T19:00:00.000Z")
+    const first = openLog(dir, () => clock)
+    clock = new Date("2026-09-25T19:06:00.000Z")
+    first.write({ kind: "warning", subject: "cas-refused", ref, marker })
+    openLog(dir, () => new Date("2026-09-25T19:10:00.000Z")).write({
+      kind: "warning",
+      subject: "cas-refused",
+      ref,
+      marker,
+    })
+
+    expect(recentCasRefusalStreak(dir, ref, marker, born)).toEqual({
+      count: 2,
+      firstAt: "2026-09-25T19:06:00.000Z",
+    })
+  })
+
+  it("stops at the third refusal even when older journals cannot be read", () => {
+    const dir = join(scratch("refusal-history"), "logs")
+    const ref = "refs/yrd/main/queue"
+    const marker = "a".repeat(40)
+    const times = ["2026-09-25T19:00:00.000Z", "2026-09-25T19:10:00.000Z", "2026-09-25T19:20:00.000Z"]
+    for (const time of times) {
+      openLog(dir, () => new Date(time)).write({ kind: "warning", subject: "cas-refused", ref, marker })
+    }
+    writeFileSync(join(dir, "q-20260101T000000000Z-old.jsonl"), "malformed journal\n")
+
+    expect(recentCasRefusalStreak(dir, ref, marker, new Date(0))).toEqual({ count: 3, firstAt: times[0] })
+  })
+
+  it("names an exhausted window instead of erasing an older refusal", () => {
+    const dir = join(scratch("refusal-budget"), "logs")
+    mkdirSync(dir)
+    const ref = "refs/yrd/main/queue"
+    const marker = "c".repeat(40)
+    const ids: string[] = []
+    for (let index = 0; index <= 128; index++) {
+      const at = new Date(Date.UTC(2026, 8, 25, 19, 0, index)).toISOString()
+      const id = `q-${at.replace(/[-:.]/gu, "")}-fixture`
+      ids.push(id)
+      const record =
+        index === 0 || index >= 127
+          ? `${JSON.stringify({ kind: "warning", run: id, at, subject: "cas-refused", ref, marker })}\n`
+          : ""
+      writeFileSync(join(dir, `${id}.jsonl`), record)
+    }
+
+    expect(
+      recentCasRefusalStreak(dir, ref, marker, new Date(0), { name: "cas-history-journals", journals: 128 }),
+    ).toEqual({
+      count: 2,
+      firstAt: new Date(Date.UTC(2026, 8, 25, 19, 0, 127)).toISOString(),
+      windowExhausted: { name: "cas-history-journals", journals: 128, oldestFile: ids[1] },
+    })
+  })
+
+  it("carries an exhausted warning through three refusals, then clears it at success", () => {
+    const dir = join(scratch("refusal-inheritance"), "logs")
+    const ref = "refs/yrd/main/queue"
+    const marker = "e".repeat(40)
+    const times = ["2026-09-25T19:00:00.000Z", "2026-09-25T19:10:00.000Z", "2026-09-25T19:20:00.000Z"]
+    for (const [index, time] of times.entries()) {
+      openLog(dir, () => new Date(time)).write({
+        kind: "warning",
+        subject: "cas-refused",
+        ref,
+        marker,
+        ...(index === 0
+          ? {
+              windowExhausted: "q-20260925T180000000Z-old",
+              windowBudget: "cas-history-journals",
+              windowBudgetJournals: 128,
+            }
+          : {}),
+      })
+    }
+
+    expect(recentCasRefusalStreak(dir, ref, marker, new Date(0))).toEqual({
+      count: 3,
+      firstAt: times[0],
+      windowExhausted: {
+        name: "cas-history-journals",
+        journals: 128,
+        oldestFile: "q-20260925T180000000Z-old",
+      },
+    })
+    openLog(dir, () => new Date("2026-09-25T19:25:00.000Z")).write({ kind: "merge", ref, marker })
+    openLog(dir, () => new Date("2026-09-25T19:30:00.000Z")).write({
+      kind: "warning",
+      subject: "cas-refused",
+      ref,
+      marker,
+    })
+    expect(recentCasRefusalStreak(dir, ref, marker, new Date(0))).toEqual({
+      count: 1,
+      firstAt: "2026-09-25T19:30:00.000Z",
+    })
+  })
+})
 
 describe("a run's journal, read back", () => {
   it("names the check running now: a start row this run never ended", () => {

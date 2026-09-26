@@ -297,6 +297,8 @@ export type LineFlow = Readonly<{
     site?: string
     budgetMs?: number
     firstAt?: string
+    /** Earlier refusals may exist beyond this named journal scan. */
+    windowExhausted?: Readonly<{ name: string; journals: number; oldestFile: string }>
   }>
 }>
 
@@ -332,13 +334,22 @@ export const STALLED_LINE_CODE = "queue-line-stalled"
 export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date): LineStall | undefined {
   if (flow.casRefused !== undefined && flow.casRefused.count >= 3) {
     const refusal = flow.casRefused
+    const window = refusal.windowExhausted
+    if (window !== undefined && refusal.firstAt === undefined) {
+      throw new Error(`CAS refusal for ${refusal.ref} has an exhausted window but no first observed time`)
+    }
     const first = refusal.firstAt === undefined ? 0 : Math.max(0, now.getTime() - Date.parse(refusal.firstAt))
     const detail = refusal.site === undefined ? "" : ` at ${refusal.site} (${String(refusal.budgetMs)}ms budget)`
     const unread = flow.waiting === undefined ? "; line not read this round" : ""
+    const history =
+      window === undefined
+        ? ""
+        : `; first observed at ${refusal.firstAt}; earlier refusals may lie beyond the ` +
+          `${window.name} ${String(window.journals)} files scan (oldest read ${window.oldestFile})`
     return {
       forMs: first,
       shape: "cas-refused",
-      cause: `publication CAS refused ${String(refusal.count)} consecutive times${detail} for ${refusal.ref} at ${refusal.marker}${unread}; the queue remains alive and will retry`,
+      cause: `publication CAS refused ${String(refusal.count)} consecutive times${detail} for ${refusal.ref} at ${refusal.marker}${unread}${history}; the queue remains alive and will retry`,
     }
   }
   const forMs = unjudgedFor(flow, now)
