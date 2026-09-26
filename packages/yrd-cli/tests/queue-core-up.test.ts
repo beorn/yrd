@@ -3043,6 +3043,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
         stop: stop.signal,
         afterHealth: async (document) => {
           seen.push(document)
+          if (seen.length === 1) await delay(100)
           if (seen.length === 3) {
             expect((await readRunnerFacts(w.workdir)).service).toMatchObject({
               kind: "beating",
@@ -3060,6 +3061,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     expect(seen).toHaveLength(4)
     expect(seen.map((document) => document.state)).toEqual(["healthy", "healthy", "unhealthy", "healthy"])
     expect(seen[2]?.error?.code).toBe("queue-line-stalled")
+    expect((seen[2]?.facts?.flow as { stalledForMs?: number } | undefined)?.stalledForMs).toBeGreaterThanOrEqual(75)
     expect(seen[2]?.error?.cause).toContain("line not read this round")
     const firstRefusal = (seen[0]?.facts?.flow as { casRefused?: { firstAt?: string } } | undefined)?.casRefused
     const thirdRefusal = (seen[2]?.facts?.flow as { casRefused?: { firstAt?: string } } | undefined)?.casRefused
