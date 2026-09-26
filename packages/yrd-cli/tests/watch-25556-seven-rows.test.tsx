@@ -118,7 +118,7 @@ describe("25556: seven rows on yrd watch", () => {
     )
     await settle(runningApp)
     expect(runningApp.lines[0]).toContain("00:01:05")
-    expect(boldAt(runningApp, 0, "YRD QUEUE")).toBe(true)
+    expect(boldAt(runningApp, 0, "YRD")).toBe(true)
     expect(boldAt(runningApp, 0, "00:01:05")).toBe(false)
     runningApp.unmount()
 
@@ -144,7 +144,7 @@ describe("25556: seven rows on yrd watch", () => {
     )
     await settle(stoppedApp)
     expect(stoppedApp.lines[0]).toContain("cutover")
-    expect(boldAt(stoppedApp, 0, "YRD QUEUE")).toBe(true)
+    expect(boldAt(stoppedApp, 0, "YRD")).toBe(true)
     stoppedApp.unmount()
   })
 

@@ -81,7 +81,7 @@ function captureIo(cwd: string): Readonly<{ io: YrdCliIO; stdout(): string; stde
   }
 }
 
-// 25716 row 31 (e364d816df): the top line reads <marker> YRD QUEUE; the status word left it and is asserted through queueLineStatus above.
+// 24196 row 27: the top line reads <marker> YRD <status.word>; the status word moves to the top left in status colour.
 describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
   describe("acceptance criterion 1 & 4: PAUSED state with reasons covers operator pause and stuck-stop", () => {
     it("pause reason 1 (operator): header shows PAUSED and list shows 'paused by <seat> since <time>: <reason>'", async () => {
@@ -115,7 +115,7 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
       expect(status.marker).toBe("■")
 
       const text = await paint(snap)
-      expect(text).toContain("■ YRD QUEUE")
+      expect(text).toContain("■ YRD PAUSED")
       expect(text).toContain(`paused by @chief since ${since}: maintenance window`)
       expect(text).not.toContain("IDLE")
       expect(text).not.toContain("STUCK")
@@ -153,7 +153,7 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
       expect(status.marker).toBe("■")
 
       const text = await paint(snap)
-      expect(text).toContain("■ YRD QUEUE")
+      expect(text).toContain("■ YRD PAUSED")
       expect(text).toContain(`paused since ${since}: stuck on task/bad@${"b".repeat(40)}`)
       expect(text).not.toContain("IDLE")
       expect(text).not.toContain("STUCK")
@@ -175,7 +175,7 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         expect(status.marker).toBe("◉")
 
         const text = await paint(snap)
-        expect(text).toContain("◉ YRD QUEUE")
+        expect(text).toContain("◉ YRD RUNNING")
         expect(text).not.toContain("IDLE")
         expect(text).not.toContain("STUCK")
       })
@@ -195,7 +195,7 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         expect(status.marker).toBe("◉")
 
         const text = await paint(snap)
-        expect(text).toContain("◉ YRD QUEUE")
+        expect(text).toContain("◉ YRD RUNNING")
         expect(text).not.toContain("IDLE")
         expect(text).not.toContain("STUCK")
       })
@@ -218,7 +218,7 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         expect(status.reason).toBeUndefined()
 
         const text = await paint(snap)
-        expect(text).toContain("■ YRD QUEUE")
+        expect(text).toContain("■ YRD STOPPED")
       })
 
       it("case 4 (dead run): queue line shows STOPPED without detail (25556)", async () => {
@@ -240,7 +240,7 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         expect(status.reason).toBeUndefined()
 
         const text = await paint(snap)
-        expect(text).toContain("■ YRD QUEUE")
+        expect(text).toContain("■ YRD STOPPED")
       })
 
       it("case 5 (recorded stop reason): queue line shows STOPPED with recorded stop reason (25556)", async () => {
@@ -265,7 +265,7 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         expect(status.reason).toBe("maintenance in progress")
 
         const text = await paint(snap)
-        expect(text).toContain("■ YRD QUEUE")
+        expect(text).toContain("■ YRD STOPPED")
         expect(text).toContain("maintenance in progress")
       })
 

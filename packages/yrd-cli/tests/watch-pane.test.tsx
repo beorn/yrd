@@ -213,9 +213,8 @@ describe("the top line (items 30, 32d, 33)", () => {
 
     const [first] = text.split("\n")
     expect(first).toContain("◉")
-    expect(first).toContain("YRD QUEUE")
+    expect(first).toContain("YRD RUNNING")
     expect(first).toContain("example.test/repo#main")
-    expect(first).not.toContain("YRD RUNNING")
   })
 
   it("has no queue All pill; the a key still shows every status", async () => {
@@ -223,7 +222,7 @@ describe("the top line (items 30, 32d, 33)", () => {
     const app = render(<WatchPane snapshot={snapshot({ rows })} live />, { cols: 120, rows: 40 })
     await app.waitForLayoutStable()
     const [first] = app.text.split("\n")
-    expect(first).toContain("YRD QUEUE")
+    expect(first).toContain("YRD STOPPED")
     expect(first?.trimEnd().endsWith("all")).toBe(false)
 
     app.press("f")
@@ -261,8 +260,8 @@ describe("the top line (items 30, 32d, 33)", () => {
     )
 
     const lines = text.split("\n").filter((line) => line.trim() !== "")
-    // 25716 row 31: line 1 shows status marker; LoudPause draws the pause sentence
-    expect(lines[0]).toContain("■ YRD QUEUE")
+    // 25716 row 31 / 24196 row 27: line 1 shows status marker and word; LoudPause draws the pause sentence
+    expect(lines[0]).toContain("■ YRD PAUSED")
     // The band is IN the table now, under the header, between waiting and done.
     expect(lines.findIndex((line) => line.includes("RUNNER"))).toBeGreaterThan(
       lines.findIndex((line) => line.includes("ISSUE / BRANCH")),
@@ -277,7 +276,7 @@ describe("the top line (items 30, 32d, 33)", () => {
     const text = await paint(<WatchPane snapshot={snapshot({ pause })} live={false} />)
 
     const lines = text.split("\n").filter((line) => line.trim() !== "")
-    expect(lines[0]).toContain("■ YRD QUEUE")
+    expect(lines[0]).toContain("■ YRD PAUSED")
     expect(lines.findIndex((line) => line.includes(pause))).toBeLessThan(
       lines.findIndex((line) => line.includes("ISSUE / BRANCH")),
     )
@@ -617,7 +616,7 @@ describe("the table (items 3, 28, 38)", () => {
     const lines = text.split("\n")
     const topLine = lines.find((line) => line.includes("YRD"))
     expect(topLine).toBeDefined()
-    expect(topLine).toContain("YRD QUEUE")
+    expect(topLine).toContain("YRD STOPPED")
 
     const header = lines.find((line) => line.includes("ISSUE / BRANCH"))
     expect(header).toBeDefined()
@@ -3424,7 +3423,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.unmount()
   })
 
-  it("item 11: top line renders YRD QUEUE at left and status at right (25630)", async () => {
+  it("item 11: top line renders YRD and status word at left (25630, 24196 row 27)", async () => {
     // 1. Idle runner
     const idleApp = render(
       <WatchPane
@@ -3435,8 +3434,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(idleApp)
     const idleTop = idleApp.lines[0]!
-    expect(idleTop.trimStart().startsWith("◉ YRD QUEUE")).toBe(true)
-    expect(idleTop).not.toContain("YRD RUNNING")
+    expect(idleTop.trimStart().startsWith("◉ YRD RUNNING")).toBe(true)
     idleApp.unmount()
 
     // 2. Stopped runner
@@ -3455,7 +3453,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(stoppedApp)
     const stoppedTop = stoppedApp.lines[0]!
-    expect(stoppedTop.trimStart().startsWith("■ YRD QUEUE")).toBe(true)
+    expect(stoppedTop.trimStart().startsWith("■ YRD STOPPED")).toBe(true)
     stoppedApp.unmount()
 
     // 3. Stuck runner
@@ -3472,7 +3470,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(stuckApp)
     const stuckTop = stuckApp.lines[0]!
-    expect(stuckTop.trimStart().startsWith("■ YRD QUEUE")).toBe(true)
+    expect(stuckTop.trimStart().startsWith("■ YRD PAUSED")).toBe(true)
     stuckApp.unmount()
   })
 
@@ -3897,9 +3895,9 @@ describe("the top line (25416)", () => {
     )
     await settle(stopped)
     const ratios = {
-      running: ratioAt(running, 0, "YRD QUEUE"),
-      paused: ratioAt(paused, 0, "YRD QUEUE"),
-      stopped: ratioAt(stopped, 0, "YRD QUEUE"),
+      running: ratioAt(running, 0, "YRD"),
+      paused: ratioAt(paused, 0, "YRD"),
+      stopped: ratioAt(stopped, 0, "YRD"),
       selectedFilter: ratioAt(running, 1, "[f]ailed"),
       unselectedFilter: ratioAt(running, 1, "[o]pen"),
     }
@@ -3910,7 +3908,7 @@ describe("the top line (25416)", () => {
   })
 
   describe("25630: yrd watch timers and header lines", () => {
-    it("line 1 inverted: YRD QUEUE and queue address at left, status and timer at right (25630)", async () => {
+    it("line 1 inverted: YRD, status word and queue address at left, timer at right (25630, 24196 row 27)", async () => {
       const RUNNER_START = new Date(NOW.getTime() - 17_000)
       const app = render(
         <WatchPane
@@ -3930,11 +3928,10 @@ describe("the top line (25416)", () => {
       // Line 1 is inverted across its full width
       expect(JSON.stringify(app.cell(2, 0).bg)).toBe(bgOf("$bg-inverse"))
       expect(JSON.stringify(app.cell(119, 0).bg)).toBe(bgOf("$bg-inverse"))
-      // Line 1 has YRD QUEUE and address at left
-      expect(line0.trimStart().startsWith("◉ YRD QUEUE github.com/beorn/hh#main")).toBe(true)
-      // Line 1 has status timer at right, status word YRD RUNNING removed (25716 row 31)
+      // Line 1 has YRD, status word and address at left (24196 row 27)
+      expect(line0.trimStart().startsWith("◉ YRD RUNNING github.com/beorn/hh#main")).toBe(true)
+      // Line 1 has status timer at right
       expect(line0).toContain("00:00:17")
-      expect(line0).not.toContain("RUNNING")
       // Filter toggles and tabs are not on line 1
       expect(line0).not.toContain("[1]")
       expect(line0).not.toContain("open")
@@ -4030,11 +4027,10 @@ describe("the top line (25416)", () => {
       )
       await settle(narrow)
       const line0 = narrow.lines[0] ?? ""
-      expect(line0.trimStart().startsWith("◉ YRD QUEUE ")).toBe(true)
+      expect(line0.trimStart().startsWith("◉ YRD RUNNING ")).toBe(true)
       expect(line0).toContain("..")
       expect(line0).not.toContain(longAddress)
       expect(line0).toContain("00:00:17")
-      expect(line0).not.toContain("RUNNING")
       narrow.unmount()
     })
 
@@ -4159,7 +4155,7 @@ describe("the top line (25416)", () => {
       expect(png[2]).toBe(0x4e)
       expect(png[3]).toBe(0x47)
       writeCaptureIfConfigured("260925-yrd-watch-25630.png", png)
-      expect(ansi).toContain("YRD QUEUE")
+      expect(ansi).toContain("YRD")
       expect(ansi).toContain("RUNNING")
       expect(ansi).toContain("0:17")
       expect(ansi).toContain("STATS")
@@ -4583,13 +4579,13 @@ describe("watch header styling, runner markers, and timer (25716 row 31)", () =>
     )
     await settle(app)
     const line0 = app.lines[0] ?? ""
-    expect(line0.trimStart().startsWith("◉ YRD QUEUE")).toBe(true)
+    expect(line0.trimStart().startsWith("◉ YRD RUNNING")).toBe(true)
     expect(line0).not.toContain("[1]")
-    expect(boldAt(app, 0, "YRD QUEUE")).toBe(true)
+    expect(boldAt(app, 0, "YRD")).toBe(true)
+    expect(boldAt(app, 0, "RUNNING")).toBe(true)
     expect(line0).toContain("00:00:17")
     expect(boldAt(app, 0, "00:00:17")).toBe(false)
     expect(fgAt(app, 0, "00:00:17")).toBe(fgOf("$fg-on-inverse-muted"))
-    expect(line0).not.toContain("RUNNING")
     app.unmount()
   })
 
@@ -5322,5 +5318,87 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  describe("24196 Row 27: status word at the top left (■ YRD STOPPED, ◉ YRD RUNNING, ■ YRD PAUSED)", () => {
+    const RUNNER = {
+      journalDir: "/w/logs",
+      service: { kind: "beating" as const, state: "healthy" as const, since: new Date(NOW.getTime() - 17_000) },
+      latest: { alive: true, id: "q-1", lastWriteAt: NOW, startedAt: new Date(NOW.getTime() - 17_000) },
+    }
+
+    const fgAt = (app: ReturnType<typeof render>, y: number, needle: string, offset = 0): string | undefined => {
+      const x = (app.lines[y] ?? "").indexOf(needle)
+      return x < 0 ? undefined : JSON.stringify(app.cell(x + offset, y).fg)
+    }
+
+    const boldAt = (app: ReturnType<typeof render>, y: number, needle: string, offset = 0): boolean | undefined => {
+      const x = (app.lines[y] ?? "").indexOf(needle)
+      return x < 0 ? undefined : app.cell(x + offset, y).bold
+    }
+
+    it("renders ◉ YRD RUNNING at top left with status colour for a running queue", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({ runner: RUNNER, queues: [{ branch: "main", label: "main", path: "/repo" }] })}
+          live={false}
+        />,
+        { cols: 120, rows: 30 },
+      )
+      await settle(app)
+      const line0 = app.lines[0] ?? ""
+      expect(line0.trimStart().startsWith("◉ YRD RUNNING")).toBe(true)
+      expect(fgAt(app, 0, "◉")).toBe(fgOf("$fg-info"))
+      expect(boldAt(app, 0, "YRD")).toBe(true)
+      expect(fgAt(app, 0, "RUNNING")).toBe(fgOf("$fg-info"))
+      expect(boldAt(app, 0, "RUNNING")).toBe(true)
+      app.unmount()
+    })
+
+    it("renders ■ YRD STOPPED at top left with status colour for a stopped queue", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            runner: {
+              journalDir: "/w/logs",
+              service: { kind: "stopped", graceful: false, why: "heartbeat overdue", cause: "timeout" },
+            },
+            queues: [{ branch: "main", label: "main", path: "/repo" }],
+          })}
+          live={false}
+        />,
+        { cols: 120, rows: 30 },
+      )
+      await settle(app)
+      const line0 = app.lines[0] ?? ""
+      expect(line0.trimStart().startsWith("■ YRD STOPPED")).toBe(true)
+      expect(fgAt(app, 0, "■")).toBe(fgOf("$fg-error"))
+      expect(boldAt(app, 0, "YRD")).toBe(true)
+      expect(fgAt(app, 0, "STOPPED")).toBe(fgOf("$fg-error"))
+      expect(boldAt(app, 0, "STOPPED")).toBe(true)
+      app.unmount()
+    })
+
+    it("renders ■ YRD PAUSED at top left with status colour for a paused/stuck queue", async () => {
+      const app = render(
+        <WatchPane
+          snapshot={snapshot({
+            runner: RUNNER,
+            pause: "operator maintenance",
+            queues: [{ branch: "main", label: "main", path: "/repo" }],
+          })}
+          live={false}
+        />,
+        { cols: 120, rows: 30 },
+      )
+      await settle(app)
+      const line0 = app.lines[0] ?? ""
+      expect(line0.trimStart().startsWith("■ YRD PAUSED")).toBe(true)
+      expect(fgAt(app, 0, "■")).toBe(fgOf("$fg-warning"))
+      expect(boldAt(app, 0, "YRD")).toBe(true)
+      expect(fgAt(app, 0, "PAUSED")).toBe(fgOf("$fg-warning"))
+      expect(boldAt(app, 0, "PAUSED")).toBe(true)
+      app.unmount()
+    })
   })
 })

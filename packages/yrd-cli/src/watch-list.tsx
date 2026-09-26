@@ -334,10 +334,10 @@ export function shortenAddress(address: string, maxLen: number): string {
 }
 
 /**
- * The top line (ia.md, 24196; 25416; 25630; 25716 row 31): inverted chrome across the whole width.
+ * The top line (ia.md, 24196; 25416; 25630; 25716 row 31; 24196 row 27): inverted chrome across the whole width.
  * Left: status marker first, pulsing in runner status colour; then [n] muted (only if >1 runner);
- * then YRD QUEUE in bold; then queue address.
- * Right: elapsed timer as hh:mm:ss in grey (status word YRD RUNNING leaves line).
+ * then YRD in bold; then state word in status colour (RUNNING, PAUSED or STOPPED); then queue address.
+ * Right: elapsed timer as hh:mm:ss in grey, and stop reason if stopped with a reason.
  */
 export function TopLine({
   queue,
@@ -372,7 +372,8 @@ export function TopLine({
   const runnerDigitsLen = showRunnerDigits
     ? (queues ?? []).map(() => 3).reduce((a, b) => a + b, 0) + ((queues?.length ?? 0) - 1) + 1
     : 0
-  const leftPrefixLen = 1 + 1 + 1 + runnerDigitsLen + 10
+  // Left side prefix: marker (1) + gap (1) + runner digits + YRD (3) + gap (1) + status word + gap (1)
+  const leftPrefixLen = 1 + 1 + runnerDigitsLen + 3 + 1 + status.word.length + 1
   const availableForAddress =
     columns !== undefined ? Math.max(0, columns - leftPrefixLen - statusRightLen - 2) : undefined
   const displayAddress =
@@ -410,7 +411,10 @@ export function TopLine({
             ))
           : null}
         <Text bold color="$fg-on-inverse" flexShrink={0}>
-          YRD QUEUE
+          YRD
+        </Text>
+        <Text bold color={status.color} flexShrink={0}>
+          {status.word}
         </Text>
         <Text color="$fg-on-inverse" wrap="truncate">
           {displayAddress}
