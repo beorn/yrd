@@ -193,6 +193,49 @@ async function drain(w: World): Promise<void> {
   )
 }
 
+describe("event queue observation refusals", () => {
+  /** @failure Event queue stats could report success after Git-Super refused its root observation.
+   * @level l2 @consumer operator reading queue list and queue stats from the same event queue
+   */
+  it("event list and stats refuse an invalid root observation", async () => {
+    const w = await world()
+    const head = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, head, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture main lost .yrd.yml")
+    await createEventQueue(createEventStore(w.work, "origin", w.git.selection), "main", head, config, new Date())
+
+    const executable = join(w.workdir, "invalid-observer.sh")
+    const selected = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin/git-super")
+    const invalid = JSON.stringify({
+      version: 1,
+      outcome: "invalid",
+      message: "fixture observation is invalid",
+      notices: [],
+    })
+    writeFileSync(
+      executable,
+      `#!/bin/sh
+if [ "$1" = super ] && [ "$2" = observe ]; then printf '%s' '${invalid}'; exit 2; fi
+exec '${selected.replaceAll("'", "'\\''")}' "$@"
+`,
+    )
+    chmodSync(executable, 0o755)
+    const options = {
+      json: true,
+      workdir: w.workdir,
+      selection: { executable, contract: "root-v1" as const, scope: "local" as const, origin: "fixture" },
+    }
+    const listed = capture(w.work)
+    expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, options)).toBe(2)
+    expect(JSON.parse(listed.stdout()).observation).toMatchObject({ outcome: "invalid" })
+
+    const stats = capture(w.work)
+    expect(await coreQueueCommand(w.work, stats.io, { command: "stats" }, options)).toBe(2)
+    expect(stats.stderr()).toContain("fixture observation is invalid")
+    expect(stats.stdout()).toBe("")
+  })
+})
+
 describe("yrd watch, the ending's exit code", () => {
   // The producer owns its protocol; ordinary Git calls still use the real
   // selected executable. These defects cross run creation and the watch lifecycle.

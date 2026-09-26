@@ -117,6 +117,35 @@ describe("yrd queue stats through the process entry", () => {
     expect(ran.stderr).not.toContain("changed to event format during legacy read")
   })
 
+  /** @failure Event stats counted drafts outside the requested committer-date window.
+   * @level l3 @consumer operator using queue stats for the default week or a historical window
+   */
+  it("applies the draft window to pushed-only branches on an event queue", async () => {
+    const work = await queueWithOneChangeAndOnePush(true)
+    const git = gitIn(work)
+    await git(["checkout", "--quiet", "-b", "task/old-pushed-only", "main"])
+    writeFileSync(join(work, "old-note.txt"), "old pushed-only branch\n")
+    await git(["add", "old-note.txt"])
+    const oldDate = new Date("2020-01-01T00:00:00.000Z").toISOString()
+    const dated = gitIn(work, undefined, undefined, {
+      env: { ...process.env, GIT_AUTHOR_DATE: oldDate, GIT_COMMITTER_DATE: oldDate },
+    })
+    await dated(["commit", "--quiet", "-m", "old pushed-only branch"])
+    await git(["push", "--quiet", "origin", "task/old-pushed-only"])
+    await git(["checkout", "--quiet", "main"])
+
+    const recent = await yrd(work, "queue", "stats", "--json")
+    expect(recent.exitCode, recent.report).toBe(0)
+    const recentDrafts = (JSON.parse(recent.stdout) as { pushedNeverSubmitted: { count: number } }).pushedNeverSubmitted
+    expect(recentDrafts.count).toBe(1)
+
+    const historical = await yrd(work, "queue", "stats", "--json", "--since", "2019-01-01T00:00:00.000Z")
+    expect(historical.exitCode, historical.report).toBe(0)
+    const historicalDrafts = (JSON.parse(historical.stdout) as { pushedNeverSubmitted: { count: number } })
+      .pushedNeverSubmitted
+    expect(historicalDrafts.count).toBe(2)
+  })
+
   it("prints the table with the queue line, the submitter line and the pushed-never-submitted count", async () => {
     const work = await queueWithOneChangeAndOnePush()
     const ran = await yrd(work, "queue", "stats")
