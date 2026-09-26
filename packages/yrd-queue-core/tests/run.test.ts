@@ -6376,7 +6376,7 @@ describe("a queue run", () => {
     const first = await queueRun(await w.options({ exit: 0 }))
     expect(first.directMerges).toEqual([direct])
     expect(messages(w).filter((message) => message.record === "merged-direct")).toEqual([
-      { change: direct, record: "merged-direct" },
+      { change: direct, record: "merged-direct", endingId: direct, endedAt: expect.any(String) },
     ])
 
     // Nothing landed on top of it, so the walk in direct.ts never reaches an
@@ -6402,8 +6402,8 @@ describe("a queue run", () => {
     const fourth = await queueRun(await w.options({ exit: 0 }))
     expect(fourth.directMerges).toEqual([direct, secondDirect])
     expect(messages(w).filter((message) => message.record === "merged-direct")).toEqual([
-      { change: direct, record: "merged-direct" },
-      { change: secondDirect, record: "merged-direct" },
+      { change: direct, record: "merged-direct", endingId: direct, endedAt: expect.any(String) },
+      { change: secondDirect, record: "merged-direct", endingId: secondDirect, endedAt: expect.any(String) },
     ])
   })
 
