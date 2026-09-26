@@ -11,6 +11,9 @@
  * 7. P2: Receipt counts watch's git calls per minute, focused and unfocused, before and after.
  */
 
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it, vi, beforeEach } from "vitest"
 import { render } from "silvery/test"
 import React, { act } from "react"
@@ -21,6 +24,13 @@ import {
   queueRef,
   changesRef,
   changeInput,
+  createEventQueue,
+  gitIn,
+  overrideRef,
+  pauseRef,
+  readConfig,
+  resolveGitSelection,
+  writePause,
 } from "@yrd/queue-core"
 import { open } from "gitomic"
 import { createMemBackend } from "gitomic/mem"
@@ -28,6 +38,7 @@ import { openEvents } from "gitomic/events"
 import { WatchPane, queueLineStatus, type WatchSnapshot } from "../src/watch-pane.tsx"
 import { readEventListing, clearEventListingCache } from "../src/queue-core-commands.ts"
 import { encodeOps } from "../../yrd-queue-core/src/ops-state.ts"
+import { installSelectedGit } from "./support/selected-git.ts"
 
 const NOW = new Date("2026-09-24T12:00:00.000Z")
 
@@ -287,6 +298,71 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     expect(r5).toBeDefined()
     expect(listRefsCalls).toContain("refs/yrd/main/")
     expect(listRefsCalls).toContain("refs/heads/") // Full head listing ran because >= 60s elapsed!
+  })
+
+  // Every row above cuts its queue over first. A live queue that has not cut over reads its pause and overrides
+  // from the legacy refs through the remote (readEventOps' legacy branch), which only a real remote can show
+  // (@dev/review2 2a403554 on 25041).
+  it("pre-cutover: a full read takes pause and overrides from the legacy refs through the remote; a reused round reads neither", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-watch-precutover-"))
+    try {
+      const remote = join(root, "remote.git")
+      const work = join(root, "work")
+      const seed = gitIn(root)
+      await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+      await seed(["clone", "--quiet", remote, work])
+      const git = gitIn(work)
+      await git(["config", "user.email", "queue@yrd.test"])
+      await git(["config", "user.name", "yrd"])
+      await git(["checkout", "--quiet", "-b", "main"])
+      writeFileSync(join(work, ".yrd.yml"), "{}\n")
+      await git(["add", ".yrd.yml"])
+      await git(["commit", "--quiet", "-m", "main declares the queue"])
+      await git(["push", "--quiet", "origin", "main"])
+      const workdir = join(root, "queue")
+      mkdirSync(workdir, { recursive: true })
+      const selected = await installSelectedGit(work)
+      const runner = gitIn(work, undefined, await resolveGitSelection(work))
+      expect(runner.selection.executable).toBe(selected.executable)
+
+      const commit = (await runner(["rev-parse", "main"])).trim()
+      const config = await readConfig(runner, commit, { branch: "main", remote: "origin" })
+      if (config === undefined) throw new Error("the fixture's target lost its declaration")
+      const store = createEventStore(work, "origin", runner.selection)
+      await createEventQueue(store, "main", commit, config, new Date("2026-09-24T12:00:00.000Z"))
+      await writePause(runner, "origin", "main", { by: "@chief", kind: "paused", reason: "pre-cutover maintenance" })
+
+      const legacyReads = (): readonly string[] =>
+        selected
+          .readCalls()
+          .flatMap(({ args }) =>
+            args.filter((arg) => arg.includes(pauseRef("main")) || arg.includes(overrideRef("main"))),
+          )
+      const readsOf = (ref: string): number => legacyReads().filter((arg) => arg.includes(ref)).length
+
+      const before = selected.readCalls().length
+      const r1 = await readEventListing(runner, config, work, workdir, commit, store, { now: 1000 })
+      expect(selected.readCalls().length, "the selected git saw the round").toBeGreaterThan(before)
+      expect(r1.pause?.reason).toBe("pre-cutover maintenance")
+      expect(r1.overrides.entries).toEqual([])
+      expect(readsOf(pauseRef("main")), "the full read fetched the legacy pause ref").toBeGreaterThan(0)
+      expect(readsOf(overrideRef("main")), "the full read fetched the legacy override ref").toBeGreaterThan(0)
+
+      const afterFirst = legacyReads().length
+      const r2 = await readEventListing(runner, config, work, workdir, commit, store, { now: 11_000 })
+      expect(r2.all).toBe(r1.all)
+      expect(r2.pause).toBe(r1.pause)
+      expect(legacyReads().length, "a reused round reads neither legacy ref").toBe(afterFirst)
+
+      // Positive control: a fresh round at the same tips reads both again, so the count above can see a read.
+      const pauseReads = readsOf(pauseRef("main"))
+      const overrideReads = readsOf(overrideRef("main"))
+      await readEventListing(runner, config, work, workdir, commit, store, { now: 12_000, forceFresh: true })
+      expect(readsOf(pauseRef("main"))).toBeGreaterThan(pauseReads)
+      expect(readsOf(overrideRef("main"))).toBeGreaterThan(overrideReads)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it("row 4: focus-aware cadence: refresh at once on focus-in, 5 s while focused, about 30 s while unfocused, never paused", async () => {
