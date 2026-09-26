@@ -791,18 +791,21 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     await w.git(["push", "--quiet", "origin", `${b}:refs/testing/target-b`])
     const wrapper = join(w.workdir, "upload-pack-target-race.sh")
     const calls = join(w.workdir, "upload-pack-target-race.count")
+    const moved = join(w.workdir, "upload-pack-target-race.moved")
     writeFileSync(
       wrapper,
       [
         "#!/bin/sh",
         `test -e "${join(w.workdir, ROUND_LOCK)}" || exec git-upload-pack "$@"`,
-        `count=0; test ! -f "${calls}" || count=$(cat "${calls}")`,
-        "count=$((count + 1))",
-        `printf '%s\\n' "$count" > "${calls}"`,
+        // yrd runs some ls-remotes concurrently, so the count is one appended line per invocation (an append is
+        // atomic; a read-then-rewrite counter can read a truncated file and fire twice), and the move is one-shot:
+        // mkdir succeeds for exactly one invocation (@dev/review2 8035e6b3).
+        `printf 'x\\n' >> "${calls}"`,
+        `count=$(wc -l < "${calls}")`,
         // An exact fetch may be skipped when A is already local. Invocation
         // two is therefore either that fetch or the queue advertisement; in
         // both cases A has already been declared and B precedes the queue read.
-        `if test "$count" -eq 2; then git --git-dir="$1" update-ref refs/heads/main ${b} ${a} || exit $?; fi`,
+        `if test "$count" -ge 2 && mkdir "${moved}" 2>/dev/null; then git --git-dir="$1" update-ref refs/heads/main ${b} ${a} || exit $?; fi`,
         'exec git-upload-pack "$@"',
         "",
       ].join("\n"),
@@ -835,7 +838,11 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
 
     expect(exit, run.stdout()).toBe(2)
     expect(rounds).toBe(2)
-    expect(Number(readFileSync(calls, "utf8").trim())).toBeGreaterThanOrEqual(2)
+    expect(
+      readFileSync(calls, "utf8")
+        .split("\n")
+        .filter((line) => line !== "").length,
+    ).toBeGreaterThanOrEqual(2)
     const written = records(run)
     expect(written).toHaveLength(3)
     expect(written[0]).toMatchObject({ base: a, config: configA, exitCode: 0, merged: [], target: a })
