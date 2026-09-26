@@ -2,9 +2,9 @@
  * The table and declaration authority, on a real remote.
  */
 
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { delimiter, join, resolve } from "node:path"
+import { delimiter, join } from "node:path"
 import { afterAll, beforeEach, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import { gitEnvironment } from "../src/git.ts"
@@ -28,16 +28,13 @@ import {
 import type { Git, Row } from "../src/index.ts"
 import { ABSENT, legacyStore, recordCommit, recordMessage, type WriteRecord } from "../src/legacy-records.ts"
 import { journalRun } from "../../../tests/support/journal-run.ts"
+import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
 // Submit admission runs `git super merge` with this process's PATH, and the root
 // worker's sealed PATH drops every entry inside the repository: in shared main that
 // is the checkout's own node_modules/.bin, so git-super is found only in a worktree,
 // through shared main's. Name git-super's bin here, as run.test.ts does; the worker
 // setup restores the sealed PATH after each test.
-const gitSuperBin = resolve(import.meta.dirname, "../../../../git-super/bin")
-if (!existsSync(gitSuperBin)) {
-  throw new Error(`git-super bin directory not found at ${gitSuperBin}`)
-}
 beforeEach(() => {
   process.env.PATH = `${gitSuperBin}${delimiter}${process.env.PATH ?? ""}`
 })

@@ -115,7 +115,12 @@ async function previousQueueReader(): Promise<typeof import("../../yrd-queue-cor
   const directory = mkdtempSync(join(tmpdir(), "yrd-old-reader-"))
   roots.push(directory)
   cpSync(join(yrdRoot, "packages/yrd-queue-core/src"), join(directory, "src"), { recursive: true })
-  symlinkSync(join(yrdRoot, "../../node_modules"), join(directory, "node_modules"), "dir")
+  // The copied source resolves its imports through the install that holds queue-core's dependencies: the
+  // superproject root inside hh, queue-core's own (the isolated linker's) in a standalone clone.
+  const installs = [join(yrdRoot, "../../node_modules"), join(yrdRoot, "packages/yrd-queue-core/node_modules")]
+  const install = installs.find((dir) => existsSync(join(dir, "@yrd/process")))
+  if (install === undefined) throw new Error(`no install holding @yrd/process at ${installs.join(" or ")}`)
+  symlinkSync(install, join(directory, "node_modules"), "dir")
   writeFileSync(join(directory, "src/events.ts"), oldEvents)
   return (await import(
     pathToFileURL(join(directory, "src/events.ts")).href
@@ -1270,7 +1275,13 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     const off = rows.filter((row) => row.message.startsWith("the relaunch exit is off"))
     expect(off, JSON.stringify(rows)).toHaveLength(1)
     expect(off[0]?.level).toBe("warn")
-    expect(off[0]?.message).toContain("records no gitlink")
+    // Inside hh a superproject records this runtime, so the captured target is what lacks the gitlink; a
+    // standalone clone has no superproject at all, and the line says that instead.
+    const yrdRoot = resolve(import.meta.dirname, "../../..")
+    const superproject = execFileSync("git", ["-C", yrdRoot, "rev-parse", "--show-superproject-working-tree"], {
+      encoding: "utf8",
+    }).trim()
+    expect(off[0]?.message).toContain(superproject === "" ? "no superproject records" : "records no gitlink")
     // And it reaches stderr too, so a person watching the service sees it
     // without a log level set.
     expect(run.stderr()).toContain("the relaunch exit is off")

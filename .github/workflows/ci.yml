@@ -1,0 +1,30 @@
+name: ci
+
+# A standalone clone of yrd installs from its own bun.lock and runs its own suite: the check that a change to
+# yrd's dependencies (or to what it imports from them) still works outside the hh superproject (25972).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: queue-core-up reads a previous yrd pin's source with git show.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      # The suite builds throwaway repositories and commits in them.
+      - run: git config --global user.name ci && git config --global user.email ci@example.invalid
+      - run: bun install --frozen-lockfile
+      - run: bun run check
