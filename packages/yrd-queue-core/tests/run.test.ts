@@ -589,6 +589,61 @@ it("plans M2 replacement and rolls back the exact legacy pause ref", async () =>
   expect((await w.git(["ls-remote", "--refs", "origin", `${queueRefPrefix("main")}/*`])).trim()).toBe(before)
 })
 
+/** @failure 25041 A3: before cutover, a pause or override written mid-merge must win its legacy ref lease.
+ * @level l3 @consumer queue operator and merge runner
+ */
+it("a pre-cutover merge cannot pass a concurrent legacy pause or override", async () => {
+  for (const raced of ["pause", "override"] as const) {
+    const w = await world()
+    await createWorldEventQueue(w)
+    await submitCommit(w, `task/${raced}-race`, `${raced}.txt`)
+    const targetBefore = await remoteTarget(w)
+    let injected = false
+    const spy = beforeGitomicPublish(async (_repo, updates) => {
+      if (injected || !updates.some((update) => update.ref === "refs/heads/main")) return
+      injected = true
+      if (raced === "pause") {
+        await writePause(w.git, "origin", "main", { kind: "paused", by: "@chief", reason: "hold merge" })
+      } else {
+        await writeOverride(
+          w.git,
+          "origin",
+          "main",
+          {
+            kind: "off",
+            check: "verify",
+            until: new Date(Date.now() + 3_600_000),
+            reason: "hold merge check",
+            actor: { by: "@chief", verified: true },
+          },
+          ["verify"],
+        )
+      }
+    })
+    let outcome: QueueRunOutcome | undefined
+    let refusal: unknown
+    try {
+      outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+    } catch (error) {
+      refusal = error
+    } finally {
+      spy.mockRestore()
+    }
+    expect(injected).toBe(true)
+    if (refusal === undefined) {
+      expect(outcome?.merged).toEqual([])
+    } else {
+      expect(String(refusal)).toContain(raced === "pause" ? pauseRef("main") : overrideRef("main"))
+    }
+    expect(await remoteTarget(w)).toBe(targetBefore)
+    if (raced === "pause") {
+      expect(await readPause(w.git, "origin", "main")).toMatchObject({ kind: "paused", by: "@chief" })
+    } else {
+      expect(await readOverrides(w.git, "origin", "main")).toMatchObject({ entries: [{ check: "verify" }] })
+    }
+  }
+})
+
 /** @failure A post-cutover merge could move main while its queue ops lease remained a client-only no-op.
  * @level l3 @consumer merge runner and queue operator
  */
