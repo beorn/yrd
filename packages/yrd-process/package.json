@@ -13,6 +13,6 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "removely": "^0.1.0"
+    "removely": "^0.2.1"
   }
 }

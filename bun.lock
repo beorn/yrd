@@ -55,7 +55,7 @@
         "zod": "^4.4.3",
       },
       "devDependencies": {
-        "removely": "^0.1.0",
+        "removely": "^0.2.1",
       },
     },
     "packages/yrd-queue-core": {
@@ -403,7 +403,7 @@
 
     "regex-utilities": ["regex-utilities@2.3.0", "", {}, "sha512-8VhliFJAWRaUiVvREIiW2NXXTmHs4vMNnSzuJVhscgmGav3g9VDxLrQndI3dZZVVdp0ZO/5v0xmX516/7M9cng=="],
 
-    "removely": ["removely@0.1.0", "", { "bin": { "removely": "./dist/cli.mjs" } }, "sha512-k0fZjY/7phBNLjQgKEkZ+KyfrfqAWCEmV8RJ7g7cEBG2123ifnDsGnrZsVm4cky0Qw6nR5CSxG4Nwtrl0X0mxg=="],
+    "removely": ["removely@0.2.1", "", { "bin": { "removely": "dist/cli.mjs" } }, "sha512-GVhHWIHAjz59ZVg0nYO93dIKfOibmdEKzc3eFHuPrvqCVg+idA3ey9Ysiz7xoawFgs/XMrXzfkBqRacjj7qbwA=="],
 
     "rolldown": ["rolldown@1.1.5", "", { "dependencies": { "@oxc-project/types": "=0.139.0", "@rolldown/pluginutils": "^1.0.0" }, "optionalDependencies": { "@rolldown/binding-android-arm64": "1.1.5", "@rolldown/binding-darwin-arm64": "1.1.5", "@rolldown/binding-darwin-x64": "1.1.5", "@rolldown/binding-freebsd-x64": "1.1.5", "@rolldown/binding-linux-arm-gnueabihf": "1.1.5", "@rolldown/binding-linux-arm64-gnu": "1.1.5", "@rolldown/binding-linux-arm64-musl": "1.1.5", "@rolldown/binding-linux-ppc64-gnu": "1.1.5", "@rolldown/binding-linux-s390x-gnu": "1.1.5", "@rolldown/binding-linux-x64-gnu": "1.1.5", "@rolldown/binding-linux-x64-musl": "1.1.5", "@rolldown/binding-openharmony-arm64": "1.1.5", "@rolldown/binding-wasm32-wasi": "1.1.5", "@rolldown/binding-win32-arm64-msvc": "1.1.5", "@rolldown/binding-win32-x64-msvc": "1.1.5" }, "bin": { "rolldown": "./bin/cli.mjs" } }, "sha512-t9z29cJjXf/vxQ8dyhCSpt6H6aSwHTk8cT5I3iy6SMXuFpk5mB6PL6XfC8PCwrPTx93udwKUm9HRteAlTGBLiA=="],
 
