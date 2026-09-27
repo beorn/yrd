@@ -1389,7 +1389,10 @@ it("refuses event teardown until an executor exists", async () => {
   )
 })
 
-it("retains a deferred check and leaves it for the long tier", async () => {
+/** @failure A deferred change stayed in the queue but its submitter and supervisor never heard why (25741 P3).
+ * @level l3 @consumer queue submitter and supervisor
+ */
+it("retains a deferred check, notifies both recipients once, and leaves it for the long tier", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
@@ -1397,7 +1400,10 @@ it("retains a deferred check and leaves it for the long tier", async () => {
   const base = await w.options({ exit: 0 })
   const deferred = {
     ...base,
-    notify: [],
+    notify: [
+      { name: "submitter", on: ["deferred" as const], run: w.notifier },
+      { name: "supervisor", on: ["deferred" as const], run: w.notifier },
+    ],
     checks: [
       {
         ...base.checks[0]!,
@@ -1408,6 +1414,14 @@ it("retains a deferred check and leaves it for the long tier", async () => {
 
   const outcome = await queueRun(deferred)
   expect(outcome).toMatchObject({ exitCode: 0, deferred: ["task/deferred-event"], merged: [] })
+  expect(messages(w)).toMatchObject([
+    { record: "deferred", submitter: "@dev/2", projectedMs: 3_600_000, boundMs: 1_800_000 },
+    { record: "deferred", submitter: "@dev/2", projectedMs: 3_600_000, boundMs: 1_800_000 },
+  ])
+  expect(Object.values((await readStatus(store, "main", "task/deferred-event")).notices ?? {})).toMatchObject([
+    { to: "submitter", result: "delivered" },
+    { to: "supervisor", result: "delivered" },
+  ])
   expect(await readStatus(store, "main", "task/deferred-event")).toMatchObject({
     status: "queued",
     deferred: { check: "verify", phase: "merge", projectedMs: 3_600_000, boundMs: 1_800_000 },
@@ -1425,6 +1439,7 @@ it("retains a deferred check and leaves it for the long tier", async () => {
   const normal = await queueRun(deferred)
   expect(normal).toMatchObject({ exitCode: 0, merged: [], failed: [], stuck: [] })
   expect((await readStatus(store, "main", "task/deferred-event")).tip).toBe(tip)
+  expect(messages(w)).toHaveLength(2)
 })
 
 /** @failure A deferred change could be ignored by the long tier or lose the declared check phase.
