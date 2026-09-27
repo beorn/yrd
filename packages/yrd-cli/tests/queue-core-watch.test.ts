@@ -995,7 +995,7 @@ describe("the queue line under a selector (24196)", () => {
       },
       page.stdout(),
     ).toEqual({
-      queueLine: "2 waiting: 2 submitted · 1 draft (7d)",
+      queueLine: "2 waiting: 2 queued · 1 draft (7d)",
       rail: "nothing under a check, and 2 in line",
       scope: true,
     })

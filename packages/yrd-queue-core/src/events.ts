@@ -458,6 +458,11 @@ function advanceChange(
     reason: prop(event, EVENT_TRAILERS.reason),
     ...(type === "verifying" ? { deferred: undefined, lastNotifiable: undefined } : {}),
     ...(type === "stuck" ? { lastNotifiable: { id: event.id, kind: "stuck" as const } } : {}),
+    ...(prop(event, EVENT_TRAILERS.run) !== undefined
+      ? { run: prop(event, EVENT_TRAILERS.run) }
+      : state.run !== undefined
+        ? { run: state.run }
+        : {}),
   }
 }
 
@@ -562,6 +567,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         notices: _previousNotices,
         lastNotifiable: _previousNotifiable,
         diagnostic: _previousDiagnostic,
+        run: _previousRun,
         ...fresh
       } = next
       return {
@@ -575,6 +581,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         endedAt: undefined,
         ending: undefined,
         reason: undefined,
+        run: undefined,
       }
     }
     case "verifying":
@@ -640,6 +647,11 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         lastNotifiable: { kind: event.type, id: event.id },
         endedAt: at,
         reason,
+        ...(prop(event, EVENT_TRAILERS.run) !== undefined
+          ? { run: prop(event, EVENT_TRAILERS.run) }
+          : state.run !== undefined
+            ? { run: state.run }
+            : {}),
       }
     }
     case "merged":

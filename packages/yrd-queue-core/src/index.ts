@@ -52,6 +52,7 @@ export {
   evolve,
   enumerateChangeSegments,
   initial,
+  isOpen,
   listChangeHistories,
   listChanges,
   queueFormat,
