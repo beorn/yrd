@@ -90,11 +90,6 @@ export function runnerRef(queue: string): string {
   return `${queueRefPrefix(queue)}/runner`
 }
 
-/** The merge-check override ref one queue owns (override.ts). */
-export function overrideRef(queue: string): string {
-  return `${queueRefPrefix(queue)}/override`
-}
-
 /**
  * A change: a branch at a head. Everything that writes about one says both,
  * and its name — `<branch>@<head>` — is the one spelling of the pair.

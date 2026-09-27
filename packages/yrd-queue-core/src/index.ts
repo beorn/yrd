@@ -26,7 +26,6 @@ export {
   encodeQueueComponent,
   parseChangeName,
   parseChangeRef,
-  overrideRef,
   pauseRef,
   queueRefPrefix,
   runIndexRef,
@@ -153,7 +152,7 @@ export {
 } from "./reference.ts"
 export type { PopulateReference, ReferenceStore } from "./reference.ts"
 export { queueRun, QueueAuthorityUnreadable } from "./run.ts"
-export { QueueRunEventRetryExhausted } from "./event-run.ts"
+export { LegacyOverridePresent, QueueRunEventRetryExhausted } from "./event-run.ts"
 export type { QueueRunOptions, QueueRunOutcome, RoundLine } from "./run.ts"
 export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from "./config.ts"
 export { parseDuration } from "./duration.ts"

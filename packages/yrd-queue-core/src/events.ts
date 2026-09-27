@@ -5,16 +5,7 @@ import { readEventChain, readEventChains } from "./event-read.ts"
 import { EVENT_READ_LIMIT } from "./event-read.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
-import {
-  assertBranch,
-  changesRef,
-  overrideRef,
-  pauseRef,
-  queueRef,
-  queueRefPrefix,
-  runIndexRef,
-  type Change,
-} from "./refs.ts"
+import { assertBranch, changesRef, pauseRef, queueRef, queueRefPrefix, runIndexRef, type Change } from "./refs.ts"
 export { queueRef } from "./refs.ts"
 export { changesRef } from "./refs.ts"
 import { readM2Pause, type PauseRecord } from "./pause.ts"
@@ -931,7 +922,7 @@ type EventOps = Readonly<{
   overrides: OverrideTable
 }>
 
-/** Read event ops together with the exact remote refs whose legacy fences were checked. */
+/** Read event ops together with the queue and M2 pause refs used for admission. */
 export async function readEventOpsWithRefs(
   store: QueueReadStore,
   git: Git,
@@ -950,11 +941,6 @@ export async function readEventOpsWithRefs(
   }
   const refs = listed?.refs ?? (await listRefs(queueRefPrefix(queue), store))
   const pauseTip = refs.get(pauseRef(queue)) ?? null
-  if (refs.has(overrideRef(queue))) {
-    throw new Error(
-      `${store.remote}#${queue}: legacy override ref ${overrideRef(queue)} remains after ${projected.opsCutover}`,
-    )
-  }
   // An identical OID carries the exact M2 body admission already validated.
   // A changed tip needs the full content check before the caller leases it.
   if (pauseTip !== null && listed?.validatedPauseTip !== pauseTip) {
@@ -983,7 +969,7 @@ export async function readEventOpsWithRefs(
   }
 }
 
-/** Read event ops and reject any remaining legacy override authority. */
+/** Read event ops under the queue and M2 pause authorities. */
 export async function readEventOps(
   store: QueueReadStore,
   git: Git,
