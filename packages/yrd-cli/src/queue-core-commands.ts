@@ -72,6 +72,7 @@ import {
   queueName,
   resolveGitSelection,
   queueRun,
+  LegacyOverridePresent,
   QueueAuthorityUnreadable,
   QueueRunEventRetryExhausted,
   readConfig,
@@ -677,6 +678,7 @@ export async function coreQueueCommand(
    */
   type ReadFailedRound = Readonly<{ kind: "read-failed"; ref: string; error: QueueAuthorityUnreadable }>
   type RetryExhaustedRound = Readonly<{ kind: "retry-exhausted"; error: QueueRunEventRetryExhausted }>
+  type LegacyOverrideRound = Readonly<{ kind: "legacy-override-present"; error: LegacyOverridePresent }>
   const oneRound = async (
     declared: CapturedDeclaration,
     only?: Change,
@@ -684,7 +686,7 @@ export async function coreQueueCommand(
     stopAtMs?: number,
     noCheck?: boolean,
     onRecord?: (record: LogRecord) => void,
-  ): Promise<QueueRunOutcome | ReadFailedRound | RetryExhaustedRound | undefined> => {
+  ): Promise<QueueRunOutcome | ReadFailedRound | RetryExhaustedRound | LegacyOverrideRound | undefined> => {
     let outcome: QueueRunOutcome
     try {
       assertPlainEventQueueConfig(config, "run")
@@ -716,6 +718,9 @@ export async function coreQueueCommand(
         ...(noCheck === undefined ? {} : { noCheck }),
       })
     } catch (error) {
+      if (error instanceof LegacyOverridePresent && request.command === "up") {
+        return { kind: "legacy-override-present", error }
+      }
       if (error instanceof QueueRunEventRetryExhausted && request.command === "up") {
         io.stderr(`yrd: ${error.message}; the service retries at its next interval\n`)
         return { kind: "retry-exhausted", error }
@@ -816,6 +821,7 @@ export async function coreQueueCommand(
     | Readonly<{ declared: CapturedDeclaration; outcome: QueueRunOutcome }>
     | ReadFailedRound
     | RetryExhaustedRound
+    | LegacyOverrideRound
     | YrdCliExitCode
   > => {
     // Read through a call each time: the signal flips while the lock is waited for.
@@ -2089,6 +2095,7 @@ export async function coreQueueCommand(
       const requiredRunIndex = runIndexRef(config.target.branch)
       let runIndexReady = false
       let runIndexWaitAnnounced = false
+      let legacyOverrideHeld: string | undefined
       const waiting = {
         onWait: (wait: RoundLockWait): void => {
           lockWaitStated = true
@@ -2197,6 +2204,46 @@ export async function coreQueueCommand(
           if (afterRoundConflict !== undefined) return afterRoundConflict
           if (typeof ran === "number") return ran
           if ("kind" in ran) {
+            if (ran.kind === "legacy-override-present") {
+              readFailure = undefined
+              openedAt = undefined
+              const { ref, oid } = ran.error
+              const why = `${ref} at ${oid} remains on ${config.target.remote}; no queue round will run while it exists`
+              if (legacyOverrideHeld !== `${ref}@${oid}`) {
+                log?.warn?.(why, { ref, oid, remote: config.target.remote })
+                io.stderr(`yrd: ${why}; @chief must verify, fold or delete the ref\n`)
+                legacyOverrideHeld = `${ref}@${oid}`
+              }
+              const alive = lineDocument(lastStop, 0)
+              const document = writeHealth({
+                ...alive,
+                state: "unhealthy",
+                error: {
+                  code: "legacy-override-present",
+                  cause: why,
+                  resolution: [
+                    `@chief: verify, fold or delete ${ref} at ${oid} before this queue judges another round.`,
+                    "No restart is needed. This service re-reads the remote ref and resumes when it is absent.",
+                  ],
+                },
+                facts: {
+                  ...alive.facts,
+                  reasonKey: `legacy-override:${ref}@${oid}`,
+                  legacyOverrideRef: ref,
+                  legacyOverrideOid: oid,
+                },
+              })
+              await request.afterHealth?.(document)
+              if (stopped()) return 0
+              await delay(Math.min(15_000, Math.max(1000, interval)), undefined, { signal: request.stop }).catch(
+                (error) => {
+                  if (!stopped()) throw error
+                },
+              )
+              if (stopped()) return 0
+              continue
+            }
+            legacyOverrideHeld = undefined
             if (ran.kind === "retry-exhausted") {
               readFailure = undefined
               openedAt = undefined
@@ -2227,6 +2274,7 @@ export async function coreQueueCommand(
             if (stopped()) return 0
             continue
           }
+          legacyOverrideHeld = undefined
           readFailure = undefined
           const { outcome } = ran
 

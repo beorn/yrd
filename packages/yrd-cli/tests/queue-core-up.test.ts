@@ -48,6 +48,7 @@ import {
   formatRunnerClaim,
   gitIn,
   parseQueueHealthDocument,
+  pauseRef,
   queueRef,
   runnerRef,
   QUEUE_HEALTH_DOCUMENT,
@@ -538,6 +539,79 @@ describe("yrd queue up, the service", () => {
       expect(rounds).toBe(1)
       expect(await w.git(["ls-remote", "--refs", "origin", indexRef])).toContain(indexRef)
       expect((await readQueueHealth(w.workdir, SERVICE)).state).toBe("healthy")
+    } finally {
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 20_000)
+
+  /**
+   * @failure A pre-cutover writer recreates the legacy override ref; the new runner exits instead of holding the line visibly.
+   * @level l2 (real Git remote and service loop)
+   * @consumer Hab's Yrd service and the operator clearing the legacy ref
+   * @testonly none
+   */
+  it("holds a legacy override ref with unhealthy health, then resumes after removal (26235)", async () => {
+    const w = await world()
+    const target = (await w.git(["rev-parse", "HEAD"])).trim()
+    const created = (await readEventQueue(createEventStore(w.work, "origin", gitIn(w.work).selection), "main")).created
+    const tree = (await w.git(["rev-parse", `${target}^{tree}`])).trim()
+    const m2 = (
+      await w.git([
+        "commit-tree",
+        tree,
+        "-p",
+        target,
+        "-m",
+        `moved to event format at ${created}\n\nRecord: paused\nPaused-By: yrd-ops-cutover\nPaused-At: 2026-09-27T00:40:59.853Z\nCause: maintenance\n`,
+      ])
+    ).trim()
+    await w.git(["push", "--quiet", "origin", `${m2}:${pauseRef("main")}`])
+    const legacyRef = "refs/yrd/main/override"
+    await w.git(["push", "--quiet", "origin", `${target}:${legacyRef}`])
+
+    const run = capture(w.work)
+    const stop = new AbortController()
+    let rounds = 0
+    let settled = false
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        heartbeatIntervalMs: 100,
+        heartbeatGraceMs: 500,
+        afterRound: () => {
+          rounds += 1
+          stop.abort()
+        },
+      },
+      { json: true, workdir: w.workdir },
+    ).finally(() => {
+      settled = true
+    })
+    try {
+      await vi.waitFor(
+        async () => {
+          const health = await readQueueHealth(w.workdir, SERVICE)
+          expect(health).toMatchObject({
+            state: "unhealthy",
+            verdict: { kind: "running" },
+            error: { code: "legacy-override-present", cause: expect.stringContaining(legacyRef) },
+          })
+          expect(health.error?.cause).toContain(target)
+          expect(health.error?.resolution.join(" ")).toContain("@chief")
+        },
+        { timeout: 5_000 },
+      )
+      expect(settled, run.stderr()).toBe(false)
+      expect(rounds).toBe(0)
+      await w.git(["push", "--quiet", "origin", `:${legacyRef}`])
+      expect(await service, run.stderr()).toBe(0)
+      expect(rounds).toBe(1)
+      expect((await readQueueHealth(w.workdir, SERVICE)).error?.code).not.toBe("legacy-override-present")
     } finally {
       stop.abort()
       await service.catch(() => undefined)

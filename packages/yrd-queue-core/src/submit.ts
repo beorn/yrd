@@ -39,7 +39,7 @@ import {
   readEventOps,
   readEventOpsWithRefs,
 } from "./events.ts"
-import { overrideRef, pauseRef, queueRefPrefix } from "./refs.ts"
+import { pauseRef, queueRefPrefix } from "./refs.ts"
 import { verifyCandidate, type Verification } from "./verifying.ts"
 import { withRemoteSeam } from "./remote-calls.ts"
 
@@ -427,16 +427,11 @@ async function submitEvent(
       admittedOps.ops.stop === undefined &&
       admittedOps.listedQueueTip === admittedOps.ops.queue.tip &&
       refs.get(queueRef(request.target.branch)) === admittedOps.ops.queue.tip &&
-      (refs.get(pauseRef(request.target.branch)) ?? null) === admittedOps.pauseTip &&
-      !refs.has(overrideRef(request.target.branch))
-    // ADR-0022: the just-listed refs are the first attempt's observation.
-    // Reusing them widens the residual unfenced legacy-override interval by
-    // one queue-chain read; M6 has no writer and 26235 retires that read.
+      (refs.get(pauseRef(request.target.branch)) ?? null) === admittedOps.pauseTip
     // The pause body is reused only when its OID matches admission's validated M2.
     // ADR-0022: the read after a rejected CAS is the next attempt's base.
-    // Reusing it has the same accepted unfenced legacy-override interval as
-    // 25626's first-attempt reuse; a stuck pause depends on a separate change
-    // ref, so it must be rederived on the second attempt.
+    // A stuck pause depends on a separate change ref, so it must be rederived
+    // on the second attempt.
     const operational =
       attempt === 1 && afterConflict !== undefined && afterConflict.ops.pause?.cause !== "stuck"
         ? afterConflict

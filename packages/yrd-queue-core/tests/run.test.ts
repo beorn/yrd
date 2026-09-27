@@ -58,7 +58,6 @@ import {
   withdraw,
   writeQueueEvent,
   OverrideRefused,
-  overrideRef,
   parseUntil,
   writeQueueOverride,
 } from "../src/index.ts"
