@@ -13,7 +13,7 @@ import {
   type ReferenceStore,
   type YrdQueueRunnerDeclaration,
 } from "@yrd/queue-core"
-import { parseQueueAddress, queueDirectory, queueRoot, type QueueAddress } from "./address.ts"
+import { hasHumanQueueBranch, parseQueueAddress, queueDirectory, queueRoot, type QueueAddress } from "./address.ts"
 import { repositoryHere } from "./declaration.ts"
 
 export type QueueLocation = Readonly<{
@@ -216,21 +216,30 @@ export async function resolveQueueLocation(
   const git = gitIn(inside ?? cwd, undefined, selection, { env })
   const addressed =
     value !== undefined &&
-    (value.includes("#") || value.startsWith("/") || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value))
+    (value.includes("#") ||
+      hasHumanQueueBranch(value) ||
+      value.startsWith("/") ||
+      /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value))
   let address: QueueAddress
   if (inside !== undefined && !addressed) {
     address = await originQueueAddress(git, value ?? (await originHead(git)))
   } else {
     if (value === undefined || !addressed) {
       throw new Error(
-        `queue command at ${cwd} needs a repository; run inside a clone or pass --queue <repo>#<queue>, for example --queue beorn/hh#main`,
+        `queue command at ${cwd} needs a repository; run inside a clone or pass --queue <repo>@<branch>, for example --queue beorn/hh@main`,
       )
     }
     let selected = value
-    if (!selected.includes("#")) selected = `${selected}#${await remoteHead(git, selected)}`
+    if (!selected.includes("#") && !hasHumanQueueBranch(selected)) {
+      selected = `${selected}#${await remoteHead(git, selected)}`
+    }
     const split = selected.indexOf("#")
-    const repository = selected.slice(0, split)
-    if (inside !== undefined && (await git(["remote"])).trim().split("\n").includes(repository)) {
+    const repository = split < 0 ? undefined : selected.slice(0, split)
+    if (
+      repository !== undefined &&
+      inside !== undefined &&
+      (await git(["remote"])).trim().split("\n").includes(repository)
+    ) {
       selected = queueName({ branch: selected.slice(split + 1), remote: repository }, await remoteUrl(git, repository))
     }
     address = parseQueueAddress(selected)
