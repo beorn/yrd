@@ -2658,7 +2658,11 @@ export async function coreQueueCommand(
           window = { since: committed, sinceFrom: { asked: request.since, kind: "commit" } }
         }
       }
-      const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, { all: true })
+      // Stats applies its own --since window to the drafts below, so it reads every draft (26014).
+      const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, {
+        all: true,
+        draftWindow: "all",
+      })
       if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
         io.stderr(`${reading.observation.message}\n`)
         return 2
@@ -4048,25 +4052,13 @@ export async function readEventListing(
     ),
     { targetSha: targetOid, since },
   )
+  // Status comes only from the event fold (25041): a change whose branch is gone stays open
+  // until a queue round records its ending, so a reader never shows a state no event holds.
   const segmentsByBranch = new Map(
-    [...histories].map(([branch, history]) => {
-      const segments = enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), repo)
-      const lastSegment = segments.at(-1)
-      if (lastSegment !== undefined && isOpen(lastSegment.state.status)) {
-        const openedAt = lastSegment.state.since?.getTime() ?? 0
-        if (!heads.has(branch) && listNow.getTime() - openedAt >= 60_000) {
-          const cancelledState: EventChange = {
-            ...lastSegment.state,
-            status: "cancelled",
-            reason: "deleted",
-            endedAt: lastSegment.state.at ?? lastSegment.state.since ?? listNow,
-          }
-          changes.set(branch, cancelledState)
-          return [branch, [...segments.slice(0, -1), { ...lastSegment, state: cancelledState }]] as const
-        }
-      }
-      return [branch, segments] as const
-    }),
+    [...histories].map(
+      ([branch, history]) =>
+        [branch, enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), repo)] as const,
+    ),
   )
   const segmentStates = new Map(
     [...segmentsByBranch].map(([branch, segments]) => [branch, segments.map((segment) => segment.state)] as const),
