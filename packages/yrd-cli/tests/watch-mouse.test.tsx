@@ -8,12 +8,17 @@
  */
 
 import React from "react"
+import { mkdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { run } from "silvery/runtime"
 import { createTermless } from "silvery/test"
+import { createTerminal } from "@termless/core"
+import { createGhosttyBackend, initGhostty } from "@termless/ghostty"
 import type { Row } from "@yrd/queue-core"
 import { WatchPane, type WatchSnapshot } from "../src/watch-pane.tsx"
 import { WATCH_RUN_OPTIONS } from "../src/watch-run-options.ts"
+import { runOf } from "../src/watch-run.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
@@ -81,6 +86,68 @@ describe("the pointer in the live pane", () => {
         "\x1b[?1003h",
       )
       expect(written).toContain("\x1b[?1006h")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  /** @failure A detail that only scrolls its tab cannot reach the rest of the pane with a wheel and PageDown.
+   * @level l2 @consumer operator reading a long change in yrd watch (26187)
+   */
+  it("scrolls a long opened detail with the wheel and PageDown", async () => {
+    using term = createTermless({ cols: 100, rows: 31 })
+    const sendInput = (data: string) => (term as unknown as { sendInput: (data: string) => void }).sendInput(data)
+    const body = Array.from({ length: 120 }, (_, index) => `SCROLL-LINE-${String(index).padStart(3, "0")}`).join("\n")
+    const handle = await run(
+      <WatchPane
+        snapshot={SNAPSHOT}
+        live={false}
+        open={async ({ row: selected }) => ({ row: selected, run: runOf(selected, "main", []), checks: [], body })}
+      />,
+      term,
+      WATCH_RUN_OPTIONS,
+    )
+    try {
+      await handle.waitForLayoutStable()
+      const lines = term.screen.getLines()
+      const selectedRow = rowOf(lines, "task/alpha")
+      await term.mouse.click(lines[selectedRow]!.indexOf("task/alpha"), selectedRow)
+      await sleep(50)
+      sendInput("\r")
+      await sleep(100)
+      await handle.waitForLayoutStable()
+      const top = term.screen.getText()
+      expect(top).toContain("SCROLL-LINE-000")
+      expect(top).not.toContain("SCROLL-LINE-100")
+      expect(top).toContain("Timeline")
+
+      sendInput("\x1b[6~")
+      await sleep(100)
+      await handle.waitForLayoutStable()
+      const paged = term.screen.getText()
+      expect(paged).not.toContain("Timeline")
+      expect(paged).not.toContain("SCROLL-LINE-000")
+
+      sendInput("\x1b[5~")
+      await sleep(100)
+      await handle.waitForLayoutStable()
+      expect(term.screen.getText()).toContain("Timeline")
+
+      await term.mouse.wheel(80, 18, 12)
+      await sleep(100)
+      await handle.waitForLayoutStable()
+      const wheeled = term.screen.getText()
+      expect(wheeled).not.toContain("Timeline")
+      expect(wheeled).not.toBe(top)
+      if (process.env.YRD_CAPTURE_DIR) {
+        mkdirSync(process.env.YRD_CAPTURE_DIR, { recursive: true })
+        const ansi = term.out.getText()
+        writeFileSync(join(process.env.YRD_CAPTURE_DIR, "26187-detail-after-wheel.ansi"), ansi)
+        await initGhostty()
+        const capture = createTerminal({ backend: createGhosttyBackend(), cols: 100, rows: 31 })
+        capture.feed(ansi.replace(/\r?\n/gu, "\r\n"))
+        writeFileSync(join(process.env.YRD_CAPTURE_DIR, "26187-detail-after-wheel.png"), await capture.screenshot())
+      }
     } finally {
       handle.unmount()
     }
