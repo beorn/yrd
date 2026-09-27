@@ -511,6 +511,25 @@ describe("a run's journal, read back", () => {
     expect(runs?.[0]?.malformed?.[0]).toContain("non-terminal decision")
   })
 
+  // 26230: reproducing the q-20260927T151245332Z-1c54e00a shape
+  it("an in-progress retry decision row followed by a merged decision does not warn as malformed", () => {
+    const at = new Date("2026-09-27T15:12:45.332Z")
+    const branch = "task/26218-depcruise-percent-path"
+    const head = "181a03b3ef560a8c533d1dbe6ee148102d95914e"
+    const { dir } = journalDir(
+      [
+        { branch, decision: "retry", head, kind: "change", reason: "queue resumed" },
+        { branch, decision: "merged", head, kind: "change" },
+      ],
+      at,
+    )
+    const read = readJournals(dir, { now: at })
+    const runs = read.runs.get(journalKey(branch, head))
+    expect(runs?.[0]?.decision).toBe("merged")
+    expect(runs?.[0]?.malformed).toBeUndefined()
+    expect(read.malformed).toEqual([])
+  })
+
   // Was "still refuses a partial incident outside a change-ref race
   // diagnostic". 24408 supersedes the refusal, not the detection: a partial
   // incident that is not a race diagnostic is still a defect, and it is still

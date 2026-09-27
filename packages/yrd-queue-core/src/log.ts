@@ -1009,6 +1009,10 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
         if (TERMINAL_DECISIONS.has(record.decision)) {
           change.decision = record.decision
           change.reason = reason
+        } else if (record.decision === "retry") {
+          // An in-progress retry row recorded by earlier writers (@i/10-yrd/26230).
+          // Not a terminal decision, but a recognized in-progress state rather
+          // than a malformed row.
         } else {
           ;(change.malformed ??= []).push(
             `run journal ${id} has a non-terminal decision for ${journalKey(branch, head)}: ${record.decision}`,

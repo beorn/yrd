@@ -186,7 +186,7 @@ export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): 
 function malformedNext(run: JournalRun | undefined): NextOwner | undefined {
   if (run?.malformed === undefined || run.malformed.length === 0) return undefined
   return {
-    because: `run journal ${run.id} has a malformed row for this change (${run.malformed.join("; ")}); the row was skipped — fix the writer (24408)`,
+    because: `run journal ${run.id} has a malformed row for this change (${run.malformed.join("; ")}); the row was skipped — fix the writer (26230)`,
     owner: "the queue's operator",
   }
 }

@@ -4112,7 +4112,7 @@ function journalFact(
  */
 function narrateMalformed(io: YrdCliIO, journals: Journals, said: Set<string>): void {
   for (const defect of journals.malformed) {
-    const line = `yrd: run journal ${defect.run} has a row that could not be read for ${defect.key}: ${defect.message}; the row was skipped — fix the writer (24408)\n`
+    const line = `yrd: run journal ${defect.run} has a row that could not be read for ${defect.key}: ${defect.message}; the row was skipped — fix the writer (26230)\n`
     if (said.has(line)) continue
     said.add(line)
     io.stderr(line)
