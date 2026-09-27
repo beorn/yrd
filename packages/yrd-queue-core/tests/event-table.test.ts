@@ -82,7 +82,7 @@ describe("event changes use the shared table row", () => {
       { branch: "task/draft", head: "e".repeat(40), committedAt: recent, author: "dev", movedSinceSubmit: false },
     ]
     const normal = eventListRows(histories, drafts, { now })
-    expect(normal.table.map((row) => row.head)).toEqual([HEAD])
+    expect(normal.table.map((row) => row.head)).toEqual([HEAD, drafts[0]!.head])
     expect(normal.document.map((row) => row.head)).toEqual([HEAD, prior.commit])
     const expanded = eventListRows(histories, drafts, { now, all: true, drafts: true })
     expect(expanded.table.map((row) => row.head)).toEqual([HEAD, drafts[0]!.head])

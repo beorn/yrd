@@ -45,6 +45,7 @@ import {
   eventListRows,
   eventRows,
   enumerateChangeSegments,
+  isOpen,
   createEventStore,
   createLocalEventStore,
   selectionFor,
@@ -2106,13 +2107,14 @@ export async function coreQueueCommand(
         const reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, selectedStore, {
           all: request.all,
           drafts: request.drafts,
+          draftWindow,
         })
         const { journals, all, drafts, observation } = reading
         if (options.json !== true) narrateMalformed(io, journals, said)
         // The run-history lens is for stats and watch detail. List is the
         // current head of each branch in both output formats; JSON expands
         // that head by run unless --latest selects its single row.
-        const unfiltered = watchRows(reading.document, { journals, perRun: true })
+        const unfiltered = watchRows(all, { journals, perRun: options.json === true })
         const listed = watchRows(all, { journals, perRun: options.json === true, latest: request.latest })
         const changes = filterRows(listed, request.terms ?? []).filter((item) => item.row.state !== "draft")
         const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
@@ -2182,7 +2184,7 @@ export async function coreQueueCommand(
                 drafts: {
                   unread: drafts.undated.map((draft) => draft.head),
                   window: draftWindow,
-                  older: 0,
+                  older: drafts.older ?? 0,
                 },
               }),
         }
@@ -2735,13 +2737,36 @@ export async function coreQueueCommand(
           request.all === true
             ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
             : `Read ${changesRef(config.target.branch, request.branch as string)} at ${config.target.remote}; draft branches are outside this reading.`
+        const views = new Map<string, Readonly<{ checks: readonly CheckView[]; note?: string }>>()
+        for (const history of histories) {
+          const run = reading.journals.runs.get(journalKey(history.branch, history.head))?.[0]
+          const declared = await declarationFor(git, config, history.base)
+          const live =
+            run?.running === undefined
+              ? undefined
+              : {
+                  name: run.running.name,
+                  ...(run.running.log === undefined ? {} : { log: run.running.log }),
+                }
+          views.set(`${history.branch}@${history.head}`, {
+            checks: checksOf([], endingOf(history), declared.checks, live, run?.checks),
+            ...(declared.note === undefined ? {} : { note: declared.note }),
+          })
+        }
         emit(
           io,
           options.json,
           {
             ...statusFact(),
             queue: name,
-            changes: histories,
+            changes: histories.map((history) => {
+              const view = views.get(`${history.branch}@${history.head}`)
+              return {
+                ...history,
+                ...(view?.checks === undefined || view.checks.length === 0 ? {} : { checks: view.checks }),
+                ...(view?.note === undefined ? {} : { checksNote: view.note }),
+              }
+            }),
             journal: journalFact(reading.journals),
             observation: reading.observation,
             scope,
@@ -2749,9 +2774,12 @@ export async function coreQueueCommand(
           histories.length === 0
             ? `no change for ${request.branch} on ${name}. ${scope}`
             : histories
-                .map(({ events, ...row }, index) =>
-                  [
+                .map(({ events, ...row }, index) => {
+                  const view = views.get(`${row.branch}@${row.head}`)
+                  return [
                     rowLine({ row }),
+                    ...(view?.note === undefined ? [] : [`  (${view.note})`]),
+                    ...(view?.checks ?? []).flatMap(checkLines),
                     ...(row.diagnostic === undefined ? [] : [`  diagnostic: ${row.diagnostic}`]),
                     `  queue: ${config.target.branch}`,
                     ...events.map((event) => {
@@ -2762,8 +2790,8 @@ export async function coreQueueCommand(
                     ...(index !== 0 || request.branch === undefined || reading.changes.get(request.branch) === undefined
                       ? []
                       : eventNoticeLines(reading.changes.get(request.branch) as EventChange)),
-                  ].join("\n"),
-                )
+                  ].join("\n")
+                })
                 .join("\n"),
         )
         return 0
@@ -3559,6 +3587,41 @@ function readOutput(check: CheckView): CheckPanel {
   }
 }
 
+const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
+  deferred: "\u263e",
+  failed: "\u00d7",
+  passed: "\u2713",
+  running: "\u25c9",
+  "not-run": "\u2212",
+  stuck: "\u25cc",
+  off: "\u2212",
+  skipped: "\u2212",
+  unmeasured: "\u2212",
+}
+
+function checkLines(check: CheckView): readonly string[] {
+  const exit = check.result?.exit === undefined ? "" : ` exit=${check.result.exit}`
+  const ms = check.result?.ms === undefined ? "" : ` ${mediaDuration(check.result.ms)}`
+  const log =
+    (check.state === "running" ? readOutput(check).why : undefined) ??
+    (check.log === undefined ? undefined : `log ${check.log}`)
+  const state =
+    check.state === "not-run"
+      ? " NOT RUN"
+      : check.state === "off"
+        ? " off"
+        : check.state === "running"
+          ? " running"
+          : check.state === "unmeasured"
+            ? " unmeasured — no result recorded"
+            : ""
+  return [
+    `  ${CHECK_GLYPH[check.state]} ${check.name}${state}${exit}${ms}`,
+    check.spec === undefined ? "      (the declaration does not name this check)" : `      $ ${check.spec.run}`,
+    ...(log === undefined ? [] : [`      ${log}`]),
+  ]
+}
+
 /** Whether an event change in this state holds a place in line. */
 function inLineState(state: Row["state"]): boolean {
   return state === "queued" || state === "stuck" || state === "verifying" || state === "checking" || state === "merging"
@@ -3788,6 +3851,7 @@ interface EventListingCache {
   branchRefs: ReadonlyMap<string, string>
   lastHeadListingAt: number
   reading: EventListingResult
+  draftWindow?: DraftWindow
 }
 
 const eventListingCaches = new Map<string, EventListingCache>()
@@ -3811,6 +3875,7 @@ export async function readEventListing(
     drafts?: boolean
     now?: number | Date
     forceFresh?: boolean
+    draftWindow?: DraftWindow
   }> = {},
 ): Promise<EventListingResult> {
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
@@ -3818,6 +3883,23 @@ export async function readEventListing(
   const cache = eventListingCaches.get(cacheKey)
   const nowMs =
     typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
+  const draftWindow = options.draftWindow ?? "7d"
+  const draftWindowChanged = cache !== undefined && cache.draftWindow !== draftWindow
+
+  const observe = async (qRefs: ReadonlyMap<string, string>, bRefs: ReadonlyMap<string, string>) =>
+    git.observe({
+      version: 1,
+      root: {
+        remote: await remoteUrl(git, config.target.remote),
+        targetRef: `refs/heads/${config.target.branch}`,
+        targetOid,
+      },
+      checked: [],
+      fence: {
+        prefixes: ["refs/heads/", queuePrefix],
+        refs: [...qRefs, ...bRefs].map(([ref, oid]) => ({ ref, oid })),
+      },
+    })
 
   // 1. Fetch event refs first
   const queueRefs = await listRefs(queuePrefix, store)
@@ -3827,10 +3909,45 @@ export async function readEventListing(
 
   const headListingRecent = cache !== undefined && nowMs - cache.lastHeadListingAt < 60_000
 
+  const firstUndatedHead = cache?.reading.drafts.undated[0]?.head
+  const undatedDraftsFetched =
+    firstUndatedHead !== undefined &&
+    (await git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], `${firstUndatedHead}\n`).then(
+      (output) => output.trim().endsWith(" commit"),
+      () => false,
+    ))
+
+  let openBranchDeleted = false
+  if (cache !== undefined && eventRefsUnchanged && headListingRecent) {
+    for (const [branch, change] of cache.reading.changes) {
+      if (isOpen(change.status)) {
+        const openedAt = change.since?.getTime() ?? 0
+        if (nowMs - openedAt >= 60_000) {
+          const branchRef = `refs/heads/${branch}`
+          if (cache.branchRefs.has(branchRef)) {
+            const current = await listRefs(branchRef, store)
+            if (current.size === 0) {
+              openBranchDeleted = true
+              break
+            }
+          }
+        }
+      }
+    }
+  }
+
   // 2. An unchanged event-ref fetch reuses the last round if head listing is recent
-  if (options?.forceFresh !== true && eventRefsUnchanged && headListingRecent) {
+  if (
+    options?.forceFresh !== true &&
+    eventRefsUnchanged &&
+    headListingRecent &&
+    !openBranchDeleted &&
+    !undatedDraftsFetched &&
+    !draftWindowChanged
+  ) {
     return {
       ...cache.reading,
+      observation: await observe(cache.queueRefs, cache.branchRefs),
       journals: readJournals(join(workdir, "logs")),
     }
   }
@@ -3838,7 +3955,13 @@ export async function readEventListing(
   // 3. Head listing: runs at most once a minute, or when event-ref fetch reports a change
   let branchRefs: ReadonlyMap<string, string>
   let headListingAt: number
-  if (options?.forceFresh === true || !eventRefsUnchanged || !headListingRecent) {
+  if (
+    options?.forceFresh === true ||
+    !eventRefsUnchanged ||
+    !headListingRecent ||
+    openBranchDeleted ||
+    draftWindowChanged
+  ) {
     branchRefs = await listRefs("refs/heads/", store)
     headListingAt = nowMs
   } else {
@@ -3847,10 +3970,18 @@ export async function readEventListing(
   }
 
   // If event refs were unchanged and branch heads also didn't change:
-  if (options?.forceFresh !== true && eventRefsUnchanged && areRefMapsEqual(cache?.branchRefs, branchRefs)) {
+  if (
+    options?.forceFresh !== true &&
+    eventRefsUnchanged &&
+    !openBranchDeleted &&
+    areRefMapsEqual(cache?.branchRefs, branchRefs) &&
+    !undatedDraftsFetched &&
+    !draftWindowChanged
+  ) {
     cache.lastHeadListingAt = headListingAt
     return {
       ...cache.reading,
+      observation: await observe(cache.queueRefs, branchRefs),
       journals: readJournals(join(workdir, "logs")),
     }
   }
@@ -3868,7 +3999,10 @@ export async function readEventListing(
     { allHistory: options.directHistory },
   )
   assertEventListingFence(config.target.branch, queue, changes, queueRefs, invalid)
+  const listNow =
+    options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
   const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
+  const since = draftWindow === "all" ? undefined : new Date(listNow.getTime() - 7 * 24 * 60 * 60 * 1000)
   const drafts = await readDrafts(
     git,
     withoutIgnoredDraftHeads(
@@ -3880,13 +4014,27 @@ export async function readEventListing(
       },
       config.ignore,
     ),
-    { targetSha: targetOid },
+    { targetSha: targetOid, since },
   )
   const segmentsByBranch = new Map(
-    [...histories].map(
-      ([branch, history]) =>
-        [branch, enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), repo)] as const,
-    ),
+    [...histories].map(([branch, history]) => {
+      const segments = enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), repo)
+      const lastSegment = segments.at(-1)
+      if (lastSegment !== undefined && isOpen(lastSegment.state.status)) {
+        const openedAt = lastSegment.state.since?.getTime() ?? 0
+        if (!heads.has(branch) && listNow.getTime() - openedAt >= 60_000) {
+          const cancelledState: EventChange = {
+            ...lastSegment.state,
+            status: "cancelled",
+            reason: "deleted",
+            endedAt: lastSegment.state.at ?? lastSegment.state.since ?? listNow,
+          }
+          changes.set(branch, cancelledState)
+          return [branch, [...segments.slice(0, -1), { ...lastSegment, state: cancelledState }]] as const
+        }
+      }
+      return [branch, segments] as const
+    }),
   )
   const segmentStates = new Map(
     [...segmentsByBranch].map(([branch, segments]) => [branch, segments.map((segment) => segment.state)] as const),
@@ -3909,9 +4057,8 @@ export async function readEventListing(
         ] as const,
     ),
   )
-  const listNow =
-    options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
-  const selected = eventListRows(segmentStates, [...drafts.dated, ...drafts.undated], {
+  const draftsToInclude = draftWindow === "all" ? [...drafts.dated, ...drafts.undated] : drafts.dated
+  const selected = eventListRows(segmentStates, draftsToInclude, {
     all: options.all,
     drafts: options.drafts,
     now: listNow,
@@ -3958,19 +4105,7 @@ export async function readEventListing(
   )
   const all = titled([...selected.table, ...invalidRows, ...directRows])
   const document = titled([...selected.document, ...invalidRows, ...directRows])
-  const observation = await git.observe({
-    version: 1,
-    root: {
-      remote: await remoteUrl(git, config.target.remote),
-      targetRef: `refs/heads/${config.target.branch}`,
-      targetOid,
-    },
-    checked: [],
-    fence: {
-      prefixes: ["refs/heads/", queuePrefix],
-      refs: [...queueRefs, ...branchRefs].map(([ref, oid]) => ({ ref, oid })),
-    },
-  })
+  const observation = await observe(queueRefs, branchRefs)
   const operational = await readEventOps(store, git, config.target.branch, targetOid)
   if (operational.queue.tip !== queue.tip) {
     throw new Error(
@@ -3998,6 +4133,7 @@ export async function readEventListing(
     branchRefs,
     lastHeadListingAt: headListingAt,
     reading,
+    draftWindow,
   })
 
   return reading
