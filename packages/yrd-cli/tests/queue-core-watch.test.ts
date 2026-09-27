@@ -689,6 +689,16 @@ describe("what a watch says it looked at", () => {
     // log of its own, so a reader that borrowed the first run's artifact for the
     // newest row, or the newest for the old one, is caught either way.
     writeFileSync(control, "printf 'SECOND_RUN_MISSING\\n'\nexit 127\n")
+    // An event queue holds a stuck change until an explicit resume (25041, @cto 7b9c3fc5), so the
+    // operator resumes before the run that judges it again.
+    expect(
+      await coreQueueCommand(
+        w.work,
+        capture(w.work).io,
+        { by: "@chief", command: "resume", reason: "judge again" },
+        { workdir: w.workdir },
+      ),
+    ).toBe(0)
     const second = capture(w.work)
     expect(await coreQueueCommand(w.work, second.io, { command: "run" }, runOptions)).toBe(2)
     const secondId = (JSON.parse(second.stdout()) as { run: string }).run
@@ -725,7 +735,9 @@ describe("what a watch says it looked at", () => {
     // any row now, and while the line is stopped it names the change it
     // stopped at, so it is told apart by its own word and not by its shape.
     const pageLines = plain.stdout().split("\n")
-    const stuckIndex = pageLines.findIndex((line) => line.includes(`stuck=${String(original.reason)}`))
+    // An event row's reason line is the fold's own reason (25041), not the legacy incident code, so the
+    // change's row is found by its branch and state.
+    const stuckIndex = pageLines.findIndex((line) => line.includes("task/history") && line.includes("◌ stuck"))
     expect(stuckIndex, plain.stdout()).toBeGreaterThanOrEqual(0)
     const changeLine = pageLines[stuckIndex]?.includes("task/history")
       ? pageLines[stuckIndex]

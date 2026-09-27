@@ -246,6 +246,42 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   }
 }
 
+/**
+ * The run journal's overlay on one change's CURRENT row, as the legacy list
+ * joined it: the newest run since the segment opened names the row, and the check running now is live
+ * while the change still holds its place in line (24972). It never rederives
+ * the state; an event row without a journal on this machine is unchanged.
+ */
+export function journalOverlay<Status extends string>(row: Row<Status>, journals: Journals | undefined): Row<Status> {
+  // Only runs of THIS segment: a change re-submitted at the same head must not
+  // borrow the run before its opening (25716 P4).
+  const since = row.since?.getTime()
+  const runs = (journals?.runs.get(journalKey(row.branch, row.head)) ?? []).filter(
+    (run) => since === undefined || run.startedAt.getTime() >= since,
+  )
+  const latest = runs[0]
+  if (latest === undefined) return row
+  const running = runs.find((run) => run.running !== undefined)?.running
+  const live = stillInLine(row.state) ? running : undefined
+  const startedAt = latest.checks[0]?.startedAt
+  return {
+    ...row,
+    ...(row.run === undefined ? { run: latest.id } : {}),
+    ...(row.startedAt === undefined && startedAt !== undefined ? { startedAt } : {}),
+    ...(live === undefined
+      ? {}
+      : {
+          live: {
+            run: runs.find((run) => run.running === live)?.id ?? latest.id,
+            check: live.name,
+            phase: live.phase,
+            since: live.startedAt,
+            ...(live.log === undefined ? {} : { log: live.log }),
+          },
+        }),
+  }
+}
+
 /** An event change holds a place while its folded status is open. */
 function stillInLine(state: Row["state"]): boolean {
   return isChangeStatus(state) && isOpen(state)

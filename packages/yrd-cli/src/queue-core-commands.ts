@@ -43,6 +43,7 @@ import {
   pauseLine,
   eventDirectMergeCommits,
   eventListRows,
+  journalOverlay,
   eventRows,
   enumerateChangeSegments,
   createEventStore,
@@ -164,7 +165,7 @@ import type { DraftWindow, WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot, WatchSource } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
-import { STATE_WORDS, clock, diagnosticLines, firstLine, mediaDuration, timingLine } from "./watch-format.ts"
+import { CHECK_GLYPH, STATE_WORDS, clock, diagnosticLines, firstLine, mediaDuration, timingLine } from "./watch-format.ts"
 import { readRunnerFacts, readRunnerService, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
@@ -2745,6 +2746,17 @@ export async function coreQueueCommand(
                 .map((row) => ({ ...row, queue: config.target.branch, events: [] }))
             : []
         const histories = [...changeHistories, ...directHistories]
+        // The human page says each change's checks (24212); `--json` keeps its document unchanged.
+        const checkViews =
+          options.json === true
+            ? []
+            : await Promise.all(
+                histories.map(({ events, ...row }) =>
+                  row.state === "direct" || row.state === "invalid"
+                    ? undefined
+                    : eventShowChecks(git, config, journalOverlay(row, reading.journals), reading.journals, events),
+                ),
+              )
         const scope =
           request.all === true
             ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
@@ -2768,6 +2780,8 @@ export async function coreQueueCommand(
                     rowLine({ row }),
                     ...(row.diagnostic === undefined ? [] : [`  diagnostic: ${row.diagnostic}`]),
                     `  queue: ${config.target.branch}`,
+                    ...(checkViews[index]?.note === undefined ? [] : [`  (${checkViews[index]?.note})`]),
+                    ...(checkViews[index]?.checks ?? []).flatMap(checkLines),
                     ...events.map((event) => {
                       const at = event.props.find(([key]) => key === "Time")?.[1]
                       const reason = event.props.find(([key]) => key === "Reason")?.[1]
@@ -3763,6 +3777,64 @@ function endingOf(row: Row): "merged" | "failed" | "stuck" | "open" {
   return row.state === "merged" || row.state === "failed" || row.state === "stuck" ? row.state : "open"
 }
 
+/**
+ * The checks one event segment was judged by, as `show` prints them: the
+ * declaration at the segment's `Base:`, joined to its `Check:` props, and,
+ * while the change is undecided, to what this machine's journal says is
+ * running now (24212). The same derivation the watch's detail opens.
+ */
+async function eventShowChecks(
+  git: Git,
+  config: QueueConfig,
+  row: Row,
+  journals: Journals,
+  events: readonly Pick<Event, "props">[],
+): Promise<Readonly<{ checks: readonly CheckView[]; note?: string }>> {
+  const values = (key: string): readonly string[] =>
+    events.flatMap((event) => event.props.filter(([name]) => name === key).map(([, value]) => value))
+  const declared = await declarationFor(git, config, values("Base").at(-1) ?? row.base)
+  const decided = row.state === "merged" || row.state === "failed" || row.state === "stuck" || row.state === "cancelled"
+  const checks = checksOf(
+    values("Check"),
+    endingOf(row),
+    declared.checks,
+    row.live === undefined
+      ? undefined
+      : { name: row.live.check, ...(row.live.log === undefined ? {} : { log: row.live.log }) },
+    decided ? undefined : journalFor({ row }, journals)?.checks,
+  )
+  return { checks, ...(declared.note === undefined ? {} : { note: declared.note }) }
+}
+
+/** One check, and under it the command that produced it and the log it wrote. */
+function checkLines(check: CheckView): readonly string[] {
+  const exit = check.result?.exit === undefined ? "" : ` exit=${check.result.exit}`
+  const ms = check.result?.ms === undefined ? "" : ` ${mediaDuration(check.result.ms)}`
+  // A running journal names the eventual artifact before runCheck writes it.
+  // Reuse the watch's availability reading so show does not advertise it early.
+  const log =
+    (check.state === "running" ? readOutput(check).why : undefined) ??
+    (check.log === undefined ? undefined : `log ${check.log}`)
+  const state =
+    check.state === "not-run"
+      ? " NOT RUN"
+      : check.state === "off"
+        ? " off"
+        : check.state === "running"
+          ? " running"
+          : check.state === "unmeasured"
+            ? " unmeasured — no result recorded"
+            : ""
+  return [
+    `  ${CHECK_GLYPH[check.state]} ${check.name}${state}${exit}${ms}`,
+    // The command above its output, which here is the path the output went to
+    // (S2.21). A check the declaration no longer names has no command to show,
+    // and says that rather than showing an empty one.
+    check.spec === undefined ? "      (the declaration does not name this check)" : `      $ ${check.spec.run}`,
+    ...(log === undefined ? [] : [`      ${log}`]),
+  ]
+}
+
 function areRefMapsEqual(
   a: ReadonlyMap<string, string> | undefined,
   b: ReadonlyMap<string, string> | undefined,
@@ -3930,10 +4002,12 @@ export async function readEventListing(
   )
   const listNow =
     options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
+  const listJournals = readJournals(join(workdir, "logs"))
   const selected = eventListRows(segmentStates, [...drafts.dated, ...drafts.undated], {
     all: options.all,
     drafts: options.drafts,
     now: listNow,
+    journals: listJournals,
   })
   const invalidRows: Row[] = [...invalid].map(([branch, defect]) => ({
     branch,
@@ -4016,7 +4090,7 @@ export async function readEventListing(
     all,
     document,
     history: titledHistory,
-    journals: readJournals(join(workdir, "logs")),
+    journals: listJournals,
     drafts: window === undefined ? drafts : { dated: windowDated, undated: drafts.undated },
     ...(window === "7d" ? { olderDrafts: folded.older } : {}),
     pause: operational.stop,

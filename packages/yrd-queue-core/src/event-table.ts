@@ -1,7 +1,8 @@
 /** Event-chain changes in the shared table shape. Status comes only from the event fold. */
 import type { ChangeStatus, EventChange } from "./events.ts"
 import type { Draft } from "./drafts.ts"
-import { clocks, type Row } from "./table.ts"
+import type { Journals } from "./log.ts"
+import { clocks, journalOverlay, type Row } from "./table.ts"
 
 function noticeOutcome(
   branch: string,
@@ -165,7 +166,7 @@ function foldEqualEndings(
 export function eventListRows(
   histories: ReadonlyMap<string, readonly EventChange[]>,
   drafts: readonly Draft[],
-  options: Readonly<{ now?: Date; all?: boolean; drafts?: boolean }> = {},
+  options: Readonly<{ now?: Date; all?: boolean; drafts?: boolean; journals?: Journals }> = {},
 ): Readonly<{ table: readonly Row<ChangeStatus>[]; document: readonly Row<ChangeStatus>[] }> {
   const now = options.now ?? new Date()
   const folded = new Map([...histories].map(([branch, segments]) => [branch, foldEqualEndings(segments)] as const))
@@ -181,7 +182,9 @@ export function eventListRows(
   const active = eventRows(current).map((row) => {
     const duplicates =
       row.format === "event" ? duplicatesOf(row.branch, (folded.get(row.branch)?.length ?? 0) - 1) : undefined
-    return duplicates === undefined ? row : { ...row, duplicates }
+    // The current segment carries this machine's journal overlay; earlier segments keep their own ending.
+    const joined = journalOverlay(row, options.journals)
+    return duplicates === undefined ? joined : { ...joined, duplicates }
   })
   const previous = [...folded].flatMap(([branch, segments]) =>
     segments.slice(0, -1).map(({ segment, duplicates }) => {
