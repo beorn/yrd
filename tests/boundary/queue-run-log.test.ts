@@ -133,12 +133,17 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     expect(opened.target, run.report).toBe("main")
     expect(opened.at, run.report).toEqual(expect.any(String))
 
-    // change — one per change seen, with what the queue run did with it.
+    // change — the event round records admission to this round, then its decision.
     const changes = ofKind(records, "change")
-    expect(changes, run.report).toHaveLength(1)
-    expect(changes[0]?.branch, run.report).toBe(branch)
-    expect(changes[0]?.head, run.report).toBe(headSha)
-    expect(changes[0]?.decision, run.report).toBe("merged")
+    expect(changes, run.report).toHaveLength(2)
+    for (const change of changes) {
+      expect(change.branch, run.report).toBe(branch)
+      expect(change.head, run.report).toBe(headSha)
+    }
+    expect(
+      changes.map((change) => change.decision),
+      run.report,
+    ).toEqual([undefined, "merged"])
 
     // check — the start row, then the end row with duration; the check's own
     // log on both.
@@ -174,7 +179,8 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     expect(merged.branch, run.report).toBe(branch)
     expect(merged.head, run.report).toBe(headSha)
     expect(merged.commit, run.report).toEqual(expect.any(String))
-    expect(merged.tip, run.report).toEqual(expect.any(String))
+    expect(merged.ref, run.report).toEqual(expect.any(String))
+    expect(merged.marker, run.report).toEqual(expect.any(String))
 
     // message — one, to the submitter, saying the change merged.
     const message = theOne(records, "message")
@@ -416,12 +422,13 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       ).toEqual([
         theOne(records, "run"),
         theOne(records, "queue"),
-        expect.objectContaining({ kind: "observation", subject: "branch-list-omissions", count: 0, branches: [] }),
         expect.objectContaining({
           kind: "observation",
           contract: "native",
           message: expect.stringContaining("native Git observes the root queue only"),
         }),
+        expect.objectContaining({ kind: "observation", subject: "branch-list-omissions", count: 0, branches: [] }),
+        expect.objectContaining({ kind: "observation", subject: "line", waiting: 0 }),
       ])
       expect(theOne(records, "queue"), run.report).toMatchObject({ queue: `${origin}#main` })
       const invocations = ofKind(records, "git")
@@ -591,7 +598,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       stderr.split("\n").filter((row) => /^\d\d:\d\d:\d\d /u.test(row))
 
     const plumbing = (rows: readonly string[]): readonly string[] =>
-      rows.filter((row) => /^\d\d:\d\d:\d\d [A-Z]+ (?:yrd:submodules\b|yrd:release\b)/u.test(row))
+      rows.filter((row) => /^\d\d:\d\d:\d\d [A-Z]+ (?:yrd:submodules\b|yrd:release\b|yrd:queue:git\b)/u.test(row))
 
     const mergingAt = async (level: string): Promise<QueueRunResult> => {
       const { repo } = await boundaryRepository({ exit: 0, hooks: true })

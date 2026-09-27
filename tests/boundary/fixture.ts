@@ -18,6 +18,7 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { runYrdProcess } from "../../packages/yrd-cli/src/cli.ts"
+import { birthEventQueue } from "../../packages/yrd-cli/tests/support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../../packages/yrd-cli/src/types.ts"
 import { installDeclaredYrdEntry } from "../../packages/yrd-cli/tests/support/declared-yrd-entry.ts"
 
@@ -658,6 +659,7 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd", ...extra.map(([path]) => path))
   await git(repo, "commit", "-qm", "main")
   await git(repo, "push", "-q", "-u", "origin", "main")
+  await birthEventQueue(repo)
   return { repo, origin, checkLog, hookLog }
 }
 

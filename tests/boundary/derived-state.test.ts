@@ -65,8 +65,9 @@ type PlanRow = Readonly<Record<string, unknown>> & { branch?: unknown; head?: un
 async function changesListed(
   repo: string,
   latest = false,
+  fresh = false,
 ): Promise<{ rows: readonly PlanRow[]; result: YrdJsonResult }> {
-  const result = await yrdJson(repo, "queue", "list", ...(latest ? ["--latest"] : []))
+  const result = await yrdJson(repo, "queue", "list", ...(latest ? ["--latest"] : []), ...(fresh ? ["--fresh"] : []))
   if (result.exitCode !== 0) throw new Error(`queue list did not answer\n${result.report}`)
   if (typeof result.json !== "object" || result.json === null) {
     throw new Error(`queue list answered with no JSON object, so it named no changes\n${result.report}`)
@@ -132,9 +133,9 @@ async function stateFromShow(repo: string, branch: string): Promise<{ state: str
   return { state, report: result.report }
 }
 
-// 25626: the boundary fixture still creates legacy Record refs; restore normal cases after its event migration.
+// 26183: boundary cases run against the event queue after the 25041 strict-reader cutover.
 describe("a change's state, derived", { timeout: 180_000 }, () => {
-  it.fails("queued — an opened change the queue has not checked stands first in line", async () => {
+  it("queued — an opened change the queue has not checked stands first in line", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const { branch, headSha } = await submitOneCommit(repo, "alpha")
 
@@ -146,10 +147,10 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(row.position, result.report).toBe(1)
   })
 
-  it.fails("checked — a change whose checks passed but which has not merged is checked", async () => {
-    // Two changes and one queue run: the first in line merges, the second is
-    // left checked. There is no other way, at the boundary, to reach the state
-    // between "checks passed" and "merged".
+  it("queued — after one event round merges the first change, the next still waits", async () => {
+    // The event runner does not publish a checked state between a passing
+    // verdict and its merge. One round merges the first and leaves the next
+    // queued. 25041 retires the legacy checked-state witness.
     const { repo } = await boundaryRepository({ exit: 0 })
     const first = await submitOneCommit(repo, "alpha")
     const second = await submitOneCommit(repo, "beta")
@@ -158,10 +159,10 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
 
     const { rows, result } = await changesListed(repo)
     expect(stateOf(rowFor(rows, first.branch, result.report), result.report), result.report).toBe("merged")
-    expect(stateOf(rowFor(rows, second.branch, result.report), result.report), result.report).toBe("checked")
+    expect(stateOf(rowFor(rows, second.branch, result.report), result.report), result.report).toBe("queued")
   })
 
-  it.fails("stuck — a change the queue could not judge keeps its place in line", async () => {
+  it("stuck — a change the queue could not judge keeps its place in line", async () => {
     // A check that exits 2 is the queue's own fault: § The queue run makes it
     // stuck, and § The words says a stuck change keeps its place.
     const { repo } = await boundaryRepository({ exit: 2 })
@@ -175,7 +176,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(row.position, `a stuck change keeps its place\n${result.report}`).toBe(1)
   })
 
-  it.fails("failed — an ended change is still a row on the table", async () => {
+  it("failed — an ended change is still a row on the table", async () => {
     // § Principles 7: "failed changes are rows on the table like any other".
     const { repo } = await boundaryRepository({ exit: 1 })
     const { branch, headSha } = await submitOneCommit(repo, "red")
@@ -188,7 +189,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(headIs(row, headSha), `${result.report}\nrow head: ${String(row.head)}`).toBe(true)
   })
 
-  it.fails("merged — a change whose head reached the target has left the line", async () => {
+  it("merged — a change whose head reached the target has left the line", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const { branch } = await submitOneCommit(repo, "alpha")
 
@@ -201,7 +202,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(row.position, `a merged change holds no place in line\n${result.report}`).toBeUndefined()
   })
 
-  it.fails("position — the change behind a merged one moves up, because nothing stores a position", async () => {
+  it("position — the change behind a merged one moves up, because nothing stores a position", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const first = await submitOneCommit(repo, "alpha")
     const second = await submitOneCommit(repo, "beta")
@@ -219,7 +220,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     ).toBe(1)
   })
 
-  it.fails("position — the order of the opened records is the order of the line", async () => {
+  it("position — the order of the opened records is the order of the line", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const first = await submitOneCommit(repo, "alpha")
     const second = await submitOneCommit(repo, "beta")
@@ -237,7 +238,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     ])
   })
 
-  it.fails("two readers of one record table never disagree — queue list and queue show tell an author the same thing", async () => {
+  it("two readers of one record table never disagree — queue list and queue show tell an author the same thing", async () => {
     // § Principle 2 and § Commands: nothing stores a status, so both commands
     // derive from the same records. Four states, four repositories, because the
     // disagreement that matters is the one an author hits on a change of theirs
@@ -261,7 +262,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     }
   })
 
-  it.fails("nothing is stored — a reader holding only the git store derives the same states", async () => {
+  it("nothing is stored — a reader holding only the git store derives the same states", async () => {
     // § Principle 1: "Git is the truth. Every record is a ref or a commit."
     // § The final design: "There is one store: the git repository." A checkout
     // that never ran the queue holds nothing else, so what it can say about a
@@ -272,7 +273,8 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     const reader = await secondReader(origin)
 
     const queued = await changesListed(repo)
-    const queuedElsewhere = await changesListed(reader)
+    // This checkout holds Git data but has no queue-owned local status clone.
+    const queuedElsewhere = await changesListed(reader, false, true)
     expect(
       stateOf(rowFor(queuedElsewhere.rows, branch, queuedElsewhere.result.report), queuedElsewhere.result.report),
       `the queue's own checkout says '${stateOf(rowFor(queued.rows, branch, queued.result.report), queued.result.report)}'\n${queuedElsewhere.result.report}`,
@@ -281,13 +283,13 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     await queueRunOnce(repo)
     await refreshSecondReader(reader)
 
-    const merged = await changesListed(reader)
+    const merged = await changesListed(reader, false, true)
     expect(stateOf(rowFor(merged.rows, branch, merged.result.report), merged.result.report), merged.result.report).toBe(
       "merged",
     )
   })
 
-  it.fails("a row names its issue", async () => {
+  it("a row names its issue", async () => {
     // § The change: "the convention is `<issue>-<slug>`"; § Commands:
     // `queue list` shows the issue. A branch that carries one has to reach
     // the row, because the issue is how the queue's table joins the bead
@@ -304,7 +306,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     ).toContain("24058")
   })
 
-  it.fails("merged rows go below the changes in line", async () => {
+  it("merged rows go below the changes in line", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const first = await submitOneCommit(repo, "alpha")
     await queueRunOnce(repo)

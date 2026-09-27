@@ -37,7 +37,7 @@
  */
 
 import { hyperlink } from "@silvery/ansi"
-import { Box, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
+import { Box, ScrollArea, Tab, TabList, TabPanel, Tabs, Text, useInput, useScrollController } from "silvery"
 import type { CheckView, JournalCommand, JournalRun, JournalStep, Row } from "@yrd/queue-core"
 import type { Event } from "@yrd/queue-core"
 import {
@@ -146,6 +146,11 @@ export function WatchDetail({
   /** The git commands' output read so far, keyed by {@link commandKey}; the pane asks for a stage's when its tab opens. */
   outputs?: ReadonlyMap<string, DiffText>
 }) {
+  const scroll = useScrollController()
+  useInput((_input, key) => {
+    if (key.pageDown) scroll.scrollBy(Math.max(1, scroll.viewportHeight - 2))
+    if (key.pageUp) scroll.scrollBy(-Math.max(1, scroll.viewportHeight - 2))
+  })
   if (detail === undefined) {
     const changeName = typeof change === "object" ? changeId(change) : change
     if (changeName !== undefined) {
@@ -167,65 +172,65 @@ export function WatchDetail({
   const selectedSubIndex = resolved.selectedSubIndex
   const migratedWithoutChecks = isMigratedWithoutCheckDetail(detail)
   return (
-    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
-      {/* The status box at the VERY top, no identity row above it (items 1, 23). */}
-      <RunStatusBox run={detail.run} joinedRun={joinedRun} />
-      {/* The change list under it (items 2, 24): one row per change in the run. */}
-      <ChangeList members={[row]} />
-      <Box height={1} flexShrink={0} />
-      {row.diagnostic === undefined ? null : (
-        <Text color="$fg-error" wrap="wrap">
-          {row.diagnostic}
-        </Text>
-      )}
-      {migratedWithoutChecks ? (
-        <Text color="$fg-warning" wrap="wrap">
-          Migrated change has no check-step detail; open Checking for the retained record and old check logs.
-        </Text>
-      ) : detail.note === undefined ? null : (
-        <Text color="$fg-warning" wrap="wrap">
-          {detail.note}
-        </Text>
-      )}
-      {detail.checks.length === 0 && !migratedWithoutChecks ? (
-        <Text color="$fg-muted">no check-step detail is recorded for this change</Text>
-      ) : null}
-      <Tabs
-        variant="filled"
-        value={tab}
-        onChange={(value: string) => {
-          onSelect?.(value)
-        }}
-      >
-        <TabList flexWrap="wrap">
-          <Tab key={CHANGES_TAB} value={CHANGES_TAB}>
-            Timeline{(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? "" : " ⚠"}
-            {"\n"}
-            <Text color="$fg-muted">{cutCounter(detail)}</Text>
-          </Tab>
-          {STAGE_TABS.map((stage) => (
-            <Tab key={stage} value={stage}>
-              <StageTabLabel detail={detail} stage={stage} />
+    <ScrollArea controller={scroll}>
+      <Box flexDirection="column" minWidth={0} paddingX={1}>
+        {/* The status box at the VERY top, no identity row above it (items 1, 23). */}
+        <RunStatusBox run={detail.run} joinedRun={joinedRun} />
+        {/* The change list under it (items 2, 24): one row per change in the run. */}
+        <ChangeList members={[row]} />
+        <Box height={1} flexShrink={0} />
+        {row.diagnostic === undefined ? null : (
+          <Text color="$fg-error" wrap="wrap">
+            {row.diagnostic}
+          </Text>
+        )}
+        {migratedWithoutChecks ? (
+          <Text color="$fg-warning" wrap="wrap">
+            Migrated change has no check-step detail; open Checking for the retained record and old check logs.
+          </Text>
+        ) : detail.note === undefined ? null : (
+          <Text color="$fg-warning" wrap="wrap">
+            {detail.note}
+          </Text>
+        )}
+        {detail.checks.length === 0 && !migratedWithoutChecks ? (
+          <Text color="$fg-muted">no check-step detail is recorded for this change</Text>
+        ) : null}
+        <Tabs
+          variant="filled"
+          value={tab}
+          onChange={(value: string) => {
+            onSelect?.(value)
+          }}
+        >
+          <TabList flexWrap="wrap">
+            <Tab key={CHANGES_TAB} value={CHANGES_TAB}>
+              Timeline{(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? "" : " ⚠"}
+              {"\n"}
+              <Text color="$fg-muted">{cutCounter(detail)}</Text>
             </Tab>
-          ))}
-        </TabList>
-        <TabPanel key={CHANGES_TAB} value={CHANGES_TAB}>
-          <ScrollArea>
+            {STAGE_TABS.map((stage) => (
+              <Tab key={stage} value={stage}>
+                <StageTabLabel detail={detail} stage={stage} />
+              </Tab>
+            ))}
+          </TabList>
+          <TabPanel key={CHANGES_TAB} value={CHANGES_TAB}>
             {(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? null : (
               <Text color="$fg-warning" wrap="wrap">
                 {diagnosticLines(row, detail.journal).join("\n")}
               </Text>
             )}
             <ChangeBox detail={detail} diffOpen={diffOpen} diff={diff} onToggleDiff={onToggleDiff} />
-          </ScrollArea>
-        </TabPanel>
-        {STAGE_TABS.map((stage) => (
-          <TabPanel key={stage} value={stage}>
-            <StageTabPanel detail={detail} stage={stage} outputs={outputs} selectedSubIndex={selectedSubIndex} />
           </TabPanel>
-        ))}
-      </Tabs>
-    </Box>
+          {STAGE_TABS.map((stage) => (
+            <TabPanel key={stage} value={stage}>
+              <StageTabPanel detail={detail} stage={stage} outputs={outputs} selectedSubIndex={selectedSubIndex} />
+            </TabPanel>
+          ))}
+        </Tabs>
+      </Box>
+    </ScrollArea>
   )
 }
 
@@ -463,21 +468,19 @@ function StageTabPanel({
   const skipped = isStageSkipped(detail, stage)
   if (skipped) {
     return (
-      <ScrollArea>
-        <TitledBox borderColor="$border-muted">
-          <Text color="$fg-muted" bold>
-            {stage.toUpperCase()} — NOT RUN
+      <TitledBox borderColor="$border-muted">
+        <Text color="$fg-muted" bold>
+          {stage.toUpperCase()} — NOT RUN
+        </Text>
+        <Box height={1} flexShrink={0} />
+        {stage === "checking" && isMigratedWithoutCheckDetail(detail) ? (
+          <Text color="$fg-warning" wrap="wrap">
+            {detail.note}
           </Text>
-          <Box height={1} flexShrink={0} />
-          {stage === "checking" && isMigratedWithoutCheckDetail(detail) ? (
-            <Text color="$fg-warning" wrap="wrap">
-              {detail.note}
-            </Text>
-          ) : (
-            <Text color="$fg-muted">{stageSkipReason(detail, stage)}</Text>
-          )}
-        </TitledBox>
-      </ScrollArea>
+        ) : (
+          <Text color="$fg-muted">{stageSkipReason(detail, stage)}</Text>
+        )}
+      </TitledBox>
     )
   }
 
@@ -485,14 +488,12 @@ function StageTabPanel({
   const borderColor = CHECK_COLOR[info.state]
 
   return (
-    <ScrollArea>
-      <TitledBox borderColor={borderColor} titleRight={stage}>
-        {stage === "provisioning" && <ProvisioningStageBody detail={detail} outputs={outputs} />}
-        {stage === "checking" && <CheckingStageBody detail={detail} selectedSubIndex={selectedSubIndex} />}
-        {stage === "merging" && <MergingStageBody detail={detail} outputs={outputs} />}
-        {stage === "deprovisioning" && <DeprovisioningStageBody detail={detail} outputs={outputs} />}
-      </TitledBox>
-    </ScrollArea>
+    <TitledBox borderColor={borderColor} titleRight={stage}>
+      {stage === "provisioning" && <ProvisioningStageBody detail={detail} outputs={outputs} />}
+      {stage === "checking" && <CheckingStageBody detail={detail} selectedSubIndex={selectedSubIndex} />}
+      {stage === "merging" && <MergingStageBody detail={detail} outputs={outputs} />}
+      {stage === "deprovisioning" && <DeprovisioningStageBody detail={detail} outputs={outputs} />}
+    </TitledBox>
   )
 }
 
@@ -1092,7 +1093,14 @@ function ChangeBox({
     ...(detail.commits === undefined ? {} : { commits: detail.commits }),
     ...(detail.run.id === undefined ? {} : { runId: detail.run.id }),
   })
-  const keyWidth = metadataKeyWidth(groups)
+  const compositions = detail.journal?.compositions ?? []
+  const compositionGroups = compositions.map((composition) => [
+    { key: "PATH", value: composition.path },
+    { key: "BASE", value: composition.base },
+    { key: "MAIN", value: composition.from },
+    { key: "COMPOSED", value: composition.merged },
+  ])
+  const keyWidth = metadataKeyWidth([...groups, ...compositionGroups])
   const body = detail.body === undefined ? "" : withoutGitConflictsBlock(detail.body).trim()
   return (
     <TitledBox>
@@ -1143,6 +1151,27 @@ function ChangeBox({
           ))}
         </Box>
       ))}
+      {compositionGroups.length === 0 ? null : (
+        <Box flexDirection="column" minWidth={0}>
+          <Box height={1} flexShrink={0} />
+          <Text bold>Composed</Text>
+          {compositionGroups.map((group, index) => (
+            <Box key={String(index)} flexDirection="column" minWidth={0}>
+              {group.map((fact) => (
+                <Box key={fact.key} flexDirection="row" minWidth={0}>
+                  <Text color="$fg-muted" flexShrink={0}>
+                    {fact.key.padEnd(keyWidth)}
+                  </Text>
+                  <Text wrap="truncate" minWidth={0}>
+                    {fact.value}
+                  </Text>
+                </Box>
+              ))}
+              {index === compositionGroups.length - 1 ? null : <Box height={1} flexShrink={0} />}
+            </Box>
+          ))}
+        </Box>
+      )}
       {detail.gitAbsent === undefined ? null : (
         <>
           <Box height={1} flexShrink={0} />
@@ -1264,9 +1293,7 @@ function CheckBody({ check }: { check: CheckPanel }) {
           </Text>
         </MarkerRow>
       ) : (
-        <ScrollArea>
-          <Text>{check.output}</Text>
-        </ScrollArea>
+        <Text>{check.output}</Text>
       )}
     </Box>
   )

@@ -1,6 +1,6 @@
 /**
  * @failure An explicit round cannot process admitted work while paused, clears
- *          the pause, or loses its reason in the run log.
+ *          the event pause, or loses its reason in the queue reading.
  * @level   l3
  * @consumer explicit queue run under frozen automatic admission
  */
@@ -30,11 +30,8 @@ describe("an explicit round keeps its pause", () => {
     expect(JSON.parse(run.stdout), run.report).not.toHaveProperty("garage")
     const { records } = await logOfQueueRun(run)
     expect(records, run.report).toContainEqual(expect.objectContaining({ kind: "run" }))
-    expect(records, run.report).toContainEqual(
-      expect.objectContaining({ kind: "pause", state: "paused", reason: "rebuilding the core", by: "@cto" }),
-    )
     for (const record of records) expect(record, run.report).not.toHaveProperty("garage")
-    const listed = await runYrd(repo, "queue", "list", "--json")
+    const listed = await runYrd(repo, "queue", "list", "--json", "--fresh")
     expect(listed.exitCode, listed.report).toBe(0)
     expect(JSON.parse(listed.stdout)).toMatchObject({
       pause: { kind: "paused", reason: "rebuilding the core", by: "@cto" },

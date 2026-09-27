@@ -12,13 +12,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { parseQueueAddress, queueDirectory } from "../../packages/yrd-cli/src/address.ts"
 import { git } from "./fixture.ts"
 import { installSelectedGit } from "../../packages/yrd-cli/tests/support/selected-git.ts"
-import {
-  createEventQueue,
-  createEventStore,
-  gitIn,
-  readConfig,
-  resolveGitSelection,
-} from "../../packages/yrd-queue-core/src/index.ts"
+import { birthEventQueue } from "../../packages/yrd-cli/tests/support/event-queue-birth.ts"
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..")
 const roots: string[] = []
@@ -78,6 +72,7 @@ describe("a queue started by address on a host with no checkout", () => {
     await git(author, "add", ".yrd.yml", "notify.sh")
     await git(author, "commit", "--quiet", "-m", "declare main queue")
     await git(author, "push", "--quiet", "origin", "main")
+    await birthEventQueue(author, "main", { localStore: false })
     await git(author, "checkout", "--quiet", "-b", "task/uri")
     writeFileSync(join(author, "change.txt"), "from uri\n")
     writeFileSync(join(author, "notify.sh"), "exit 42\n")
@@ -115,7 +110,7 @@ describe("a queue started by address on a host with no checkout", () => {
     ])
     expect(submitExit, `${submitStderr}\n${submitStdout}`).toBe(0)
     expect(await git(remote, "for-each-ref", "--format=%(refname)", "refs/yrd/main/")).toContain(
-      "refs/yrd/main/task/uri@",
+      "refs/yrd/main/changes/task/uri",
     )
 
     const address = `${remote}#main`
@@ -188,11 +183,11 @@ describe("a queue started by address on a host with no checkout", () => {
       .find((call) => call?.name === "push")
     expect(authorPush, "selected author Git saw no push verb").toBeDefined()
     expect(authorPush?.tail).toContain("--atomic")
-    // Three leases in one atomic push: the task branch, the queue ref, and the pause fence that serializes intake
-    // with queue pause and the format cutover (d7fda91051, 25646).
+    // Three leases in one atomic event push: task branch, change chain, and
+    // queue tip. The queue tip fences intake against a racing maintenance event.
     const leases = authorPush?.tail.filter((arg) => arg.startsWith("--force-with-lease=")) ?? []
     expect(leases).toHaveLength(3)
-    expect(leases.some((arg) => arg.startsWith("--force-with-lease=refs/yrd/main/pause:"))).toBe(true)
+    expect(leases.some((arg) => arg.startsWith("--force-with-lease=refs/yrd/main/queue:"))).toBe(true)
     expect(
       selectedCalls.some(
         ({ cwd, args }) =>
@@ -217,24 +212,14 @@ describe("a queue started by address on a host with no checkout", () => {
     const target = await git(remote, "rev-parse", "refs/heads/main")
     expect((await git(remote, "rev-list", "--parents", "-n", "1", target)).split(" ")).toHaveLength(3)
 
-    // An event queue read must use the same selected executable as legacy
-    // submission. Gitomic's remote fetch uses --git-dir before the verb.
+    // An event queue read must use the selected executable for its remote
+    // fetch after the target moves.
     await git(author, "checkout", "--quiet", "main")
     await git(author, "pull", "--quiet", "--ff-only", "origin", "main")
     writeFileSync(join(author, ".yrd.yml"), "{}\n")
     await git(author, "add", ".yrd.yml")
     await git(author, "commit", "--quiet", "-m", "declare event queue")
     await git(author, "push", "--quiet", "origin", "main")
-    const declared = await git(author, "rev-parse", "HEAD")
-    const config = await readConfig(gitIn(author), declared, { remote: "origin", branch: "main" })
-    if (config === undefined) throw new Error("event boundary fixture lost its queue declaration")
-    await createEventQueue(
-      createEventStore(author, "origin", await resolveGitSelection(author)),
-      "main",
-      declared,
-      config,
-      new Date(),
-    )
     const beforeEventRead = selected.readCalls().length
     const listing = Bun.spawn(["bun", join(REPO_ROOT, "bin/yrd.ts"), "queue", "list", "--queue", address, "--json"], {
       cwd: owned,
@@ -256,17 +241,13 @@ describe("a queue started by address on a host with no checkout", () => {
       listing.exited,
     ])
     expect(listExit, `${listErr}\n${listOut}`).toBe(0)
+    const eventReads = selected.readCalls().slice(beforeEventRead)
     expect(
-      selected
-        .readCalls()
-        .slice(beforeEventRead)
-        .some(
-          ({ cwd, args }) =>
-            cwd === owned &&
-            args[0] === "--git-dir" &&
-            gitSubcommand(args)?.name === "fetch" &&
-            args.some((arg) => arg.includes("refs/yrd/main/queue")),
-        ),
+      eventReads.some(
+        ({ cwd, args }) =>
+          cwd === owned && gitSubcommand(args)?.name === "fetch" && args.some((arg) => arg.includes("refs/yrd/main/*")),
+      ),
+      JSON.stringify(eventReads.filter(({ args }) => gitSubcommand(args)?.name === "fetch").map(({ args }) => args)),
     ).toBe(true)
   }, 120_000)
 })

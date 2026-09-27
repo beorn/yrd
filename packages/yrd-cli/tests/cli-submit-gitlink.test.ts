@@ -15,6 +15,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { gitIn } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
+import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -136,6 +137,7 @@ async function world(): Promise<World> {
   await git(["commit", "--quiet", "-m", "root with two components"])
   const base = (await git(["rev-parse", "HEAD"])).trim()
   await git(["push", "--quiet", "origin", "main"])
+  await birthEventQueue(work, "main", { localStore: false })
 
   // The root still records `old`; each declared component remote holds `held`.
   // `unheld` exists in a local checkout only, so local object presence cannot
@@ -176,7 +178,7 @@ async function assertCarrier(
     expect((await git(["ls-tree", head, path])).trim()).toBe(`160000 commit ${sha}\t${path}`)
   }
   expect(await git(["show", "-s", "--format=%B", head])).toContain("Refs: 25804")
-  const listed = await yrd(w.work, "list", "--json")
+  const listed = await yrd(w.work, "list", "--json", "--fresh")
   expect(listed.exitCode, listed.report).toBe(0)
   expect(
     (JSON.parse(listed.stdout) as { changes: readonly { branch: string }[] }).changes.some(
@@ -194,16 +196,9 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     const one = w.components[0]!
     const branch = `pin/vendor-one/${one.held.slice(0, 12)}`
     const git = gitIn(w.work)
-    const tree = (await git(["mktree"], "")).trim()
-    const pause = (
-      await git([
-        "commit-tree",
-        tree,
-        "-m",
-        "25041 lab cutover\n\nRecord: paused\nPaused-By: @chief\nCause: maintenance\n",
-      ])
-    ).trim()
+    const yrdBin = join(import.meta.dirname, "../../../bin/yrd.ts")
     const marker = join(w.root, "maintenance-injected")
+    const injectionLog = join(w.root, "maintenance.log")
     const wrapper = join(w.root, "git-inject-maintenance.sh")
     writeFileSync(
       wrapper,
@@ -214,7 +209,8 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
         `case " $* " in *" update-ref refs/heads/${branch} "*)`,
         `  if [ "$result" -eq 0 ] && [ ! -f '${marker}' ]; then`,
         `    : > '${marker}'`,
-        `    git -C '${w.work}' push --quiet origin '${pause}:refs/yrd/main/pause' || exit $?`,
+        `    cd '${w.work}' || exit $?`,
+        `    bun '${yrdBin}' queue pause --queue main --maintenance '25041 lab cutover' --notify '@chief' --json > '${injectionLog}' 2>&1 || exit $?`,
         "  fi ;;",
         "esac",
         'exit "$result"',
@@ -265,7 +261,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       `${one.path}=${one.unheld}`,
       "--issue",
       "25804",
-      "--notify",
+      "--submitter",
       "@dev/2",
     )
     expect(ran.exitCode, ran.report).toBe(2)
@@ -284,7 +280,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       `${one.path}=${one.held}`,
       "--issue",
       "25804",
-      "--notify",
+      "--submitter",
       "@dev/2",
     )
     expect(ran.exitCode, ran.report).toBe(0)
@@ -306,7 +302,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       pair[1]!,
       "--issue",
       "25804",
-      "--notify",
+      "--submitter",
       "@dev/2",
       "--json",
     )
@@ -328,7 +324,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       pair[0]!,
       "--issue",
       "25804",
-      "--notify",
+      "--submitter",
       "@dev/2",
     )
     expect(open.exitCode, open.report).toBe(2)
@@ -346,7 +342,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       pair[0]!,
       "--issue",
       "25804",
-      "--notify",
+      "--submitter",
       "@dev/2",
       "--json",
     )
@@ -370,7 +366,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     await git(["add", one.path])
     await git(["commit", "--quiet", "-m", "pin one manually\n\nRefs: 25804"])
     await git(["checkout", "--quiet", "main"])
-    const opened = await yrd(w.work, "submit", "task/manual-pin", "--issue", "25804", "--notify", "@dev/2")
+    const opened = await yrd(w.work, "submit", "task/manual-pin", "--issue", "25804", "--submitter", "@dev/2")
     expect(opened.exitCode, opened.report).toBe(0)
 
     const before = await refs(w.remote)
@@ -381,7 +377,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       `${one.path}=${one.held}`,
       "--issue",
       "25804",
-      "--notify",
+      "--submitter",
       "@dev/2",
     )
     expect(duplicate.exitCode, duplicate.report).toBe(2)
@@ -403,7 +399,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     await git(["add", "other.txt"])
     await git(["commit", "--quiet", "-m", "second commit\n\nRefs: 25804"])
     await git(["checkout", "--quiet", "main"])
-    const opened = await yrd(w.work, "submit", "task/multi-commit-pin", "--issue", "25804", "--notify", "@dev/2")
+    const opened = await yrd(w.work, "submit", "task/multi-commit-pin", "--issue", "25804", "--submitter", "@dev/2")
     expect(opened.exitCode, opened.report).toBe(0)
 
     const before = await refs(w.remote)
@@ -414,7 +410,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       `${one.path}=${one.held}`,
       "--issue",
       "25804",
-      "--notify",
+      "--submitter",
       "@dev/2",
     )
     expect(duplicate.exitCode, duplicate.report).toBe(2)
@@ -437,7 +433,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       `${one.path}=${one.unheld}`,
       "--issue",
       "25804",
-      "--notify",
+      "--submitter",
       "@dev/2",
     )
     expect(opened.exitCode, opened.report).toBe(0)
@@ -455,9 +451,9 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     const round = await yrd(w.work, "queue", "run", "--json")
     expect(round.exitCode, round.report).toBe(0)
     expect((await gitIn(w.remote)(["rev-list", "--parents", "-n", "1", carrier])).trim()).toBe(`${carrier} ${w.base}`)
-    // A successful queue merge retires its branch. Its change record retains
-    // the original carrier identity while main receives the composed tree.
-    expect(await refs(w.remote)).not.toContain(`refs/heads/${branch} `)
+    // The event queue keeps the submitted branch at its original carrier;
+    // main receives the composed tree without rewriting that branch.
+    expect(await remoteHead(w.remote, branch)).toBe(carrier)
     const merged = await remoteHead(w.remote, "main")
     expect(merged).not.toBe(advanced)
     expect((await gitIn(w.remote)(["ls-tree", merged, one.path])).trim()).toBe(
