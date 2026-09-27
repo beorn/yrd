@@ -46,7 +46,11 @@ function instant(value: string, key: string): number {
 }
 
 function checked(claim: RunnerClaim): RunnerClaim {
-  if (!/^[^\s/\x00-\x1f:]+$/u.test(claim.host)) {
+  if (
+    claim.host.length === 0 ||
+    /[\s/:]/u.test(claim.host) ||
+    [...claim.host].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+  ) {
     throw new TypeError(`runner claim Runner host is invalid: ${JSON.stringify(claim.host)}`)
   }
   if (!Number.isSafeInteger(claim.pid) || claim.pid <= 0) {
