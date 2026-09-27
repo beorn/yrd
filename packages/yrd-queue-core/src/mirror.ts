@@ -228,6 +228,25 @@ export async function refreshMirror(options: RefreshMirrorOptions): Promise<Mirr
   return await result(outcome, refreshedAt)
 }
 
+/**
+ * A queue writer invalidates the local status view after publishing remote refs.
+ * Use the refresh lock so an in-flight fetch cannot publish a fresh stamp after
+ * this unlink. An absent store has no cached view and its first reader creates it.
+ */
+export async function invalidateMirrorStamp(path: string, url: string): Promise<void> {
+  if (!existsSync(path)) return
+  try {
+    using _lock = await lockMirror(url, path, MIRROR_LOCK_WAIT_MS)
+    rmSync(join(path, MIRROR_REFRESHED_AT), { force: true })
+  } catch (error) {
+    throw new MirrorUnavailable(
+      url,
+      path,
+      `status stamp could not be invalidated: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+}
+
 async function lockMirror(url: string, path: string, waitMs: number): Promise<FlockHandle> {
   const lock = `${path}.lock`
   const deadline = Date.now() + waitMs

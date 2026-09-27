@@ -23,6 +23,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { type Git, gitIn } from "../src/git.ts"
 import {
   MIRROR_REFRESHED_AT,
+  invalidateMirrorStamp,
   mirrorLocation,
   mirrorRefreshedAt,
   MirrorUnavailable,
@@ -248,6 +249,42 @@ describe("refreshMirror", () => {
     expect(readRemoteCalls(counted.dir).verbs.fetch).toBe(1)
     expect(left.refreshedAt.getTime()).toBe(right.refreshedAt.getTime())
     expect(left.refreshedAt.getTime()).toBeGreaterThanOrEqual(created.refreshedAt.getTime())
+  })
+
+  it("a writer invalidating during fetch leaves the completed refresh uncertified", async () => {
+    const { root, store, upstream, env } = host()
+    await upstreamRepository(upstream, "child", env)
+    const url = `${HOSTED}child.git`
+    const created = await refreshMirror({ root: store, url, gitIn: through(env) })
+    let entered!: () => void
+    let release!: () => void
+    const fetching = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const continueFetch = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const blockedGitIn = (cwd: string): Git => {
+      const git = gitIn(cwd, undefined, undefined, { env })
+      return async (args, input) => {
+        if (args[0] === "fetch") {
+          entered()
+          await continueFetch
+        }
+        return git(args, input)
+      }
+    }
+    const refreshing = refreshMirror({ path: created.path, url, gitIn: blockedGitIn, maxAgeMs: 0 })
+    await fetching
+    const invalidating = invalidateMirrorStamp(created.path, url)
+    release()
+    await Promise.all([refreshing, invalidating])
+    expect(existsSync(join(created.path, MIRROR_REFRESHED_AT))).toBe(false)
+    const counted = traced(env, root)
+    expect(
+      (await refreshMirror({ path: created.path, url, gitIn: through(counted.env), maxAgeMs: 60_000 })).outcome,
+    ).toBe("fetched")
+    expect(readRemoteCalls(counted.dir).verbs.fetch).toBe(1)
   })
 
   it("refuses by name when the lock is held past the bound, and fetches nothing", async () => {

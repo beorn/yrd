@@ -5,7 +5,16 @@
  * @level l2 (`coreQueueCommand` against a real remote and clone)
  * @consumer Every queue command.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -200,6 +209,49 @@ it("reads a fresh queue-owned store without remote Git calls and refreshes once 
   )
 })
 
+it("refreshes local status after an event queue write in the same workdir (25626)", async () => {
+  const repo = await world("{}\n")
+  const git = gitIn(repo)
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+  await appendOpsCutover(createEventStore(repo, "origin", git.selection), git, "main", target, new Date(), "@chief")
+  const workdir = join(dirname(repo), "queue")
+  const owned = join(workdir, "repo")
+  const remote = join(dirname(repo), "remote.git")
+  mkdirSync(workdir)
+  await gitIn(workdir)(["clone", "--quiet", "--no-checkout", remote, owned])
+  const options = { json: true, queue: "main", workdir, localStatusStore: { path: owned, transport: remote } } as const
+  const before = capture(repo)
+  expect(await coreQueueCommand(repo, before.io, { command: "list" }, options), before.stderr()).toBe(0)
+  expect(JSON.parse(before.stdout())).toMatchObject({ stopped: null })
+
+  const paused = capture(repo)
+  expect(
+    await coreQueueCommand(
+      repo,
+      paused.io,
+      { command: "pause", by: "@dev/11", reason: "repair" },
+      { json: true, queue: "main", workdir },
+    ),
+    paused.stderr(),
+  ).toBe(0)
+  const previousTrace = process.env.GIT_TRACE2_EVENT
+  const trace = join(dirname(repo), "after-write-trace")
+  mkdirSync(trace)
+  try {
+    process.env.GIT_TRACE2_EVENT = trace
+    const after = capture(repo)
+    expect(await coreQueueCommand(repo, after.io, { command: "list" }, options), after.stderr()).toBe(0)
+    expect(JSON.parse(after.stdout())).toMatchObject({ source: "local", stopped: { by: "@dev/11", cause: "operator" } })
+    const warm = capture(repo)
+    expect(await coreQueueCommand(repo, warm.io, { command: "list" }, options), warm.stderr()).toBe(0)
+    expect(readRemoteCalls(trace).verbs).toEqual({ fetch: 1 })
+  } finally {
+    if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT
+    else process.env.GIT_TRACE2_EVENT = previousTrace
+  }
+})
+
 it("names an observed legacy ref in the local refusal and reads it through the fresh path (25626)", async () => {
   const repo = await world("{}\n")
   const git = gitIn(repo)
@@ -231,6 +283,27 @@ it("names an observed legacy ref in the local refusal and reads it through the f
     fresh.stderr(),
   ).toBe(0)
   expect(fresh.stdout()).toContain("task/legacy")
+})
+
+it("names an empty local queue prefix as absent (25626)", async () => {
+  const repo = await world("{}\n")
+  const root = dirname(repo)
+  const remote = join(root, "remote.git")
+  const owned = join(root, "owned")
+  await gitIn(root)(["clone", "--quiet", "--no-checkout", remote, owned])
+  await expect(
+    coreQueueCommand(
+      repo,
+      capture(repo).io,
+      { command: "list" },
+      {
+        json: true,
+        queue: "main",
+        workdir: join(root, "queue"),
+        localStatusStore: { path: owned, transport: remote },
+      },
+    ),
+  ).rejects.toThrow(/no queue exists at refs\/yrd\/main\/ in queue status store .*observed no refs/)
 })
 
 describe("a queue is the selected origin branch carrying config", () => {
