@@ -6,14 +6,15 @@
  * @consumer every queue run, `yrd check` and `yrd env` compose — all borrow from one reference
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { acquireExclusive } from "git-super/exclusive"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn } from "../src/git.ts"
+import { gitIn, type Git } from "../src/git.ts"
 import type { LogWrite } from "../src/log.ts"
 import { GitlinkNotOnRemote, populateReferenceStores, ReferenceUnpopulated } from "../src/reference.ts"
-import { freshWorktree } from "../src/worktree.ts"
+import { freshWorktree, reapWorktrees, registeredWorktrees } from "../src/worktree.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
@@ -243,6 +244,80 @@ describe("populateReferenceStores", () => {
 
     await expect(populateReferenceStores({ gitIn: (cwd) => gitIn(cwd), repo })).rejects.toThrow(/vendor\/dep/u)
   }, 60_000)
+})
+
+/**
+ * @failure A queue prune runs while another git-super worktree mutation of the
+ * same repository is in flight, bypassing its worktree mutation lock (26240).
+ * @level l2 (real repositories and real Git)
+ * @consumer reapWorktrees at queue start and Worktree.remove
+ */
+describe("queue prunes share git-super's worktree lock", () => {
+  async function lockedRepository(
+    name: string,
+  ): Promise<Readonly<{ root: string; repo: string; git: Git; commit: string; lock: string }>> {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), `yrd-worktree-prune-${name}-`)))
+    roots.push(root)
+    const repo = join(root, "repo")
+    const commit = await repository(repo, "one.txt")
+    const git = gitIn(repo)
+    const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    return { commit, git, lock: join(common, "yrd-worktree-mutations"), repo, root }
+  }
+
+  async function registered(git: Git): Promise<readonly string[]> {
+    return (await registeredWorktrees(git)).map((worktree) => worktree.path)
+  }
+
+  async function stillRunningAfter(operation: Promise<unknown>, ms: number): Promise<boolean> {
+    const running = Symbol("running")
+    const first = await Promise.race([
+      operation.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise<symbol>((resolve) => setTimeout(() => resolve(running), ms)),
+    ])
+    return first === running
+  }
+
+  it("reap waits to forget a stale registration until the lock is free", async () => {
+    const { commit, git, lock, root } = await lockedRepository("reap")
+    const stale = join(root, "stale")
+    await git(["worktree", "add", "--quiet", "--detach", stale, commit])
+    renameSync(stale, join(root, "moved-away"))
+
+    const held = await acquireExclusive(lock, {}, "a bay being provisioned")
+    let reaping: Promise<unknown> | undefined
+    try {
+      reaping = reapWorktrees(git, join(root, "worktrees"), "this-run")
+      expect(await stillRunningAfter(reaping, 500)).toBe(true)
+      expect(await registered(git)).toContain(stale)
+    } finally {
+      held.release()
+    }
+    await reaping
+    expect(await registered(git)).not.toContain(stale)
+  })
+
+  it("remove drops the directory first and waits to forget registration", async () => {
+    const { commit, git, lock, repo, root } = await lockedRepository("remove")
+    const worktree = await freshWorktree(git, repo, commit, join(root, "candidate"))
+    expect(await registered(git)).toContain(worktree.path)
+
+    const held = await acquireExclusive(lock, {}, "a bay being provisioned")
+    let removing: Promise<void> | undefined
+    try {
+      removing = worktree.remove()
+      expect(await stillRunningAfter(removing, 500)).toBe(true)
+      expect(existsSync(worktree.path)).toBe(false)
+      expect(await registered(git)).toContain(worktree.path)
+    } finally {
+      held.release()
+    }
+    await removing
+    expect(await registered(git)).not.toContain(worktree.path)
+  })
 })
 
 describe("freshWorktree", () => {
