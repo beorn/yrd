@@ -759,7 +759,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
 
     expect(open).toHaveBeenCalledTimes(1)
     // No identity title row above the box: the first thing in the detail is the border with the run on it.
-    expect(text).toContain("RUN main#")
+    expect(text).toContain("RUN main [")
     // One line: the marker, the bold status and its explanation, and no step line under it (25441).
     const status = lines.findIndex((line) => line.includes("× Failed test"))
     expect(status).toBeGreaterThan(-1)
@@ -821,6 +821,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
     const mock: WatchRun = {
       kind: "deployment",
       id: RUN_ID,
+      number: 7,
       label: "staging",
       row: row({ state: "merging", position: 1, run: RUN_ID }),
       steps: [
@@ -831,7 +832,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
     }
     const text = await paint(at(<RunStatusBox run={mock} />))
 
-    expect(text).toContain("RUN staging#")
+    expect(text).toContain("RUN staging#7")
     expect(text).toMatch(/◉ Merging #1/u)
     // Its steps are tabs of the detail, not lines of the box.
     expect(text).not.toContain("build image")
@@ -5452,7 +5453,7 @@ describe("independent queue watch (22949)", () => {
     const header = app.lines.find((line) => line.includes("CHANGES") && line.includes("RUN"))
     expect(header).toMatch(/\bTIME\s+Q\s+RUN\s+CHANGES\b/u)
     const firstRow = app.lines.find((line) => line.includes("first repository"))
-    expect(firstRow).toMatch(/\b1\s+\d{6}\s+first repository/u)
+    expect(firstRow).toMatch(/\b1\s+q-20260903\S*\s+first repository/u)
     expect(app.text).toContain("[1] YRD QUEUE example.test/one#main (/one)")
     expect(app.text).toContain("example.test/two#main")
     expect(app.text.match(/RUNNER/gu)?.length).toBe(2)
@@ -5487,6 +5488,99 @@ describe("independent queue watch (22949)", () => {
     expect(app.text).toContain("example.test/two#main")
     app.unmount()
   })
+})
+
+it("navigates a numbered run by bare address with one selected queue and reports unknown lookup", async () => {
+  const numbered = { row: failedRow(), run: { id: RUN_ID, number: 7 } } as WatchRow
+  const first = snapshot({ rows: [numbered], unfiltered: [numbered] })
+  const resolveRunAddress = vi.fn(async (address: string) => {
+    if (address === "#7") return { canonical: "example.test/repo@main#7", id: RUN_ID, number: 7 }
+    if (address === "#9")
+      return { canonical: "example.test/repo@main#9", id: "pruned-run", number: 9, startedAt: NOW.toISOString() }
+    throw new Error(
+      "E_RUN_UNKNOWN: example.test/repo@main#8 has no entry at refs/yrd/main/runs:by-number/0/8 on https://example.test/repo.git",
+    )
+  })
+  const app = render(
+    <WatchPane snapshot={first} resolveRunAddress={resolveRunAddress} open={opener()} live={false} />,
+    { cols: 120, rows: 40 },
+  )
+  await settle(app)
+  await app.press("n")
+  await settle(app)
+  expect(app.text).toContain("Run address")
+  await app.press("#")
+  await app.press("7")
+  await app.press("Enter")
+  await waitFor(() => expect(resolveRunAddress).toHaveBeenCalledWith("#7"))
+  await settle(app)
+  expect(app.text).toContain("fix the parser")
+  await app.press("n")
+  await app.press("#")
+  await app.press("8")
+  await app.press("Enter")
+  await waitFor(() => expect(resolveRunAddress).toHaveBeenCalledWith("#8"))
+  await settle(app)
+  await waitFor(() => expect(app.text).toContain("refs/yrd/main/runs:by-number/0/8"))
+  await app.press("Escape")
+  await app.press("n")
+  await app.press("#")
+  await app.press("9")
+  await app.press("Enter")
+  await settle(app)
+  expect(app.text).toContain("known in the run index")
+  expect(app.text).toMatch(/detail\s+is unavailable/u)
+  app.unmount()
+})
+
+it("requires a full run address when multiple watch queues are selected", async () => {
+  const first = snapshot({
+    queue: "example.test/one#main",
+    rows: [{ row: failedRow(), run: { id: RUN_ID, number: 7 } } as WatchRow],
+  })
+  const second = snapshot({ queue: "example.test/two#main", rows: [{ row: row({ subject: "second run" }) }] })
+  const resolveFirst = vi.fn(async () => ({ canonical: "example.test/one@main#7", id: RUN_ID, number: 7 }))
+  const app = render(
+    <WatchPane
+      snapshot={first}
+      sources={[
+        { id: first.queue, label: "one", snapshot: first, resolveRunAddress: resolveFirst },
+        { id: second.queue, label: "two", snapshot: second },
+      ]}
+      live={false}
+    />,
+    { cols: 160, rows: 50 },
+  )
+  await settle(app)
+  await app.press("n")
+  await settle(app)
+  await app.press("#")
+  await app.press("7")
+  await settle(app)
+  await act(async () => {
+    await app.press("Enter")
+  })
+  await settle(app)
+  await waitFor(() => expect(app.text).toContain("full remote run address"))
+  expect(resolveFirst).not.toHaveBeenCalled()
+  await app.press("Escape")
+  await app.press("n")
+  for (const character of "example.test/one@main#7") await app.press(character)
+  await app.press("Enter")
+  await waitFor(() => expect(resolveFirst).toHaveBeenCalledWith("example.test/one@main#7"))
+  await settle(app)
+  expect(app.text).not.toContain("second run")
+  await app.press("f")
+  await settle(app)
+  expect(app.text).not.toContain("fix the parser")
+  await app.press("n")
+  await app.press("#")
+  await app.press("7")
+  await app.press("Enter")
+  await waitFor(() => expect(resolveFirst).toHaveBeenCalledWith("#7"))
+  await settle(app)
+  expect(app.text).toContain("fix the parser")
+  app.unmount()
 })
 
 it("keeps each queue's last good reading and retries failures without delaying another queue (22949)", async () => {

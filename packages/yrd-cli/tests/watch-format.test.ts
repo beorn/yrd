@@ -142,16 +142,16 @@ describe("friendlyPath (items 30a, 33)", () => {
   })
 })
 
-describe("runShortName (items 34, 36, 38)", () => {
-  it("names a run by its own start instant, never by its random tail", () => {
+describe("runShortName (ADR-0028)", () => {
+  it("uses the durable number after publication and the opaque id before publication", () => {
     const startedAt = new Date(2026, 8, 4, 17, 4, 6)
     const id = runId(startedAt)
-    expect(runShortName("main", id)).toBe("main#170406")
-    expect(runShortName("main", id)).not.toContain(id.slice(-8))
+    expect(runShortName("main", id, 7)).toBe("main#7")
+    expect(runShortName("main", id)).toBe(`main [${id}]`)
   })
 
-  it("shows a name that is not one of ours as it is", () => {
-    expect(runShortName("main", "garage-7")).toBe("main#garage-7")
+  it("does not print an unknown id as a run number", () => {
+    expect(runShortName("main", "garage-7")).toBe("main [garage-7]")
   })
 })
 

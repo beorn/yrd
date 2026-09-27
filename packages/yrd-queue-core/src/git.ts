@@ -798,7 +798,7 @@ export function createLegacyBackend(gitExecutable = "git"): GitomicBackend {
   }
   return {
     ...first.backend,
-    fetchRefs: (repo, refs, remote) => {
+    fetchRefs: (repo, refs, remote, options) => {
       const { env, reader } = readerForCall()
       return retryLegacyPublickeyRead(
         "fetch",
@@ -806,8 +806,8 @@ export function createLegacyBackend(gitExecutable = "git"): GitomicBackend {
         remote,
         refs,
         env,
-        () => reader.fetchRefs(repo, refs, remote),
-        (env) => makeReader(env).fetchRefs(repo, refs, remote),
+        () => reader.fetchRefs(repo, refs, remote, options),
+        (env) => makeReader(env).fetchRefs(repo, refs, remote, options),
       )
     },
     listRefs: (repo, prefix, remote) => {
