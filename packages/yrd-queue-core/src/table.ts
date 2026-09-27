@@ -197,6 +197,7 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   const result =
     run.incident === undefined
       ? run.decision === "checked" ||
+        run.decision === "deferred" ||
         run.decision === "merged" ||
         run.decision === "failed" ||
         run.decision === "stuck" ||
@@ -401,6 +402,8 @@ function resultOf(kind: string, check: string | undefined): string {
       return check === undefined ? "fail" : `fail ${check}`
     case "stuck":
       return check === undefined ? "stuck" : `stuck ${check}`
+    case "deferred":
+      return check === undefined ? "deferred" : `deferred ${check}`
     default:
       return kind
   }

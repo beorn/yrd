@@ -346,6 +346,7 @@ export async function eventQueueRun(
     ...(observation.contract === "native" ? {} : { outcome: observation.outcome }),
   })
   let directMerges: readonly string[] = []
+  const deferredChanges: string[] = []
   /** The line as this round read it (25669), stated on every outcome once the line is read. */
   const read: { line?: RoundLine } = {}
   const result = (
@@ -367,7 +368,7 @@ export async function eventQueueRun(
     merged,
     failed,
     stuck,
-    deferred,
+    deferred: [...new Set([...deferredChanges, ...deferred])],
     directMerges,
     checkedWaiting: 0,
     ...(read.line === undefined ? {} : { line: read.line }),
@@ -1641,7 +1642,8 @@ export async function eventQueueRun(
         })
         await tell(branch, "deferred", ended)
         log.write({ kind: "change", branch, head, decision: "deferred", reason })
-        return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch])
+        deferredChanges.push(branch)
+        continue
       }
       const passedLogs = decisionResults
         .filter(

@@ -102,9 +102,13 @@ async function previousQueueReader(): Promise<typeof import("../../yrd-queue-cor
     oldEvents = execFileSync("git", ["-C", yrdRoot, "show", `${oldPin}:packages/yrd-queue-core/src/events.ts`], {
       encoding: "utf8",
     })
-    oldRecords = execFileSync("git", ["-C", yrdRoot, "show", `${oldPin}:packages/yrd-queue-core/src/legacy-records.ts`], {
-      encoding: "utf8",
-    })
+    oldRecords = execFileSync(
+      "git",
+      ["-C", yrdRoot, "show", `${oldPin}:packages/yrd-queue-core/src/legacy-records.ts`],
+      {
+        encoding: "utf8",
+      },
+    )
   } catch (error) {
     throw new Error(`historical Yrd reader ${oldPin} is absent; run git fetch --unshallow origin main in vendor/yrd`, {
       cause: error,
@@ -3830,17 +3834,19 @@ describe("yrd queue run --tier long", () => {
 
     const normalRun = capture(w.work)
     expect(await coreQueueCommand(w.work, normalRun.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect((records(normalRun)[0] as { deferred: string[] }).deferred.sort()).toEqual(["task/older", "task/younger"])
 
     const listed = capture(w.work)
     expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes.filter(
       (r) => r.branch !== "main",
     )
-    // Both deferred; not their order. Ended rows sort newest first by the record commit's
-    // whole-second time, so two records written ~150 ms apart tie or split by the clock.
-    expect(rows.map((r) => [r.branch, r.state]).sort()).toEqual([
-      ["task/older", "deferred"],
-      ["task/younger", "deferred"],
+    // Deferred is a queued change with a visible reason in the event model.
+    expect(
+      rows.map((r) => [r.branch, r.state, String(r.reason).includes("deferred"), r.malformed === undefined]).sort(),
+    ).toEqual([
+      ["task/older", "queued", true, true],
+      ["task/younger", "queued", true, true],
     ])
 
     const longRun = capture(w.work)

@@ -58,10 +58,16 @@ import type { GitInvocation, GitInvocationOptions, GitOutputSink } from "./git.t
  * and folded a merged run to sent (@i/10-yrd/24129). The fold refuses it
  * loudly and never synthesises a decision for the gap.
  *
- * Exported only so tests/vocabulary.test.ts can pin it: a reader built before
- * a new decision refuses the rows that carry it.
+ * A reader built before a new decision refuses the rows that carry it.
  */
-export const TERMINAL_DECISIONS: ReadonlySet<string> = new Set(["checked", "merged", "failed", "stuck", "withdrawn"])
+export const TERMINAL_DECISIONS: ReadonlySet<string> = new Set([
+  "checked",
+  "deferred",
+  "merged",
+  "failed",
+  "stuck",
+  "withdrawn",
+])
 
 /** Ref-write diagnostics emitted by run.ts's refused bookkeeping-write path. */
 export const CHANGE_REF_DIAGNOSTICS = {
