@@ -148,8 +148,15 @@ export function statusLineOf(row: Row, joinedRun = false): Readonly<{ status: st
     return { status, explanation: `as ${row.merge.slice(0, 12)}${at}` }
   }
   const explanation = explanationLine(row)
+  const status = capitalize(headlineOf(row, joinedRun))
+  const statusWord = status.toLowerCase().split(/\s+/u)[0] ?? ""
+  // The explanation already names the state ("It failed …"): do not print
+  // "Failed" again in front of it (26242 row 12).
+  if (explanation !== undefined && statusWord !== "" && explanation.toLowerCase().includes(statusWord)) {
+    return { status: explanation }
+  }
   return {
-    status: capitalize(headlineOf(row, joinedRun)),
+    status,
     ...(explanation === undefined ? {} : { explanation }),
   }
 }
