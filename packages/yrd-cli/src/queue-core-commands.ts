@@ -34,8 +34,6 @@ import { issueResolver } from "./issue-resolver.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
   assertPlainEventQueueConfig,
-  adoptLegacy,
-  directMergeCommits,
   changeName,
   checksOf,
   claimWorktrees,
@@ -69,9 +67,7 @@ import {
   gitIn,
   incidentLine,
   incidentLines,
-  inspectLegacyAdoption,
   journalKey,
-  list,
   queueName,
   resolveGitSelection,
   queueRun,
@@ -79,14 +75,11 @@ import {
   QueueRunEventRetryExhausted,
   readConfig,
   readJournals,
-  readHistories,
-  readQueue,
   readRunLog,
   remoteUrl,
   subjects,
   targetName,
   runCheck,
-  show,
   inspectSubmit,
   inspectSubmitAtHead,
   preparePinCarrier,
@@ -94,30 +87,21 @@ import {
   readRemoteCommit,
   refAt,
   readDrafts,
-  DRAFT_WINDOW_MS,
-  foldDrafts,
-  endingInstants,
   submit,
   withdraw,
   NothingToWithdraw,
   sweepCandidateRefs,
   liftLine,
-  pauseStop,
-  STOPPED_BY,
   OverrideRefused,
-  expireOverrides,
   overrideFacts,
   overrideLine,
   parseUntil,
-  readOverrides,
-  writeOverride,
   type OverrideFact,
   type OverrideEntry,
   type OverrideTable,
   type PinCarrierPin,
   notifyOutsideRound,
   overrideNotice,
-  skippedChecks,
   HEARTBEAT_GRACE_MS,
   HEARTBEAT_INTERVAL_MS,
   QUEUE_HEALTH_DOCUMENT,
@@ -131,13 +115,9 @@ import {
   gracefulStopHealthDocument,
   writtenHealthDocument,
   runtimeGitlinkPath,
-  readStop,
   stopFact,
   QueuePaused,
   QueueNotPaused,
-  writePause,
-  readCheckTrailer,
-  trailers,
   type CheckResult,
   type CheckSpec,
   type CheckView,
@@ -158,7 +138,6 @@ import {
   type RoundLine,
   type PauseRecord,
   type RuntimeGitlinkOff,
-  type ChangeRecord,
   type Change,
   type EventChange,
   type Event,
@@ -167,8 +146,6 @@ import {
   type JournalCommand,
   type Row,
   type StopFact,
-  tipOf,
-  trailer,
   remoteCallsLine,
   traceRemoteCalls,
 } from "@yrd/queue-core"
@@ -294,7 +271,6 @@ const processTerminate: TerminatePort = {
 }
 
 export type CoreQueueCommand =
-  | Readonly<{ command: "adopt-legacy"; apply: boolean }>
   | Readonly<{
       command: "submit"
       branch?: string
@@ -441,7 +417,6 @@ export type CoreQueueCommand =
 
 /** What each command is called when it has to say it needs a queue. */
 const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
-  "adopt-legacy": "queue adopt-legacy",
   check: "check",
   drop: "drop",
   ignore: "ignore",
@@ -576,6 +551,12 @@ export async function coreQueueCommand(
   const captured = await declaration()
   if (captured === undefined) return noQueueOnTarget(targetLabel)
   const config = captured.config
+  const eventStore = createEventStore(repo, config.target.remote, selection)
+  if ((await queueFormat(eventStore, config.target.branch)) !== "event") {
+    throw new Error(
+      `${config.target.remote}#${config.target.branch} uses a legacy Record ref; expected ${queueRef(config.target.branch)}`,
+    )
+  }
   const resolveIssue = issueResolver(config, repo, env)
   const workdir = options.workdir ?? (await workdirOf(git))
   mkdirSync(workdir, { recursive: true })
@@ -602,24 +583,11 @@ export async function coreQueueCommand(
   ): Promise<QueueRunOutcome | ReadFailedRound | RetryExhaustedRound | undefined> => {
     let outcome: QueueRunOutcome
     try {
-      const event =
-        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
-      if (event) assertPlainEventQueueConfig(config, "run")
-      // Expire, then snapshot, BEFORE the run and so before its header (25296,
-      // @cto 462dfe95): a window that passed gets its `expired` record in its
-      // own leased push, and the round is judged, and its merge fenced, under
-      // the table that write left. An event queue has no override (refused at
-      // the verb), so it reads none.
-      const overrides = event
-        ? undefined
-        : await expireOverrides(git, config.target.remote, config.target.branch, Date.now(), STOPPED_BY)
+      assertPlainEventQueueConfig(config, "run")
       outcome = await queueRun({
         ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
         branchDeletionGraceMs:
           Math.max(1, request.command === "up" ? (request.intervalSeconds ?? 15) : 15) * 1000 + 60_000,
-        ...(overrides === undefined
-          ? {}
-          : { overrides: overrides.table, overridesExpired: overrides.expired, overridesReminded: overrides.reminded }),
         foreground: request.command === "run" || request.command === "merge",
         ...(only === undefined ? {} : { only }),
         ...(tier === undefined ? {} : { tier }),
@@ -652,7 +620,7 @@ export async function coreQueueCommand(
     // A round that HOLDS a stuck stop judged nothing, so it has no stuck line
     // of its own; it names the stop it held and the cures, so a service log
     // read at any round says what the line waits on and what lifts it.
-    const held = pauseStop(outcome.stopped)
+    const held = outcome.stopped?.ring === "pause" ? (outcome.stopped.what as PauseRecord) : undefined
     if (outcome.stuck.length === 0 && held?.change !== undefined) {
       io.stderr(`yrd: ${liftLine(held, config.target.remote, config.target.branch)}\n`)
     }
@@ -802,53 +770,32 @@ export async function coreQueueCommand(
   const readChangeNow = async (change: Change) => {
     const target = await readRemoteCommit(git, config.target.remote, `refs/heads/${config.target.branch}`)
     if (target === undefined) throw new Error(`the target ${targetLabel} is not at ${config.target.remote}`)
-    const isEvent =
-      (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
-    if (isEvent) {
-      const reading = await readEventListing(
-        git,
-        config,
-        repo,
-        workdir,
-        target,
-        createEventStore(repo, config.target.remote, selection),
-        { all: true, forceFresh: true },
-      )
-      const selected = reading.changes.get(change.branch)
-      const row = reading.all.find((candidate) => candidate.branch === change.branch)
-      const state = selected?.status ?? row?.state
-      if (state === undefined) {
-        throw new Error(`${changeName(change)} is not at ${targetLabel} after its round: its change ref is gone`)
-      }
-      const landing = state === "merged" ? (selected?.merge ?? row?.merge) : undefined
-      const head = selected?.commit ?? row?.head ?? change.head
-      return {
-        entry: {
-          change: { branch: change.branch, head },
-          reading: {
-            state,
-            trailers: landing === undefined ? [] : [["Merge", landing] as const],
-            kind: state,
-            merge: landing,
-          },
-        },
-        state,
-        stop: reading.pause,
-        landing,
-      }
-    }
-    const now = await readQueue(git, config.target.remote, config.target.branch, target)
-    const entry = now.changes.find(
-      (candidate) => candidate.change.branch === change.branch && candidate.change.head === change.head,
-    )
-    if (entry === undefined) {
+    const reading = await readEventListing(git, config, repo, workdir, target, eventStore, {
+      all: true,
+      forceFresh: true,
+    })
+    const selected = reading.changes.get(change.branch)
+    const row = reading.all.find((candidate) => candidate.branch === change.branch)
+    const state = selected?.status ?? row?.state
+    if (state === undefined) {
       throw new Error(`${changeName(change)} is not at ${targetLabel} after its round: its change ref is gone`)
     }
-    const state = entry.reading.state
-    const lastRecord = entry.change.records.at(-1)
-    const landing =
-      (lastRecord === undefined ? undefined : trailer(lastRecord, "Merge")) ?? (state === "merged" ? target : undefined)
-    return { entry, state, stop: now.stop, landing }
+    const landing = state === "merged" ? (selected?.merge ?? row?.merge) : undefined
+    const head = selected?.commit ?? row?.head ?? change.head
+    return {
+      entry: {
+        change: { branch: change.branch, head },
+        reading: {
+          state,
+          trailers: landing === undefined ? [] : [["Merge", landing] as const],
+          kind: state,
+          merge: landing,
+        },
+      },
+      state,
+      stop: reading.pause,
+      landing,
+    }
   }
 
   /**
@@ -886,99 +833,6 @@ export async function coreQueueCommand(
   }
 
   switch (request.command) {
-    case "adopt-legacy": {
-      const eventStore = createEventStore(repo, config.target.remote, selection)
-      const name = config.target.branch
-      if ((await queueFormat(eventStore, name)) !== "event") {
-        io.stderr(`${config.target.remote}#${name}: yrd-adopt-legacy-format: adoption needs an event queue\n`)
-        return 1
-      }
-      if (request.apply && (await readEventOps(eventStore, git, name, captured.oid)).stop === undefined) {
-        io.stderr(
-          `${config.target.remote}#${name}: yrd-adopt-legacy-unpaused: pause with yrd queue pause --reason <text> before --apply\n`,
-        )
-        return 1
-      }
-      const targetOid = await readRemoteCommit(git, config.target.remote, `refs/heads/${name}`)
-      if (targetOid === undefined) {
-        throw new Error(
-          `${config.target.remote} refs/heads/${name}: yrd-adopt-legacy-target-missing: target ref is absent`,
-        )
-      }
-      const plan = await inspectLegacyAdoption({ store: eventStore, git, queue: name, target: targetOid })
-      const prefix = `${queueRefPrefix(name)}/`
-      const scope = `under ${prefix} at ${config.target.remote}`
-      const inspected = plan.rows.map((row) => ({
-        branch: row.branch,
-        oldRef: row.ref,
-        oldOid: row.record,
-        head: row.head,
-        opened: row.opened.toISOString(),
-        oldStatus: row.oldStatus,
-        plannedStatus: row.plannedStatus,
-        ending: row.ending ?? null,
-        targetChainTip: row.targetChainTip,
-        branchHead: row.branchHead,
-        branchObservedAt: row.branchObservedAt.toISOString(),
-        branchFact:
-          row.branchHead === null
-            ? `refs/heads/${row.branch} absent at ${row.branchObservedAt.toISOString()}, not leasable`
-            : `refs/heads/${row.branch} at ${row.branchHead}, lease on apply`,
-      }))
-      const plannedCount = `${String(inspected.length)} legacy record${inspected.length === 1 ? "" : "s"}`
-      const presentBranches = inspected.filter((row) => row.branchHead !== null).length
-      const absentBranches = inspected.length - presentBranches
-      if (!request.apply) {
-        emit(
-          io,
-          options.json,
-          {
-            mode: "dry-run",
-            remote: config.target.remote,
-            prefix,
-            excluded: [`${prefix}changes/`, `${prefix}queue`, `${prefix}pause`, `${prefix}override`],
-            count: inspected.length,
-            branchFacts: { present: presentBranches, absent: absentBranches },
-            rows: inspected,
-          },
-          [
-            `${plannedCount} ${scope}; excluded ${prefix}changes/ and queue control refs; branch facts: ${String(presentBranches)} present, ${String(absentBranches)} absent`,
-            ...inspected.map(
-              (row) =>
-                `${row.branch}: ${row.oldRef}@${row.oldOid} → ${row.ending === null ? `opened (${row.plannedStatus})` : `ending ${row.ending}`} · Opened ${row.opened} · target chain ${row.targetChainTip ?? "absent"} · Branch: ${row.branchFact}`,
-            ),
-          ].join("\n"),
-        )
-        return 0
-      }
-      const receipts = await adoptLegacy({ store: eventStore, plan, at: new Date() })
-      const adopted = receipts.filter((row) => row.result === "adopted").length
-      const refused = receipts.length - adopted
-      emit(
-        io,
-        options.json,
-        {
-          mode: "apply",
-          remote: config.target.remote,
-          prefix,
-          planned: inspected.length,
-          adopted,
-          refused,
-          rows: receipts,
-          ...(refused === 0 ? {} : { next: "inspect current refs with yrd queue adopt-legacy before another apply" }),
-        },
-        [
-          `${plannedCount} ${scope}; ${String(adopted)} adopted, ${String(refused)} refused`,
-          ...receipts.map((row) =>
-            row.result === "adopted"
-              ? `${row.branch}: ${row.oldRef}@${row.oldOid} → adopted ${row.eventOid} · Branch: ${row.branchFact}`
-              : `${row.branch}: ${row.oldRef}@${row.oldOid} → refused ${row.ref}: expected ${row.expected ?? "absent"}, observed ${row.observed ?? "absent"}${row.error === undefined ? "" : ` · ${row.error}`} · Branch: ${row.branchFact}`,
-          ),
-          ...(refused === 0 ? [] : ["Inspect current refs with yrd queue adopt-legacy before another --apply."]),
-        ].join("\n"),
-      )
-      return refused === 0 ? 0 : 1
-    }
     case "ignore":
     case "unignore": {
       if (request.command === "unignore" && "reason" in request) {
@@ -1073,106 +927,30 @@ export async function coreQueueCommand(
       }
       try {
         const eventStore = createEventStore(repo, config.target.remote, selection)
-        let resumeStuck = false
-        let releaseReason: string | undefined
-        let releaseNeedsPause = false
+        const current = await readEventOps(eventStore, git, config.target.branch, captured.oid)
+        const standing = current.stop
+        if (request.command === "pause" && standing !== undefined) {
+          throw new QueuePaused(standing, config.target.remote, config.target.branch)
+        }
+        if (request.command === "resume" && standing === undefined) throw new QueueNotPaused()
+        const at = new Date()
         const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
-        if ((await queueFormat(eventStore, config.target.branch)) === "event") {
-          const now = await readEventOps(eventStore, git, config.target.branch, captured.oid)
-          if (now.source === "event") {
-            const standing = now.stop
-            if (request.command === "pause" && standing !== undefined) {
-              throw new QueuePaused(standing, config.target.remote, config.target.branch)
-            }
-            if (request.command === "resume" && standing === undefined) throw new QueueNotPaused()
-            const at = new Date()
-            const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
-            const id = await writeQueueEvent(eventStore, config.target.branch, {
-              type: request.command === "pause" ? "paused" : "resumed",
-              reason,
-              by: request.by,
-              at,
-              ...(request.command === "pause" ? { cause: request.cause ?? "operator" } : {}),
-            })
-            const written: PauseRecord = {
-              kind: request.command === "pause" ? "paused" : "resumed",
-              sha: id,
-              at,
-              reason,
-              by: request.by,
-              cause: request.command === "pause" ? (request.cause ?? "operator") : "operator",
-            }
-            await emitPauseResult(written)
-            return 0
-          }
-          if (request.command === "resume") {
-            const { queue, histories, invalid } = await readEventQueueWithChanges(eventStore, config.target.branch)
-            const defect = invalid.values().next().value
-            if (defect !== undefined) {
-              throw new Error(`${defect.ref} at ${defect.tip}: cannot judge stuck resume: ${defect.error}`)
-            }
-            if (queue.release !== undefined) {
-              resumeStuck = true
-              releaseReason = queue.release.reason
-            } else {
-              for (const [branch, history] of histories) {
-                if (
-                  history.state.status === "stuck" &&
-                  !(await queueResumedAfter(eventStore, config.target.branch, branch, history))
-                ) {
-                  const stuck = history.events.findLast((event) => event.type === "stuck")
-                  if (stuck === undefined) throw new Error(`${branch}: stuck change has no stuck event`)
-                  resumeStuck = true
-                  releaseReason = stuckReleaseReason(stuck.id, reason)
-                  releaseNeedsPause = queue.pause === undefined
-                  break
-                }
-              }
-            }
-          }
+        const id = await writeQueueEvent(eventStore, config.target.branch, {
+          type: request.command === "pause" ? "paused" : "resumed",
+          reason,
+          by: request.by,
+          at,
+          ...(request.command === "pause" ? { cause: request.cause ?? "operator" } : {}),
+        })
+        const written: PauseRecord = {
+          kind: request.command === "pause" ? "paused" : "resumed",
+          sha: id,
+          at,
+          reason,
+          by: request.by,
+          cause: request.command === "pause" ? (request.cause ?? "operator") : "operator",
         }
-        // Whether a stop STANDS is the one derivation's answer, never the tip's
-        // kind alone: a stuck stop whose change has left the line is over, so a
-        // pause may follow it and there is nothing for a resume to end.
-        const { pause: tip, stop } = await readStop(git, config.target.remote, config.target.branch, captured.oid)
-        const lifted = tip?.kind === "paused" && stop === undefined ? tip : undefined
-        const pause =
-          request.command === "resume" && stop === undefined && resumeStuck
-            ? undefined
-            : await writePause(
-                git,
-                config.target.remote,
-                config.target.branch,
-                {
-                  by: request.by,
-                  kind: request.command === "pause" ? "paused" : "resumed",
-                  reason,
-                  ...(request.command === "pause" ? { cause: request.cause ?? "operator" } : {}),
-                },
-                lifted,
-              )
-        if (resumeStuck) {
-          const at = new Date()
-          if (releaseReason === undefined) throw new Error("stuck resume has no release reason")
-          if (releaseNeedsPause) {
-            await writeQueueEvent(eventStore, config.target.branch, {
-              type: "paused",
-              reason: releaseReason,
-              by: request.by,
-              at,
-            })
-          }
-          const event = await writeQueueEvent(eventStore, config.target.branch, {
-            type: "resumed",
-            reason: releaseReason,
-            by: request.by,
-            at,
-          })
-          await emitPauseResult(pause ?? { kind: "resumed", sha: event, at, reason, by: request.by, cause: "operator" })
-          return 0
-        }
-        if (pause === undefined) throw new Error("resume had neither a standing pause nor a stuck change")
-        await emitPauseResult(pause)
+        await emitPauseResult(written)
         return 0
       } catch (error) {
         if (error instanceof QueuePaused || error instanceof QueueNotPaused) {
@@ -1183,16 +961,10 @@ export async function coreQueueCommand(
       }
     }
     case "override": {
-      // Until ops-cutover, the existing Record writer remains the authority for
-      // both queue formats. An event writer must not run before the cutover.
-      const overrideStore = createEventStore(repo, config.target.remote, selection)
-      const eventOps =
-        (await queueFormat(overrideStore, config.target.branch)) === "event"
-          ? await readEventOps(overrideStore, git, config.target.branch, captured.oid)
-          : undefined
+      const eventOps = await readEventOps(eventStore, git, config.target.branch, captured.oid)
       const now = Date.now()
       if (request.action === "list") {
-        const table = eventOps?.overrides ?? (await readOverrides(git, config.target.remote, config.target.branch))
+        const table = eventOps.overrides
         emit(
           io,
           options.json,
@@ -1220,10 +992,7 @@ export async function coreQueueCommand(
                 until: parseUntil(request.until ?? "", now),
               } as const)
             : ({ actor, check: request.check ?? "", kind: "clear", reason: request.reason ?? "" } as const)
-        const written =
-          eventOps?.source === "event"
-            ? await writeQueueOverride(overrideStore, config.target.branch, write, declaredMerge, new Date(now))
-            : await writeOverride(git, config.target.remote, config.target.branch, write, declaredMerge)
+        const written = await writeQueueOverride(eventStore, config.target.branch, write, declaredMerge, new Date(now))
         const standing = written.record.entries.find((entry) => entry.check === request.check)
         // The page is the override's side effect, never its condition (@cto
         // ccd8dfa8): a notifier that fails is said on stderr and journaled, and
@@ -1318,36 +1087,15 @@ export async function coreQueueCommand(
       let activeShas: Set<string>
       try {
         activeShas = new Set<string>()
-        const eventStore = createEventStore(repo, remote, selection)
-        if ((await queueFormat(eventStore, config.target.branch)) === "event") {
-          const events = await readEventQueueWithChanges(eventStore, config.target.branch)
-          for (const [_, history] of events.histories) {
-            if (
-              history.state.status !== "merged" &&
-              history.state.status !== "failed" &&
-              history.state.status !== "cancelled"
-            ) {
-              if (history.state.commit !== undefined) {
-                activeShas.add(history.state.commit)
-              }
-              if (history.state.candidate !== undefined) {
-                activeShas.add(history.state.candidate)
-              }
-            }
-          }
-        } else {
-          const read = await readQueue(git, remote, config.target.branch, captured.oid)
-          for (const entry of read.changes) {
-            if (
-              entry.reading.state !== "merged" &&
-              entry.reading.state !== "failed" &&
-              entry.reading.state !== "withdrawn"
-            ) {
-              activeShas.add(entry.change.head)
-              if (entry.change.branchHead !== undefined) {
-                activeShas.add(entry.change.branchHead)
-              }
-            }
+        const events = await readEventQueueWithChanges(createEventStore(repo, remote, selection), config.target.branch)
+        for (const [_, history] of events.histories) {
+          if (
+            history.state.status !== "merged" &&
+            history.state.status !== "failed" &&
+            history.state.status !== "cancelled"
+          ) {
+            if (history.state.commit !== undefined) activeShas.add(history.state.commit)
+            if (history.state.candidate !== undefined) activeShas.add(history.state.candidate)
           }
         }
       } catch (error) {
@@ -1374,11 +1122,7 @@ export async function coreQueueCommand(
       return result.failed.length > 0 ? 1 : 0
     }
     case "submit": {
-      if (
-        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
-      ) {
-        assertPlainEventQueueConfig(config, "submit")
-      }
+      assertPlainEventQueueConfig(config, "submit")
       if (request.pins !== undefined) {
         if (request.branch !== undefined) throw new Error("--gitlink does not take a branch operand")
         if (request.issue === undefined) throw new Error("--gitlink needs --issue <id>")
@@ -1551,57 +1295,18 @@ export async function coreQueueCommand(
           ? undefined
           : gitIn(request.author.repo, undefined, request.author.selection, { env: options.env })
       const local = author === undefined ? undefined : await refAt(author, `refs/heads/${branch}`)
-      const isEventQueue =
-        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
       let standing:
-        | {
-            change: Change
-            reading: { state: Row["state"] }
-            landing?: string
-          }
+        | { change: Change; reading: { state: Row["state"] }; landing?: string }
         | undefined
-      if (isEventQueue) {
-        const reading = await readEventListing(
-          git,
-          config,
-          repo,
-          workdir,
-          captured.oid,
-          createEventStore(repo, config.target.remote, selection),
-          { all: true },
-        )
-        const selected = reading.changes.get(branch)
-        const row = reading.all.find((candidate) => candidate.branch === branch)
-        const head = selected?.commit ?? row?.head
-        const state = selected?.status ?? row?.state
-        if (head !== undefined && state !== undefined) {
-          const landing = state === "merged" ? (selected?.merge ?? row?.merge) : undefined
-          if (local === undefined ? inLineState(state) || state === "merged" : head === local) {
-            standing = {
-              change: { branch, head },
-              reading: { state },
-              landing,
-            }
-          }
-        }
-      } else {
-        const read = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
-        const own = read.changes.filter((entry) => entry.change.branch === branch)
-        // A local branch names its head's change; with none, the change of this
-        // branch that holds a place in line is the one.
-        const entry =
-          local === undefined
-            ? own.find((entry) => inLineState(entry.reading.state))
-            : own.find((entry) => entry.change.head === local)
-        if (entry !== undefined) {
-          const lastRecord = entry.change.records.at(-1)
-          standing = {
-            change: entry.change,
-            reading: entry.reading,
-            landing:
-              (lastRecord === undefined ? undefined : trailer(lastRecord, "Merge")) ??
-              (entry.reading.state === "merged" ? captured.oid : undefined),
-          }
+      const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, { all: true })
+      const selected = reading.changes.get(branch)
+      const row = reading.all.find((candidate) => candidate.branch === branch)
+      const head = selected?.commit ?? row?.head
+      const standingState = selected?.status ?? row?.state
+      if (head !== undefined && standingState !== undefined) {
+        const landing = standingState === "merged" ? (selected?.merge ?? row?.merge) : undefined
+        if (local === undefined ? inLineState(standingState) || standingState === "merged" : head === local) {
+          standing = { change: { branch, head }, reading: { state: standingState }, landing }
         }
       }
       if (standing?.reading.state === "merged") {
@@ -2077,26 +1782,18 @@ export async function coreQueueCommand(
         )
         return 0
       }
-      // THE LINE AS IT STANDS AT START, read the way a round reads it (remote.ts
-      // `readStop`, the round's own derivation) and written before round 1 opens
+      // THE LINE AS IT STANDS AT START, read from the queue event chain and written before round 1 opens
       // (24523 F1). A supervisor waiting for this process's own document reads
       // it now instead of waiting out a long first round against its
       // predecessor's, and a stuck stop that stands writes the stuck page, so a
       // relaunch continues the page rather than clearing it and opening it again.
       // A stop that cannot be read is what a round that cannot read its queue
       // already is: stuck, exit 2, and no document claiming a state nobody read.
-      let eventFormat = false
       try {
-        const eventStore = createEventStore(repo, config.target.remote, selection)
-        if ((await queueFormat(eventStore, config.target.branch)) === "event") {
-          eventFormat = true
-          const operational = await readEventOps(eventStore, git, config.target.branch, captured.oid)
-          lastStop = operational.stop
-          lastRelease = operational.queue.release?.id
-          setChainPressure(operational.queue.writePressure)
-        } else {
-          lastStop = (await readStop(git, config.target.remote, config.target.branch, captured.oid)).stop
-        }
+        const operational = await readEventOps(eventStore, git, config.target.branch, captured.oid)
+        lastStop = operational.stop
+        lastRelease = operational.queue.release?.id
+        setChainPressure(operational.queue.writePressure)
       } catch (error) {
         return stuck(
           `the line's stop cannot be read at start: ${error instanceof Error ? error.message : String(error)}`,
@@ -2228,15 +1925,10 @@ export async function coreQueueCommand(
           // after an act lifts it. The hook sees the document as written, with
           // nothing awaited between the write and the call.
           const sleepMs = sleepAfter(outcome, interval)
-          lastStop = pauseStop(outcome.stopped)
-          if (eventFormat) {
-            const latestQueue = await readEventQueue(
-              createEventStore(repo, config.target.remote, selection),
-              config.target.branch,
-            )
-            if (lastRelease !== undefined) lastRelease = latestQueue.release?.id
-            setChainPressure(latestQueue.writePressure)
-          }
+          lastStop = outcome.stopped?.ring === "pause" ? (outcome.stopped.what as PauseRecord) : undefined
+          const latestQueue = await readEventQueue(eventStore, config.target.branch)
+          if (lastRelease !== undefined) lastRelease = latestQueue.release?.id
+          setChainPressure(latestQueue.writePressure)
           lastStuck = outcome.pendingStuck ?? outcome.stuck
           openedAt = undefined
           flow = flowAfterRound(flow, outcome, new Date())
@@ -2299,9 +1991,8 @@ export async function coreQueueCommand(
           /** Every decision the rows carry, one per run per change and unfiltered, for the STATS box. */
           decisions: readonly RunDecision[]
           /** The queue read the rows came from, so a detail opened later reads the same tip. */
-          entries: QueueEntries | undefined
-          eventChanges: ReadonlyMap<string, EventChange> | undefined
-          eventInvalid: EventListingResult["invalid"] | undefined
+          eventChanges: ReadonlyMap<string, EventChange>
+          eventInvalid: EventListingResult["invalid"]
           journals: Journals
           /** The stop that stands, as the reading derived it. */
           stopped: StopFact | null
@@ -2313,50 +2004,25 @@ export async function coreQueueCommand(
       > => {
         // JSON keeps one row per opened segment and per local run. The human
         // table keeps each branch's current segment only.
-        const format = await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)
-        const reading =
-          format === "event"
-            ? await readEventListing(
-                git,
-                declared.config,
-                repo,
-                workdir,
-                declared.oid,
-                createEventStore(repo, declared.config.target.remote, selection),
-                {
-                  all: request.all,
-                  drafts: request.drafts,
-                },
-              )
-            : {
-                format: "legacy" as const,
-                ...(await readListing(
-                  git,
-                  declared.config,
-                  workdir,
-                  declared.oid,
-                  options.json === true ? {} : { shown: { draftWindow } },
-                )),
-              }
+        const reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, eventStore, {
+          all: request.all,
+          drafts: request.drafts,
+        })
         const { journals, all, drafts, observation } = reading
         if (options.json !== true) narrateMalformed(io, journals, said)
         // The run-history lens is for stats and watch detail. List is the
         // current head of each branch in both output formats; JSON expands
         // that head by run unless --latest selects its single row.
-        const unfiltered = watchRows(reading.format === "event" ? reading.document : all, { journals, perRun: true })
+        const unfiltered = watchRows(reading.document, { journals, perRun: true })
         const listed = watchRows(all, { journals, perRun: options.json === true, latest: request.latest })
         const changes = filterRows(listed, request.terms ?? []).filter((item) => item.row.state !== "draft")
         const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
-        const documentRows =
-          reading.format === "event" && request.drafts === true ? filterRows(listed, request.terms ?? []) : changes
+        const documentRows = request.drafts === true ? filterRows(listed, request.terms ?? []) : changes
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
-        const pause = reading.format === "event" ? reading.pause : reading.queue.stop
+        const pause = reading.pause
         // The table and stop come from the same authority read as this listing.
-        const overrides =
-          reading.format === "event"
-            ? overrideFacts(reading.overrides, Date.now())
-            : overrideFacts(await readOverrides(git, config.target.remote, config.target.branch), Date.now())
+        const overrides = overrideFacts(reading.overrides, Date.now())
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table. Zero
         // rows also names the fields the term was checked against, so a state
@@ -2368,10 +2034,7 @@ export async function coreQueueCommand(
             ? undefined
             : `${String(documentRows.length)} of ${String(listed.filter((item) => item.row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
               (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
-        const baseScope =
-          reading.format === "event"
-            ? `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
-            : undefined
+        const baseScope = `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
         const ignoreScope =
           config.ignore.length === 0
             ? undefined
@@ -2392,9 +2055,8 @@ export async function coreQueueCommand(
             overrides,
             ...(scope === undefined ? {} : { scope }),
           },
-          entries: reading.format === "event" ? undefined : reading.queue.changes,
-          eventChanges: reading.format === "event" ? reading.changes : undefined,
-          eventInvalid: reading.format === "event" ? reading.invalid : undefined,
+          eventChanges: reading.changes,
+          eventInvalid: reading.invalid,
           journals,
           queue: queueName(config.target, await remoteUrl(git, config.target.remote)),
           // Pre-M8 a repository has exactly one queue: the target's branch, on
@@ -2418,7 +2080,7 @@ export async function coreQueueCommand(
                 drafts: {
                   unread: drafts.undated.map((draft) => draft.head),
                   window: draftWindow,
-                  older: "olderDrafts" in reading ? (reading.olderDrafts ?? 0) : 0,
+                  older: 0,
                 },
               }),
         }
@@ -2557,7 +2219,6 @@ export async function coreQueueCommand(
         let ending: YrdCliExitCode | undefined
         // The queue read the LAST round made: a detail opened between rounds
         // reads the same tips the table shows, never a fresher or staler one.
-        let entries: QueueEntries | undefined = first.entries
         let eventChanges = first.eventChanges
         let eventInvalid = first.eventInvalid
         let journals = first.journals
@@ -2576,7 +2237,6 @@ export async function coreQueueCommand(
                 app.unmount()
                 io.stderr(`${next.observation.message}\n`)
               }
-              entries = next.entries
               eventChanges = next.eventChanges
               eventInvalid = next.eventInvalid
               journals = next.journals
@@ -2585,33 +2245,35 @@ export async function coreQueueCommand(
             loadDiff: (item) => readDiff(git, config, item),
             loadCommandOutput: (command) => Promise.resolve(readCommandOutput(command)),
             open: (item) => {
-              if (entries === undefined) {
-                if (item.row.state === "direct") {
-                  return openDetail(git, config, [], item, config.target.branch, journalFor(item, journals))
-                }
-                const selected = eventChanges?.get(item.row.branch)
-                const defect = eventInvalid?.get(item.row.branch)
-                if (defect !== undefined) {
-                  return Promise.resolve({
-                    row: item.row,
-                    run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run),
-                    checks: [],
-                    note: `Raw events: yrd queue show ${item.row.branch} --json`,
-                  })
-                }
-                if (selected === undefined) throw new Error(`event change ${item.row.branch} left the selected listing`)
-                return openEventDetail(
-                  git,
-                  config,
-                  item,
-                  config.target.branch,
-                  repo,
-                  selected,
-                  journalFor(item, journals),
-                  workdir,
-                )
+              if (item.row.state === "direct") {
+                return Promise.resolve({
+                  row: item.row,
+                  run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run),
+                  checks: [],
+                  ...(journalFor(item, journals) === undefined ? {} : { journal: journalFor(item, journals) }),
+                })
               }
-              return openDetail(git, config, entries, item, config.target.branch, journalFor(item, journals))
+              const selected = eventChanges.get(item.row.branch)
+              const defect = eventInvalid.get(item.row.branch)
+              if (defect !== undefined) {
+                return Promise.resolve({
+                  row: item.row,
+                  run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run),
+                  checks: [],
+                  note: `Raw events: yrd queue show ${item.row.branch} --json`,
+                })
+              }
+              if (selected === undefined) throw new Error(`event change ${item.row.branch} left the selected listing`)
+              return openEventDetail(
+                git,
+                config,
+                item,
+                config.target.branch,
+                repo,
+                selected,
+                journalFor(item, journals),
+                workdir,
+              )
             },
             onEnding:
               request.terms === undefined || request.terms.length === 0
@@ -2849,16 +2511,8 @@ export async function coreQueueCommand(
           window = { since: committed, sinceFrom: { asked: request.since, kind: "commit" } }
         }
       }
-      const store = createEventStore(repo, config.target.remote, selection)
-      const reading =
-        (await queueFormat(store, config.target.branch)) === "event"
-          ? await readEventListing(git, config, repo, workdir, captured.oid, store, { all: true })
-          : { format: "legacy" as const, ...(await readListing(git, config, workdir, captured.oid)) }
-      if (
-        reading.format === "event" &&
-        reading.observation.contract === "root-v1" &&
-        reading.observation.outcome === "invalid"
-      ) {
+      const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, { all: true })
+      if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
         io.stderr(`${reading.observation.message}\n`)
         return 2
       }
@@ -2867,7 +2521,7 @@ export async function coreQueueCommand(
       // not be read for must not make an understated stat look measured.
       if (options.json !== true) narrateMalformed(io, journals, new Set())
       // Per RUN: `queue stats` counts decisions, and one change can carry several.
-      const rows = watchRows(reading.format === "event" ? reading.document : reading.all, {
+      const rows = watchRows(reading.document, {
         journals,
         perRun: true,
       })
@@ -2875,21 +2529,15 @@ export async function coreQueueCommand(
       // one derivation over this same reading and the same window. Nothing is
       // fetched, so a head never read here counts as undated.
       const draftSince = window?.since ?? new Date(now.getTime() - DEFAULT_WINDOW_MS)
-      const drafts =
-        reading.format === "event"
-          ? {
-              dated: reading.drafts.dated.filter((draft) => {
-                if (draft.committedAt === undefined) {
-                  throw new Error(`event draft ${draft.branch}@${draft.head} has no committer date`)
-                }
-                return draft.committedAt >= draftSince
-              }),
-              undated: reading.drafts.undated,
-            }
-          : await readDrafts(git, withoutIgnoredDraftHeads(reading.queue, config.ignore), {
-              since: draftSince,
-              targetSha: captured.oid,
-            })
+      const drafts = {
+        dated: reading.drafts.dated.filter((draft) => {
+          if (draft.committedAt === undefined) {
+            throw new Error(`event draft ${draft.branch}@${draft.head} has no committer date`)
+          }
+          return draft.committedAt >= draftSince
+        }),
+        undated: reading.drafts.undated,
+      }
       const stats = queueStats(rows, [...drafts.dated, ...drafts.undated], {
         now,
         ...window,
@@ -2912,9 +2560,7 @@ export async function coreQueueCommand(
         io.stderr("yrd: queue show needs a branch or --all --json\n")
         return 2
       }
-      if (
-        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
-      ) {
+      {
         const reading = await readEventListing(
           git,
           config,
@@ -3008,107 +2654,6 @@ export async function coreQueueCommand(
         )
         return 0
       }
-      if (request.all === true) {
-        io.stderr("yrd: queue show --all requires an event queue\n")
-        return 2
-      }
-      const branch = request.branch
-      if (branch === undefined) throw new Error("queue show lost its branch after validation")
-      const queue = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
-      const journals = readJournals(join(workdir, "logs"))
-      if (options.json !== true) narrateMalformed(io, journals, new Set())
-      const matching = queue.changes.filter((entry) => entry.change.branch === branch)
-      const hydrated = await readHistories(git, matching, config.target.remote, config.target.branch)
-      const changes = show(hydrated, branch, {
-        journals,
-        subjects: await subjects(
-          git,
-          matching.map((entry) => entry.change.head),
-        ),
-      })
-      // The checks a change was JUDGED BY: the declaration at the commit its
-      // record names in `Base:`, joined to what actually ran. `show` used to
-      // print the packed `Check:` trailer as it stood, so a check that never
-      // ran — every check after a failing one — was simply not on the screen,
-      // and the command that produced a log was nowhere.
-      const views = new Map<string, Readonly<{ checks: readonly CheckView[]; note?: string }>>()
-      for (const change of changes) {
-        const declared = await declarationFor(git, config, change.row.base)
-        const ending = endingOf(change.row)
-        // A DECIDED change's records are its full account: `change.checks`
-        // already folds every record's `Check:` trailers, submit through
-        // merge. The run this machine's journal happens to hold for it may be
-        // only the phase that last touched the change — an earlier phase ran
-        // under an earlier run this one does not carry — so trusting it
-        // alone here is how a merged change loses evidence it still has (its
-        // own 2026-09 recurrence). The journal stays the better source only
-        // while the change is still being decided: that is what lets a check
-        // running right now show as running instead of a stale prior result.
-        const decided = ending === "merged" || ending === "failed" || ending === "stuck"
-        views.set(change.row.head, {
-          checks: checksOf(
-            change.checks,
-            ending,
-            declared.checks,
-            change.row.live === undefined
-              ? undefined
-              : {
-                  name: change.row.live.check,
-                  ...(change.row.live.log === undefined ? {} : { log: change.row.live.log }),
-                },
-            decided ? undefined : journalFor({ row: change.row }, journals)?.checks,
-            skippedChecks(change.records),
-          ),
-          ...(declared.note === undefined ? {} : { note: declared.note }),
-        })
-      }
-      // What was queried, and where: an empty answer that names only the branch
-      // it did not find leaves the reader to guess which queue at which remote
-      // was read (@i/10-yrd/24050). The same identity `stats` prints.
-      const name = queueName(config.target, await remoteUrl(git, config.target.remote))
-      emit(
-        io,
-        options.json,
-        {
-          queue: name,
-          changes: changes.map((change) => ({
-            ...change.row,
-            queue: config.target.branch,
-            checks: views.get(change.row.head)?.checks ?? [],
-            ...(views.get(change.row.head)?.note === undefined ? {} : { checksNote: views.get(change.row.head)?.note }),
-            records: change.records.map((record) => ({
-              at: record.at,
-              kind: record.kind,
-              sha: record.sha,
-              subject: record.subject,
-              trailers: trailerFields(record),
-            })),
-          })),
-          journal: journalFact(journals),
-        },
-        changes.length === 0
-          ? `no change for ${request.branch} on ${name}`
-          : changes
-              .map((change) => {
-                const view = views.get(change.row.head)
-                const headline =
-                  change.row.incident === undefined
-                    ? rowLine({ row: change.row })
-                    : rowLine({ row: { ...change.row, reason: undefined, result: undefined } })
-                return [
-                  headline,
-                  ...diagnosticLines(change.row, journalFor({ row: change.row }, journals)),
-                  `  queue: ${config.target.branch}`,
-                  ...(change.row.incident === undefined
-                    ? []
-                    : incidentLines(change.row.incident).map((line) => `  ${line}`)),
-                  ...(view?.note === undefined ? [] : [`  (${view.note})`]),
-                  ...(view?.checks ?? []).flatMap(checkLines),
-                ].join("\n")
-              })
-              .join("\n"),
-      )
-      return 0
     }
   }
 }
@@ -3308,32 +2853,6 @@ function runOptions(
  * a logger root of this file's own would create spans the stage accounting
  * never counts.
  */
-/**
- * A record's trailers as JSON, for `show --json`: every name, every value.
- *
- * `show --json` used to emit at, kind, sha and subject and nothing else, so a
- * reader consuming the queue AS DATA learned who withdrew a change, and why, by
- * parsing the subject line back into fields the record already carried
- * (@i/10-yrd/g-ergonomics/24666).
- *
- * VALUES ARE ARRAYS BECAUSE NAMES REPEAT. A run writes one `Check` trailer per
- * check result (queue-core run.ts `checkTrailers`), and three readers already
- * use the plural accessor for exactly that. A name-to-value map would keep one
- * `Check` and silently drop the rest, which is the failure this repo bans; a
- * `string | string[]` union would push a type test onto every reader for a
- * difference the record model does not make. So every name gets a list, and the
- * two JSON reads are the twins of the two accessors in legacy-records.ts:
- * `trailers.By[0]` is `trailer(record, "By")` and `trailers.Check` is
- * `trailers(record, "Check")`. Names come in the order the record first carries
- * them, values in record order. Always present, empty when there are none: a
- * reader must not have to tell "no trailers" from "a build that omits them".
- */
-function trailerFields(record: ChangeRecord): Readonly<Record<string, readonly string[]>> {
-  const fields: Record<string, string[]> = {}
-  for (const [name, value] of record.trailers) (fields[name] ??= []).push(value)
-  return fields
-}
-
 function renderer(root: ConditionalLogger | undefined): (record: LogRecord) => void {
   if (root === undefined) return () => {}
   const base = root.child("queue")
@@ -3675,8 +3194,6 @@ function missedSelector(terms: readonly string[], queue: string, matched: number
 }
 
 /** One reading of the queue as the pane consumes it. */
-/** The entries one queue read yields: the type `readQueue` returns, named here rather than widened in the core. */
-type QueueEntries = Awaited<ReturnType<typeof readQueue>>["changes"]
 
 /** Open exactly the event tip shown in the table, including every event in its history. */
 export async function openEventDetail(
@@ -3740,104 +3257,6 @@ export async function openEventDetail(
     ...(await headFacts(git, config, row)),
     ...(note === undefined ? {} : { note }),
   }
-}
-
-/**
- * One change's detail, read for the row under the cursor and for nothing else
- * (plan D2): its checks joined to the declaration it was judged by and to what
- * their logs hold, its records for HISTORY, and what git says about the head:
- * body, the commits past the base, the diff's size. Every git-derived part is
- * ABSENT with a sentence when the head is not in this repository, never a
- * blank. Nothing here writes.
- */
-export async function openDetail(
-  git: Git,
-  config: QueueConfig,
-  entries: QueueEntries,
-  item: WatchRow,
-  label: string,
-  journal?: JournalRun,
-): Promise<ChangeDetail> {
-  const { row } = item
-  const own = entries.filter((entry) => entry.change.branch === row.branch && entry.change.head === row.head)
-  const histories = own.length === 0 ? [] : await readHistories(git, own, config.target.remote, config.target.branch)
-  const shown = histories.flatMap((entry) => show([entry], entry.change.branch))
-  const records = shown.flatMap((change) => change.records)
-  // ONE JUDGEMENT PER ROW, scoped by THE RUN THIS ROW IS ABOUT and never by the
-  // newest run the change carries. A row a journal split (`item.run`) opens on
-  // the judgement that run ended, found by its id in each trailer's create-only
-  // log path: folding them all opened the OLD row on the newest run's checks
-  // (the andon — a stuck change the line re-took after a resume and that stuck
-  // again). Within a judgement the records stay the full account, because a
-  // merged change's submit-phase checks can come from an earlier run
-  // (1fca452c).
-  //
-  // A row that stands for its WHOLE change splits by nothing and so keeps the
-  // whole fold — every run's `Check:` trailers, which is the only place the
-  // older run's output is still reachable now that the table is one row per
-  // change (S1). Reading `row.run` here instead would scope that row to the
-  // newest run and drop the rest in silence, which is the same defect as the
-  // incident above with the rows the other way round.
-  const packed = judgementOf(records, item.run?.id).flatMap((record) => trailers(record, "Check"))
-  const declared = await declarationFor(git, config, row.base)
-  const ending = endingOf(row)
-  // A DECIDED change's records are its full account: `packed` (folded from
-  // `show` above) already carries every record's `Check:` trailers, submit
-  // through merge. `item.run` — this machine's own journal, selected upstream
-  // by `journalFor` — may hold only the phase that last touched the change,
-  // so trusting it here for a decided change is how a merged change loses
-  // evidence it still has (the `show` case's own 2026-09 recurrence,
-  // 1fca452c). The journal stays the better source only while the change is
-  // still being decided: that is what lets a check running right now show as
-  // running instead of a stale prior result.
-  const decided = ending === "merged" || ending === "failed" || ending === "stuck"
-  const views = checksOf(
-    packed,
-    ending,
-    declared.checks,
-    row.live === undefined
-      ? undefined
-      : { name: row.live.check, ...(row.live.log === undefined ? {} : { log: row.live.log }) },
-    decided ? undefined : item.run?.checks,
-    skippedChecks(judgementOf(records, item.run?.id)),
-  )
-  const checks = views.map(readOutput)
-  const about = row.state === "direct" ? {} : await headFacts(git, config, row)
-  return {
-    checks,
-    row,
-    ...(journal === undefined ? {} : { journal }),
-    run: runOf(row, label, views, item.run?.id ?? row.run),
-    ...(histories.length === 0 ? {} : { records }),
-    ...about,
-    ...(declared.note === undefined ? {} : { note: declared.note }),
-  }
-}
-
-/**
- * The records of the one judgement a history row's run ended: the change's
- * records cut after each record that ends a judgement (anything but opened,
- * checked or the `sent` that reports an ending), and the piece whose `Check:`
- * trailers log under that run. Every record when the run is unknown or no piece
- * names it, which is exactly the fold the detail read before.
- */
-function judgementOf(records: readonly ChangeRecord[], run: string | undefined): readonly ChangeRecord[] {
-  if (run === undefined) return records
-  const endsJudgement = (record: ChangeRecord) =>
-    record.kind !== "opened" && record.kind !== "checked" && record.kind !== "sent"
-  const pieces: ChangeRecord[][] = []
-  for (const record of records) {
-    const current = pieces.at(-1)
-    if (current === undefined || (current.some(endsJudgement) && record.kind !== "sent")) pieces.push([record])
-    else current.push(record)
-  }
-  const marker = `/${run}/`
-  const named = pieces.find((piece) =>
-    piece.some((record) =>
-      trailers(record, "Check").some((packed) => readCheckTrailer(packed).log?.includes(marker) === true),
-    ),
-  )
-  return named ?? records
 }
 
 /** The base a change's own commits are counted and diffed from: the record's, else the target as it stands. */
@@ -4026,11 +3445,10 @@ function readOutput(check: CheckView): CheckPanel {
   }
 }
 
-/** Whether a change in this state holds a place in line: queued, checked or stuck. */
+/** Whether an event change in this state holds a place in line. */
 function inLineState(state: Row["state"]): boolean {
   return (
     state === "queued" ||
-    state === "checked" ||
     state === "stuck" ||
     state === "verifying" ||
     state === "checking" ||
@@ -4132,14 +3550,13 @@ export function endingCode(states: readonly Row["state"][]): YrdCliExitCode | un
         state === "queued" ||
         state === "verifying" ||
         state === "checking" ||
-        state === "merging" ||
-        state === "checked",
+        state === "merging",
     )
   ) {
     return undefined
   }
   if (states.some((state) => state === "stuck")) return 2
-  if (states.some((state) => state === "failed" || state === "withdrawn" || state === "cancelled")) return 1
+  if (states.some((state) => state === "failed" || state === "cancelled")) return 1
   return 0
 }
 
@@ -4226,8 +3643,8 @@ async function declarationFor(
 }
 
 /** How the change ended, in the word `checksOf` needs to judge its last check. */
-function endingOf(row: Row): "checked" | "merged" | "failed" | "stuck" | "open" {
-  return row.state === "merged" || row.state === "failed" || row.state === "stuck" || row.state === "checked"
+function endingOf(row: Row): "merged" | "failed" | "stuck" | "open" {
+  return row.state === "merged" || row.state === "failed" || row.state === "stuck"
     ? row.state
     : "open"
 }
@@ -4445,11 +3862,17 @@ export async function readEventListing(
     diagnostic: `${defect.ref}@${defect.tip}: ${defect.error}`,
     subject: defect.error,
   }))
-  const directRows = list([], {
-    directMerges,
-    now: listNow,
-    ...(options.all ? { sinceMs: Number.POSITIVE_INFINITY } : {}),
-  })
+  const directRows: Row[] = directMerges
+    .filter((commit) => options.all === true || listNow.getTime() - commit.at.getTime() <= 7 * 24 * 60 * 60 * 1000)
+    .map((commit): Row => ({
+      at: commit.at,
+      head: commit.commit,
+      branch: commit.target,
+      reason: directMergeLine(commit),
+      state: "direct",
+      subject: commit.subject,
+    }))
+    .sort((left, right) => (right.at?.getTime() ?? 0) - (left.at?.getTime() ?? 0))
   const projected = [...selected.table, ...selected.document, ...directRows]
   const titles = await subjects(
     git,
@@ -4538,103 +3961,6 @@ export function assertEventListingFence(
       throw new Error(`${ref} appeared during event list at ${tip}; read the queue again`)
     }
   }
-}
-
-/**
- * One legacy queue reading for list, watch and stats: change refs, the local
- * run journal, direct target commits and head subjects. `shown` adds ending
- * instants and draft branches for the human table.
- */
-export async function readListing(
-  git: GitRunner,
-  config: QueueConfig,
-  workdir: string,
-  targetOid: string,
-  options: Readonly<{ shown?: Readonly<{ draftWindow: DraftWindow }> }> = {},
-): Promise<
-  Readonly<{
-    queue: Awaited<ReturnType<typeof readQueue>>
-    journals: Journals
-    all: readonly Row[]
-    /** The drafts of the window asked for; absent when none was. */
-    drafts?: DraftReading
-    /** The seven-day drafts older than a day, folded into a count rather than listed (25424). */
-    olderDrafts?: number
-    observation: GitObservation
-  }>
-> {
-  const queue = await readQueue(git, config.target.remote, config.target.branch, targetOid)
-  if (queue.observation.fence.refs.some(({ ref }) => ref === queueRef(config.target.branch))) {
-    throw new Error(
-      `${config.target.remote}#${config.target.branch} changed to event format during legacy read; read the queue again`,
-    )
-  }
-  const observation = await git.observe({
-    version: 1,
-    root: {
-      remote: await remoteUrl(git, config.target.remote),
-      targetRef: `refs/heads/${config.target.branch}`,
-      targetOid,
-    },
-    ...queue.observation,
-  })
-  const journals = readJournals(join(workdir, "logs"))
-  const window = options.shown?.draftWindow
-  const drafts =
-    window === undefined
-      ? undefined
-      : await readDrafts(git, withoutIgnoredDraftHeads(queue, config.ignore), {
-          targetSha: targetOid,
-          ...(window === "7d" ? { since: new Date(Date.now() - DRAFT_WINDOW_MS) } : {}),
-        })
-  const folded = foldDrafts(drafts?.dated ?? [], new Date())
-  const all = list(queue.changes, {
-    directMerges: await directMergeCommits(git, config.target.branch, targetOid, queue.changes),
-    journals,
-    subjects: await subjects(
-      git,
-      queue.changes.map((entry) => entry.change.head),
-    ),
-    ...(options.shown === undefined ? {} : { endings: await endingInstants(git, queue.changes) }),
-    // Seven days lists the drafts of the last day and counts the older ones
-    // and the undated apart; every draft lists them all, marked.
-    ...(drafts === undefined ? {} : { drafts: window === "all" ? [...drafts.dated, ...drafts.undated] : folded.rows }),
-  })
-  return {
-    all: markStaleVerdicts(all, queue.changes, config.blob),
-    journals,
-    queue,
-    observation,
-    ...(drafts === undefined ? {} : { drafts }),
-    ...(drafts === undefined || window === "all" ? {} : { olderDrafts: folded.older }),
-  }
-}
-
-/**
- * A checked change whose verdict names a check config the target no longer
- * declares is not yet judged under the current one (@i/10-yrd/25301, @cto
- * c7115f0f (3)): the round re-judges it when its walk reaches it, so until then
- * the list says so instead of reading as checked and ready.
- */
-function markStaleVerdicts(
-  rows: readonly Row[],
-  changes: Awaited<ReturnType<typeof readQueue>>["changes"],
-  blob: string,
-): readonly Row[] {
-  const stale = new Set(
-    changes
-      .filter((entry) => {
-        const tip = tipOf(entry.change)
-        return tip.kind === "checked" && trailer(tip, "Config") !== blob
-      })
-      .map((entry) => `${entry.change.branch}@${entry.change.head}`),
-  )
-  if (stale.size === 0) return rows
-  return rows.map((row) =>
-    row.state === "checked" && stale.has(`${row.branch}@${row.head}`)
-      ? { ...row, reason: `not yet judged under ${blob.slice(0, 12)}` }
-      : row,
-  )
 }
 
 /** Prefilter only advertised draft heads; a submitted change remains in the listing. */

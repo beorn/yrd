@@ -103,7 +103,6 @@ export function rowDecision(row: Row): RowVerdict | undefined {
       }
     case "failed":
     case "stuck":
-    case "checked":
       return { decision: row.state, duplicate: false }
     default:
       return undefined

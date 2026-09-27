@@ -9,7 +9,7 @@
  */
 
 import { homedir } from "node:os"
-import { clocks, runStartedAt, type ChangeStatus, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
+import { clocks, runStartedAt, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
 import { STATE_WORDS, type DisplayState } from "./watch-words.ts"
 
 export {
@@ -24,48 +24,26 @@ export {
 
 /**
  * The word a row's state reads as (watch-words.ts): a check running on it now
- * reads checking whatever its records say; otherwise the core's state, in the
- * operator's word (`queued` paints submitted, `checked` paints pending).
+ * reads checking whatever its events say; otherwise the core's event state.
  */
-type DisplayRow = Pick<Row<Row["state"] | ChangeStatus>, "state" | "live" | "format">
+type DisplayRow = Pick<Row, "state" | "live" | "format">
 
 export function displayState(row: DisplayRow): DisplayState {
   if (row.live !== undefined) return "checking"
-  if (row.format === "event") {
-    switch (row.state) {
-      case "verifying":
-        return "event-verifying"
-      case "draft":
-      case "queued":
-      case "checking":
-      case "merging":
-      case "merged":
-      case "failed":
-      case "stuck":
-      case "cancelled":
-      case "direct":
-      case "invalid":
-        return row.state
-      default:
-        throw new Error(`event row has a legacy status: ${row.state}`)
-    }
-  }
   switch (row.state) {
-    case "queued":
-      return "submitted"
-    case "checked":
-      return "pending"
-    case "withdrawn":
-      return "cancelled"
+    case "verifying":
+      return "event-verifying"
     case "draft":
+    case "queued":
+    case "checking":
+    case "merging":
+    case "cancelled":
+    case "invalid":
     case "direct":
-    case "deferred":
     case "merged":
     case "failed":
     case "stuck":
       return row.state
-    default:
-      throw new Error(`legacy row has an event status without its format: ${row.state}`)
   }
 }
 
@@ -124,9 +102,7 @@ export function diagnosticLines(
 export const STATE_GLYPH: Readonly<Record<DisplayRow["state"], string>> = {
   invalid: "!",
   cancelled: "⊘",
-  checked: "◉",
   checking: "◉",
-  deferred: "☾",
   direct: "→",
   draft: "◇",
   failed: "×",
@@ -135,7 +111,6 @@ export const STATE_GLYPH: Readonly<Record<DisplayRow["state"], string>> = {
   queued: "○",
   stuck: "◌",
   verifying: "◉",
-  withdrawn: "⊘",
 }
 
 /** The glyph a check running RIGHT NOW overlays on any state: the overlay reads live, the word still reads the state. */
@@ -304,10 +279,10 @@ export function toHms(timerStr: string): string {
   if (!match) return timerStr
   const parts = match[0].split(":")
   if (parts.length === 2) {
-    return `00:${parts[0]!.padStart(2, "0")}:${parts[1]!.padStart(2, "0")}`
+    return `00:${parts.map((part) => part.padStart(2, "0")).join(":")}`
   }
   if (parts.length === 3) {
-    return `${parts[0]!.padStart(2, "0")}:${parts[1]!.padStart(2, "0")}:${parts[2]!.padStart(2, "0")}`
+    return parts.map((part) => part.padStart(2, "0")).join(":")
   }
   return timerStr
 }
@@ -341,7 +316,6 @@ export function ageRunText(row: Row, now: Date): string {
     row.state === "merged" ||
     row.state === "failed" ||
     row.state === "cancelled" ||
-    row.state === "withdrawn" ||
     row.state === "direct"
   const age = measured.ageMs === undefined ? "—" : mediaDuration(measured.ageMs)
   const runtime = measured.runtimeMs ?? measured.checkingMs ?? (isEnded ? measured.tookMs : undefined)

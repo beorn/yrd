@@ -187,7 +187,7 @@ export type Band = (typeof BANDS)[number]
 export function bandOf(row: Pick<Row, "state" | "position" | "live">, holding = true): Band {
   if (row.live !== undefined && holding) return "runner"
   if (row.state === "draft") return "drafts"
-  if (row.position !== undefined || row.state === "queued" || row.state === "checked" || row.state === "stuck") {
+  if (row.position !== undefined || row.state === "queued" || row.state === "stuck") {
     return "waiting"
   }
   return "done"

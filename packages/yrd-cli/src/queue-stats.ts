@@ -238,7 +238,7 @@ function groupOf(key: string, rows: readonly WatchRow[]): StatsGroup {
       unclassified: unclassifiedRows(rows).length,
     },
     failed: inState("failed"),
-    inLine: inState("queued", "checked"),
+    inLine: inState("queued", "verifying", "checking", "merging"),
     key,
     latency: latencyOf(rows),
     merged,

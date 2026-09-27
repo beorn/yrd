@@ -57,17 +57,14 @@ export function bucketOf(row: Pick<Row, "state" | "live">): StatusBucket {
   switch (row.state) {
     case "merged":
     case "direct":
-    case "withdrawn":
     case "cancelled":
       return "done"
     case "failed":
     case "invalid":
       return "failed"
     case "queued":
-    case "checked":
     case "stuck":
     case "draft":
-    case "deferred":
       return "open"
     case "verifying":
     case "checking":
@@ -109,30 +106,14 @@ export type ListLayout = Readonly<{
 export function changesSuffix(row: Row): Readonly<{ text: string; color: string }> | undefined {
   if (row.live !== undefined) return { color: "$fg-info", text: row.live.check }
   if (row.state === "failed" && row.reason !== undefined) return { color: "$fg-error", text: `err=${row.reason}` }
-  // A checked row's reason is its stale verdict: judged under a check config the target no longer declares (25301).
-  if (row.state === "checked" && row.reason !== undefined) return { color: "$fg-muted", text: row.reason }
+  if (row.state === "queued" && row.reason?.startsWith("deferred ")) {
+    return { color: "$fg-accent", text: row.reason }
+  }
   if (row.state === "stuck" && row.reason !== undefined) {
     return { color: "$fg-warning", text: `${STATE_WORDS.stuck.word}=${row.reason}` }
   }
-  if (row.state === "withdrawn" && row.reason !== undefined) {
+  if (row.state === "cancelled" && row.reason !== undefined) {
     return { color: "$fg-muted", text: `${STATE_WORDS.cancelled.word}=${row.reason}` }
-  }
-  if (row.state === "deferred") {
-    const projected = row.projectedMs !== undefined ? `${Math.round(row.projectedMs / 60000)}m` : undefined
-    const bound = row.boundMs !== undefined ? `${Math.round(row.boundMs / 60000)}m` : undefined
-    const rel =
-      row.projectedMs !== undefined && row.boundMs !== undefined
-        ? row.projectedMs > row.boundMs
-          ? ">"
-          : row.projectedMs < row.boundMs
-            ? "<"
-            : "="
-        : ">"
-    const timing = projected && bound ? `projected ${projected} ${rel} ${bound}, ` : ""
-    return {
-      color: "$fg-accent",
-      text: `${timing}waits for the long check`,
-    }
   }
   return undefined
 }

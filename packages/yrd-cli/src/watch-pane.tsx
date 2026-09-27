@@ -1154,8 +1154,8 @@ function endingOf(rows: readonly WatchRow[]): 0 | 1 | 2 | undefined {
   // A draft is no change, so it neither holds the watch open nor ends it.
   const states: readonly Row["state"][] = rows.map((row) => row.row.state).filter((state) => state !== "draft")
   if (states.length === 0) return undefined
-  if (states.some((state) => state === "queued" || state === "checked")) return undefined
+  if (states.some((state) => state === "queued" || state === "verifying" || state === "checking" || state === "merging")) return undefined
   if (states.some((state) => state === "stuck")) return 2
-  if (states.some((state) => state === "failed" || state === "withdrawn")) return 1
+  if (states.some((state) => state === "failed" || state === "cancelled")) return 1
   return 0
 }

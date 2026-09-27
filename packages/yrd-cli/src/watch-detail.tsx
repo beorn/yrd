@@ -38,12 +38,11 @@
 
 import { hyperlink } from "@silvery/ansi"
 import { Box, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
-import type { ChangeRecord, CheckView, JournalCommand, JournalRun, JournalStep, Row } from "@yrd/queue-core"
+import type { CheckView, JournalCommand, JournalRun, JournalStep, Row } from "@yrd/queue-core"
 import type { Event } from "@yrd/queue-core"
 import {
   diffSummary,
   eventHistoryEntries,
-  historyEntries,
   metadataGroups,
   metadataKeyWidth,
   timelineOf,
@@ -90,9 +89,7 @@ export type ChangeDetail = Readonly<{
   /** The run this detail is about, as the status box and the RUN column draw it. */
   run: WatchRun
   checks: readonly CheckPanel[]
-  /** The change's own records, for HISTORY; absent when the histories were not read. */
-  records?: readonly ChangeRecord[]
-  /** The event chain selected by the table, for event-format HISTORY. */
+  /** The event chain selected by the table, for HISTORY. */
   events?: readonly Event[]
   /** The head commit's body, for the Changes tab. */
   body?: string
@@ -1028,10 +1025,9 @@ function TimingRows({ row }: { row: Row }) {
   )
 }
 
-/** The change's history from whichever source was read: the event chain, else the legacy records. */
+/** The selected change's event history, when the row represents an event chain. */
 function historyOf(detail: ChangeDetail): readonly HistoryEntry[] | undefined {
-  if (detail.events !== undefined) return eventHistoryEntries(detail.events)
-  return detail.records === undefined ? undefined : historyEntries(detail.records)
+  return detail.events === undefined ? undefined : eventHistoryEntries(detail.events)
 }
 
 /** The first tab's second line: which of the branch's cuts this is, e.g. `cut 2/3`. */
