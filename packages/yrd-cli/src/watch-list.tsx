@@ -130,7 +130,7 @@ export function truncateWithEllipsis(str: string, maxLen: number): string {
 }
 
 /**
- * Allocates display widths for the ISSUE / BRANCH column (25716):
+ * Allocates display widths for the CHANGES column (25716):
  * - Branch name and error each take at most 50% of the column width.
  * - Title keeps the remainder and never less than a third.
  * - Anything cut ends with an ellipsis.
@@ -483,7 +483,7 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
         q: (layout.qWidth ?? 0) === 0 ? null : label(layout.isFullQueue ? "QUEUE" : "Q"),
         run: label("RUN"),
         queueRun: label("QUEUE / RUN"),
-        task: label("ISSUE / BRANCH"),
+        task: label("CHANGES"),
         status: label("STATUS"),
         agent: label("WHO"),
         ageRun: label("AGE / RUN"),
