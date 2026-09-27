@@ -607,6 +607,8 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       // Dropping a branch records the last head being deleted even when no
       // change was open. This is also the first event for an unsubmitted branch.
       if (!isOpen(state.status) && event.type === "cancelled" && reason === "dropped") {
+        // A branch cleanup cannot turn a landed change back into cancelled.
+        if (state.status === "merged") return endingRefusal(state, event)
         return {
           ...next,
           status: "cancelled",
@@ -1884,6 +1886,42 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   const fetchRefs = store.backend.fetchRefs
   if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs for dropped branch commit")
   const head = (await fetchRefs(store.repo, branchRef, store.remote)).get(branchRef)
+  if (state.ending !== undefined && head !== undefined) {
+    const kept = history.flatMap((event) => event.links)
+    if (!kept.includes(head)) {
+      const lastKept = kept.at(-1)
+      throw new Error(
+        `${branchRef} at ${head} has already ended ${state.ending.kind}; its last kept link is ${lastKept ?? "none"}. ` +
+          `The branch is deletable when its head equals a kept link. ` +
+          `See 25658 P3: drop an ended branch head reachable from origin/main through the one ancestry implementation.`,
+      )
+    }
+  }
+  if (state.ending !== undefined && state.reason !== "dropped" && state.status !== "merged") {
+    const note = request.note?.trim()
+    if (note === undefined || note === "") {
+      throw new Error(`${ref} in ${store.repo}: dropping an ended change requires --reason`)
+    }
+    if (selectedTip === null) throw new Error(`${ref} in ${store.repo}: ended change has no chain tip`)
+    if (state.commit === undefined) throw new Error(`${ref} in ${store.repo}: ended change has no kept head`)
+    const input = changeInput("cancelled", {
+      queueTip,
+      at: new Date(),
+      commit: state.commit,
+      reason: "dropped",
+      by: request.by,
+      title: `dropped ${branch}`,
+      content: note,
+    })
+    const result = await chain.append(decide(history, input), {
+      expect: selectedTip,
+      ...(head === undefined ? {} : { also: [{ ref: branchRef, expect: head, oid: null }] }),
+    })
+    const written = result.events.findLast((event) => event.type === "cancelled")?.id
+    if (written === undefined) throw new Error(`${ref} in ${store.repo}: dropped event was not written`)
+    if (head !== undefined) await deleteCandidateRefsForShas(gitIn(store.repo), store.repo, store.remote, [head])
+    return { queue, branch, event: written, head: state.commit }
+  }
   if (head === undefined) {
     if (state.ending !== undefined && state.reason === "dropped") {
       const ending = history.findLast((event) => event.id === state.ending?.id)
@@ -1900,15 +1938,6 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
     )
   }
   if (state.ending !== undefined) {
-    const kept = history.flatMap((event) => event.links)
-    if (!kept.includes(head)) {
-      const lastKept = kept.at(-1)
-      throw new Error(
-        `${branchRef} at ${head} has already ended ${state.ending.kind}; its last kept link is ${lastKept ?? "none"}. ` +
-          `The branch is deletable when its head equals a kept link. ` +
-          `See 25658 P3: drop an ended branch head reachable from origin/main through the one ancestry implementation.`,
-      )
-    }
     if (store.backend.publish === undefined) {
       throw new Error("Gitomic backend lacks publish for dropped branch deletion")
     }
