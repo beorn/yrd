@@ -81,6 +81,9 @@ import {
   subjects,
   targetName,
   runCheck,
+  DEFAULT_CHECK_BOUND_MS,
+  STEP_BOUNDS_MS,
+  STEP_STATES,
   inspectSubmit,
   inspectSubmitAtHead,
   preparePinCarrier,
@@ -1599,7 +1602,21 @@ export async function coreQueueCommand(
         chainPressure = pressure
       }
       let threshold = { declared: config.health.declared, ms: config.health.stallAfterMs }
-      const flowReading = (): FlowReading | undefined => (flow === undefined ? undefined : { flow, threshold })
+      let activeChecks = config.checks
+      let activeSetup = config.setup
+      const flowReading = (): FlowReading | undefined =>
+        flow === undefined
+          ? undefined
+          : {
+              flow: {
+                ...flow,
+                ...(flow.roundOpen === undefined || runnerPhase === undefined
+                  ? {}
+                  : { roundOpen: { ...flow.roundOpen, phase: runnerPhase } }),
+              },
+              threshold,
+              claim: runnerClaim(),
+            }
       /**
        * The open round's phase, from its own journal (25669 row 2), for the next
        * write to state: the heartbeat writes first and never waits on this read.
@@ -1643,7 +1660,15 @@ export async function coreQueueCommand(
        */
       const writeHealth = (document: QueueHealthDocument): QueueHealthDocument => {
         const written = writtenHealthDocument(
-          { ...document, facts: { ...document.facts, publication: publicationStatus } },
+          {
+            ...document,
+            facts: {
+              ...document.facts,
+              publication: publicationStatus,
+              runnerClaim: runnerClaim(),
+              ...(runnerPhase === undefined ? {} : { runnerPhase }),
+            },
+          },
           writer,
           heartbeat,
           new Date(),
@@ -1679,6 +1704,8 @@ export async function coreQueueCommand(
       let runnerState: RunnerClaim["state"] = "idle"
       let holding: string | undefined
       let runnerSince = writer.startedAt
+      let runnerDeadline: string | undefined
+      let runnerPhase: string | undefined
       const runnerClaim = (at: Date = new Date()): RunnerClaim => ({
         host: hostname(),
         pid: writer.pid,
@@ -1688,6 +1715,7 @@ export async function coreQueueCommand(
         state: runnerState,
         ...(holding === undefined ? {} : { holding }),
         since: runnerSince,
+        ...(runnerDeadline === undefined ? {} : { deadline: runnerDeadline }),
       })
       const publisher = new RunnerPublisher(
         git,
@@ -1704,12 +1732,37 @@ export async function coreQueueCommand(
           io.stderr(`yrd: ${line}\n`)
         },
       )
-      const setRunnerState = (state: RunnerClaim["state"], selected?: string): void => {
-        if (runnerState === state && holding === selected) return
-        if (runnerState !== state) runnerSince = new Date().toISOString()
+      const setRunnerState = (
+        state: RunnerClaim["state"],
+        selected?: string,
+        phase?: string,
+        since = new Date().toISOString(),
+        boundMs?: number,
+      ): void => {
+        const bounded =
+          state === "provisioning" || state === "checking" || state === "merging" || state === "deprovisioning"
+        if (
+          bounded &&
+          (phase === undefined || boundMs === undefined || !Number.isSafeInteger(boundMs) || boundMs <= 0)
+        ) {
+          throw new Error(`bounded runner ${state} needs a named phase and positive declared bound`)
+        }
+        if (!bounded && (phase !== undefined || boundMs !== undefined)) {
+          throw new Error(`unbounded runner ${state} cannot carry a phase deadline`)
+        }
+        if (runnerState === state && holding === selected && runnerPhase === phase && runnerSince === since) return
+        runnerSince = since
         runnerState = state
         holding = selected
+        runnerPhase = phase
+        if (bounded) {
+          if (boundMs === undefined) throw new Error(`bounded runner ${state} has no declared bound`)
+          runnerDeadline = new Date(Date.parse(since) + boundMs).toISOString()
+        } else {
+          runnerDeadline = undefined
+        }
         void publisher.publish(runnerClaim())
+        if (bounded && stated !== undefined) writeHealth(lineDocument(lastStop, 0))
       }
       const recordRunnerState = (record: LogRecord): void => {
         const selected =
@@ -1717,21 +1770,34 @@ export async function coreQueueCommand(
             ? `${record.branch}@${record.head}`
             : undefined
         if (record.kind === "check" && record.end === undefined) {
-          setRunnerState(record.name === "setup" ? "provisioning" : "checking", selected)
-        } else if (record.kind === "step" && record.end === undefined) {
+          if (typeof record.name !== "string" || typeof record.start !== "string") {
+            throw new Error("check start lacks a name or start instant for its runner deadline")
+          }
+          const boundMs = (() => {
+            if (record.name === "setup") {
+              if (activeSetup === undefined) throw new Error("runner setup has no declaration for its bound")
+              return DEFAULT_CHECK_BOUND_MS
+            }
+            const spec = activeChecks.find((check) => check.name === record.name)
+            if (spec === undefined) throw new Error(`runner check ${record.name} has no declaration for its bound`)
+            return spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
+          })()
           setRunnerState(
-            record.phase === "merge"
-              ? "merging"
-              : record.name === "remove" ||
-                  record.name === "retain" ||
-                  record.name === "deprovision" ||
-                  record.name === "retire"
-                ? "deprovisioning"
-                : "provisioning",
+            record.name === "setup" ? "provisioning" : "checking",
             selected,
+            record.name,
+            record.start,
+            boundMs,
           )
-        } else if (record.kind === "merge") {
-          setRunnerState("merging", selected)
+        } else if (record.kind === "step" && record.end === undefined) {
+          if (typeof record.name !== "string" || typeof record.start !== "string") {
+            throw new Error("step start lacks a name or start instant for its runner deadline")
+          }
+          if (!Object.hasOwn(STEP_BOUNDS_MS, record.name)) {
+            throw new Error(`runner step ${record.name} has no declared detection bound`)
+          }
+          const name = record.name as keyof typeof STEP_BOUNDS_MS
+          setRunnerState(STEP_STATES[name], selected, name, record.start, STEP_BOUNDS_MS[name])
         }
       }
       const runnerConflictExit = (): YrdCliExitCode | undefined => {
@@ -2173,13 +2239,17 @@ export async function coreQueueCommand(
           }
           // The declaration again under the lock, as the target holds it now: a
           // correct edit at the target is the next round's, never a restart's.
-          if (lastStop === undefined) setRunnerState("provisioning")
+          if (lastStop === undefined) {
+            setRunnerState("provisioning", undefined, "prepare", new Date().toISOString(), STEP_BOUNDS_MS.prepare)
+          }
           const ran = await lockedRound({
             before: async (declared) => {
               // The round opens now, judged against the threshold THIS round's
               // declaration carries, so an edit to health.stallAfter is the next
               // round's, like every other key.
               threshold = { declared: declared.config.health.declared, ms: declared.config.health.stallAfterMs }
+              activeChecks = declared.config.checks
+              activeSetup = declared.config.setup
               openedAt = new Date().toISOString()
               if (flow !== undefined) flow = { ...flow, roundOpen: { startedAt: openedAt } }
               if (lockWaitStated) {

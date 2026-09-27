@@ -2,11 +2,13 @@
 import {
   formatRunnerClaim,
   judgeRunnerClaim,
+  judgeRunnerDeadline,
   parseRunnerClaim,
   readRemoteCommit,
   runnerRef,
   type Git,
   type RunnerClaim,
+  type RunnerDeadlineJudgment,
 } from "@yrd/queue-core"
 
 type Trailers = Readonly<{
@@ -17,11 +19,13 @@ type Trailers = Readonly<{
   State: RunnerClaim["state"]
   Holding?: string
   Since: string
+  Deadline?: string
 }>
 
 export type PublishedRunner = Readonly<{
   signal: "fresh" | "silent" | "absent" | "unreadable"
   claim?: Trailers
+  phase?: RunnerDeadlineJudgment
   /** Absence and unreadability must say where the reader looked and why it could not answer. */
   why?: string
 }>
@@ -35,6 +39,7 @@ function trailers(claim: RunnerClaim): Trailers {
     State: claim.state,
     ...(claim.holding === undefined ? {} : { Holding: claim.holding }),
     Since: claim.since,
+    ...(claim.deadline === undefined ? {} : { Deadline: claim.deadline }),
   }
 }
 
@@ -59,9 +64,10 @@ export async function readPublishedRunner(
   try {
     const claim = await claimAt(git, tip, ref)
     const verdict = judgeRunnerClaim(claim, now)
+    const phase = judgeRunnerDeadline(claim, now)
     return verdict.status === "unreadable"
-      ? { signal: "unreadable", claim: trailers(claim), why: `${remote} ${ref} at ${tip}: ${verdict.reason}` }
-      : { signal: verdict.status, claim: trailers(claim) }
+      ? { signal: "unreadable", claim: trailers(claim), phase, why: `${remote} ${ref} at ${tip}: ${verdict.reason}` }
+      : { signal: verdict.status, claim: trailers(claim), phase }
   } catch (error) {
     return {
       signal: "unreadable",

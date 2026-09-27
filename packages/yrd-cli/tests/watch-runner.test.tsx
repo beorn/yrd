@@ -488,6 +488,29 @@ describe("runnerWord, the one word", () => {
     expect(runnerLine(silent, NOW).holds).toContain("runner silent since")
   })
 
+  /** @failure The remote ref judged a phase overdue but the human row hid the verdict. @level l1 */
+  it("names a fresh runner's overdue phase on the human row", () => {
+    const off: RunnerFacts = {
+      journalDir: "/w/logs",
+      service: { kind: "absent", why: "no local health document" },
+      published: {
+        signal: "fresh",
+        claim: {
+          Runner: "queue-host/42",
+          Started: NOW.toISOString(),
+          At: NOW.toISOString(),
+          Beat: "60000ms",
+          State: "merging",
+          Since: NOW.toISOString(),
+          Deadline: NOW.toISOString(),
+        },
+        phase: { status: "overdue", reason: "phase Deadline passed" },
+      },
+    }
+    expect(runnerLine(off, NOW).detail).toContain("phase overdue: phase Deadline passed")
+    expect(runnerLine(off, NOW, { stopped: PAUSED }).state).toBe("paused")
+  })
+
   /**
    * A stop record is a GIT fact and reads from any clone, so it outranks a
    * missing journal: a clone with nothing local to read still knows the line is
@@ -1067,5 +1090,35 @@ describe("the line's flow on the runner's row (25669)", () => {
     const stalled = { ...flow, stalledForMs: minutes(47), unjudgedForMs: minutes(47) }
     const line = runnerLine(facts({ ...BEATING, flow: stalled, state: "unhealthy" }), NOW, { waiting: 11 })
     expect(line.holds).toContain("stalled 47:00: no change judged while 11 waited (threshold 45:00)")
+  })
+
+  /** @failure A deadline page appeared to be the old unjudged clock in the human row. @level l1 */
+  it("shows the service's declared-bound page sentence", () => {
+    const service: RunnerService = {
+      ...BEATING,
+      state: "unhealthy",
+      flow: { ...flow, stalledForMs: minutes(3) },
+      stallCause:
+        "step publish past its declared bound (30m, since 2026-09-03T11:27:00.000Z); the runner does not cancel it",
+    }
+    const line = runnerLine(facts(service), NOW, { waiting: 11 })
+    expect(line.holds).toContain(service.stallCause)
+    expect(line.holds).not.toContain("no change judged while")
+  })
+
+  it("reads the declared-bound sentence from the health document", async () => {
+    const cause = "round past its declared bound (typecheck, bound 30m, since 2026-09-03T11:27:00.000Z)"
+    const raw = JSON.parse(healthDocument({ staleAfterMs: 5 * 60_000, flow })) as Record<string, unknown>
+    const stated = workdirWith({
+      ageMs: 1_000,
+      health: JSON.stringify({
+        ...raw,
+        state: "unhealthy",
+        error: { code: "queue-line-stalled", cause, resolution: [] },
+      }),
+    })
+    const service = await readRunnerService(stated, NOW)
+    expect(service.kind).toBe("beating")
+    expect(runnerLine(facts(service), NOW, { waiting: 11 }).holds).toContain(cause)
   })
 })

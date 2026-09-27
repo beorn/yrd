@@ -21,6 +21,7 @@
 
 import { stopFact, stuckCures, type PauseRecord } from "./pause.ts"
 import { changeName } from "./refs.ts"
+import { judgeRunnerDeadline, type RunnerClaim } from "./runner-claim.ts"
 
 export const QUEUE_HEALTH_SCHEMA = "hab-service-health/2" as const
 
@@ -324,7 +325,7 @@ export type LineFlow = Readonly<{
 export type StallThreshold = Readonly<{ ms: number; declared: boolean }>
 
 /** A flow reading and the threshold it is judged against, as the loop hands both to a health write. */
-export type FlowReading = Readonly<{ flow: LineFlow; threshold: StallThreshold }>
+export type FlowReading = Readonly<{ flow: LineFlow; threshold: StallThreshold; claim?: RunnerClaim }>
 
 /** The last remote-read round failure; the service retains and counts it until one round succeeds. */
 export type RoundReadFailure = Readonly<{ ref: string; error: string; count: number }>
@@ -349,7 +350,12 @@ export const STALLED_LINE_CODE = "queue-line-stalled"
  * costs little triage and a stopped or blind line — the one this exists for —
  * reads as itself.
  */
-export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date): LineStall | undefined {
+export function lineStall(
+  flow: LineFlow,
+  threshold: StallThreshold,
+  now: Date,
+  claim?: RunnerClaim,
+): LineStall | undefined {
   if (flow.casRefused !== undefined && flow.casRefused.count >= 3) {
     const refusal = flow.casRefused
     const window = refusal.windowExhausted
@@ -370,6 +376,15 @@ export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date):
       cause: `publication CAS refused ${String(refusal.count)} consecutive times${detail} for ${refusal.ref} at ${refusal.marker}${unread}${history}; the queue remains alive and will retry`,
     }
   }
+  let fallback = ""
+  if (flow.roundOpen !== undefined && claim !== undefined) {
+    const deadline = judgeRunnerDeadline(claim, now)
+    if (deadline.status === "within") return undefined
+    if (deadline.status === "overdue") {
+      return phaseDeadlineStall(claim, flow.roundOpen.phase ?? claim.state, now)
+    }
+    fallback = `${deadline.reason}; 45m fallback; `
+  }
   const forMs = unjudgedFor(flow, now)
   if (forMs === undefined || flow.oldestWaiting === undefined || forMs < threshold.ms) return undefined
   const opened = Date.parse(flow.oldestWaiting.openedAt)
@@ -387,7 +402,7 @@ export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date):
           ? ` (phase unread: ${flow.roundOpen.phaseUnread})`
           : ""
     return {
-      cause: `a round has been running its checks for ${running}${on}${at}; ${observation}`,
+      cause: `${fallback}a round has been running its checks for ${running}${on}${at}; ${observation}`,
       forMs,
       shape: "slow-round",
     }
@@ -400,6 +415,23 @@ export function lineStall(flow: LineFlow, threshold: StallThreshold, now: Date):
     cause: `no round running; ${last} while ${String(flow.waiting)} waited; ${observation}`,
     forMs,
     shape: "stopped-line",
+  }
+}
+
+/** One page sentence for both the heartbeat writer and the health-document reader. */
+function phaseDeadlineStall(claim: RunnerClaim, phase: string, now: Date): LineStall {
+  const judgment = judgeRunnerDeadline(claim, now)
+  if (judgment.status !== "overdue" || claim.deadline === undefined) {
+    throw new Error(`phase ${phase} is not overdue: ${judgment.reason}`)
+  }
+  const boundMs = Date.parse(claim.deadline) - Date.parse(claim.since)
+  return {
+    forMs: now.getTime() - Date.parse(claim.deadline),
+    shape: "slow-round",
+    cause:
+      claim.state === "checking"
+        ? `round past its declared bound (${phase}, bound ${span(boundMs)}, since ${claim.since})`
+        : `step ${phase} past its declared bound (${span(boundMs)}, since ${claim.since}); the runner does not cancel it`,
   }
 }
 
@@ -435,8 +467,9 @@ export function withLineFlow(
   readFailure?: RoundReadFailure,
 ): QueueHealthDocument {
   const foreign = document.error !== undefined && document.error.code !== STALLED_LINE_CODE
-  const stall = stop === undefined && !foreign ? lineStall(reading.flow, reading.threshold, now) : undefined
-  const facts = { ...document.facts, flow: flowFact(reading, unjudgedFor(reading.flow, now), stall) }
+  const stall =
+    stop === undefined && !foreign ? lineStall(reading.flow, reading.threshold, now, reading.claim) : undefined
+  const facts = { ...document.facts, flow: flowFact(reading, unjudgedFor(reading.flow, now), stall, now) }
   if (foreign) return withRoundReadFailure({ ...document, facts }, readFailure)
   const { error: _cleared, ...rest } = document
   if (stall === undefined) return withRoundReadFailure({ ...rest, state: "healthy", facts }, readFailure)
@@ -483,9 +516,12 @@ function flowFact(
   reading: FlowReading,
   unjudgedForMs: number | undefined,
   stall: LineStall | undefined,
+  now: Date,
 ): Readonly<Record<string, unknown>> {
   return {
     ...reading.flow,
+    ...(reading.claim?.deadline === undefined ? {} : { deadline: reading.claim.deadline }),
+    ...(reading.claim === undefined ? {} : { deadlineJudgment: judgeRunnerDeadline(reading.claim, now).status }),
     stallAfterMs: reading.threshold.ms,
     stallAfterDeclared: reading.threshold.declared,
     ...(unjudgedForMs === undefined ? {} : { slow: unjudgedForMs > ROUND_BUDGET_MS, unjudgedForMs }),
@@ -503,7 +539,7 @@ function stalledFailure(stall: LineStall, flow: LineFlow): QueueHealthFailure {
       stall.shape === "cas-refused"
         ? `Read the refused publication rows in the last round journals for ${flow.casRefused?.ref ?? "the change"}; repair persistent ref contention, then let the queue retry.`
         : stall.shape === "slow-round"
-          ? "A round is running: read its journal (yrd queue list shows the RUNNER line and the round's log) to see which check it is in and whether that check is making progress."
+          ? "A round is running: read its journal (yrd queue list shows the RUNNER line and the round's log) to see which check or step it is in and whether that phase is making progress."
           : "No round is judging anything: read the last round's journal and the service's own log for why rounds complete without taking a change.",
       ...(oldest === undefined
         ? []
@@ -511,7 +547,9 @@ function stalledFailure(stall: LineStall, flow: LineFlow): QueueHealthFailure {
       "The service is alive and heartbeating: no restart is needed to read this, and a restart alone does not cure a line that judges nothing.",
       stall.shape === "cas-refused"
         ? "This page clears when this change publishes successfully."
-        : "This page clears on the next judgement — a change merged, failed or recorded stuck — and never by itself.",
+        : stall.shape === "slow-round"
+          ? "This page clears when the phase advances within its new bound or a change is judged; it never clears merely because time passes."
+          : "This page clears on the next judgement — a change merged, failed or recorded stuck — and never by itself.",
     ],
   }
 }
@@ -546,27 +584,57 @@ export const STUCK_RECORD_CODE = "yrd-round-stuck"
 export function believableHealthDocument(document: QueueHealthDocument, now: Date): QueueHealthDocument {
   const staleAfter = document.facts?.staleAfter
   const writtenAt = document.facts?.writtenAt
-  if (typeof staleAfter !== "string") return document
-  const deadline = Date.parse(staleAfter)
-  if (Number.isNaN(deadline) || now.getTime() <= deadline) return document
-  return {
-    schema: QUEUE_HEALTH_SCHEMA,
-    service: document.service,
-    state: "unhealthy",
-    verdict: { kind: "running" },
-    error: {
-      code: "queue-round-overdue",
-      cause:
-        `the service last wrote this document at ${typeof writtenAt === "string" ? writtenAt : "an unrecorded instant"} ` +
-        `and declared it believable until ${staleAfter}; nothing has been written since, ` +
-        `so its last verdict (${document.state}) is no longer a measurement of anything`,
-      resolution: [
-        "The service restates this document on a heartbeat, through long rounds, idle sleeps and a stopped line alike, so overdue means its writer stopped writing: the process is gone, or its event loop is held.",
-        "facts.runner names that writer when the document carries one: if the process is gone, start the service again; if it is still running, it is alive and not writing, so inspect it before stopping it.",
-        "A hand `yrd queue run` does not write this document, so it cannot clear this page; the page clears the moment the service writes again.",
-      ],
-    },
-    facts: { ...document.facts, overdueBy: now.getTime() - deadline },
+  if (typeof staleAfter === "string") {
+    const deadline = Date.parse(staleAfter)
+    if (!Number.isNaN(deadline) && now.getTime() > deadline) {
+      return {
+        schema: QUEUE_HEALTH_SCHEMA,
+        service: document.service,
+        state: "unhealthy",
+        verdict: { kind: "running" },
+        error: {
+          code: "queue-round-overdue",
+          cause:
+            `the service last wrote this document at ${typeof writtenAt === "string" ? writtenAt : "an unrecorded instant"} ` +
+            `and declared it believable until ${staleAfter}; nothing has been written since, ` +
+            `so its last verdict (${document.state}) is no longer a measurement of anything`,
+          resolution: [
+            "The service restates this document on a heartbeat, through long rounds, idle sleeps and a stopped line alike, so overdue means its writer stopped writing: the process is gone, or its event loop is held.",
+            "facts.runner names that writer when the document carries one: if the process is gone, start the service again; if it is still running, it is alive and not writing, so inspect it before stopping it.",
+            "A hand `yrd queue run` does not write this document, so it cannot clear this page; the page clears the moment the service writes again.",
+          ],
+        },
+        facts: { ...document.facts, overdueBy: now.getTime() - deadline },
+      }
+    }
+  }
+  if (document.error !== undefined) return document
+  const stored = document.facts?.runnerClaim
+  if (stored === undefined) return document
+  if (typeof stored !== "object" || stored === null) {
+    return unreadableHealthDocument(
+      document.service,
+      "health document facts.runnerClaim is not an object",
+      String(stored),
+    )
+  }
+  try {
+    const claim = stored as RunnerClaim
+    if (judgeRunnerDeadline(claim, now).status !== "overdue") return document
+    const phase = typeof document.facts?.runnerPhase === "string" ? document.facts.runnerPhase : claim.state
+    const stall = phaseDeadlineStall(claim, phase, now)
+    return {
+      ...document,
+      state: "unhealthy",
+      error: stalledFailure(stall, {}),
+      facts: { ...document.facts, phaseOverdue: true },
+    }
+  } catch (error) {
+    return unreadableHealthDocument(
+      document.service,
+      `health document facts.runnerClaim cannot be judged: ${error instanceof Error ? error.message : String(error)}`,
+      JSON.stringify(stored).slice(0, 2000),
+    )
   }
 }
 
