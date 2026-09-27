@@ -42,6 +42,7 @@ export {
 } from "./runner-claim.ts"
 export type { RunnerClaim, RunnerClaimJudgment, RunnerClaimState, RunnerDeadlineJudgment } from "./runner-claim.ts"
 export type { Change } from "./refs.ts"
+export { formatQueueKey, parseQueueKey } from "./queue-key.ts"
 export { activateRunIndex, lookupRunIndex, runIndexPath, RUN_INDEX_CODES } from "./run-index.ts"
 export type { RunIndexLookup, RunIndexRecord } from "./run-index.ts"
 export {

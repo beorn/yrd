@@ -15,6 +15,7 @@
 import { refAt, type Git } from "./git.ts"
 import { parseDuration } from "./duration.ts"
 import { DEFAULT_STALL_AFTER_MS, STALL_AFTER_FLOOR_MS } from "./service-health.ts"
+import { formatQueueKey } from "./queue-key.ts"
 import type { CheckSpec } from "./check.ts"
 
 /**
@@ -35,7 +36,8 @@ export type Target = Readonly<{
 
 /**
  * The queue's own name: its target with the remote resolved to a URL and
- * normalized — `<host>/<path>#<branch>`.
+ * normalized — legacy `<host>/<path>#<branch>` unless the branch contains #,
+ * when the shared versioned queue-key codec spells both fields.
  *
  * A remote NAME means nothing outside the repository that holds it: two clones
  * call one queue `origin` and `yrd`, and a reader of a merge commit has neither.
@@ -47,7 +49,7 @@ export type Target = Readonly<{
  * unambiguous and is kept whole.
  */
 export function queueName(target: Target, remoteUrl: string): string {
-  return `${normalizedRemote(remoteUrl)}#${target.branch}`
+  return formatQueueKey(normalizedRemote(remoteUrl), target.branch)
 }
 
 /** A remote URL as the queue's name spells it; a path is returned as it stands. */

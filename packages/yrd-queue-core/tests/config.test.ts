@@ -236,4 +236,10 @@ describe("a queue's stable name", () => {
   ])("normalizes %s at %s", (branch, remote, expected) => {
     expect(queueName({ branch, remote: "unused" }, remote)).toBe(expected)
   })
+
+  it("writes a v2 key only for a # branch, including Unicode byte escapes (26201)", () => {
+    expect(queueName({ branch: "release#é", remote: "origin" }, "https://github.com/beorn/hh.git")).toBe(
+      "v2#github.com%2Fbeorn%2Fhh#release%23%C3%A9",
+    )
+  })
 })

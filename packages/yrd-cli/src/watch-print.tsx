@@ -21,6 +21,7 @@ import { TimeText } from "./watch-primitives.tsx"
 import { NowProvider } from "./watch-clock.ts"
 import { ListHeader, ListRow, TopLine, listLayout, separatorBefore, type LineStatus } from "./watch-list.tsx"
 import { queueLineStatus, type WatchSnapshot } from "./watch-pane.tsx"
+import { formatStoredQueueAddress } from "./address.ts"
 
 export type ListingPrintOptions = Readonly<{
   /** The terminal's width; the page lays out to it and truncates long cells as the pane does. */
@@ -41,7 +42,7 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
   // page that spelled them here is how the pane drifted last time.
   const runner = runnerOf(snapshot, snapshot.at)
   const rows = bandedRows(snapshot.rows, false)
-  const queue = { digit: 1, label: snapshot.queue }
+  const queue = { digit: 1, label: formatStoredQueueAddress(snapshot.queue) }
   const layout = listLayout(rows, columns, snapshot.at, runner, queue, {
     singleQueue: false,
     separateColumns: true,
@@ -54,8 +55,8 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
         {/* The pause rides RUNNER's rail; only a page with no run journal says it up here. */}
         <LoudPause snapshot={snapshot} />
         {/* The queue's own name, as a stranger spells it — the line a logged round's `updated` stamp sits under. */}
-        <Text wrap="truncate">{snapshot.queue}</Text>
-        <TopLine queues={queues} visible={undefined} onToggle={() => undefined} status={printedStatus(snapshot)} />
+        <Text wrap="truncate">{queue.label}</Text>
+        <TopLine queues={queues} status={printedStatus(snapshot)} />
         <QueueLine snapshot={snapshot} columns={columns} />
         {snapshot.journalAbsent === undefined ? null : (
           <Text color="$fg-muted" wrap="truncate">

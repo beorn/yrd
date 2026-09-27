@@ -31,6 +31,7 @@ import { TitledBox } from "./watch-primitives.tsx"
 import { lineOf, runnerOf } from "./watch-runner-reading.ts"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import type { WatchRow } from "./watch-rows.ts"
+import { formatStoredQueueAddress } from "./address.ts"
 
 export { lineOf, runnerOf } from "./watch-runner-reading.ts"
 
@@ -307,7 +308,7 @@ export function RunnerTitledBox({
   const liveDuration = snap?.runner ? runnerOf(snap, now).duration : undefined
   const activeLine = liveDuration !== undefined ? { ...line, duration: liveDuration } : line
   const color = STATE_WORDS[activeLine.state].color
-  const queueUrl = snap?.queue
+  const queueUrl = snap?.queue === undefined ? undefined : formatStoredQueueAddress(snap.queue)
   const readFailure = snap?.runner?.service.kind === "beating" ? snap.runner.service.readFailure : undefined
   return (
     <Box flexDirection="column" marginTop={1} marginBottom={1}>
