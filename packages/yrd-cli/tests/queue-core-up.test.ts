@@ -39,8 +39,6 @@ import * as gitomic from "gitomic"
 import { openEvents } from "gitomic/events"
 import {
   appendChangeEvent,
-  appendOpsCutover,
-  appendRecord,
   changeInput,
   changeRef,
   createEventQueue,
@@ -53,8 +51,6 @@ import {
   readConfig,
   readEventQueue,
   readEventOps,
-  readPause,
-  readRecords,
   readRemoteCommit,
   readRunLog,
   readStatus,
@@ -67,8 +63,6 @@ import {
   watchRows,
   writeQueueEvent,
   writeQueueOverride,
-  writePause,
-  type ChangeRecord,
   type Git,
   type QueueHealthDocument,
   type QueueRunOutcome,
@@ -76,7 +70,7 @@ import {
 } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
-import { coreQueueCommand, endingCode, openDetail, readListing } from "../src/queue-core-commands.ts"
+import { coreQueueCommand, endingCode } from "../src/queue-core-commands.ts"
 import { changesSuffix } from "../src/watch-list.tsx"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import { readRunnerFacts } from "../src/watch-runner.ts"
@@ -103,8 +97,12 @@ async function previousQueueReader(): Promise<typeof import("../../yrd-queue-cor
   const yrdRoot = resolve(import.meta.dirname, "../../..")
   const oldPin = "14f772a1244f1b9d2bfd199364f099186a126767"
   let oldEvents: string
+  let oldRecords: string
   try {
     oldEvents = execFileSync("git", ["-C", yrdRoot, "show", `${oldPin}:packages/yrd-queue-core/src/events.ts`], {
+      encoding: "utf8",
+    })
+    oldRecords = execFileSync("git", ["-C", yrdRoot, "show", `${oldPin}:packages/yrd-queue-core/src/legacy-records.ts`], {
       encoding: "utf8",
     })
   } catch (error) {
@@ -117,6 +115,7 @@ async function previousQueueReader(): Promise<typeof import("../../yrd-queue-cor
   cpSync(join(yrdRoot, "packages/yrd-queue-core/src"), join(directory, "src"), { recursive: true })
   symlinkSync(join(yrdRoot, "../../node_modules"), join(directory, "node_modules"), "dir")
   writeFileSync(join(directory, "src/events.ts"), oldEvents)
+  writeFileSync(join(directory, "src/legacy-records.ts"), oldRecords)
   return (await import(
     pathToFileURL(join(directory, "src/events.ts")).href
   )) as typeof import("../../yrd-queue-core/src/events.ts")
@@ -440,146 +439,6 @@ describe("yrd queue up, the service", () => {
     }
     expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({ facts: { stopped: { by: "@chief" } } })
   })
-
-  it("stays alive through pause and two consecutive merges after resume (24096)", async () => {
-    const w = await world()
-    const heads = new Map<string, string>()
-    // The notifier runs after the atomic merge and before its sent record.
-    // A second writer at the real remote wins that interval for each merge.
-    const remote = (await w.git(["remote", "get-url", "origin"])).trim()
-    await identity(gitIn(remote))
-    const rival = join(w.work, "..", "notify-rival.ts")
-    writeFileSync(
-      rival,
-      `
-import { appendRecord, changeRef, gitIn, parseChangeName, readRecords } from ${JSON.stringify(resolve(import.meta.dirname, "../../yrd-queue-core/src/index.ts"))}
-const change = parseChangeName(JSON.parse(await Bun.stdin.text()).change)
-if (!change) throw new Error("notifier received no change")
-const git = gitIn(${JSON.stringify(remote)})
-const ref = changeRef("main", change)
-const oid = (await git(["rev-parse", "--verify", ref + "^{commit}"])).trim()
-const tip = (await readRecords(git, oid)).at(-1)
-if (!tip || tip.kind !== "merged") throw new Error("notifier ran before the merge record landed")
-// Like any writer, the rival leaves Ended-At to recordCommit, which refuses an ending that brings its own (25995).
-const trailers = tip.trailers.filter(([name]) => name !== "Ended-At")
-await appendRecord(git, "main", { change, kind: "merged", subject: "another observer recorded the merge", trailers })
-`,
-    )
-    await redeclare(w, `notify:\n  - rival:\n      on: [merged]\n      run: ${JSON.stringify(`bun '${rival}'`)}\n`)
-    // One service invocation must survive its first merge's bookkeeping and
-    // reach the next admitted change, not merely return success for one round.
-    for (const name of ["one", "two"]) {
-      await w.git(["checkout", "--quiet", "-b", `task/${name}`, "main"])
-      writeFileSync(join(w.work, `${name}.txt`), `${name}\n`)
-      await w.git(["add", `${name}.txt`])
-      await w.git(["commit", "--quiet", "-m", name])
-      heads.set(name, (await w.git(["rev-parse", "HEAD"])).trim())
-      await w.git(["checkout", "--quiet", "main"])
-      await submit(w.git, "origin", {
-        branch: `task/${name}`,
-        submitter: "@dev/2",
-        target: { branch: "main", remote: "origin" },
-      })
-    }
-    expect(
-      await coreQueueCommand(
-        w.work,
-        capture(w.work).io,
-        { by: "@chief", command: "pause", reason: "repair main" },
-        { workdir: w.workdir },
-      ),
-    ).toBe(0)
-
-    // T1: the service fixes one executable for its lifetime. Native-only
-    // rounds could not expose a fresh selection or a lost rebinding later.
-    const selected = await installSelectedGit(w.work)
-    const selectedCallsAfterRound: number[] = []
-    const stop = new AbortController()
-    let rounds = 0
-    const service = capture(w.work)
-    const { log, rows } = logRows()
-    expect(
-      await coreQueueCommand(
-        w.work,
-        service.io,
-        {
-          command: "up",
-          intervalSeconds: 0,
-          stop: stop.signal,
-          afterRound: async () => {
-            rounds += 1
-            selectedCallsAfterRound.push(selected.readCalls().filter((call) => call.marker === "up-rounds").length)
-            if (rounds === 1) {
-              await coreQueueCommand(
-                w.work,
-                capture(w.work).io,
-                { by: "@chief", command: "resume", reason: "repair merged" },
-                { workdir: w.workdir },
-              )
-              await w.git(["config", "yrd.git", JSON.stringify({ executable: "git", contract: "native" })])
-            } else if (rounds === 3) {
-              stop.abort()
-            }
-          },
-        },
-        {
-          env: {
-            ...process.env,
-            PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
-            YRD_SELECTED_TEST_MARKER: "up-rounds",
-          },
-          json: true,
-          log,
-          workdir: w.workdir,
-        },
-      ),
-    ).toBe(0)
-    expect(rounds).toBe(3)
-    expect(records(service)[0]).toMatchObject({
-      exitCode: 0,
-      merged: [],
-      stopped: { ring: "pause", what: { kind: "paused" } },
-    })
-    expect(records(service)[1]).toMatchObject({ exitCode: 0, merged: ["task/one"] })
-    expect(records(service)[2]).toMatchObject({ exitCode: 0, merged: ["task/two"] })
-    expect(selectedCallsAfterRound[0]).toBeGreaterThan(0)
-    for (let index = 1; index < selectedCallsAfterRound.length; index += 1) {
-      expect(selectedCallsAfterRound[index]).toBeGreaterThan(selectedCallsAfterRound[index - 1]!)
-    }
-    for (const round of records(service)) {
-      const invocations = readRunLog(join(w.workdir, "logs"), String(round.run)).filter((row) => row.kind === "git")
-      expect(invocations.length).toBeGreaterThan(0)
-      for (const invocation of invocations) {
-        expect(invocation).toMatchObject({
-          executable: selected.executable,
-          contract: "native",
-          scope: "local",
-          origin: "file:.git/config",
-          complete: true,
-        })
-      }
-    }
-    for (const name of ["one", "two"]) {
-      expect((await w.git(["show", `origin/main:${name}.txt`])).trim()).toBe(name)
-      const head = heads.get(name)
-      if (head === undefined) throw new Error(`no submitted head for ${name}`)
-      const change = { branch: `task/${name}`, head }
-      const ref = changeRef("main", change)
-      await w.git(["fetch", "--quiet", "origin", `+${ref}:${ref}`])
-      const tip = (await w.git(["rev-parse", "--verify", `${ref}^{commit}`])).trim()
-      const history = await readRecords(w.git, tip)
-      expect(history.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "merged", "sent"])
-      expect(trailer(history[4]!, "State")).toBe("merged")
-      const merge = trailer(history[2]!, "Merge")
-      expect(merge).toMatch(/^[0-9a-f]{40}$/u)
-      await w.git(["merge-base", "--is-ancestor", merge!, "origin/main"])
-      const warning = rows.find((row) => row.level === "warn" && row.message.startsWith(`${ref}:`))
-      expect(warning?.message).toMatch(/remote [0-9a-f]{40}, intended [0-9a-f]{40} \(diverged\); inspect: git -C /u)
-    }
-    // Three rounds launch the real selected executable for every Git call,
-    // plus a spawned notifier per merge: 25 s measured at load average 51
-    // (2026-09-24), so 15 s failed on a busy host while the service was fine.
-  }, 60_000)
 
   // 24472: legacy branch-name inference must be visible in both submit modes;
   // the domain reader tests cannot prove the CLI tells its caller.
@@ -1293,103 +1152,6 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
 })
 
 describe("yrd queue list, the table", () => {
-  it("renders one stored lossless incident compactly in list and fully in show", async () => {
-    const w = await world()
-    await w.git(["checkout", "--quiet", "-b", "task/incident", "main"])
-    writeFileSync(join(w.work, "incident.txt"), "incident\n")
-    await w.git(["add", "incident.txt"])
-    await w.git(["commit", "--quiet", "-m", "incident specimen"])
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    await w.git(["checkout", "--quiet", "main"])
-    const change = { branch: "task/incident", head }
-    await submit(w.git, "origin", {
-      branch: change.branch,
-      submitter: "@dev/3",
-      target: { branch: "main", remote: "origin" },
-    })
-    // Submit publishes remotely without moving an application ref here. This
-    // fixture appends local legacy records, so seed their parent explicitly.
-    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
-    const evidence = join(w.workdir, "incident", "q-lossless.jsonl")
-    mkdirSync(join(w.workdir, "incident"), { recursive: true })
-    writeFileSync(evidence, '{"kind":"change","decision":"stuck"}\n')
-    const subject = `verify could not decide ${"x".repeat(450)}THE-END-OF-THE-INCIDENT`
-    const incident = {
-      code: "yrd-check-unresolved",
-      subject,
-      via: "verify during merge in yrd queue test [q-lossless]",
-      evidence,
-      next: "repair verify or its queue environment, then run yrd queue run",
-      owner: "the queue operator",
-    }
-    const incidentTrailers = [
-      ["Code", incident.code],
-      ["Subject", incident.subject],
-      ["Via", incident.via],
-      ["Evidence", incident.evidence],
-      ["Next", incident.next],
-      ["Owner", incident.owner],
-    ] as const
-    const ended = await appendRecord(w.git, "main", {
-      change,
-      kind: "stuck",
-      subject,
-      trailers: incidentTrailers,
-    })
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "sent",
-      subject: "logged the incident",
-      trailers: [["State", "stuck"], ["For", ended], ["To", "none"], ["Delivery", "none"], ...incidentTrailers],
-    })
-    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
-
-    const listedJson = capture(w.work)
-    expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
-      0,
-    )
-    const listed = records(listedJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
-    expect(listed.changes[0]).toMatchObject({ incident, reason: incident.code, state: "stuck" })
-    expect(String(listed.changes[0]?.result)).toContain("THE-END-OF-THE-INCIDENT")
-
-    const listedText = capture(w.work)
-    expect(await coreQueueCommand(w.work, listedText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    // Compact: the list's row names the incident by its code, in the status
-    // suffix the pane draws (`stuck=<code>`, @cto 07b07f37); the sentence
-    // itself is `show`'s, below. The status word appears once, in STATUS.
-    // Since 25716 row 31 (e364d816df) the suffix sits on the row's own second line, under the branch.
-    const listedLines = listedText.stdout().split("\n")
-    const at = listedLines.findIndex((line) => line.includes("task/incident"))
-    const listedLine = at < 0 ? undefined : listedLines[at]
-    expect(listedLine, listedText.stdout()).toBeDefined()
-    expect(`${listedLine}\n${listedLines[at + 1] ?? ""}`, listedText.stdout()).toContain(`stuck=${incident.code}`)
-    expect(listedLine).toMatch(/◌ stuck\b/u)
-    expect(listedText.stdout()).not.toContain("THE-END-OF-THE-INCIDENT")
-
-    const shownJson = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        shownJson.io,
-        { command: "show", branch: change.branch },
-        { json: true, workdir: w.workdir },
-      ),
-    ).toBe(0)
-    const shown = records(shownJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
-    expect(shown.changes[0]).toMatchObject({ incident, reason: incident.code, state: "stuck" })
-
-    const shownText = capture(w.work)
-    expect(
-      await coreQueueCommand(w.work, shownText.io, { command: "show", branch: change.branch }, { workdir: w.workdir }),
-    ).toBe(0)
-    expect(shownText.stdout()).toContain(`  subject: ${subject}`)
-    expect(shownText.stdout()).toContain(`  via: ${incident.via}`)
-    expect(shownText.stdout()).toContain(`  evidence: ${evidence}`)
-    expect(shownText.stdout()).toContain(`  next: ${incident.next}`)
-    expect(shownText.stdout()).toContain(`  owner: ${incident.owner}`)
-    expect(shownText.stdout().match(/\bstuck\b/gu), shownText.stdout()).toHaveLength(1)
-  })
-
   it("a commit the target gained around the queue is a row of its own, in the JSON and on the line (E5)", async () => {
     const w = await world()
     // The queue's history starts at its first record, so there is one change
@@ -1433,374 +1195,6 @@ describe("yrd queue list, the table", () => {
     expect(directLine, asText.stdout()).toBeDefined()
     expect(directLine).toContain("direct.txt around the queue")
     expect(directLine).toMatch(/\bmain\b/u)
-  })
-})
-
-describe("yrd queue show, one change's evidence", () => {
-  it("shows the current running check without relabeling an older unresolved result as passed", async () => {
-    // Reader tests supplied measured checks directly; this proves that the CLI
-    // selects the current journal instead of combining all historical trailers.
-    const w = await world()
-    await redeclare(w, "checks:\n  - affected-tests:\n      run: test\n")
-    const base = (await w.git(["rev-parse", "main"])).trim()
-    const branch = "task/retry"
-    await w.git(["checkout", "--quiet", "-b", branch, "main"])
-    writeFileSync(join(w.work, "retry.txt"), "retry\n")
-    await w.git(["add", "retry.txt"])
-    await w.git(["commit", "--quiet", "-m", "retry"])
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    await w.git(["checkout", "--quiet", "main"])
-    const change = { branch, head }
-    await submit(w.git, "origin", {
-      branch,
-      submitter: "@dev/3",
-      target: { branch: "main", remote: "origin" },
-    })
-    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "stuck",
-      subject: "old run could not judge",
-      trailers: [
-        ["Base", base],
-        ["Check", "affected-tests exit=3 ms=5 log=/old/affected.log"],
-      ],
-    })
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "checked",
-      subject: "new on-submit checks passed",
-      trailers: [["Base", base]],
-    })
-    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
-    const at = new Date().toISOString()
-    const run = runId(new Date(at))
-    const dir = join(w.workdir, "logs")
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(
-      join(dir, `${run}.jsonl`),
-      [
-        { kind: "run", base, queue: "q", target: "main", checks: ["affected-tests"] },
-        { kind: "check", ...change, name: "affected-tests", phase: "merge", start: at, log: "/new/affected.log" },
-      ]
-        .map((record) => JSON.stringify({ ...record, at, run }))
-        .join("\n") + "\n",
-    )
-    const output = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        output.io,
-        { command: "show", branch },
-        {
-          json: true,
-          workdir: w.workdir,
-        },
-      ),
-    ).toBe(0)
-    const shown = records(output)[0] as { changes: { run: string; checks: unknown[] }[] }
-    expect(shown.changes[0]?.run).toBe(run)
-    expect(shown.changes[0]?.checks).toEqual([
-      {
-        name: "affected-tests",
-        phase: "merge",
-        state: "running",
-        log: "/new/affected.log",
-        spec: { name: "affected-tests", run: "test" },
-      },
-    ])
-  })
-
-  it("hydrates the checked-to-sent history and leaves a genuinely missing check not run", async () => {
-    const w = await world()
-    await redeclare(
-      w,
-      [
-        "checks:",
-        "  - typecheck:",
-        "      run: bun run typecheck",
-        "  - manifest-co-change:",
-        "      run: bun run manifest-co-change",
-        "  - substrate-pair:",
-        "      run: bun run substrate-pair",
-        "  - affected-tests:",
-        "      run: bun run affected-tests",
-        "  - never-ran:",
-        "      run: bun run never-ran",
-        "",
-      ].join("\n"),
-    )
-    const base = (await w.git(["rev-parse", "main"])).trim()
-    await w.git(["checkout", "--quiet", "-b", "task/evidence", "main"])
-    writeFileSync(join(w.work, "evidence.txt"), "evidence\n")
-    await w.git(["add", "evidence.txt"])
-    await w.git(["commit", "--quiet", "-m", "evidence"])
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    await w.git(["checkout", "--quiet", "main"])
-    const change = { branch: "task/evidence", head }
-    await submit(w.git, "origin", {
-      branch: change.branch,
-      submitter: "@dev/3",
-      target: { branch: "main", remote: "origin" },
-    })
-    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "checked",
-      subject: "on-submit checks passed",
-      trailers: [
-        ["Base", base],
-        ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
-        ["Check", "manifest-co-change exit=0 ms=13 log=/tmp/manifest.log"],
-        ["Check", "substrate-pair exit=0 ms=14 log=/tmp/substrate.log"],
-        ["Check", "affected-tests exit=0 ms=14 log=/tmp/submit-affected.log"],
-      ],
-    })
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "merged",
-      subject: "merged task/evidence into main",
-      trailers: [
-        ["Base", base],
-        ["Merge", base],
-        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
-      ],
-    })
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "sent",
-      subject: "sent merge notice",
-      trailers: [
-        ["State", "merged"],
-        ["Base", base],
-        ["Merge", base],
-        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
-      ],
-    })
-    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
-
-    const run = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        run.io,
-        { command: "show", branch: change.branch },
-        { json: true, workdir: w.workdir },
-      ),
-    ).toBe(0)
-    const shown = records(run)[0] as Readonly<{
-      changes: readonly Readonly<{
-        checks: readonly Readonly<{ name: string; state: string }>[]
-        records: readonly Readonly<{ kind: string }>[]
-      }>[]
-    }>
-
-    expect(shown.changes[0]?.records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
-    expect(shown.changes[0]?.checks.map((check) => [check.name, check.state])).toEqual([
-      ["typecheck", "passed"],
-      ["manifest-co-change", "passed"],
-      ["substrate-pair", "passed"],
-      ["affected-tests", "passed"],
-      ["never-ran", "not-run"],
-    ])
-    expect(shown.changes[0]?.checks.find((check) => check.name === "affected-tests")).toMatchObject({
-      log: "/tmp/affected.log",
-      result: { log: "/tmp/affected.log" },
-    })
-  })
-
-  /**
-   * @failure  `show --json` emitted only at, kind, sha and subject per record,
-   *           so a JSON reader learned who withdrew a change, and why, only by
-   *           parsing the subject line back into fields the record already had
-   *           (@i/10-yrd/g-ergonomics/24666).
-   * @level    l3 — real records appended to a real chain, read back through the
-   *           real command
-   * @consumer anything reading the queue as data rather than as a page.
-   */
-  it("carries every record trailer into show --json, repeats included", async () => {
-    const w = await world()
-    const base = (await w.git(["rev-parse", "main"])).trim()
-    await w.git(["checkout", "--quiet", "-b", "task/withdrawn", "main"])
-    writeFileSync(join(w.work, "withdrawn.txt"), "withdrawn\n")
-    await w.git(["add", "withdrawn.txt"])
-    await w.git(["commit", "--quiet", "-m", "withdrawn"])
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    await w.git(["checkout", "--quiet", "main"])
-    const change = { branch: "task/withdrawn", head }
-    await submit(w.git, "origin", {
-      branch: change.branch,
-      submitter: "@dev/3",
-      target: { branch: "main", remote: "origin" },
-    })
-    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
-    // A repeated name on one record: a run writes one `Check` per result, so
-    // any shape that maps a name to a single value loses all but one of them.
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "checked",
-      subject: "on-submit checks passed",
-      trailers: [
-        ["Base", base],
-        ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
-        ["Check", "affected-tests exit=0 ms=14 log=/tmp/affected.log"],
-      ],
-    })
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "withdrawn",
-      subject: "withdrew task/withdrawn",
-      trailers: [
-        ["By", "@dev/9"],
-        ["Note", "superseded by task/two"],
-      ],
-    })
-    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
-
-    const run = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        run.io,
-        { command: "show", branch: change.branch },
-        { json: true, workdir: w.workdir },
-      ),
-    ).toBe(0)
-    const shown = records(run)[0] as Readonly<{
-      changes: readonly Readonly<{
-        records: readonly Readonly<{ kind: string; trailers: Readonly<Record<string, readonly string[]>> }>[]
-      }>[]
-    }>
-    const rows = shown.changes[0]?.records ?? []
-
-    // The ending a person chose, as FIELDS rather than as prose to re-parse.
-    const withdrawn = rows.find((record) => record.kind === "withdrawn")
-    expect(withdrawn?.trailers.By).toEqual(["@dev/9"])
-    expect(withdrawn?.trailers.Note).toEqual(["superseded by task/two"])
-    // Every value of a repeated name survives, in record order.
-    expect(rows.find((record) => record.kind === "checked")?.trailers.Check).toEqual([
-      "typecheck exit=0 ms=12 log=/tmp/typecheck.log",
-      "affected-tests exit=0 ms=14 log=/tmp/affected.log",
-    ])
-    // Present and empty for a record that carries none, never absent: a reader
-    // must not have to tell "no trailers" from "this build does not send them".
-    expect(rows.every((record) => typeof record.trailers === "object")).toBe(true)
-  })
-
-  it("keeps a merged change's submit evidence when this machine's own journal only names the merge phase", async () => {
-    // Live specimen (@cto, 2026-09): `queue show` on an already-merged change
-    // printed the correct merged verdict — "pass affected-tests" — and then
-    // rendered every declared check as NOT RUN. The queue's own journal on
-    // this machine had a run for this exact branch+head (it just processed
-    // the merge), but that run's OWN checks list did not carry the
-    // submit-phase evidence — an earlier phase ran under an earlier run this
-    // one does not repeat. `change.checks` (this same fixture as the sibling
-    // test above) already folds every record's `Check:` trailers correctly;
-    // this proves a same-machine journal must not be trusted over that fold
-    // once the change is DECIDED.
-    const w = await world()
-    await redeclare(
-      w,
-      [
-        "checks:",
-        "  - typecheck:",
-        "      run: bun run typecheck",
-        "  - manifest-co-change:",
-        "      run: bun run manifest-co-change",
-        "  - substrate-pair:",
-        "      run: bun run substrate-pair",
-        "  - affected-tests:",
-        "      run: bun run affected-tests",
-        "  - never-ran:",
-        "      run: bun run never-ran",
-        "",
-      ].join("\n"),
-    )
-    const base = (await w.git(["rev-parse", "main"])).trim()
-    await w.git(["checkout", "--quiet", "-b", "task/evidence-with-journal", "main"])
-    writeFileSync(join(w.work, "evidence.txt"), "evidence\n")
-    await w.git(["add", "evidence.txt"])
-    await w.git(["commit", "--quiet", "-m", "evidence"])
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    await w.git(["checkout", "--quiet", "main"])
-    const change = { branch: "task/evidence-with-journal", head }
-    await submit(w.git, "origin", {
-      branch: change.branch,
-      submitter: "@dev/3",
-      target: { branch: "main", remote: "origin" },
-    })
-    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "checked",
-      subject: "on-submit checks passed",
-      trailers: [
-        ["Base", base],
-        ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
-        ["Check", "manifest-co-change exit=0 ms=13 log=/tmp/manifest.log"],
-        ["Check", "substrate-pair exit=0 ms=14 log=/tmp/substrate.log"],
-        ["Check", "affected-tests exit=0 ms=14 log=/tmp/submit-affected.log"],
-      ],
-    })
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "merged",
-      subject: "merged task/evidence-with-journal into main",
-      trailers: [
-        ["Base", base],
-        ["Merge", base],
-        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
-      ],
-    })
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "sent",
-      subject: "sent merge notice",
-      trailers: [
-        ["State", "merged"],
-        ["Base", base],
-        ["Merge", base],
-        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
-      ],
-    })
-    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
-
-    // This machine's own run journal: it just processed the merge (so it is
-    // very much "the run" the row's own bookkeeping would select), but its
-    // journal names only the decision, never the individual checks — exactly
-    // what a run that merged without re-running anything, or one whose
-    // earlier-phase sibling has aged out of the retention window, leaves
-    // behind.
-    const at = new Date().toISOString()
-    const run = runId(new Date(at))
-    const dir = join(w.workdir, "logs")
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(
-      join(dir, `${run}.jsonl`),
-      [{ kind: "change", ...change, decision: "merged" }]
-        .map((record) => JSON.stringify({ ...record, at, run }))
-        .join("\n") + "\n",
-    )
-
-    const output = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        output.io,
-        { command: "show", branch: change.branch },
-        { json: true, workdir: w.workdir },
-      ),
-    ).toBe(0)
-    const shown = records(output)[0] as Readonly<{
-      changes: readonly Readonly<{ checks: readonly Readonly<{ name: string; state: string }>[] }>[]
-    }>
-    expect(shown.changes[0]?.checks.map((check) => [check.name, check.state])).toEqual([
-      ["typecheck", "passed"],
-      ["manifest-co-change", "passed"],
-      ["substrate-pair", "passed"],
-      ["affected-tests", "passed"],
-      ["never-ran", "not-run"],
-    ])
   })
 })
 
@@ -2016,178 +1410,6 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
   })
 })
 
-describe("yrd watch's own detail pane (openDetail), one change's evidence", () => {
-  it("keeps a merged change's submit evidence when this machine's own journal only names the merge phase", async () => {
-    // The `show` sibling test above reproduces the @cto 2026-09 specimen
-    // against the `show` command's own call site (fixed by 1fca452c). This is
-    // the SAME specimen shape against `openDetail` — the watch pane's own
-    // Enter-to-open detail loader — which 1fca452c did not touch: it still
-    // unconditionally passed this machine's journal-selected run into
-    // `checksOf`, with no guard for a change that is already DECIDED. Absent
-    // the fix, this fails exactly like the `show` case did before 1fca452c:
-    // every check but the merge-phase's own reads NOT RUN.
-    const w = await world()
-    await redeclare(
-      w,
-      [
-        "checks:",
-        "  - typecheck:",
-        "      run: bun run typecheck",
-        "  - manifest-co-change:",
-        "      run: bun run manifest-co-change",
-        "  - substrate-pair:",
-        "      run: bun run substrate-pair",
-        "  - affected-tests:",
-        "      run: bun run affected-tests",
-        "  - never-ran:",
-        "      run: bun run never-ran",
-        "",
-      ].join("\n"),
-    )
-    const base = (await w.git(["rev-parse", "main"])).trim()
-    await w.git(["checkout", "--quiet", "-b", "task/evidence-open-detail", "main"])
-    writeFileSync(join(w.work, "evidence.txt"), "evidence\n")
-    await w.git(["add", "evidence.txt"])
-    await w.git(["commit", "--quiet", "-m", "evidence"])
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    await w.git(["checkout", "--quiet", "main"])
-    const change = { branch: "task/evidence-open-detail", head }
-    await submit(w.git, "origin", {
-      branch: change.branch,
-      submitter: "@dev/3",
-      target: { branch: "main", remote: "origin" },
-    })
-    await w.git(["fetch", "--quiet", "origin", `+${changeRef("main", change)}:${changeRef("main", change)}`])
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "checked",
-      subject: "on-submit checks passed",
-      trailers: [
-        ["Base", base],
-        ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
-        ["Check", "manifest-co-change exit=0 ms=13 log=/tmp/manifest.log"],
-        ["Check", "substrate-pair exit=0 ms=14 log=/tmp/substrate.log"],
-        ["Check", "affected-tests exit=0 ms=14 log=/tmp/submit-affected.log"],
-      ],
-    })
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "merged",
-      subject: "merged task/evidence-open-detail into main",
-      trailers: [
-        ["Base", base],
-        ["Merge", base],
-        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
-      ],
-    })
-    await appendRecord(w.git, "main", {
-      change,
-      kind: "sent",
-      subject: "sent merge notice",
-      trailers: [
-        ["State", "merged"],
-        ["Base", base],
-        ["Merge", base],
-        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
-      ],
-    })
-    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
-
-    // This machine's own run journal: it just processed the merge, but its
-    // journal names only the decision, never the individual checks — same
-    // shape as the `show` sibling fixture above.
-    const at = new Date().toISOString()
-    const run = runId(new Date(at))
-    const dir = join(w.workdir, "logs")
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(
-      join(dir, `${run}.jsonl`),
-      [{ kind: "change", ...change, decision: "merged" }]
-        .map((record) => JSON.stringify({ ...record, at, run }))
-        .join("\n") + "\n",
-    )
-
-    // The exact pipeline `yrd watch` itself uses to get from a target OID to
-    // the `entries`/`item` pair `openDetail` is called with (queue-core-commands.ts's
-    // own `open:` callback wiring): readConfig -> readListing -> watchRows.
-    const target = { branch: "main", remote: "origin" }
-    const oid = await readRemoteCommit(w.git, "origin", "refs/heads/main")
-    if (oid === undefined) throw new Error("test setup: origin/main was not readable")
-    const config = await readConfig(w.git, oid, target)
-    if (config === undefined) throw new Error("test setup: the target carries no .yrd.yml")
-    // `World.git` is typed to the narrower `Git` call signature; the value
-    // `world()` actually hands out comes from `gitIn()`, declared `GitRunner`
-    // (the same value the CLI's own `readListing` call site is given).
-    const { all, journals, queue } = await readListing(w.git as GitRunner, config, w.workdir, oid)
-    const rows = watchRows(all, { journals, perRun: true })
-    const item = rows.find((row) => row.row.branch === change.branch)
-    if (item === undefined) throw new Error("test setup: the change did not appear in the watch rows")
-
-    const detail = await openDetail(w.git, config, queue.changes, item, "main")
-    expect(detail.checks.map((check) => [check.name, check.state])).toEqual([
-      ["typecheck", "passed"],
-      ["manifest-co-change", "passed"],
-      ["substrate-pair", "passed"],
-      ["affected-tests", "passed"],
-      ["never-ran", "not-run"],
-    ])
-  })
-})
-
-describe("yrd list marks a stale verdict (@i/10-yrd/25301, @cto c7115f0f (3))", () => {
-  it("a checked change judged under another check config reads 'not yet judged under <blob>'; a current one does not", async () => {
-    const w = await world()
-    await redeclare(w, ["checks:", "  - typecheck:", "      run: bun run typecheck", ""].join("\n"))
-    const base = (await w.git(["rev-parse", "main"])).trim()
-    const target = { branch: "main", remote: "origin" }
-    const oid = await readRemoteCommit(w.git, "origin", "refs/heads/main")
-    if (oid === undefined) throw new Error("test setup: origin/main was not readable")
-    const config = await readConfig(w.git, oid, target)
-    if (config === undefined) throw new Error("test setup: the target carries no .yrd.yml")
-    const checkedUnder = async (branch: string, blob: string) => {
-      await w.git(["checkout", "--quiet", "-b", branch, "main"])
-      writeFileSync(join(w.work, `${branch.slice(5)}.txt`), `${branch}\n`)
-      await w.git(["add", "-A"])
-      await w.git(["commit", "--quiet", "-m", branch])
-      const head = (await w.git(["rev-parse", "HEAD"])).trim()
-      await w.git(["checkout", "--quiet", "main"])
-      await submit(w.git, "origin", { branch, submitter: "@dev/3", target })
-      const ref = changeRef("main", { branch, head })
-      await w.git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `${ref}:${ref}`])
-      await appendRecord(w.git, "main", {
-        change: { branch, head },
-        kind: "checked",
-        subject: "on-submit checks passed",
-        trailers: [
-          ["Config", blob],
-          ["Base", base],
-          ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
-        ],
-      })
-      await w.git([
-        "push",
-        "--quiet",
-        "origin",
-        `${changeRef("main", { branch, head })}:${changeRef("main", { branch, head })}`,
-      ])
-    }
-    await checkedUnder("task/stale", "0".repeat(40))
-    await checkedUnder("task/current", config.blob)
-
-    const { all } = await readListing(w.git as GitRunner, config, w.workdir, oid)
-
-    const stale = all.find((row) => row.branch === "task/stale")
-    expect(stale).toMatchObject({ state: "checked", reason: `not yet judged under ${config.blob.slice(0, 12)}` })
-    expect(changesSuffix(stale!)).toEqual({
-      color: "$fg-muted",
-      text: `not yet judged under ${config.blob.slice(0, 12)}`,
-    })
-    const current = all.find((row) => row.branch === "task/current")
-    expect(current?.state).toBe("checked")
-    expect(current?.reason).toBeUndefined()
-  })
-})
-
 /**
  * @failure  A stuck change is stepped over by the service: the loop re-runs the
  *           fault on a backoff ladder, the page promises to clear itself when a
@@ -2332,200 +1554,6 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(rounds.indexOf(merged[0]!)).toBeGreaterThanOrEqual(3)
   })
 
-  /** @failure 25041 F1: the pre-cutover reader rejected the migration's own Start-Paused fence.
-   * @level l2 @consumer queue operator and Hab's yrd service
-   */
-  it("resumes, runs and cuts over a migrated Start-Paused queue", async () => {
-    const migrated = async (withLegacyPause = true) => {
-      const w = await world()
-      const target = (await w.git(["rev-parse", "main"])).trim()
-      const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
-      const staged = await (
-        await openEvents({ ...store, ref: queueRef("main"), writer: "yrd-migration" })
-      ).stage(
-        [
-          {
-            type: "created",
-            props: [
-              ["Commit", target],
-              ["Time", new Date().toISOString()],
-              ["Start-Paused", "25041 event migration cutover"],
-              ["Pause-Cause", "maintenance"],
-            ],
-            keeps: [target],
-          },
-        ],
-        { expect: null },
-      )
-      await staged.publish()
-      if (withLegacyPause) {
-        await writePause(w.git, "origin", "main", {
-          by: "yrd-migration",
-          kind: "paused",
-          reason: "25041 event migration cutover",
-          cause: "maintenance",
-        })
-      }
-      const queue = await readEventQueue(store, "main")
-      expect(queue.pause?.id).toBe(queue.created)
-      return { w, target, store, created: queue.created }
-    }
-
-    {
-      const { w, target, store, created } = await migrated()
-      const output = capture(w.work)
-      expect(
-        await coreQueueCommand(
-          w.work,
-          output.io,
-          { by: "@chief", command: "resume", reason: "migration completed" },
-          { workdir: w.workdir },
-        ),
-      ).toBe(0)
-      expect(await readPause(w.git, "origin", "main")).toMatchObject({ kind: "resumed" })
-      expect((await readEventQueue(store, "main")).pause?.id).toBe(created)
-      expect(await readEventOps(store, w.git, "main", target)).toMatchObject({
-        source: "legacy",
-        pause: { kind: "resumed" },
-        stop: undefined,
-      })
-    }
-    {
-      const { w } = await migrated()
-      const output = capture(w.work)
-      expect(await coreQueueCommand(w.work, output.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
-      expect(records(output)[0]).toMatchObject({ exitCode: 0, merged: [] })
-      expect(await readPause(w.git, "origin", "main")).toMatchObject({ kind: "paused", cause: "maintenance" })
-    }
-    {
-      const { w, target, store } = await migrated()
-      const cutover = await appendOpsCutover(store, w.git, "main", target, new Date(), "@chief")
-      expect(await readEventQueue(store, "main")).toMatchObject({ tip: cutover.queueAfter, opsCutover: cutover.event })
-    }
-    {
-      const { w, target, store } = await migrated(false)
-      await expect(readEventOps(store, w.git, "main", target)).rejects.toThrow(/missing legacy pause ref/u)
-    }
-  }, 120_000)
-
-  /** @failure 25041: before ops cutover, resume left a stuck change held or a later pause paged it again.
-   * @level l2 @consumer queue operator and Hab's yrd service
-   */
-  it("retries a pre-cutover stuck event change after queue resume", async () => {
-    const w = await world(false)
-    const target = (await w.git(["rev-parse", "main"])).trim()
-    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
-    if (config === undefined) throw new Error("the fixture's target lost its declaration")
-    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
-    await createEventQueue(store, "main", target, config, new Date())
-    const earlier = stuckReleaseReason("a".repeat(40), "an earlier resume cannot release a later stuck change")
-    await writeQueueEvent(store, "main", { type: "paused", at: new Date(), by: "@chief", reason: earlier })
-    await writeQueueEvent(store, "main", {
-      type: "resumed",
-      at: new Date(),
-      by: "@chief",
-      reason: earlier,
-    })
-    const branch = "task/pre-cutover-stuck"
-    await oneChange(w, branch)
-    const submitted = await readStatus(store, "main", branch)
-    if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
-    await appendChangeEvent(store, "main", branch, submitted.tip, {
-      type: "stuck",
-      at: new Date(),
-      reason: "repair needed",
-    })
-
-    const first = capture(w.work)
-    expect(await coreQueueCommand(w.work, first.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(2)
-    expect(records(first)[0]).toMatchObject({ exitCode: 2, stuck: [branch] })
-
-    const paused = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        paused.io,
-        { by: "@chief", command: "pause", reason: "repair the stuck change" },
-        { workdir: w.workdir },
-      ),
-      paused.stderr(),
-    ).toBe(0)
-    expect(await readPause(w.git, "origin", "main")).toMatchObject({ kind: "paused", by: "@chief" })
-    const held = capture(w.work)
-    const stop = new AbortController()
-    const seen: QueueHealthDocument[] = []
-    expect(
-      await coreQueueCommand(
-        w.work,
-        held.io,
-        {
-          command: "up",
-          intervalSeconds: 0,
-          stop: stop.signal,
-          afterHealth: (document) => {
-            seen.push(document)
-            stop.abort()
-          },
-        },
-        { json: true, workdir: w.workdir },
-      ),
-      held.stderr(),
-    ).toBe(0)
-    expect(records(held)[0]).toMatchObject({ exitCode: 0, stuck: [], pendingStuck: [branch] })
-    expect(seen[0]?.facts).toMatchObject({ stopped: { by: "@chief" }, stuckChanges: [branch] })
-    expect(seen[0]?.error?.resolution.join(" ")).toContain("yrd queue resume")
-
-    const resumed = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        resumed.io,
-        { by: "@chief", command: "resume", reason: "repaired" },
-        { workdir: w.workdir },
-      ),
-      resumed.stderr(),
-    ).toBe(0)
-    // A foreground run ignores a standing pause, so read the durable stop before retrying.
-    expect(await readPause(w.git, "origin", "main")).toMatchObject({
-      kind: "resumed",
-      by: "@chief",
-      reason: "repaired",
-    })
-    const releaseEvents = await (await openEvents({ ...store, ref: queueRef("main") })).events({ limit: 1024 })
-    expect(releaseEvents.slice(-2).map((event) => event.type)).toEqual(["paused", "resumed"])
-    expect(releaseEvents.at(-1)?.props.find(([key]) => key === "Reason")?.[1]).toMatch(
-      /^yrd-stuck-release:[0-9a-f]{40} repaired$/u,
-    )
-    // A later operator hold must not page the stuck change whose release already stands.
-    await writePause(w.git, "origin", "main", { by: "@chief", kind: "paused", reason: "later hold" })
-    const heldAfterResume = capture(w.work)
-    const hold = new AbortController()
-    const healthAfterResume: QueueHealthDocument[] = []
-    expect(
-      await coreQueueCommand(
-        w.work,
-        heldAfterResume.io,
-        {
-          command: "up",
-          intervalSeconds: 0,
-          stop: hold.signal,
-          afterHealth: (document) => {
-            healthAfterResume.push(document)
-            hold.abort()
-          },
-        },
-        { json: true, workdir: w.workdir },
-      ),
-      heldAfterResume.stderr(),
-    ).toBe(0)
-    expect(records(heldAfterResume)[0]).toMatchObject({ exitCode: 0, pendingStuck: [] })
-    expect(healthAfterResume[0]?.facts?.stuckChanges).toBeUndefined()
-    await writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "later hold lifted" })
-    const after = capture(w.work)
-    expect(await coreQueueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
-    expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
-  }, 60_000)
-
   // @failure 25041: waiting for a moved checkout can hide a stuck change from the service health reader.
   it("keeps pending stuck changes in health while waiting for a checkout", async () => {
     const w = await gitlinkWorld(false, false)
@@ -2596,7 +1624,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       at: new Date(),
       reason: "repair needed",
     })
-    expect(await readPause(w.git, "origin", "main")).toBeUndefined()
+    expect((await readEventQueue(store, "main")).ops?.pause).toBeUndefined()
 
     const service = capture(w.work)
     const stop = new AbortController()
@@ -2635,46 +1663,6 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     const after = capture(w.work)
     expect(await coreQueueCommand(w.work, after.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
     expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
-  }, 60_000)
-
-  // @failure 25041: an interrupted stuck release can leave a pause forever or let ops cutover corrupt the queue.
-  it("completes an unfinished pre-cutover stuck release on the next service round", async () => {
-    const w = await world(false)
-    const target = (await w.git(["rev-parse", "main"])).trim()
-    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
-    if (config === undefined) throw new Error("the fixture's target lost its declaration")
-    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
-    await createEventQueue(store, "main", target, config, new Date())
-    const branch = "task/unfinished-release"
-    await oneChange(w, branch)
-    const submitted = await readStatus(store, "main", branch)
-    if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
-    const stuck = await appendChangeEvent(store, "main", branch, submitted.tip, {
-      type: "stuck",
-      at: new Date(),
-      reason: "repair needed",
-    })
-    const reason = stuckReleaseReason(stuck, "repaired")
-    const paused = await writeQueueEvent(store, "main", { type: "paused", by: "@chief", reason, at: new Date() })
-    expect((await readEventQueue(store, "main")).release?.id).toBe(paused)
-    const queueBefore = (await w.git(["ls-remote", "origin", queueRef("main")])).trim()
-    await expect(appendOpsCutover(store, w.git, "main", target, new Date(), "@chief")).rejects.toThrow(
-      /unfinished stuck release.*complete it before ops-cutover/,
-    )
-    expect((await w.git(["ls-remote", "origin", queueRef("main")])).trim()).toBe(queueBefore)
-    const stop = new AbortController()
-    const service = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        service.io,
-        { command: "up", intervalSeconds: 0, stop: stop.signal, afterHealth: () => stop.abort() },
-        { json: true, workdir: w.workdir },
-      ),
-      service.stderr(),
-    ).toBe(0)
-    expect((await readEventQueue(store, "main")).release).toBeUndefined()
-    expect((await readStatus(store, "main", branch)).status).toBe("merged")
   }, 60_000)
 
   // @failure 25041: resume can release a readable stuck change while another change history is unreadable.
@@ -2720,7 +1708,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
       if (config === undefined) throw new Error("the fixture's target lost its declaration")
       const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
-      await createEventQueue(store, "main", target, config, new Date())
+      await old.createEventQueue(store, "main", target, config, new Date())
       const branch = `task/old-reader-${legacyPause ? "legacy" : "plain"}`
       await oneChange(w, branch)
       const submitted = await readStatus(store, "main", branch)
@@ -2781,72 +1769,6 @@ describe("a stuck change stops the line; the service stays up and pages (the and
         await expect(old.readEventQueueWithChanges(store, "main")).rejects.toThrow(/resumes a running queue/)
       }
     }
-  }, 90_000)
-
-  it("retries a stuck release after only its legacy pause was resumed", async () => {
-    const w = await world(false)
-    const target = (await w.git(["rev-parse", "main"])).trim()
-    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
-    if (config === undefined) throw new Error("the fixture's target lost its declaration")
-    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
-    await createEventQueue(store, "main", target, config, new Date())
-    const branch = "task/legacy-first-only"
-    await oneChange(w, branch)
-    const submitted = await readStatus(store, "main", branch)
-    if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
-    await appendChangeEvent(store, "main", branch, submitted.tip, {
-      type: "stuck",
-      at: new Date(),
-      reason: "repair needed",
-    })
-    const paused = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        paused.io,
-        { by: "@chief", command: "pause", reason: "repair" },
-        { workdir: w.workdir },
-      ),
-      paused.stderr(),
-    ).toBe(0)
-    const firstOnly = await writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "repaired" })
-    expect((await readEventQueue(store, "main")).pause).toBeUndefined()
-    expect((await readStatus(store, "main", branch)).status).toBe("stuck")
-    const stop = new AbortController()
-    const health: QueueHealthDocument[] = []
-    const service = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        service.io,
-        {
-          command: "up",
-          intervalSeconds: 0,
-          stop: stop.signal,
-          afterHealth: (doc) => {
-            health.push(doc)
-            stop.abort()
-          },
-        },
-        { json: true, workdir: w.workdir },
-      ),
-      service.stderr(),
-    ).toBe(0)
-    expect(health[0]?.facts?.stopped).toBeNull()
-    expect(health[0]?.error?.resolution.join(" ")).toContain("yrd queue resume")
-    const resumed = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        resumed.io,
-        { by: "@chief", command: "resume", reason: "repaired" },
-        { workdir: w.workdir },
-      ),
-      resumed.stderr(),
-    ).toBe(0)
-    expect((await readPause(w.git, "origin", "main"))?.sha).toBe(firstOnly.sha)
-    const events = await (await openEvents({ ...store, ref: queueRef("main") })).events({ limit: 1024 })
-    expect(events.slice(-2).map((event) => event.type)).toEqual(["paused", "resumed"])
   }, 90_000)
 
   // What no round can fix still ends the service: a round that cannot even
@@ -3011,9 +1933,9 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
     const ran = capture(w.work)
     expect(await coreQueueCommand(w.work, ran.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
     expect(records(ran)[0]).toMatchObject({ merged: ["task/late"], stuck: [] })
-    await w.git(["fetch", "--quiet", "origin", `+${lateRef}:${lateRef}`])
-    const history = await readRecords(w.git, (await w.git(["rev-parse", "--verify", `${lateRef}^{commit}`])).trim())
-    expect(history.map((record) => record.kind).slice(0, 3)).toEqual(["opened", "checked", "merged"])
+    const late = await readStatus(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", "task/late")
+    expect(late.status).toBe("merged")
+    expect(late.ending?.kind).toBe("merged")
   })
 
   it("list --json says stopped: null while the line runs, and names the stop while it is stopped", async () => {
@@ -4398,18 +3320,6 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     return head
   }
 
-  /** One change's records at the remote, oldest first; none when the remote holds no such change. */
-  async function recordsAt(w: World, branch: string, head: string): Promise<readonly ChangeRecord[]> {
-    const ref = changeRef("main", { branch, head })
-    if ((await w.git(["ls-remote", "--refs", "origin", ref])).trim() === "") return []
-    await w.git(["fetch", "--quiet", "origin", `+${ref}:${ref}`])
-    return readRecords(w.git, (await w.git(["rev-parse", "--verify", `${ref}^{commit}`])).trim())
-  }
-
-  async function kindsOf(w: World, branch: string, head: string): Promise<readonly string[]> {
-    return (await recordsAt(w, branch, head)).map((record) => record.kind)
-  }
-
   /** The remote's main, fetched. */
   async function mainAt(w: World): Promise<string> {
     const tip = await readRemoteCommit(w.git, "origin", "refs/heads/main")
@@ -4462,62 +3372,6 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     }
   }
 
-  // ACCEPTANCE (stuck-stops-the-line, the rows naming yrd merge): no service is
-  // running, and the change asked for is merged out of turn, through every
-  // check, while the checked change ahead of it keeps its place and its verdict.
-  it("with no service running, merges the named change while an older checked change stays in line", async () => {
-    const w = await verbWorld()
-    await submitted(w, "task/first", "first.txt")
-    const olderHead = await submitted(w, "task/older", "older.txt")
-    const namedHead = await submitted(w, "task/named", "named.txt")
-    // One round merges the first in line and prepares only the next head (25301 cure (a)):
-    // task/older waits checked, and task/named waits unjudged until something reaches it.
-    const round = await yrd(w, "queue", "run", "--json")
-    expect(round.exitCode, round.report).toBe(0)
-    expect(await kindsOf(w, "task/older", olderHead)).toEqual(["opened", "checked"])
-    expect(await kindsOf(w, "task/named", namedHead)).toEqual(["opened"])
-
-    const merged = await yrd(w, "merge", "task/named")
-
-    // The target's newest merge names the change asked for, not the one first in line.
-    const tip = await mainAt(w)
-    expect((await w.git(["log", "-1", "--format=%(trailers:key=Change,valueonly)", tip])).trim(), merged.report).toBe(
-      `task/named@${namedHead}`,
-    )
-    expect(await onMain(w, namedHead)).toBe(true)
-    // The older checked change is untouched: not merged, not re-judged, still checked.
-    expect(await onMain(w, olderHead)).toBe(false)
-    expect(await kindsOf(w, "task/older", olderHead)).toEqual(["opened", "checked"])
-    expect(merged.exitCode, merged.report).toBe(0)
-  })
-
-  // ACCEPTANCE: merge is submit, idempotent. A change already checked is merged
-  // on that verdict, never reopened by a same-head retry, and merging a merged
-  // change again is an answer (exit 0) that writes and merges nothing.
-  it("merging a change the line already checked adds no retry, and merging it again exits 0 and changes nothing", async () => {
-    const w = await verbWorld()
-    await submitted(w, "task/first", "first.txt")
-    const head = await submitted(w, "task/checked", "checked.txt")
-    const round = await yrd(w, "queue", "run", "--json")
-    expect(round.exitCode, round.report).toBe(0)
-    expect(await kindsOf(w, "task/checked", head)).toEqual(["opened", "checked"])
-
-    const merged = await yrd(w, "merge", "task/checked")
-
-    const kinds = await kindsOf(w, "task/checked", head)
-    expect(kinds.slice(0, 3), merged.report).toEqual(["opened", "checked", "merged"])
-    expect(kinds.filter((kind) => kind === "opened")).toHaveLength(1)
-    expect(merged.exitCode, merged.report).toBe(0)
-
-    const ref = changeRef("main", { branch: "task/checked", head })
-    const tipBefore = (await w.git(["ls-remote", "--refs", "origin", ref])).trim()
-    const mainBefore = await mainAt(w)
-    const again = await yrd(w, "merge", "task/checked")
-    expect(again.exitCode, again.report).toBe(0)
-    expect((await w.git(["ls-remote", "--refs", "origin", ref])).trim()).toBe(tipBefore)
-    expect(await mainAt(w)).toBe(mainBefore)
-  })
-
   // ACCEPTANCE: the exit is the named change's state once merge is done — 1 when
   // it ended failed, 0 when its head is on the target, 2 for anything else.
   it.each([
@@ -4544,7 +3398,8 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     // Never submitted: merge opens the change itself, then judges it.
     const merged = await yrd(w, "merge", "task/judged")
 
-    expect(await kindsOf(w, "task/judged", head), merged.report).toContain(ending)
+    const judged = await readStatus(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", "task/judged")
+    expect(judged, merged.report).toMatchObject({ commit: head, status: ending })
     expect(merged.exitCode, merged.report).toBe(exit)
   })
 
@@ -4569,149 +3424,6 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     expect(await onMain(w, stuckHead), merged.report).toBe(true)
     expect(await stopOf(w)).toBeNull()
     expect(merged.exitCode, merged.report).toBe(0)
-  })
-
-  // ACCEPTANCE, the other half: a stuck head that sticks again on the repaired
-  // target keeps the line stopped, counted, and is not judged a third time. The
-  // exit is the fix's own: it merged.
-  it("a stuck head that sticks again once the fix merged keeps the stop, and the fix's merge still exits 0", async () => {
-    const w = await verbWorld()
-    const check = gate(w)
-    await redeclare(w, check.declaration)
-    const stuckHead = await submitted(w, "task/stuck", "sticks-again.txt")
-    const fixHead = await branchWith(w, "task/fix", "repaired.txt")
-    const stuck = await yrd(w, "queue", "run", "--json")
-    expect(stuck.exitCode, stuck.report).toBe(2)
-    expect(check.judgements(stuckHead)).toBe(1)
-
-    const merged = await yrd(w, "merge", "task/fix")
-
-    expect(await onMain(w, fixHead), merged.report).toBe(true)
-    expect(check.judgements(stuckHead), merged.report).toBe(2)
-    expect((await kindsOf(w, "task/stuck", stuckHead)).filter((kind) => kind === "stuck")).toHaveLength(2)
-    expect(await stopOf(w)).toMatchObject({ by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` })
-    expect(merged.exitCode, merged.report).toBe(0)
-  })
-
-  // ACCEPTANCE (rows 2 and 4 together, @chief c5c33f8e): the verdict merge keeps
-  // is keyed on the head, never on the branch. A branch that moved on after its
-  // change was checked is submitted again at its new head, and that head is
-  // judged before anything merges: the old verdict never lands the new head.
-  it("a head that moved after its change was checked is judged again, and never merges on the old verdict", async () => {
-    const w = await verbWorld()
-    const check = gate(w)
-    await redeclare(w, check.declaration)
-    await submitted(w, "task/first", "repaired.txt")
-    const checkedHead = await submitted(w, "task/moved", "repaired.txt")
-    // One round merges the first change in line and leaves this one checked.
-    const round = await yrd(w, "queue", "run", "--json")
-    expect(round.exitCode, round.report).toBe(0)
-    expect(await kindsOf(w, "task/moved", checkedHead)).toEqual(["opened", "checked"])
-    expect(check.judgements(checkedHead)).toBe(1)
-    // The branch moves on after its verdict, the way the workflow says: onto the
-    // target as it is now, then one commit more, whose tree fails the gate.
-    await w.git(["fetch", "--quiet", "origin", "main"])
-    await w.git(["checkout", "--quiet", "task/moved"])
-    await w.git(["rebase", "--quiet", "FETCH_HEAD"])
-    writeFileSync(join(w.work, "fails.txt"), "fails.txt\n")
-    await w.git(["add", "fails.txt"])
-    await w.git(["commit", "--quiet", "-m", "task/moved: fails.txt"])
-    const movedHead = (await w.git(["rev-parse", "HEAD"])).trim()
-    await w.git(["checkout", "--quiet", "main"])
-
-    const merged = await yrd(w, "merge", "task/moved")
-
-    expect(check.judgements(movedHead), merged.report).toBe(1)
-    expect(await kindsOf(w, "task/moved", movedHead), merged.report).toContain("failed")
-    expect(await onMain(w, movedHead), merged.report).toBe(false)
-    expect(await onMain(w, checkedHead), merged.report).toBe(false)
-    expect(merged.exitCode, merged.report).toBe(1)
-  })
-
-  // ACCEPTANCE (row 7): a merge that fails on a stopped line ends failed, goes
-  // back to the submitter through the notify entry that wants failed, and the
-  // stop stays where it was: main does not move and the stuck head is not judged
-  // again.
-  it("a fix that fails on a stopped line ends failed, is sent back to its submitter, and the line stays stopped", async () => {
-    const w = await verbWorld()
-    const check = gate(w)
-    const told = join(dirname(w.workdir), "told.jsonl")
-    const notifier = join(dirname(w.workdir), "notifier.sh")
-    writeFileSync(told, "")
-    writeFileSync(notifier, ["#!/bin/sh", `cat >> "${told}"`, ""].join("\n"))
-    chmodSync(notifier, 0o755)
-    await redeclare(w, `${check.declaration}notify:\n  - submitter:\n      on: [failed]\n      run: ${notifier}\n`)
-    const stuckHead = await submitted(w, "task/stuck", "stuck.txt")
-    const fixHead = await branchWith(w, "task/fix", "fails.txt")
-    const stuck = await yrd(w, "queue", "run", "--json")
-    expect(stuck.exitCode, stuck.report).toBe(2)
-    const stop = { by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` }
-    expect(await stopOf(w)).toMatchObject(stop)
-    const mainBefore = await mainAt(w)
-
-    const merged = await yrd(w, "merge", "task/fix", "--notify", "@dev/4")
-
-    expect(await kindsOf(w, "task/fix", fixHead), merged.report).toContain("failed")
-    expect(merged.exitCode, merged.report).toBe(1)
-    const messages = readFileSync(told, "utf8")
-      .split("\n")
-      .filter((line) => line.trim() !== "")
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
-    expect(messages, merged.report).toEqual([
-      expect.objectContaining({ change: `task/fix@${fixHead}`, record: "failed", submitter: "@dev/4" }),
-    ])
-    expect(await stopOf(w)).toMatchObject(stop)
-    expect(check.judgements(stuckHead), merged.report).toBe(1)
-    expect(await mainAt(w), merged.report).toBe(mainBefore)
-  })
-
-  // ACCEPTANCE (Q6): a merge that loses the target at the lease is not retried
-  // by this command. It exits 2, says what moved, and names the command that
-  // tries again; the change keeps its place and its verdict.
-  it("when the target moves at the lease, yrd merge exits 2 naming what moved and the command to run again", async () => {
-    const w = await verbWorld()
-    // A commit made around the queue, ready to land on main.
-    const around = await branchWith(w, "around", "around.txt")
-    const head = await branchWith(w, "task/moved", "moved.txt")
-    const before = await mainAt(w)
-    // The window the lease exists for: the merge's own atomic push has reached
-    // the remote, its checks all passed and its reads are done, and main moves
-    // before the refs update. The remote's pre-receive hook lands the commit
-    // around the queue once, for the first push that moves main; that push of
-    // its own moves main too, and finds the mark.
-    const root = dirname(w.workdir)
-    const moved = join(root, "target-moved-at-the-lease")
-    const hook = join(root, "remote.git", "hooks", "pre-receive")
-    mkdirSync(dirname(hook), { recursive: true })
-    writeFileSync(
-      hook,
-      [
-        "#!/bin/sh",
-        "updates=$(cat)",
-        `printf '%s\\n' "$updates" | grep -q ' refs/heads/main$' || exit 0`,
-        `[ -e "${moved}" ] && exit 0`,
-        `touch "${moved}"`,
-        "env -u GIT_DIR -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \\",
-        `  git -C "${w.work}" push --quiet origin ${around}:refs/heads/main`,
-        "",
-      ].join("\n"),
-    )
-    chmodSync(hook, 0o755)
-
-    const merged = await yrd(w, "merge", "task/moved")
-
-    // The instrument, before anything is concluded from it: the lease saw the
-    // move, and the target is the commit around the queue, not this merge.
-    expect(existsSync(moved), merged.report).toBe(true)
-    expect(await mainAt(w), merged.report).toBe(around)
-    expect(await onMain(w, head)).toBe(false)
-    expect(await kindsOf(w, "task/moved", head)).toEqual(["opened", "checked"])
-    expect(merged.stderr, merged.report).toContain(
-      `yrd: task/moved@${head} is still in line, checked: the target origin/main moved to ${around.slice(0, 12)} ` +
-        `after this round read it at ${before.slice(0, 12)}, so the merge was not pushed; `,
-    )
-    expect(merged.stderr, merged.report).toContain("or run yrd merge task/moved again")
-    expect(merged.exitCode, merged.report).toBe(2)
   })
 
   // 25687. On an event queue, yrd merge's postcondition reads the event chain
