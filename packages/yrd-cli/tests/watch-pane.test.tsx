@@ -821,6 +821,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
     const mock: WatchRun = {
       kind: "deployment",
       id: RUN_ID,
+      number: 7,
       label: "staging",
       row: row({ state: "merging", position: 1, run: RUN_ID }),
       steps: [
@@ -831,7 +832,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
     }
     const text = await paint(at(<RunStatusBox run={mock} />))
 
-    expect(text).toContain("RUN staging#")
+    expect(text).toContain("RUN staging#7")
     expect(text).toMatch(/◉ Merging #1/u)
     // Its steps are tabs of the detail, not lines of the box.
     expect(text).not.toContain("build image")
@@ -5452,7 +5453,7 @@ describe("independent queue watch (22949)", () => {
     const header = app.lines.find((line) => line.includes("CHANGES") && line.includes("RUN"))
     expect(header).toMatch(/\bTIME\s+Q\s+RUN\s+CHANGES\b/u)
     const firstRow = app.lines.find((line) => line.includes("first repository"))
-    expect(firstRow).toMatch(/\b1\s+\d{6}\s+first repository/u)
+    expect(firstRow).toMatch(/\b1\s+q-20260903\S*\s+first repository/u)
     expect(app.text).toContain("[1] YRD QUEUE example.test/one#main (/one)")
     expect(app.text).toContain("example.test/two#main")
     expect(app.text.match(/RUNNER/gu)?.length).toBe(2)

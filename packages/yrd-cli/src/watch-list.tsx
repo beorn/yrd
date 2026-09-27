@@ -224,8 +224,12 @@ export function listLayout(
     columns < 100
       ? 0
       : Math.max(5, (runner?.by ?? "—").length, ...rows.map((item) => (item.row.submitter ?? "—").length))
+  // An unnumbered round shows its opaque id, but its column must not consume the task at narrow widths.
   const runWidth = separate
-    ? Math.max(3, ...rows.map((item) => runIdentifier(runIdOf(item), item.run?.number).length))
+    ? Math.min(
+        columns < 80 ? 12 : columns < 120 ? 18 : 24,
+        Math.max(3, ...rows.map((item) => runIdentifier(runIdOf(item), item.run?.number).length)),
+      )
     : 0
   const ageRunWidth = Math.max(
     AGE_RUN_MIN_WIDTH,
@@ -243,10 +247,13 @@ export function listLayout(
     : 0
   const queueRunWidth = separate
     ? 0
-    : Math.max(
-        11,
-        queueRunText(queue.digit, queue.label, undefined).length,
-        ...rows.map((item) => queueRunText(queue.digit, queue.label, runIdOf(item), item.run?.number).length),
+    : Math.min(
+        columns < 80 ? 16 : columns < 120 ? 22 : 28,
+        Math.max(
+          11,
+          queueRunText(queue.digit, queue.label, undefined).length,
+          ...rows.map((item) => queueRunText(queue.digit, queue.label, runIdOf(item), item.run?.number).length),
+        ),
       )
   const fixedNonTask =
     timeWidth +
