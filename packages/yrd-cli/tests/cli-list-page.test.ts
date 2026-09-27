@@ -151,9 +151,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     // notice a machine that runs no queue prints, G5) the header the pane draws.
     expect(lines[0]).toMatch(/remote\.git#main$/u)
     expect(lines[1]).toContain("YRD")
-    const header = lines.findIndex(
-      (line) => line.includes("ISSUE / BRANCH") && line.includes("QUEUE") && line.includes("RUN"),
-    )
+    const header = lines.findIndex((line) => line.includes("CHANGES") && line.includes("QUEUE") && line.includes("RUN"))
     expect(header, plain.report).toBeGreaterThan(1)
     expect(lines[header], plain.report).toContain("QUEUE")
     expect(lines[header], plain.report).toContain("RUN")
@@ -208,7 +206,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(widest(wide.stdout)).toBeLessThanOrEqual(160)
     expect(widest(piped.stdout)).toBeLessThanOrEqual(120)
     // The header keeps every column at every width.
-    for (const ran of [narrow, wide, piped]) expect(ran.stdout, ran.report).toMatch(/ISSUE \/ BRANCH/u)
+    for (const ran of [narrow, wide, piped]) expect(ran.stdout, ran.report).toContain("CHANGES")
   })
 
   it("leaves `--json` exactly as it was: the same document with or without colour, and never a colour byte", async () => {
