@@ -301,7 +301,9 @@ function DetailScroll({
   const omitted = Math.max(0, controller.maxScroll - controller.scrollOffset)
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-      <ScrollArea controller={controller}>{children}</ScrollArea>
+      <ScrollArea controller={controller} scrollbar={false}>
+        {children}
+      </ScrollArea>
       {omitted > 0 ? (
         <Text color="$fg-muted" flexShrink={0}>
           {`${omitted} more lines`}
@@ -850,15 +852,8 @@ function CheckingStageBody({ detail, selectedSubIndex }: { detail: ChangeDetail;
 
   if (selectedSubIndex !== undefined && detail.checks[selectedSubIndex] !== undefined) {
     const selectedCheck = detail.checks[selectedSubIndex]
-    const remedy = detail.run.steps?.[selectedSubIndex]?.remedy
     return (
       <Box flexDirection="column" minWidth={0}>
-        {/* The remedy leads the tab (39): the filled tabs cost rows, and whose move it is must not fall below the fold. */}
-        {remedy !== undefined ? (
-          <Text color={CHECK_COLOR[selectedCheck.state]} wrap="wrap">
-            {remedy}
-          </Text>
-        ) : null}
         {detail.checks.length > 1 ? (
           <Box flexDirection="column" minWidth={0}>
             {detail.checks.map((c, idx) => (
