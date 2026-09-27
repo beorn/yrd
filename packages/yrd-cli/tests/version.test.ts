@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
-import { formatYrdRuntimeVersion, YRD_VERSION } from "../src/version.ts"
+import { formatYrdRuntimeVersion, readDistributionVersion, yrdSourceRoot, YRD_VERSION } from "../src/version.ts"
 
 const root = resolve(import.meta.dirname, "../../..")
 
@@ -185,5 +185,20 @@ describe("version CLI", () => {
     expect(exitCode, stderr).toBe(0)
     expect(stdout).toMatch(new RegExp(`^yrd ${YRD_VERSION}\\+${sha}(?:-dirty)?\\n$`, "u"))
     expect(stderr).toBe("")
+  })
+
+  it("derives the distribution version from the owning git-yrd package.json", () => {
+    const sourceRoot = yrdSourceRoot()
+    expect(sourceRoot).toBeDefined()
+    expect(readDistributionVersion(sourceRoot)).toBe(YRD_VERSION)
+
+    const tempRoot = mkdtempSync(resolve(tmpdir(), "yrd-dist-version-"))
+    try {
+      writeFileSync(join(tempRoot, "package.json"), JSON.stringify({ name: "git-yrd", version: "9.9.9-test" }))
+      expect(readDistributionVersion(tempRoot)).toBe("9.9.9-test")
+      expect(yrdSourceRoot(tempRoot)).toBe(tempRoot)
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true })
+    }
   })
 })
