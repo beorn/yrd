@@ -375,10 +375,11 @@ describe("yrd queue up, the service", () => {
     const pauseCheck = join(w.workdir, "pause-during-check.ts")
     writeFileSync(
       pauseCheck,
-      `import { gitIn, readPause, writePause } from ${JSON.stringify(queueCoreEntry)}\n` +
+      `import { createEventStore, gitIn, readEventQueue, writeQueueEvent } from ${JSON.stringify(queueCoreEntry)}\n` +
         `const git = gitIn(${JSON.stringify(w.work)})\n` +
-        `if (await readPause(git, "origin", "main") === undefined) {\n` +
-        `  await writePause(git, "origin", "main", { by: "@chief", kind: "paused", reason: "maintenance" })\n` +
+        `const store = createEventStore(${JSON.stringify(w.work)}, "origin", git.selection)\n` +
+        `if ((await readEventQueue(store, "main")).ops?.pause === undefined) {\n` +
+        `  await writeQueueEvent(store, "main", { type: "paused", at: new Date(), by: "@chief", reason: "maintenance" })\n` +
         `}\n`,
     )
     await redeclare(w, `checks:\n  - gate:\n      on: [submit]\n      run: bun ${pauseCheck}\n`)
@@ -422,7 +423,7 @@ describe("yrd queue up, the service", () => {
     )
     expect(exit, JSON.stringify({ stderr: run.stderr(), stdout: run.stdout(), roundCount })).toBe(0)
     expect(roundCount).toBe(2)
-    const pause = await readPause(w.git, "origin", "main")
+    const pause = (await readEventQueue(createEventStore(w.work, "origin", gitIn(w.work).selection), "main")).ops?.pause
     if (pause === undefined) throw new Error("the fixture's pause was not published")
     expect(pause).toMatchObject({ by: "@chief", kind: "paused" })
     expect(records(run)).toHaveLength(2)
@@ -778,7 +779,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
         expect(records(run)[0]).toMatchObject({ head })
         const ref = changesRef("main", branch)
         const history = await (
-          await openEvents({ ...createEventStore(w.work, "origin", w.git.selection), ref })
+          await openEvents({ ...createEventStore(w.work, "origin", gitIn(w.work).selection), ref })
         ).events()
         expect(history.map((event) => event.type)).toEqual(["opened"])
         expect(history[0]?.props.some(([key]) => key === "Target")).toBe(false)
@@ -2542,7 +2543,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
       at: new Date(),
       reason: "repair needed",
     })
-    await writePause(w.git, "origin", "main", { by: "@chief", kind: "paused", reason: "repair" })
+    await writeQueueEvent(store, "main", { type: "paused", at: new Date(), by: "@chief", reason: "repair" })
     const run = capture(w.work)
     const stop = new AbortController()
     let rounds = 0
@@ -3414,7 +3415,6 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
     const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
     await createEventQueue(store, "main", commit, config, new Date())
-    await appendOpsCutover(store, w.git, "main", commit, new Date(), "@chief")
     const earlier = new Date(Date.now() - 3_600_000)
     await writeQueueOverride(
       store,
