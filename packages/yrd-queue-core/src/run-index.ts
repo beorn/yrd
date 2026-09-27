@@ -35,7 +35,78 @@ export function nextRunNumber(raw: string | undefined, ref: string): number {
 
 export type RunIndexLookup =
   | Readonly<{ kind: "known"; number: number; record: RunIndexRecord }>
-  | Readonly<{ kind: "unknown"; number: number }>
+  | Readonly<{ kind: "unknown"; number: number; knownThrough: number }>
+
+/** Bring the index along with the event queue's existing fetch, including on a cold clone. */
+export function queueReadWithRunIndex(
+  store: QueueLocation,
+  queue: string,
+): Readonly<{
+  store: QueueLocation
+  tip(): Oid
+}> {
+  const indexRef = runIndexRef(queue)
+  const eventsRef = queueRef(queue)
+  const fetchRefs = store.backend.fetchRefs
+  if (fetchRefs === undefined) throw new TypeError(`${indexRef}: Gitomic backend needs fetchRefs`)
+  let captured: Oid | undefined
+  return {
+    store: {
+      ...store,
+      backend: {
+        ...store.backend,
+        fetchRefs: async (repo, refs, remote, options) => {
+          const tips = await fetchRefs(repo, refs, remote, options)
+          if (Array.isArray(refs) && refs.includes(eventsRef) && refs.includes(indexRef)) {
+            const tip = tips.get(indexRef)
+            if (tip === undefined) {
+              throw new Error(
+                `${RUN_INDEX_CODES.missing}: ${indexRef} at ${remote} is absent for existing ${eventsRef}; activate the queue run index from its recovery bundle before allocating or looking up a number`,
+              )
+            }
+            captured = tip
+          }
+          return tips
+        },
+      },
+    },
+    tip: () => {
+      if (captured === undefined) throw new Error(`${indexRef}: queue read did not fetch the run index`)
+      return captured
+    },
+  }
+}
+
+/** Stage an index successor locally; the event publisher leases both refs in one push. */
+export async function stageRunIndexEntry(
+  store: QueueLocation,
+  queue: string,
+  tip: Oid,
+  identity: RunIndexIdentity,
+  queueTip: Oid,
+  at: Date,
+): Promise<Readonly<{ number: number; next: Oid }>> {
+  const ref = runIndexRef(queue)
+  const number = nextRunNumber(await readBlob(store.backend, store.repo, tip, ref, "next"), ref)
+  if (!Number.isSafeInteger(number + 1)) throw new Error(`${ref}: next ${number} exceeds the safe run-number range`)
+  const path = runIndexPath(number)
+  if ((await readBlob(store.backend, store.repo, tip, ref, path)) !== undefined) {
+    throw new Error(`${ref}:${path} already exists while next is ${number}`)
+  }
+  const next = await store.backend.writeCommit(store.repo, {
+    parent: tip,
+    time: Math.floor(at.getTime() / 1000),
+    changes: new Map([
+      ["next", String(number + 1)],
+      [path, JSON.stringify({ ...identity, firstQueueTip: queueTip })],
+    ]),
+    message: `allocate run ${number}`,
+    writer: "yrd",
+    instance: randomUUID(),
+    seq: 0,
+  })
+  return { number, next }
+}
 
 /** Prepare an unpublished index tip; the caller publishes it atomically with queue creation or activation. */
 export async function writeRunIndexGenesis(store: QueueLocation, at: Date): Promise<Oid> {
@@ -81,33 +152,6 @@ export async function activateRunIndex(store: QueueLocation, queue: string, at: 
     store.remote,
   )
   return genesis
-}
-
-/** A queue clone may predate the index ref; seed only its derived local kept copy from remote authority. */
-export async function primeRunIndexKeptRef(store: QueueLocation, queue: string): Promise<void> {
-  const indexRef = runIndexRef(queue)
-  const eventsRef = queueRef(queue)
-  const fetchRefs = store.backend.fetchRefs
-  const listRefs = store.backend.listRefs
-  if (fetchRefs === undefined || listRefs === undefined) {
-    throw new TypeError(`${indexRef}: Gitomic backend needs fetchRefs and listRefs for the run index`)
-  }
-  const tips = await fetchRefs(store.repo, [eventsRef, indexRef], store.remote, { absent: "omit" })
-  if (tips.get(eventsRef) === undefined) throw new Error(`${eventsRef} at ${store.remote} is absent`)
-  const remoteTip = tips.get(indexRef)
-  if (remoteTip === undefined) {
-    throw new Error(
-      `${RUN_INDEX_CODES.missing}: ${indexRef} at ${store.remote} is absent for existing ${eventsRef}; activate the queue run index from its recovery bundle before allocating or looking up a number`,
-    )
-  }
-  if ((await listRefs(store.repo, indexRef)).get(indexRef) !== undefined) return
-  const outcome = await store.backend.compareAndSwap(store.repo, indexRef, remoteTip, "0".repeat(remoteTip.length))
-  if (outcome === "locked") {
-    throw new Error(`${indexRef} in ${store.repo}: local kept ref is locked during run-index setup`)
-  }
-  if (outcome === "moved" && (await listRefs(store.repo, indexRef)).get(indexRef) === undefined) {
-    throw new Error(`${indexRef} in ${store.repo}: local kept ref moved but is still absent`)
-  }
 }
 
 function corrupt(ref: string, path: string, reason: string): Error {
@@ -191,10 +235,10 @@ export async function lookupRunIndex(store: QueueLocation, queue: string, number
   }
   const nextRaw = await readBlob(store.backend, store.repo, tip, indexRef, "next")
   const next = nextRunNumber(nextRaw, indexRef)
-  if (number >= next) return { kind: "unknown", number }
+  if (number >= next) return { kind: "unknown", number, knownThrough: next - 1 }
   const path = runIndexPath(number)
   const raw = await readBlob(store.backend, store.repo, tip, indexRef, path)
   return raw === undefined
-    ? { kind: "unknown", number }
+    ? { kind: "unknown", number, knownThrough: next - 1 }
     : { kind: "known", number, record: parseRecord(indexRef, path, raw) }
 }

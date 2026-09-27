@@ -11,6 +11,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { appendNumberedChangeEvent, createEventStore, gitIn, readStatus, selectionFor, submit } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
+import { resolveQueueLocation } from "../src/queue-location.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
@@ -90,6 +91,17 @@ async function yrd(cwd: string, ...args: string[]): Promise<{ code: number; stdo
 }
 
 describe("yrd runs show", () => {
+  it("names the missing remote index for an existing queue (26193)", async () => {
+    const { work } = await fixture()
+    await gitIn(work)(["push", "--quiet", "origin", ":refs/yrd/main/runs"])
+    const shown = await yrd(work, "runs", "show", `${address}#1`, "--json")
+    expect(shown.code).toBe(2)
+    expect(shown.stdout).toBe("")
+    expect(shown.stderr).toContain("E_RUN_INDEX_MISSING")
+    expect(shown.stderr).toContain("refs/yrd/main/runs")
+    expect(shown.stderr).toContain("origin")
+  }, 60_000)
+
   it("returns an indexed record with explicit unavailable local detail and byte-clean JSON (26193)", async () => {
     const { work } = await fixture()
     const shown = await yrd(work, "runs", "show", `${address}#1`, "--json")
@@ -101,11 +113,33 @@ describe("yrd runs show", () => {
       record: { id: "opaque-test-run" },
       detail: { status: "unavailable", reason: expect.stringContaining("absent on this host") },
     })
+    const human = await yrd(work, "runs", "show", `${address}#1`)
+    expect(human.code, human.stderr).toBe(0)
+    const parsed = JSON.parse(shown.stdout) as { record: { firstQueueTip: string } }
+    expect(human.stdout).toContain(`first queue tip ${parsed.record.firstQueueTip}`)
+    const location = await resolveQueueLocation(work, address, process.env)
+    const logs = join(location.workdir, "logs")
+    mkdirSync(logs, { recursive: true })
+    writeFileSync(
+      join(logs, "opaque-test-run.jsonl"),
+      `${JSON.stringify({
+        kind: "run",
+        run: "opaque-test-run",
+        at: "2026-09-27T12:00:00.000Z",
+        target: "main",
+      })}\n`,
+    )
+    const withJournal = await yrd(work, "runs", "show", `${address}#1`, "--json")
+    expect(withJournal.code, withJournal.stderr).toBe(0)
+    expect(JSON.parse(withJournal.stdout)).toMatchObject({
+      detail: { status: "available", records: [{ kind: "run", run: "opaque-test-run" }] },
+    })
     const unknown = await yrd(work, "runs", "show", `${address}#2`, "--json")
     expect(unknown.code).toBe(2)
     expect(unknown.stdout).toBe("")
     expect(unknown.stderr).toContain("E_RUN_UNKNOWN")
     expect(unknown.stderr).toContain("by-number/0/2")
+    expect(unknown.stderr).toContain("indexed range is 1..1 (may have gaps)")
     const repeated = await yrd(work, "runs", "activate", address, "--json")
     expect(repeated.code).toBe(2)
     expect(repeated.stdout).toBe("")

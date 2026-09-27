@@ -366,7 +366,7 @@ function buildProgram(
       )
       if (lookup.kind === "unknown") {
         throw new Error(
-          `${RUN_INDEX_CODES.unknown}: ${address.canonical} has no entry at ${runIndexRef(address.queue.queue)}:${runIndexPath(address.number)} on ${address.queue.transport}`,
+          `${RUN_INDEX_CODES.unknown}: parsed ${address.canonical}; ${runIndexRef(address.queue.queue)}:${runIndexPath(address.number)} on ${address.queue.transport} has no entry; indexed range is ${lookup.knownThrough === 0 ? "empty" : `1..${lookup.knownThrough} (may have gaps)`}`,
         )
       }
       const journal = join(location.workdir, "logs", `${lookup.record.id}.jsonl`)
@@ -391,7 +391,7 @@ function buildProgram(
         options.json === true
           ? `${JSON.stringify(product)}\n`
           : [
-              `${product.address}  ${lookup.record.id}  ${lookup.record.startedAt}  ${lookup.record.host}  ${lookup.record.actor}`,
+              `${product.address}  ${lookup.record.id}  ${lookup.record.startedAt}  ${lookup.record.host}  ${lookup.record.actor}  first queue tip ${lookup.record.firstQueueTip}`,
               ...(detail.status === "available"
                 ? detail.records.map((record) => JSON.stringify(record))
                 : [detail.reason]),

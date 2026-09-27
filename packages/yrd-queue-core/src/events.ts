@@ -1,13 +1,22 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
-import { open } from "gitomic"
-import { Conflict } from "./git.ts"
+import { Conflict, RetriesExhausted } from "./git.ts"
 import { listRefs, openEvents } from "./git.ts"
 import { readEventChain, readEventChains } from "./event-read.ts"
 import { EVENT_READ_LIMIT } from "./event-read.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
-import { overrideRef, pauseRef, queueRef, queueRefPrefix, runIndexRef, type Change } from "./refs.ts"
+import {
+  assertBranch,
+  changesRef,
+  overrideRef,
+  pauseRef,
+  queueRef,
+  queueRefPrefix,
+  runIndexRef,
+  type Change,
+} from "./refs.ts"
 export { queueRef } from "./refs.ts"
+export { changesRef } from "./refs.ts"
 import { readM2Pause, type PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
 import { createLegacyBackend, gitIn, refAt } from "./git.ts"
@@ -25,13 +34,7 @@ import {
   type OverrideWrite,
 } from "./override.ts"
 import { deleteCandidateRefsForShas } from "./candidate-refs.ts"
-import {
-  nextRunNumber,
-  primeRunIndexKeptRef,
-  runIndexPath,
-  writeRunIndexGenesis,
-  type RunIndexIdentity,
-} from "./run-index.ts"
+import { queueReadWithRunIndex, stageRunIndexEntry, writeRunIndexGenesis, type RunIndexIdentity } from "./run-index.ts"
 
 export const CHANGE_STATUSES = [
   "draft",
@@ -301,29 +304,6 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
     ...(details.commit === undefined ? {} : { keeps: [details.commit] }),
     ...(details.title === undefined ? {} : { title: details.title }),
     ...(details.content === undefined ? {} : { content: details.content }),
-  }
-}
-
-/** Queue life is a chain at one reserved leaf, distinct from branch changes. */
-/** One chain for a branch's entire sequence of changes. */
-export function changesRef(queue: string, branch: string): string {
-  assertBranch(branch)
-  return `${queueRefPrefix(queue)}/changes/${branch}`
-}
-
-function assertBranch(branch: string): void {
-  if (
-    branch.length === 0 ||
-    branch === "@" ||
-    branch.startsWith("/") ||
-    branch.endsWith("/") ||
-    branch.includes("..") ||
-    branch.includes("@{") ||
-    branch.endsWith(".") ||
-    /[\x00-\x20\x7f~^:?*[\\]/u.test(branch) ||
-    branch.split("/").some((part) => part.length === 0 || part.startsWith(".") || part.endsWith(".lock"))
-  ) {
-    throw new TypeError(`invalid branch for an event ref: ${JSON.stringify(branch)}`)
   }
 }
 
@@ -887,8 +867,16 @@ export async function createEventQueue(
 
 /** Read and validate the queue declaration and its current operator stop. */
 export async function readEventQueue(store: QueueReadStore, queue: string): Promise<EventQueue> {
+  return readEventQueueWithFetch(store, queue)
+}
+
+async function readEventQueueWithFetch(
+  store: QueueReadStore,
+  queue: string,
+  fetch?: readonly string[],
+): Promise<EventQueue> {
   const ref = queueRef(queue)
-  const events = await readEventChain(await openEvents({ ...store, ref }))
+  const events = await readEventChain(await openEvents({ ...store, ref, ...(fetch === undefined ? {} : { fetch }) }))
   const projected = projectEventQueue(events, ref, store.repo)
   const warningAt = Math.ceil(EVENT_READ_LIMIT * 0.75)
   let writePressure: EventQueueProjection["writePressure"]
@@ -1856,8 +1844,16 @@ async function appendDecision(
   write: ChangeWrite,
   onPrepared?: (oid: Oid) => void,
   numbered?: RunIndexIdentity,
+  retry?: Readonly<{ deadline: number; attempts: number; budgetMs: number }>,
 ): Promise<Readonly<{ event: string; number?: number }>> {
-  const queueTip = (await readEventQueue(store, queue)).tip
+  const indexRead = numbered === undefined ? undefined : queueReadWithRunIndex(store, queue)
+  const queueTip = (
+    await readEventQueueWithFetch(
+      indexRead?.store ?? store,
+      queue,
+      numbered === undefined ? undefined : [runIndexRef(queue)],
+    )
+  ).tip
   const history = await readChangeEvents(store, queue, branch, selectedTip)
   const input = changeInput(write.type, {
     queueTip,
@@ -1897,62 +1893,31 @@ async function appendDecision(
     ) {
       throw new TypeError(`${indexRef}: run identity needs id, startedAt, host and actor`)
     }
-    await primeRunIndexKeptRef(store, queue)
-    const index = await open({
-      repo: store.repo,
-      remote: store.remote,
-      ref: indexRef,
-      backend: store.backend,
-      writer: "yrd",
-      ...(store.retryBudgetMs === undefined ? {} : { retryBudgetMs: store.retryBudgetMs }),
-    })
-    let stagedEvent: Oid | undefined
-    let allocated: number | undefined
-    let updates: readonly AlsoRef[] = []
-    const fetch = [...new Set([ref, queueRef(queue), ...(also ?? []).map((update) => update.ref)])]
-    await index.transact(
-      async (map, _base, attempt) => {
-        if (attempt?.tips.get(ref) !== selectedTip) {
-          throw new Conflict(
-            `${ref} moved before the numbered decision: expected ${selectedTip}, read ${attempt?.tips.get(ref) ?? "absent"}`,
-            { refs: [ref] },
-          )
-        }
-        const number = nextRunNumber(await map.get("next"), indexRef)
-        if (!Number.isSafeInteger(number + 1)) {
-          throw new Error(`${indexRef}: next ${number} exceeds the safe run-number range`)
-        }
-        const path = runIndexPath(number)
-        if (await map.has(path)) throw new Error(`${indexRef}:${path} already exists while next is ${number}`)
-        const staged = await chain.stage(planned, { expect: selectedTip })
-        stagedEvent = staged.head
-        allocated = number
-        onPrepared?.(staged.head)
-        updates = [...(also ?? []), ...((await write.prepareAlso?.(staged.head)) ?? [])]
-        for (const update of updates) {
-          if (attempt?.tips.get(update.ref) !== (update.expect ?? undefined)) {
-            throw new Conflict(
-              `${update.ref} moved before the numbered decision: expected ${update.expect ?? "absent"}, read ${attempt?.tips.get(update.ref) ?? "absent"}`,
-              { refs: [update.ref] },
-            )
-          }
-        }
-        map.set("next", String(number + 1))
-        map.set(path, JSON.stringify({ ...numbered, firstQueueTip: queueTip }))
-      },
-      `allocate run for ${ref}`,
-      {
-        fetch,
-        beside: () => {
-          if (stagedEvent === undefined) throw new Error(`${indexRef}: numbered event was not staged`)
-          return [{ ref, expect: selectedTip, oid: stagedEvent }, ...updates]
-        },
-      },
-    )
-    if (stagedEvent === undefined || allocated === undefined) {
-      throw new Error(`${indexRef}: numbered publication landed without an event or number`)
+    if (indexRead === undefined) throw new Error(`${indexRef}: numbered queue read was absent`)
+    const staged = await chain.stage(planned, { expect: selectedTip })
+    onPrepared?.(staged.head)
+    const updates = [...(also ?? []), ...((await write.prepareAlso?.(staged.head)) ?? [])]
+    const index = await stageRunIndexEntry(store, queue, indexRead.tip(), numbered, queueTip, write.at)
+    try {
+      await staged.publish({ also: [{ ref: indexRef, expect: indexRead.tip(), oid: index.next }, ...updates] })
+    } catch (error) {
+      if (
+        error instanceof Conflict &&
+        error.refs.length > 0 &&
+        error.refs.every((lost) => lost === indexRef || lost === queueRef(queue))
+      ) {
+        const budgetMs = retry?.budgetMs ?? store.retryBudgetMs ?? 30_000
+        const deadline = retry?.deadline ?? Date.now() + budgetMs
+        if (Date.now() >= deadline) throw new RetriesExhausted((retry?.attempts ?? 0) + 1, budgetMs, { cause: error })
+        return appendDecision(store, queue, branch, selectedTip, write, onPrepared, numbered, {
+          deadline,
+          attempts: (retry?.attempts ?? 0) + 1,
+          budgetMs,
+        })
+      }
+      throw error
     }
-    return { event: stagedEvent, number: allocated }
+    return { event: staged.head, number: index.number }
   }
   // A transport error can arrive after the atomic push landed. The merge
   // publisher needs the exact event OID before that call so its remote read can

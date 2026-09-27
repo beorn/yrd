@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
+import { Conflict } from "gitomic"
 import { createProcess, type Process } from "@yrd/process"
 import * as verifying from "../src/verifying.ts"
 import {
@@ -87,6 +88,7 @@ describe("event submit", () => {
     expect(await lookupRunIndex(createEventStore(born.work, "origin", selectionFor(born.git)), "main", 1)).toEqual({
       kind: "unknown",
       number: 1,
+      knownThrough: 0,
     })
 
     const rejected = await world(false)
@@ -122,8 +124,21 @@ describe("event submit", () => {
       changesRef("main", "task/numbered"),
       runIndexRef("main"),
     ])
+    const firstStore = store(w)
+    const publish = firstStore.backend.publish
+    if (publish === undefined) throw new Error("fixture has no atomic publisher")
+    const pushes: string[][] = []
     const written = await appendNumberedChangeEvent(
-      store(w),
+      {
+        ...firstStore,
+        backend: {
+          ...firstStore.backend,
+          publish: async (...args: Parameters<typeof publish>) => {
+            pushes.push(args[1].map((update) => update.ref))
+            return publish(...args)
+          },
+        },
+      },
       "main",
       "task/numbered",
       status.tip,
@@ -131,6 +146,7 @@ describe("event submit", () => {
       { id: "opaque-run-1", startedAt: "2026-09-27T12:00:00.000Z", host: "hh", actor: "yrd" },
     )
     expect(written.number).toBe(1)
+    expect(pushes).toEqual([[changesRef("main", "task/numbered"), runIndexRef("main")]])
     expect(written.event).toMatch(/^[0-9a-f]{40}$/u)
     expect(await lookupRunIndex(store(w), "main", 1)).toMatchObject({
       kind: "known",
@@ -144,6 +160,28 @@ describe("event submit", () => {
       kind: "known",
       record: { id: "opaque-run-1" },
     })
+    const freshGit = gitIn(fresh)
+    await freshGit(["config", "user.email", "queue@yrd.test"])
+    await freshGit(["config", "user.name", "yrd"])
+    const freshWorld = { ...w, git: freshGit, work: fresh }
+    const secondHead = await branchWithCommit(freshWorld, "task/after-restart", "after-restart.txt")
+    await submit(freshGit, "origin", {
+      branch: "task/after-restart",
+      submitter: "author",
+      target: { branch: "main", remote: "origin" },
+    })
+    const secondStatus = await readStatus(store(freshWorld), "main", "task/after-restart")
+    if (secondStatus.tip === undefined) throw new Error("fresh clone submission has no tip")
+    const second = await appendNumberedChangeEvent(
+      store(freshWorld),
+      "main",
+      "task/after-restart",
+      secondStatus.tip,
+      { type: "verifying", at: new Date(), commit: secondHead },
+      { id: "opaque-run-2", startedAt: "2026-09-27T12:01:00.000Z", host: "hh", actor: "yrd" },
+    )
+    expect(second.number).toBe(2)
+    expect(await lookupRunIndex(store(freshWorld), "main", 1)).toMatchObject({ kind: "known" })
     const after = await w.git([
       "ls-remote",
       "--refs",
@@ -152,6 +190,29 @@ describe("event submit", () => {
       runIndexRef("main"),
     ])
     expect(after).not.toBe(before)
+  })
+
+  it("refuses allocation when the remote queue survives but its index is missing (26193)", async () => {
+    const w = await world()
+    const head = await branchWithCommit(w, "task/missing-index", "missing-index.txt")
+    await submit(w.git, "origin", {
+      branch: "task/missing-index",
+      submitter: "author",
+      target: { branch: "main", remote: "origin" },
+    })
+    const status = await readStatus(store(w), "main", "task/missing-index")
+    if (status.tip === undefined) throw new Error("fixture submission has no tip")
+    await w.git(["push", "--quiet", "origin", `:${runIndexRef("main")}`])
+    const missing = appendNumberedChangeEvent(
+      store(w),
+      "main",
+      "task/missing-index",
+      status.tip,
+      { type: "verifying", at: new Date(), commit: head },
+      { id: "must-not-allocate", startedAt: "2026-09-27T12:00:00.000Z", host: "hh", actor: "yrd" },
+    )
+    await expect(missing).rejects.toThrow(/E_RUN_INDEX_MISSING.*refs\/yrd\/main\/runs.*origin/u)
+    expect((await readStatus(store(w), "main", "task/missing-index")).status).toBe("queued")
   })
 
   /** @failure Two writers for one queue could both claim N, or leave an index record without its change event.
@@ -166,21 +227,54 @@ describe("event submit", () => {
       await submit(w.git, "origin", { branch, submitter: "author", target: { branch: "main", remote: "origin" } })
     }
     const statuses = await Promise.all(branches.map((branch) => readStatus(store(w), "main", branch)))
-    const written = await Promise.all(
-      branches.map((branch, index) => {
-        const tip = statuses[index]?.tip
-        const head = heads[index]
-        if (tip === undefined || head === undefined) throw new Error(`${branch}: fixture lost submission`)
-        return appendNumberedChangeEvent(
-          store(w),
-          "main",
-          branch,
-          tip,
-          { type: "verifying", at: new Date(), commit: head },
-          { id: `race-${index}`, startedAt: "2026-09-27T12:00:00.000Z", host: "hh", actor: "yrd" },
-        )
-      }),
+    const publish = store(w).backend.publish
+    if (publish === undefined) throw new Error("fixture has no atomic publisher")
+    let rejected = 0
+    let winner: Awaited<ReturnType<typeof appendNumberedChangeEvent>> | undefined
+    const firstStore = store(w)
+    const competingStore = {
+      ...firstStore,
+      backend: {
+        ...firstStore.backend,
+        publish: async (...args: Parameters<typeof publish>) => {
+          if (winner === undefined) {
+            winner = await appendNumberedChangeEvent(
+              store(w),
+              "main",
+              branches[1],
+              statuses[1]!.tip!,
+              { type: "verifying", at: new Date(), commit: heads[1] },
+              { id: "race-1", startedAt: "2026-09-27T12:00:00.000Z", host: "hh", actor: "yrd" },
+            )
+          }
+          try {
+            return await publish(...args)
+          } catch (error) {
+            if (error instanceof Conflict) {
+              rejected += 1
+              expect(args[1].map((update) => update.ref)).toEqual([
+                changesRef("main", branches[0]),
+                runIndexRef("main"),
+              ])
+              expect(await lookupRunIndex(store(w), "main", 2)).toEqual({ kind: "unknown", number: 2, knownThrough: 1 })
+              expect((await readStatus(store(w), "main", branches[0])).status).toBe("queued")
+            }
+            throw error
+          }
+        },
+      },
+    }
+    const first = await appendNumberedChangeEvent(
+      competingStore,
+      "main",
+      branches[0],
+      statuses[0]!.tip!,
+      { type: "verifying", at: new Date(), commit: heads[0] },
+      { id: "race-0", startedAt: "2026-09-27T12:00:00.000Z", host: "hh", actor: "yrd" },
     )
+    if (winner === undefined) throw new Error("competing writer did not publish")
+    const written = [first, winner]
+    expect(rejected).toBe(1)
     expect(written.map((entry) => entry.number).sort((a, b) => a - b)).toEqual([1, 2])
     for (const [index, entry] of written.entries()) {
       expect(await lookupRunIndex(store(w), "main", entry.number)).toMatchObject({
@@ -189,7 +283,7 @@ describe("event submit", () => {
       })
       expect((await readStatus(store(w), "main", branches[index]!)).status).toBe("verifying")
     }
-    expect(await lookupRunIndex(store(w), "main", 3)).toEqual({ kind: "unknown", number: 3 })
+    expect(await lookupRunIndex(store(w), "main", 3)).toEqual({ kind: "unknown", number: 3, knownThrough: 2 })
   })
 
   /** @failure Maintenance admits a submit after the queue is stopped. */

@@ -229,7 +229,7 @@ describe("ADR-0028 run-index lookup", () => {
     await seedEventQueue(location, "main", commit, new Date("2026-09-27T12:00:00Z"))
     const tip = await activateRunIndex(location, "main", new Date("2026-09-27T12:01:00Z"))
     expect(tip).toMatch(/^[0-9a-f]{40}$/u)
-    expect(await lookupRunIndex(location, "main", 1)).toEqual({ kind: "unknown", number: 1 })
+    expect(await lookupRunIndex(location, "main", 1)).toEqual({ kind: "unknown", number: 1, knownThrough: 0 })
     await expect(activateRunIndex(location, "main", new Date("2026-09-27T12:02:00Z"))).rejects.toThrow(
       /refs\/yrd\/main\/runs.*already exists/u,
     )
@@ -262,7 +262,7 @@ describe("ADR-0028 run-index lookup", () => {
       number: 1,
       record: { id: "opaque-run-id", firstQueueTip },
     })
-    expect(await lookupRunIndex(location, "main", 2)).toEqual({ kind: "unknown", number: 2 })
+    expect(await lookupRunIndex(location, "main", 2)).toEqual({ kind: "unknown", number: 2, knownThrough: 1 })
   })
 })
 

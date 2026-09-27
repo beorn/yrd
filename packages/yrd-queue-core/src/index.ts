@@ -22,6 +22,7 @@
 
 export {
   changeName,
+  changesRef,
   encodeQueueComponent,
   parseChangeName,
   parseChangeRef,
@@ -43,7 +44,6 @@ export {
   appendNumberedChangeEvent,
   appendNumberedPublishedMerge,
   changeInput,
-  changesRef,
   createEventQueue,
   createLocalEventStore,
   decide,
