@@ -1281,8 +1281,7 @@ describe("yrd queue show names the queue it read (@i/10-yrd/24050)", () => {
 })
 
 describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)", () => {
-  // @followup 26175: event-run must write the complete incident in its run journal.
-  it.fails("26175: names the same branch and cure whichever of the three commands reports it", async () => {
+  it("26175: names the same branch and cure whichever of the three commands reports it", async () => {
     const w = await world()
     // A setup that cannot reach its remote: it sticks the same way on every
     // judgement, retried once inside the round and then written, and that is
@@ -3130,8 +3129,7 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
 
   // ROW 2. The measured specimen, reproduced: the record says the remote could
   // not be reached, and says which signature it saw.
-  // @followup 26175: restore setup classification in event-run's run journal.
-  it.fails("26175: says yrd-setup-unreachable, and names the signature it matched", async () => {
+  it("26175: says yrd-setup-unreachable, and names the signature it matched", async () => {
     const w = await world()
     const line = "error: GET https://api.github.com/repos/beorn/verify-publishable/tarball/ef92031daa - 504"
     await roundWithSetup(w, "task/upstream-504", failingSetup(w.workdir, "upstream-504", line))
@@ -3147,8 +3145,7 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
   // is not transport-shaped must still be billed exactly as before. A classifier
   // that is too generous does not fail loudly — it relabels real breaks as
   // outages, and then they are retried forever instead of being fixed.
-  // @followup 26175: preserve unusable setup as a distinct incident reason.
-  it.fails("26175: a real break still says yrd-setup-unusable and still tells you to repair it", async () => {
+  it("26175: a real break still says yrd-setup-unusable and still tells you to repair it", async () => {
     const w = await world()
     const line = "error: lockfile had changes, but lockfile is frozen"
     await roundWithSetup(w, "task/real-break", failingSetup(w.workdir, "real-break", line))
@@ -3161,8 +3158,7 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
   // The distinction yrd already paid for one layer up, asserted here too: a
   // remote that ANSWERED 404 holds an answer, not a fault. Retrying it forever
   // would stop the queue on a component commit that never left somebody's bay.
-  // @followup 26175: a 404 remains a setup answer in the event-run incident.
-  it.fails("26175: a 404 is an answer, not an unreachable remote", async () => {
+  it("26175: a 404 is an answer, not an unreachable remote", async () => {
     const w = await world()
     const line = "error: GET https://api.github.com/repos/beorn/x/tarball/deadbeef - 404"
     await roundWithSetup(w, "task/answered-404", failingSetup(w.workdir, "answered-404", line))
