@@ -152,7 +152,12 @@ import {
   remoteCallsLine,
   traceRemoteCalls,
   withRemoteSeam,
+  lookupRunIndex,
+  runIndexRef,
+  runIndexPath,
+  RUN_INDEX_CODES,
 } from "@yrd/queue-core"
+import { formatQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
 import { readUnitIntent } from "./unit-intent.ts"
 import { noticeLine } from "./watch-notice.ts"
 import { FILTER_FIELDS, eventNoticeLines, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
@@ -2324,6 +2329,33 @@ export async function coreQueueCommand(
         const source: WatchSource = {
           id: first.queue,
           label: first.queue,
+          resolveRunAddress: async (operand) => {
+            const selected = parseQueueAddress(first.queue)
+            if (selected.kind !== "remote") {
+              throw new Error(`${first.queue}: a local queue has no portable run address`)
+            }
+            const full = operand.startsWith("#") ? `${formatQueueAddress(selected)}${operand}` : operand
+            const address = parseRunAddress(full)
+            if (address.queue.canonical !== selected.canonical) {
+              throw new Error(`${address.canonical}: selected queue is ${formatQueueAddress(selected)}`)
+            }
+            const lookup = await lookupRunIndex(
+              createEventStore(repo, config.target.remote, selectionFor(git)),
+              address.queue.queue,
+              address.number,
+            )
+            if (lookup.kind === "unknown") {
+              throw new Error(
+                `${RUN_INDEX_CODES.unknown}: ${address.canonical} has no entry at ${runIndexRef(address.queue.queue)}:${runIndexPath(address.number)} on ${address.queue.transport}; index high-water is ${lookup.knownThrough} (gaps may exist)`,
+              )
+            }
+            return {
+              canonical: address.canonical,
+              id: lookup.record.id,
+              number: lookup.number,
+              startedAt: lookup.record.startedAt,
+            }
+          },
           load: async (asked) => {
             const refreshed = await declaration()
             if (refreshed === undefined) throw new Error(`${targetLabel} no longer carries a .yrd.yml`)
