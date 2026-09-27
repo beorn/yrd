@@ -163,13 +163,7 @@ export type WatchRow = Readonly<{
 }>
 
 export type WatchRowOptions = Readonly<{
-  /**
-   * Accepted and INERT: one row per change is what {@link watchRows} does now,
-   * so `--latest` asks for the only behaviour there is. It stays accepted
-   * because removing it breaks every script that passes it for no gain, and it
-   * stays inert because keeping it DOING something would keep two row models
-   * alive. Delete it when no caller passes it.
-   */
+  /** Select one current row even when a caller requests the per-run lens. */
   latest?: boolean
   /**
    * One row per RUN of each change instead of one per change. STATS counts
@@ -206,7 +200,9 @@ export function watchRowKey(row: WatchRow): string {
  * lose every superseded run's verdict if it were folded away.
  */
 export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): readonly WatchRow[] {
-  if (options.perRun !== true || options.journals === undefined) return rows.map((row) => ({ row }))
+  if (options.latest === true || options.perRun !== true || options.journals === undefined) {
+    return rows.map((row) => ({ row }))
+  }
   const journals = options.journals
   return rows.flatMap((row) => {
     const runs = journals.runs.get(journalKey(row.branch, row.head)) ?? []
@@ -458,13 +454,14 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
     ended && row.state !== "direct" && row.since !== undefined && endedWhen !== undefined
       ? Math.max(0, endedWhen.getTime() - row.since.getTime())
       : undefined
+  const ageStart = row.since ?? row.at
   const ageMs = ended
     ? row.since !== undefined && endedWhen !== undefined
       ? Math.max(0, endedWhen.getTime() - row.since.getTime())
       : undefined
-    : (row.since ?? row.at) === undefined
+    : ageStart === undefined
       ? undefined
-      : Math.max(0, now.getTime() - (row.since ?? row.at)!.getTime())
+      : Math.max(0, now.getTime() - ageStart.getTime())
   return {
     ...(runtimeMs === undefined ? {} : { runtimeMs }),
     ...(clockAt === undefined ? {} : { clockAt }),

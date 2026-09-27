@@ -720,7 +720,7 @@ function buildProgram(
     command: T,
   ): T =>
     command
-      .option("--latest", "one row per change; the default keeps every run that touched it")
+      .option("--latest", "one row per current branch head; default JSON keeps every run of that head")
       .option("--all", "include ended changes older than seven days on event queues")
       .option("--drafts", "include unsubmitted branch heads on event queues")
       .option("--status <state>", "select by state: exactly the same as giving <state> as a filter term")
@@ -821,17 +821,22 @@ function buildProgram(
       setExit(taken)
     })
   queue
-    .command("show <branch>")
+    .command("show [branch]")
     .description("the branch's changes, each check's result and log")
+    .option("--all", "all branches and their change segments as JSON")
     .option("--json", "emit stable JSON")
     .option("--queue <value>", QUEUE_HELP)
     .action(async (branch, options) => {
-      const { json, queue } = options as { json?: boolean; queue?: string }
+      const { all, json, queue } = options as { all?: boolean; json?: boolean; queue?: string }
       const location = await resolveQueueLocation(cwd(), queue, env, "reader")
       const taken = await coreQueueCommand(
         location.repo,
         io,
-        { branch: branch as string, command: "show" },
+        {
+          command: "show",
+          ...(branch === undefined ? {} : { branch: branch as string }),
+          ...(all === true ? { all } : {}),
+        },
         {
           json,
           env,

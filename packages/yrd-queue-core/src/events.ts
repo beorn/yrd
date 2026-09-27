@@ -439,7 +439,7 @@ function assertBranch(branch: string): void {
   }
 }
 
-type EventShape = Pick<Event, "id" | "type" | "props" | "links">
+type EventShape = Pick<Event, "id" | "type" | "props" | "links"> & Partial<Pick<Event, "writer">>
 
 /** What the queue projection reads; a not-yet-written event is validated in this shape, never as a full Event. */
 type QueueEventShape = EventShape & Pick<Event, "parent" | "writer">
@@ -2211,6 +2211,8 @@ export type ChangeSegment = Readonly<{
   opened: Oid
   head: Oid
   state: EventChange
+  /** The events of this submission alone, including its opening and ending. */
+  events: readonly EventShape[]
   /** Original record commits, in the order their migration events absorbed them. */
   sources: readonly Readonly<{ ref: string; oid: Oid }>[]
 }>
@@ -2326,7 +2328,7 @@ export function adoptedChange(event: EventShape): ChangeSegment {
     endedAt: ended,
     ending: { kind: status, id: event.id },
   }
-  return { opened: event.id, head, state, sources }
+  return { opened: event.id, head, state, events: [event], sources }
 }
 
 /** Read every opened segment while leaving the normal list's current fold unchanged. */
@@ -2335,22 +2337,25 @@ export function enumerateChangeSegments(events: readonly Event[], ref: string, r
   const segments: ChangeSegment[] = []
   let state = initial
   let opened: Oid | undefined
+  let ownEvents: Event[] = []
   let sources: Array<{ ref: string; oid: Oid }> = []
   const adopted: ChangeSegment[] = []
   const retain = () => {
     if (opened === undefined) return
     if (state.commit === undefined) throw new Error(`${ref}: opened segment ${opened} has no Commit:`)
-    segments.push({ opened, head: state.commit, state, sources })
+    segments.push({ opened, head: state.commit, state, events: ownEvents, sources })
   }
   for (const event of events) {
     if (event.type === "adopted") adopted.push(adoptedChange(event))
     if (event.type === "opened") {
       retain()
+      ownEvents = []
       sources = []
     }
     state = evolve(state, event)
     if (event.type === "opened") opened = event.id
     if (event.type === "adopted") continue
+    ownEvents.push(event)
     for (const [key, value] of event.props) {
       if (key !== "Migrated-From") continue
       const split = value.lastIndexOf("@")
@@ -2377,6 +2382,7 @@ export function enumerateChangeSegments(events: readonly Event[], ref: string, r
       opened: first.id,
       head: state.commit,
       state: diagnose(state, `${ref}: malformed history has no opened event`),
+      events: ownEvents,
       sources,
     })
   }

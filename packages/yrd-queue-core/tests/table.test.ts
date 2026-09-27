@@ -151,6 +151,8 @@ describe("the table is the queue read rendered", () => {
     expect(joined[1]?.diagnostics).toBeUndefined()
     expect(show(entries, run.branch, { journals })[0]?.row.diagnostics).toEqual([diagnostic])
     expect(watchRows(joined, { journals, latest: true })[0]?.row.diagnostics).toEqual([diagnostic])
+    expect(watchRows(joined, { journals, perRun: true, latest: true }).filter((item) => item.row.branch === run.branch)).toHaveLength(1)
+    expect(watchRows(joined, { journals, perRun: true }).filter((item) => item.row.branch === run.branch)).toHaveLength(2)
     const split = watchRows(joined, { journals })
     expect(split[0]?.row.diagnostics).toEqual([diagnostic])
     expect(split[1]?.row.diagnostics).toBeUndefined()

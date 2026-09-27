@@ -43,6 +43,7 @@ import {
   pauseLine,
   eventDirectMergeCommits,
   eventListRows,
+  eventRows,
   enumerateChangeSegments,
   createEventStore,
   selectionFor,
@@ -159,6 +160,7 @@ import {
   type ChangeRecord,
   type Change,
   type EventChange,
+  type Event,
   type EventQueue,
   type DraftReading,
   type JournalCommand,
@@ -424,7 +426,7 @@ export type CoreQueueCommand =
       /** Include unsubmitted branch heads on event queues. */
       drafts?: boolean
     }>
-  | Readonly<{ command: "show"; branch: string }>
+  | Readonly<{ command: "show"; branch?: string; all?: boolean }>
   | Readonly<{
       command: "stats"
       /** `3h`, an instant, or a commit: rows decided before it and refs whose tip is older are outside the window. */
@@ -2317,23 +2319,15 @@ export async function coreQueueCommand(
               }
         const { journals, all, drafts, observation } = reading
         if (options.json !== true) narrateMalformed(io, journals, said)
-        // TWO LENSES OVER ONE READING, and which is which is the whole of S1.
-        //
-        // `unfiltered` is one row per RUN: what the queue DID. The document
-        // keeps it, because the spec keeps runs in `--json` and a machine
-        // reader that has always had a row per judgement must not silently get
-        // one per change; the queue line and STATS count from it too, and both
-        // already fold a change's runs into one themselves.
-        //
-        // `rows` is the TABLE's, one row per change: where each change STANDS.
-        // The operator read their own queue on 2026-09-17 and saw one branch
-        // on two rows, which is what the old default did wherever a run
-        // journal could be read.
+        // The run-history lens is for stats and watch detail. List is the
+        // current head of each branch in both output formats; JSON expands
+        // that head by run unless --latest selects its single row.
         const unfiltered = watchRows(reading.format === "event" ? reading.document : all, { journals, perRun: true })
-        const changes = filterRows(unfiltered, request.terms ?? []).filter((item) => item.row.state !== "draft")
+        const listed = watchRows(all, { journals, perRun: options.json === true, latest: request.latest })
+        const changes = filterRows(listed, request.terms ?? []).filter((item) => item.row.state !== "draft")
         const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
         const documentRows =
-          reading.format === "event" && request.drafts === true ? filterRows(unfiltered, request.terms ?? []) : changes
+          reading.format === "event" && request.drafts === true ? filterRows(listed, request.terms ?? []) : changes
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = reading.format === "event" ? reading.pause : reading.queue.stop
@@ -2351,7 +2345,7 @@ export async function coreQueueCommand(
         const filteredScope =
           request.terms === undefined || request.terms.length === 0
             ? undefined
-            : `${String(documentRows.length)} of ${String(reading.format === "event" ? reading.document.length : all.filter((row) => row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
+            : `${String(documentRows.length)} of ${String(listed.filter((item) => item.row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
               (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
         const baseScope =
           reading.format === "event"
@@ -2885,6 +2879,18 @@ export async function coreQueueCommand(
       return 0
     }
     case "show": {
+      if (request.all === true && request.branch !== undefined) {
+        io.stderr("yrd: queue show --all cannot take a branch\n")
+        return 2
+      }
+      if (request.all === true && options.json !== true) {
+        io.stderr("yrd: queue show --all requires --json\n")
+        return 2
+      }
+      if (request.all !== true && request.branch === undefined) {
+        io.stderr("yrd: queue show needs a branch or --all --json\n")
+        return 2
+      }
       if (
         (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
       ) {
@@ -2902,64 +2908,85 @@ export async function coreQueueCommand(
           return 2
         }
         const name = queueName(config.target, await remoteUrl(git, config.target.remote))
-        const row = reading.all.find((candidate) => candidate.branch === request.branch)
-        const selected = reading.changes.get(request.branch)
-        const defect = reading.invalid.get(request.branch)
-        if ((row === undefined) !== (selected === undefined && defect === undefined)) {
-          throw new Error(`event listing for ${request.branch} disagrees with its change fold`)
-        }
-        if (selected !== undefined && selected.tip === undefined) {
-          throw new Error(`event change ${request.branch} has no selected tip`)
-        }
-        const events =
-          defect !== undefined
-            ? defect.events
-            : selected === undefined
-              ? []
-              : await readChangeEvents(
-                  createEventStore(repo, config.target.remote, selection),
-                  config.target.branch,
-                  request.branch,
-                  selected.tip as string,
-                )
+        const branches =
+          request.all === true
+            ? [...new Set([...reading.history.keys(), ...reading.all.map((row) => row.branch)])].sort()
+            : [request.branch as string]
+        const histories = branches.flatMap((branch) => {
+          const selected = reading.changes.get(branch)
+          const history = reading.history.get(branch)
+          if (selected !== undefined && (selected.tip === undefined || history === undefined || history.length === 0)) {
+            throw new Error(`event listing for ${branch} lost its selected change history`)
+          }
+          if (history !== undefined) {
+            return history.map(({ row, events }, index) => ({
+              ...row,
+              queue: config.target.branch,
+              events,
+              ...(index === 0 ? { notices: selected?.notices ?? {} } : {}),
+            }))
+          }
+          const row = reading.all.find((candidate) => candidate.branch === branch)
+          if (row === undefined) {
+            if (reading.invalid.has(branch)) throw new Error(`event listing for ${branch} lost its invalid row`)
+            return []
+          }
+          return [
+            {
+              ...row,
+              queue: config.target.branch,
+              events: reading.invalid.get(branch)?.events ?? [],
+            },
+          ]
+        })
         const scope =
-          `Read ${changesRef(config.target.branch, request.branch)} at ${config.target.remote}; ` +
-          "draft branches and direct target commits are outside this reading; check results are not projected from events yet."
+          request.all === true
+            ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
+            : `Read ${changesRef(config.target.branch, request.branch as string)} at ${config.target.remote}; draft branches are outside this reading.`
         emit(
           io,
           options.json,
           {
             queue: name,
-            changes:
-              row === undefined
-                ? []
-                : [{ ...row, queue: config.target.branch, events, notices: selected?.notices ?? {} }],
+            changes: histories,
             journal: journalFact(reading.journals),
             observation: reading.observation,
             scope,
           },
-          row === undefined
+          histories.length === 0
             ? `no change for ${request.branch} on ${name}. ${scope}`
-            : [
-                rowLine({ row }),
-                ...(row.diagnostic === undefined ? [] : [`  diagnostic: ${row.diagnostic}`]),
-                `  queue: ${config.target.branch}`,
-                ...events.map((event) => {
-                  const at = event.props.find(([key]) => key === "Time")?.[1]
-                  const reason = event.props.find(([key]) => key === "Reason")?.[1]
-                  return `  ${at ?? "Time absent"} ${event.type}${event.writer === null ? "" : ` by ${event.writer}`}${reason === undefined ? "" : ` — ${reason}`}`
-                }),
-                ...(selected === undefined ? [] : eventNoticeLines(selected)),
-              ].join("\n"),
+            : histories
+                .map(({ events, ...row }, index) =>
+                  [
+                    rowLine({ row }),
+                    ...(row.diagnostic === undefined ? [] : [`  diagnostic: ${row.diagnostic}`]),
+                    `  queue: ${config.target.branch}`,
+                    ...events.map((event) => {
+                      const at = event.props.find(([key]) => key === "Time")?.[1]
+                      const reason = event.props.find(([key]) => key === "Reason")?.[1]
+                      return `  ${at ?? "Time absent"} ${event.type}${event.writer == null ? "" : ` by ${event.writer}`}${reason === undefined ? "" : ` — ${reason}`}`
+                    }),
+                    ...(index !== 0 || request.branch === undefined || reading.changes.get(request.branch) === undefined
+                      ? []
+                      : eventNoticeLines(reading.changes.get(request.branch) as EventChange)),
+                  ].join("\n"),
+                )
+                .join("\n"),
         )
         return 0
       }
+      if (request.all === true) {
+        io.stderr("yrd: queue show --all requires an event queue\n")
+        return 2
+      }
+      const branch = request.branch
+      if (branch === undefined) throw new Error("queue show lost its branch after validation")
       const queue = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
       const journals = readJournals(join(workdir, "logs"))
       if (options.json !== true) narrateMalformed(io, journals, new Set())
-      const matching = queue.changes.filter((entry) => entry.change.branch === request.branch)
+      const matching = queue.changes.filter((entry) => entry.change.branch === branch)
       const hydrated = await readHistories(git, matching, config.target.remote, config.target.branch)
-      const changes = show(hydrated, request.branch, {
+      const changes = show(hydrated, branch, {
         journals,
         subjects: await subjects(
           git,
@@ -4224,6 +4251,7 @@ export type EventListingResult = Readonly<{
   format: "event"
   all: readonly Row[]
   document: readonly Row[]
+  history: ReadonlyMap<string, readonly EventHistoryRow[]>
   journals: Journals
   drafts: DraftReading
   pause: PauseRecord | undefined
@@ -4231,6 +4259,11 @@ export type EventListingResult = Readonly<{
   changes: ReadonlyMap<string, EventChange>
   invalid: Awaited<ReturnType<typeof readEventQueueWithChanges>>["invalid"]
   observation: GitObservation
+}>
+
+type EventHistoryRow = Readonly<{
+  row: Row
+  events: readonly (Pick<Event, "id" | "type" | "props" | "links"> & Partial<Pick<Event, "writer">>)[]
 }>
 
 interface EventListingCache {
@@ -4325,14 +4358,29 @@ export async function readEventListing(
     ),
     { targetSha: targetOid },
   )
-  const segmentStates = new Map(
+  const segmentsByBranch = new Map(
     [...histories].map(
       ([branch, history]) =>
+        [branch, enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), repo)] as const,
+    ),
+  )
+  const segmentStates = new Map(
+    [...segmentsByBranch].map(([branch, segments]) => [branch, segments.map((segment) => segment.state)] as const),
+  )
+  const historyRows = new Map(
+    [...segmentsByBranch].map(
+      ([branch, segments]) =>
         [
           branch,
-          enumerateChangeSegments(history.events, changesRef(config.target.branch, branch), repo).map(
-            (segment) => segment.state,
-          ),
+          segments
+            .map((segment, index): EventHistoryRow => {
+              const projected = eventRows(new Map([[branch, segment.state]]))[0]
+              if (projected === undefined)
+                throw new Error(`event change ${branch} lost opened segment ${segment.opened}`)
+              const { position: _position, ...historical } = projected
+              return { row: index === segments.length - 1 ? projected : historical, events: segment.events }
+            })
+            .reverse(),
         ] as const,
     ),
   )
@@ -4369,6 +4417,12 @@ export async function readEventListing(
       ...row,
       ...(row.state === "invalid" || titles.get(row.head) === undefined ? {} : { subject: titles.get(row.head) }),
     }))
+  const titledHistory = new Map(
+    [...historyRows].map(
+      ([branch, entries]) =>
+        [branch, entries.map(({ row, events }) => ({ row: titled([row])[0] as Row, events }))] as const,
+    ),
+  )
   const all = titled([...selected.table, ...invalidRows, ...directRows])
   const document = titled([...selected.document, ...invalidRows, ...directRows])
   const observation = await git.observe({
@@ -4394,6 +4448,7 @@ export async function readEventListing(
     format: "event",
     all,
     document,
+    history: titledHistory,
     journals: readJournals(join(workdir, "logs")),
     drafts,
     pause: operational.stop,

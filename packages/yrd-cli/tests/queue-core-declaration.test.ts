@@ -326,6 +326,175 @@ describe("a queue is the selected origin branch carrying config", () => {
     )
   }, 15_000)
 
+  // 25607: the branch's event chain can hold several heads. List answers
+  // where the branch stands now; show answers what happened to each head.
+  it("lists only a reused branch's current head and shows every landed or cancelled head", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const time = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000)
+    const queueTip = await createQueue(repo, "main", target, time(60))
+    const branch = "task/reused"
+    await git(["checkout", "--quiet", "-b", branch])
+    const commit = async (name: string) => {
+      writeFileSync(join(repo, name), `${name}\n`)
+      await git(["add", name])
+      await git(["commit", "--quiet", "-m", name])
+      return (await git(["rev-parse", "HEAD"])).trim()
+    }
+    const first = await commit("first.txt")
+    await git(["checkout", "--quiet", "main"])
+    await git(["merge", "--quiet", "--no-ff", "-m", "first landing", branch])
+    const firstMerge = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", branch])
+    const cancelled = await commit("cancelled.txt")
+    const current = await commit("current.txt")
+    await git(["checkout", "--quiet", "main"])
+    await git(["merge", "--quiet", "--no-ff", "-m", "current landing", branch])
+    const currentMerge = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", "main"])
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: time(50), commit: first, by: "yrd" }),
+        changeInput("merged", {
+          queueTip,
+          at: time(49),
+          commit: firstMerge,
+          reason: `observed on target at ${firstMerge}`,
+        }),
+        changeInput("opened", { queueTip, at: time(40), commit: cancelled, by: "yrd" }),
+        changeInput("cancelled", { queueTip, at: time(39), reason: "resubmitted" }),
+        changeInput("opened", { queueTip, at: time(30), commit: current, by: "yrd" }),
+        changeInput("merged", {
+          queueTip,
+          at: time(29),
+          commit: currentMerge,
+          reason: `observed on target at ${currentMerge}`,
+        }),
+      ],
+      { expect: null },
+    )
+    const list = async (latest: boolean) => {
+      const output = capture(repo)
+      expect(
+        await coreQueueCommand(
+          repo,
+          output.io,
+          { command: "list", terms: [branch], ...(latest ? { latest: true } : {}) },
+          { json: true, queue: "main" },
+        ),
+        output.stderr(),
+      ).toBe(0)
+      return (JSON.parse(output.stdout()) as { changes: readonly { branch: string; head: string }[] }).changes
+    }
+    expect(new Set((await list(false)).map((row) => row.head))).toEqual(new Set([current]))
+    expect(await list(true)).toEqual([expect.objectContaining({ branch, head: current })])
+    const shown = capture(repo)
+    expect(await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" })).toBe(0)
+    const history = (
+      JSON.parse(shown.stdout()) as { changes: readonly { head: string; state: string; merge?: string }[] }
+    ).changes
+    expect(history.map(({ head, state, merge }) => [head, state, merge])).toEqual([
+      [current, "merged", currentMerge],
+      [cancelled, "cancelled", undefined],
+      [first, "merged", firstMerge],
+    ])
+    const bulk = capture(repo)
+    expect(await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: "main" })).toBe(0)
+    const allHistory = (
+      JSON.parse(bulk.stdout()) as { changes: readonly { branch: string; events: readonly { type: string }[] }[] }
+    ).changes
+    expect(allHistory.filter((row) => row.branch === branch)).toEqual(history)
+    const cliBulk = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "show", "--all", "--json", "--queue", "main"], cliBulk.io)).toBe(0)
+    expect((JSON.parse(cliBulk.stdout()) as { changes: readonly { branch: string }[] }).changes.filter((row) => row.branch === branch)).toEqual(history)
+    expect(
+      allHistory.filter((row) => row.branch === branch).map((row) => row.events.map((event) => event.type)),
+    ).toEqual([
+      ["opened", "merged"],
+      ["opened", "cancelled"],
+      ["opened", "merged"],
+    ])
+    const withBranch = capture(repo)
+    expect(
+      await coreQueueCommand(
+        repo,
+        withBranch.io,
+        { command: "show", branch, all: true },
+        { json: true, queue: "main" },
+      ),
+    ).toBe(2)
+    expect(withBranch.stderr()).toContain("--all cannot take a branch")
+    const withoutJson = capture(repo)
+    expect(await coreQueueCommand(repo, withoutJson.io, { command: "show", all: true }, { queue: "main" })).toBe(2)
+    expect(withoutJson.stderr()).toContain("--all requires --json")
+    const human = capture(repo)
+    expect(await coreQueueCommand(repo, human.io, { command: "show", branch }, { queue: "main" })).toBe(0)
+    for (const head of [current, cancelled, first]) expect(human.stdout()).toContain(head.slice(0, 12))
+  }, 25_000)
+
+  it("keeps an equal-head duplicate in the current list and both submissions in show", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const time = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000)
+    const queueTip = await createQueue(repo, "main", target, time(40))
+    const branch = "task/twice"
+    await git(["checkout", "--quiet", "-b", branch])
+    writeFileSync(join(repo, "twice.txt"), "twice\n")
+    await git(["add", "twice.txt"])
+    await git(["commit", "--quiet", "-m", "twice"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    await git(["merge", "--quiet", "--no-ff", "-m", "landed twice", branch])
+    const merge = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", "main"])
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: time(30), commit: head, by: "yrd" }),
+        changeInput("merged", { queueTip, at: time(29), commit: merge, reason: `observed on target at ${merge}` }),
+        changeInput("opened", { queueTip, at: time(20), commit: head, by: "yrd" }),
+        changeInput("merged", { queueTip, at: time(19), commit: merge, reason: `observed on target at ${merge}` }),
+      ],
+      { expect: null },
+    )
+    const listed = capture(repo)
+    expect(
+      await coreQueueCommand(
+        repo,
+        listed.io,
+        { command: "list", latest: true, terms: [branch] },
+        { json: true, queue: "main" },
+      ),
+    ).toBe(0)
+    const current = (
+      JSON.parse(listed.stdout()) as { changes: readonly { head: string; duplicates?: readonly unknown[] }[] }
+    ).changes
+    expect(current).toEqual([expect.objectContaining({ head, duplicates: [expect.any(Object)] })])
+    const shown = capture(repo)
+    expect(await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" })).toBe(0)
+    const segments = (
+      JSON.parse(shown.stdout()) as { changes: readonly { head: string; events: readonly { type: string }[] }[] }
+    ).changes
+    expect(segments.map(({ head: shownHead, events }) => [shownHead, events.map((event) => event.type)])).toEqual([
+      [head, ["opened", "merged"]],
+      [head, ["opened", "merged"]],
+    ])
+    const bulk = capture(repo)
+    expect(await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: "main" })).toBe(0)
+    expect(
+      (JSON.parse(bulk.stdout()) as { changes: readonly { branch: string }[] }).changes.filter(
+        (row) => row.branch === branch,
+      ),
+    ).toEqual(segments)
+  }, 25_000)
+
   // 25656: the event runner stores Check: evidence, and watch detail must give
   // that evidence to the existing check tabs instead of discarding it.
   it("projects stored event Check results into watch detail", async () => {
