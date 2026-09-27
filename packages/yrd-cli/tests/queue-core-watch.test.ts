@@ -93,7 +93,15 @@ const declaredQueues = vi.hoisted(
       owner: string
     }[],
 )
-vi.mock("../../../hab.projects.ts", () => ({ yrdQueueRunnerDeclarations: declaredQueues }))
+vi.mock("@yrd/queue-core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@yrd/queue-core")>()
+  return {
+    ...actual,
+    get yrdQueueRunnerDeclarations() {
+      return declaredQueues
+    },
+  }
+})
 
 function renderedSnapshot(): WatchSnapshot | undefined {
   return rendered.snapshot
