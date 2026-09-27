@@ -38,6 +38,7 @@ import {
 import { createProcess } from "@yrd/process"
 import { repositoryHere as findRepository } from "./declaration.ts"
 import { originHead } from "./queue-location.ts"
+import { issueResolver } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 
@@ -126,6 +127,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     )
   }
   const config = await readConfig(git, base, { remote: "origin", branch: target })
+  const resolveIssue = config === undefined ? undefined : issueResolver(config, root)
   let provisioned: { path: string; headSha: string; baseSha: string }
   if (branch === undefined) {
     const environments = join(resolve(root, await workdirOf(git)), "environments")
@@ -155,7 +157,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     try {
       const environmentGit = gitIn(path, process)
       headSha = (await environmentGit(["rev-parse", "HEAD"])).trim()
-      const binding = await issueOf(environmentGit, branch, headSha, base, options.issue)
+      const binding = await issueOf(environmentGit, branch, headSha, base, options.issue, resolveIssue)
       if (binding === undefined) throw new Error(`no issue resolved for requested binding ${options.issue}`)
       if (binding.source !== "binding") {
         const tree = (await environmentGit(["rev-parse", `${headSha}^{tree}`])).trim()

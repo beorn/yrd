@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
+import { issueResolver } from "./issue-resolver.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
   assertPlainEventQueueConfig,
@@ -575,6 +576,7 @@ export async function coreQueueCommand(
   const captured = await declaration()
   if (captured === undefined) return noQueueOnTarget(targetLabel)
   const config = captured.config
+  const resolveIssue = issueResolver(config, repo, env)
   const workdir = options.workdir ?? (await workdirOf(git))
   mkdirSync(workdir, { recursive: true })
 
@@ -1389,11 +1391,12 @@ export async function coreQueueCommand(
         if (request.branch !== undefined) throw new Error("--gitlink does not take a branch operand")
         if (request.issue === undefined) throw new Error("--gitlink needs --issue <id>")
         if (options.populateReference !== true) throw new Error("--gitlink needs the queue-owned clone")
+        const canonicalIssue = resolveIssue === undefined ? request.issue : await resolveIssue(request.issue)
         const prepared = await preparePinCarrier({
           git,
           repo,
           target: config.target,
-          issue: request.issue,
+          issue: canonicalIssue,
           pins: request.pins,
           env: env ?? process.env,
         })
@@ -1401,7 +1404,8 @@ export async function coreQueueCommand(
           branch: prepared.branch,
           submitter: request.submitter,
           target: config.target,
-          issue: request.issue,
+          issue: canonicalIssue,
+          resolveIssue,
         }
         const inspected = await inspectSubmitAtHead(git, config.target.remote, submission, prepared.head)
         if (request.dryRun === true) {
@@ -1468,6 +1472,7 @@ export async function coreQueueCommand(
         submitter: request.submitter,
         target: config.target,
         ...(request.issue === undefined ? {} : { issue: request.issue }),
+        resolveIssue,
       }
       // Operator and stuck stops accept submits (the andon, operator 2026-09-16).
       // A maintenance stop refuses in the shared inspection before this echo.
@@ -1639,6 +1644,7 @@ export async function coreQueueCommand(
           submitter: request.submitter,
           target: { branch: config.target.branch, remote },
           ...(request.issue === undefined ? {} : { issue: request.issue }),
+          resolveIssue,
         })
         // The stop the submit was accepted under is not echoed here: this
         // command does not wait for it to lift, and the stop that still stands

@@ -133,6 +133,35 @@ async function createQueue(repo: string, queue: string, commit: string, at: Date
 }
 
 describe("a queue is the selected origin branch carrying config", () => {
+  it("uses the target's issue resolver even when the candidate changes its declaration", async () => {
+    const targetResolver = ["sh", "-c", 'printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"]
+    const repo = await world(`issueResolver: ${JSON.stringify(targetResolver)}\n`)
+    const git = gitIn(repo)
+    await git(["checkout", "--quiet", "-b", "task/26050"])
+    writeFileSync(join(repo, ".yrd.yml"), `issueResolver: ${JSON.stringify(["sh", "-c", "exit 81", "resolver"])}\n`)
+    await git(["add", ".yrd.yml"])
+    await git(["commit", "--quiet", "-m", "bind short\n\nRefs: 26050"])
+    await git(["commit", "--quiet", "--allow-empty", "-m", "bind full\n\nRefs: @km/storage/26050-full"])
+    const run = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--dry-run", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(run.stdout())).toMatchObject({ issue: "@km/storage/26050-full" })
+  })
+
+  it("refuses a missing issue with the raw reference and target resolver command", async () => {
+    const repo = await world(`issueResolver: ${JSON.stringify(["sh", "-c", "exit 31", "lookup"])}\n`)
+    const git = gitIn(repo)
+    await git(["checkout", "--quiet", "-b", "task/unknown"])
+    await git(["commit", "--quiet", "--allow-empty", "-m", "bind\n\nRefs: 26050"])
+    const run = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--dry-run"], run.io)).toBe(2)
+    expect(run.stderr()).toContain("26050")
+    expect(run.stderr()).toContain("exit 31")
+    expect(run.stderr()).toContain("target .yrd.yml issueResolver")
+  })
+
   it("creates and runs an event queue from a parsed plain-check declaration", async () => {
     // Literal QueueConfig fixtures omit absent optional keys. A real
     // declaration materializes some of them as undefined, and those must not

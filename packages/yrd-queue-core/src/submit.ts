@@ -40,7 +40,11 @@ export type SubmitRequest = Readonly<{
   target: Target
   submitter: string
   issue?: string
+  /** Host-owned issue identity. A configured resolver must either return one canonical issue or throw. */
+  resolveIssue?: IssueResolver
 }>
+
+export type IssueResolver = (raw: string) => Promise<string>
 
 export type IssueResolution = Readonly<{
   issue: string
@@ -283,7 +287,7 @@ export async function inspectSubmitAtHead(
       `${request.branch} at ${head} has no common base with ${targetName(request.target)}; found no merge base, expected ${targetHead}. Start a change from that target; ${bound}`,
     )
   }
-  const issue = await issueOf(git, request.branch, head, targetHead, request.issue)
+  const issue = await issueOf(git, request.branch, head, targetHead, request.issue, request.resolveIssue)
   // Operator and stuck stops are echoed; a maintenance stop refuses intake.
   // Issue conflicts are settled before
   // repository composition starts; every other refusal below still carries
@@ -537,6 +541,7 @@ export async function issueOf(
   head: string,
   targetHead: string,
   declared?: string,
+  resolveIssue?: IssueResolver,
 ): Promise<IssueResolution | undefined> {
   if (
     declared !== undefined &&
@@ -569,6 +574,24 @@ export async function issueOf(
     )
   }
   let binding: IssueResolution | undefined
+  const canonical = async (raw: string): Promise<string> => {
+    if (resolveIssue === undefined) return raw
+    let resolved: string
+    try {
+      resolved = await resolveIssue(raw)
+    } catch (cause) {
+      throw new Error(`cannot resolve issue ${JSON.stringify(raw)} for ${branch}: ${String(cause)}`, { cause })
+    }
+    if (
+      typeof resolved !== "string" ||
+      resolved.trim() === "" ||
+      resolved !== resolved.trim() ||
+      /[\u0000-\u001f\u007f]/u.test(resolved)
+    ) {
+      throw new Error(`issue resolver returned no single-line canonical issue for ${JSON.stringify(raw)} on ${branch}`)
+    }
+    return resolved
+  }
   const records = history.split("\0")
   if (records.pop() !== "") {
     throw new Error(`incomplete issue binding history for ${branch} at ${head} against target ${targetHead}`)
@@ -587,23 +610,25 @@ export async function issueOf(
           `invalid issue binding in ${branch} at ${commit}: expected a single-line value without control characters`,
         )
       }
-      if (binding === undefined) binding = { issue, source: "binding", commit }
-      else if (binding.issue !== issue) {
+      const canonicalIssue = await canonical(issue)
+      if (binding === undefined) binding = { issue: canonicalIssue, source: "binding", commit }
+      else if (binding.issue !== canonicalIssue) {
         throw new Error(
-          `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${issue} at ${commit}`,
+          `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${canonicalIssue} at ${commit}`,
         )
       }
     }
   }
   if (binding !== undefined) {
-    if (declared !== undefined && declared !== binding.issue) {
+    const canonicalDeclared = declared === undefined ? undefined : await canonical(declared)
+    if (canonicalDeclared !== undefined && canonicalDeclared !== binding.issue) {
       throw new Error(
-        `declared issue ${declared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}`,
+        `declared issue ${canonicalDeclared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}`,
       )
     }
     return binding
   }
-  if (declared !== undefined) return { issue: declared, source: "declared" }
+  if (declared !== undefined) return { issue: await canonical(declared), source: "declared" }
   const legacy = /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
-  return legacy === undefined ? undefined : { issue: legacy, source: "legacy-branch" }
+  return legacy === undefined ? undefined : { issue: await canonical(legacy), source: "legacy-branch" }
 }

@@ -284,6 +284,46 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     await expect(issueOf(failed, "task/123-label", head, target)).rejects.toThrow("missing-binding-object")
   })
 
+  /** @failure Two spellings of one issue make submit refuse after an environment bind commit.
+   * @level l2 @consumer Yrd submit and its opened change record
+   */
+  it("submits one canonical issue when branch history uses a short id and a full path", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/26050", "change.txt")
+    await w.git(["checkout", "--quiet", "task/26050"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind\n\nRefs: 26050"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "work\n\nRefs: @km/storage/26050-full"])
+    const canonical = "@km/storage/26050-full"
+    const submitted = await submit(w.git, "origin", {
+      branch: "task/26050",
+      submitter: "author",
+      target: { remote: "origin", branch: "main" },
+      resolveIssue: async (raw) => {
+        if (raw === "26050" || raw === canonical) return canonical
+        throw new Error(`unknown issue ${raw}`)
+      },
+    })
+    expect(submitted.issue?.issue).toBe(canonical)
+    expect((await readRecords(w.git, submitted.opened))[0]?.trailers).toContainEqual(["Issue", canonical])
+  })
+
+  it("names both canonical issues for a real conflict and refuses resolver failure", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/two-issues", "change.txt")
+    await w.git(["checkout", "--quiet", "task/two-issues"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "first\n\nRefs: 26050"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "second\n\nRefs: 26051"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await expect(
+      issueOf(w.git, "task/two-issues", head, w.target, undefined, async (raw) => `@km/storage/${raw}-full`),
+    ).rejects.toThrow(/@km\/storage\/26050-full.*@km\/storage\/26051-full/u)
+    await expect(
+      issueOf(w.git, "task/two-issues", head, w.target, undefined, async () => {
+        throw new Error("lookup unavailable")
+      }),
+    ).rejects.toThrow(/26050.*lookup unavailable/u)
+  })
+
   /** @failure Binding conflicts publish work or a declared issue overrides explicit history.
    * @level l2 @consumer Yrd submit and dry run
    */
