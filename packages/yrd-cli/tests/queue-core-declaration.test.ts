@@ -11,7 +11,6 @@ import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   CHANGE_STATUSES,
-  appendOpsCutover,
   assertPlainEventQueueConfig,
   changeInput,
   changeRef,
@@ -26,14 +25,13 @@ import {
   queueRef,
   readConfig,
   readEventQueue,
-  readQueue,
+  readEventQueueWithChanges,
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
-  writePause,
   watchRows,
 } from "@yrd/queue-core"
 import { openEvents } from "gitomic/events"
-import { assertEventListingFence, coreQueueCommand, openEventDetail, readListing } from "../src/queue-core-commands.ts"
+import { assertEventListingFence, coreQueueCommand, openEventDetail } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
@@ -125,11 +123,11 @@ async function world(config?: string): Promise<string> {
   return repo
 }
 
-async function createQueue(repo: string, queue: string, commit: string, at: Date): Promise<string> {
+async function createQueue(repo: string, queue: string, commit: string, at: Date, remote = "origin"): Promise<string> {
   const git = gitIn(repo)
-  const config = await readConfig(git, commit, { branch: queue, remote: "origin" })
+  const config = await readConfig(git, commit, { branch: queue, remote })
   if (config === undefined) throw new Error(`fixture target ${commit} lost .yrd.yml`)
-  return createEventQueue(createEventStore(repo, "origin", gitIn(repo).selection), queue, commit, config, at)
+  return createEventQueue(createEventStore(repo, remote, git.selection), queue, commit, config, at)
 }
 
 describe("a queue is the selected origin branch carrying config", () => {
@@ -137,6 +135,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const targetResolver = ["sh", "-c", 'printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"]
     const repo = await world(`issueResolver: ${JSON.stringify(targetResolver)}\n`)
     const git = gitIn(repo)
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     await git(["checkout", "--quiet", "-b", "task/26050"])
     writeFileSync(join(repo, ".yrd.yml"), `issueResolver: ${JSON.stringify(["sh", "-c", "exit 81", "resolver"])}\n`)
     await git(["add", ".yrd.yml"])
@@ -153,6 +152,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   it("refuses a missing issue with the raw reference and target resolver command", async () => {
     const repo = await world(`issueResolver: ${JSON.stringify(["sh", "-c", "exit 31", "lookup"])}\n`)
     const git = gitIn(repo)
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     await git(["checkout", "--quiet", "-b", "task/unknown"])
     await git(["commit", "--quiet", "--allow-empty", "-m", "bind\n\nRefs: 26050"])
     const run = capture(repo)
@@ -302,7 +302,6 @@ describe("a queue is the selected origin branch carrying config", () => {
     const created = await createQueue(repo, "main", targetOid, new Date("2026-09-22T14:00:00.000Z"))
     const declaration = await readConfig(git, targetOid, { remote: "origin", branch: "main" })
     if (declaration === undefined) throw new Error("fixture target lost .yrd.yml")
-    await expect(readListing(git, declaration, repo, targetOid)).rejects.toThrow(/event format/)
     await git(["checkout", "--quiet", "-b", "task/event"])
     writeFileSync(join(repo, "work.txt"), "event work\n")
     await git(["add", "work.txt"])
@@ -345,7 +344,6 @@ describe("a queue is the selected origin branch carrying config", () => {
     const detail = await openEventDetail(git, declaration, row, "main", repo, selected)
     expect(detail.events?.map((event) => event.type)).toEqual(["opened"])
     expect(eventHistoryEntries(detail.events ?? []).map((entry) => entry.text)).toEqual(["opened by yrd"])
-    expect(detail.records).toBeUndefined()
     await chain.append(
       [changeInput("verifying", { queueTip: created, at: new Date("2026-09-22T14:02:00.000Z"), commit })],
       { expect: selected.tip as string },
@@ -997,11 +995,6 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(
       eventRows(await listChanges(store, "main")).find((row) => row.branch === "task/event-submit")?.position,
     ).toBe(beforePosition)
-    const refusedWithdraw = capture(repo)
-    expect(
-      await runYrdProcess(["bun", "yrd", "withdraw", "task/event-submit", "--queue", "main"], refusedWithdraw.io),
-    ).toBe(1)
-    expect(refusedWithdraw.stderr()).toContain("use yrd drop")
     const dropped = capture(repo)
     expect(
       await runYrdProcess(["bun", "yrd", "drop", "task/event-submit", "--queue", "main", "--json"], dropped.io),
@@ -1100,56 +1093,38 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(head).not.toBe(landing)
   })
 
-  it.each(["legacy", "event"] as const)(
-    "hides only matching draft heads in a %s listing",
-    async (format) => {
-      const repo = await world("ignore: [task/hidden*, 'scratch/**']\n")
-      const git = gitIn(repo)
-      const commit = (await git(["rev-parse", "HEAD"])).trim()
-      const store = { repo, remote: "origin" }
-      const queueTip =
-        format === "event" ? await createQueue(repo, "main", commit, new Date("2026-09-22T14:00:00.000Z")) : undefined
-      for (const branch of ["task/hidden", "scratch/nested", "task/kept", "other/task/hidden"]) {
-        await git(["checkout", "--quiet", "-b", branch, "main"])
-        writeFileSync(join(repo, `${branch.replaceAll("/", "-")}.txt`), `${branch}\n`)
-        await git(["add", "."])
-        await git(["commit", "--quiet", "-m", branch])
-        await git(["push", "--quiet", "origin", branch])
-      }
-      await git(["checkout", "--quiet", "main"])
-      if (queueTip !== undefined) {
-        await (
-          await openEvents({ ...store, ref: changesRef("main", "task/hidden-submitted"), writer: "yrd" })
-        ).append([changeInput("opened", { queueTip, at: new Date(), commit, by: "@dev/2" })], { expect: null })
-      }
-      const run = capture(repo)
-      expect(
-        await coreQueueCommand(
-          repo,
-          run.io,
-          { command: "list", drafts: format === "event" },
-          { json: format === "event", queue: "main" },
-        ),
-        run.stderr(),
-      ).toBe(0)
-      const shown =
-        format === "event"
-          ? (JSON.parse(run.stdout()) as { changes: readonly { branch: string }[] }).changes.map((row) => row.branch)
-          : run.stdout()
-      expect(shown).toContain("task/kept")
-      expect(shown).toContain("other/task/hidden")
-      if (Array.isArray(shown)) {
-        expect((JSON.parse(run.stdout()) as { scope: string }).scope).toContain("task/hidden*")
-        expect(shown).not.toContain("task/hidden")
-        expect(shown).not.toContain("scratch/nested")
-        expect(shown).toContain("task/hidden-submitted")
-      } else {
-        expect(shown).not.toMatch(/\s+task\/hidden\s+/u)
-        expect(shown).not.toMatch(/\s+scratch\/nested\s+/u)
-      }
-    },
-    30_000,
-  )
+  it("hides only matching draft heads in an event listing", async () => {
+    const repo = await world("ignore: [task/hidden*, 'scratch/**']\n")
+    const git = gitIn(repo)
+    const commit = (await git(["rev-parse", "HEAD"])).trim()
+    const store = { repo, remote: "origin" }
+    const queueTip = await createQueue(repo, "main", commit, new Date("2026-09-22T14:00:00.000Z"))
+    for (const branch of ["task/hidden", "scratch/nested", "task/kept", "other/task/hidden"]) {
+      await git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(repo, `${branch.replaceAll("/", "-")}.txt`), `${branch}\n`)
+      await git(["add", "."])
+      await git(["commit", "--quiet", "-m", branch])
+      await git(["push", "--quiet", "origin", branch])
+    }
+    await git(["checkout", "--quiet", "main"])
+    await (
+      await openEvents({ ...store, ref: changesRef("main", "task/hidden-submitted"), writer: "yrd" })
+    ).append([changeInput("opened", { queueTip, at: new Date(), commit, by: "@dev/2" })], { expect: null })
+    const run = capture(repo)
+    expect(
+      await coreQueueCommand(repo, run.io, { command: "list", drafts: true }, { json: true, queue: "main" }),
+      run.stderr(),
+    ).toBe(0)
+    const shown = (JSON.parse(run.stdout()) as { changes: readonly { branch: string }[] }).changes.map(
+      (row) => row.branch,
+    )
+    expect(shown).toContain("task/kept")
+    expect(shown).toContain("other/task/hidden")
+    expect((JSON.parse(run.stdout()) as { scope: string }).scope).toContain("task/hidden*")
+    expect(shown).not.toContain("task/hidden")
+    expect(shown).not.toContain("scratch/nested")
+    expect(shown).toContain("task/hidden-submitted")
+  }, 30_000)
 
   it("requires reason and actor for ignore, then returns byte-clean JSON for both verbs", async () => {
     const repo = await world("{}\n")
@@ -1256,53 +1231,12 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main"], submitted.io), submitted.stderr()).toBe(0)
   })
 
-  it("directs drop on a legacy queue to the existing withdraw command", async () => {
+  it("refuses drop on a queue without an event declaration", async () => {
     const repo = await world("{}\n")
     const refused = capture(repo)
     const exit = await runYrdProcess(["bun", "yrd", "drop", "task/example", "--queue", "main"], refused.io)
-    expect(refused.stderr()).toContain("yrd withdraw")
+    expect(refused.stderr()).toContain("expected refs/yrd/main/queue")
     expect(exit).toBe(2)
-  })
-
-  it("keeps event-queue pause and resume on the legacy ref before ops-cutover", async () => {
-    const repo = await world("{}\n")
-    const git = gitIn(repo)
-    const head = (await git(["rev-parse", "HEAD"])).trim()
-    const store = createEventStore(repo, "origin", gitIn(repo).selection)
-    await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
-    const paused = capture(repo)
-    expect(
-      await runYrdProcess(
-        ["bun", "yrd", "queue", "pause", "--queue", "main", "--reason", "repair", "--json"],
-        paused.io,
-      ),
-      paused.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(paused.stdout())).toMatchObject({ kind: "paused", reason: "repair" })
-    expect((await readEventQueue(store, "main")).pause).toBeUndefined()
-    const pausedRef = (await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause"])).trim()
-    expect(pausedRef).toContain("refs/yrd/main/pause")
-    const pausedOid = pausedRef.split(/\s+/u)[0]
-    expect(pausedOid).toBeTruthy()
-    expect(
-      await gitIn(join(dirname(repo), "remote.git"))([
-        "show",
-        "-s",
-        "--format=%(trailers:only,unfold)",
-        pausedOid ?? "",
-      ]),
-    ).toContain("Record: paused\nPaused-By:")
-    const resumed = capture(repo)
-    expect(
-      await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main", "--json"], resumed.io),
-      resumed.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(resumed.stdout())).toMatchObject({
-      kind: "resumed",
-      service: { running: false, health: "absent", start: "hab up yrd" },
-    })
-    expect((await readEventQueue(store, "main")).pause).toBeUndefined()
-    expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause"])).toContain("refs/yrd/main/pause")
   })
 
   /** @failure The operator cannot set the intake fence or dry-run claims a fenced submit would open.
@@ -1311,6 +1245,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   it("sets a maintenance intake stop with one reason and refuses dry-run submit", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     await git(["checkout", "--quiet", "-b", "task/fenced"])
     writeFileSync(join(repo, "fenced.txt"), "change\n")
     await git(["add", "fenced.txt"])
@@ -1522,59 +1457,15 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(line.stdout()).toContain("run hab up yrd")
   })
 
-  it("keeps an event-queue override on the legacy ref before ops-cutover", async () => {
+  it("routes pause and override commands to queue events without moving legacy refs", async () => {
     const repo = await world('checks:\n  - verify: {run: "true", on: [merge]}\n')
     const git = gitIn(repo)
     const head = (await git(["rev-parse", "HEAD"])).trim()
     const store = createEventStore(repo, "origin", git.selection)
     await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
-    const before = (await readEventQueue(store, "main")).tip
-    const until = new Date(Date.now() + 3_600_000).toISOString()
-    const set = capture(repo)
-    expect(
-      await runYrdProcess(
-        [
-          "bun",
-          "yrd",
-          "queue",
-          "override",
-          "--queue",
-          "main",
-          "--check",
-          "verify",
-          "--off",
-          "--until",
-          until,
-          "--reason",
-          "flaky gate",
-          "--json",
-        ],
-        set.io,
-      ),
-      set.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(set.stdout())).toMatchObject({ kind: "set", overrides: [{ check: "verify", state: "active" }] })
-    expect((await readEventQueue(store, "main")).tip).toBe(before)
-    const ref = (await git(["ls-remote", "--refs", "origin", "refs/yrd/main/override"])).trim()
-    expect(ref).toContain("refs/yrd/main/override")
-    const oid = ref.split(/\s+/u)[0]
-    expect(
-      await gitIn(join(dirname(repo), "remote.git"))(["show", "-s", "--format=%(trailers:only,unfold)", oid ?? ""]),
-    ).toContain("Record: set")
-  })
-
-  it("routes pause and override commands to queue events after ops-cutover", async () => {
-    const repo = await world('checks:\n  - verify: {run: "true", on: [merge]}\n')
-    const git = gitIn(repo)
-    const head = (await git(["rev-parse", "HEAD"])).trim()
-    const store = createEventStore(repo, "origin", git.selection)
-    await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
-    await appendOpsCutover(store, git, "main", head, new Date(), "@chief")
     const legacyRefs = async () =>
       (await git(["ls-remote", "--refs", "origin", "refs/yrd/main/pause", "refs/yrd/main/override"])).trim()
-    // The cutover leaves its maintenance pause fence on the legacy ref (b5d9e94fe5, 25041); what this row pins is that
-    // pause and override after the cutover write events and never move a legacy ref.
-    const legacyAtCutover = await legacyRefs()
+    const legacyBefore = await legacyRefs()
     const paused = capture(repo)
     expect(
       await runYrdProcess(
@@ -1616,16 +1507,16 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).toBe(0)
     expect(JSON.parse(listed.stdout())).toMatchObject({ overrides: [{ check: "verify", state: "active" }] })
     expect((await readEventQueue(store, "main")).ops?.pause?.reason).toBe("repair")
-    expect(await legacyRefs()).toBe(legacyAtCutover)
+    expect(await legacyRefs()).toBe(legacyBefore)
     const resumed = capture(repo)
     expect(await runYrdProcess(["bun", "yrd", "queue", "resume", "--queue", "main"], resumed.io)).toBe(0)
     expect(resumed.stdout()).toContain("yrd service is stopped (no health document); run hab up yrd")
     expect((await readEventQueue(store, "main")).ops?.pause).toBeUndefined()
-    expect(await legacyRefs()).toBe(legacyAtCutover)
+    expect(await legacyRefs()).toBe(legacyBefore)
   })
 
-  /** @failure Event-format intake ignores an ops maintenance pause after the cutover.
-   * @level l2 @consumer addressed submit and its dry run after ops-cutover
+  /** @failure Event-format intake ignores an ops maintenance pause.
+   * @level l2 @consumer addressed submit and its dry run
    */
   it("refuses event-format submit under maintenance without opening a change", async () => {
     const repo = await world("{}\n")
@@ -1633,7 +1524,6 @@ describe("a queue is the selected origin branch carrying config", () => {
     const target = (await git(["rev-parse", "HEAD"])).trim()
     const store = createEventStore(repo, "origin", git.selection)
     await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
-    await appendOpsCutover(store, git, "main", target, new Date(), "@chief")
     await git(["checkout", "--quiet", "-b", "task/event-fenced"])
     writeFileSync(join(repo, "event-fenced.txt"), "change\n")
     await git(["add", "event-fenced.txt"])
@@ -1711,16 +1601,19 @@ describe("a queue is the selected origin branch carrying config", () => {
     // queue read: even an unreadable change must not prevent the operator from
     // pausing it, and the capture must not rewrite this clone's refs/FETCH_HEAD.
     const release = (await git(["rev-parse", "release/1.x"])).trim()
+    const queueTip = await createQueue(repo, "release/1.x", release, new Date())
     const tree = (await git(["rev-parse", `${release}^{tree}`])).trim()
     const advanced = (await git(["commit-tree", tree, "-p", release, "-m", "advance the queue target"])).trim()
     await remote(["fetch", "--quiet", "--no-tags", repo, advanced])
     await remote(["update-ref", "refs/heads/release/1.x", advanced])
-    const malformedRef = changeRef("release/1.x", { branch: "task/unreadable", head: advanced })
-    await remote(["update-ref", malformedRef, advanced])
+    const malformedRef = changesRef("release/1.x", "task/unreadable")
+    await (
+      await openEvents({ ...createEventStore(repo, "origin", git.selection), ref: malformedRef, writer: "yrd" })
+    ).append([changeInput("verifying", { queueTip, at: new Date(), commit: advanced })], { expect: null })
     const refs = ["for-each-ref", "--format=%(refname) %(objectname)"]
     const yrdRefs = async (): Promise<readonly string[]> =>
       (await remote(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).trim().split("\n").sort()
-    const expectedYrdRefs = ["refs/yrd/release%2F1.x/pause", malformedRef].sort()
+    const expectedYrdRefs = [queueRef("release/1.x"), malformedRef].sort()
     const before = await git(refs)
     const fetchHead = (await git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
     writeFileSync(fetchHead, "another command's fetch result\n")
@@ -1761,12 +1654,18 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await yrdRefs()).toEqual(expectedYrdRefs)
     expect(await git(refs)).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("another command's fetch result\n")
-    await expect(readQueue(git, "origin", "release/1.x", advanced)).rejects.toThrow(malformedRef)
+    expect(
+      (await readEventQueueWithChanges(createEventStore(repo, "origin", git.selection), "release/1.x")).invalid.get(
+        "task/unreadable",
+      )?.ref,
+    ).toBe(malformedRef)
   })
 
   // 25296: the verb end to end, against the FETCHED target's declaration.
-  it("queue override sets, lists, refuses an unknown check and clears, touching only the override ref", async () => {
+  it("queue override sets, lists, refuses an unknown check and clears through queue events", async () => {
     const repo = await world('checks:\n  - verify: {run: "true", on: [merge]}\n  - lint: {run: "true", on: [submit]}\n')
+    const git = gitIn(repo)
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     const yrd = async (...args: string[]) => {
       const run = capture(repo)
       const code = await runYrdProcess(["bun", "yrd", "queue", "override", "--queue", "main", ...args], run.io)
@@ -1784,7 +1683,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       "the declared merge checks are: verify",
     )
     expect((await yrd("--check", "verify", "--off", "--reason", "x")).stderr).toContain("needs --until <time>")
-    expect(await refs()).toBe("")
+    const refsBefore = await refs()
 
     const set = await yrd("--check", "verify", "--off", "--until", until, "--reason", "flaky gate", "--json")
     expect(set.code, set.stderr).toBe(0)
@@ -1792,7 +1691,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       kind: "set",
       overrides: [{ check: "verify", reason: "flaky gate", state: "active", until, verified: false }],
     })
-    expect(await refs()).toBe("refs/yrd/main/override")
+    expect(await refs()).toBe(refsBefore)
     // No notify entry wants `override`: the verb says so once, naming the record that stands in for the page.
     expect(set.stderr.match(/no notify entry in \.yrd\.yml wants override events/gu)).toHaveLength(1)
 
@@ -1818,6 +1717,8 @@ describe("a queue is the selected origin branch carrying config", () => {
         '  - broken: {on: [override], run: "echo pager down >&2; exit 3"}\n' +
         '  - merges: {on: [merged], run: "exit 9"}\n',
     )
+    const git = gitIn(repo)
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     const state = join(dirname(repo), "state")
     await gitIn(repo)(["config", "yrd.workdir", state])
     const yrd = async (...args: string[]) => {
@@ -1940,6 +1841,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const origin = (await git(["remote", "get-url", "origin"])).trim()
     const destination = join(dirname(repo), "destination.git")
     await git(["clone", "--quiet", "--bare", origin, destination])
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date(), destination)
     await git(["checkout", "--quiet", "-b", "task/addressed"])
     writeFileSync(join(repo, "addressed.txt"), "unpublished author work\n")
     await git(["add", "addressed.txt"])
@@ -1956,7 +1858,25 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect((await git(["ls-remote", "--refs", destination, "refs/heads/task/addressed"])).split("\t")[0]).toBe(head)
     // A paused destination still takes the submit (the andon, operator
     // 2026-09-16), and the echo names the ADDRESSED queue's resume command.
-    await writePause(git, destination, "main", { by: "@dev/3", kind: "paused", reason: "inspect destination" })
+    const pause = capture(repo)
+    expect(
+      await runYrdProcess(
+        [
+          "bun",
+          "yrd",
+          "queue",
+          "pause",
+          "--queue",
+          `${destination}#main`,
+          "--reason",
+          "inspect destination",
+          "--notify",
+          "@dev/3",
+        ],
+        pause.io,
+      ),
+      pause.stderr(),
+    ).toBe(0)
     const accepted = capture(repo)
     expect(
       await runYrdProcess(
@@ -1979,6 +1899,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     const git = gitIn(repo)
     await git(["branch", "release/1.x"])
     await git(["push", "--quiet", "origin", "release/1.x"])
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", target, new Date())
+    await createQueue(repo, "release/1.x", target, new Date())
     for (const [branch, queue] of [
       ["task/default", "main"],
       ["task/topic", "release/1.x"],
