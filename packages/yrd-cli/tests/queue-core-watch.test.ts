@@ -93,7 +93,7 @@ const declaredQueues = vi.hoisted(
       owner: string
     }[],
 )
-vi.mock("git-yrd/hab-projects", () => ({ yrdQueueRunnerDeclarations: declaredQueues }))
+vi.mock("../../../hab.projects.ts", () => ({ yrdQueueRunnerDeclarations: declaredQueues }))
 
 function renderedSnapshot(): WatchSnapshot | undefined {
   return rendered.snapshot
