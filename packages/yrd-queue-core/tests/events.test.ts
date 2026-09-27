@@ -908,6 +908,27 @@ describe("ADR-0016 event fold", () => {
     expect(dropped.since).toBeUndefined()
     expect(evolve(dropped, event("merged", "d".repeat(40), [["Commit", A]], [A])).status).toBe("merged")
   })
+
+  // @failure a malformed drop event after a landing turns a merged change into cancelled (26223).
+  it("refuses a dropped ending after merge without changing the merged projection", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const merged = evolve(opened, event("merged", B, [["Commit", A]], [A]))
+    expect(() =>
+      evolve(
+        merged,
+        event(
+          "cancelled",
+          "c".repeat(40),
+          [
+            ["Reason", "dropped"],
+            ["Commit", A],
+          ],
+          [A],
+        ),
+      ),
+    ).toThrow(/cancelled.*follows merged/)
+    expect(merged.status).toBe("merged")
+  })
 })
 
 describe("the queue-format boundary", () => {
@@ -990,6 +1011,9 @@ describe("the queue-format boundary", () => {
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
     const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    await expect(drop(location, { queue: "lab", branch: "task/never", by: "@dev/2" })).rejects.toThrow(
+      /there is no branch to drop/,
+    )
     const branchRef = "refs/heads/task/absent"
     const branch = await open({ ...store, ref: branchRef })
     const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
@@ -1009,14 +1033,24 @@ describe("the queue-format boundary", () => {
       [changeInput("failed", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), reason: "check failed" })],
       { expect: opened.head },
     )
-    await expect(drop(location, { queue: "lab", branch: "task/absent", by: "@dev/2" })).rejects.toThrow(
-      /refs\/heads\/task\/absent.*already ended failed.*no branch to drop/,
-    )
+    await expect(drop(location, { queue: "lab", branch: "task/absent", by: "@dev/2" })).rejects.toThrow(/--reason/)
     expect(await chain.head()).toBe(failed.head)
+    const dropped = await drop(location, {
+      queue: "lab",
+      branch: "task/absent",
+      by: "@dev/2",
+      note: "owner retired the failed change",
+    })
+    expect(await readStatus(location, "lab", "task/absent")).toMatchObject({
+      status: "cancelled",
+      reason: "dropped",
+      commit: head,
+    })
+    expect((await chain.events()).at(-1)).toMatchObject({ id: dropped.event, type: "cancelled", links: [head] })
   })
 
-  // @failure a drop after a failed ending replaces the failed notice event and stops the queue judge (25658).
-  it("deletes an already-ended branch whose head is kept without changing its ending or queued notice", async () => {
+  // @failure an owner drop after a failed ending deletes the name but leaves Df seeing a failure (26223).
+  it("records an owner drop after an ended change and deletes its kept branch in one publish", async () => {
     const { store, location } = remoteMemStore("yrd-event-drop-ended")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
@@ -1034,10 +1068,82 @@ describe("the queue-format boundary", () => {
     )
     const before = await readStatus(location, "lab", "task/ended")
     expect(before.lastNotifiable).toMatchObject({ kind: "failed", id: failed.head })
-    await drop(location, { queue: "lab", branch: "task/ended", by: "@dev/2" })
+    await expect(drop(location, { queue: "lab", branch: "task/ended", by: "@dev/2" })).rejects.toThrow(/--reason/)
+    expect(await branch.head()).toBe(head)
     expect(await chain.head()).toBe(failed.head)
+    const dropped = await drop(location, {
+      queue: "lab",
+      branch: "task/ended",
+      by: "@dev/2",
+      note: "owner retired the failed change",
+    })
+    expect(await chain.head()).toBe(dropped.event)
     expect((await listRefs("refs/heads/task/ended", store)).size).toBe(0)
-    expect(await readStatus(location, "lab", "task/ended")).toEqual(before)
+    expect(await readStatus(location, "lab", "task/ended")).toMatchObject({
+      status: "cancelled",
+      reason: "dropped",
+      commit: head,
+    })
+    expect((await chain.events()).at(-1)).toMatchObject({
+      id: dropped.event,
+      type: "cancelled",
+      links: [head],
+      content: "owner retired the failed change",
+      props: expect.arrayContaining([
+        ["By", "@dev/2"],
+        ["Reason", "dropped"],
+      ]),
+    })
+  })
+
+  it("only deletes the branch name of a merged change", async () => {
+    const { store, location } = remoteMemStore("yrd-event-drop-merged")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/merged" })
+    const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+    const chain = await openEvents({ ...store, ref: changesRef("lab", "task/merged") })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      { expect: null },
+    )
+    const merged = await chain.append(
+      [changeInput("merged", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: head })],
+      { expect: opened.head },
+    )
+    await drop(location, { queue: "lab", branch: "task/merged", by: "@dev/2" })
+    expect(await chain.head()).toBe(merged.head)
+    expect((await listRefs("refs/heads/task/merged", store)).size).toBe(0)
+    expect((await readStatus(location, "lab", "task/merged")).status).toBe("merged")
+  })
+
+  // @failure a rival branch move after an ended drop publishes would retire work the event did not keep (26223).
+  it("leaves an ended change untouched when its branch-delete lease loses", async () => {
+    const { store, location, beforeNextPublish } = remoteMemStore("yrd-event-drop-ended-race")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/ended-race" })
+    const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+    const chain = await openEvents({ ...store, ref: changesRef("lab", "task/ended-race") })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      { expect: null },
+    )
+    const failed = await chain.append(
+      [changeInput("failed", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), reason: "check failed" })],
+      { expect: opened.head },
+    )
+    let rival = ""
+    beforeNextPublish(async () => {
+      rival = (await branch.transact(async (map) => map.set("work", "two"), "rival head")).oid
+    })
+    await expect(
+      drop(location, { queue: "lab", branch: "task/ended-race", by: "@dev/2", note: "retire" }),
+    ).rejects.toBeInstanceOf(Conflict)
+    expect(await branch.head()).toBe(rival)
+    expect(await chain.head()).toBe(failed.head)
   })
 
   // @failure delete-only drop loses a branch's newer, unkept commit (ADR-0018 / 25658).
@@ -1058,9 +1164,9 @@ describe("the queue-format boundary", () => {
       { expect: opened.head },
     )
     const advanced = (await branch.transact(async (map) => map.set("work", "two"), "push after ending")).oid
-    await expect(drop(location, { queue: "lab", branch: "task/advanced", by: "@dev/2" })).rejects.toThrow(
-      new RegExp(`task/advanced.*${advanced}.*${kept}`),
-    )
+    await expect(
+      drop(location, { queue: "lab", branch: "task/advanced", by: "@dev/2", note: "retire" }),
+    ).rejects.toThrow(new RegExp(`task/advanced.*${advanced}.*${kept}`))
     expect(await branch.head()).toBe(advanced)
     expect(await chain.head()).toBe(failed.head)
   })
