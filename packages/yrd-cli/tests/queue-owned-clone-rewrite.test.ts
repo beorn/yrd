@@ -14,7 +14,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, queueName, remoteUrl } from "@yrd/queue-core"
 import { parseQueueAddress } from "../src/address.ts"
-import { resolveQueueLocation } from "../src/queue-location.ts"
+import { resolveDeclaredQueueLocations, resolveQueueLocation } from "../src/queue-location.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -117,6 +117,48 @@ describe("resolveQueueLocation behind a transport rewrite", () => {
     expect(location.repo).not.toBe(inside)
     expect((await gitIn(location.repo, undefined, undefined, { env })(["show", "main:other.txt"])).trim()).toBe(
       "other queue",
+    )
+  }, 60_000)
+
+  /** @failure Bare watch resolves only its current repository, so a second declared queue's own changes and runner are invisible.
+   * @level l2 @consumer bare watch reading the Yrd runner declaration
+   */
+  it("resolves two declared repositories to two queue-owned clones", async () => {
+    const { env, root } = await fixture()
+    const inside = join(root, "inside")
+    await gitIn(root, undefined, undefined, { env })(["clone", "--quiet", transport, inside])
+
+    const otherRemote = join(root, "other.git")
+    const other = join(root, "other")
+    const seed = gitIn(root, undefined, undefined, { env })
+    await seed(["init", "--quiet", "--bare", "--initial-branch=main", otherRemote])
+    await seed(["clone", "--quiet", otherRemote, other])
+    const otherGit = gitIn(other, undefined, undefined, { env })
+    writeFileSync(join(other, "other.txt"), "second queue\n")
+    await otherGit(["add", "--all"])
+    await otherGit([...author, "commit", "--quiet", "--message", "add second queue"])
+    await otherGit(["push", "--quiet", "origin", "main"])
+
+    const locations = await resolveDeclaredQueueLocations(
+      root,
+      [
+        { serviceName: "yrd-code", repository: { name: "code", path: "inside" }, queue: { base: "main" } },
+        { serviceName: "yrd-other", repository: { name: "other", path: "other" }, queue: { base: "main" } },
+      ],
+      env,
+    )
+    expect(locations).toHaveLength(2)
+    const [first, second] = locations
+    if (first?.kind !== "resolved" || second?.kind !== "resolved") {
+      throw new Error(`both declared queues should resolve: ${JSON.stringify(locations)}`)
+    }
+    expect(first.location.address?.canonical).toBe(address)
+    expect(second.location.address?.canonical).toBe(`${otherRemote}#main`)
+    expect((await gitIn(first.location.repo, undefined, undefined, { env })(["show", "main:product.txt"])).trim()).toBe(
+      "product",
+    )
+    expect((await gitIn(second.location.repo, undefined, undefined, { env })(["show", "main:other.txt"])).trim()).toBe(
+      "second queue",
     )
   }, 60_000)
 })
