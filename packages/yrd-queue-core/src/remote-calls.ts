@@ -127,16 +127,14 @@ export function traceRemoteCalls(
   mkdirSync(directory, { recursive: true })
   const previous = process.env.GIT_TRACE2_EVENT
   const previousVars = process.env.GIT_TRACE2_ENV_VARS
-  const previousSeam = process.env.YRD_SEAM
   process.env.GIT_TRACE2_EVENT = directory
   if (options.seams) {
     process.env.GIT_TRACE2_ENV_VARS = [...new Set([...(previousVars?.split(",") ?? []), "YRD_SEAM"])].join(",")
-    process.env.YRD_SEAM = "submit.setup"
   }
   return {
     env: {
       GIT_TRACE2_EVENT: directory,
-      ...(options.seams ? { GIT_TRACE2_ENV_VARS: process.env.GIT_TRACE2_ENV_VARS, YRD_SEAM: "submit.setup" } : {}),
+      ...(options.seams ? { GIT_TRACE2_ENV_VARS: process.env.GIT_TRACE2_ENV_VARS } : {}),
     },
     end() {
       if (previous === undefined) delete process.env.GIT_TRACE2_EVENT
@@ -144,8 +142,6 @@ export function traceRemoteCalls(
       if (options.seams) {
         if (previousVars === undefined) delete process.env.GIT_TRACE2_ENV_VARS
         else process.env.GIT_TRACE2_ENV_VARS = previousVars
-        if (previousSeam === undefined) delete process.env.YRD_SEAM
-        else process.env.YRD_SEAM = previousSeam
       }
       try {
         return readRemoteCalls(directory)

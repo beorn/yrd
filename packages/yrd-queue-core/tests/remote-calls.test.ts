@@ -109,12 +109,13 @@ describe("remote calls are counted from git's trace2 event log", () => {
       /^[0-9a-f]{40}$/u,
     )
     await withRemoteSeam("listBranch", () => caller(["ls-remote", remote, "refs/heads/main"]))
+    await caller(["ls-remote", remote, "refs/heads/main"])
     const calls = traced.end()
     expect(calls.seams).toMatchObject({
       readRemoteCommit: { fetch: 1 },
       listBranch: { "ls-remote": 1 },
     })
-    expect(calls.seams.unattributed).toBeUndefined()
+    expect(calls.seams.unattributed).toMatchObject({ "ls-remote": 1 })
     expect(calls.unreadable).toBe(0)
   })
 
