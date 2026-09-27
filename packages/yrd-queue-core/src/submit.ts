@@ -202,7 +202,7 @@ export type SubmitInspection = Readonly<{
   stop?: PauseRecord
 }>
 
-function refuseMaintenance(
+export function refuseMaintenance(
   stop: PauseRecord | undefined,
   remote: string,
   queue: string,
