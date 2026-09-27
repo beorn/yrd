@@ -759,7 +759,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
 
     expect(open).toHaveBeenCalledTimes(1)
     // No identity title row above the box: the first thing in the detail is the border with the run on it.
-    expect(text).toContain("RUN main#")
+    expect(text).toContain("RUN main [")
     // One line: the marker, the bold status and its explanation, and no step line under it (25441).
     const status = lines.findIndex((line) => line.includes("× Failed test"))
     expect(status).toBeGreaterThan(-1)

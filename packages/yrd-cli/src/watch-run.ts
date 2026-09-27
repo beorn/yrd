@@ -38,6 +38,8 @@ export type WatchRun = Readonly<{
   kind: WatchRunKind
   /** The run's own id; absent for a change no run has touched yet (a pre-run row). */
   id?: string
+  /** Queue-scoped durable number, absent until the first event lands. */
+  number?: number
   /** The queue's name as the RUN cell and the border title spell it (pre-M8: the target's branch). */
   label: string
   /** The core's row, read through — never restated. */
@@ -66,10 +68,12 @@ export function runOf(
   label: string,
   checks: readonly CheckView[],
   runId: string | undefined = row.run,
+  number?: number,
 ): WatchRun {
   return {
     kind: "queue",
     ...(runId === undefined ? {} : { id: runId }),
+    ...(number === undefined ? {} : { number }),
     label,
     row,
     steps: stepsOf(checks, row),
@@ -77,8 +81,8 @@ export function runOf(
 }
 
 /** The border title (item 1): `RUN main#000406`; a pre-run row has no run to name and gets no title. */
-export function runTitle(run: Pick<WatchRun, "id" | "label">): string | undefined {
-  return run.id === undefined ? undefined : `RUN ${runShortName(run.label, run.id)}`
+export function runTitle(run: Pick<WatchRun, "id" | "label" | "number">): string | undefined {
+  return run.id === undefined ? undefined : `RUN ${runShortName(run.label, run.id, run.number)}`
 }
 
 /**

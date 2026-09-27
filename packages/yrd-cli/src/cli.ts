@@ -30,13 +30,24 @@
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { join } from "node:path"
 import { drainOutput } from "loggily"
-import { parseDuration, yrdQueueRunnerDeclarations } from "@yrd/queue-core"
+import {
+  activateRunIndex,
+  createEventStore,
+  lookupRunIndex,
+  parseDuration,
+  readRunLog,
+  runIndexPath,
+  runIndexRef,
+  RUN_INDEX_CODES,
+  yrdQueueRunnerDeclarations,
+} from "@yrd/queue-core"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
 import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere } from "./declaration.ts"
 import { resolveDeclaredQueueLocations, resolveQueueLocation, type QueueLocation } from "./queue-location.ts"
+import { formatQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { legendLines } from "./watch-words.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
@@ -339,6 +350,75 @@ function buildProgram(
   }
   const queue = program.command("queue").description("the line of changes for the target branch")
   queue.helpCommand(false)
+  const runs = program.command("runs").description("lookup or activate durable numbers within one queue")
+  runs.helpCommand(false)
+  runs
+    .command("show <run-address>")
+    .description("read a published run by full repository@branch#number address")
+    .option("--json", "emit stable JSON")
+    .action(async (operand: string, options: { json?: boolean }) => {
+      const address = parseRunAddress(operand)
+      const location = await resolveQueueLocation(cwd(), formatQueueAddress(address.queue), env)
+      const lookup = await lookupRunIndex(
+        createEventStore(location.repo, "origin", location.selection),
+        address.queue.queue,
+        address.number,
+      )
+      if (lookup.kind === "unknown") {
+        throw new Error(
+          `${RUN_INDEX_CODES.unknown}: ${address.canonical} has no entry at ${runIndexRef(address.queue.queue)}:${runIndexPath(address.number)} on ${address.queue.transport}`,
+        )
+      }
+      const journal = join(location.workdir, "logs", `${lookup.record.id}.jsonl`)
+      let detail:
+        | Readonly<{ status: "available"; records: ReturnType<typeof readRunLog> }>
+        | Readonly<{ status: "unavailable"; reason: string }>
+      try {
+        const records = readRunLog(join(location.workdir, "logs"), lookup.record.id)
+        if (!records.some((record) => record.kind === "run" && record.run === lookup.record.id)) {
+          throw new Error(`${journal} has no header for indexed run ${lookup.record.id}`)
+        }
+        detail = { status: "available", records }
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error
+        detail = {
+          status: "unavailable",
+          reason: `${journal} is absent on this host; the index record remains authoritative`,
+        }
+      }
+      const product = { address: address.canonical, number: lookup.number, record: lookup.record, detail }
+      io.stdout(
+        options.json === true
+          ? `${JSON.stringify(product)}\n`
+          : [
+              `${product.address}  ${lookup.record.id}  ${lookup.record.startedAt}  ${lookup.record.host}  ${lookup.record.actor}`,
+              ...(detail.status === "available"
+                ? detail.records.map((record) => JSON.stringify(record))
+                : [detail.reason]),
+            ].join("\n") + "\n",
+      )
+    })
+  runs
+    .command("activate <queue-address>")
+    .description("create the run index once for an existing queue, after its CODE carrier lands")
+    .option("--json", "emit stable JSON")
+    .action(async (operand: string, options: { json?: boolean }) => {
+      const address = parseQueueAddress(operand)
+      if (address.kind !== "remote") {
+        throw new Error(`${operand}: activation needs a portable remote <repo>@<branch> address`)
+      }
+      const canonical = formatQueueAddress(address)
+      const location = await resolveQueueLocation(cwd(), canonical, env)
+      const oid = await activateRunIndex(
+        createEventStore(location.repo, "origin", location.selection),
+        address.queue,
+        new Date(),
+      )
+      const product = { queue: canonical, ref: runIndexRef(address.queue), oid }
+      io.stdout(
+        options.json === true ? `${JSON.stringify(product)}\n` : `${canonical}: activated ${product.ref} at ${oid}\n`,
+      )
+    })
   queue
     .command("submit [branch]")
     .description("push the branch and open its change; defaults to the branch checked out here")

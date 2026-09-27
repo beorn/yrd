@@ -2344,7 +2344,7 @@ export async function coreQueueCommand(
             if (item.row.state === "direct") {
               return Promise.resolve({
                 row: item.row,
-                run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run),
+                run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run, item.run?.number),
                 checks: [],
                 ...(journalFor(item, journals) === undefined ? {} : { journal: journalFor(item, journals) }),
               })
@@ -2354,7 +2354,7 @@ export async function coreQueueCommand(
             if (defect !== undefined) {
               return Promise.resolve({
                 row: item.row,
-                run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run),
+                run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run, item.run?.number),
                 checks: [],
                 note: `Raw events: yrd queue show ${item.row.branch} --json`,
               })
@@ -3361,7 +3361,7 @@ export async function openEventDetail(
       : declared?.note
   return {
     row,
-    run: runOf(row, label, views, item.run?.id ?? row.run),
+    run: runOf(row, label, views, item.run?.id ?? row.run, item.run?.number),
     checks: views.map(readOutput),
     events,
     ...(journal === undefined ? {} : { journal }),

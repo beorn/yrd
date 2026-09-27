@@ -1191,7 +1191,7 @@ function SingleWatchPane({
           <Box height={1} flexShrink={0}>
             <Text bold color="$fg-warning" wrap="truncate">
               {`⚠︎ the row under the cursor left the table: ${vanished.row.branch}@${vanished.row.head.slice(0, 12)}${
-                vanished.run === undefined ? "" : ` ${runShortName(label, vanished.run.id)}`
+                vanished.run === undefined ? "" : ` ${runShortName(label, vanished.run.id, vanished.run.number)}`
               }; the cursor stays on its neighbour, Home follows the newest again`}
             </Text>
           </Box>
