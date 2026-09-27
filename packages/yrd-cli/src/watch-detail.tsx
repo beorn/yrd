@@ -1092,7 +1092,14 @@ function ChangeBox({
     ...(detail.commits === undefined ? {} : { commits: detail.commits }),
     ...(detail.run.id === undefined ? {} : { runId: detail.run.id }),
   })
-  const keyWidth = metadataKeyWidth(groups)
+  const compositions = detail.journal?.compositions ?? []
+  const compositionGroups = compositions.map((composition) => [
+    { key: "PATH", value: composition.path },
+    { key: "BASE", value: composition.base },
+    { key: "MAIN", value: composition.from },
+    { key: "COMPOSED", value: composition.merged },
+  ])
+  const keyWidth = metadataKeyWidth([...groups, ...compositionGroups])
   const body = detail.body === undefined ? "" : withoutGitConflictsBlock(detail.body).trim()
   return (
     <TitledBox>
@@ -1143,6 +1150,27 @@ function ChangeBox({
           ))}
         </Box>
       ))}
+      {compositionGroups.length === 0 ? null : (
+        <Box flexDirection="column" minWidth={0}>
+          <Box height={1} flexShrink={0} />
+          <Text bold>Composed</Text>
+          {compositionGroups.map((group, index) => (
+            <Box key={String(index)} flexDirection="column" minWidth={0}>
+              {group.map((fact) => (
+                <Box key={fact.key} flexDirection="row" minWidth={0}>
+                  <Text color="$fg-muted" flexShrink={0}>
+                    {fact.key.padEnd(keyWidth)}
+                  </Text>
+                  <Text wrap="truncate" minWidth={0}>
+                    {fact.value}
+                  </Text>
+                </Box>
+              ))}
+              {index === compositionGroups.length - 1 ? null : <Box height={1} flexShrink={0} />}
+            </Box>
+          ))}
+        </Box>
+      )}
       {detail.gitAbsent === undefined ? null : (
         <>
           <Box height={1} flexShrink={0} />
