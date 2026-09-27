@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: queue check scans a temporary repository and workdir>
  * @failure  `yrd check` ran the target's checks in the INVOKING tree, so it
  *           answered "is my cwd green" while wearing the name of
  *           the queue's judgement. A checkout whose dependencies are symlinked

@@ -2,7 +2,7 @@
  * @failure The 2026-09-24 DROP quarantine contains 21 valid chains and 41 cancelled-only chains; moving the latter as-is blinds Yrd listing.
  * @level l1 — real local bare origin, queue event writer, and the one-off adoption CLI.
  * @consumer #25658 direct adoption of the quarantined drops.
- * @reach fs-walk <temporary fixture>/ only; the production remote is never named.
+ * @reach fs-walk <fixture-only: adoption CLI scans a temporary local bare remote>
  * @testonly none
  */
 import { spawnSync } from "node:child_process"

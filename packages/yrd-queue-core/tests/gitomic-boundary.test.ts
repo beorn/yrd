@@ -1,3 +1,6 @@
+/**
+ * @reach fs-walk vendor/yrd/packages/*\/src/** vendor/yrd/packages/*\/scripts/**
+ */
 import { execFileSync } from "node:child_process"
 import { readFileSync, readdirSync } from "node:fs"
 import { fileURLToPath } from "node:url"

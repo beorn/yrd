@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: mirror cases scan temporary local repositories>
  * @failure Every compose reads each component repository from GitHub over its own ssh login, so one
  *          round opens a hundred logins for data a single fetch per repository would have brought.
  * @level   l2 (real repositories, real `clone --mirror` and `fetch --prune`, real kernel flocks)

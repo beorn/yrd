@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: watch pane walks rendered lines and temporary capture files>
  * @failure  The port kept the verb and lost the pane: no status box on the
  *           border, no step lines, no change list, no Changes tab, a flat
  *           text row instead of columns, a queue name where the operator's
@@ -5495,8 +5496,9 @@ it("navigates a numbered run by bare address with one selected queue and reports
   const first = snapshot({ rows: [numbered], unfiltered: [numbered] })
   const resolveRunAddress = vi.fn(async (address: string) => {
     if (address === "#7") return { canonical: "example.test/repo@main#7", id: RUN_ID, number: 7 }
-    if (address === "#9")
+    if (address === "#9") {
       return { canonical: "example.test/repo@main#9", id: "pruned-run", number: 9, startedAt: NOW.toISOString() }
+    }
     throw new Error(
       "E_RUN_UNKNOWN: example.test/repo@main#8 has no entry at refs/yrd/main/runs:by-number/0/8 on https://example.test/repo.git",
     )

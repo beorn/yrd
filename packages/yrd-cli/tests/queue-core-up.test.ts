@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: queue up runs copied real source against a temporary remote and workdir>
  * @failure  The service (`yrd queue up`) reads the target's declaration once,
  *           at start, and runs every later round on that reading: an edit at
  *           the target — a check added, a key mistyped, the switch removed —

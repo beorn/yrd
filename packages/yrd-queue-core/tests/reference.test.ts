@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: reference cases use temporary repos and a named git-super binary>
  * @failure The queue's reference repository holds no object store for a gitlink, so every
  *          compose clones that submodule from the network instead of borrowing it.
  * @level   l2 (real repositories, real submodules, real `git super worktree add`)

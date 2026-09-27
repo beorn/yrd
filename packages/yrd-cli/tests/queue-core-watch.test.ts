@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: queue watch scans a temporary remote and log workdir>
  * @failure  A watch that cannot be trusted to END is a watch nobody scripts
  *           against: the retired monitor exited 0 whatever became of the
  *           change, so a seat waiting on `yrd watch <branch>` learned nothing

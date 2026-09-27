@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: queue declaration scans temporary remote and state fixtures>
  * @failure A command reads config from the caller's checkout or a retired
  * target: hint instead of the selected queue branch at origin, so it judges
  * against the wrong rules or guesses after malformed authority.

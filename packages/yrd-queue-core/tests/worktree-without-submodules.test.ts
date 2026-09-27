@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: worktree Git calls use an in-memory recorder>
  * @failure  A plain `git worktree add|remove` runs for a commit that DOES record
  *           .gitmodules, so the worktree is created with every submodule
  *           unmaterialized and the failure surfaces later as missing files.
