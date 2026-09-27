@@ -922,7 +922,9 @@ function runnerLineOf(
   const publishedDetail =
     published?.signal === "fresh" || published?.signal === "silent"
       ? `published status from runner ref: ${published.signal}, ${publishedClaim?.State ?? "unreadable state"} since ${publishedClaim?.Since ?? "unknown"}, beat at ${publishedClaim?.At ?? "unknown"}${published.phase?.status === "overdue" ? ` · phase overdue: ${published.phase.reason}` : published.phase?.status === "unavailable" ? ` · ${published.phase.reason}` : ""}${unjudged}`
-      : published?.why
+      : published?.why === undefined
+        ? undefined
+        : `${published.why}${unjudged}`
   const detail = publishedDetail === undefined ? localDetail : `${publishedDetail} · ${localDetail}`
   switch (state) {
     case "provisioning":

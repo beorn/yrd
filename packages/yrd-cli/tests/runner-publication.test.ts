@@ -79,6 +79,14 @@ describe("runner ref publication", () => {
         new Date(f.own.at),
       ).detail,
     ).toContain("unjudged trailers: Due")
+    const skewed = await readPublishedRunner(f.git, "main", "origin", tip, new Date(Date.parse(f.own.at) - 31_000))
+    expect(skewed).toMatchObject({ signal: "unreadable", unjudgedTrailers: ["Due"] })
+    expect(
+      runnerLine(
+        { journalDir: "/no-local-journal", service: { kind: "absent", why: "no local document" }, published: skewed },
+        new Date(Date.parse(f.own.at) - 31_000),
+      ).detail,
+    ).toContain("unjudged trailers: Due")
   })
 
   it("uses the shared deadline judgment for a fresh remote claim", async () => {
