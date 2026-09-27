@@ -117,6 +117,13 @@ describe("remote calls are counted from git's trace2 event log", () => {
     })(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
     expect(() => roundRemoteCallsRow(oldTrace.end())).toThrow(/untagged component-main refresh/u)
     expect(existsSync(join(root, "old-trace2"))).toBe(false)
+
+    // Submit observes the same Git call but has no round refresh boundary.
+    const submitTrace = traceRemoteCalls(join(root, "submit-trace2"), { seams: true })
+    await gitIn(seed, undefined, undefined, {
+      env: { ...process.env, ...submitTrace.env, GIT_SSH_COMMAND: ssh },
+    })(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+    expect(submitTrace.end().sshChildren).toBe(1)
   }, 60_000)
 
   it("removes its trace directory once it has counted it, so no round leaves its trace2 log behind", async () => {

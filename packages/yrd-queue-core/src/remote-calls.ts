@@ -51,6 +51,7 @@ function describeSshCall(
   argv: readonly string[] | undefined,
   refresh: boolean,
   sshChildren: number,
+  requireRefreshTag: boolean,
 ): RemoteCalls["sshCalls"][number] {
   if (command === undefined || argv === undefined || repository === undefined) {
     return { command: "unknown", repository: repository ?? "unknown", refresh, sshChildren }
@@ -62,7 +63,7 @@ function describeSshCall(
     if (!mainFetch) {
       throw new Error(`Trace2 tagged a non-component-main SSH call as refresh: ${command} in ${repository}`)
     }
-  } else if (mainFetch) {
+  } else if (mainFetch && requireRefreshTag) {
     throw new Error(
       `Trace2 found an untagged component-main refresh fetch in ${repository}; round SSH split cannot be proven`,
     )
@@ -71,7 +72,10 @@ function describeSshCall(
 }
 
 /** Count the remote calls recorded under one trace2 directory. A directory that is not there is refused. */
-export function readRemoteCalls(directory: string): RemoteCalls {
+export function readRemoteCalls(
+  directory: string,
+  options: Readonly<{ requireRefreshTag?: boolean }> = {},
+): RemoteCalls {
   let names: string[]
   try {
     if (!statSync(directory).isDirectory()) throw new Error("not a directory")
@@ -144,7 +148,9 @@ export function readRemoteCalls(directory: string): RemoteCalls {
       }
     }
     if (fileSshChildren > 0) {
-      sshCalls.push(describeSshCall(command, repository, argv, refresh, fileSshChildren))
+      sshCalls.push(
+        describeSshCall(command, repository, argv, refresh, fileSshChildren, options.requireRefreshTag === true),
+      )
     }
     if (remote) {
       const row = (seams[seam ?? "unattributed"] ??= {})
@@ -193,7 +199,7 @@ export function traceRemoteCalls(
         else process.env.GIT_TRACE2_ENV_VARS = previousVars
       }
       try {
-        return readRemoteCalls(directory)
+        return readRemoteCalls(directory, { requireRefreshTag: options.refresh })
       } finally {
         rmSync(directory, { recursive: true, force: true })
       }
