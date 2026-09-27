@@ -3,6 +3,47 @@ import type { ChangeStatus, EventChange } from "./events.ts"
 import type { Draft } from "./drafts.ts"
 import { clocks, type Row } from "./table.ts"
 
+function noticeOutcome(
+  branch: string,
+  change: EventChange,
+): Pick<Row<ChangeStatus>, "told" | "refused" | "undelivered" | "next"> {
+  const endingNotices = Object.values(change.notices ?? {}).filter((notice) => notice.for === change.ending?.id)
+  const refused = endingNotices
+    .filter((notice) => notice.result === "refused")
+    .map((notice) => {
+      if (notice.reason === undefined) throw new Error(`event change ${branch}: refused ${notice.to} has no reason`)
+      return `${notice.to} refused=${notice.reason}`
+    })
+  const undelivered = endingNotices
+    .filter((notice) => notice.result === "failed")
+    .map((notice) => {
+      if (notice.reason === undefined) throw new Error(`event change ${branch}: failed ${notice.to} has no reason`)
+      return notice.reason
+    })
+  const notTold = [...refused, ...undelivered]
+  const submitterTold = endingNotices.some((notice) => notice.to === "submitter" && notice.result === "delivered")
+  return {
+    ...(endingNotices.length === 0 ? {} : { told: notTold.length === 0 }),
+    ...(refused.length === 0 ? {} : { refused: refused.join("; ") }),
+    ...(undelivered.length === 0 ? {} : { undelivered: undelivered.join("; ") }),
+    ...(notTold.length > 0
+      ? {
+          next: {
+            owner: "the queue's operator",
+            because: `${[...new Set(endingNotices.filter((notice) => notice.result !== "delivered").map((notice) => notice.to))].join(", ")} not told: ${notTold.join("; ")}`,
+          },
+        }
+      : change.status === "failed" && submitterTold && change.submitter !== undefined
+        ? {
+            next: {
+              owner: change.submitter,
+              because: `it failed (${change.reason ?? "reason unrecorded"}), and only the branch's author can move it`,
+            },
+          }
+        : {}),
+  }
+}
+
 /** One row per branch; the caller supplies the already-folded change chains. */
 export function eventRows(
   changes: ReadonlyMap<string, EventChange>,
@@ -64,6 +105,7 @@ export function eventRows(
         : { reason: `deferred ${change.deferred.check}: ${change.deferred.reason}` }),
       ...(change.ignored === undefined ? {} : { ignored: change.ignored }),
       ...(change.diagnostic === undefined ? {} : { diagnostic: change.diagnostic }),
+      ...noticeOutcome(branch, change),
     })
   }
   const changeRows = rows.sort((left, right) => {

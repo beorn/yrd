@@ -22,6 +22,54 @@ function event(
 }
 
 describe("event changes use the shared table row", () => {
+  it("shows a refused ending notice and gives the queue operator the next move", () => {
+    const ended = "c".repeat(40)
+    const failed: EventChange = {
+      status: "failed",
+      commit: HEAD,
+      submitter: "@dev/2",
+      reason: "verify",
+      since: new Date(TIME),
+      at: new Date(TIME),
+      endedAt: new Date(TIME),
+      ending: { kind: "failed", id: ended },
+      notices: {
+        [`${ended}:submitter`]: {
+          for: ended,
+          to: "submitter",
+          result: "refused",
+          reason: "tribe refused (24581)",
+        },
+      },
+    }
+    expect(eventRows(new Map([["task/refused", failed]]))[0]).toMatchObject({
+      told: false,
+      refused: "submitter refused=tribe refused (24581)",
+      next: { owner: "the queue's operator", because: "submitter not told: submitter refused=tribe refused (24581)" },
+    })
+  })
+
+  it("keeps the failed change with its submitter after a delivered ending notice", () => {
+    const ended = "d".repeat(40)
+    const failed: EventChange = {
+      status: "failed",
+      commit: HEAD,
+      submitter: "@dev/2",
+      reason: "verify",
+      since: new Date(TIME),
+      at: new Date(TIME),
+      endedAt: new Date(TIME),
+      ending: { kind: "failed", id: ended },
+      notices: {
+        [`${ended}:submitter`]: { for: ended, to: "submitter", result: "delivered" },
+      },
+    }
+    expect(eventRows(new Map([["task/told", failed]]))[0]).toMatchObject({
+      told: true,
+      next: { owner: "@dev/2", because: "it failed (verify), and only the branch's author can move it" },
+    })
+  })
+
   it("keeps the default seven-day table current and JSON historical, with drafts and older endings opt-in", () => {
     const recent = new Date("2026-09-23T14:00:00.000Z")
     const old = new Date("2026-09-01T14:00:00.000Z")
