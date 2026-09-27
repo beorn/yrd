@@ -1422,7 +1422,7 @@ function Table({
     singleQueue: isSingleQueue,
     separateColumns: true,
   })
-  const layout = multipleQueues ? { ...baseLayout, isFullQueue: true, qWidth: 3 } : baseLayout
+  const layout = baseLayout
   const plan: BandPlan = bandPlan(rows, columns - 4)
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
@@ -1484,7 +1484,7 @@ function Table({
                     layout={layout}
                     cursor={index === cursor}
                     queueDigit={itemQueue.digit}
-                    queueLabel={multipleQueues ? `[${itemQueue.digit}]` : itemQueue.label}
+                    queueLabel={itemQueue.label}
                   />
                 )
               }
@@ -1499,7 +1499,7 @@ function Table({
                   hovered={meta.isHovered}
                   live={live}
                   queueDigit={itemQueue.digit}
-                  queueLabel={multipleQueues ? `[${itemQueue.digit}]` : itemQueue.label}
+                  queueLabel={itemQueue.label}
                 />
               )
               if (separator === undefined && brk === undefined) return row

@@ -12,9 +12,8 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { run } from "silvery/runtime"
-import { createTermless } from "silvery/test"
-import { createTerminal } from "@termless/core"
-import { createGhosttyBackend, initGhostty } from "@termless/ghostty"
+import { bufferToStyledText, createTermless } from "silvery/test"
+import { renderAnsiPng } from "@termless/ghostty"
 import type { Row } from "@yrd/queue-core"
 import { WatchPane, type WatchSnapshot } from "../src/watch-pane.tsx"
 import { WATCH_RUN_OPTIONS } from "../src/watch-run-options.ts"
@@ -108,6 +107,19 @@ describe("the pointer in the live pane", () => {
       WATCH_RUN_OPTIONS,
     )
     try {
+      const captureFrame = async (stage: string): Promise<void> => {
+        if (!process.env.YRD_CAPTURE_DIR) return
+        if (handle.buffer === null) throw new Error("watch detail has no rendered buffer to capture")
+        mkdirSync(process.env.YRD_CAPTURE_DIR, { recursive: true })
+        const name = `26187-detail-${stage}`
+        const ansi = bufferToStyledText(handle.buffer)
+        writeFileSync(join(process.env.YRD_CAPTURE_DIR, `${name}.ansi`), ansi)
+        writeFileSync(join(process.env.YRD_CAPTURE_DIR, `${name}.txt`), term.screen.getText())
+        writeFileSync(
+          join(process.env.YRD_CAPTURE_DIR, `${name}.png`),
+          await renderAnsiPng(ansi.replace(/\r?\n/gu, "\r\n"), { cols: 100, rows: 31 }),
+        )
+      }
       await handle.waitForLayoutStable()
       const lines = term.screen.getLines()
       const selectedRow = rowOf(lines, "task/alpha")
@@ -120,6 +132,7 @@ describe("the pointer in the live pane", () => {
       expect(top).toContain("SCROLL-LINE-000")
       expect(top).not.toContain("SCROLL-LINE-100")
       expect(top).toContain("Timeline")
+      await captureFrame("before")
 
       sendInput("\x1b[6~")
       await sleep(100)
@@ -127,27 +140,21 @@ describe("the pointer in the live pane", () => {
       const paged = term.screen.getText()
       expect(paged).not.toContain("Timeline")
       expect(paged).not.toContain("SCROLL-LINE-000")
+      await captureFrame("after-pagedown")
 
       sendInput("\x1b[5~")
       await sleep(100)
       await handle.waitForLayoutStable()
       expect(term.screen.getText()).toContain("Timeline")
 
-      await term.mouse.wheel(80, 18, 12)
+      await term.mouse.wheel(80, 18, 32)
       await sleep(100)
       await handle.waitForLayoutStable()
       const wheeled = term.screen.getText()
       expect(wheeled).not.toContain("Timeline")
+      expect(wheeled).not.toContain("SCROLL-LINE-000")
       expect(wheeled).not.toBe(top)
-      if (process.env.YRD_CAPTURE_DIR) {
-        mkdirSync(process.env.YRD_CAPTURE_DIR, { recursive: true })
-        const ansi = term.out.getText()
-        writeFileSync(join(process.env.YRD_CAPTURE_DIR, "26187-detail-after-wheel.ansi"), ansi)
-        await initGhostty()
-        const capture = createTerminal({ backend: createGhosttyBackend(), cols: 100, rows: 31 })
-        capture.feed(ansi.replace(/\r?\n/gu, "\r\n"))
-        writeFileSync(join(process.env.YRD_CAPTURE_DIR, "26187-detail-after-wheel.png"), await capture.screenshot())
-      }
+      await captureFrame("after-wheel")
     } finally {
       handle.unmount()
     }
