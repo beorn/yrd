@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, readRemoteCommit, runnerRef, type RunnerClaim } from "@yrd/queue-core"
+import { gitIn, readRemoteCommit, roundHealthDocument, runnerRef, type RunnerClaim } from "@yrd/queue-core"
 import { readPublishedRunner, RunnerPublisher } from "../src/runner-publication.ts"
 import { runnerLine } from "../src/watch-runner.ts"
 
@@ -65,28 +65,28 @@ describe("runner ref publication", () => {
   it("keeps a future trailer in the published claim and names it on the human row", async () => {
     const f = await fixture()
     const deadline = new Date(Date.parse(f.own.at) + 30 * 60_000).toISOString()
-    const tip = await f.replace({ ...f.own, state: "checking" }, `Deadline: ${deadline}\nDue: later\n`)
+    const tip = await f.replace({ ...f.own, state: "checking" }, `Deadline: ${deadline}\nIntent: later\n`)
     const published = await readPublishedRunner(f.git, "main", "origin", tip, new Date(f.own.at))
     expect(published).toMatchObject({
       signal: "fresh",
-      claim: { Deadline: deadline, Due: "later" },
+      claim: { Deadline: deadline, Intent: "later" },
       phase: { status: "within" },
-      unjudgedTrailers: ["Due"],
+      unjudgedTrailers: ["Intent"],
     })
     expect(
       runnerLine(
         { journalDir: "/no-local-journal", service: { kind: "absent", why: "no local document" }, published },
         new Date(f.own.at),
       ).detail,
-    ).toContain("unjudged trailers: Due")
+    ).toContain("unjudged trailers: Intent")
     const skewed = await readPublishedRunner(f.git, "main", "origin", tip, new Date(Date.parse(f.own.at) - 31_000))
-    expect(skewed).toMatchObject({ signal: "unreadable", unjudgedTrailers: ["Due"] })
+    expect(skewed).toMatchObject({ signal: "unreadable", unjudgedTrailers: ["Intent"] })
     expect(
       runnerLine(
         { journalDir: "/no-local-journal", service: { kind: "absent", why: "no local document" }, published: skewed },
         new Date(Date.parse(f.own.at) - 31_000),
       ).detail,
-    ).toContain("unjudged trailers: Due")
+    ).toContain("unjudged trailers: Intent")
   })
 
   it("uses the shared deadline judgment for a fresh remote claim", async () => {
@@ -100,6 +100,38 @@ describe("runner ref publication", () => {
       claim: { Deadline: deadline },
       phase: { status: "overdue" },
     })
+  })
+
+  /** @failure The remote RUNNER row and local health page could disagree about a cycling round's total Due. @level l2 */
+  it("uses the identical whole-round Due sentence remotely and locally", async () => {
+    const f = await fixture()
+    const now = Date.parse(f.own.at)
+    const started = new Date(now - 100 * 60_000).toISOString()
+    const round = new Date(now - 79 * 60_000).toISOString()
+    const since = new Date(now - 60_000).toISOString()
+    const due = new Date(now - 4 * 60_000).toISOString()
+    const deadline = new Date(now + 29 * 60_000).toISOString()
+    const claim: RunnerClaim = { ...f.own, started, round, since, due, deadline, candidates: 3, state: "checking" }
+    await f.publisher.publish(claim)
+    const published = await readPublishedRunner(f.git, "main", "origin", await f.remoteTip(), new Date(now))
+    expect(published).toMatchObject({
+      signal: "fresh",
+      phase: { status: "within" },
+      round: { status: "overdue" },
+      claim: { Due: due, Round: round, Candidates: "3" },
+    })
+    const local = roundHealthDocument("yrd", undefined, 120_000, new Date(now), {
+      flow: { waiting: 3, roundOpen: { startedAt: round, phase: "hold" } },
+      threshold: { ms: 45 * 60_000, declared: false },
+      claim,
+    })
+    expect(local.error?.cause).toBe(published.round?.reason)
+    expect(
+      runnerLine(
+        { journalDir: "/no-local-journal", service: { kind: "absent", why: "no local document" }, published },
+        new Date(now),
+      ).detail,
+    ).toContain(published.round?.reason)
   })
 
   it("creates a leased parentless claim readable without a local journal", async () => {

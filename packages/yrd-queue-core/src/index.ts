@@ -36,11 +36,18 @@ export {
   formatRunnerClaim,
   judgeRunnerClaim,
   judgeRunnerDeadline,
+  judgeRunnerDue,
   parseRunnerClaim,
   RUNNER_CLAIM_STATES,
   RUNNER_STATES,
 } from "./runner-claim.ts"
-export type { RunnerClaim, RunnerClaimJudgment, RunnerClaimState, RunnerDeadlineJudgment } from "./runner-claim.ts"
+export type {
+  RunnerClaim,
+  RunnerClaimJudgment,
+  RunnerClaimState,
+  RunnerDeadlineJudgment,
+  RunnerDueJudgment,
+} from "./runner-claim.ts"
 export type { Change } from "./refs.ts"
 export { formatQueueKey, parseQueueKey } from "./queue-key.ts"
 export { activateRunIndex, lookupRunIndex, runIndexPath, RUN_INDEX_CODES } from "./run-index.ts"
@@ -122,6 +129,8 @@ export {
   DEFAULT_CHECK_BOUND_MS,
   STEP_BOUNDS_MS,
   STEP_STATES,
+  roundBoundMs,
+  TRANSPORT_RETRY_LIMIT,
 } from "./check.ts"
 export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckView } from "./check.ts"
 export {

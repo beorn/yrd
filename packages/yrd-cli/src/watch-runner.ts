@@ -921,7 +921,7 @@ function runnerLineOf(
     published?.unjudgedTrailers === undefined ? "" : ` · unjudged trailers: ${published.unjudgedTrailers.join(", ")}`
   const publishedDetail =
     published?.signal === "fresh" || published?.signal === "silent"
-      ? `published status from runner ref: ${published.signal}, ${publishedClaim?.State ?? "unreadable state"} since ${publishedClaim?.Since ?? "unknown"}, beat at ${publishedClaim?.At ?? "unknown"}${published.phase?.status === "overdue" ? ` · phase overdue: ${published.phase.reason}` : published.phase?.status === "unavailable" ? ` · ${published.phase.reason}` : ""}${unjudged}`
+      ? `published status from runner ref: ${published.signal}, ${publishedClaim?.State ?? "unreadable state"} since ${publishedClaim?.Since ?? "unknown"}, beat at ${publishedClaim?.At ?? "unknown"}${published.phase?.status === "overdue" ? ` · phase overdue: ${published.phase.reason}` : published.phase?.status === "unavailable" ? ` · ${published.phase.reason}` : ""}${published.round?.status === "overdue" ? ` · round overdue: ${published.round.reason}` : published.round?.status === "unavailable" ? ` · ${published.round.reason}` : ""}${unjudged}`
       : published?.why === undefined
         ? undefined
         : `${published.why}${unjudged}`

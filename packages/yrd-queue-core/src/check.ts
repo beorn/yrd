@@ -71,9 +71,11 @@ export type CheckSpec = Readonly<{
 }>
 
 export const DEFAULT_CHECK_BOUND_MS = 30 * 60 * 1000
+export const TRANSPORT_RETRY_LIMIT = 1
 
 /** Detection bounds for steps that cannot be cancelled safely mid-operation. */
 export const STEP_BOUNDS_MS = {
+  "line-read": 30 * 60 * 1000,
   compose: 30 * 60 * 1000,
   worktree: 30 * 60 * 1000,
   prepare: 30 * 60 * 1000,
@@ -85,6 +87,7 @@ export const STEP_BOUNDS_MS = {
 
 /** The one mapping from a timed step to the state its claim publishes. */
 export const STEP_STATES = {
+  "line-read": "provisioning",
   compose: "provisioning",
   worktree: "provisioning",
   prepare: "provisioning",
@@ -93,6 +96,49 @@ export const STEP_STATES = {
   merge: "merging",
   notify: "merging",
 } as const satisfies Record<keyof typeof STEP_BOUNDS_MS, RunnerClaimState>
+
+/** The declared upper bound for one frozen line, including one transport retry. */
+export function roundBoundMs(checks: readonly CheckSpec[], setup: string | undefined, candidates: number): number {
+  if (!Number.isSafeInteger(candidates) || candidates < 1) {
+    throw new TypeError(`round Candidates must be a positive safe integer: ${String(candidates)}`)
+  }
+  const baseCandidateSteps = Object.entries(STEP_BOUNDS_MS)
+    .filter(([name]) => name !== "line-read")
+    .reduce((sum, [, bound]) => sum + bound, 0)
+  const activeChecks = checks.filter((check) => check.run !== "true")
+  const programRootOccurrences = activeChecks
+    .filter((check) => check.programRoot === true)
+    .reduce((sum, check) => sum + (check.on ?? ["merge"]).length, 0)
+  // Each attempt may run both phases. A program-root check prepares and
+  // removes two more worktrees per phase, before and after its declared check.
+  const phaseWorktrees = STEP_BOUNDS_MS.prepare + STEP_BOUNDS_MS.remove
+  const perCandidateSteps = baseCandidateSteps + phaseWorktrees * (1 + 2 * programRootOccurrences)
+  const declaredChecks = activeChecks.reduce(
+    (sum, check) => sum + (check.on ?? ["merge"]).length * (check.timeoutMs ?? DEFAULT_CHECK_BOUND_MS),
+    0,
+  )
+  const setupBounds =
+    setup === undefined || (checks.length > 0 && activeChecks.length === 0)
+      ? 0
+      : (2 + 2 * programRootOccurrences) * DEFAULT_CHECK_BOUND_MS
+  const perCandidate = perCandidateSteps + declaredChecks + setupBounds
+  // After a failed check, settled-base attribution can run its declared phase
+  // once more, including its own worktree, setup, and protected P/C worktrees.
+  // The failed phase is unknown when the line is read, so budget all checks.
+  const attribution =
+    activeChecks.length === 0
+      ? 0
+      : STEP_BOUNDS_MS.compose +
+        STEP_BOUNDS_MS.worktree +
+        phaseWorktrees * (1 + 2 * programRootOccurrences) +
+        (setupBounds === 0 ? 0 : (1 + 2 * programRootOccurrences) * DEFAULT_CHECK_BOUND_MS) +
+        declaredChecks
+  const total = STEP_BOUNDS_MS["line-read"] + candidates * (perCandidate * (1 + TRANSPORT_RETRY_LIMIT) + attribution)
+  if (!Number.isSafeInteger(total)) {
+    throw new RangeError(`round bound is not a safe integer for ${String(candidates)} candidates`)
+  }
+  return total
+}
 
 /**
  * The line a check writes when it has already computed a pass/fail, before any
