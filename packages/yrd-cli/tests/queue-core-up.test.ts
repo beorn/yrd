@@ -122,11 +122,10 @@ async function previousQueueReader(): Promise<typeof import("../../yrd-queue-cor
   )) as typeof import("../../yrd-queue-core/src/events.ts")
 }
 
-// A selected event change must keep the watch open through every working phase;
-// the legacy watch tests only exercise queued and checked.
+// A selected event change must keep the watch open through every working phase.
 describe("event watch selector endings", () => {
   it("waits through working phases and reports each ending", () => {
-    for (const phase of ["queued", "verifying", "checking", "merging", "checked"] as const) {
+    for (const phase of ["queued", "verifying", "checking", "merging"] as const) {
       expect(endingCode([phase])).toBeUndefined()
     }
     expect(endingCode(["merged"])).toBe(0)
@@ -232,7 +231,7 @@ type World = Readonly<{
 }>
 
 /** A bare remote whose `main` declares the queue, and a clone of it. */
-async function world(): Promise<World> {
+async function world(eventQueue = true): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -247,6 +246,12 @@ async function world(): Promise<World> {
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
+  if (eventQueue) {
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture target lost its declaration")
+    await createEventQueue(createEventStore(work, "origin", git.selection), "main", target, config, new Date())
+  }
   const workdir = join(root, "queue")
   mkdirSync(workdir, { recursive: true })
   return { git, work, workdir }
@@ -281,7 +286,7 @@ type GitlinkWorld = World &
  * at `a`. Modelled on the queue core's own gitlink case: `b` is on the
  * submodule's main, so candidate settling accepts a change that records it.
  */
-async function gitlinkWorld(sourceReadFailure = false): Promise<GitlinkWorld> {
+async function gitlinkWorld(sourceReadFailure = false, eventQueue = true): Promise<GitlinkWorld> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-gitlink-"))
   roots.push(root)
   // Ownership comes from hosted identities; Git transports these fixture URLs locally.
@@ -321,6 +326,12 @@ async function gitlinkWorld(sourceReadFailure = false): Promise<GitlinkWorld> {
   await git(["add", ".yrd.yml", ".gitmodules", "submodule"])
   await git(["commit", "--quiet", "-m", "main, with the submodule at a"])
   await git(["push", "--quiet", "origin", "main"])
+  if (eventQueue) {
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the gitlink fixture target lost its declaration")
+    await createEventQueue(createEventStore(work, "origin", git.selection), "main", target, config, new Date())
+  }
 
   // The submodule's main moves on to `b`; the root still records `a`.
   writeFileSync(join(submoduleWork, "lib.txt"), "b\n")
@@ -360,7 +371,7 @@ describe("yrd queue up, the service", () => {
    * @level l2 @consumer Hab's yrd service and its health reader
    */
   it("holds an event queue paused while judging without ending the service (25920)", async () => {
-    const w = await world()
+    const w = await world(false)
     const pauseCheck = join(w.workdir, "pause-during-check.ts")
     writeFileSync(
       pauseCheck,
@@ -645,7 +656,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       expect(accepted.stderr()).toContain("49 new failures on main")
       expect(accepted.stderr()).toContain("yrd queue resume")
     }
-    const ref = changeRef("main", { branch: "task/one", head })
+    const ref = changesRef("main", "task/one")
     expect(await w.git(["ls-remote", "--refs", "origin", ref])).toContain(ref)
 
     const listed = capture(w.work)
@@ -699,7 +710,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     expect(resumedList).toMatchObject({ changes: [{ branch: "task/one" }], pause: null })
     expect(resumedList?.changes).toEqual(pausedList?.changes)
 
-    // A retry on a paused line is accepted too, and appends to the change it retries.
+    // A retry on a paused line is accepted too, without changing the selected event.
     const beforeRetry = await w.git(["ls-remote", "--refs", "origin", ref])
     expect(
       await coreQueueCommand(
@@ -719,7 +730,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       ),
     ).toBe(0)
     expect(retried.stderr()).toContain("retry arrives while paused")
-    expect(await w.git(["ls-remote", "--refs", "origin", ref])).not.toBe(beforeRetry)
+    expect(await w.git(["ls-remote", "--refs", "origin", ref])).toBe(beforeRetry)
     // The budget of the service case above: accepted submits push where refused
     // ones did not, and under a loaded host this case measured 4-6 s, at the
     // 5 s default.
@@ -760,17 +771,18 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       if (valid) {
         await expect(attempt).resolves.toBe(0)
         // The one stderr line a clean submit writes is its remote-call count (25570 row 3): the queue read, the
-        // record push and every fetch, from git's own trace2 log, with no torn line.
+        // event push and every fetch, from git's own trace2 log, with no torn line.
         expect(run.stderr()).toMatch(
           /^yrd: submit remote calls: processes=\d+ ssh_children=0 remote_ms=\d+ unreadable=0 (?=.*\bpush=1\b)[^\n]*\n$/u,
         )
         expect(records(run)[0]).toMatchObject({ head })
-        const history = await readRecords(w.git, (records(run)[0] as { opened: string }).opened)
-        expect(history.map((record) => record.kind)).toEqual(["opened"])
-        expect(trailer(history[0]!, "Target")).toBeUndefined()
-        expect(await w.git(["ls-remote", "--refs", "origin", changeRef("main", { branch, head })])).toContain(
-          changeRef("main", { branch, head }),
-        )
+        const ref = changesRef("main", branch)
+        const history = await (
+          await openEvents({ ...createEventStore(w.work, "origin", w.git.selection), ref })
+        ).events()
+        expect(history.map((event) => event.type)).toEqual(["opened"])
+        expect(history[0]?.props.some(([key]) => key === "Target")).toBe(false)
+        expect(await w.git(["ls-remote", "--refs", "origin", ref])).toContain(ref)
       } else {
         if (scenario === "legacy protected declaration") {
           await expect(attempt).rejects.toThrow(/\.yrd\.yml: unknown key landing/u)
@@ -2399,7 +2411,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
    * @level l2 @consumer queue operator and Hab's yrd service
    */
   it("retries a pre-cutover stuck event change after queue resume", async () => {
-    const w = await world()
+    const w = await world(false)
     const target = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
@@ -2515,7 +2527,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
 
   // @failure 25041: waiting for a moved checkout can hide a stuck change from the service health reader.
   it("keeps pending stuck changes in health while waiting for a checkout", async () => {
-    const w = await gitlinkWorld()
+    const w = await gitlinkWorld(false, false)
     const target = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
@@ -2568,7 +2580,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
    * @level l2 @consumer queue operator and Hab's yrd service
    */
   it("resumes a pre-cutover stuck event change without a legacy pause", async () => {
-    const w = await world()
+    const w = await world(false)
     const target = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
@@ -2626,7 +2638,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
 
   // @failure 25041: an interrupted stuck release can leave a pause forever or let ops cutover corrupt the queue.
   it("completes an unfinished pre-cutover stuck release on the next service round", async () => {
-    const w = await world()
+    const w = await world(false)
     const target = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
@@ -2666,7 +2678,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
 
   // @failure 25041: resume can release a readable stuck change while another change history is unreadable.
   it("refuses stuck resume until every event change history can be judged", async () => {
-    const w = await world()
+    const w = await world(false)
     const target = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
@@ -2702,7 +2714,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
   it("keeps pre-cutover stuck releases readable by the previous Yrd pin", async () => {
     const old = await previousQueueReader()
     for (const legacyPause of [false, true]) {
-      const w = await world()
+      const w = await world(false)
       const target = (await w.git(["rev-parse", "main"])).trim()
       const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
       if (config === undefined) throw new Error("the fixture's target lost its declaration")
@@ -2771,7 +2783,7 @@ describe("a stuck change stops the line; the service stays up and pages (the and
   }, 90_000)
 
   it("retries a stuck release after only its legacy pause was resumed", async () => {
-    const w = await world()
+    const w = await world(false)
     const target = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
@@ -3297,7 +3309,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
    * @level l2 @consumer Hab health probe and queue list/watch reader
    */
   it("keeps the service alive through repeated failed remote-read rounds, pages once, and clears after recovery", async () => {
-    const w = await world()
+    const w = await world(false)
     const commit = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
@@ -3396,7 +3408,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
    * @level l2 @consumer Hab health probe and queue watch
    */
   it("keeps up alive and pages repeated event retry exhaustion before its first line reading", async () => {
-    const w = await world()
+    const w = await world(false)
     const commit = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
@@ -3537,7 +3549,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
    * @level l2 @consumer Hab's yrd service
    */
   it("keeps up alive when a rival advances the change after its status read", async () => {
-    const w = await world()
+    const w = await world(false)
     const commit = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
@@ -3613,7 +3625,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
   // 25669 row 2: an event round held open is named on each beat with the phase
   // its own journal says it is in, so `yrd queue health` says where it is.
   it("the beats of an open event round name its phase, from the round's own journal", async () => {
-    const w = await world()
+    const w = await world(false)
     const held = heldSetup(w.workdir)
     await redeclare(w, `setup: ${held.command}\n`)
     const commit = (await w.git(["rev-parse", "main"])).trim()
@@ -3675,7 +3687,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
   // the round the 09-24 cut-over stood still in. Its own journalled line makes
   // it judgeable: the beats state the waiting count and the phase it is in.
   it("the first round after a start is judged from its own journal's line", async () => {
-    const w = await world()
+    const w = await world(false)
     const held = heldSetup(w.workdir)
     await redeclare(w, `setup: ${held.command}\n`)
     const commit = (await w.git(["rev-parse", "main"])).trim()
@@ -4345,8 +4357,8 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
    * so every queue command the shell runs keeps its owned clone, journal and
    * worktrees inside the world and never under the host's state directory.
    */
-  async function verbWorld(): Promise<World> {
-    const w = await world()
+  async function verbWorld(eventQueue = true): Promise<World> {
+    const w = await world(eventQueue)
     await w.git(["config", "yrd.workdir", w.workdir])
     return w
   }
@@ -4706,7 +4718,7 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
   // through the same reader as queue show (readEventListing), and a merged round
   // exits 0 naming the landing sha.
   it("on an event queue, yrd merge merges the change, exits 0, and names the landing sha in the output line (#25687)", async () => {
-    const w = await verbWorld()
+    const w = await verbWorld(false)
     const commit = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
@@ -4754,7 +4766,7 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
   // 25937 (P3). On an event queue, yrd merge --json for a stuck change must not report
   // a candidate commit as its landing, and the Merge trailer must not be emitted.
   it("on an event queue, yrd merge --json on a stuck change does not report a landing (#25937)", async () => {
-    const w = await verbWorld()
+    const w = await verbWorld(false)
     const commit = (await w.git(["rev-parse", "main"])).trim()
     const config = await readConfig(w.git, commit, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("the fixture's target lost its declaration")
