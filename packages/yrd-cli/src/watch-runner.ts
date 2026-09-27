@@ -129,6 +129,8 @@ export type RunnerService =
       state: string
       since?: Date
       flow?: RunnerFlow
+      /** The service's own page sentence, when it judged the line stalled. */
+      stallCause?: string
       readFailure?: Readonly<{ ref: string; error: string; count: number }>
     }>
   // `graceful`: the service wrote its own stop (25430). False is a stop outside one — a SIGKILL, a crash, a
@@ -303,6 +305,7 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
     state: document.state,
     ...(since === undefined ? {} : { since }),
     ...(flow === undefined ? {} : { flow }),
+    ...(document.error?.code === "queue-line-stalled" ? { stallCause: document.error.cause } : {}),
     ...(readFailure === undefined ? {} : { readFailure }),
   }
 }
@@ -813,6 +816,7 @@ export function runnerLine(
  */
 function flowNote(service: RunnerService | undefined): string | undefined {
   if (service?.kind !== "beating") return undefined
+  if (service.stallCause !== undefined) return service.stallCause
   if (service.readFailure !== undefined) {
     return `last round failed reading ${service.readFailure.ref} (${String(service.readFailure.count)} consecutive): ${service.readFailure.error}; queue alive, retrying`
   }
@@ -876,7 +880,7 @@ function runnerLineOf(
   const localDetail = service?.kind === "unreadable" ? `${service.why} · ${found}` : found
   const publishedDetail =
     published?.signal === "fresh" || published?.signal === "silent"
-      ? `published status from runner ref: ${published.signal}, ${publishedClaim?.State ?? "unreadable state"} since ${publishedClaim?.Since ?? "unknown"}, beat at ${publishedClaim?.At ?? "unknown"}`
+      ? `published status from runner ref: ${published.signal}, ${publishedClaim?.State ?? "unreadable state"} since ${publishedClaim?.Since ?? "unknown"}, beat at ${publishedClaim?.At ?? "unknown"}${published.phase?.status === "overdue" ? ` · phase overdue: ${published.phase.reason}` : published.phase?.status === "unavailable" ? ` · ${published.phase.reason}` : ""}`
       : published?.why
   const detail = publishedDetail === undefined ? localDetail : `${publishedDetail} · ${localDetail}`
   switch (state) {

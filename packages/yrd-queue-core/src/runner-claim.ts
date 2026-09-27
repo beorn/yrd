@@ -27,6 +27,8 @@ export type RunnerClaim = Readonly<{
   /** Present only while a change is selected. */
   holding?: string
   since: string
+  /** Current phase bound; absent on unbounded states and in legacy claims. */
+  deadline?: string
 }>
 
 export type RunnerClaimJudgment = Readonly<{
@@ -34,8 +36,13 @@ export type RunnerClaimJudgment = Readonly<{
   reason: string
 }>
 
+export type RunnerDeadlineJudgment = Readonly<{
+  status: "within" | "overdue" | "unavailable" | "unbounded" | "unreadable"
+  reason: string
+}>
+
 const SUBJECT = "yrd runner claim"
-const ORDER = ["Runner", "Started", "At", "Beat", "State", "Holding", "Since"] as const
+const ORDER = ["Runner", "Started", "At", "Beat", "State", "Holding", "Since", "Deadline"] as const
 const REQUIRED = ["Runner", "Started", "At", "Beat", "State", "Since"] as const
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u
 
@@ -76,6 +83,13 @@ function checked(claim: RunnerClaim): RunnerClaim {
   if (!(RUNNER_CLAIM_STATES as readonly string[]).includes(claim.state)) {
     throw new TypeError(`runner claim State is invalid: ${JSON.stringify(claim.state)}`)
   }
+  if (claim.deadline !== undefined) {
+    const deadline = instant(claim.deadline, "Deadline")
+    if (deadline < since) throw new TypeError("runner claim Deadline must be at or after Since")
+    if (claim.state === "idle" || claim.state === "stuck" || claim.state === "paused" || claim.state === "stopped") {
+      throw new TypeError(`runner claim Deadline is invalid for ${claim.state} State`)
+    }
+  }
   if (claim.holding !== undefined) {
     const change = parseChangeName(claim.holding)
     if (change === undefined) {
@@ -93,12 +107,22 @@ function checked(claim: RunnerClaim): RunnerClaim {
 /** Full root-commit message; Beat's unit is integer milliseconds. */
 export function formatRunnerClaim(input: RunnerClaim): string {
   const claim = checked(input)
+  if (
+    claim.deadline === undefined &&
+    (claim.state === "provisioning" ||
+      claim.state === "checking" ||
+      claim.state === "merging" ||
+      claim.state === "deprovisioning")
+  ) {
+    throw new TypeError(`runner claim Deadline is required for ${claim.state} State`)
+  }
   return (
     `${SUBJECT}\n\nRunner: ${claim.host}/${String(claim.pid)}\n` +
     `Started: ${claim.started}\nAt: ${claim.at}\nBeat: ${String(claim.beatMs)}ms\n` +
     `State: ${claim.state}\n` +
     (claim.holding === undefined ? "" : `Holding: ${claim.holding}\n`) +
-    `Since: ${claim.since}\n`
+    `Since: ${claim.since}\n` +
+    (claim.deadline === undefined ? "" : `Deadline: ${claim.deadline}\n`)
   )
 }
 
@@ -115,8 +139,9 @@ export function parseRunnerClaim(body: string): RunnerClaim {
     if (match === null) throw new TypeError(`runner claim malformed trailer: ${JSON.stringify(line)}`)
     const key = match[1]
     const value = match[2]
-    if (key === undefined || value === undefined)
+    if (key === undefined || value === undefined) {
       throw new TypeError(`runner claim malformed trailer: ${JSON.stringify(line)}`)
+    }
     const order = (ORDER as readonly string[]).indexOf(key)
     if (order < 0) throw new TypeError(`runner claim unknown trailer ${key}`)
     if (values.has(key)) throw new TypeError(`runner claim duplicate ${key} trailer`)
@@ -145,6 +170,7 @@ export function parseRunnerClaim(body: string): RunnerClaim {
     state: required(values, "State") as RunnerClaimState,
     ...(values.has("Holding") ? { holding: required(values, "Holding") } : {}),
     since: required(values, "Since"),
+    ...(values.has("Deadline") ? { deadline: required(values, "Deadline") } : {}),
   })
 }
 
@@ -164,4 +190,35 @@ export function judgeRunnerClaim(claim: RunnerClaim, now: Date): RunnerClaimJudg
     }
   }
   return { status: "fresh", reason: `runner At is within three ${String(claim.beatMs)}ms beats` }
+}
+
+/** One declared-bound judgment for remote claims and local health documents. */
+export function judgeRunnerDeadline(claim: RunnerClaim, now: Date): RunnerDeadlineJudgment {
+  checked(claim)
+  if (claim.state === "idle" || claim.state === "stuck" || claim.state === "paused" || claim.state === "stopped") {
+    return { status: "unbounded", reason: `${claim.state} has no phase deadline` }
+  }
+  if (claim.deadline === undefined) {
+    return { status: "unavailable", reason: "deadline unavailable: writer predates Deadline" }
+  }
+  const current = now.getTime()
+  if (!Number.isFinite(current)) return { status: "unreadable", reason: "reader clock is invalid" }
+  const since = Date.parse(claim.since)
+  if (current < since - 30_000) {
+    return {
+      status: "unreadable",
+      reason: `clock-skew: phase Since is ${String(since - current)}ms ahead of the reader clock`,
+    }
+  }
+  const deadline = Date.parse(claim.deadline) + 3 * claim.beatMs
+  if (current > deadline) {
+    return {
+      status: "overdue",
+      reason: `phase Deadline ${claim.deadline} passed more than three ${String(claim.beatMs)}ms beats ago`,
+    }
+  }
+  return {
+    status: "within",
+    reason: `phase Deadline ${claim.deadline} is within three ${String(claim.beatMs)}ms beats`,
+  }
 }

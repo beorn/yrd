@@ -36,11 +36,12 @@ export {
 export {
   formatRunnerClaim,
   judgeRunnerClaim,
+  judgeRunnerDeadline,
   parseRunnerClaim,
   RUNNER_CLAIM_STATES,
   RUNNER_STATES,
 } from "./runner-claim.ts"
-export type { RunnerClaim, RunnerClaimJudgment, RunnerClaimState } from "./runner-claim.ts"
+export type { RunnerClaim, RunnerClaimJudgment, RunnerClaimState, RunnerDeadlineJudgment } from "./runner-claim.ts"
 export type { Change } from "./refs.ts"
 export { activateRunIndex, lookupRunIndex, runIndexPath, RUN_INDEX_CODES } from "./run-index.ts"
 export type { RunIndexLookup, RunIndexRecord } from "./run-index.ts"
@@ -111,7 +112,17 @@ export {
   type GitObservation,
   type Git,
 } from "./git.ts"
-export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck, skippedChecks } from "./check.ts"
+export {
+  checkLogPath,
+  checkTrailer,
+  checksOf,
+  readCheckTrailer,
+  runCheck,
+  skippedChecks,
+  DEFAULT_CHECK_BOUND_MS,
+  STEP_BOUNDS_MS,
+  STEP_STATES,
+} from "./check.ts"
 export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckView } from "./check.ts"
 export {
   CHANGE_REF_DIAGNOSTICS,
