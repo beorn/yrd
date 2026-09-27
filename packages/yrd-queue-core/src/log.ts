@@ -90,6 +90,8 @@ export function runId(started: Date = new Date()): string {
 
 export const LOG_KINDS = [
   "run",
+  // Written only after the first change event and index record land in one leased push.
+  "run-number",
   // The queue this run is for, written the instant its remote URL resolves
   // (24470). It is a record of its own rather than a header field because the
   // header is written FIRST, before any Git call, and the queue name is the one
@@ -449,6 +451,8 @@ type JournalComposition = Readonly<{
 export type JournalRun = Readonly<{
   /** The run's own id, which is also its file's name. */
   id: string
+  /** Durable queue-scoped number, present only after its first leased publication. */
+  number?: number
   /** When the run started, read from the id itself. */
   startedAt: Date
   branch: string
@@ -931,6 +935,16 @@ function commandOf(record: LogRecord): JournalCommand | undefined {
 }
 
 function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): readonly JournalRun[] {
+  const numbered = records.filter((record) => record.kind === "run-number")
+  if (numbered.length > 1) {
+    throw new Error(`run journal ${id} has ${numbered.length} run-number rows; expected at most one`)
+  }
+  const rawNumber = numbered[0]?.number
+  const number =
+    typeof rawNumber === "number" && Number.isSafeInteger(rawNumber) && rawNumber > 0 ? rawNumber : undefined
+  if (numbered.length === 1 && number === undefined) {
+    throw new Error(`run journal ${id} has invalid run-number ${String(rawNumber)}`)
+  }
   const byChange = new Map<
     string,
     {
@@ -1101,6 +1115,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       ...(typeof base === "string" ? { base } : {}),
       head: change.head,
       id,
+      ...(number === undefined ? {} : { number }),
       // A run that reached a decision about the change is not running a check
       // on it, whatever start row went unended when the run was killed.
       ...(running === undefined || change.decision !== undefined ? {} : { running }),

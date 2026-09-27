@@ -48,6 +48,38 @@ export function queueRefPrefix(queue: string): string {
   return `${YRD_REFS}/${encodeQueueComponent(queue)}`
 }
 
+/** The queue's one durable run-number index ref. */
+export function runIndexRef(queue: string): string {
+  return `${queueRefPrefix(queue)}/runs`
+}
+
+/** One event chain for a branch's sequence of changes. */
+export function changesRef(queue: string, branch: string): string {
+  assertBranch(branch)
+  return `${queueRefPrefix(queue)}/changes/${branch}`
+}
+
+export function assertBranch(branch: string): void {
+  if (
+    branch.length === 0 ||
+    branch === "@" ||
+    branch.startsWith("/") ||
+    branch.endsWith("/") ||
+    branch.includes("..") ||
+    branch.includes("@{") ||
+    branch.endsWith(".") ||
+    /[\x00-\x20\x7f~^:?*[\\]/u.test(branch) ||
+    branch.split("/").some((part) => part.length === 0 || part.startsWith(".") || part.endsWith(".lock"))
+  ) {
+    throw new TypeError(`invalid branch for an event ref: ${JSON.stringify(branch)}`)
+  }
+}
+
+/** The queue's event chain. */
+export function queueRef(queue: string): string {
+  return `${queueRefPrefix(queue)}/queue`
+}
+
 /** The operational pause ref one queue owns. */
 export function pauseRef(queue: string): string {
   return `${queueRefPrefix(queue)}/pause`
