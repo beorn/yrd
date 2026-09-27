@@ -15,9 +15,16 @@ import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { gracefulStopHealthDocument, QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, runId } from "@yrd/queue-core"
+import {
+  gracefulStopHealthDocument,
+  QUEUE_HEALTH_DOCUMENT,
+  QUEUE_HEALTH_SCHEMA,
+  RUNNER_CLAIM_STATES,
+  runId,
+} from "@yrd/queue-core"
 import { SERVICE } from "../src/queue-health.ts"
 import { clock } from "../src/watch-format.ts"
+import { RUNNER_STATES } from "../src/watch-words.ts"
 import {
   readRunnerFacts,
   readRunnerService,
@@ -391,6 +398,9 @@ describe("readRunnerService, the loop's own liveness", () => {
 })
 
 describe("runnerWord, the one word", () => {
+  it("keeps the published live states in the page's one runner vocabulary", () => {
+    expect([...RUNNER_STATES, "stopped"]).toEqual(RUNNER_CLAIM_STATES)
+  })
   const facts = (over: Partial<NonNullable<RunnerFacts["latest"]>>, service: RunnerService = BEATING): RunnerFacts => ({
     journalDir: "/w/logs",
     service,
@@ -457,6 +467,34 @@ describe("runnerWord, the one word", () => {
     const off: RunnerFacts = { journalDir: "/w/logs", absent: "none", service: { kind: "absent", why: "none" } }
     expect(runnerWord(off, false)).toBe("unpublished")
     expect(runnerWord(undefined, false)).toBe("unpublished")
+  })
+
+  /**
+   * @failure A remote runner ref was read but the page still said unpublished because this clone has no journal.
+   * @level l1
+   * @consumer the operator watching a queue from another machine
+   */
+  it("uses a fresh published phase off-machine and says silent only when the ref ages", () => {
+    const claim = {
+      Runner: "queue-host/42",
+      Started: NOW.toISOString(),
+      At: NOW.toISOString(),
+      Beat: "60000ms",
+      State: "checking" as const,
+      Holding: `task/one@${"a".repeat(40)}`,
+      Since: NOW.toISOString(),
+    }
+    const off: RunnerFacts = {
+      journalDir: "/w/logs",
+      absent: "no journal on this machine",
+      service: { kind: "absent", why: "no local health document" },
+      published: { signal: "fresh", claim },
+    }
+    expect(runnerWord(off, false)).toBe("checking")
+    expect(runnerLine(off, NOW).holds).toContain("task/one@")
+    const silent: RunnerFacts = { ...off, published: { signal: "silent", claim } }
+    expect(runnerWord(silent, false)).toBe("silent")
+    expect(runnerLine(silent, NOW).holds).toContain("runner silent since")
   })
 
   /**

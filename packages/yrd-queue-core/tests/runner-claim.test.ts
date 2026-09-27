@@ -1,3 +1,9 @@
+/**
+ * @failure A malformed or stale runner ref could be believed as a live service.
+ * @level l1 (the pure root-commit wire and freshness rule)
+ * @consumer Yrd's resident publisher and off-machine readers
+ * @testonly none
+ */
 import { describe, expect, it } from "vitest"
 import { formatRunnerClaim, judgeRunnerClaim, parseRunnerClaim, runnerRef } from "../src/index.ts"
 

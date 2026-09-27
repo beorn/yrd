@@ -19,6 +19,7 @@ import {
   queueFormat,
   resetQueueFormatCache,
   queueRef,
+  runnerRef,
   changesRef,
   changeInput,
 } from "@yrd/queue-core"
@@ -253,6 +254,27 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     expect(r2).toBeDefined()
     expect(r2.all).toBe(r1.all) // Reused!
     expect(listRefsCalls).toEqual(["refs/yrd/main/"]) // Only checked event refs! No refs/heads/!
+
+    // A status beat is a new queue-owned ref, but no change or admission fact.
+    // Its creation and movement must retain the cached change reading and be
+    // absent from the observer's prefixes as well as its explicit ref rows.
+    const status = await open({ ...localStore, ref: runnerRef("main") })
+    await status.transact(async (map) => map.set("beat", "one"), "beat one")
+    listRefsCalls.length = 0
+    const r2a = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, { now: 20_000 })
+    expect(r2a.all).toBe(r1.all)
+    expect(r2a.runnerTip).toBeDefined()
+    expect(listRefsCalls).toEqual(["refs/yrd/main/"])
+    await status.transact(async (map) => map.set("beat", "two"), "beat two")
+    listRefsCalls.length = 0
+    const r2b = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, { now: 21_000 })
+    expect(r2b.all).toBe(r1.all)
+    expect(r2b.runnerTip).not.toBe(r2a.runnerTip)
+    expect(listRefsCalls).toEqual(["refs/yrd/main/"])
+    const fence = mockGit.observe.mock.calls.at(-1)?.[0]?.fence
+    expect(fence.prefixes).not.toContain("refs/yrd/main/")
+    expect(fence.prefixes).not.toContain(runnerRef("main"))
+    expect(fence.refs.map((row: { ref: string }) => row.ref)).not.toContain(runnerRef("main"))
 
     // Call 3 at t=30s: event refs CHANGED!
     // Event refs changed -> triggers full head listing immediately even though < 60s!

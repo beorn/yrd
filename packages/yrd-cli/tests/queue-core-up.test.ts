@@ -31,6 +31,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
+import { monitorEventLoopDelay } from "node:perf_hooks"
 import { dirname, join, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, describe, expect, it, vi } from "vitest"
@@ -43,9 +44,11 @@ import {
   createEventQueue,
   createEventStore,
   changesRef,
+  formatRunnerClaim,
   gitIn,
   parseQueueHealthDocument,
   queueRef,
+  runnerRef,
   QUEUE_HEALTH_DOCUMENT,
   readConfig,
   readEventQueue,
@@ -336,6 +339,107 @@ async function submitGitlink(w: GitlinkWorld, branch: string, sha: string): Prom
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
+  /**
+   * @failure A second live runner could start rounds despite a fresh claim from another identity.
+   * @level l2 (real queue service, leased remote claim and health document)
+   * @consumer Hab, which must keep the conflicting runner down and expose the named owner
+   */
+  it("exits without a round and names a fresh second runner in health", async () => {
+    const w = await world()
+    const now = new Date().toISOString()
+    const tree = (await w.git(["mktree"], "")).trim()
+    const rival = (
+      await w.git([
+        "commit-tree",
+        tree,
+        "-m",
+        formatRunnerClaim({
+          host: "other-host",
+          pid: 7,
+          started: now,
+          at: now,
+          beatMs: 60_000,
+          state: "checking",
+          since: now,
+        }),
+      ])
+    ).trim()
+    await w.git(["push", "--quiet", "origin", `${rival}:${runnerRef("main")}`])
+    const run = capture(w.work)
+    expect(await coreQueueCommand(w.work, run.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir })).toBe(
+      2,
+    )
+    expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({
+      state: "unhealthy",
+      error: { code: "runner-conflict" },
+      facts: { "runner-conflict": `other-host/7 ${now}` },
+    })
+    const logDir = join(w.workdir, "logs")
+    expect(existsSync(logDir) ? readdirSync(logDir) : []).toEqual([])
+  })
+
+  /**
+   * @failure A long check kept its journal quiet, and the remote runner ref could age into silence while the service was healthy.
+   * @level l2 (real queued check, remote ref and service loop)
+   * @consumer an off-machine operator reading the published runner during a check
+   */
+  it("beats the remote claim during a long check without blocking the event loop for one Beat", async () => {
+    const w = await world()
+    await redeclare(w, "checks:\n  - hold:\n      on: [submit]\n      run: sleep 35\n")
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    await w.git(["checkout", "--quiet", "-b", "task/beat", "main"])
+    writeFileSync(join(w.work, "beat.txt"), "beat\n")
+    await w.git(["add", "beat.txt"])
+    await w.git(["commit", "--quiet", "-m", "a change with a long check"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/beat",
+      submitter: "@dev/5",
+      target: { branch: "main", remote: "origin" },
+    })
+
+    const stop = new AbortController()
+    const run = capture(w.work)
+    const stalls = monitorEventLoopDelay({ resolution: 20 })
+    stalls.enable()
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        heartbeatIntervalMs: 100,
+        afterRound: () => stop.abort(),
+      },
+      { json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(
+        async () => {
+          expect((await readRunnerFacts(w.workdir)).latest?.activeStep?.kind).toBe("check")
+        },
+        { timeout: 15_000, interval: 100 },
+      )
+      const before = await readRemoteCommit(w.git, "origin", runnerRef("main"))
+      expect(before).toBeDefined()
+      await vi.waitFor(
+        async () => {
+          expect((await readRunnerFacts(w.workdir)).latest?.activeStep?.kind).toBe("check")
+          expect(await readRemoteCommit(w.git, "origin", runnerRef("main"))).not.toBe(before)
+        },
+        { timeout: 36_000, interval: 500 },
+      )
+      expect(await service, run.stderr()).toBe(0)
+      expect(stalls.max / 1_000_000, "maximum event-loop stall in milliseconds").toBeLessThan(30_000)
+    } finally {
+      stop.abort()
+      await service
+      stalls.disable()
+    }
+  }, 60_000)
+
   /**
    * @failure A carrier needing the runs index exits terminally when the older queue has events but no runs ref.
    * @level l2 (real Git remote and the service loop)
