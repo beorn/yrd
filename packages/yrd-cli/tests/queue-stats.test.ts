@@ -23,7 +23,16 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, readDrafts, readQueue, submit } from "@yrd/queue-core"
+import {
+  createEventQueue,
+  createEventStore,
+  gitIn,
+  listChanges,
+  listRefs,
+  readConfig,
+  readDrafts,
+  submit,
+} from "@yrd/queue-core"
 import type { Draft, Row, WatchRow } from "@yrd/queue-core"
 import {
   decisionsOfRows,
@@ -458,6 +467,10 @@ describe("the pushed refs are the drafts, read through the one shared derivation
     await dated(work, ago(5 * hour))(["commit", "--quiet", "-m", "declare the queue"])
     await git(["push", "--quiet", "origin", "main"])
     const target = (await git(["rev-parse", "HEAD"])).trim()
+    const store = createEventStore(work, "origin", git.selection)
+    const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture target lost .yrd.yml")
+    await createEventQueue(store, "main", target, config, now)
     const pushed = async (name: string, at: Date): Promise<string> => {
       await git(["checkout", "--quiet", "-b", name, "main"])
       writeFileSync(join(work, `${name.replaceAll("/", "-")}.txt`), `${name}\n`)
@@ -493,7 +506,14 @@ describe("the pushed refs are the drafts, read through the one shared derivation
     const absent = (await elsewhere(["rev-parse", "HEAD"])).trim()
 
     // The shared derivation the stats command reads, over the stats' own default window.
-    const read = await readQueue(git, "origin", "main", target)
+    const refs = await listRefs("refs/heads/", store)
+    const changes = await listChanges(store, "main")
+    const read = {
+      heads: new Map([...refs].map(([ref, head]) => [ref.slice("refs/heads/".length), head])),
+      changes: [...changes].flatMap(([branch, change]) =>
+        change.commit === undefined ? [] : [{ change: { branch, head: change.commit } }],
+      ),
+    }
     const drafts = await readDrafts(git, read, { since: new Date(now.getTime() - 7 * 24 * hour), targetSha: target })
     const stats = queueStats([], [...drafts.dated, ...drafts.undated], { now })
 
