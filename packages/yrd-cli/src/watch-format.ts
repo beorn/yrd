@@ -9,7 +9,7 @@
  */
 
 import { homedir } from "node:os"
-import { clocks, runStartedAt, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
+import { clocks, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
 import { STATE_WORDS, type DisplayState } from "./watch-words.ts"
 
 export {
@@ -222,19 +222,9 @@ export function friendlyPath(path: string, home: string = homedir()): string {
   return path.startsWith(`${root}/`) ? `~${path.slice(root.length)}` : path
 }
 
-/**
- * A run's short name on screen: `<label>#<HHMMSS>`, the run's own start
- * instant in local time, read from the id itself (items 34/36/38 asked for
- * `label#N`; the queue core mints `q-<instant>-<random>` and stores no
- * counter, so the instant is the number a run has). The random tail is never
- * shown beside commit shas: two hex strings, one a run and one a commit, read
- * as the same kind of thing. The full id stays in the detail and in `--json`.
- * A name that is not one of ours is shown as it is.
- */
-export function runShortName(label: string, id: string): string {
-  const startedAt = runStartedAt(id)
-  if (startedAt === undefined) return `${label}#${id}`
-  return `${label}#${clock(startedAt, { seconds: true }).replace(/:/gu, "")}`
+/** A durable queue number after publication, or the full opaque id before one exists. */
+export function runShortName(label: string, id: string, number?: number): string {
+  return number === undefined ? `${label} [${id}]` : `${label}#${number}`
 }
 
 /**
@@ -313,10 +303,7 @@ export function durationText(row: Row, now: Date): string {
 export function ageRunText(row: Row, now: Date): string {
   const measured = clocks(row, now)
   const isEnded =
-    row.state === "merged" ||
-    row.state === "failed" ||
-    row.state === "cancelled" ||
-    row.state === "direct"
+    row.state === "merged" || row.state === "failed" || row.state === "cancelled" || row.state === "direct"
   const age = measured.ageMs === undefined ? "—" : mediaDuration(measured.ageMs)
   const runtime = measured.runtimeMs ?? measured.checkingMs ?? (isEnded ? measured.tookMs : undefined)
   const run = runtime === undefined ? "—" : runTime(runtime)
@@ -332,17 +319,15 @@ export function runTime(milliseconds: number): string {
 export const AGE_RUN_MIN_WIDTH = "00:00 / 00:00".length
 
 /** Bare numeric attempt / timestamp identifier without label prefix: `085315` or `—`. */
-export function runIdentifier(id: string | undefined): string {
+export function runIdentifier(id: string | undefined, number?: number): string {
   if (id === undefined) return "—"
-  const startedAt = runStartedAt(id)
-  if (startedAt === undefined) return id
-  return clock(startedAt, { seconds: true }).replace(/:/gu, "")
+  return number === undefined ? id : String(number)
 }
 
 /** Queue digit beside the run: `1 · main#2342`, or `1 · —` with no attempt. */
-export function queueRunText(digit: number, label: string, runId: string | undefined): string {
+export function queueRunText(digit: number, label: string, runId: string | undefined, number?: number): string {
   if (runId === undefined) return `${String(digit)} · —`
-  return `${String(digit)} · ${runShortName(label, runId)}`
+  return `${String(digit)} · ${runShortName(label, runId, number)}`
 }
 
 /**
