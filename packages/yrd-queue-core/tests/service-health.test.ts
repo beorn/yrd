@@ -17,6 +17,7 @@ import {
   withLineFlow,
 } from "../src/service-health.ts"
 import type { PauseRecord } from "../src/pause.ts"
+import type { RunnerClaim } from "../src/runner-claim.ts"
 
 // A stuck change STOPS THE LINE (the andon, operator 2026-09-16): the queue
 // pauses itself naming the change, the service stays up holding the stop, and
@@ -338,6 +339,64 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
     )
     const unread = { ...flow, roundOpen: { phaseUnread: "no journal", startedAt: "2026-09-24T19:35:00.000Z" } }
     expect(lineStall(unread, threshold, at("20:30:00"))?.cause).toContain("for 55m (phase unread: no journal); ")
+  })
+
+  test("an open round pages only after its current declared deadline plus three beats", () => {
+    const flow = {
+      lastJudgedAt: "2026-09-24T19:40:00.000Z",
+      oldestWaiting: oldest,
+      roundOpen: { branch: "task/slow", phase: "affected-tests", startedAt: "2026-09-24T19:35:00.000Z" },
+      waiting: 3,
+    }
+    const claim: RunnerClaim = {
+      host: "queue-host",
+      pid: 42,
+      started: "2026-09-24T19:00:00.000Z",
+      at: "2026-09-24T20:31:00.000Z",
+      beatMs: 60_000,
+      state: "checking",
+      since: "2026-09-24T20:00:00.000Z",
+      deadline: "2026-09-24T20:30:00.000Z",
+    }
+    expect(lineStall(flow, threshold, at("20:32:59"), claim)).toBeUndefined()
+    expect(lineStall(flow, threshold, new Date("2026-09-24T20:33:00.001Z"), claim)).toMatchObject({
+      shape: "slow-round",
+      cause: expect.stringContaining(
+        "round past its declared bound (affected-tests, bound 30m, since 2026-09-24T20:00:00.000Z)",
+      ),
+    })
+    const local = roundHealthDocument("yrd", undefined, INTERVAL, at("20:32:59"), { flow, threshold, claim })
+    expect(local.state).toBe("healthy")
+    expect(local.facts?.flow).toMatchObject({ deadline: claim.deadline })
+    const stored = { ...local, facts: { ...local.facts, runnerClaim: claim, runnerPhase: "affected-tests" } }
+    expect(believableHealthDocument(stored, new Date("2026-09-24T20:33:00.001Z"))).toMatchObject({
+      state: "unhealthy",
+      error: { code: STALLED_LINE_CODE, cause: expect.stringContaining("round past its declared bound") },
+    })
+    expect(believableHealthDocument(stored, new Date("2026-09-24T20:33:00.001Z")).error?.resolution).toContain(
+      "This page clears when the phase advances within its new bound or a change is judged; it never clears merely because time passes.",
+    )
+    expect(
+      roundHealthDocument("yrd", undefined, INTERVAL, new Date("2026-09-24T20:33:00.001Z"), { flow, threshold, claim })
+        .state,
+    ).toBe("unhealthy")
+    const legacy = { ...claim, deadline: undefined }
+    expect(lineStall(flow, threshold, at("20:30:00"), legacy)?.cause).toContain(
+      "deadline unavailable: writer predates Deadline; 45m fallback",
+    )
+    expect(
+      roundHealthDocument("yrd", stuckStop, INTERVAL, new Date("2026-09-24T20:33:00.001Z"), { flow, threshold, claim })
+        .error?.code,
+    ).toBe("queue-round-stuck")
+    const hungStep: RunnerClaim = { ...claim, state: "merging" }
+    expect(
+      lineStall(
+        { ...flow, roundOpen: { ...flow.roundOpen, phase: "merge" } },
+        threshold,
+        new Date("2026-09-24T20:33:00.001Z"),
+        hungStep,
+      )?.cause,
+    ).toBe("step merge past its declared bound (30m, since 2026-09-24T20:00:00.000Z); the runner does not cancel it")
   })
 
   test("idle is not stalled: nothing waiting never reads stalled, however long since the last judgement", () => {
