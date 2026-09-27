@@ -144,7 +144,15 @@ export { resolveRemote } from "./remote.ts"
 export { DRAFT_EXCLUDED_PREFIXES, DRAFT_WINDOW_MS, readDrafts } from "./drafts.ts"
 export type { Draft, DraftReading } from "./drafts.ts"
 export { directMergeLine, eventDirectMergeCommits } from "./direct.ts"
-export { refuseTarget, inspectSubmit, inspectSubmitAtHead, freshnessLine, submit, issueOf } from "./submit.ts"
+export {
+  refuseTarget,
+  inspectSubmit,
+  inspectSubmitAtHead,
+  freshnessLine,
+  submit,
+  issueOf,
+  normalizeIssueReference,
+} from "./submit.ts"
 export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
 export type { PinCarrierPin, PreparedPinCarrier } from "./pin-carrier.ts"
 export type { IssueResolution, IssueResolver } from "./submit.ts"
