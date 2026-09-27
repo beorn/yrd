@@ -18,10 +18,12 @@
  * one place and `checking` in another. One word, one colour, one table.
  *
  * Every surface reads a word from here when it draws, never a copy taken
- * earlier, so one edit here changes every surface. That is why the table is
- * not frozen, and why this module imports nothing: `yrd list --help` prints
- * the legend without loading the queue core.
+ * earlier, so one edit here changes every surface. Runner phases come from
+ * the queue core's claim vocabulary, which also validates the published wire.
  */
+
+import { RUNNER_STATES } from "@yrd/queue-core"
+export { RUNNER_STATES }
 
 export type WordEntry = {
   word: string
@@ -46,9 +48,8 @@ export const LEGEND_STATES = [
 ] as const
 
 /**
- * THE RUNNER'S EIGHT STATES, in legend order (@cto, relayed by @chief). Four of
- * them — `fitting` (key `verifying`), `checking`, `merging`, `stuck` — are a
- * change's words too, and deliberately so: the flow page draws the runner as a
+ * THE RUNNER'S SEVEN STATES, in legend order (@cto, relayed by @chief).
+ * `checking`, `merging` and `stuck` are change words too: the flow page draws the runner as a
  * row in the same STATUS column as every change, so the column reads one
  * vocabulary and no word is minted twice for one fact. When the runner is
  * checking, the change it holds is checking; that overlap IS the design.
@@ -56,18 +57,8 @@ export const LEGEND_STATES = [
  * `processing` retires here. It named the checking phase and the merging phase
  * with one word, and a phase earns a word when it takes time and can fail:
  * running the project's own checks and writing the target are two such phases,
- * and `fitting` (composing the tree that will be judged) is a third.
+ * and `provisioning` (composing the tree that will be judged) is a third.
  */
-export const RUNNER_STATES = [
-  "idle",
-  "provisioning",
-  "checking",
-  "merging",
-  "deprovisioning",
-  "stuck",
-  "paused",
-] as const
-
 /**
  * The two SIGNALS, plus the unpublished case. A signal is derived where the
  * page is drawn and stored NOWHERE — never a record kind, never a field:
@@ -94,18 +85,7 @@ export const RUNNER_SIGNALS = ["silent", "stopped", "unpublished"] as const
 /**
  * The runner words a reading can produce on the queue's own machine or off it.
  */
-export const RUNNER_STATES_SAID = [
-  "idle",
-  "provisioning",
-  "checking",
-  "merging",
-  "deprovisioning",
-  "silent",
-  "stopped",
-  "stuck",
-  "paused",
-  "unpublished",
-] as const
+export const RUNNER_STATES_SAID = [...RUNNER_STATES, ...RUNNER_SIGNALS] as const
 
 /** A word a change's row can show: one of the nine, or `direct`, which is no change. */
 export type DisplayState =

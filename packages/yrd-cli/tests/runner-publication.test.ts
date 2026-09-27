@@ -127,4 +127,14 @@ describe("runner ref publication", () => {
     expect(await live.remoteTip()).toBe(rival)
     expect(live.statuses.at(-1)).toBe("failed")
   })
+
+  it("names the safe removal command when a foreign claim is unreadable", async () => {
+    const f = await fixture()
+    const future = new Date(Date.now() + 60_000).toISOString()
+    await f.replace({ ...f.own, host: "rival", pid: 8, at: future })
+    await f.publisher.publish(f.own)
+    expect(f.statuses).toEqual(["failed"])
+    expect(f.notices.join(" ")).toContain("verifying no live runner")
+    expect(f.notices.join(" ")).toContain(`git push origin :${f.ref}`)
+  })
 })

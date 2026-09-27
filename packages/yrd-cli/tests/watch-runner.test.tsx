@@ -15,16 +15,9 @@ import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import {
-  gracefulStopHealthDocument,
-  QUEUE_HEALTH_DOCUMENT,
-  QUEUE_HEALTH_SCHEMA,
-  RUNNER_CLAIM_STATES,
-  runId,
-} from "@yrd/queue-core"
+import { gracefulStopHealthDocument, QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, runId } from "@yrd/queue-core"
 import { SERVICE } from "../src/queue-health.ts"
 import { clock } from "../src/watch-format.ts"
-import { RUNNER_STATES } from "../src/watch-words.ts"
 import {
   readRunnerFacts,
   readRunnerService,
@@ -398,9 +391,6 @@ describe("readRunnerService, the loop's own liveness", () => {
 })
 
 describe("runnerWord, the one word", () => {
-  it("keeps the published live states in the page's one runner vocabulary", () => {
-    expect([...RUNNER_STATES, "stopped"]).toEqual(RUNNER_CLAIM_STATES)
-  })
   const facts = (over: Partial<NonNullable<RunnerFacts["latest"]>>, service: RunnerService = BEATING): RunnerFacts => ({
     journalDir: "/w/logs",
     service,

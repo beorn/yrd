@@ -152,7 +152,17 @@ export class RunnerPublisher {
       this.known = true
       return
     }
-    const prior = await claimAt(this.git, current, this.ref)
+    const unreadable = (cause: string): Error =>
+      new Error(
+        `${this.ref} at ${current}: cannot take over an unreadable runner claim: ${cause}. ` +
+          `After verifying no live runner, run \`git push ${this.remote} :${this.ref}\` to remove the claim.`,
+      )
+    let prior: RunnerClaim
+    try {
+      prior = await claimAt(this.git, current, this.ref)
+    } catch (error) {
+      throw unreadable(error instanceof Error ? error.message : String(error))
+    }
     if (prior.host === claim.host && prior.pid === claim.pid && prior.started === claim.started) {
       this.tip = current
       this.known = true
@@ -169,7 +179,7 @@ export class RunnerPublisher {
     const verdict = judgeRunnerClaim(prior, new Date())
     if (verdict.status === "fresh") throw new RunnerConflict(prior, this.ref)
     if (verdict.status === "unreadable") {
-      throw new Error(`${this.ref} at ${current}: cannot take over an unreadable claim: ${verdict.reason}`)
+      throw unreadable(verdict.reason)
     }
     this.onNotice(`taking over stale runner ${prior.host}/${String(prior.pid)} started ${prior.started} at ${this.ref}`)
     this.tip = current

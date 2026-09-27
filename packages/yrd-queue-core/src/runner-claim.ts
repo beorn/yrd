@@ -1,7 +1,8 @@
 /** The runner ref is an observed health claim, never a lease or authority. */
 import { assertBranch, parseChangeName } from "./refs.ts"
 
-export const RUNNER_CLAIM_STATES = [
+/** Live runner phases shared by the wire, CLI, and human views. */
+export const RUNNER_STATES = [
   "idle",
   "provisioning",
   "checking",
@@ -9,8 +10,9 @@ export const RUNNER_CLAIM_STATES = [
   "deprovisioning",
   "stuck",
   "paused",
-  "stopped",
 ] as const
+
+export const RUNNER_CLAIM_STATES = [...RUNNER_STATES, "stopped"] as const
 
 export type RunnerClaimState = (typeof RUNNER_CLAIM_STATES)[number]
 
@@ -43,6 +45,12 @@ function instant(value: string, key: string): number {
     throw new TypeError(`runner claim ${key} must be a canonical UTC ISO instant; got ${JSON.stringify(value)}`)
   }
   return time
+}
+
+function required(values: ReadonlyMap<string, string>, key: string): string {
+  const value = values.get(key)
+  if (value === undefined) throw new TypeError(`runner claim missing ${key} trailer`)
+  return value
 }
 
 function checked(claim: RunnerClaim): RunnerClaim {
@@ -105,30 +113,38 @@ export function parseRunnerClaim(body: string): RunnerClaim {
   for (const line of lines) {
     const match = /^([A-Za-z]+): (.*)$/u.exec(line)
     if (match === null) throw new TypeError(`runner claim malformed trailer: ${JSON.stringify(line)}`)
-    const key = match[1]!
+    const key = match[1]
+    const value = match[2]
+    if (key === undefined || value === undefined)
+      throw new TypeError(`runner claim malformed trailer: ${JSON.stringify(line)}`)
     const order = (ORDER as readonly string[]).indexOf(key)
     if (order < 0) throw new TypeError(`runner claim unknown trailer ${key}`)
     if (values.has(key)) throw new TypeError(`runner claim duplicate ${key} trailer`)
     if (order <= last) throw new TypeError(`runner claim ${key} trailer is out of order`)
-    values.set(key, match[2]!)
+    values.set(key, value)
     last = order
   }
   for (const key of REQUIRED) {
     if (!values.has(key)) throw new TypeError(`runner claim missing ${key} trailer`)
   }
-  const runner = /^([^/]+)\/([1-9]\d*)$/u.exec(values.get("Runner")!)
+  const runner = /^([^/]+)\/([1-9]\d*)$/u.exec(required(values, "Runner"))
   if (runner === null) throw new TypeError(`runner claim Runner must be host/positive-pid`)
-  const beat = /^([1-9]\d*)ms$/u.exec(values.get("Beat")!)
+  const host = runner[1]
+  const pid = runner[2]
+  if (host === undefined || pid === undefined) throw new TypeError("runner claim Runner must be host/positive-pid")
+  const beat = /^([1-9]\d*)ms$/u.exec(required(values, "Beat"))
   if (beat === null) throw new TypeError("runner claim Beat must be integer milliseconds, e.g. 60000ms")
+  const beatValue = beat[1]
+  if (beatValue === undefined) throw new TypeError("runner claim Beat must be integer milliseconds, e.g. 60000ms")
   return checked({
-    host: runner[1]!,
-    pid: Number(runner[2]),
-    started: values.get("Started")!,
-    at: values.get("At")!,
-    beatMs: Number(beat[1]),
-    state: values.get("State")! as RunnerClaimState,
-    ...(values.has("Holding") ? { holding: values.get("Holding")! } : {}),
-    since: values.get("Since")!,
+    host,
+    pid: Number(pid),
+    started: required(values, "Started"),
+    at: required(values, "At"),
+    beatMs: Number(beatValue),
+    state: required(values, "State") as RunnerClaimState,
+    ...(values.has("Holding") ? { holding: required(values, "Holding") } : {}),
+    since: required(values, "Since"),
   })
 }
 
@@ -138,12 +154,14 @@ export function judgeRunnerClaim(claim: RunnerClaim, now: Date): RunnerClaimJudg
   const current = now.getTime()
   if (!Number.isFinite(current)) return { status: "unreadable", reason: "reader clock is invalid" }
   const ageMs = current - Date.parse(claim.at)
-  if (ageMs < -30_000)
+  if (ageMs < -30_000) {
     return { status: "unreadable", reason: `clock-skew: runner At is ${String(-ageMs)}ms ahead of the reader clock` }
-  if (ageMs > 3 * claim.beatMs)
+  }
+  if (ageMs > 3 * claim.beatMs) {
     return {
       status: "silent",
       reason: `runner At is ${String(ageMs)}ms old, beyond three ${String(claim.beatMs)}ms beats`,
     }
+  }
   return { status: "fresh", reason: `runner At is within three ${String(claim.beatMs)}ms beats` }
 }
