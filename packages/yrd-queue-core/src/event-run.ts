@@ -2002,7 +2002,9 @@ export async function eventQueueRun(
           at: new Date(),
           ...evidence,
           ...(attemptedRetry ? { retry: { retried: 1 as const } } : {}),
-          reason: "yrd-check-unresolved",
+          // The change's reason is the composed diagnosis, so status says why it is stuck (26089);
+          // the code travels on the stuck record below.
+          reason,
         })
         await writeStuckStop(branch, head, ended, reason)
         await tell(branch, "stuck", ended)
