@@ -68,7 +68,7 @@ export function lineOf(rows: readonly WatchRow[]): Readonly<{ held: Row | undefi
 }
 
 /**
- * The queue line: `5 waiting: 2 pending, 2 submitted, 1 stuck · checking
+ * The queue line: `5 waiting: 2 merging, 2 queued, 1 stuck · checking
  * task/x for 3:21 · line stopped at task/s since 11:54 · last merge 11:56
  * (task/y) · 2 drafts (7d), 1 not yet read`.
  *
@@ -82,7 +82,7 @@ export function lineOf(rows: readonly WatchRow[]): Readonly<{ held: Row | undefi
 export function queueLine(snapshot: WatchSnapshot, now: Date, width: number): string {
   const { held, waiting } = lineOf(snapshot.unfiltered)
   const breakdownCounts = new Map<string, number>()
-  for (const key of ["pending", "submitted", "stuck"] as const) {
+  for (const key of ["merging", "queued", "stuck"] as const) {
     const n = waiting.filter((row) => displayState(row) === key).length
     if (n === 0) continue
     const label = STATE_WORDS[key].word

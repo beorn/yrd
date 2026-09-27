@@ -19,7 +19,7 @@ import { act } from "react"
 import { describe, expect, it, vi } from "vitest"
 import { bufferToStyledText, bufferToText, render } from "silvery/test"
 import { Box, DISCLOSURE_MARKERS, Text } from "silvery"
-import type { ChangeRecord, GitObservation, JournalCommand, JournalRun, Row } from "@yrd/queue-core"
+import type { Event, GitObservation, JournalCommand, JournalRun, Row } from "@yrd/queue-core"
 import { checksOf, journalKey, watchRows as perRunRows } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -131,6 +131,24 @@ function detailOf(
   over: Partial<ChangeDetail> = {},
 ): ChangeDetail {
   return { checks, row: item.row, run: runOf(item.row, "main", checks, item.run?.id ?? item.row.run), ...over }
+}
+
+function event(type: string, at: Date, writer: string, props: readonly (readonly [string, string])[] = []): Event {
+  const ident = { name: "yrd", email: "yrd@test.invalid" }
+  return {
+    id: at.getTime().toString(16).padStart(40, "0"),
+    parent: null,
+    links: [],
+    type,
+    title: type,
+    content: "",
+    props: [["Time", at.toISOString()], ...props],
+    writer,
+    instance: null,
+    seq: null,
+    author: ident,
+    committer: ident,
+  }
 }
 
 function snapshot(over: Partial<WatchSnapshot> = {}): WatchSnapshot {
@@ -400,7 +418,7 @@ describe("ia.md first viewport and inverse pills (24196)", () => {
       app.lines.join("\n"),
     ).toBe(true)
     expect(
-      app.lines.some((line) => line.includes("submitted")),
+      app.lines.some((line) => line.includes("queued")),
       app.lines.join("\n"),
     ).toBe(true)
     const openCellBefore = app.cell(openX, pillsY)
@@ -628,20 +646,18 @@ describe("the table (items 3, 28, 38)", () => {
   it("names the queue digit and a dash when the row has no attempt (ia.md drafts/waiting)", async () => {
     const text = await paint(<WatchPane snapshot={snapshot({ rows: [{ row: row() }] })} live={false} />)
 
-    const line = text
-      .split("\n")
-      .find((candidate) => candidate.includes("○ submitted") || candidate.includes("task/one"))
-    expect(line).toContain("○ submitted")
+    const line = text.split("\n").find((candidate) => candidate.includes("○ queued") || candidate.includes("task/one"))
+    expect(line).toContain("○ queued")
     expect(line).toMatch(/1 · —|\/ —/)
   })
 
-  it("queued paints submitted and checked paints pending, same warning colour, not failed", async () => {
+  it("queued uses warning and merging uses info, distinct from failed", async () => {
     const app = render(
       <WatchPane
         snapshot={snapshot({
           rows: [
             { row: row({ branch: "task/queued", state: "queued" }) },
-            { row: row({ branch: "task/checked", head: "1".repeat(40), state: "checked" }) },
+            { row: row({ branch: "task/checked", head: "1".repeat(40), state: "merging" }) },
             { row: row({ branch: "task/failed", reason: "test", state: "failed" }) },
           ],
         })}
@@ -653,15 +669,15 @@ describe("the table (items 3, 28, 38)", () => {
     const painted = app.lines
     const at = (branch: string, word: string) => {
       const y = painted.findIndex((line) => line.includes(branch) && !line.includes("RUNNER"))
-      const x = (painted[y] ?? "").indexOf(word)
+      const x = (painted[y] ?? "").lastIndexOf(word)
       return { fg: y < 0 || x < 0 ? undefined : app.cell(x, y).fg, line: painted[y] ?? "" }
     }
-    const queued = at("task/queued", "submitted")
-    const checked = at("task/checked", "pending")
+    const queued = at("task/queued", "queued")
+    const merging = at("task/checked", "merging")
     const failed = at("task/failed", "failed")
-    expect(queued.line, painted.join("\n")).toContain("○ submitted")
-    expect(checked.line, painted.join("\n")).toContain("pending")
-    expect(queued.fg, JSON.stringify({ queued: queued.fg, checked: checked.fg, failed: failed.fg })).toEqual(checked.fg)
+    expect(queued.line, painted.join("\n")).toContain("○ queued")
+    expect(merging.line, painted.join("\n")).toContain("merging")
+    expect(queued.fg).not.toEqual(merging.fg)
     expect(queued.fg).not.toEqual(failed.fg)
     app.unmount()
   })
@@ -806,7 +822,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
       kind: "deployment",
       id: RUN_ID,
       label: "staging",
-      row: row({ state: "checked", position: 1, run: RUN_ID }),
+      row: row({ state: "merging", position: 1, run: RUN_ID }),
       steps: [
         { name: "build image", state: "passed", ms: 90_000 },
         { name: "roll out", state: "running" },
@@ -816,7 +832,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
     const text = await paint(at(<RunStatusBox run={mock} />))
 
     expect(text).toContain("RUN staging#")
-    expect(text).toMatch(/◉ Pending #1/u)
+    expect(text).toMatch(/◉ Merging #1/u)
     // Its steps are tabs of the detail, not lines of the box.
     expect(text).not.toContain("build image")
   })
@@ -835,38 +851,23 @@ describe("the change list and the Timeline tab (items 2, 4, 6, 24, 25, 31; 25441
 
   it("opens the Timeline tab on its own box: the timeline oldest first with times to the next, the clocks, then the id header, title, body, METADATA groups, the diff fold last", async () => {
     const item: WatchRow = { row: failedRow() }
-    const records: readonly ChangeRecord[] = [
-      {
-        at: new Date(NOW.getTime() - 3_600_000),
-        kind: "opened",
-        sha: "1".repeat(40),
-        subject: "opened",
-        trailers: [["Submitter", "@chief"]],
-      },
-      {
-        at: NOW,
-        kind: "failed",
-        sha: "2".repeat(40),
-        subject: "failed",
-        trailers: [
-          ["Reason", "test"],
-          ["Remedy", "fix the test and resubmit"],
-        ],
-      },
+    const events: readonly Event[] = [
+      event("opened", new Date(NOW.getTime() - 3_600_000), "@chief"),
+      event("failed", NOW, "yrd", [["Reason", "test"]]),
     ]
     const detail = detailOf(item, CHECKS, {
       body: "The parser dropped the last token.\n\nRefs: @i/10-yrd/24096",
       commits: { count: 3, first: new Date(NOW.getTime() - 7_200_000), last: new Date(NOW.getTime() - 3_700_000) },
       diffStat: { additions: 214, deletions: 38, files: 4 },
-      records,
+      events,
     })
     const text = await paint(at(<WatchDetail detail={detail} selected={CHANGES_TAB} />), [], 100)
 
     // The timeline first, oldest first (25441): drafted at the head's date, then this cut's history,
     // each with its time to the next; the ending has none.
     const draftedAt = text.search(/\d\d:\d\d:\d\d {2}Drafted · 1:40/u)
-    const openedAt = text.search(/\d\d:\d\d:\d\d {2}Submitted by @chief · 1h00m/u)
-    const failedAt = text.indexOf("Failed test — fix the test and resubmit")
+    const openedAt = text.search(/\d\d:\d\d:\d\d {2}Opened by @chief · 1h00m/u)
+    const failedAt = text.indexOf("Failed by yrd — test")
     expect(draftedAt).toBeGreaterThan(-1)
     expect(openedAt).toBeGreaterThan(draftedAt)
     expect(failedAt).toBeGreaterThan(openedAt)
@@ -898,26 +899,12 @@ describe("the change list and the Timeline tab (items 2, 4, 6, 24, 25, 31; 25441
         reason: longError,
       }),
     }
-    const records: readonly ChangeRecord[] = [
-      {
-        at: new Date(NOW.getTime() - 10 * 60 * 1000),
-        kind: "opened",
-        sha: "cafebabe".padEnd(40, "0"),
-        subject: "opened",
-        trailers: [["Submitter", "@dev/9"]],
-      },
-      {
-        at: new Date(NOW.getTime() - 5 * 60 * 1000),
-        kind: "failed",
-        sha: "cafebabe".padEnd(40, "0"),
-        subject: "failed",
-        trailers: [
-          ["Reason", longError],
-          ["Detail", "full error detail that must remain visible"],
-        ],
-      },
-    ]
-    const detail = detailOf(item, CHECKS, { records })
+    const detail = detailOf(item, CHECKS, {
+      events: [
+        event("opened", new Date(NOW.getTime() - 60 * 60_000), "@dev/9"),
+        event("failed", new Date(NOW.getTime() - 30 * 60_000), "yrd", [["Reason", longError]]),
+      ],
+    })
     const text = await paint(at(<WatchDetail detail={detail} selected={CHANGES_TAB} />), [], 80)
 
     // In detail pane, branch is wrapped across lines, keeping the full text without truncation
@@ -1214,7 +1201,7 @@ describe("the running step and the check-less declaration", () => {
     const live = row({
       live: { check: "affected-tests", phase: "merge", run: RUN_ID, since: new Date(NOW.getTime() - 151_000) },
       position: 1,
-      state: "checked",
+      state: "merging",
     })
     const checks: readonly CheckPanel[] = [
       { name: "typecheck", result: { ms: 8_000, result: "pass" }, state: "passed" },
@@ -1275,7 +1262,7 @@ describe("the detail's stage tab keys", () => {
     const text = await paint(
       at(
         <WatchDetail
-          detail={detailOf({ row: row({ state: "checked", position: 1 }) }, checks)}
+          detail={detailOf({ row: row({ state: "merging", position: 1 }) }, checks)}
           selected="provisioning"
         />,
       ),
@@ -1598,7 +1585,7 @@ describe("the RUNNER marker is wired to the ROWS, not to the process (items 1, 5
   const underCheck = row({
     live: { check: "affected-tests", phase: "merge", run: RUN_ID, since: new Date(NOW.getTime() - 151_000) },
     position: 1,
-    state: "checked",
+    state: "merging",
   })
 
   it("reads CHECKING while a row has a live check", async () => {
@@ -1680,7 +1667,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     "failed",
     "cancelled",
   ] as const
-  const KEYS = [...STATES, "direct", "waiting", "took", "runner", "verifying"] as const
+  const KEYS = [...STATES, "queued", "direct", "waiting", "took", "runner", "verifying"] as const
   type Entry = { word: string; color: string; means?: string; next?: string }
   type WordTable = Record<(typeof KEYS)[number], Entry>
 
@@ -1790,7 +1777,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         position: 1,
         since: ago(50 * MINUTE),
         startedAt: ago(20 * MINUTE),
-        state: "checked",
+        state: "merging",
         subject: "passed, waits to merge",
         submitter: "@dev/4",
       }),
@@ -1861,7 +1848,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         endedAt: ago(30 * MINUTE),
         head: "7".repeat(40),
         since: ago(40 * MINUTE),
-        state: "withdrawn",
+        state: "cancelled",
         subject: "taken back by its submitter",
         submitter: "@dev/3",
       }),
@@ -1958,7 +1945,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const W = await words()
     const recheck = "q-20260903T112000000Z-5ecf00d0"
     const { live: _running, ...before } = running()
-    const passed = row({ branch: "task/y1", head: "2".repeat(40), position: 1, state: "checked" })
+    const passed = row({ branch: "task/y1", head: "2".repeat(40), position: 1, state: "merging" })
     const stuckAt = ago(6 * MINUTE)
     const mergedAt = ago(3 * MINUTE + 12_000)
     const rows: WatchRow[] = [
@@ -1968,7 +1955,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       // A change checked twice (the target moved under it) is ONE change waiting to merge.
       split({ ...passed, at: ago(3 * MINUTE), endedAt: ago(3 * MINUTE) }, recheck, "checked"),
       split({ ...passed, at: ago(25 * MINUTE), endedAt: ago(25 * MINUTE) }, EARLIER_RUN, "checked"),
-      { row: row({ branch: "task/y2", head: "3".repeat(40), position: 3, state: "checked" }) },
+      { row: row({ branch: "task/y2", head: "3".repeat(40), position: 3, state: "merging" }) },
       { row: row({ branch: "task/z1", head: "5".repeat(40), position: 4, state: "queued" }) },
       { row: row({ branch: "task/z2", head: "6".repeat(40), position: 5, state: "queued" }) },
       {
@@ -2005,7 +1992,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // columns narrower than the terminal): drafts, breakdown, the last merge's branch, the last merge,
     // times, branch names.
     const waiting = `5 ${W.waiting.word}`
-    const breakdown = `: 2 ${W.pending.word}, 2 ${W.submitted.word}, 1 ${W.stuck.word}`
+    const breakdown = `: 2 ${W.merging.word}, 2 ${W.queued.word}, 1 ${W.stuck.word}`
     const check = (times: boolean) => ` · ${W.checking.word} task/x${times ? " for 3:21" : ""}`
     const stop = (times: boolean) => ` · line stopped at task/s${times ? ` since ${clock(stuckAt)}` : ""}`
     const merge = (branch: boolean) => ` · last merge ${clock(mergedAt)}${branch ? " (task/y)" : ""}`
@@ -2075,8 +2062,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const W = await words()
     const since = ago(25 * MINUTE)
     const rows: WatchRow[] = [
-      { row: row({ branch: "task/p1", head: "2".repeat(40), position: 1, state: "checked" }) },
-      { row: row({ branch: "task/p2", head: "3".repeat(40), position: 2, state: "checked" }) },
+      { row: row({ branch: "task/p1", head: "2".repeat(40), position: 1, state: "merging" }) },
+      { row: row({ branch: "task/p2", head: "3".repeat(40), position: 2, state: "merging" }) },
       { row: row({ branch: "task/s1", head: "4".repeat(40), position: 3, state: "queued" }) },
       { row: row({ branch: "task/s2", head: "5".repeat(40), position: 4, state: "queued" }) },
       { row: row({ branch: "task/s3", head: "6".repeat(40), position: 5, state: "queued" }) },
@@ -2094,7 +2081,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const waiting = `5 ${W.waiting.word}`
 
     expect({ 70: await at(70), 50: await at(50), 40: await at(40) }).toEqual({
-      70: `${waiting}: 2 ${W.pending.word}, 3 ${W.submitted.word} · paused since ${clock(since)} by @chief`,
+      70: `${waiting}: 2 ${W.merging.word}, 3 ${W.queued.word} · paused since ${clock(since)} by @chief`,
       50: `${waiting} · paused since ${clock(since)} by @chief`,
       40: `${waiting} · paused by @chief`,
     })
@@ -2103,7 +2090,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   it("the RUNNER rail counts the changes waiting in line as the top line does: once per change, the held one apart (A2-set-v3 Q5)", async () => {
     const W = await words()
     const { live: _running, ...before } = running()
-    const passed = row({ branch: "task/y1", head: "2".repeat(40), position: 1, state: "checked" })
+    const passed = row({ branch: "task/y1", head: "2".repeat(40), position: 1, state: "merging" })
     const rows: WatchRow[] = [
       split(running(), RUN_ID),
       split({ ...before, at: ago(40 * MINUTE) }, EARLIER_RUN),
@@ -2323,7 +2310,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       run: RUN_ID,
       since: ago((5 * 60 + 37) * MINUTE),
       startedAt,
-      state: "checked",
+      state: "merging",
     })
     const listing = await lines(snapshot({ rows: [{ row: held }], runner: RUNNER }), 120, 40)
     const header = listing.find((line) => line.includes("ISSUE / BRANCH") && line.includes("AGE / RUN")) ?? ""
@@ -2365,7 +2352,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
    *           3:00 · Wait time 12:00` in its detail. One word, one basis (A2-set-v4); the attempt's runtime
    *           stays in the detail.
    */
-  it("a pending row's detail says the waiting number its table cell says, and the attempt's runtime under its own name, with no Age or Wait time", async () => {
+  it("a queued row's detail says the waiting number its table cell says, and the attempt's runtime under its own name, with no Age or Wait time", async () => {
     const W = await words()
     const pending = row({
       at: ago(35 * MINUTE),
@@ -2376,7 +2363,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       run: RUN_ID,
       since: ago(50 * MINUTE),
       startedAt: ago(38 * MINUTE),
-      state: "checked",
+      state: "queued",
       subject: "passed, waits to merge",
     })
 
@@ -2588,19 +2575,19 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
   it("one change to the word table changes every surface that draws a state word, both helps included", async () => {
     const W = await words()
-    const SENTINEL = "PENDINGWORD"
-    const was = W.pending.word
+    const SENTINEL = "MERGINGWORD"
+    const was = W.merging.word
     const item = row({
       at: ago(3 * MINUTE),
       branch: "task/y1",
       head: "2".repeat(40),
       position: 1,
       since: ago(50 * MINUTE),
-      state: "checked",
+      state: "merging",
       subject: "passed, waits to merge",
     })
     const snap = snapshot({ rows: [{ row: item }], runner: RUNNER })
-    W.pending.word = SENTINEL
+    W.merging.word = SENTINEL
     try {
       const pane = await lines(snap, 120, 40)
       const help = await lines(snapshot({ rows: [] }), 160, 48, ["?"])
@@ -2620,20 +2607,20 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
       expect(Object.keys(surfaces).filter((surface) => surfaces[surface] !== true)).toEqual([])
     } finally {
-      W.pending.word = was
+      W.merging.word = was
     }
   })
 
-  it("never draws the queue's internal names queued, checked or withdrawn as a state word, on any surface", async () => {
-    const pending = row({
+  it("draws event statuses without the retired checked or withdrawn names on any surface", async () => {
+    const merging = row({
       at: ago(3 * MINUTE),
       branch: "task/y1",
       head: "2".repeat(40),
       position: 1,
-      state: "checked",
+      state: "merging",
       subject: "passed, waits to merge",
     })
-    const submitted = row({
+    const queued = row({
       branch: "task/z",
       head: "3".repeat(40),
       position: 2,
@@ -2646,33 +2633,33 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       endedAt: ago(30 * MINUTE),
       head: "7".repeat(40),
       reason: "replaced",
-      state: "withdrawn",
+      state: "cancelled",
       subject: "a newer head replaced it",
     })
-    const snap = snapshot({ rows: [pending, submitted, cancelled].map((item) => ({ row: item })), runner: RUNNER })
+    const snap = snapshot({ rows: [merging, queued, cancelled].map((item) => ({ row: item })), runner: RUNNER })
     const pane = await lines(snap, 120, 40)
     const help = await lines(snapshot({ rows: [] }), 160, 48, ["?"])
     const page = (await printListing(snap, { color: false, columns: 120 })).split("\n")
     const cli = await listHelp()
-    const internal = /\b(queued|checked|withdrawn)\b/u
+    const internal = /\b(checked|withdrawn)\b/u
     // The notice's own word, before its cause and its next owner: the prose after it is the core's.
     const noticeWord = (item: Row): string => noticeLine(item).split("  ·  ")[0] ?? ""
     const surfaces: Readonly<Record<string, string>> = {
       "? help": help.join("\n"),
       "notice word, cancelled": noticeWord(cancelled),
-      "notice word, pending": noticeWord(pending),
-      "notice word, submitted": noticeWord(submitted),
+      "notice word, merging": noticeWord(merging),
+      "notice word, queued": noticeWord(queued),
       "page row, cancelled": tableRow(page, "task/w"),
-      "page row, pending": tableRow(page, "task/y1"),
-      "page row, submitted": tableRow(page, "task/z"),
+      "page row, merging": tableRow(page, "task/y1"),
+      "page row, queued": tableRow(page, "task/z"),
       "page top line": page[page.findIndex((line) => line.includes("YRD")) + 1] ?? "",
       "pane row, cancelled": tableRow(pane, "task/w"),
-      "pane row, pending": tableRow(pane, "task/y1"),
-      "pane row, submitted": tableRow(pane, "task/z"),
+      "pane row, merging": tableRow(pane, "task/y1"),
+      "pane row, queued": tableRow(pane, "task/z"),
       "pane top line": topLineOf(pane).line,
       "queue show line, cancelled": rowLine({ row: cancelled }),
-      "queue show line, pending": rowLine({ row: pending }),
-      "queue show line, submitted": rowLine({ row: submitted }),
+      "queue show line, merging": rowLine({ row: merging }),
+      "queue show line, queued": rowLine({ row: queued }),
       "yrd list --help": cli,
     }
 
@@ -4119,7 +4106,7 @@ describe("the top line (25416)", () => {
             head: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
             since: new Date(now.getTime() - 35 * 60_000),
             startedAt: new Date(now.getTime() - 20 * 60_000),
-            state: "checked",
+            state: "merging",
             submitter: "@dev/9",
             subject: "fix(watch): freeze done clocks and count RUNNING from runner start",
           },
@@ -4303,7 +4290,7 @@ describe("one tab per stage of the round, from its journal (25441 slice 2)", () 
       live: { check: "typecheck", phase: "merge", run: RUN_ID, since: before(20_000) },
       position: 1,
       run: RUN_ID,
-      state: "checked",
+      state: "merging",
     })
     const journal = journalOf({
       steps: [
@@ -4380,7 +4367,7 @@ describe("an ended change's check that never ended (25521)", () => {
       running,
       startedAt: started,
     })
-    const withdrawn = row({ endedAt: NOW, reason: "replaced", run: RUN_ID, state: "withdrawn" })
+    const withdrawn = row({ endedAt: NOW, reason: "replaced", run: RUN_ID, state: "cancelled" })
     const [item] = perRunRows([withdrawn], {
       journals: {
         dir: "/w/logs",
