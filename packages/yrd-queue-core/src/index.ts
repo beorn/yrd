@@ -135,7 +135,7 @@ export type { Ending, Notifier, QueueConfig, QueueHealthConfig, Target } from ".
 export { clocks, endingInstants, subjects, watchRows, watchRowKey } from "./table.ts"
 export type { Clocks, NextOwner, Row, WatchRow, WatchRowOptions } from "./table.ts"
 export { resolveRemote } from "./remote.ts"
-export { DRAFT_EXCLUDED_PREFIXES, DRAFT_WINDOW_MS, readDrafts } from "./drafts.ts"
+export { DRAFT_EXCLUDED_PREFIXES, DRAFT_ROW_MS, DRAFT_WINDOW_MS, foldDrafts, readDrafts } from "./drafts.ts"
 export type { Draft, DraftReading } from "./drafts.ts"
 export { directMergeLine, eventDirectMergeCommits } from "./direct.ts"
 export { refuseTarget, inspectSubmit, inspectSubmitAtHead, freshnessLine, submit, issueOf } from "./submit.ts"

@@ -995,7 +995,7 @@ describe("the queue line under a selector (24196)", () => {
       },
       page.stdout(),
     ).toEqual({
-      queueLine: "2 waiting: 2 submitted · 1 draft (7d)",
+      queueLine: "2 waiting: 2 queued · 1 draft (7d)",
       rail: "nothing under a check, and 2 in line",
       scope: true,
     })
@@ -1051,9 +1051,11 @@ exec '${realGit}' "$@"
         () => false,
       )
 
-    // Once the first round has printed, the watched change's branch is deleted, so a later round reads it ended.
+    // Once the first round has printed, the watched change's branch is deleted and a queue round ends it: an
+    // event change's status comes only from its events (25041), so a later watch round reads the runner's ending.
     const watched = capture(w.work)
     let printed = false
+    let ended: Promise<void> | undefined
     const io: YrdCliIO = {
       ...watched.io,
       stdout(text) {
@@ -1061,6 +1063,7 @@ exec '${realGit}' "$@"
         if (printed) return
         printed = true
         execFileSync(realGit, ["--git-dir", join(root, "remote.git"), "update-ref", "-d", "refs/heads/task/good"])
+        ended = drain(w)
       },
     }
     // A reader confirms a missing branch only once its change is older than the deletion grace (at least
@@ -1074,6 +1077,7 @@ exec '${realGit}' "$@"
     )
       .catch((error: unknown) => `threw: ${error instanceof Error ? error.message : String(error)}`)
       .finally(() => vi.useRealTimers())
+    await ended
 
     expect(
       {

@@ -89,6 +89,8 @@ import {
   invalidateMirrorStamp,
   refAt,
   readDrafts,
+  foldDrafts,
+  DRAFT_WINDOW_MS,
   submit,
   withdraw,
   NothingToWithdraw,
@@ -2060,6 +2062,8 @@ export async function coreQueueCommand(
        * the same captured declaration as the queue reading, so the rows and
        * the reading share one tip and no second reading can disagree with it.
        */
+      /** Draft heads were fetched since the last round: the next reading dates them, so it bypasses the listing cache. */
+      let draftsFetched = false
       const round = async (
         declared: CapturedDeclaration,
         draftWindow: DraftWindow = "7d",
@@ -2106,13 +2110,22 @@ export async function coreQueueCommand(
         const reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, selectedStore, {
           all: request.all,
           drafts: request.drafts,
+          // A human page or watch lists its window's drafts; `--json` carries none (24196).
+          ...(options.json === true ? {} : { shown: { draftWindow } }),
+          ...(draftsFetched ? { forceFresh: true } : {}),
         })
-        const { journals, all, drafts, observation } = reading
+        draftsFetched = false
+        const { journals, all, drafts, observation, olderDrafts } = reading
         if (options.json !== true) narrateMalformed(io, journals, said)
         // The run-history lens is for stats and watch detail. List is the
         // current head of each branch in both output formats; JSON expands
         // that head by run unless --latest selects its single row.
-        const unfiltered = watchRows(reading.document, { journals, perRun: true })
+        // The document holds every change; the table's drafts join it so the
+        // queue line counts the window's drafts, never the document's (24196).
+        const unfiltered = watchRows(
+          [...reading.document.filter((row) => row.state !== "draft"), ...all.filter((row) => row.state === "draft")],
+          { journals, perRun: true },
+        )
         const listed = watchRows(all, { journals, perRun: options.json === true, latest: request.latest })
         const changes = filterRows(listed, request.terms ?? []).filter((item) => item.row.state !== "draft")
         const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
@@ -2182,7 +2195,7 @@ export async function coreQueueCommand(
                 drafts: {
                   unread: drafts.undated.map((draft) => draft.head),
                   window: draftWindow,
-                  older: 0,
+                  older: olderDrafts ?? 0,
                 },
               }),
         }
@@ -2210,6 +2223,7 @@ export async function coreQueueCommand(
         const fresh = (one.drafts?.unread ?? []).filter((head) => !sighted.has(head))
         if (fresh.length === 0) return
         for (const head of fresh) sighted.add(head)
+        draftsFetched = true
         let why: unknown
         const worked = async (argv: readonly string[]): Promise<boolean> => {
           try {
@@ -3768,7 +3782,10 @@ export type EventListingResult = Readonly<{
   document: readonly Row[]
   history: ReadonlyMap<string, readonly EventHistoryRow[]>
   journals: Journals
+  /** The drafts of the window shown, when one was; otherwise every draft this reading can date. */
   drafts: DraftReading
+  /** The seven-day drafts older than a day, folded into a count rather than listed (25424); absent unless the 7d window was shown. */
+  olderDrafts?: number
   pause: PauseRecord | undefined
   overrides: OverrideTable
   changes: ReadonlyMap<string, EventChange>
@@ -3809,12 +3826,14 @@ export async function readEventListing(
     all?: boolean
     directHistory?: boolean
     drafts?: boolean
+    /** A human page or watch: its draft window's drafts are table rows, never document rows (24196). */
+    shown?: Readonly<{ draftWindow: DraftWindow }>
     now?: number | Date
     forceFresh?: boolean
   }> = {},
 ): Promise<EventListingResult> {
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
-  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}`
+  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}#shown:${options.shown?.draftWindow ?? "none"}`
   const cache = eventListingCaches.get(cacheKey)
   const nowMs =
     typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
@@ -3956,7 +3975,22 @@ export async function readEventListing(
         [branch, entries.map(({ row, events }) => ({ row: titled([row])[0] as Row, events }))] as const,
     ),
   )
-  const all = titled([...selected.table, ...invalidRows, ...directRows])
+  // Seven days lists the drafts of the last day and counts the older ones and
+  // the undated apart; every draft lists them all, marked. `--drafts` already
+  // put every draft in the table, so the window adds none of its own.
+  const window = options.shown?.draftWindow
+  const windowDated =
+    window === "7d"
+      ? drafts.dated.filter(
+          (draft) => draft.committedAt !== undefined && listNow.getTime() - draft.committedAt.getTime() <= DRAFT_WINDOW_MS,
+        )
+      : drafts.dated
+  const folded = foldDrafts(windowDated, listNow)
+  const windowDrafts =
+    window === undefined || options.drafts === true
+      ? []
+      : eventRows(new Map(), window === "all" ? [...windowDated, ...drafts.undated] : folded.rows)
+  const all = titled([...selected.table, ...invalidRows, ...directRows, ...windowDrafts])
   const document = titled([...selected.document, ...invalidRows, ...directRows])
   const observation = await git.observe({
     version: 1,
@@ -3983,7 +4017,8 @@ export async function readEventListing(
     document,
     history: titledHistory,
     journals: readJournals(join(workdir, "logs")),
-    drafts,
+    drafts: window === undefined ? drafts : { dated: windowDated, undated: drafts.undated },
+    ...(window === "7d" ? { olderDrafts: folded.older } : {}),
     pause: operational.stop,
     overrides: operational.overrides,
     changes,
