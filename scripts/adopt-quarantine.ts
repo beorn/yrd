@@ -280,7 +280,7 @@ async function applyQuarantine(
       `live target differs for ${conflicts.map((item) => `${item.branch}@${item.targetOid}`).join(", ")}; return to @cto before a write`,
     )
   }
-  const pending = selected.filter((item) => item.state === "pending").slice(0, options.applyCount)
+  const pending = selected.filter((item) => item.state === "pending")
   if (pending.length !== options.applyCount) {
     throw new Error(
       `--apply ${options.applyCount} requested, but ${pending.length} pending rows matched; already adopted/contained rows are not silently counted`,

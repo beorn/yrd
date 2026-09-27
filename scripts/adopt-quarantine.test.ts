@@ -55,11 +55,19 @@ function cli(work: string, ...args: string[]): unknown {
 function yrd(work: string, ...args: string[]): { changes: Array<{ branch: string; state: string }> } {
   const result = spawnSync(
     "bun",
-    [fileURLToPath(new URL("../bin/yrd.ts", import.meta.url)), "queue", ...args, "--json", "--fresh", "--queue", "main"],
+    [
+      fileURLToPath(new URL("../bin/yrd.ts", import.meta.url)),
+      "queue",
+      ...args,
+      "--json",
+      "--fresh",
+      "--queue",
+      "main",
+    ],
     { cwd: work, encoding: "utf8" },
   )
   if (result.status !== 0) throw new Error(`yrd queue ${args.join(" ")} exited ${result.status}: ${result.stderr}`)
-  return JSON.parse(result.stdout)
+  return JSON.parse(result.stdout) as { changes: Array<{ branch: string; state: string }> }
 }
 
 async function fixture(): Promise<{
@@ -123,8 +131,9 @@ async function fixture(): Promise<{
 it("plans the exact old refs, moves the valid chain, and repairs the cancelled-only chain without deleting quarantine", async () => {
   const { work, store, queueTip, badTip, goodTip } = await fixture()
   const [existing] = await (await openEvents({ ...store, ref: "refs/yrd-quarantine/main/changes/task/good" })).events()
-  if (existing === undefined || store.backend.publish === undefined)
+  if (existing === undefined || store.backend.publish === undefined) {
     throw new Error("fixture has no opened event or publisher")
+  }
   await store.backend.publish(
     work,
     [{ ref: "refs/yrd/main/changes/task/good", expect: "0".repeat(existing.id.length), oid: existing.id }],
@@ -145,6 +154,16 @@ it("plans the exact old refs, moves the valid chain, and repairs the cancelled-o
       expect.objectContaining({ branch: "task/bad", kind: "repair", sourceOid: badTip }),
     ]),
   )
+  const partial = spawnSync(
+    "bun",
+    [fileURLToPath(new URL("./adopt-quarantine.ts", import.meta.url)), "--apply", "1", ...common],
+    { cwd: work, encoding: "utf8" },
+  )
+  expect(partial.status).toBe(2)
+  expect(partial.stderr).toContain("2 pending rows matched")
+  expect(partial.stdout).toBe("")
+  expect(git(work, "ls-remote", "origin", "refs/yrd/main/changes/task/good")).toContain(existing.id)
+  expect(git(work, "ls-remote", "origin", "refs/yrd/main/changes/task/bad")).toBe("")
   cli(work, "--apply", "1", "--only", "task/good", ...common)
   expect(git(work, "ls-remote", "origin", "refs/yrd/main/changes/task/good")).toContain(goodTip)
   expect((await readStatus(store, "main", "task/good")).status).toBe("cancelled")
