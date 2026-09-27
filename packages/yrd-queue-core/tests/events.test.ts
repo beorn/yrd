@@ -1955,7 +1955,10 @@ describe("the queue-format boundary", () => {
     await expect(readEventQueueWithChanges(location, "lab")).rejects.toThrow(/refs\/yrd\/lab\/queue.*must be created/)
   })
 
-  it("reads a queue chain beyond one page through the combined read", async () => {
+  /** @failure The read path pages a long queue, but its real writer still refuses event 1025.
+   * @level l1 @consumer Yrd queue run's direct-commit observation
+   */
+  it("reads and writes a queue chain beyond one page", async () => {
     const { store, location } = remoteMemStore("yrd-long-concurrent-list")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
@@ -1979,6 +1982,14 @@ describe("the queue-format boundary", () => {
       tip = written.head
     }
     expect((await readEventQueueWithChanges(location, "lab")).queue.created).toBe(queueTip)
+    const observed = await writeQueueEvent(location, "lab", {
+      type: "observed",
+      commit,
+      by: QUEUE_RUN_WRITER,
+      at: new Date("2026-09-22T14:01:00.000Z"),
+    })
+    expect((await readEventQueue(location, "lab")).observed[commit]?.id).toBe(observed)
+    expect(await branch.head()).toBe(observed)
   })
 
   it("pages a listed change chain beyond 1024 events without dropping its opening", async () => {
