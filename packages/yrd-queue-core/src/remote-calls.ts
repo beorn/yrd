@@ -41,10 +41,41 @@ export type RemoteCalls = Readonly<{
   unreadable: number
   /** Per-function remote verbs and transport children; `unattributed` is an explicit measurement gap. */
   seams: Readonly<Record<string, Readonly<Record<string, number>>>>
+  /** Each SSH child with its Git command and the explicit git-super refresh tag, before Trace2 is removed. */
+  sshCalls: readonly Readonly<{ command: string; repository: string; refresh: boolean; sshChildren: number }>[]
 }>
 
+function describeSshCall(
+  command: string | undefined,
+  repository: string | undefined,
+  argv: readonly string[] | undefined,
+  refresh: boolean,
+  sshChildren: number,
+  requireRefreshTag: boolean,
+): RemoteCalls["sshCalls"][number] {
+  if (command === undefined || argv === undefined || repository === undefined) {
+    return { command: "unknown", repository: repository ?? "unknown", refresh, sshChildren }
+  }
+  const dryRun = argv.includes("--dry-run") ? " --dry-run" : ""
+  const mainRef = argv.some((arg) => /^\+refs\/heads\/[^:]+:refs\/remotes\/origin\/[^:]+$/u.test(arg))
+  const mainFetch = command === "fetch" && argv.includes("--no-tags") && argv.includes("origin") && mainRef
+  if (refresh) {
+    if (!mainFetch) {
+      throw new Error(`Trace2 tagged a non-component-main SSH call as refresh: ${command} in ${repository}`)
+    }
+  } else if (mainFetch && requireRefreshTag) {
+    throw new Error(
+      `Trace2 found an untagged component-main refresh fetch in ${repository}; round SSH split cannot be proven`,
+    )
+  }
+  return { command: `${command}${dryRun}`, repository, refresh, sshChildren }
+}
+
 /** Count the remote calls recorded under one trace2 directory. A directory that is not there is refused. */
-export function readRemoteCalls(directory: string): RemoteCalls {
+export function readRemoteCalls(
+  directory: string,
+  options: Readonly<{ requireRefreshTag?: boolean }> = {},
+): RemoteCalls {
   let names: string[]
   try {
     if (!statSync(directory).isDirectory()) throw new Error("not a directory")
@@ -61,6 +92,7 @@ export function readRemoteCalls(directory: string): RemoteCalls {
   let remoteSeconds = 0
   let unreadable = 0
   const seams: Record<string, Record<string, number>> = {}
+  const sshCalls: { command: string; repository: string; refresh: boolean; sshChildren: number }[] = []
   for (const name of names) {
     let started = false
     let remote = false
@@ -68,6 +100,10 @@ export function readRemoteCalls(directory: string): RemoteCalls {
     const fileVerbs: Record<string, number> = {}
     let fileSshChildren = 0
     let fileRemoteMs = 0
+    let command: string | undefined
+    let repository: string | undefined
+    let refresh = false
+    let argv: readonly string[] | undefined
     for (const line of readFileSync(join(directory, name), "utf8").split("\n")) {
       if (line === "") continue
       let event: {
@@ -77,6 +113,8 @@ export function readRemoteCalls(directory: string): RemoteCalls {
         t_abs?: unknown
         param?: unknown
         value?: unknown
+        argv?: unknown
+        worktree?: unknown
       }
       try {
         event = JSON.parse(line) as typeof event
@@ -86,10 +124,16 @@ export function readRemoteCalls(directory: string): RemoteCalls {
         continue
       }
       if (event.event === "start") started = true
+      if (event.event === "start" && Array.isArray(event.argv) && event.argv.every((arg) => typeof arg === "string")) {
+        argv = event.argv as string[]
+      }
+      if (event.event === "def_repo" && typeof event.worktree === "string") repository = event.worktree
+      if (event.event === "def_param" && event.param === "GIT_SUPER_PHASE" && event.value === "refresh") refresh = true
       if (event.event === "def_param" && event.param === "YRD_SEAM" && typeof event.value === "string") {
         seam = event.value
       }
       if (event.event === "cmd_name" && typeof event.name === "string" && REMOTE_VERBS.has(event.name)) {
+        command = event.name
         verbs[event.name] = (verbs[event.name] ?? 0) + 1
         remote = true
         fileVerbs[event.name] = (fileVerbs[event.name] ?? 0) + 1
@@ -103,6 +147,11 @@ export function readRemoteCalls(directory: string): RemoteCalls {
         fileRemoteMs += Math.round(event.t_abs * 1000)
       }
     }
+    if (fileSshChildren > 0) {
+      sshCalls.push(
+        describeSshCall(command, repository, argv, refresh, fileSshChildren, options.requireRefreshTag === true),
+      )
+    }
     if (remote) {
       const row = (seams[seam ?? "unattributed"] ??= {})
       for (const [name, count] of Object.entries(fileVerbs)) row[name] = (row[name] ?? 0) + count
@@ -111,7 +160,7 @@ export function readRemoteCalls(directory: string): RemoteCalls {
     }
     if (started) processes++
   }
-  return { processes, verbs, sshChildren, remoteMs: Math.round(remoteSeconds * 1000), unreadable, seams }
+  return { processes, verbs, sshChildren, remoteMs: Math.round(remoteSeconds * 1000), unreadable, seams, sshCalls }
 }
 
 /**
@@ -122,29 +171,35 @@ export function readRemoteCalls(directory: string): RemoteCalls {
  */
 export function traceRemoteCalls(
   directory: string,
-  options: Readonly<{ seams?: boolean }> = {},
+  options: Readonly<{ seams?: boolean; refresh?: boolean }> = {},
 ): Readonly<{ env: Readonly<NodeJS.ProcessEnv>; end(): RemoteCalls }> {
   mkdirSync(directory, { recursive: true })
   const previous = process.env.GIT_TRACE2_EVENT
   const previousVars = process.env.GIT_TRACE2_ENV_VARS
   process.env.GIT_TRACE2_EVENT = directory
-  if (options.seams) {
-    process.env.GIT_TRACE2_ENV_VARS = [...new Set([...(previousVars?.split(",") ?? []), "YRD_SEAM"])].join(",")
+  if (options.seams || options.refresh) {
+    process.env.GIT_TRACE2_ENV_VARS = [
+      ...new Set([
+        ...(previousVars?.split(",") ?? []),
+        ...(options.seams ? ["YRD_SEAM"] : []),
+        ...(options.refresh ? ["GIT_SUPER_PHASE"] : []),
+      ]),
+    ].join(",")
   }
   return {
     env: {
       GIT_TRACE2_EVENT: directory,
-      ...(options.seams ? { GIT_TRACE2_ENV_VARS: process.env.GIT_TRACE2_ENV_VARS } : {}),
+      ...(options.seams || options.refresh ? { GIT_TRACE2_ENV_VARS: process.env.GIT_TRACE2_ENV_VARS } : {}),
     },
     end() {
       if (previous === undefined) delete process.env.GIT_TRACE2_EVENT
       else process.env.GIT_TRACE2_EVENT = previous
-      if (options.seams) {
+      if (options.seams || options.refresh) {
         if (previousVars === undefined) delete process.env.GIT_TRACE2_ENV_VARS
         else process.env.GIT_TRACE2_ENV_VARS = previousVars
       }
       try {
-        return readRemoteCalls(directory)
+        return readRemoteCalls(directory, { requireRefreshTag: options.refresh })
       } finally {
         rmSync(directory, { recursive: true, force: true })
       }
@@ -172,5 +227,43 @@ export function remoteCallsRow(calls: RemoteCalls): Readonly<Record<string, numb
         Object.entries(row).map(([name, count]) => [`seam.${seam}.${name}`, count]),
       ),
     ),
+  }
+}
+
+/** A round's durable, exact split. A torn or unnamed SSH call cannot become a plausible zero. */
+export function roundRemoteCallsRow(calls: RemoteCalls): Readonly<Record<string, number | string | readonly string[]>> {
+  if (calls.unreadable !== 0) {
+    throw new Error(`round SSH split cannot be proven: ${calls.unreadable} unreadable Trace2 event(s)`)
+  }
+  if (calls.sshCalls.some((call) => call.command === "unknown" || call.repository === "unknown")) {
+    throw new Error("round SSH split cannot be proven: a transport child lacks its Git command or repository")
+  }
+  const total = calls.sshCalls.reduce((sum, call) => sum + call.sshChildren, 0)
+  if (total !== calls.sshChildren) {
+    throw new Error(`round SSH split cannot be proven: named ${total} of ${calls.sshChildren} children`)
+  }
+  const group = (refresh: boolean) => {
+    const grouped = new Map<string, { command: string; repository: string; ssh_children: number }>()
+    for (const call of calls.sshCalls) {
+      if (call.refresh !== refresh) continue
+      const key = JSON.stringify([call.command, call.repository])
+      const row = grouped.get(key) ?? { command: call.command, repository: call.repository, ssh_children: 0 }
+      row.ssh_children += call.sshChildren
+      grouped.set(key, row)
+    }
+    return [...grouped.values()]
+      .sort((a, b) => a.repository.localeCompare(b.repository) || a.command.localeCompare(b.command))
+      .map((row) => `${row.ssh_children} ${row.command} @ ${row.repository}`)
+  }
+  const refreshCalls = group(true)
+  const beyondCalls = group(false)
+  const refreshChildren = calls.sshCalls.filter((call) => call.refresh).reduce((sum, call) => sum + call.sshChildren, 0)
+  return {
+    ...remoteCallsRow(calls),
+    refresh_boundary: "GIT_SUPER_PHASE=refresh on component-main fetch",
+    refresh_ssh_children: refreshChildren,
+    beyond_refresh_ssh_children: calls.sshChildren - refreshChildren,
+    refresh_calls: refreshCalls,
+    beyond_refresh_calls: beyondCalls,
   }
 }
