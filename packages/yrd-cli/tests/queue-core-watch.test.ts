@@ -25,15 +25,7 @@ import {
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join, resolve } from "node:path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
-import {
-  createEventQueue,
-  createEventStore,
-  gitIn,
-  readConfig,
-  readJournals,
-  submit,
-  type Git,
-} from "@yrd/queue-core"
+import { createEventQueue, createEventStore, gitIn, readConfig, readJournals, submit, type Git } from "@yrd/queue-core"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
