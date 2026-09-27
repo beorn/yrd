@@ -347,6 +347,7 @@ export function WatchDetail({
   runnerSnapshot?: WatchSnapshot
 }) {
   const runnerScroll = useScrollController()
+  const changesScroll = useScrollController()
   const now = useNow()
 
   if (runnerSnapshot !== undefined) {
@@ -457,41 +458,43 @@ export function WatchDetail({
         <Text color="$fg-muted">no check-step detail is recorded for this change</Text>
       ) : null}
       <Box flexGrow={1} minHeight={0} minWidth={0} flexDirection="column">
-      <Tabs
-        variant="filled"
-        value={tab}
-        onChange={(value: string) => {
-          onSelect?.(value)
-        }}
-      >
-        <TabList flexWrap="wrap">
-          <Tab key={CHANGES_TAB} value={CHANGES_TAB}>
-            Timeline{(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? "" : " ⚠"}
-            {"\n"}
-            <Text color="$fg-muted">{cutCounter(detail)}</Text>
-          </Tab>
-          {STAGE_TABS.map((stage) => (
-            <Tab key={stage} value={stage}>
-              <StageTabLabel detail={detail} stage={stage} />
+        <Tabs
+          variant="filled"
+          value={tab}
+          onChange={(value: string) => {
+            onSelect?.(value)
+          }}
+        >
+          <TabList flexWrap="wrap">
+            <Tab key={CHANGES_TAB} value={CHANGES_TAB}>
+              Timeline{(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? "" : " ⚠"}
+              {"\n"}
+              <Text color="$fg-muted">{cutCounter(detail)}</Text>
             </Tab>
-          ))}
-        </TabList>
-        <TabPanel key={CHANGES_TAB} value={CHANGES_TAB}>
-          {(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? null : (
-            <Text color="$fg-warning" wrap="wrap">
-              {diagnosticLines(row, detail.journal).join("\n")}
-            </Text>
-          )}
-          <ChangeBox detail={detail} diffOpen={diffOpen} diff={diff} onToggleDiff={onToggleDiff} />
-        </TabPanel>
-        {STAGE_TABS.map((stage) => (
-          <TabPanel key={stage} value={stage}>
-            <Box flexGrow={1} minHeight={0} minWidth={0} flexDirection="column">
-              <StageTabPanel detail={detail} stage={stage} outputs={outputs} selectedSubIndex={selectedSubIndex} />
-            </Box>
+            {STAGE_TABS.map((stage) => (
+              <Tab key={stage} value={stage}>
+                <StageTabLabel detail={detail} stage={stage} />
+              </Tab>
+            ))}
+          </TabList>
+          <TabPanel key={CHANGES_TAB} value={CHANGES_TAB}>
+            <DetailScroll controller={changesScroll}>
+              {(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? null : (
+                <Text color="$fg-warning" wrap="wrap">
+                  {diagnosticLines(row, detail.journal).join("\n")}
+                </Text>
+              )}
+              <ChangeBox detail={detail} diffOpen={diffOpen} diff={diff} onToggleDiff={onToggleDiff} />
+            </DetailScroll>
           </TabPanel>
-        ))}
-      </Tabs>
+          {STAGE_TABS.map((stage) => (
+            <TabPanel key={stage} value={stage}>
+              <Box flexGrow={1} minHeight={0} minWidth={0} flexDirection="column">
+                <StageTabPanel detail={detail} stage={stage} outputs={outputs} selectedSubIndex={selectedSubIndex} />
+              </Box>
+            </TabPanel>
+          ))}
+        </Tabs>
       </Box>
     </Box>
   )

@@ -149,7 +149,7 @@ function RunAddressDialog({
       <ModalDialog
         title="Run address"
         width={110}
-        height={10}
+        height={error === undefined ? 10 : 14}
         footer={
           error === undefined ? (
             "Enter to navigate · Escape to close"
