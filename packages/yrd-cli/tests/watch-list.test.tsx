@@ -157,7 +157,7 @@ describe("the drafts the home list folds into a count (25424)", () => {
   })
 })
 
-describe("ISSUE / BRANCH column capping and title preservation (25716)", () => {
+describe("CHANGES column capping and title preservation (25716)", () => {
   const longBranch =
     "task/@i/10-yrd/25041-readers-tolerate-an-unknown-event-kind/25647-advance-pins/25667-readers-tolerate-an-unknown-event-kind-with-extra-padding-to-reach-150-chars-total-length"
   const longError =
@@ -171,7 +171,7 @@ describe("ISSUE / BRANCH column capping and title preservation (25716)", () => {
     expect(truncateWithEllipsis("longer", 0)).toBe("")
   })
 
-  // Acceptance: in the ISSUE / BRANCH column, an error and a branch name each take at most 50%
+  // Acceptance: in the CHANGES column, an error and a branch name each take at most 50%
   // of the column's width; the title keeps the remainder and never less than a third;
   // anything cut ends with an ellipsis; the full text stays in the detail pane.
   // Witness: a 150-character branch and a 120-character error, each at three terminal widths (80, 120, 160).

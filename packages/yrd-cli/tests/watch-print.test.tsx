@@ -157,7 +157,7 @@ describe("the printed page's frame", () => {
     const text = await paint(snapshot({ pause, runner }))
     const lines = text.split("\n").filter((line) => line.trim() !== "")
     const title = lines.findIndex((line) => line.includes("YRD"))
-    const header = lines.findIndex((line) => line.includes("ISSUE / BRANCH"))
+    const header = lines.findIndex((line) => line.includes("CHANGES"))
     const runnerRow = lines.findIndex((line) => line.includes("RUNNER"))
     expect(title).toBeGreaterThanOrEqual(0)
     expect(header).toBeGreaterThan(title)
@@ -184,7 +184,7 @@ describe("the printed page's frame", () => {
     const text = await paint(snapshot({ runner }))
     const lines = text.split("\n").filter((line) => line.trim() !== "")
     const name = lines.findIndex((line) => line.trim() === "example.test/repo#main")
-    const header = lines.findIndex((line) => line.includes("ISSUE / BRANCH"))
+    const header = lines.findIndex((line) => line.includes("CHANGES"))
     expect(name).toBeGreaterThanOrEqual(0)
     expect(name).toBeLessThan(header)
   })
@@ -314,7 +314,7 @@ function flowJournals(): Journals {
  */
 function table(text: string): readonly string[] {
   const lines = text.split("\n").filter((line) => line.trim() !== "")
-  return lines.slice(lines.findIndex((line) => line.includes("ISSUE / BRANCH")))
+  return lines.slice(lines.findIndex((line) => line.includes("CHANGES")))
 }
 
 function flowSnapshot(over: Partial<WatchSnapshot> = {}): WatchSnapshot {
@@ -380,7 +380,7 @@ describe("the flow page: four bands, one row per change", () => {
     expect(runner, text).toBeDefined()
     expect(runner).toContain("?")
     expect(text).toContain("╭─ RUNNER")
-    const header = lines.find((line) => line.includes("ISSUE / BRANCH"))
+    const header = lines.find((line) => line.includes("CHANGES"))
     expect(header).toContain("QUEUE")
     expect(header).toContain("RUN")
     expect(header).not.toContain("QUEUE / RUN")
