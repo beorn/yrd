@@ -83,6 +83,7 @@ import {
   targetName,
   runCheck,
   DEFAULT_CHECK_BOUND_MS,
+  effectiveCheckTimeoutMs,
   STEP_BOUNDS_MS,
   STEP_STATES,
   roundBoundMs,
@@ -1794,7 +1795,7 @@ export async function coreQueueCommand(
             roundPlan = {
               round: openedAt,
               due: new Date(
-                Date.parse(openedAt) + roundBoundMs(activeChecks, activeSetup, record.waiting),
+                Date.parse(openedAt) + roundBoundMs(activeChecks, activeSetup, record.waiting, "normal"),
               ).toISOString(),
               candidates: record.waiting,
             }
@@ -1831,7 +1832,7 @@ export async function coreQueueCommand(
             }
             const spec = activeChecks.find((check) => check.name === record.name)
             if (spec === undefined) throw new Error(`runner check ${record.name} has no declaration for its bound`)
-            return spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
+            return effectiveCheckTimeoutMs(spec, "normal")
           })()
           setRunnerState(
             record.name === "setup" || record.purpose === "program-root-setup" ? "provisioning" : "checking",

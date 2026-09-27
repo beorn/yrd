@@ -127,6 +127,7 @@ export {
   runCheck,
   skippedChecks,
   DEFAULT_CHECK_BOUND_MS,
+  effectiveCheckTimeoutMs,
   STEP_BOUNDS_MS,
   STEP_STATES,
   roundBoundMs,

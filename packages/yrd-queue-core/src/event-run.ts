@@ -28,7 +28,7 @@ import { eventRows } from "./event-table.ts"
 import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
 import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
-import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, TRANSPORT_RETRY_LIMIT, type CheckResult } from "./check.ts"
+import { checkLogPath, effectiveCheckTimeoutMs, runCheck, TRANSPORT_RETRY_LIMIT, type CheckResult } from "./check.ts"
 import { InvalidQueueConfig, UnknownConfigKey, queueName, readConfig } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
 import { recentCasRefusalStreak, recentCasRefusals, recentPublicationNotLanded, type QueueRunLog } from "./log.ts"
@@ -1633,10 +1633,7 @@ export async function eventQueueRun(
                     durationMs: 0,
                     log: "",
                     why: "stop-time",
-                    projectedMs:
-                      (options.tier === "long" ? check.long?.timeoutMs : undefined) ??
-                      check.timeoutMs ??
-                      DEFAULT_CHECK_BOUND_MS,
+                    projectedMs: effectiveCheckTimeoutMs(check, options.tier),
                     boundMs: 0,
                   },
                   attempt,
