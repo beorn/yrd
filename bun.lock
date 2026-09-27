@@ -80,12 +80,14 @@
     },
   },
   "overrides": {
-    "git-super": "github:beorn/git-super#5ce370c5379f8fcff95e07b6fbc11ef7a05ca7a6",
+    "git-super": "github:beorn/git-super#98396823155db34371052a7014b17e34614e5353",
     "gitomic": "github:beorn/gitomic#3b994cc930479df184375a72b3bb371981fa6076",
     "loggily": "github:beorn/loggily#1d92a8d782daf8e9d2a5131d7dec988f2f1d0a0b",
   },
   "packages": {
     "@bearly/flock": ["@bearly/flock@0.1.1", "", {}, "sha512-YT4E+eanXhIDIHpHqi971KX36IjcfakkAHsSo81B8Fb8mVNwyIKeb6tXTHoOgHJr/p6fjy59iu4QWeqdu9BQbA=="],
+
+    "@bearly/pacing": ["@bearly/pacing@0.1.0", "", {}, "sha512-t5c9YUrcZjETONe+DvjjnRtfqlNzPexR3CgFFe7sdqeWlMCVQ8e41qHl/ACHwm42wpRERRrn9dHRuZFLl9I7cg=="],
 
     "@chenglou/pretext": ["@chenglou/pretext@0.0.8", "", {}, "sha512-yqm2GMxnPI7VHcHwe84P8ZF0JK/2d2DMKPqMN+s95jQhwDMYYXKVFVJUMEaVWckQStdsjdLav/0Vu+d9YbtGxA=="],
 
@@ -335,7 +337,7 @@
 
     "gifenc": ["gifenc@1.0.3", "", {}, "sha512-xdr6AdrfGBcfzncONUOlXMBuc5wJDtOueE3c5rdG0oNgtINLD+f2iFZltrBRZYzACRbKr+mSVU/x98zv2u3jmw=="],
 
-    "git-super": ["git-super@github:beorn/git-super#5ce370c", { "dependencies": { "@bearly/flock": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-5ce370c", "sha512-7F1b3WeOUlW9AAuRp3yvlXBzz4I9xm6Y2zNQJ/lVhXWAaR0WEPjdSY1pVCs9t5ej4s0YDuf+mkupt5k6h4IT/g=="],
+    "git-super": ["git-super@github:beorn/git-super#9839682", { "dependencies": { "@bearly/flock": "^0.1.0", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-9839682", "sha512-HbBTW/AmRBMDRx0vnz1DSk6YblFFuSjoYPRECvn8dJTEffc8AE9VHHURHR9pg51MW6wQWRMg0tI/FvxAFRfLkA=="],
 
     "gitomic": ["gitomic@github:beorn/gitomic#3b994cc", { "dependencies": { "@bearly/flock": "^0.1.1" }, "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-3b994cc", "sha512-hFv4k2l1w6l45fjzx8yM5LtXdSm6Y4juUhCAk7e2KCCcF8PwwCvQXTpYFXwIQLr9/c/21DRWIpGL2V5QrR0Y5g=="],
 
