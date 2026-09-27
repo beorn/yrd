@@ -11,6 +11,7 @@
  * and 13.7 s per judged change.
  */
 
+import { execFileSync } from "node:child_process"
 import {
   chmodSync,
   existsSync,
@@ -52,7 +53,7 @@ import {
 } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
 import { appendChangeEvent } from "../src/events.ts"
-import { gitSuperBin, siblingGitSuperBin } from "../../../tests/support/git-super-bin.ts"
+import { gitSuperBin, siblingGitSuperBin, superprojectRoot } from "../../../tests/support/git-super-bin.ts"
 
 // The root Vitest project seals PATH in its setup beforeEach. Reassert this
 // test's checked-out GitSuper after that hook so both test runners use it.
@@ -1038,7 +1039,7 @@ async function addNestedSubmodule(
 
 describe("settling gitlinks", () => {
   it("resolves the candidate workspace's git-super bin relative to this test file", async () => {
-    if (existsSync(siblingGitSuperBin)) {
+    if (superprojectRoot !== "") {
       expect(gitSuperBin).toBe(siblingGitSuperBin)
       expect(gitSuperBin).toContain("/vendor/git-super/bin")
     } else {
@@ -1048,6 +1049,23 @@ describe("settling gitlinks", () => {
     const w = await world()
     const options = await w.options()
     expect(options.env?.PATH?.split(":")[0]).toBe(gitSuperBin)
+  })
+
+  it.skipIf(superprojectRoot === "")("matches standalone override pins to the hh gitlinks", () => {
+    const manifest = JSON.parse(readFileSync(join(import.meta.dirname, "../../..", "package.json"), "utf8")) as {
+      overrides: Record<string, string>
+    }
+    const status = JSON.parse(
+      execFileSync(join(gitSuperBin, "git-super"), ["--repo", superprojectRoot, "--json", "status"], {
+        encoding: "utf8",
+      }),
+    ) as { consultedRepositories: Array<{ path: string; to?: string }> }
+
+    for (const name of ["git-super", "gitomic", "loggily"]) {
+      const pin = status.consultedRepositories.find((repository) => repository.path === `vendor/${name}`)?.to
+      expect(pin, `hh vendor/${name} gitlink must be materialized`).toMatch(/^[0-9a-f]{40}$/)
+      expect(manifest.overrides[name]).toBe(`github:beorn/${name}#${pin}`)
+    }
   })
 
   // The shared verifier applies git-super's pin verdict before opening a change. The pin forks
