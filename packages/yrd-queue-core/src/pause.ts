@@ -32,7 +32,7 @@ import {
   standsEnded,
   type ChangeRecord,
 } from "./legacy-records.ts"
-import type { CommitMeta } from "./git.ts"
+import { refAt, type CommitMeta } from "./git.ts"
 import type { Git } from "./git.ts"
 
 import { changeName, parseChangeName, pauseRef, type Change } from "./refs.ts"
@@ -153,8 +153,12 @@ export function stopFact(stop: PauseRecord | undefined): StopFact | null {
  * malformed, unreachable and unreadable state throws instead of opening the
  * queue on a guess.
  */
-export async function readPause(git: Git, remote: string, queue: string): Promise<PauseRecord | undefined> {
+export async function readPause(git: Git, remote: string | undefined, queue: string): Promise<PauseRecord | undefined> {
   const ref = pauseRef(queue)
+  if (remote === undefined) {
+    const local = await refAt(git, ref)
+    return local === undefined ? undefined : parsePause(git, local, `local ${ref}`)
+  }
   const store = await legacyStore(git)
   const captured = (await store.backend.fetchRefs(store.repo, ref, remote)).get(ref)
   return captured === undefined ? undefined : parsePause(git, captured, `${remote} ${ref}`)

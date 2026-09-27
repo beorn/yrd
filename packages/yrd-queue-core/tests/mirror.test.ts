@@ -6,7 +6,16 @@
  *           25567's host service, which takes over the refresh of the same store
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { tryAcquireFlock } from "@bearly/flock"
@@ -15,6 +24,7 @@ import { type Git, gitIn } from "../src/git.ts"
 import {
   MIRROR_REFRESHED_AT,
   mirrorLocation,
+  mirrorRefreshedAt,
   MirrorUnavailable,
   refreshDeclaredMirrors,
   refreshMirror,
@@ -127,6 +137,53 @@ describe("mirrorLocation", () => {
 })
 
 describe("refreshMirror", () => {
+  it("certifies an existing queue store only after one scoped fetch, and rejects a scopeless stamp", async () => {
+    const { root, store, upstream, env } = host()
+    await upstreamRepository(upstream, "child", env)
+    const url = `${HOSTED}child.git`
+    const created = await refreshMirror({ root: store, url, gitIn: through(env) })
+    unlinkSync(join(created.path, MIRROR_REFRESHED_AT))
+    const refspecs = ["+refs/heads/*:refs/heads/*", "+refs/yrd/main/*:refs/yrd/main/*"]
+    const counted = traced(env, root)
+    const refreshed = await refreshMirror({
+      path: created.path,
+      url,
+      gitIn: through(counted.env),
+      refspecs,
+      maxAgeMs: 60_000,
+    })
+    expect(refreshed.outcome).toBe("fetched")
+    expect(readRemoteCalls(counted.dir).verbs.fetch).toBe(1)
+    expect(mirrorRefreshedAt(created.path)).toEqual(refreshed.refreshedAt)
+    expect(JSON.parse(readFileSync(join(created.path, MIRROR_REFRESHED_AT), "utf8"))).toEqual({
+      at: refreshed.refreshedAt.toISOString(),
+      remote: "origin",
+      refspecs,
+    })
+    const warm = await refreshMirror({
+      path: created.path,
+      url,
+      gitIn: through(counted.env),
+      refspecs,
+      maxAgeMs: 60_000,
+    })
+    expect(warm.outcome).toBe("fresh")
+    expect(readRemoteCalls(counted.dir).verbs.fetch).toBe(1)
+    writeFileSync(
+      join(created.path, MIRROR_REFRESHED_AT),
+      `${JSON.stringify({ at: new Date().toISOString(), remote: "origin", refspecs: ["+refs/heads/main:refs/heads/main"] })}\n`,
+    )
+    await expect(
+      refreshMirror({ path: created.path, url, gitIn: through(counted.env), refspecs, maxAgeMs: 60_000 }),
+    ).rejects.toThrow("does not cover")
+    const legacyAt = new Date()
+    writeFileSync(join(created.path, MIRROR_REFRESHED_AT), `${legacyAt.toISOString()}\n`)
+    expect(mirrorRefreshedAt(created.path)).toEqual(legacyAt)
+    await expect(
+      refreshMirror({ path: created.path, url, gitIn: through(counted.env), refspecs, maxAgeMs: 60_000 }),
+    ).rejects.toThrow(`${created.path}/${MIRROR_REFRESHED_AT}`)
+  })
+
   it("creates a bare mirror with gc off and a refreshed-at stamp, then fetches and prunes on refresh", async () => {
     const { store, upstream, env } = host()
     const work = await upstreamRepository(upstream, "child", env)
@@ -141,8 +198,8 @@ describe("refreshMirror", () => {
     expect((await mirror(["config", "--get", "gc.auto"])).trim()).toBe("0")
     expect((await mirror(["rev-parse", "--is-bare-repository"])).trim()).toBe("true")
     expect((await mirror(["rev-parse", "refs/heads/main"])).trim()).toBe(await head(work, env))
-    const stamped = readFileSync(join(created.path, MIRROR_REFRESHED_AT), "utf8").trim()
-    expect(new Date(stamped).getTime()).toBe(created.refreshedAt.getTime())
+    const stamped = mirrorRefreshedAt(created.path)
+    expect(stamped).toEqual(created.refreshedAt)
 
     writeFileSync(join(work, "more.txt"), "more\n")
     await git(["add", "--all"])
