@@ -38,7 +38,7 @@ export const CHANGE_STATUSES = [
 export type ChangeStatus = (typeof CHANGE_STATUSES)[number]
 const CHANGE_ENDINGS = ["merged", "failed", "cancelled"] as const satisfies readonly ChangeStatus[]
 export type ChangeEnding = (typeof CHANGE_ENDINGS)[number]
-export type CancellationReason = "resubmitted" | "dropped" | "deleted" | "unrecorded"
+export type CancellationReason = "resubmitted" | "dropped" | "deleted" | "unrecorded" | "withdrawn"
 const LANDING_IN_PROGRESS = "landing in progress; resubmit after merged/failed/stuck, resume if runner gone"
 
 export const EVENT_TRAILERS = {
@@ -345,7 +345,7 @@ export function adoptedInput(details: AdoptedInputDetails): EventInput {
   }
   if (
     details.status === "cancelled" &&
-    !["resubmitted", "dropped", "deleted", "unrecorded"].includes(details.reason ?? "")
+    !["resubmitted", "dropped", "deleted", "unrecorded", "withdrawn"].includes(details.reason ?? "")
   ) {
     throw new TypeError("cancelled adoption needs a CancellationReason")
   }
@@ -755,10 +755,11 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
           reason !== "resubmitted" &&
           reason !== "dropped" &&
           reason !== "deleted" &&
+          reason !== "withdrawn" &&
           (reason !== "unrecorded" || !migrated)
         ) {
           throw new Error(
-            `event ${event.id} cancelled needs Reason: resubmitted, dropped, deleted or evidenced unrecorded`,
+            `event ${event.id} cancelled needs Reason: resubmitted, dropped, deleted, withdrawn or evidenced unrecorded`,
           )
         }
         if (reason === "dropped" || reason === "deleted") keptCommit(event)
@@ -2165,6 +2166,7 @@ export function adoptedChange(event: EventShape): ChangeSegment {
     reason !== "resubmitted" &&
     reason !== "dropped" &&
     reason !== "deleted" &&
+    reason !== "withdrawn" &&
     reason !== "unrecorded"
   ) {
     throw new Error(`adopted event ${event.id} has invalid cancelled reason: ${reason}`)

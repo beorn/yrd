@@ -3,8 +3,7 @@
  *
  * A branch is its ref at the queue's remote. Event queues have one queue chain
  * and one change chain per branch under `refs/yrd/<queue>/`; their status is a
- * fold over those events. Unmigrated queues retain their legacy `Record:`
- * format until #25041 converts it. The queue-format selector chooses one.
+ * fold over those events. A legacy queue ref is refused with its name.
  *
  * This package is the replacement core of the [plan](../../../../pm/@i/10-yrd/plan.md)
  * § Milestones M4. It reuses the git wrapper, submodule materialization, the
@@ -40,7 +39,6 @@ export {
   adoptedChange,
   adoptedInput,
   appendChangeEvent,
-  appendOpsCutover,
   changeInput,
   changesRef,
   createEventQueue,
@@ -75,7 +73,6 @@ export type {
   ChangeStatus,
   EventChange,
   EventQueue,
-  OpsCutoverReceipt,
   QueueLocation,
   SetBranchIgnoredRequest,
   DropRequest,
@@ -83,22 +80,9 @@ export type {
 } from "./events.ts"
 export { eventListRows, eventRows } from "./event-table.ts"
 export { assertPlainEventQueueConfig } from "./event-config.ts"
-export {
-  appendRecord,
-  DIRECT_MERGE,
-  endingRecord,
-  mergedBy,
-  mergedByRun,
-  readRecord,
-  readRecords,
-  trailer,
-  trailers,
-} from "./legacy-records.ts"
-export type { ChangeRecord } from "./legacy-records.ts"
-export { incidentFrom, incidentLine, incidentLines, incidentTrailers } from "./incident.ts"
+export { DIRECT_MERGE, mergedBy, mergedByRun, trailer, trailers } from "./git.ts"
+export { incidentLine, incidentLines, incidentTrailers } from "./incident.ts"
 export type { Incident } from "./incident.ts"
-export { holdsPlaceInLine, inLine, nextOwner, readChange, tipOf } from "./state.ts"
-export type { NextOwner } from "./state.ts"
 export {
   configValue,
   createEventStore,
@@ -150,43 +134,29 @@ export type { QueueRunOptions, QueueRunOutcome, RoundLine } from "./run.ts"
 export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from "./config.ts"
 export { parseDuration } from "./duration.ts"
 export type { Ending, Notifier, QueueConfig, QueueHealthConfig, Target } from "./config.ts"
-export { clocks, endingInstants, list, show, subjects, watchRows, watchRowKey } from "./table.ts"
-export type { Clocks, ListOptions, Row, WatchRow, WatchRowOptions } from "./table.ts"
-export { readHistories, readQueue, readStop, resolveRemote } from "./remote.ts"
+export { clocks, endingInstants, subjects, watchRows, watchRowKey } from "./table.ts"
+export type { Clocks, NextOwner, Row, WatchRow, WatchRowOptions } from "./table.ts"
+export { resolveRemote } from "./remote.ts"
 export { DRAFT_EXCLUDED_PREFIXES, DRAFT_ROW_MS, DRAFT_WINDOW_MS, foldDrafts, readDrafts } from "./drafts.ts"
 export type { Draft, DraftReading } from "./drafts.ts"
-export { directMergeCommits, directMergeLine, eventDirectMergeCommits } from "./direct.ts"
+export { directMergeLine, eventDirectMergeCommits } from "./direct.ts"
 export { refuseTarget, inspectSubmit, inspectSubmitAtHead, freshnessLine, submit, issueOf } from "./submit.ts"
 export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
 export type { PinCarrierPin, PreparedPinCarrier } from "./pin-carrier.ts"
 export type { IssueResolution, IssueResolver } from "./submit.ts"
 export { withdraw, NothingToWithdraw } from "./withdraw.ts"
 export type { WithdrawRequest, Withdrawn, WithdrawnChange } from "./withdraw.ts"
-export {
-  QueuePaused,
-  QueueNotPaused,
-  liftLine,
-  lineStop,
-  pauseLine,
-  readPause,
-  stopFact,
-  stuckCures,
-  writePause,
-} from "./pause.ts"
-export type { PauseCause, PauseRecord, PauseKind, StopFact, WritePause } from "./pause.ts"
-export { pauseStop, STOPPED_BY } from "./with-pause.ts"
+export { QueuePaused, QueueNotPaused, liftLine, pauseLine, stopFact, stuckCures } from "./pause.ts"
+export type { PauseCause, PauseRecord, PauseKind, StopFact } from "./pause.ts"
 export {
   NO_OVERRIDES,
   OVERRIDE_MAX_HOURS,
   OverrideRefused,
-  expireOverrides,
   isActive as isOverrideActive,
   overrideFacts,
   overrideLine,
   parseUntil,
-  readOverrides,
   stateAt as overrideStateAt,
-  writeOverride,
 } from "./override.ts"
 export type {
   OverrideActor,
@@ -198,8 +168,6 @@ export type {
 } from "./override.ts"
 export { notifyOutsideRound, overrideNotice } from "./with-notify.ts"
 export type { OutsideRound, OverrideNotice } from "./with-notify.ts"
-export { inspectLegacyAdoption, adoptLegacy } from "./migration.ts"
-export type { LegacyAdoptionPlan, LegacyAdoptionRow, LegacyAdoptionReceipt } from "./migration.ts"
 
 export { remoteUrl } from "./remote.ts"
 

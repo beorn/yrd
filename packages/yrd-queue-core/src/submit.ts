@@ -22,14 +22,12 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Conflict, createEventStore, listRefs, openEvents, selectionFor, type Event } from "./git.ts"
+import { ABSENT, Conflict, createEventStore, listRefs, openEvents, selectionFor, type Event } from "./git.ts"
 import { readEventChain } from "./event-read.ts"
 import { targetName, type Target } from "./config.ts"
-import { ABSENT, legacyStore, recordCommit } from "./legacy-records.ts"
 import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, type Git } from "./git.ts"
-import { changeRef, pauseRef } from "./refs.ts"
-import { pauseFence, QueuePaused, type PauseRecord } from "./pause.ts"
-import { readStop, remoteUrl } from "./remote.ts"
+import { type PauseRecord } from "./pause.ts"
+import { remoteUrl } from "./remote.ts"
 import { changeInput, changesRef, decide, initial, project, queueFormat, queueRef, readEventOps } from "./events.ts"
 import { verifyCandidate, type Verification } from "./verifying.ts"
 
@@ -294,10 +292,12 @@ export async function inspectSubmitAtHead(
   // this captured stop.
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
   const store = createEventStore(root, remote, selectionFor(git))
-  const stop =
-    (await queueFormat(store, request.target.branch)) === "event"
-      ? (await readEventOps(store, git, request.target.branch, targetHead)).stop
-      : (await readStop(git, remote, request.target.branch, targetHead)).stop
+  if ((await queueFormat(store, request.target.branch)) !== "event") {
+    throw new Error(
+      `${remote}#${request.target.branch} uses a legacy Record ref; expected ${queueRef(request.target.branch)}`,
+    )
+  }
+  const stop = (await readEventOps(store, git, request.target.branch, targetHead)).stop
   refuseMaintenance(stop, remote, request.target.branch)
   const scratch = mkdtempSync(join(tmpdir(), "yrd-submit-verifying-"))
   const hooksPath = join(scratch, "hooks-disabled")
@@ -338,10 +338,7 @@ export async function inspectSubmitAtHead(
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   const inspected = await inspectSubmit(git, remote, request)
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-  if ((await queueFormat(createEventStore(root, remote, selectionFor(git)), request.target.branch)) === "event") {
-    return submitEvent(git, remote, request, root, inspected)
-  }
-  return submitLegacy(git, remote, request, inspected)
+  return submitEvent(git, remote, request, root, inspected)
 }
 
 async function submitEvent(
@@ -433,100 +430,6 @@ async function submitEvent(
     }
   }
   throw new Error(`${remote}#${request.target.branch} queue tip moved twice during submit; resubmit`)
-}
-
-async function submitLegacy(
-  git: Git,
-  remote: string,
-  request: SubmitRequest,
-  inspected: SubmitInspection,
-): Promise<Submitted> {
-  const { targetHead } = inspected
-  const head = inspected.head
-  const issue = inspected.issue
-  // 24454: every gitlink this head moved is fetchable from its submodule
-  // remote before the change exists, or the submit refuses with the commit and
-  // checkout named. A refused publication opens nothing.
-  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-  const published = await publishMovedGitlinks(git, root, targetHead, head)
-  const change = { branch: request.branch, head }
-  const ref = changeRef(request.target.branch, change)
-  const branchRef = `refs/heads/${request.branch}`
-  const store = await legacyStore(git)
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if ((await queueFormat(createEventStore(root, remote, selectionFor(git)), request.target.branch)) === "event") {
-      throw new Error(
-        `${remote}#${request.target.branch} changed to event format during submit; resubmit to use the new format`,
-      )
-    }
-    const observed = await readStop(git, remote, request.target.branch, targetHead)
-    refuseMaintenance(observed.stop, remote, request.target.branch, published)
-    let fence
-    try {
-      fence = await pauseFence(
-        git,
-        remote,
-        request.target.branch,
-        { by: request.submitter, reason: `submit ${request.branch}` },
-        observed.stop,
-        observed.pause?.kind === "paused" && observed.stop === undefined ? observed.pause : undefined,
-      )
-    } catch (error) {
-      if (error instanceof QueuePaused) {
-        refuseMaintenance(error.pause, remote, request.target.branch, published)
-        if (attempt === 0) continue
-      }
-      throw error
-    }
-    const remoteBranch = (await store.backend.listRefs(store.repo, branchRef, remote)).get(branchRef)
-    // A prefix fetch makes absence an honest empty and brings the retry parent
-    // into Gitomic's private namespace without moving an application ref.
-    const remoteTip = (await store.backend.fetchRefs(store.repo, ref, remote)).get(ref)
-    const retry = remoteTip !== undefined
-    const trailers: (readonly [string, string])[] = [["Submitter", request.submitter]]
-    if (issue !== undefined) trailers.push(["Issue", issue.issue])
-    const opened = await recordCommit(
-      git,
-      {
-        change,
-        kind: "opened",
-        subject: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
-        trailers,
-      },
-      remoteTip,
-    )
-    // The pause fence serializes intake with queue pause and the format
-    // cutover, including when the pause ref was absent before this submit.
-    try {
-      await store.backend.publish(
-        store.repo,
-        [
-          { ref: branchRef, expect: remoteBranch ?? ABSENT, oid: head },
-          { ref, expect: remoteTip ?? ABSENT, oid: opened },
-          { ref: pauseRef(request.target.branch), expect: fence.expected, oid: fence.sha },
-        ],
-        remote,
-      )
-    } catch (error) {
-      if (!(error instanceof Conflict) || !error.refs.includes(pauseRef(request.target.branch))) throw error
-      const moved = await readStop(git, remote, request.target.branch, targetHead)
-      refuseMaintenance(moved.stop, remote, request.target.branch, published)
-      if (attempt === 0) continue
-      throw error
-    }
-    return {
-      branch: request.branch,
-      head,
-      targetHead,
-      opened,
-      retry,
-      published,
-      verifying: inspected.verifying,
-      ...(issue === undefined ? {} : { issue }),
-      ...(observed.stop === undefined ? {} : { stop: observed.stop }),
-    }
-  }
-  throw new Error(`${remote}#${request.target.branch} pause authority moved twice during submit; resubmit`)
 }
 
 /**

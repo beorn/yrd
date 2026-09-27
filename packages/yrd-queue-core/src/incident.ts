@@ -8,7 +8,6 @@
  */
 
 import { isAbsolute } from "node:path"
-import { trailers, type ChangeRecord } from "./legacy-records.ts"
 
 export const INCIDENT_TRAILERS = ["Code", "Subject", "Via", "Evidence", "Next", "Owner"] as const
 
@@ -28,25 +27,6 @@ const PROPERTY: Readonly<Record<(typeof INCIDENT_TRAILERS)[number], keyof Incide
   Evidence: "evidence",
   Next: "next",
   Owner: "owner",
-}
-
-/** Read one complete incident from a stuck or sent record. Missing or repeated authority is loud. */
-export function incidentFrom(record: ChangeRecord): Incident {
-  const values = Object.fromEntries(
-    INCIDENT_TRAILERS.map((name) => {
-      const found = trailers(record, name)
-      if (found.length !== 1 || found[0]?.trim() === "") {
-        throw new Error(
-          `record ${record.sha.slice(0, 12)} carries ${String(found.length)} ${name}: trailers; a queue incident needs exactly one non-empty value`,
-        )
-      }
-      return [PROPERTY[name], found[0]]
-    }),
-  ) as Record<keyof Incident, string>
-  if (!isAbsolute(values.evidence)) {
-    throw new Error(`record ${record.sha.slice(0, 12)} Evidence: is not an absolute path: ${values.evidence}`)
-  }
-  return values
 }
 
 /** The six trailers one incident writes, in the order a full reader renders them. */

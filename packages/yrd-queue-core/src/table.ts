@@ -1,50 +1,12 @@
-/**
- * The one table ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design,
- * Commands): `yrd queue list` and `yrd queue show <branch>`, derived at read
- * time from the queue read. Nothing here is stored and nothing here is a
- * second reader: both views are the queue read rendered, so they can never
- * disagree with a queue run or with each other. Every row is read off the
- * change's tip, whose trailers carry its derived state. One-change detail
- * folds `Check:` evidence from the full history supplied by `readHistories`.
- * The row for a commit the queue did not put on the target, a direct merge, is
- * read off the target itself (E5).
- *
- * Two readings JOIN the records here, and neither is a second derivation of
- * anything the records already say:
- *
- * - the run journal (`readJournals`), which is what makes a check running
- *   RIGHT NOW visible. `readChange` still owns the five states and always
- *   will; `live` is an overlay ON a state, never a sixth one. It is local to
- *   the machine the queue runs on, so off that machine it is absent — and
- *   {@link Journals.absent} says where it looked, so no caller prints a blank
- *   where a fact belongs.
- * - the head commit's subject (`subjects`), read in ONE batched git call for
- *   the whole table, because a filter and a title both mean the change's own
- *   subject and the records carry only the RECORD's.
- */
-
-import { endedKind, mergedByRun, trailer, trailers, type ChangeRecord } from "./legacy-records.ts"
-import { readCheckTrailer } from "./check.ts"
-import { directMergeLine, type DirectMerge } from "./direct.ts"
-import type { Draft } from "./drafts.ts"
-import { journalKey, type Journals, type JournalRun, type LogRecord } from "./log.ts"
-import { incidentFrom, incidentLine, type Incident } from "./incident.ts"
-import { CHANGE_STATUSES, isOpen, type ChangeStatus } from "./events.ts"
+/** Event queue table rows, journal overlays, clocks and commit subjects. */
+import { journalKey, type JournalRun, type Journals, type LogRecord } from "./log.ts"
+import { incidentLine, type Incident } from "./incident.ts"
+import { CHANGE_STATUSES, isOpen, type ChangeStatus, type EventChange } from "./events.ts"
 import type { Git } from "./git.ts"
-import type { QueueEntry, QueueRead } from "./remote.ts"
-import {
-  CHANGE_STATES,
-  holdsPlaceInLine,
-  inLine,
-  nextOwner,
-  tellingOf,
-  tipOf,
-  type ChangeState,
-  type NextOwner,
-  type Telling,
-} from "./state.ts"
 
-export type Row<Status extends string = ChangeState | ChangeStatus | "direct" | "draft" | "invalid"> = Readonly<{
+export type NextOwner = Readonly<{ owner: string; because: string }>
+
+export type Row<Status extends string = ChangeStatus | "direct" | "invalid"> = Readonly<{
   /** Event rows keep their fold's status word; legacy rows use the historical display vocabulary. */
   format?: "event"
   /** The change's branch; for a `direct` row, the target that commit moved. */
@@ -229,21 +191,6 @@ function malformedNext(run: JournalRun | undefined): NextOwner | undefined {
   }
 }
 
-/**
- * Who acts on an ending somebody was not told, and why: `submitter not told:
- * tribe refused (24581)`. Undefined when the telling reached everyone it
- * tried. The queue will not tell them again, so the move is its operator's.
- */
-function untoldNext(telling: Telling | undefined): NextOwner | undefined {
-  if (telling === undefined || telling.told) return undefined
-  return {
-    because: telling.notTold
-      .map((name) => `${name.to} not told: ${name.refused === undefined ? name.undelivered : name.refused}`)
-      .join("; "),
-    owner: "the queue's operator",
-  }
-}
-
 /** Join already-recorded run facts; never rederive the change's state. */
 function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   const check = run.decision === "failed" ? run.checks.findLast((check) => check.result === "fail") : run.checks.at(-1)
@@ -298,108 +245,15 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   }
 }
 
-/**
- * Whether a row's change still holds its place, in the model its state word
- * comes from: the records' `holdsPlaceInLine`, or the events' `isOpen`. A row
- * carries either vocabulary, and each model already owns its own answer.
- */
+/** An event change holds a place while its folded status is open. */
 function stillInLine(state: Row["state"]): boolean {
-  if (isChangeState(state)) return holdsPlaceInLine(state)
   return isChangeStatus(state) && isOpen(state)
-}
-
-function isChangeState(state: string): state is ChangeState {
-  return (CHANGE_STATES as readonly string[]).includes(state)
 }
 
 function isChangeStatus(state: string): state is ChangeStatus {
   return (CHANGE_STATUSES as readonly string[]).includes(state)
 }
 
-export type ListOptions = Readonly<{
-  now?: Date
-  /** How far back the ended rows reach; the plan's default is seven days. */
-  sinceMs?: number
-  /** The commits on the target the queue did not put there, each its own row (E5; `directMergeCommits` reads them). */
-  directMerges?: readonly DirectMerge[]
-  /** What the run journals on this machine say (`readJournals`); absent leaves every journal-derived field absent. */
-  journals?: Journals
-  /** Each head's commit subject, by full sha (`subjects`); a head not in the map has none. */
-  subjects?: ReadonlyMap<string, string>
-  /**
-   * Each ending record's instant, by its sha (`endingInstants`): what a tip that is the notice sent after it
-   * cannot say. Given, the rows carry {@link Row.endingAt}; absent, no row does.
-   */
-  endings?: ReadonlyMap<string, Date>
-  /** The drafts of the same reading (`readDrafts`), listed after everything else: newest first, then the undated. */
-  drafts?: readonly Draft[]
-}>
-
-/**
- * THE ONE ORDER, the order the queue takes things (@i/10-yrd/24196): the
- * change a check holds right now first, then every other change in line by
- * its position, stuck where it stands; then every ended change within
- * `sinceMs` (the plan's default is seven days), and among them every commit
- * that went around the queue, newest ending first; then the drafts, newest
- * first, the ones not read here last. Each group is ordered by the instant its
- * rows show as their one clock ({@link clocks}' `clockAt`), so the times on
- * screen agree with the rows' order.
- */
-export function list(entries: QueueRead, options: ListOptions = {}): readonly Row[] {
-  const now = options.now ?? new Date()
-  const sinceMs = options.sinceMs ?? 7 * 24 * 60 * 60 * 1000
-  const live = inLine(entries.map((entry) => entry.change)).map((change) => change.head)
-  const position = new Map(live.map((head, index) => [head, index + 1]))
-  const rows = entries.map((entry) => row(entry, position.get(entry.change.head), options))
-  const held = (candidate: Row): number => (candidate.live === undefined ? 1 : 0)
-  const inLineRows = rows
-    .filter((candidate) => candidate.position !== undefined)
-    .sort((left, right) => held(left) - held(right) || (left.position ?? 0) - (right.position ?? 0))
-  // The window is about when a change ENDED, not when it was opened: a change
-  // opened long ago and merged today is today's news. The ending is the ending
-  // record's, never the notice sent after it, which a later telling moves.
-  const ended = (candidate: Row): Date | undefined => clocks(candidate, now).clockAt
-  const endedRows = [
-    ...rows.filter((candidate) => candidate.position === undefined),
-    ...(options.directMerges ?? []).map(directMergeRow),
-  ]
-    .filter((candidate) => {
-      const at = ended(candidate)
-      return at === undefined || now.getTime() - at.getTime() <= sinceMs
-    })
-    .sort((left, right) => (ended(right)?.getTime() ?? 0) - (ended(left)?.getTime() ?? 0))
-  const committed = (candidate: Row): number => candidate.at?.getTime() ?? Number.NEGATIVE_INFINITY
-  const drafts = (options.drafts ?? [])
-    .map(draftRow)
-    .sort((left, right) => (committed(right) === committed(left) ? 0 : committed(right) > committed(left) ? 1 : -1))
-  return [...inLineRows, ...endedRows, ...drafts]
-}
-
-/** One branch's changes, newest first, each with every check's result and log. */
-export function show(
-  entries: QueueRead,
-  branch: string,
-  options: ListOptions = {},
-): readonly Readonly<{ row: Row; checks: readonly string[]; records: readonly ChangeRecord[] }>[] {
-  return entries
-    .filter((entry) => entry.change.branch === branch)
-    .map((entry) => ({
-      checks: entry.change.records.flatMap((record) => trailers(record, "Check")),
-      records: entry.change.records,
-      row: row(entry, undefined, options),
-    }))
-    .sort((left, right) => (right.row.since?.getTime() ?? 0) - (left.row.since?.getTime() ?? 0))
-}
-
-/**
- * The clocks a change keeps, read once so `queue list`, `queue show` and the
- * watch cannot disagree about how old anything is.
- *
- * Each is absent rather than zero when what it is measured from is absent: a
- * change with no journal on this machine and no checked record has no instant
- * checking began, so it has no runtime, and a reader that printed `0s` for it
- * would be stating a measurement nobody made.
- */
 export type Clocks = Readonly<{
   /**
    * How long this attempt's checks ran: from its first check's start to its decision, or to now while a check
@@ -430,12 +284,7 @@ export type Clocks = Readonly<{
 export function clocks(row: Row, now: Date = new Date()): Clocks {
   // A change waiting in line holds no check, so nothing about it is running:
   // only a check holding the row runs its clock to now (@i/10-yrd/24196).
-  const ended =
-    row.state === "merged" ||
-    row.state === "failed" ||
-    row.state === "withdrawn" ||
-    row.state === "cancelled" ||
-    row.state === "direct"
+  const ended = row.state === "merged" || row.state === "failed" || row.state === "cancelled" || row.state === "direct"
   const endedWhen = row.endingAt ?? row.endedAt ?? (ended ? row.at : undefined)
   const until = endedWhen ?? row.endedAt ?? (row.live === undefined ? undefined : now)
   const runtimeMs =
@@ -444,7 +293,7 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
       : Math.max(0, until.getTime() - row.startedAt.getTime())
   const since = (at: Date | undefined): number | undefined =>
     at === undefined ? undefined : Math.max(0, now.getTime() - at.getTime())
-  const waitingState = row.state === "queued" || row.state === "checked" || row.state === "stuck"
+  const waitingState = row.state === "queued" || row.state === "stuck"
   const inLineState = waitingState || row.state === "verifying" || row.state === "checking" || row.state === "merging"
   const clockAt = inLineState ? (row.since ?? row.at) : ended ? (endedWhen ?? row.at) : row.at
   const checkingMs = since(row.live?.since)
@@ -473,36 +322,16 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
   }
 }
 
-/**
- * The instant of every ending record a tip-only reading hides behind a notice:
- * a tip that is the sent record after an ending names that ending in `For:`,
- * and this reads each such record's commit instant in ONE no-walk log for the
- * whole table. The queue read's own no-walk log cannot carry them, because it
- * reads the tips before it knows which ones are notices. An ending record the
- * log does not answer for is loud: the fetch that brought the tip brought it.
- */
-export async function endingInstants(git: Git, entries: QueueRead): Promise<ReadonlyMap<string, Date>> {
-  const wanted = [
-    ...new Set(
-      entries.flatMap((entry) => {
-        const tip = tipOf(entry.change)
-        const ending = tip.kind === "sent" ? trailer(tip, "For") : undefined
-        return ending === undefined || endedKind(tip) === "sent" ? [] : [ending]
-      }),
-    ),
-  ]
+/** The exact ending instants already carried by folded event chains. */
+export function endingInstants(changes: ReadonlyMap<string, EventChange>): ReadonlyMap<string, Date> {
   const found = new Map<string, Date>()
-  if (wanted.length === 0) return found
-  const out = await git(["log", "--no-walk=unsorted", "--stdin", "--format=%H %cI"], `${wanted.join("\n")}\n`)
-  for (const line of out.split("\n")) {
-    const [sha, at] = line.trim().split(" ")
-    if (sha === undefined || at === undefined) continue
-    const instant = new Date(at)
-    if (Number.isNaN(instant.getTime())) throw new Error(`ending record ${sha}: git returned an invalid instant ${at}`)
-    found.set(sha, instant)
+  for (const [branch, change] of changes) {
+    if (change.ending === undefined) continue
+    if (change.endedAt === undefined || Number.isNaN(change.endedAt.getTime())) {
+      throw new Error(`event change ${branch} ending ${change.ending.id} has no valid ending instant`)
+    }
+    found.set(change.ending.id, change.endedAt)
   }
-  const missing = wanted.filter((sha) => !found.has(sha))
-  if (missing.length > 0) throw new Error(`git log gave no instant for ending record(s) ${missing.join(", ")}`)
   return found
 }
 
@@ -563,159 +392,7 @@ export async function subjects(git: Git, heads: readonly string[]): Promise<Read
   return found
 }
 
-function row(entry: QueueEntry, position: number | undefined, options: ListOptions = {}): Row {
-  const tip = tipOf(entry.change)
-  const packed = trailers(tip, "Check").at(-1)
-  const lastCheck = packed === undefined ? undefined : readCheckTrailer(packed)
-  const opened = trailer(tip, "Opened")
-  const ended = endedKind(tip)
-  const endedAt =
-    ended === "merged" || ended === "failed" || ended === "stuck"
-      ? entry.change.records.findLast((record) => record.kind === ended)?.at
-      : undefined
-  const noticed = tip.kind === "sent" ? trailer(tip, "For") : undefined
-  const endings = options.endings
-  const endingAt =
-    endings !== undefined && (ended === "merged" || ended === "failed" || ended === "stuck" || ended === "withdrawn")
-      ? (entry.change.records.findLast((record) => record.kind === ended)?.at ??
-        (noticed === undefined ? undefined : endings.get(noticed)))
-      : undefined
-  const submitter = trailer(tip, "Submitter")
-  const runs = options.journals?.runs.get(journalKey(entry.change.branch, entry.change.head)) ?? []
-  const latest = runs[0]
-  const running = runs.find((run) => run.running !== undefined)
-  const startedAt = checkingBegan(runs, tip, ended)
-  const state = entry.reading.state
-  const incident =
-    state === "stuck" || (state === "queued" && trailer(tip, "Code") !== undefined) ? incidentFrom(tip) : undefined
-  const subject = options.subjects?.get(entry.change.head)
-  const run = latest?.id ?? mergedByRun(trailer(tip, "Merged-By"))
-  // 24972: the journal's `running` marker is an OVERLAY, and a change that has
-  // ended cannot be under a check whatever a run journal still says. One run
-  // whose `running` was never closed — a killed runner, a crash, or simply an
-  // operator's `queue withdraw` — used to pin the change as in-flight forever,
-  // with an age nothing bounded: `checking 85h32m` on changes `queue show`
-  // called merged at the same instant, and during a stop the list named the
-  // wrong change as the line's occupant while it was checking another one.
-  //
-  // The gate is the place in line, not a second list of state words. A change
-  // that still holds its place can legitimately be running: `stuck` is NOT an
-  // ending (legacy-records.ts ENDING_KINDS), it keeps its place and the next run takes
-  // it again, and since no record kind means "checking", this marker is the
-  // only signal that re-check has. Suppressing it for `stuck` would render a
-  // genuinely running re-check as idle — which is why the gate asks whether the
-  // change is still in line rather than naming merged/failed/withdrawn again.
-  //
-  // Read off `state` rather than `endedKind(tip)`: `readChange` takes the
-  // chain's ending record over a stray later tip (24635) and reads an
-  // ancestry-first merge with no record at all — the garage case — as merged,
-  // and a tip-only test leaves both of those still rendering as checking.
-  const live = holdsPlaceInLine(state) ? running?.running : undefined
-  const telling = tellingOf(tip)
-  const refused = telling?.notTold.flatMap((name) => (name.refused === undefined ? [] : [name.refused])) ?? []
-  const undelivered = telling?.notTold.flatMap((name) => (name.refused === undefined ? [name.undelivered] : [])) ?? []
-  // The newest run's own defect outranks the state's next owner: a reader told
-  // only "the queue acts next" would never learn that part of what the queue
-  // recorded about this change could not be read (24408). An ending somebody
-  // was not told outranks it too, because the queue will not tell them again.
-  const next =
-    malformedNext(latest) ??
-    untoldNext(telling) ??
-    (incident === undefined
-      ? nextOwner(entry.reading, {
-          ...(submitter === undefined ? {} : { submitter }),
-          ...(options.journals?.dir === undefined ? {} : { journal: options.journals.dir }),
-        })
-      : undefined)
-  return {
-    at: tip.at,
-    branch: entry.change.branch,
-    head: entry.change.head,
-    log: lastCheck?.log,
-    position,
-    reason: incident?.code ?? entry.reading.reason,
-    ...(entry.reading.supersededBy === undefined ? {} : { supersededBy: entry.reading.supersededBy }),
-    result:
-      incident === undefined
-        ? tip.kind === "opened"
-          ? undefined
-          : resultOf(ended, lastCheck?.name)
-        : incidentLine(incident),
-    since: opened === undefined ? undefined : new Date(opened),
-    state,
-    submitter: trailer(tip, "Submitter"),
-    issue: trailer(tip, "Issue"),
-    merge: trailer(tip, "Merge"),
-    base: trailer(tip, "Base"),
-    ...(incident === undefined ? {} : { incident }),
-    ...(subject === undefined ? {} : { subject }),
-    ...(run === undefined ? {} : { run }),
-    ...(latest?.diagnostics === undefined ? {} : { diagnostics: latest.diagnostics }),
-    ...(latest?.malformed === undefined ? {} : { malformed: latest.malformed }),
-    ...(startedAt === undefined ? {} : { startedAt }),
-    // Ended is what the RECORD says ended it. A change read merged from
-    // ancestry alone, or failed because its branch moved under it, ended
-    // outside the records and has no instant to name: absent, not the tip's.
-    // A sent record inherits state, not the ending instant. A tip-only read
-    // cannot name that instant; hydrated history finds the actual ending.
-    ...(endedAt === undefined ? {} : { endedAt }),
-    ...(endingAt === undefined ? {} : { endingAt }),
-    ...(live === undefined || running === undefined
-      ? {}
-      : {
-          live: {
-            check: live.name,
-            phase: live.phase,
-            run: running.id,
-            since: live.startedAt,
-            ...(live.log === undefined ? {} : { log: live.log }),
-          },
-        }),
-    ...(telling === undefined ? {} : { told: telling.told }),
-    ...(refused.length === 0 ? {} : { refused: refused.join("; ") }),
-    ...(undelivered.length === 0 ? {} : { undelivered: undelivered.join("; ") }),
-    ...(next === undefined ? {} : { next }),
-    ...(trailer(tip, "ProjectedMs") === undefined ? {} : { projectedMs: Number(trailer(tip, "ProjectedMs")) }),
-    ...(trailer(tip, "BoundMs") === undefined ? {} : { boundMs: Number(trailer(tip, "BoundMs")) }),
-  }
-}
-
-/**
- * When this run's checks began: the newest journal run's first check-start.
- * An earlier run cannot lend its start to a new round that has not started a
- * check. Without a journal, the checked tip's own instant is the only measured
- * start; otherwise absent is the honest answer.
- */
-function checkingBegan(runs: readonly JournalRun[], tip: ChangeRecord, ended: ChangeRecord["kind"]): Date | undefined {
-  if (runs.length > 0) return runs[0]?.checks[0]?.startedAt
-  return ended === "checked" ? tip.at : undefined
-}
-
-/** A draft: its head's branch, author and commit instant, and nothing a record would say (drafts.ts). */
-function draftRow(draft: Draft): Row {
-  return {
-    branch: draft.branch,
-    head: draft.head,
-    state: "draft",
-    ...(draft.committedAt === undefined ? {} : { at: draft.committedAt }),
-    ...(draft.author === undefined ? {} : { author: draft.author }),
-    ...(draft.movedSinceSubmit === true ? { movedSinceSubmit: true } : {}),
-  }
-}
-
-/** A direct merge: `<target> moved around the queue at <sha12> (<subject>)`, and the gitlinks it moved. */
-function directMergeRow(commit: DirectMerge): Row {
-  return {
-    at: commit.at,
-    head: commit.commit,
-    branch: commit.target,
-    reason: directMergeLine(commit),
-    state: "direct",
-    subject: commit.subject,
-  }
-}
-
-function resultOf(kind: ChangeRecord["kind"], check: string | undefined): string {
+function resultOf(kind: string, check: string | undefined): string {
   switch (kind) {
     case "checked":
     case "merged":

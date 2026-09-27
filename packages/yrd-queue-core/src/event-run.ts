@@ -507,7 +507,7 @@ export async function eventQueueRun(
     return result(observation.outcome === "invalid" ? 2 : 0)
   }
 
-  const operational = await readEventOps(store, git, queue, target)
+  let operational = await readEventOps(store, git, queue, target)
   if (operational.queue.release !== undefined) {
     const release = operational.queue.release
     throw new Error(`event queue ${url}#${queue}: unfinished pre-cutover release ${release.id} after ops cutover`)

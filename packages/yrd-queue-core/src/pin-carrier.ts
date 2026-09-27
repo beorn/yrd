@@ -13,10 +13,9 @@ import {
   selectionFor,
   type Git,
 } from "./git.ts"
-import { isOpen, listChanges, queueFormat } from "./events.ts"
+import { isOpen, listChanges, queueFormat, queueRef } from "./events.ts"
 import { populateReferenceStores } from "./reference.ts"
-import { readQueue, remoteUrl } from "./remote.ts"
-import { holdsPlaceInLine, readChange } from "./state.ts"
+import { remoteUrl } from "./remote.ts"
 
 export type PinCarrierPin = Readonly<{ path: string; sha: string }>
 export type PreparedPinCarrier = Readonly<{ branch: string; head: string; targetHead: string }>
@@ -106,20 +105,12 @@ export async function preparePinCarrier(
   const identity = pinIdentity(pins)
   const changes: Array<Readonly<{ branch: string; head: string; open: boolean }>> = []
   const store = createEventStore(repo, target.remote, selectionFor(git))
-  if ((await queueFormat(store, target.branch)) === "event") {
-    for (const [branch, change] of await listChanges(store, target.branch)) {
-      if (change.commit !== undefined) {
-        changes.push({ branch, head: change.commit, open: isOpen(change.status) })
-      }
-    }
-  } else {
-    const reading = await readQueue(git, target.remote, target.branch, targetHead)
-    for (const entry of reading.changes) {
-      changes.push({
-        branch: entry.change.branch,
-        head: entry.change.head,
-        open: holdsPlaceInLine(readChange(entry.change).state),
-      })
+  if ((await queueFormat(store, target.branch)) !== "event") {
+    throw new Error(`${target.remote}#${target.branch} in ${repo}: expected event queue ref ${queueRef(target.branch)}`)
+  }
+  for (const [branch, change] of await listChanges(store, target.branch)) {
+    if (change.commit !== undefined) {
+      changes.push({ branch, head: change.commit, open: isOpen(change.status) })
     }
   }
   for (const change of changes) {
