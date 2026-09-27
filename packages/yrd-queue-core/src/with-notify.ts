@@ -147,7 +147,7 @@ export function isChargedFailure(reason: string | undefined): boolean {
   return !UNCHARGED.has(reason ?? "")
 }
 
-/** @testonly Shared failure-reason classification for focused mutation coverage. */
+/** Shared failure-reason classification for focused mutation coverage and prior failure folding. */
 export function sameFailureReason(reasons: readonly (string | undefined)[]): string | undefined {
   // No length check: an empty list has no first element, and the absent-reason
   // guard below already refuses `undefined`. Mutation control found the extra

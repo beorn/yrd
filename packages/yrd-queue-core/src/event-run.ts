@@ -57,6 +57,7 @@ import {
   messageFor,
   notifyOutsideRound,
   overrideNotice,
+  sameFailureReason,
 } from "./with-notify.ts"
 import { changeName } from "./refs.ts"
 import { setupStuckCode, setupStuckNext, transportFaultIn } from "./setup-transport.ts"
@@ -427,13 +428,22 @@ export async function eventQueueRun(
       throw new Error(`event queue ${url}#${queue}: ${branch} merged event ${eventId} has no kept Commit`)
     }
     // Count branch failures, not failed checks: a verifier refusal before any check still counts.
-    const failures =
+    const failedEvents =
       kind === "failed"
         ? (await readChangeEvents(store, queue, branch, tip)).filter(
             (event) =>
               event.type === "failed" &&
               isChargedFailure(event.props.find(([key]) => key === EVENT_TRAILERS.reason)?.[1]),
-          ).length
+          )
+        : undefined
+    const failures = failedEvents?.length
+    const priorReason =
+      failedEvents !== undefined
+        ? sameFailureReason(
+            failedEvents
+              .filter((event) => event.id !== eventId)
+              .map((event) => event.props.find(([key]) => key === EVENT_TRAILERS.reason)?.[1]),
+          )
         : undefined
     const head = change.commit
     const text = messageFor(kind, {
@@ -463,7 +473,7 @@ export async function eventQueueRun(
           ...(kind === "merged"
             ? { merge }
             : { reason: kind === "cancelled" ? "branch absent from remote" : (change.reason ?? kind), log: log.path }),
-          ...(kind === "failed" ? { failures } : {}),
+          ...(kind === "failed" ? { failures, ...(priorReason !== undefined ? { priorReason } : {}) } : {}),
           ...(kind === "deferred"
             ? { projectedMs: change.deferred?.projectedMs, boundMs: change.deferred?.boundMs }
             : {}),

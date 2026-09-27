@@ -457,6 +457,9 @@ it("sends two failed endings when the same head is resubmitted", async () => {
   ])
   expect(messages(w).map((message) => message.endingId)).toEqual([expect.any(String), expect.any(String)])
   expect(messages(w)[0]?.endingId).not.toBe(messages(w)[1]?.endingId)
+  expect(messages(w)[0]?.priorReason).toBeUndefined()
+  expect(messages(w)[1]?.priorReason).toBe(messages(w)[0]?.reason)
+  expect(messages(w)[1]?.priorReason).toBeDefined()
 })
 
 /** @failure 25041: a second stuck event for the same branch@head reused the first notice identity.
