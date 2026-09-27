@@ -1,5 +1,6 @@
 /** One-time conversion of a legacy change's resting reading into event inputs (25041). */
 import { Conflict, offTheTarget, openEvents, type EventInput, type Git } from "./git.ts"
+import { readEventChain } from "./event-read.ts"
 import {
   adoptedInput,
   changeInput,
@@ -329,7 +330,7 @@ export async function inspectLegacyAdoption(
       continue
     }
     const chain = await openEvents({ ...store, ref: candidate.ref })
-    project(await chain.events({ limit: 1024 }), candidate.ref, store.repo)
+    project(await readEventChain(chain), candidate.ref, store.repo)
   }
   if (old.length === 0) return { queue, target, queueTip, rows: [] }
   const branchRefs = await backend.listRefs(store.repo, "refs/heads/", store.remote)
@@ -376,7 +377,7 @@ export async function inspectLegacyAdoption(
     const chain = await openEvents({ ...store, ref: changesRef(queue, entry.change.branch) })
     const targetChainTip = await chain.head()
     if (targetChainTip !== null) {
-      project(await chain.events({ limit: 1024 }), changesRef(queue, entry.change.branch), store.repo)
+      project(await readEventChain(chain), changesRef(queue, entry.change.branch), store.repo)
     }
     const oldStatus = migratedStatus(source.reading)
     const actualEnding = originalEndingRecord(change.records)

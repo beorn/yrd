@@ -37,7 +37,7 @@
  * `setup:` included.
  */
 
-import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs"
+import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import type { JournalCheck } from "./log.ts"
@@ -691,6 +691,9 @@ function openCheckLog(path: string): CheckLog {
       if (failure === undefined) write(encoder.encode(`\n[yrd: ${text}]\n`), "notes")
     },
     close: (result) => {
+      if (result !== undefined && written.stdout + written.stderr + written.notes === 0) {
+        write(encoder.encode(`[yrd: check emitted no output; process exited ${String(result.exitCode)}]\n`), "notes")
+      }
       const truncated = result?.outputTruncation ?? []
       if (truncated.length > 0) {
         // Only display-overflow acceptance needs this additional process
@@ -734,9 +737,9 @@ function openCheckLog(path: string): CheckLog {
         // remains in the returned stuck reason if this write also fails.
         write(encoder.encode(`\n[yrd: this log is INCOMPLETE — ${failure}]\n`), "notes")
       }
+      const expected = written.stdout + written.stderr + written.notes
       try {
         const size = fstatSync(file).size
-        const expected = written.stdout + written.stderr + written.notes
         if (size !== expected) {
           failure ??= `its log at ${path} has size ${size}, expected ${expected} written bytes (stdout=${written.stdout}, stderr=${written.stderr}, notes=${written.notes})`
         }
@@ -747,6 +750,14 @@ function openCheckLog(path: string): CheckLog {
         closeSync(file)
       } catch (error) {
         failure ??= `its log at ${path} could not be closed: ${error instanceof Error ? error.message : String(error)}`
+      }
+      try {
+        const receipt = statSync(path)
+        if (!receipt.isFile() || receipt.size === 0 || receipt.size !== expected) {
+          failure ??= `its log at ${path} is not a non-empty regular file or changed after completion (size ${String(receipt.size)}, expected ${String(expected)})`
+        }
+      } catch (error) {
+        failure ??= `its log at ${path} is missing after completion: ${error instanceof Error ? error.message : String(error)}`
       }
       return failure
     },

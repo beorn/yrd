@@ -13,6 +13,18 @@ const TARGET = { branch: "release/1.x", remote: "yrd" } as const
 const SOURCE = { at: "captured-target-A", blob: "b".repeat(40), target: TARGET } as const
 
 describe("the queue declaration grammar", () => {
+  it("reads a host issue resolver as an argument vector", () => {
+    expect(parseConfig("issueResolver: [hh-km, bd, show, --json]\n", SOURCE).issueResolver).toEqual([
+      "hh-km",
+      "bd",
+      "show",
+      "--json",
+    ])
+  })
+  it.each(["[]", "''", "[hh-km, '']", "[hh-km, 42]"])("refuses an invalid issue resolver %s", (value) => {
+    expect(() => parseConfig(`issueResolver: ${value}\n`, SOURCE)).toThrow(/issueResolver: must be a non-empty argv/u)
+  })
+
   it("reads every supported field and supplies only the declared defaults", () => {
     const config = parseConfig(
       [

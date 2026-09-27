@@ -133,6 +133,54 @@ describe("25041 old resting-state conversion", () => {
     expect(migrated(inputs).status).toBe("merged")
   })
 
+  /** @failure A resting-state conversion drops a terminal or intermediate old commit while another head remains intact.
+   * @level l1 @consumer 25041 migration's all-chain parent accounting
+   */
+  it("keeps each old record once across every resting state and reused branch heads", () => {
+    const cases: Array<{
+      head: string
+      kinds: readonly ChangeRecord["kind"][]
+      reading: LegacyMigrationChange["reading"]
+    }> = [
+      { head: "a".repeat(40), kinds: ["opened", "checked", "deferred"], reading: { state: "deferred" } },
+      { head: "b".repeat(40), kinds: ["opened", "checked", "merged"], reading: { state: "merged" } },
+      { head: "c".repeat(40), kinds: ["opened", "checked", "failed"], reading: { state: "failed" } },
+      { head: "d".repeat(40), kinds: ["opened", "stuck", "sent"], reading: { state: "stuck", reason: "runner died" } },
+      {
+        head: "e".repeat(40),
+        kinds: ["opened", "checked", "withdrawn"],
+        reading: { state: "withdrawn", reason: "superseded", supersededBy: "f".repeat(40) },
+      },
+    ]
+    const expected: string[] = []
+    const received: string[] = []
+    for (const [caseIndex, example] of cases.entries()) {
+      const ref = `refs/yrd/main/task/reused@${example.head}`
+      const records = example.kinds.map((kind, recordIndex) =>
+        record(kind, (caseIndex * 10 + recordIndex + 1).toString(16).padStart(40, "0"), OPENED),
+      ) as [ChangeRecord, ...ChangeRecord[]]
+      const inputs = inputsForLegacy(
+        {
+          ref,
+          change: { branch: "task/reused", head: example.head, headOnTarget: false, records },
+          reading: example.reading,
+        },
+        QUEUE,
+      )
+      expected.push(...records.map(({ sha }) => `${ref}@${sha}`))
+      for (const input of inputs) {
+        const kept = new Set(input.keeps ?? [])
+        for (const [key, value] of input.props ?? []) {
+          if (key !== "Migrated-From") continue
+          received.push(value)
+          expect(kept.has(value.slice(value.lastIndexOf("@") + 1))).toBe(true)
+        }
+      }
+    }
+    expect(received.sort()).toEqual(expected.sort())
+    expect(new Set(received).size).toBe(expected.length)
+  })
+
   it("uses the original stuck time when a later sent record repeats that resting state", () => {
     const opened = record("opened", "1".repeat(40), OPENED)
     const stuckAt = "2026-09-24T10:05:00.000Z"

@@ -4373,6 +4373,23 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     return head
   }
 
+  it("resolves both spellings of one issue before merging an unsubmitted branch", async () => {
+    const w = await verbWorld()
+    await redeclare(
+      w,
+      `issueResolver: ${JSON.stringify(["sh", "-c", 'printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"])}\n`,
+    )
+    await branchWith(w, "task/26050", "change.txt")
+    await w.git(["checkout", "--quiet", "task/26050"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind short\n\nRefs: 26050"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind full\n\nRefs: @km/storage/26050-full"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    const merged = await yrd(w, "merge", "task/26050")
+    expect(merged.exitCode, merged.report).toBe(0)
+    expect(await onMain(w, head)).toBe(true)
+  })
+
   /** The same branch, submitted. */
   async function submitted(w: World, branch: string, file: string): Promise<string> {
     const head = await branchWith(w, branch, file)

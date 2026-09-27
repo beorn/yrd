@@ -2,6 +2,7 @@
 import { mkdirSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { Conflict, RetriesExhausted, openEvents } from "./git.ts"
+import { readEventAt } from "./event-read.ts"
 
 import {
   appendChangeEvent,
@@ -458,10 +459,15 @@ export async function eventQueueRun(
   }
   const tellDirect = async (commit: string, eventId: string): Promise<void> => {
     if (!options.notify?.some((entry) => entry.on.includes("merged-direct"))) return
-    const observed = (await (await openEvents({ ...store, ref: queueRef(queue) })).events()).find(
-      (event) => event.id === eventId,
-    )
-    if (observed === undefined) throw new Error(`event queue ${url}#${queue}: direct notice has no event ${eventId}`)
+    const ref = queueRef(queue)
+    const recorded = await readEventQueue(store, queue)
+    if (recorded.observed[commit]?.id !== eventId) {
+      throw new Error(`event queue ${url}#${queue}: direct notice lost observed ${commit} at ${eventId}`)
+    }
+    const observed = await readEventAt(await openEvents({ ...store, ref }), eventId, ref, store.repo)
+    if (observed.type !== "observed") {
+      throw new Error(`${ref} in ${store.repo}: direct notice event ${eventId} is ${observed.type}, expected observed`)
+    }
     for (const entry of options.notify ?? []) {
       if (!entry.on.includes("merged-direct")) continue
       const state = await readEventQueue(store, queue)
@@ -1278,25 +1284,17 @@ export async function eventQueueRun(
       const candidate = verified.verifying.candidate
       const raises = (await readRootChanges(git, candidate))?.changes ?? []
       tip = await appendOwnedChange(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })
-      const checkLogs = (["submit", "merge"] as const).flatMap((phase) =>
-        (options.noCheck === true ? [] : options.checks.filter((check) => (check.on ?? ["merge"]).includes(phase))).map(
-          (check) =>
-            checkLogPath(join(options.workdir, "checks", `${branch}@${head}`, log.id, "attempt-1", phase), check.name),
-        ),
-      )
-      tip = await appendOwnedChange(store, queue, branch, tip, {
-        type: "checking",
-        at: new Date(),
-        ...(checkLogs.length === 0 ? {} : { reason: `check logs: ${checkLogs.join(", ")}` }),
-      })
+      tip = await appendOwnedChange(store, queue, branch, tip, { type: "checking", at: new Date() })
       const results: EventCheck[] = []
       let attemptedRetry = false
       let decisionResults: EventCheck[] = []
+      let skippedByOverride = new Set<string>()
       let setupDecision:
         | { kind: "failed" | "stuck"; reason: string; fault?: ReturnType<typeof transportFaultIn> }
         | undefined
       for (let attempt = 1; attempt <= 2; attempt++) {
         const startOfAttempt = results.length
+        skippedByOverride = new Set()
         for (const phase of ["submit", "merge"] as const) {
           if (options.noCheck === true) {
             continue
@@ -1329,17 +1327,16 @@ export async function eventQueueRun(
             }
             continue
           }
-          const checks = options.checks.filter(
-            (check) =>
-              check.run !== "true" &&
-              (check.on ?? ["merge"]).includes(phase) &&
-              !(
-                phase === "merge" &&
-                operational.overrides.entries.some(
-                  (entry) => entry.check === check.name && isActive(entry, options.now?.() ?? Date.now()),
-                )
-              ),
-          )
+          const checks = options.checks.filter((check) => {
+            if (check.run === "true" || !(check.on ?? ["merge"]).includes(phase)) return false
+            const overridden =
+              phase === "merge" &&
+              operational.overrides.entries.some(
+                (entry) => entry.check === check.name && isActive(entry, options.now?.() ?? Date.now()),
+              )
+            if (overridden) skippedByOverride.add(check.name)
+            return !overridden
+          })
           // A declared setup still runs when this phase has no check to run, unless every declared check is off (then the phase was skipped above).
           if (checks.length === 0 && options.setup === undefined) continue
           const logDir = join(
@@ -1578,7 +1575,18 @@ export async function eventQueueRun(
         const stoppedThisAttempt = decisionResults.find(({ run }) => run.result !== "pass")
         if (attempt === 1 && stoppedThisAttempt?.run.result === "stuck") {
           const check = stoppedThisAttempt.run
-          const fault = transportFaultIn(`${readFileSync(check.log, "utf8")}\n${check.why ?? ""}`)
+          let checkLog = ""
+          try {
+            checkLog = readFileSync(check.log, "utf8")
+          } catch (error) {
+            log.write({
+              kind: "warning",
+              branch,
+              head,
+              reason: `retry attribution could not read check log ${check.log}: ${error instanceof Error ? error.message : String(error)}`,
+            })
+          }
+          const fault = transportFaultIn(`${checkLog}\n${check.why ?? ""}`)
           if (fault !== undefined) {
             attemptedRetry = true
             log.write({
@@ -1668,7 +1676,23 @@ export async function eventQueueRun(
         log.write({ kind: "change", branch, head, decision: "deferred", reason })
         return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch])
       }
-      const checkReason = checkLogs.length === 0 ? undefined : `merge checks passed; logs: ${checkLogs.join(", ")}`
+      const passedLogs = decisionResults
+        .filter(
+          ({ run }) =>
+            run.result === "pass" && options.checks.some((check) => check.name === run.name && check.run !== "true"),
+        )
+        .map(({ run }) => run.log)
+      const skippedChecks = options.checks.flatMap((check) => {
+        if (options.noCheck === true) return [`${check.name} (no-check mode)`]
+        if (check.run === "true") return [`${check.name} (configured off)`]
+        if (skippedByOverride.has(check.name)) return [`${check.name} (merge override)`]
+        return []
+      })
+      const checkReason =
+        [
+          ...(passedLogs.length === 0 ? [] : [`merge checks passed; logs: ${passedLogs.join(", ")}`]),
+          ...(skippedChecks.length === 0 ? [] : [`skipped checks: ${skippedChecks.join(", ")}`]),
+        ].join("; ") || undefined
       tip = await appendOwnedChange(store, queue, branch, tip, {
         type: "merging",
         at: new Date(),

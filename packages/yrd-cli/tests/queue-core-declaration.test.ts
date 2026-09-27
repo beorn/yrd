@@ -133,6 +133,35 @@ async function createQueue(repo: string, queue: string, commit: string, at: Date
 }
 
 describe("a queue is the selected origin branch carrying config", () => {
+  it("uses the target's issue resolver even when the candidate changes its declaration", async () => {
+    const targetResolver = ["sh", "-c", 'printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"]
+    const repo = await world(`issueResolver: ${JSON.stringify(targetResolver)}\n`)
+    const git = gitIn(repo)
+    await git(["checkout", "--quiet", "-b", "task/26050"])
+    writeFileSync(join(repo, ".yrd.yml"), `issueResolver: ${JSON.stringify(["sh", "-c", "exit 81", "resolver"])}\n`)
+    await git(["add", ".yrd.yml"])
+    await git(["commit", "--quiet", "-m", "bind short\n\nRefs: 26050"])
+    await git(["commit", "--quiet", "--allow-empty", "-m", "bind full\n\nRefs: @km/storage/26050-full"])
+    const run = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--dry-run", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(run.stdout())).toMatchObject({ issue: "@km/storage/26050-full" })
+  })
+
+  it("refuses a missing issue with the raw reference and target resolver command", async () => {
+    const repo = await world(`issueResolver: ${JSON.stringify(["sh", "-c", "exit 31", "lookup"])}\n`)
+    const git = gitIn(repo)
+    await git(["checkout", "--quiet", "-b", "task/unknown"])
+    await git(["commit", "--quiet", "--allow-empty", "-m", "bind\n\nRefs: 26050"])
+    const run = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--dry-run"], run.io)).toBe(2)
+    expect(run.stderr()).toContain("26050")
+    expect(run.stderr()).toContain("exit 31")
+    expect(run.stderr()).toContain("target .yrd.yml issueResolver")
+  })
+
   it("creates and runs an event queue from a parsed plain-check declaration", async () => {
     // Literal QueueConfig fixtures omit absent optional keys. A real
     // declaration materializes some of them as undefined, and those must not
@@ -409,8 +438,14 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).changes
     expect(allHistory.filter((row) => row.branch === branch)).toEqual(history)
     const cliBulk = capture(repo)
-    expect(await runYrdProcess(["bun", "yrd", "queue", "show", "--all", "--json", "--queue", "main"], cliBulk.io)).toBe(0)
-    expect((JSON.parse(cliBulk.stdout()) as { changes: readonly { branch: string }[] }).changes.filter((row) => row.branch === branch)).toEqual(history)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "show", "--all", "--json", "--queue", "main"], cliBulk.io)).toBe(
+      0,
+    )
+    expect(
+      (JSON.parse(cliBulk.stdout()) as { changes: readonly { branch: string }[] }).changes.filter(
+        (row) => row.branch === branch,
+      ),
+    ).toEqual(history)
     expect(
       allHistory.filter((row) => row.branch === branch).map((row) => row.events.map((event) => event.type)),
     ).toEqual([
@@ -854,6 +889,59 @@ describe("a queue is the selected origin branch carrying config", () => {
       await coreQueueCommand(repo, accounted.io, { command: "list", terms: ["direct"] }, { json: true, queue: "main" }),
     ).toBe(0)
     expect((JSON.parse(accounted.stdout()) as { changes: readonly unknown[] }).changes).toEqual([])
+  }, 15_000)
+
+  it("shows an older direct commit after an accounted queue publication", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const declaration = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", declaration, new Date("2026-09-22T14:00:00.000Z"))
+    writeFileSync(join(repo, "older.txt"), "direct\n")
+    await git(["add", "older.txt"])
+    await git(["commit", "--quiet", "-m", "older direct"])
+    const direct = (await git(["rev-parse", "HEAD"])).trim()
+    writeFileSync(join(repo, "accounted.txt"), "queue\n")
+    await git(["add", "accounted.txt"])
+    await git(["commit", "--quiet", "-m", "accounted queue publication"])
+    const published = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["push", "--quiet", "origin", "main"])
+    await (
+      await openEvents({ ...store, ref: changesRef("main", "task/accounted"), writer: "yrd" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: published, by: "yrd" }),
+        changeInput("merged", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: published }),
+      ],
+      { expect: null },
+    )
+    const shown = capture(repo)
+    expect(await coreQueueCommand(repo, shown.io, { command: "show", all: true }, { json: true, queue: "main" })).toBe(
+      0,
+    )
+    const rows = (JSON.parse(shown.stdout()) as { changes: readonly { head: string; state: string }[] }).changes
+    expect(rows).toContainEqual(expect.objectContaining({ head: direct, state: "direct" }))
+  }, 15_000)
+
+  it("shows every direct commit by its commit identity", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const declaration = (await git(["rev-parse", "HEAD"])).trim()
+    await createQueue(repo, "main", declaration, new Date("2026-09-22T14:00:00.000Z"))
+    const direct: string[] = []
+    for (const name of ["first", "second"]) {
+      writeFileSync(join(repo, `${name}.txt`), `${name}\n`)
+      await git(["add", `${name}.txt`])
+      await git(["commit", "--quiet", "-m", `${name} direct`])
+      direct.push((await git(["rev-parse", "HEAD"])).trim())
+    }
+    await git(["push", "--quiet", "origin", "main"])
+    const shown = capture(repo)
+    expect(await coreQueueCommand(repo, shown.io, { command: "show", all: true }, { json: true, queue: "main" })).toBe(
+      0,
+    )
+    const rows = (JSON.parse(shown.stdout()) as { changes: readonly { head: string; state: string }[] }).changes
+    expect(rows.filter((row) => row.state === "direct").map((row) => row.head)).toEqual(direct)
   }, 15_000)
 
   it("submits an unpublished branch, then drops its open change and branch atomically", async () => {

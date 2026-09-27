@@ -131,6 +131,7 @@ export async function eventDirectMergeCommits(
   declaration: string,
   histories: Parameters<typeof mergedHistoryCommits>[0],
   observed: ReadonlySet<string> = new Set(),
+  options: Readonly<{ allHistory?: boolean }> = {},
 ): Promise<readonly DirectMerge[]> {
   const accounted = mergedHistoryCommits(histories)
   const line = await firstParentLine(git, targetSha, `${declaration}..${targetSha}`)
@@ -139,7 +140,10 @@ export async function eventDirectMergeCommits(
   }
   const found: DirectMerge[] = []
   for (const row of line) {
-    if (accounted.has(row.commit) || observed.has(row.commit)) break
+    if (accounted.has(row.commit) || observed.has(row.commit)) {
+      if (!options.allHistory) break
+      continue
+    }
     const first = row.parents[0]
     if (first === undefined) {
       throw new Error(`${target} at ${row.commit}: first-parent line ended after declaration ${declaration}`)

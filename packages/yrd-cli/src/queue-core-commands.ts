@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
+import { issueResolver } from "./issue-resolver.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
   assertPlainEventQueueConfig,
@@ -575,6 +576,7 @@ export async function coreQueueCommand(
   const captured = await declaration()
   if (captured === undefined) return noQueueOnTarget(targetLabel)
   const config = captured.config
+  const resolveIssue = issueResolver(config, repo, env)
   const workdir = options.workdir ?? (await workdirOf(git))
   mkdirSync(workdir, { recursive: true })
 
@@ -1389,11 +1391,12 @@ export async function coreQueueCommand(
         if (request.branch !== undefined) throw new Error("--gitlink does not take a branch operand")
         if (request.issue === undefined) throw new Error("--gitlink needs --issue <id>")
         if (options.populateReference !== true) throw new Error("--gitlink needs the queue-owned clone")
+        const canonicalIssue = resolveIssue === undefined ? request.issue : await resolveIssue(request.issue)
         const prepared = await preparePinCarrier({
           git,
           repo,
           target: config.target,
-          issue: request.issue,
+          issue: canonicalIssue,
           pins: request.pins,
           env: env ?? process.env,
         })
@@ -1401,7 +1404,8 @@ export async function coreQueueCommand(
           branch: prepared.branch,
           submitter: request.submitter,
           target: config.target,
-          issue: request.issue,
+          issue: canonicalIssue,
+          resolveIssue,
         }
         const inspected = await inspectSubmitAtHead(git, config.target.remote, submission, prepared.head)
         if (request.dryRun === true) {
@@ -1468,6 +1472,7 @@ export async function coreQueueCommand(
         submitter: request.submitter,
         target: config.target,
         ...(request.issue === undefined ? {} : { issue: request.issue }),
+        resolveIssue,
       }
       // Operator and stuck stops accept submits (the andon, operator 2026-09-16).
       // A maintenance stop refuses in the shared inspection before this echo.
@@ -1639,6 +1644,7 @@ export async function coreQueueCommand(
           submitter: request.submitter,
           target: { branch: config.target.branch, remote },
           ...(request.issue === undefined ? {} : { issue: request.issue }),
+          resolveIssue,
         })
         // The stop the submit was accepted under is not echoed here: this
         // command does not wait for it to lift, and the stop that still stands
@@ -1754,6 +1760,15 @@ export async function coreQueueCommand(
       // zero waiting, and a legacy-format round reads none, so it states none.
       let flow: LineFlow | undefined
       let readFailure: Readonly<{ ref: string; error: string; count: number }> | undefined
+      let chainPressure: Awaited<ReturnType<typeof readEventQueue>>["writePressure"]
+      const setChainPressure = (pressure: typeof chainPressure): void => {
+        if (chainPressure === undefined && pressure !== undefined) {
+          log?.warn?.(
+            `queue event chain has ${pressure.count}/${pressure.limit} events; Gitomic transact reaches its cap around ${pressure.projectedCrossing ?? "an unknown date (no growth in the last 48 hours)"}`,
+          )
+        }
+        chainPressure = pressure
+      }
       let threshold = { declared: config.health.declared, ms: config.health.stallAfterMs }
       const flowReading = (): FlowReading | undefined => (flow === undefined ? undefined : { flow, threshold })
       /**
@@ -1871,7 +1886,15 @@ export async function coreQueueCommand(
           lastStuck,
           lastRelease,
         )
-        return { ...base, facts: { ...base.facts, ...relaunchOff, serviceStarted } }
+        return {
+          ...base,
+          facts: {
+            ...base.facts,
+            ...relaunchOff,
+            serviceStarted,
+            ...(chainPressure === undefined ? {} : { eventChainPressure: chainPressure }),
+          },
+        }
       }
       /**
        * The last stop the loop knows: read at start, then derived by every round.
@@ -2070,12 +2093,15 @@ export async function coreQueueCommand(
       // relaunch continues the page rather than clearing it and opening it again.
       // A stop that cannot be read is what a round that cannot read its queue
       // already is: stuck, exit 2, and no document claiming a state nobody read.
+      let eventFormat = false
       try {
         const eventStore = createEventStore(repo, config.target.remote, selection)
         if ((await queueFormat(eventStore, config.target.branch)) === "event") {
+          eventFormat = true
           const operational = await readEventOps(eventStore, git, config.target.branch, captured.oid)
           lastStop = operational.stop
           lastRelease = operational.queue.release?.id
+          setChainPressure(operational.queue.writePressure)
         } else {
           lastStop = (await readStop(git, config.target.remote, config.target.branch, captured.oid)).stop
         }
@@ -2211,10 +2237,13 @@ export async function coreQueueCommand(
           // nothing awaited between the write and the call.
           const sleepMs = sleepAfter(outcome, interval)
           lastStop = pauseStop(outcome.stopped)
-          if (lastRelease !== undefined) {
-            lastRelease = (
-              await readEventQueue(createEventStore(repo, config.target.remote, selection), config.target.branch)
-            ).release?.id
+          if (eventFormat) {
+            const latestQueue = await readEventQueue(
+              createEventStore(repo, config.target.remote, selection),
+              config.target.branch,
+            )
+            if (lastRelease !== undefined) lastRelease = latestQueue.release?.id
+            setChainPressure(latestQueue.writePressure)
           }
           lastStuck = outcome.pendingStuck ?? outcome.stuck
           openedAt = undefined
@@ -2901,7 +2930,7 @@ export async function coreQueueCommand(
           workdir,
           captured.oid,
           createEventStore(repo, config.target.remote, selection),
-          { all: true },
+          { all: true, directHistory: request.all === true },
         )
         if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
           io.stderr(`${reading.observation.message}\n`)
@@ -2910,9 +2939,14 @@ export async function coreQueueCommand(
         const name = queueName(config.target, await remoteUrl(git, config.target.remote))
         const branches =
           request.all === true
-            ? [...new Set([...reading.history.keys(), ...reading.all.map((row) => row.branch)])].sort()
+            ? [
+                ...new Set([
+                  ...reading.history.keys(),
+                  ...reading.all.filter((row) => row.state !== "direct").map((row) => row.branch),
+                ]),
+              ].sort()
             : [request.branch as string]
-        const histories = branches.flatMap((branch) => {
+        const changeHistories = branches.flatMap((branch) => {
           const selected = reading.changes.get(branch)
           const history = reading.history.get(branch)
           if (selected !== undefined && (selected.tip === undefined || history === undefined || history.length === 0)) {
@@ -2939,6 +2973,13 @@ export async function coreQueueCommand(
             },
           ]
         })
+        const directHistories =
+          request.all === true
+            ? reading.all
+                .filter((row) => row.state === "direct")
+                .map((row) => ({ ...row, queue: config.target.branch, events: [] }))
+            : []
+        const histories = [...changeHistories, ...directHistories]
         const scope =
           request.all === true
             ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
@@ -4292,13 +4333,14 @@ export async function readEventListing(
   store: ReturnType<typeof createEventStore>,
   options: Readonly<{
     all?: boolean
+    directHistory?: boolean
     drafts?: boolean
     now?: number | Date
     forceFresh?: boolean
   }> = {},
 ): Promise<EventListingResult> {
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
-  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#drafts:${options.drafts === true}`
+  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}`
   const cache = eventListingCaches.get(cacheKey)
   const nowMs =
     typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
@@ -4342,7 +4384,15 @@ export async function readEventListing(
   // 4. Full read
   const { queue, histories, invalid } = await readEventQueueWithChanges(store, config.target.branch)
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
-  const directMerges = await eventDirectMergeCommits(git, config.target.branch, targetOid, queue.declaration, histories)
+  const directMerges = await eventDirectMergeCommits(
+    git,
+    config.target.branch,
+    targetOid,
+    queue.declaration,
+    histories,
+    new Set(),
+    { allHistory: options.directHistory },
+  )
   assertEventListingFence(config.target.branch, queue, changes, queueRefs, invalid)
   const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
   const drafts = await readDrafts(
@@ -4375,8 +4425,9 @@ export async function readEventListing(
           segments
             .map((segment, index): EventHistoryRow => {
               const projected = eventRows(new Map([[branch, segment.state]]))[0]
-              if (projected === undefined)
+              if (projected === undefined) {
                 throw new Error(`event change ${branch} lost opened segment ${segment.opened}`)
+              }
               const { position: _position, ...historical } = projected
               return { row: index === segments.length - 1 ? projected : historical, events: segment.events }
             })

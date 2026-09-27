@@ -1,6 +1,8 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
 import { Conflict } from "./git.ts"
-import { chainsUnder, listRefs, openEvents } from "./git.ts"
+import { listRefs, openEvents } from "./git.ts"
+import { readEventChain, readEventChains } from "./event-read.ts"
+import { EVENT_READ_LIMIT } from "./event-read.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
 import { overrideRef, pauseRef, queueRefPrefix } from "./refs.ts"
@@ -906,6 +908,16 @@ type EventQueueProjection = Readonly<{
   notices: Readonly<
     Record<string, Readonly<{ id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }>>
   >
+  /** Present once the chain reaches 75% of Gitomic's unpaged transact span. */
+  writePressure?: Readonly<{
+    count: number
+    limit: number
+    warningAt: number
+    recent24h: number
+    recent48h: number
+    projectedCrossing: string | null
+    projectionReason?: string
+  }>
 }>
 
 const validatedQueue = Symbol("validated event queue")
@@ -985,8 +997,43 @@ export async function createEventQueue(
 /** Read and validate the queue declaration and its current operator stop. */
 export async function readEventQueue(store: QueueLocation, queue: string): Promise<EventQueue> {
   const ref = queueRef(queue)
-  const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
-  const result: EventQueue = { ...projectEventQueue(events, ref, store.repo), [validatedQueue]: true }
+  const events = await readEventChain(await openEvents({ ...store, ref }))
+  const projected = projectEventQueue(events, ref, store.repo)
+  const warningAt = Math.ceil(EVENT_READ_LIMIT * 0.75)
+  let writePressure: EventQueueProjection["writePressure"]
+  if (events.length >= warningAt) {
+    const now = Date.now()
+    const times = events.map((event) => {
+      const time = prop(event, EVENT_TRAILERS.time)
+      if (time === undefined) throw new Error(`${ref} in ${store.repo}: validated event ${event.id} lost Time:`)
+      return Date.parse(time)
+    })
+    const recent24h = times.filter((time) => time <= now && time > now - 86_400_000).length
+    const recent48h = times.filter((time) => time <= now && time > now - 172_800_000).length
+    const dailyRate = Math.max(recent24h, recent48h / 2)
+    const projectedCrossing =
+      events.length >= EVENT_READ_LIMIT
+        ? new Date(now).toISOString()
+        : dailyRate > 0
+          ? new Date(now + ((EVENT_READ_LIMIT - events.length) / dailyRate) * 86_400_000).toISOString()
+          : null
+    writePressure = {
+      count: events.length,
+      limit: EVENT_READ_LIMIT,
+      warningAt,
+      recent24h,
+      recent48h,
+      projectedCrossing,
+      ...(dailyRate > 0 || events.length >= EVENT_READ_LIMIT
+        ? {}
+        : { projectionReason: "no event growth measured in the last 48 hours; crossing date unknown" }),
+    }
+  }
+  const result: EventQueue = {
+    ...projected,
+    ...(writePressure === undefined ? {} : { writePressure }),
+    [validatedQueue]: true,
+  }
   queueLocations.set(result, { repo: store.repo, remote: store.remote, queue, backend: store.backend })
   return result
 }
@@ -1192,7 +1239,7 @@ async function eventLineStop(
   if (pause?.kind !== "paused") return undefined
   if (pause.cause === "operator" || pause.cause === "maintenance" || pause.change === undefined) return pause
   const ref = changesRef(queue, pause.change.branch)
-  const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
+  const events = await readEventChain(await openEvents({ ...store, ref }))
   if (events.length === 0) return pause
   const state = project(events, ref, store.repo)
   if (state.commit !== pause.change.head || !isOpen(state.status)) return undefined
@@ -1215,7 +1262,7 @@ export async function queueResumedAfter(
     throw new Error(`event queue ${store.remote}#${queue}: stuck change ${branch} has no stuck event`)
   }
   const ref = queueRef(queue)
-  const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
+  const events = await readEventChain(await openEvents({ ...store, ref }))
   projectEventQueue(events, ref, store.repo)
   const cause = prop(stuck, EVENT_TRAILERS.queue)
   const index = events.findIndex((event) => event.id === cause)
@@ -1483,7 +1530,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   const first = events[0]
   if (first === undefined) throw new Error(`missing event queue chain ${ref} in ${repo}`)
   if (first.parent !== null) {
-    throw new Error(`event queue chain ${ref} in ${repo} exceeds 1024 events; refusing a partial read`)
+    throw new Error(`event queue chain ${ref} in ${repo} did not reach genesis; refusing a partial read`)
   }
   let previous: string | undefined
   let declaration: string | undefined
@@ -1778,7 +1825,7 @@ export async function readStatus(store: QueueLocation, queue: string, branch: st
   const tip = await chain.head()
   if (tip === null) throw new Error(`missing event chain ${ref} in ${store.repo}`)
   try {
-    return project(await chain.events({ limit: 1024 }), ref, store.repo)
+    return project(await readEventChain(chain), ref, store.repo)
   } catch (error) {
     throw new Error(`${ref}@${tip}: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
   }
@@ -1807,7 +1854,7 @@ export async function setBranchIgnored(store: QueueLocation, request: SetBranchI
   if (selectedTip === null) {
     throw new Error(`yrd-ignore-change-missing: ${branch}: ${ref} is absent in ${store.repo}; submit the branch first`)
   }
-  const state = project(await chain.events({ limit: 1024 }), ref, store.repo)
+  const state = project(await readEventChain(chain), ref, store.repo)
   if (!isOpen(state.status)) {
     throw new Error(
       `yrd-ignore-change-ended: ${branch}: change ended ${state.status} at ${state.ending?.id ?? selectedTip}; only an open change can be ignored`,
@@ -1845,7 +1892,7 @@ export async function readChangeEvents(
   selectedTip: string,
 ): Promise<readonly Event[]> {
   const ref = changesRef(queue, branch)
-  const events = await (await openEvents({ ...store, ref })).events({ limit: 1024 })
+  const events = await readEventChain(await openEvents({ ...store, ref }))
   const state = project(events, ref, store.repo)
   if (state.tip !== selectedTip) {
     throw new Conflict(`${ref} moved after the selected reading: expected ${selectedTip}, read ${state.tip}`, {
@@ -2035,7 +2082,7 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   const ref = changesRef(queue, branch)
   const chain = await openEvents({ ...store, ref, writer: request.by })
   const selectedTip = await chain.head()
-  const history = selectedTip === null ? [] : await chain.events({ limit: 1024 })
+  const history = selectedTip === null ? [] : await readEventChain(chain)
   const state = selectedTip === null ? initial : project(history, ref, store.repo)
   const branchRef = `refs/heads/${branch}`
   const fetchRefs = store.backend.fetchRefs
@@ -2139,10 +2186,7 @@ export async function readEventQueueWithChanges(
   queue: string,
 ): Promise<Readonly<{ queue: EventQueue } & ChangeHistories>> {
   const prefix = `${queueRefPrefix(queue)}/changes/`
-  const [queueState, chains] = await Promise.all([
-    readEventQueue(store, queue),
-    chainsUnder(prefix, { ...store, limit: 1024 }),
-  ])
+  const [queueState, chains] = await Promise.all([readEventQueue(store, queue), readEventChains(prefix, store)])
   return { queue: queueState, ...projectChangeHistories(chains, prefix, store.repo) }
 }
 
@@ -2169,7 +2213,7 @@ export async function listChangeHistories(
     }
   }
   const prefix = `${queueRefPrefix(queue)}/changes/`
-  const chains = await chainsUnder(prefix, { ...store, limit: 1024 })
+  const chains = await readEventChains(prefix, store)
   return projectChangeHistories(chains, prefix, store.repo)
 }
 

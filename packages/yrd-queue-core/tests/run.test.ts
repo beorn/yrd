@@ -1227,6 +1227,7 @@ it("applies an event override to merge checks and runs the check after clear", a
   )
   const off = await queueRun(await w.options({ exit: 0, on: ["merge"] }))
   expect(off).toMatchObject({ exitCode: 0, merged: ["task/override-off"] })
+  expect((await readStatus(store, "main", "task/override-off")).reason).toContain("verify (merge override)")
   expect(existsSync(w.checkLog) ? readFileSync(w.checkLog, "utf8").trim() : "").toBe("")
   await writeQueueOverride(
     store,
@@ -1693,6 +1694,58 @@ it("runs a configured event change's default merge check before merging", async 
     ]),
   )
   expect(deciding?.links).toEqual([await remoteTarget(w)])
+})
+
+/** @failure A merged event says disabled checks passed and cites log paths that no check wrote.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("cites only measured check logs in a mixed event run (26089)", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/mixed-checks", "one.txt")
+
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [
+      { name: "off-submit", run: "true", on: ["submit"] },
+      { name: "verify", run: "echo measured" },
+      { name: "off-merge", run: "true" },
+    ],
+    notify: [],
+  })
+
+  expect(outcome.merged).toEqual(["task/mixed-checks"])
+  const measured = checkLogFor(outcome, "task/mixed-checks", "merge", "verify")
+  const status = await readStatus(store, "main", "task/mixed-checks")
+  expect(status.reason).toContain(measured)
+  expect(status.reason).toContain("off-submit (configured off)")
+  expect(status.reason).toContain("off-merge (configured off)")
+  expect(status.reason).not.toContain("off-submit.log")
+  expect(status.reason).not.toContain("off-merge.log")
+  expect(readFileSync(measured, "utf8")).toContain("measured")
+})
+
+/** @failure An absent check log throws during transport retry detection, so the queue never records its unmeasured verdict.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("records a missing event check log as stuck instead of retrying it (26089)", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/lost-check-log", "one.txt")
+
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [{ name: "verify", run: `find "${join(w.workdir, "checks")}" -name verify.log -delete` }],
+    notify: [],
+  })
+
+  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/lost-check-log"], merged: [] })
+  expect(await readStatus(store, "main", "task/lost-check-log")).toMatchObject({
+    status: "stuck",
+    reason: expect.stringContaining("missing after completion"),
+  })
 })
 
 /** @failure Event admission accepted on-submit and setup declarations without running either before landing.
@@ -3057,6 +3110,40 @@ it("settles a direct-merge notice on the queue chain across an empty journal", a
     { change: direct, record: "merged-direct", endingId: observed?.id, endedAt: expect.any(String) },
   ])
 })
+
+/** @failure An old observed event fell outside Gitomic's default 50-event read,
+ * crashing every later queue round even though its notice was settled.
+ * @level l2 @consumer Hab's yrd service
+ */
+it("reads a settled direct notice beyond the default event window", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const direct = await pushAroundQueue(w, "direct-notice-depth.txt")
+  const options = {
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+  } satisfies QueueRunOptions
+
+  expect((await queueRun(options)).directMerges).toEqual([direct])
+  const observed = (await readEventQueue(store, "main")).observed[direct]
+  if (observed === undefined) throw new Error("fixture did not record the direct merge")
+  await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
+  for (let index = 0; index < 25; index++) {
+    await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "depth", at: new Date() })
+    await writeQueueEvent(store, "main", { type: "resumed", by: "operator", reason: "depth", at: new Date() })
+  }
+  expect(
+    (await (await openEvents({ ...store, ref: queueRef("main") })).events()).some((event) => event.id === observed.id),
+  ).toBe(false)
+
+  const restarted = await queueRun({ ...options, workdir: join(w.workdir, "fresh-depth-journal") })
+  expect(restarted.directMerges).toEqual([])
+  expect(messages(w)).toEqual([
+    { change: direct, record: "merged-direct", endingId: observed.id, endedAt: expect.any(String) },
+  ])
+}, 60_000)
 
 /** @failure 25736: an exhausted direct-notice queue transaction escaped as an unknown round error.
  * @level l2 @consumer Hab's yrd service and direct-merge notification recipient
@@ -8515,6 +8602,9 @@ describe("skipping setup and worktree when every declared check is off (25716 ro
       phase: "merge",
       result: "pass",
     })
+    expect(readFileSync(checkLogFor(outcome, "task/synth", "merge", "c1"), "utf8")).toContain(
+      "configured off; no command ran",
+    )
   })
 
   // @i/10-yrd/25936 P2: under noCheck, allDeclaredChecksOff must not write result pass, exit 0 for real checks that never ran
@@ -8535,6 +8625,7 @@ describe("skipping setup and worktree when every declared check is off (25716 ro
 
   it("writes no pass result records on an event queue under noCheck when a check has a real program (25936 P2)", async () => {
     const w = await world()
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
     await createWorldEventQueue(w)
     await submitCommit(w, "task/nocheck-event", "nocheck-event.txt")
     const opts = await w.options({ exit: 0 })
@@ -8545,6 +8636,7 @@ describe("skipping setup and worktree when every declared check is off (25716 ro
       notify: [],
     })
     expect(outcome.merged).toEqual(["task/nocheck-event"])
+    expect((await readStatus(store, "main", "task/nocheck-event")).reason).toContain("real-check (no-check mode)")
     const results = logRecords(outcome).filter((r) => r.kind === "result" && r.name === "real-check")
     expect(results).toEqual([])
   })

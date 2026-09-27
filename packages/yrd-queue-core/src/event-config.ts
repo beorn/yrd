@@ -19,6 +19,7 @@ const QUEUE_KEYS = new Set([
   "checks",
   "health",
   "ignore",
+  "issueResolver",
   "blob",
   "notify",
   "setup",

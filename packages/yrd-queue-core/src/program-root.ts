@@ -1,5 +1,5 @@
 /** One protected P/C lifecycle for queue phases and the non-publishing check command. */
-import { existsSync, lstatSync, mkdirSync, readlinkSync, writeFileSync } from "node:fs"
+import { lstatSync, mkdirSync, readlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import { gitIn, refAt, type Git } from "./git.ts"
@@ -494,7 +494,7 @@ export function recordSynthesizedPassResults(options: SynthesizePassRecordsOptio
     .filter((c) => (c.on ?? ["merge"]).includes(options.phase) && c.run === "true")
     .map((check) => {
       const log = checkLogPath(options.logDir, check.name)
-      if (!existsSync(log)) writeFileSync(log, "")
+      writeFileSync(log, "[yrd: configured off; no command ran]\n", { flag: "wx" })
       const start = new Date().toISOString()
       const about = {
         branch: options.branch,
