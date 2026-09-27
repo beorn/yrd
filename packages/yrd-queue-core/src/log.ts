@@ -437,6 +437,14 @@ export type JournalStep = Readonly<{
   parts?: readonly Readonly<{ name: string; ms: number }>[]
 }>
 
+type JournalComposition = Readonly<{
+  path: string
+  base: string
+  from: string
+  to?: string
+  merged: string
+}>
+
 /** What one run's journal says about one change. */
 export type JournalRun = Readonly<{
   /** The run's own id, which is also its file's name. */
@@ -474,6 +482,8 @@ export type JournalRun = Readonly<{
   base?: string
   /** The merge commit this run recorded, if it recorded one. */
   merge?: string
+  /** Component pins this change's run composed from its settled merge rows. */
+  compositions?: readonly JournalComposition[]
   /** Last non-diagnostic record, or the first diagnostic when there is no other record. */
   at: Date
 }>
@@ -933,6 +943,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       diagnostics?: LogRecord[]
       malformed?: string[]
       merge?: string
+      compositions?: JournalComposition[]
       at: Date
     }
   >()
@@ -993,6 +1004,27 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       if (claimed !== undefined) change.incident = claimed
     }
     if (record.kind === "merge" && typeof record.commit === "string") change.merge = record.commit
+    if (record.kind === "settle" && record.state === "merged") {
+      const required = ["path", "base", "from", "merged"] as const
+      const invalid: string[] = required.filter((key) => {
+        const value = record[key]
+        return typeof value !== "string" || value.trim() === ""
+      })
+      if (record.to !== undefined && (typeof record.to !== "string" || record.to.trim() === "")) invalid.push("to")
+      if (invalid.length > 0) {
+        ;(change.malformed ??= []).push(
+          `run journal ${id} settle ${String(record.path ?? "unknown path")} lacks valid ${invalid.join(", ")}`,
+        )
+        continue
+      }
+      ;(change.compositions ??= []).push({
+        path: record.path as string,
+        base: record.base as string,
+        from: record.from as string,
+        ...(record.to === undefined ? {} : { to: record.to as string }),
+        merged: record.merged as string,
+      })
+    }
     if (record.kind === "result") {
       const index = change.checks.findLastIndex((check) => check.name === record.name && check.phase === record.phase)
       const check = change.checks[index]
@@ -1065,6 +1097,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       ...(change.diagnostics === undefined ? {} : { diagnostics: change.diagnostics }),
       ...(change.malformed === undefined ? {} : { malformed: change.malformed }),
       ...(change.merge === undefined ? {} : { merge: change.merge }),
+      ...(change.compositions === undefined ? {} : { compositions: change.compositions }),
       ...(typeof base === "string" ? { base } : {}),
       head: change.head,
       id,
