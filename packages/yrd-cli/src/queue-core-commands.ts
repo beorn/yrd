@@ -461,6 +461,22 @@ function submitCalls(
   }
 }
 
+/** Classify only the established index reader's result; remote errors remain failed reads. */
+async function readRunIndexPrecondition(
+  store: Parameters<typeof lookupRunIndex>[0],
+  queue: string,
+): Promise<Readonly<{ kind: "ready" }> | Readonly<{ kind: "missing" | "corrupt" | "failed-read"; message: string }>> {
+  try {
+    await lookupRunIndex(store, queue, 1)
+    return { kind: "ready" }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (message.startsWith(`${RUN_INDEX_CODES.missing}:`)) return { kind: "missing", message }
+    if (message.startsWith(`${RUN_INDEX_CODES.corrupt}:`)) return { kind: "corrupt", message }
+    return { kind: "failed-read", message }
+  }
+}
+
 /**
  * Run one queue command on the new core.
  *
@@ -1942,6 +1958,9 @@ export async function coreQueueCommand(
        * pages nobody.
        */
       let lockWaitStated = false
+      const requiredRunIndex = runIndexRef(config.target.branch)
+      let runIndexReady = false
+      let runIndexWaitAnnounced = false
       const waiting = {
         onWait: (wait: RoundLockWait): void => {
           lockWaitStated = true
@@ -1957,6 +1976,71 @@ export async function coreQueueCommand(
       }
       try {
         for (;;) {
+          // A carrier that needs a remote ref owns its own startup condition.
+          // Keep the process and heartbeat alive while @chief activates an old
+          // queue's run index; no round may allocate a number before it exists.
+          if (!runIndexReady) {
+            const precondition = await readRunIndexPrecondition(eventStore, config.target.branch)
+            if (precondition.kind === "ready") {
+              runIndexReady = true
+              readFailure = undefined
+              if (runIndexWaitAnnounced) writeHealth(lineDocument(lastStop, 0))
+            } else {
+              if (precondition.kind === "corrupt") return stuck(precondition.message)
+              if (precondition.kind === "missing") {
+                readFailure = undefined
+                const cure = `yrd runs activate <repo>@${config.target.branch}`
+                const why = `${requiredRunIndex} at ${config.target.remote} is absent for the existing queue; no round will run until @chief runs ${cure}`
+                if (!runIndexWaitAnnounced) {
+                  log?.warn?.(why, { ref: requiredRunIndex, remote: config.target.remote })
+                  emit(
+                    io,
+                    options.json,
+                    { reason: "remote-precondition-missing", ref: requiredRunIndex, message: why },
+                    why,
+                  )
+                  runIndexWaitAnnounced = true
+                }
+                const alive = lineDocument(lastStop, 0)
+                const document = writeHealth({
+                  ...alive,
+                  state: "unhealthy",
+                  error: {
+                    code: "queue-remote-precondition-missing",
+                    cause: why,
+                    resolution: [
+                      `@chief: run ${cure} for this queue after its carrier lands.`,
+                      "No restart is needed. This service re-reads the remote ref and starts rounds when it appears.",
+                    ],
+                  },
+                  facts: {
+                    ...alive.facts,
+                    reasonKey: `remote-precondition:${requiredRunIndex}`,
+                    waitingForRef: requiredRunIndex,
+                  },
+                })
+                await request.afterHealth?.(document)
+              } else {
+                // The reader could not tell whether the ref exists. Carry this
+                // through the ordinary failed-read rail, never as "missing".
+                readFailure = {
+                  ref: requiredRunIndex,
+                  error: precondition.message,
+                  count: readFailure?.ref === requiredRunIndex ? readFailure.count + 1 : 1,
+                }
+                const document = writeHealth(lineDocument(lastStop, interval))
+                await request.afterHealth?.(document)
+              }
+              if (stopped()) return 0
+              await delay(Math.min(15_000, Math.max(1000, interval)), undefined, { signal: request.stop }).catch(
+                (delayError) => {
+                  if (!stopped()) throw delayError
+                },
+              )
+              if (stopped()) return 0
+              continue
+            }
+          }
           // The declaration again under the lock, as the target holds it now: a
           // correct edit at the target is the next round's, never a restart's.
           const ran = await lockedRound({
