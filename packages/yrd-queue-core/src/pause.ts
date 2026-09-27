@@ -1,42 +1,6 @@
-/**
- * A merge pause: one append-only record ref at the queue's remote.
- *
- * The ref is operational state, not queue configuration. Its latest commit is
- * the whole answer: `paused` stops queue work and `resumed` permits it. A
- * missing ref is the one honest resumed default; an unreadable ref is loud.
- *
- * A pause has a CAUSE, and that is the andon (operator 2026-09-16: "STUCK means
- * fail loud and fix - andon - stop the line - fix it"). `operator` is a
- * person's `yrd queue pause`, and a record that names no cause is one: every
- * record written before causes existed was. `stuck` is the queue pausing
- * ITSELF: a change it could not judge stopped the line, and the record names
- * that change and carries its stuck record's cures. Both stop checking and
- * merging while submits queue behind them. `maintenance` is a person-set stop
- * that also closes intake during a fenced migration.
- *
- * An operator or maintenance stop lifts only by `yrd queue resume`. A stuck stop also lifts
- * when the change it names leaves the line: withdrawn, merged, or ended by a
- * later judgement. No timer ever lifts either. {@link lineStop} is the ONE
- * derivation of "is the line stopped", and every reader asks it — the run, the
- * service and its page, list, submit and the pause writers — so no two of them
- * can decide it differently.
- */
-
-import {
-  ABSENT,
-  endedKind,
-  legacyPauseCommit,
-  legacyStore,
-  legacyTrailers,
-  readLegacyCommit,
-  standsEnded,
-  type ChangeRecord,
-} from "./legacy-records.ts"
-import type { CommitMeta } from "./git.ts"
-import type { Git } from "./git.ts"
-
-import { changeName, parseChangeName, pauseRef, type Change } from "./refs.ts"
-import { holdsPlaceInLine, type ChangeState } from "./state.ts"
+/** The retained M2 intake fence and operator-facing pause facts. */
+import { readRemoteCommit, type Git } from "./git.ts"
+import { changeName, pauseRef, type Change } from "./refs.ts"
 
 export type PauseKind = "paused" | "resumed"
 
@@ -56,29 +20,6 @@ export type PauseRecord = Readonly<{
   /** A stuck stop's cures: its stuck record's own `Next`, carried so the page needs no second read. */
   next?: string
 }>
-
-export type WritePause = Readonly<{
-  kind: PauseKind
-  reason: string
-  by: string
-  /** Absent is `operator`. A `stuck` pause names its `change`, and may carry that change's cures as `next`. */
-  cause?: PauseCause
-  change?: Change
-  next?: string
-}>
-
-/** The state-preserving record and expected tip one atomic merge push must carry. */
-export type PauseFence = Readonly<{
-  sha: string
-  expected: string
-  previous?: PauseRecord
-}>
-
-/** The permanent legacy intake fence left by a Record -> Event cutover. */
-export function eventCutoverTip(pause: PauseRecord | undefined): string | undefined {
-  if (pause?.kind !== "paused" || pause.cause !== "maintenance") return undefined
-  return /^moved to event format at ([0-9a-f]{40}(?:[0-9a-f]{24})?)$/u.exec(pause.reason)?.[1]
-}
 
 /** A normal operational refusal: the line is intentionally stopped. */
 export class QueuePaused extends Error {
@@ -103,37 +44,6 @@ export class QueueNotPaused extends Error {
   }
 }
 
-/**
- * The stop that stands, or undefined while the line runs: THE ONE DERIVATION.
- *
- * `named` is the queue read's entry for the change a stuck stop names, with its
- * record history — `readQueue` expands exactly that one entry. An operator's
- * stop stands until a resume record replaces it. A stuck stop stands while its
- * change still holds a place in line (state.ts `holdsPlaceInLine`, the predicate
- * `inLine` selects by) AND no ending has been recorded on it since it last
- * stuck. So ANY ending lifts it — merged, withdrawn, failed, a replaced head —
- * with no list of ending kinds kept here. A same-head retry re-opens the chain
- * without curing anything, while an ending followed by a resubmit is a new
- * submission this stop never named, and must never stop the line a second time. A change the read cannot find at all
- * keeps the line stopped — nothing says it left — and `yrd queue resume` cures
- * that. The record itself is never rewritten here: a stop that lifted leaves its
- * record in place until the next write to the pause ref replaces it, which the
- * next merge's atomic fence does.
- */
-export function lineStop(
-  pause: PauseRecord | undefined,
-  named:
-    | Readonly<{ change: Readonly<{ records: readonly ChangeRecord[] }>; reading: Readonly<{ state: ChangeState }> }>
-    | undefined,
-): PauseRecord | undefined {
-  if (pause?.kind !== "paused") return undefined
-  if (pause.cause === "operator" || pause.cause === "maintenance" || named === undefined) return pause
-  if (!holdsPlaceInLine(named.reading.state)) return undefined
-  const records = named.change.records
-  const stuckAt = records.findLastIndex((record) => endedKind(record) === "stuck")
-  return records.slice(stuckAt + 1).some((record) => standsEnded(record)) ? undefined : pause
-}
-
 /** The stop as every JSON reader carries it (`yrd list --json`, the page's facts, submit's echo). */
 export type StopFact = Readonly<{ cause: PauseCause; change: string | null; by: string; since: string }>
 
@@ -148,88 +58,52 @@ export function stopFact(stop: PauseRecord | undefined): StopFact | null {
   }
 }
 
-/**
- * Read the latest pause record from the remote. Absence alone means resumed;
- * malformed, unreachable and unreadable state throws instead of opening the
- * queue on a guess.
- */
-export async function readPause(git: Git, remote: string, queue: string): Promise<PauseRecord | undefined> {
-  const ref = pauseRef(queue)
-  const store = await legacyStore(git)
-  const captured = (await store.backend.fetchRefs(store.repo, ref, remote)).get(ref)
-  return captured === undefined ? undefined : parsePause(git, captured, `${remote} ${ref}`)
-}
-
-/**
- * Append one paused or resumed record under a lease on the remote tip.
- *
- * `lifted` is a paused record the caller derived as no longer standing
- * ({@link lineStop}): a new pause may chain on it, and there is nothing for a
- * resume to end. Any OTHER paused tip is a stop that stands.
- */
-export async function writePause(
+/** Read only the permanent M2 tip. Other legacy pause records are refused. */
+export async function readM2Pause(
   git: Git,
   remote: string,
   queue: string,
-  write: WritePause,
-  lifted?: PauseRecord,
-): Promise<PauseRecord> {
+  created: string,
+): Promise<PauseRecord | undefined> {
   const ref = pauseRef(queue)
-  const reason = oneLine(write.reason, "a pause record needs a reason")
-  const by = oneLine(write.by, "a pause record needs an actor")
-  if (write.kind === "paused" && write.cause === "stuck" && write.change === undefined) {
-    throw new Error("a stuck pause names the change it stopped for")
+  const sha = await readRemoteCommit(git, remote, ref)
+  if (sha === undefined) return undefined
+  const where = `${remote}#${queue} ${ref} at ${sha}`
+  const body = await git(["show", "-s", "--format=%B", sha])
+  const fields =
+    /^moved to event format at ([0-9a-f]{40}(?:[0-9a-f]{24})?)\n\nRecord: paused\nPaused-By: yrd-ops-cutover\nPaused-At: ([^\n]+)\nCause: maintenance\n{1,2}$/u.exec(
+      body,
+    )
+  if (fields === null) {
+    throw new Error(
+      `${where}: expected the exact M2 maintenance fence fields; read ${JSON.stringify(body.slice(0, 400))}`,
+    )
   }
-  if (write.cause !== "stuck" && (write.change !== undefined || write.next !== undefined)) {
-    throw new Error("a person-set pause names no change: only a stuck stop waits on one")
+  const cutover = fields[1]
+  if (cutover !== created) {
+    throw new Error(`${where}: M2 names event-created ${cutover}; expected ${created}`)
   }
-  const previous = await readPause(git, remote, queue)
-  if (eventCutoverTip(previous) !== undefined) {
-    throw new Error(`${remote}#${queue} moved to event format at ${eventCutoverTip(previous)}; use the event queue`)
+  const atText = fields[2] ?? ""
+  const at = new Date(atText)
+  if (Number.isNaN(at.getTime()) || at.toISOString() !== atText) {
+    throw new Error(`${where}: M2 has invalid Paused-At ${JSON.stringify(atText)}`)
   }
-  const stands = previous?.kind === "paused" && previous.sha !== lifted?.sha ? previous : undefined
-  if (write.kind === "paused" && stands !== undefined) throw new QueuePaused(stands, remote, queue)
-  if (write.kind === "resumed" && stands === undefined) {
-    throw new QueueNotPaused(previous?.kind === "paused" ? previous : undefined)
+  const parents = (await git(["show", "-s", "--format=%P", sha])).trim().split(/\s+/u)
+  if (parents.length !== 1 || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(parents[0] ?? "")) {
+    throw new Error(`${where}: M2 must have exactly one predecessor; read ${parents.join(", ")}`)
   }
-  const commit = await legacyPauseCommit(git, previous, { ...write, by, reason })
-  const store = await legacyStore(git)
-  await store.backend.publish(store.repo, [{ ref, expect: previous?.sha ?? ABSENT, oid: commit }], remote)
-  return parsePause(git, commit, `${remote} ${ref}`)
-}
-
-/**
- * Prepare the record that linearizes one merge against `queue pause`.
- *
- * Preparation moves no ref. The caller must include both the lease and
- * `${sha}:${pauseRef(queue)}` in the SAME atomic push as the target and change
- * updates. Only the unchanged pause admitting an explicit foreground round
- * may be carried forward paused; a stop the round derived as lifted is
- * replaced by a resumed record in that same push; any newer pause refuses.
- * Unreadable authority is loud.
- */
-export async function pauseFence(
-  git: Git,
-  remote: string,
-  queue: string,
-  write: Readonly<{ reason: string; by: string }>,
-  admittedPause?: PauseRecord,
-  liftedPause?: PauseRecord,
-): Promise<PauseFence> {
-  const reason = oneLine(write.reason, "a pause fence needs a reason")
-  const by = oneLine(write.by, "a pause fence needs an actor")
-  const previous = await readPause(git, remote, queue)
-  if (previous !== undefined && eventCutoverTip(previous) !== undefined) {
-    throw new QueuePaused(previous, remote, queue)
+  const predecessor = await git(["show", "-s", "--format=%B", parents[0] ?? ""])
+  if (/^moved to event format at [0-9a-f]{40}(?:[0-9a-f]{24})?\n\n/u.test(predecessor)) {
+    throw new Error(`${where}: second commit atop an M2 fence ${parents[0]} is not an approved tip`)
   }
-  if (previous?.kind === "paused" && previous.sha !== admittedPause?.sha && previous.sha !== liftedPause?.sha) {
-    throw new QueuePaused(previous, remote, queue)
-  }
-  const sha =
-    previous?.kind === "paused" && previous.sha === admittedPause?.sha
-      ? await legacyPauseCommit(git, previous, { ...carried(previous), kind: "paused" }, previous.at)
-      : await legacyPauseCommit(git, previous, { by, kind: "resumed", reason })
-  return { expected: previous?.sha ?? ABSENT, previous, sha }
+  return Object.freeze({
+    kind: "paused",
+    sha,
+    at,
+    reason: `moved to event format at ${created}`,
+    by: "yrd-ops-cutover",
+    cause: "maintenance",
+  })
 }
 
 /** The operator-facing line shared by list, the submit echo, refusals and the pause commands. */
@@ -276,99 +150,4 @@ export function stuckCures(branch: string): string {
     `merge a queued fix with yrd merge <its branch> (it runs alone on the stopped line, then ${branch} is judged once more), ` +
     "or yrd queue resume once the queue itself is repaired; until one of them, the line stays stopped"
   )
-}
-
-export async function parsePause(git: Git, sha: string, where: string): Promise<PauseRecord> {
-  return pauseFromMeta(await readLegacyCommit(git, sha), where)
-}
-
-/** Parse one pause from a Gitomic history row already read in a batch. */
-export function pauseFromMeta(meta: CommitMeta, where: string): PauseRecord {
-  const sha = meta.oid
-  const id = sha
-  const atText = new Date(meta.timestamp * 1_000).toISOString()
-  const body = meta.message
-  const parsed = legacyTrailers(body)
-  const kinds = parsed.filter(([name]) => name === "Record").map(([, value]) => value)
-  const kind = kinds[0]
-  if (kinds.length !== 1 || (kind !== "paused" && kind !== "resumed")) {
-    throw new Error(
-      `${where} at ${sha.slice(0, 12)} carries no valid Record: paused|resumed trailer ` +
-        `(found ${String(kinds.length)}; exactly one is required)`,
-    )
-  }
-  const byKey = "Paused-By"
-  const actors = parsed.filter(([name]) => name === byKey).map(([, value]) => value)
-  const by = actors[0]
-  if (actors.length !== 1 || by === undefined || by === "") {
-    throw new Error(
-      `${where} at ${sha.slice(0, 12)} carries no single non-empty ${byKey}: trailer ` +
-        `(found ${String(actors.length)})`,
-    )
-  }
-  const reason = body?.split("\n")[0]?.trim()
-  if (id === undefined || id === "" || atText === undefined || reason === undefined || reason === "") {
-    throw new Error(`${where} at ${sha.slice(0, 12)} is not a readable pause record`)
-  }
-  if (
-    reason.startsWith("moved to event format at ") &&
-    !/^moved to event format at [0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(reason)
-  ) {
-    throw new Error(`${where} at ${sha.slice(0, 12)} has an invalid event cutover tip in its pause reason`)
-  }
-  // A foreground fence is a new commit, not a new decision to pause. Keep the
-  // original pause time while its own commit time records the merge's fence.
-  const pauseTimes = parsed.filter(([name]) => name === "Paused-At").map(([, value]) => value)
-  if (pauseTimes.length > 1) throw new Error(`${where} at ${sha.slice(0, 12)} carries multiple Paused-At: trailers`)
-  const at = new Date(pauseTimes[0] ?? atText)
-  if (Number.isNaN(at.getTime())) {
-    throw new Error(`${where} at ${sha.slice(0, 12)} has an unreadable pause time '${pauseTimes[0] ?? atText}'`)
-  }
-  // No Cause at all is the operator's: every record before causes existed.
-  // A cause nobody defined, or two, is refused rather than guessed at — a stop
-  // read as the wrong cause is lifted by the wrong act.
-  const causes = parsed.filter(([name]) => name === "Cause").map(([, value]) => value)
-  const cause = causes[0] ?? "operator"
-  if (causes.length > 1 || (cause !== "operator" && cause !== "stuck" && cause !== "maintenance")) {
-    throw new Error(
-      `${where} at ${sha.slice(0, 12)} carries an unreadable Cause: ${causes.join(", ")} (operator, stuck or maintenance, at most one)`,
-    )
-  }
-  const changes = parsed.filter(([name]) => name === "Change").map(([, value]) => value)
-  const change = changes.length === 1 ? parseChangeName(changes[0] ?? "") : undefined
-  if (cause === "stuck" && kind === "paused" && change === undefined) {
-    throw new Error(
-      `${where} at ${sha.slice(0, 12)} is a stuck stop with no readable Change: <branch>@<sha> ` +
-        `(found ${String(changes.length)}); no reader could say which change lifts it`,
-    )
-  }
-  const nexts = parsed.filter(([name]) => name === "Next").map(([, value]) => value)
-  return Object.freeze({
-    at,
-    by,
-    cause,
-    kind,
-    reason,
-    sha: id,
-    ...(cause === "stuck" && change !== undefined ? { change } : {}),
-    ...(cause === "stuck" && nexts[0] !== undefined ? { next: nexts[0] } : {}),
-  })
-}
-
-/** The facts a carried-forward paused record keeps: the decision, not the commit. */
-function carried(previous: PauseRecord): Omit<WritePause, "kind"> {
-  return {
-    by: previous.by,
-    cause: previous.cause,
-    reason: previous.reason,
-    ...(previous.change === undefined ? {} : { change: previous.change }),
-    ...(previous.next === undefined ? {} : { next: previous.next }),
-  }
-}
-
-function oneLine(value: string, missing: string): string {
-  const text = value.trim()
-  if (text === "") throw new Error(missing)
-  if (text.includes("\n")) throw new Error(`${missing}; it must be one line`)
-  return text
 }

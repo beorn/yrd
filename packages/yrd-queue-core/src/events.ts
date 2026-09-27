@@ -6,7 +6,7 @@ import { EVENT_READ_LIMIT } from "./event-read.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
 import { overrideRef, pauseRef, queueRefPrefix } from "./refs.ts"
-import { eventCutoverTip, readPause, type PauseRecord } from "./pause.ts"
+import { readM2Pause, type PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
 import { gitIn, refAt } from "./git.ts"
 import type { Git, GitSelection } from "./git.ts"
@@ -17,14 +17,11 @@ import { decodeOps, encodeOps, OPS_SELF, type OpsState } from "./ops-state.ts"
 import {
   decideOverride,
   decideOverrideClock,
-  readOverrides,
   type OverrideDecision,
   type OverrideEntry,
   type OverrideTable,
   type OverrideWrite,
 } from "./override.ts"
-import { readStop } from "./remote.ts"
-import { legacyPauseCommit } from "./legacy-records.ts"
 import { deleteCandidateRefsForShas } from "./candidate-refs.ts"
 
 export const CHANGE_STATUSES = [
@@ -983,6 +980,7 @@ export async function createEventQueue(
         props: [
           [EVENT_TRAILERS.commit, commit],
           [EVENT_TRAILERS.time, at.toISOString()],
+          ["Ops", encodeOps({ overrides: [] })],
         ],
         keeps: [commit],
       },
@@ -1038,15 +1036,15 @@ export async function readEventQueue(store: QueueLocation, queue: string): Promi
   return result
 }
 
-/** Four honest ops reads: pre-cutover legacy; post-cutover events; leftover refs refuse. */
+/** Read event ops and reject any remaining legacy override authority. */
 export async function readEventOps(
   store: QueueLocation,
   git: Git,
   queue: string,
-  targetSha: string,
+  _targetSha: string,
 ): Promise<
   Readonly<{
-    source: "legacy" | "event"
+    source: "event"
     queue: EventQueue
     pause?: PauseRecord
     stop?: PauseRecord
@@ -1054,34 +1052,21 @@ export async function readEventOps(
   }>
 > {
   const projected = await readEventQueue(store, queue)
-  if (projected.opsCutover === undefined) {
-    if (projected.pause !== undefined && projected.pause.id !== projected.created) {
-      throw new Error(
-        `${queueRef(queue)}: pre-cutover pause event ${projected.pause.id} still stands while ${pauseRef(queue)} owns the stop; ops cutover is incomplete`,
-      )
-    }
-    const [stop, overrides] = await Promise.all([
-      readStop(git, store.remote, queue, targetSha),
-      readOverrides(git, store.remote, queue),
-    ])
-    if (projected.pause?.id === projected.created && stop.pause === undefined) {
-      throw new Error(`${queueRef(queue)}: missing legacy pause ref ${pauseRef(queue)} for Start-Paused migration`)
-    }
-    return { source: "legacy", queue: projected, ...stop, overrides }
+  if (projected.opsCutover === undefined || projected.ops === undefined) {
+    throw new Error(
+      `${store.remote}#${queue}: ${queueRef(queue)} has no event ops authority; expected an ops-cutover event`,
+    )
   }
-  if (projected.ops === undefined) throw new Error(`${queueRef(queue)}: ops-cutover has no complete state`)
   const refs = await listRefs(queueRefPrefix(queue), store)
   if (refs.has(overrideRef(queue))) {
     throw new Error(
-      `${store.remote}#${queue}: ops cutover incomplete; ${overrideRef(queue)} remains after ${projected.opsCutover}`,
+      `${store.remote}#${queue}: legacy override ref ${overrideRef(queue)} remains after ${projected.opsCutover}`,
     )
   }
   if (refs.has(pauseRef(queue))) {
-    const legacy = await readPause(git, store.remote, queue)
-    if (eventCutoverTip(legacy) !== projected.created || legacy?.sha !== refs.get(pauseRef(queue))) {
-      throw new Error(
-        `${store.remote}#${queue}: legacy pause ref is not the permanent maintenance fence for ${projected.created}`,
-      )
+    const fence = await readM2Pause(git, store.remote, queue, projected.created)
+    if (fence?.sha !== refs.get(pauseRef(queue))) {
+      throw new Error(`${store.remote}#${queue}: ${pauseRef(queue)} changed during the M2 tip read`)
     }
   }
   const stop = await eventLineStop(store, queue, projected.ops.pause)
@@ -1091,142 +1076,6 @@ export async function readEventOps(
     pause: projected.ops.pause,
     stop,
     overrides: { sha: projected.tip, entries: projected.ops.overrides },
-  }
-}
-
-export type OpsCutoverReceipt = Readonly<{
-  event: string
-  queueBefore: string
-  queueAfter: string
-  pauseAfter: string
-  pauseBefore?: string
-  overrideBefore?: string
-}>
-
-export type OpsCutoverPausePlan =
-  | Readonly<{ tip: string | null; priorKind: "paused" | "resumed" | null; disposition: "retain" }>
-  | Readonly<{
-      tip: string | null
-      priorKind: "paused" | "resumed" | null
-      disposition: "replace"
-      record: Readonly<{ kind: "paused"; cause: "maintenance"; by: string; reason: string; at: string }>
-    }>
-
-/** Stage the complete legacy state, then switch ops authority while preserving a cutover intake fence. */
-export async function appendOpsCutover(
-  store: QueueLocation,
-  git: Git,
-  queue: string,
-  targetSha: string,
-  at: Date,
-  by: string,
-  expected?: Readonly<{
-    queueBefore: string
-    pauseBefore?: string
-    overrideBefore?: string
-    pause?: OpsCutoverPausePlan
-  }>,
-  onStaged?: (queueOid: string, pauseOid: string) => void,
-): Promise<OpsCutoverReceipt> {
-  if (Number.isNaN(at.getTime())) throw new TypeError("ops-cutover Time: needs a valid instant")
-  if (by.trim() === "") throw new TypeError("ops-cutover needs an actor")
-  const prior = await readEventOps(store, git, queue, targetSha)
-  if (prior.source !== "legacy") {
-    throw new Error(`${queueRef(queue)}: ops-cutover already exists at ${prior.queue.opsCutover}`)
-  }
-  if (prior.queue.release !== undefined) {
-    throw new Error(
-      `${queueRef(queue)}: unfinished stuck release at ${prior.queue.release.id}; complete it before ops-cutover`,
-    )
-  }
-  const refs = await listRefs(queueRefPrefix(queue), store)
-  const pauseBefore = refs.get(pauseRef(queue))
-  const overrideBefore = refs.get(overrideRef(queue))
-  if (
-    expected !== undefined &&
-    (expected.queueBefore !== prior.queue.tip ||
-      expected.pauseBefore !== pauseBefore ||
-      expected.overrideBefore !== overrideBefore)
-  ) {
-    throw new Conflict(`${queueRef(queue)}: ops-cutover refs differ from the verified plan`, {
-      refs: [queueRef(queue), pauseRef(queue), overrideRef(queue)],
-    })
-  }
-  if (pauseBefore !== prior.pause?.sha || overrideBefore !== prior.overrides.sha) {
-    throw new Conflict(`${queueRef(queue)}: legacy refs moved while preparing ops-cutover`, {
-      refs: [pauseRef(queue), overrideRef(queue)],
-    })
-  }
-  const retainPause = eventCutoverTip(prior.pause) === prior.queue.created
-  const disposition = retainPause ? "retain" : "replace"
-  if (
-    expected?.pause !== undefined &&
-    (expected.pause.tip !== (pauseBefore ?? null) ||
-      expected.pause.priorKind !== (prior.pause?.kind ?? null) ||
-      expected.pause.disposition !== disposition)
-  ) {
-    throw new Conflict(`${queueRef(queue)}: pause disposition differs from the verified plan`, {
-      refs: [pauseRef(queue)],
-    })
-  }
-  const reason = `moved to event format at ${prior.queue.created}`
-  const record = expected?.pause?.disposition === "replace" ? expected.pause.record : undefined
-  if (
-    record !== undefined &&
-    (record.kind !== "paused" ||
-      record.cause !== "maintenance" ||
-      record.reason !== reason ||
-      record.by.trim() === "" ||
-      Number.isNaN(new Date(record.at).getTime()))
-  ) {
-    throw new Error(`${pauseRef(queue)}: planned M2 record is not a valid maintenance fence for ${prior.queue.created}`)
-  }
-  const state: OpsState = {
-    ...(prior.stop === undefined ? {} : { pause: prior.stop }),
-    overrides: prior.overrides.entries,
-  }
-  const ref = queueRef(queue)
-  const input: EventInput = {
-    type: "ops-cutover",
-    props: [
-      [EVENT_TRAILERS.queue, prior.queue.tip],
-      [EVENT_TRAILERS.time, at.toISOString()],
-      ["Ops", encodeOps(state)],
-    ],
-  }
-  const staged = await (await openEvents({ ...store, ref, writer: by })).stage([input], { expect: prior.queue.tip })
-  const pauseAfter = retainPause
-    ? pauseBefore
-    : await legacyPauseCommit(
-        git,
-        prior.pause,
-        { kind: "paused", cause: "maintenance", by: record?.by ?? by, reason },
-        record === undefined ? at : new Date(record.at),
-      )
-  if (pauseAfter === undefined) throw new Error(`${pauseRef(queue)}: ops-cutover has no maintenance fence`)
-  onStaged?.(staged.head, pauseAfter)
-  const also: AlsoRef[] = [
-    { ref: pauseRef(queue), expect: pauseBefore ?? null, oid: pauseAfter },
-    ...(overrideBefore === undefined ? [] : [{ ref: overrideRef(queue), expect: overrideBefore, oid: null }]),
-  ]
-  await staged.publish({ also })
-  const event = staged.events[0]?.id
-  if (event === undefined) throw new Error(`${ref}: staged ops-cutover had no event`)
-  const readback = await readEventQueue(store, queue)
-  if (readback.opsCutover !== event || readback.tip !== staged.head) {
-    throw new Error(`${ref}: ops-cutover publish returned but readback differs from staged ${staged.head}`)
-  }
-  const leftovers = await listRefs(queueRefPrefix(queue), store)
-  if (leftovers.get(pauseRef(queue)) !== pauseAfter || leftovers.has(overrideRef(queue))) {
-    throw new Error(`${ref}: ops-cutover published but legacy refs differ from the retained fence`)
-  }
-  return {
-    event,
-    queueBefore: prior.queue.tip,
-    queueAfter: staged.head,
-    pauseAfter,
-    ...(pauseBefore === undefined ? {} : { pauseBefore }),
-    ...(overrideBefore === undefined ? {} : { overrideBefore }),
   }
 }
 
@@ -1563,6 +1412,10 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
     switch (event.type) {
       case "created":
         if (index !== 0) throw new Error(`${ref}: event ${event.id} declares a second queue`)
+        if (prop(event, "Ops") !== undefined) {
+          ops = readOpsEvent(event, ref)
+          opsCutover = event.id
+        }
         break
       case "ops-cutover":
         if (opsCutover !== undefined) throw new Error(`${ref}: event ${event.id} declares a second ops cutover`)

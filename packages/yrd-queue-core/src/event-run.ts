@@ -58,8 +58,8 @@ import {
 } from "./with-notify.ts"
 import { changeName } from "./refs.ts"
 import { transportFaultIn } from "./setup-transport.ts"
-import { readRootChanges } from "./legacy-records.ts"
-import { mergedBy } from "./legacy-records.ts"
+import { readRootChanges } from "./root-changes.ts"
+import { mergedBy } from "./git.ts"
 import { settledBaseCommit } from "./settled-base.ts"
 
 function endingTime(event: Event, context: string): string {
@@ -70,9 +70,8 @@ function endingTime(event: Event, context: string): string {
   return time
 }
 import { repairMissingBranchHeads } from "./remote.ts"
-import { expireOverrides, isActive, overrideFence } from "./override.ts"
-import { pauseFence, QueuePaused } from "./pause.ts"
-import { overrideRef, pauseRef } from "./refs.ts"
+import { isActive } from "./override.ts"
+import { QueuePaused } from "./pause.ts"
 
 const DEFAULT_QUEUE_RUN_RETRY_BUDGET_MS = 5_000
 // If all journals are live service rounds at its 120s interval, 128 cover
@@ -508,32 +507,19 @@ export async function eventQueueRun(
     return result(observation.outcome === "invalid" ? 2 : 0)
   }
 
-  let operational = await readEventOps(store, git, queue, target)
+  const operational = await readEventOps(store, git, queue, target)
   if (operational.queue.release !== undefined) {
     const release = operational.queue.release
-    if (operational.source !== "legacy") {
-      throw new Error(`event queue ${url}#${queue}: unfinished pre-cutover release ${release.id} after ops cutover`)
-    }
-    await runTransaction("stuck-release", release.id, () =>
-      writeQueueEvent(store, queue, {
-        type: "resumed",
-        reason: release.reason,
-        by: "yrd-run",
-        at: new Date(),
-      }),
-    )
-    operational = await readEventOps(store, git, queue, target)
+    throw new Error(`event queue ${url}#${queue}: unfinished pre-cutover release ${release.id} after ops cutover`)
   }
   // No override can expire or need a reminder when the table is empty. Keep
   // the round's injected clock for its stop window until a clock act is due.
   const clock =
     operational.overrides.entries.length === 0
       ? { expired: [], reminded: [] }
-      : operational.source === "legacy"
-        ? await expireOverrides(git, options.target.remote, queue, options.now?.() ?? Date.now(), "yrd")
-        : await runTransaction("expire-overrides", operational.queue.tip, () =>
-            expireQueueOverrides(store, queue, options.now?.() ?? Date.now(), "yrd"),
-          )
+      : await runTransaction("expire-overrides", operational.queue.tip, () =>
+          expireQueueOverrides(store, queue, options.now?.() ?? Date.now(), "yrd"),
+        )
   for (const [action, entries] of [
     ["expired", clock.expired],
     ["reminder", clock.reminded],
@@ -950,24 +936,6 @@ export async function eventQueueRun(
     let preparedMerge: string | undefined
     let ended: string | undefined
     try {
-      const opsFences =
-        operational.source === "legacy"
-          ? await (async () => {
-              const pause = await pauseFence(
-                git,
-                options.target.remote,
-                queue,
-                { by: "yrd", reason: `merge ${branch}` },
-                operational.stop,
-                operational.pause?.kind === "paused" && operational.stop === undefined ? operational.pause : undefined,
-              )
-              const override = await overrideFence(git, operational.overrides, "yrd", `merge ${branch}`)
-              return [
-                { ref: pauseRef(queue), expect: pause.expected, oid: pause.sha },
-                { ref: overrideRef(queue), expect: override.expected, oid: override.sha },
-              ]
-            })()
-          : undefined
       ended = await timedStep(log, { branch, head, name: "merge", phase: "merge" }, () =>
         appendOwnedMerge(
           store,
@@ -980,7 +948,6 @@ export async function eventQueueRun(
             targetExpect: parent,
             queueTip: queueState.tip,
             run: log.id,
-            ...(opsFences === undefined ? {} : { opsFences }),
             ...(reason === undefined ? {} : { reason }),
           },
           (oid) => {

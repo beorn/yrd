@@ -1,4 +1,6 @@
+import { execFileSync } from "node:child_process"
 import { readFileSync, readdirSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
 const REF_COMMAND = /\[\s*"(ls-remote|for-each-ref|update-ref|fetch|push)"/gu
@@ -12,6 +14,24 @@ function refCommands(text: string): string[] {
 }
 
 describe("the legacy Gitomic boundary", () => {
+  it("retains only the M2 tip check as a production Record reader (25041)", () => {
+    // @source-grep: a future legacy fallback can compile and pass event journeys;
+    // the accepted retirement contract permits exactly one M2 tip check.
+    const repo = new URL("../../../", import.meta.url)
+    const tracked = execFileSync("git", ["ls-files", "-z", "--", "packages"], {
+      cwd: fileURLToPath(repo),
+      encoding: "utf8",
+    }).split("\0")
+    const hits = tracked
+      .filter(
+        (path) =>
+          /^packages\/[^/]+\/(?:src|scripts)\/.*\.[cm]?[jt]sx?$/u.test(path) && !/\.test\.[cm]?[jt]sx?$/u.test(path),
+      )
+      .map((path) => ({ path, count: readFileSync(new URL(path, repo), "utf8").split("Record:").length - 1 }))
+      .filter(({ count }) => count > 0)
+    expect(hits).toEqual([{ path: "packages/yrd-queue-core/src/pause.ts", count: 1 }])
+  })
+
   it("routes every production event-chain read through the named Yrd read policy", () => {
     // @source-grep: the P0 direct notice read fell back to Gitomic's default 50;
     // the policy is the only production site allowed to call these raw readers.

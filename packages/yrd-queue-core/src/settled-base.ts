@@ -1,7 +1,7 @@
 /** Compose the candidate's raised root gitlinks onto the target without its authored content. */
 import type { Process } from "@yrd/process"
 import { gitIn, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
-import type { RootChanges } from "./legacy-records.ts"
+import type { RootChanges } from "./root-changes.ts"
 import { freshWorktree, type PlumbingLog } from "./worktree.ts"
 
 export async function settledBaseCommit(

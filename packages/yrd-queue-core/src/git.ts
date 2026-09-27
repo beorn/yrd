@@ -21,6 +21,7 @@ import { isAbsolute } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createShellBackend, type GitomicBackend } from "gitomic"
+import type { Event } from "gitomic/events"
 import { GIT_REPOSITORY_LOCAL_ENV_VARS } from "removely"
 export { chainsUnder, listRefs, openEvents } from "gitomic/events"
 export type { AlsoRef, Event, EventInput } from "gitomic/events"
@@ -34,6 +35,32 @@ import {
   verboseSshRetryEnvironment,
 } from "git-super/process"
 import type { QueueObservation } from "./remote.ts"
+
+/** Git's expected old value when a ref must be absent. */
+export const ABSENT = "0".repeat(40)
+
+/** Attribution written on a merge made by a queue round. */
+export function mergedBy(queue: string, run: string): string {
+  return `yrd queue ${queue} [${run}]`
+}
+
+/** The queue run named by a merge attribution, if there is one. */
+export function mergedByRun(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : (/^yrd queue .+ \[([^\]]+)\]$/u.exec(value)?.[1] ?? undefined)
+}
+
+/** Attribution for a merge made outside a queue round. */
+export const DIRECT_MERGE = "direct"
+
+/** The first value of an event property, or undefined. */
+export function trailer(event: Pick<Event, "props">, name: string): string | undefined {
+  return event.props.find(([key]) => key === name)?.[1]
+}
+
+/** Every value of an event property, in recorded order. */
+export function trailers(event: Pick<Event, "props">, name: string): readonly string[] {
+  return event.props.filter(([key]) => key === name).map(([, value]) => value)
+}
 
 /** One git invocation, returning its stdout; `input` is its stdin. Throws on a non-zero exit. */
 export type Git = (args: readonly string[], input?: string) => Promise<string>
