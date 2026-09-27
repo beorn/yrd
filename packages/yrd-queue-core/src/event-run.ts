@@ -964,7 +964,8 @@ export async function eventQueueRun(
   const standing = remaining.find((change) => change.status === "stuck")
   if (standing !== undefined) {
     const retryNamedStuck =
-      options.foreground === true && options.only?.branch === standing.branch && options.only.head === standing.commit
+      options.foreground === true &&
+      (options.only === undefined || (options.only.branch === standing.branch && options.only.head === standing.commit))
     if (!retryNamedStuck && !(await queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)))) {
       const stuckEvent = histories.get(standing.branch)?.events.findLast((event) => event.type === "stuck")
       if (stuckEvent === undefined) {
@@ -1771,11 +1772,12 @@ export async function eventQueueRun(
         failed.push(branch)
         continue
       }
-      const evidence: { checks: EventCheck[]; base: string; config: string; commit: string } = {
+      const evidence: { checks: EventCheck[]; base: string; config: string; commit: string; run: string } = {
         checks: attemptedRetry && stoppedCheck?.result === "stuck" ? results : decisionResults,
         base: target,
         config: options.configBlob,
         commit: candidate,
+        run: log.id,
       }
       if (stoppedCheck?.result === "fail") {
         const ended = await appendOwnedChange(store, queue, branch, tip, {
@@ -1802,7 +1804,7 @@ export async function eventQueueRun(
           at: new Date(),
           ...evidence,
           ...(attemptedRetry ? { retry: { retried: 1 as const } } : {}),
-          reason,
+          reason: "yrd-check-unresolved",
         })
         await writeStuckStop(branch, head, ended, reason)
         await tell(branch, "stuck", ended)

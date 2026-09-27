@@ -206,9 +206,9 @@ export function eventListRows(
         (left, right) => (clocks(right, now).clockAt?.getTime() ?? 0) - (clocks(left, now).clockAt?.getTime() ?? 0),
       ),
   ]
-  const draftRows = options.drafts ? eventRows(new Map(), drafts) : []
+  const draftRows = eventRows(new Map(), drafts)
   return {
     table: [...ordered(active.filter(visible)), ...draftRows],
-    document: [...ordered(selected), ...draftRows],
+    document: [...ordered(selected), ...(options.drafts ? draftRows : [])],
   }
 }
