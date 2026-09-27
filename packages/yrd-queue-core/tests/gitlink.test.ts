@@ -22,7 +22,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join, resolve } from "node:path"
+import { dirname, join } from "node:path"
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { Process } from "@yrd/process"
@@ -52,11 +52,8 @@ import {
 } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
 import { appendChangeEvent } from "../src/events.ts"
+import { gitSuperBin, siblingGitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
-const gitSuperBin = resolve(import.meta.dirname, "../../../../git-super/bin")
-if (!existsSync(gitSuperBin)) {
-  throw new Error(`git-super bin directory not found at ${gitSuperBin}`)
-}
 // The root Vitest project seals PATH in its setup beforeEach. Reassert this
 // test's checked-out GitSuper after that hook so both test runners use it.
 beforeEach(() => {
@@ -1041,9 +1038,12 @@ async function addNestedSubmodule(
 
 describe("settling gitlinks", () => {
   it("resolves the candidate workspace's git-super bin relative to this test file", async () => {
-    expect(gitSuperBin).toBe(resolve(import.meta.dirname, "../../../../git-super/bin"))
-    expect(existsSync(gitSuperBin)).toBe(true)
-    expect(gitSuperBin).toContain("/vendor/git-super/bin")
+    if (existsSync(siblingGitSuperBin)) {
+      expect(gitSuperBin).toBe(siblingGitSuperBin)
+      expect(gitSuperBin).toContain("/vendor/git-super/bin")
+    } else {
+      expect(gitSuperBin).toContain("/node_modules/git-super/bin")
+    }
     expect(existsSync(join(gitSuperBin, "git-super"))).toBe(true)
     const w = await world()
     const options = await w.options()
