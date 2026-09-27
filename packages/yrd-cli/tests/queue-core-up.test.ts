@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: queue up runs copied real source against a temporary remote and workdir>
  * @failure  The service (`yrd queue up`) reads the target's declaration once,
  *           at start, and runs every later round on that reading: an edit at
  *           the target — a check added, a key mistyped, the switch removed —
@@ -25,6 +26,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -54,6 +56,7 @@ import {
   readStatus,
   ROUND_LOCK,
   runId,
+  runIndexRef,
   setBranchIgnored,
   submit,
   trailer,
@@ -334,6 +337,109 @@ async function submitGitlink(w: GitlinkWorld, branch: string, sha: string): Prom
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
+  /**
+   * @failure A carrier needing the runs index exits terminally when the older queue has events but no runs ref.
+   * @level l2 (real Git remote and the service loop)
+   * @consumer Hab's Yrd service and @chief, who activates the index after the carrier lands
+   */
+  it("waits on a missing remote runs index, then runs after activation without relaunch (26229)", async () => {
+    const w = await world()
+    const eventsRef = queueRef("main")
+    const indexRef = runIndexRef("main")
+    await w.git(["push", "--quiet", "origin", `:${indexRef}`])
+    expect(await w.git(["ls-remote", "--refs", "origin", eventsRef])).toContain(eventsRef)
+    expect(await w.git(["ls-remote", "--refs", "origin", indexRef])).toBe("")
+    const run = capture(w.work)
+    const stop = new AbortController()
+    let rounds = 0
+    let settled = false
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        heartbeatIntervalMs: 100,
+        heartbeatGraceMs: 500,
+        afterRound: () => {
+          rounds += 1
+          stop.abort()
+        },
+      },
+      { json: true, workdir: w.workdir },
+    ).finally(() => {
+      settled = true
+    })
+    try {
+      await vi.waitFor(
+        async () => {
+          const health = await readQueueHealth(w.workdir, SERVICE)
+          expect(health, run.stderr()).toMatchObject({
+            state: "unhealthy",
+            verdict: { kind: "running" },
+            error: { code: "queue-remote-precondition-missing", cause: expect.stringContaining(indexRef) },
+          })
+          expect(health.error?.resolution.join(" ")).toContain("yrd runs activate")
+          expect(health.error?.resolution.join(" ")).toContain("@chief")
+        },
+        { timeout: 5_000 },
+      )
+      expect(settled, run.stderr()).toBe(false)
+      expect(rounds).toBe(0)
+      const logs = join(w.workdir, "logs")
+      expect(existsSync(logs) ? readdirSync(logs) : []).toEqual([])
+      await delay(700)
+      expect((await readQueueHealth(w.workdir, SERVICE)).error?.code).toBe("queue-remote-precondition-missing")
+
+      // A transport failure is unknown, not evidence that the index is still
+      // absent. Exercise the same remote read while its fixture remote is down.
+      const remote = join(dirname(w.work), "remote.git")
+      const offline = `${remote}.offline`
+      renameSync(remote, offline)
+      try {
+        await vi.waitFor(
+          async () => {
+            const health = await readQueueHealth(w.workdir, SERVICE)
+            expect(health.facts?.roundReadFailure).toMatchObject({ ref: indexRef, count: expect.any(Number) })
+            expect(health.error?.code).not.toBe("queue-remote-precondition-missing")
+          },
+          { timeout: 5_000 },
+        )
+      } finally {
+        renameSync(offline, remote)
+      }
+      expect(rounds).toBe(0)
+      // Exercise the operator's exact step, not a direct call to its core.
+      const address = "yrd-precondition.test/org/queue@main"
+      const previous = { global: process.env.GIT_CONFIG_GLOBAL, state: process.env.XDG_STATE_HOME }
+      const global = join(dirname(w.work), "gitconfig")
+      writeFileSync(global, `[url "file://${remote}"]\n\tinsteadOf = https://yrd-precondition.test/org/queue.git\n`)
+      process.env.GIT_CONFIG_GLOBAL = global
+      process.env.XDG_STATE_HOME = join(dirname(w.work), "state")
+      try {
+        const activated = capture(w.work)
+        expect(
+          await runYrdProcess([process.execPath, "/usr/local/bin/yrd", "runs", "activate", address], activated.io),
+          activated.stderr(),
+        ).toBe(0)
+        expect(activated.stdout()).toContain(indexRef)
+      } finally {
+        if (previous.global === undefined) delete process.env.GIT_CONFIG_GLOBAL
+        else process.env.GIT_CONFIG_GLOBAL = previous.global
+        if (previous.state === undefined) delete process.env.XDG_STATE_HOME
+        else process.env.XDG_STATE_HOME = previous.state
+      }
+      expect(await service, run.stderr()).toBe(0)
+      expect(rounds).toBe(1)
+      expect(await w.git(["ls-remote", "--refs", "origin", indexRef])).toContain(indexRef)
+      expect((await readQueueHealth(w.workdir, SERVICE)).state).toBe("healthy")
+    } finally {
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 20_000)
+
   /** @failure A pause published while an event round judges a change is reported as stuck; Hab does not relaunch exit 2.
    * @level l2 @consumer Hab's yrd service and its health reader
    */

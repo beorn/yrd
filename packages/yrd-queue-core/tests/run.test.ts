@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: queue run scans temporary remote and log workdirs>
  * One queue run, end to end, against a real remote and a real check script.
  *
  * Every case asserts on what the plan says a reader can see: the exit code,

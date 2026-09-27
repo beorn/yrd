@@ -14,8 +14,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { stripAnsi } from "@silvery/ansi"
-import { gitIn, submit } from "@yrd/queue-core"
+import { QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, gitIn, submit } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
+import { workdirOf } from "../src/workdir.ts"
 import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -225,12 +226,14 @@ describe("`yrd list` prints the watch's page, once", () => {
       "observation",
       "overrides",
       "pause",
+      "runner",
       "scope",
       "source",
       "stopped",
     ])
     expect(document["source"]).toBe("local")
     expect(document["overrides"]).toEqual([])
+    expect(document["runner"]).toEqual({ state: "unpublished", service: { kind: "absent", why: expect.any(String) } })
     expect((document as { observation: unknown }).observation).toMatchObject({ contract: "native", notices: [] })
     const [row] = document["changes"] as readonly Record<string, unknown>[]
     expect(row).toMatchObject({ branch: "task/one", position: 1, state: "queued", submitter: "@dev/10" })
@@ -357,17 +360,64 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
       "observation",
       "overrides",
       "pause",
+      "runner",
       "scope",
       "source",
       "stopped",
     ])
     expect(documentOf(flagged)["changes"], flagged.report).toEqual([])
+    expect(documentOf(flagged)["runner"]).toEqual({
+      state: "unpublished",
+      service: { kind: "absent", why: expect.any(String) },
+    })
     expect(documentOf(positional)["changes"], positional.report).toEqual([])
     // And 22301's own specimen, the other way round: a non-matching state must
     // never answer with the queue it did not select.
     expect(flagged.stdout, flagged.report).not.toContain("task/one")
     expect(flagged.stdout, flagged.report).toBe(positional.stdout)
     expect(stripAnsi(flagged.stderr), flagged.report).toBe(stripAnsi(positional.stderr))
+  })
+})
+
+/**
+ * @failure A queued row cannot distinguish a healthy service waiting its turn from no poller;
+ *          the JSON document did not expose the runner at all, even after a filter hid every row.
+ * @level l3
+ * @consumer an agent checking whether a queue is actively polled before submitting more work
+ */
+describe("the JSON runner is independent of selected change rows (#24570)", () => {
+  it("reports a beating idle poller with a waiting change, even when the filter selects zero rows", async () => {
+    const work = await queueWithOneChange()
+    const git = gitIn(work)
+    await git(["config", "yrd.workdir", join(work, "..", "queue")])
+    const workdir = await workdirOf(git, { cwd: work })
+    mkdirSync(workdir, { recursive: true })
+    const now = Date.now()
+    writeFileSync(
+      join(workdir, QUEUE_HEALTH_DOCUMENT),
+      JSON.stringify({
+        schema: QUEUE_HEALTH_SCHEMA,
+        service: "yrd",
+        state: "healthy",
+        verdict: { kind: "running" },
+        facts: {
+          writtenAt: new Date(now).toISOString(),
+          staleAfter: new Date(now + 5 * 60_000).toISOString(),
+          runner: { pid: process.pid, startedAt: new Date(now).toISOString(), command: "yrd queue up" },
+        },
+      }),
+    )
+
+    const populated = await yrd(work, { color: false }, "list", "--json")
+    const filtered = await yrd(work, { color: false }, "list", "--json", "__no_such_change__")
+    expect(populated.exitCode, populated.report).toBe(0)
+    expect(filtered.exitCode, filtered.report).toBe(0)
+    const populatedDoc = JSON.parse(populated.stdout) as Record<string, unknown>
+    const filteredDoc = JSON.parse(filtered.stdout) as Record<string, unknown>
+    expect(populatedDoc["changes"]).toHaveLength(1)
+    expect(filteredDoc["changes"]).toEqual([])
+    expect(populatedDoc["runner"]).toEqual({ state: "idle", service: { kind: "beating" } })
+    expect(filteredDoc["runner"]).toEqual(populatedDoc["runner"])
   })
 })
 

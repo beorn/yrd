@@ -170,6 +170,7 @@ import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
 import { STATE_WORDS, clock, diagnosticLines, firstLine, mediaDuration, timingLine } from "./watch-format.ts"
 import { readRunnerFacts, readRunnerService, type RunnerFacts } from "./watch-runner.ts"
+import { runnerOf } from "./watch-runner-reading.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
   DEFAULT_WINDOW_MS,
@@ -458,6 +459,22 @@ function submitCalls(
         io.stderr(`yrd: submit remote calls unknown: ${error instanceof Error ? error.message : String(error)}\n`)
       }
     },
+  }
+}
+
+/** Classify only the established index reader's result; remote errors remain failed reads. */
+async function readRunIndexPrecondition(
+  store: Parameters<typeof lookupRunIndex>[0],
+  queue: string,
+): Promise<Readonly<{ kind: "ready" }> | Readonly<{ kind: "missing" | "corrupt" | "failed-read"; message: string }>> {
+  try {
+    await lookupRunIndex(store, queue, 1)
+    return { kind: "ready" }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (message.startsWith(`${RUN_INDEX_CODES.missing}:`)) return { kind: "missing", message }
+    if (message.startsWith(`${RUN_INDEX_CODES.corrupt}:`)) return { kind: "corrupt", message }
+    return { kind: "failed-read", message }
   }
 }
 
@@ -1942,6 +1959,9 @@ export async function coreQueueCommand(
        * pages nobody.
        */
       let lockWaitStated = false
+      const requiredRunIndex = runIndexRef(config.target.branch)
+      let runIndexReady = false
+      let runIndexWaitAnnounced = false
       const waiting = {
         onWait: (wait: RoundLockWait): void => {
           lockWaitStated = true
@@ -1957,6 +1977,71 @@ export async function coreQueueCommand(
       }
       try {
         for (;;) {
+          // A carrier that needs a remote ref owns its own startup condition.
+          // Keep the process and heartbeat alive while @chief activates an old
+          // queue's run index; no round may allocate a number before it exists.
+          if (!runIndexReady) {
+            const precondition = await readRunIndexPrecondition(eventStore, config.target.branch)
+            if (precondition.kind === "ready") {
+              runIndexReady = true
+              readFailure = undefined
+              if (runIndexWaitAnnounced) writeHealth(lineDocument(lastStop, 0))
+            } else {
+              if (precondition.kind === "corrupt") return stuck(precondition.message)
+              if (precondition.kind === "missing") {
+                readFailure = undefined
+                const cure = `yrd runs activate <repo>@${config.target.branch}`
+                const why = `${requiredRunIndex} at ${config.target.remote} is absent for the existing queue; no round will run until @chief runs ${cure}`
+                if (!runIndexWaitAnnounced) {
+                  log?.warn?.(why, { ref: requiredRunIndex, remote: config.target.remote })
+                  emit(
+                    io,
+                    options.json,
+                    { reason: "remote-precondition-missing", ref: requiredRunIndex, message: why },
+                    why,
+                  )
+                  runIndexWaitAnnounced = true
+                }
+                const alive = lineDocument(lastStop, 0)
+                const document = writeHealth({
+                  ...alive,
+                  state: "unhealthy",
+                  error: {
+                    code: "queue-remote-precondition-missing",
+                    cause: why,
+                    resolution: [
+                      `@chief: run ${cure} for this queue after its carrier lands.`,
+                      "No restart is needed. This service re-reads the remote ref and starts rounds when it appears.",
+                    ],
+                  },
+                  facts: {
+                    ...alive.facts,
+                    reasonKey: `remote-precondition:${requiredRunIndex}`,
+                    waitingForRef: requiredRunIndex,
+                  },
+                })
+                await request.afterHealth?.(document)
+              } else {
+                // The reader could not tell whether the ref exists. Carry this
+                // through the ordinary failed-read rail, never as "missing".
+                readFailure = {
+                  ref: requiredRunIndex,
+                  error: precondition.message,
+                  count: readFailure?.ref === requiredRunIndex ? readFailure.count + 1 : 1,
+                }
+                const document = writeHealth(lineDocument(lastStop, interval))
+                await request.afterHealth?.(document)
+              }
+              if (stopped()) return 0
+              await delay(Math.min(15_000, Math.max(1000, interval)), undefined, { signal: request.stop }).catch(
+                (delayError) => {
+                  if (!stopped()) throw delayError
+                },
+              )
+              if (stopped()) return 0
+              continue
+            }
+          }
           // The declaration again under the lock, as the target holds it now: a
           // correct edit at the target is the next round's, never a restart's.
           const ran = await lockedRound({
@@ -2127,6 +2212,16 @@ export async function coreQueueCommand(
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = reading.pause
+        const stopped = stopFact(pause)
+        const runner = await readRunnerFacts(workdir)
+        const service = runner.service
+        const runnerStatus =
+          options.json === true
+            ? {
+                state: runnerOf({ unfiltered, runner, stopped }, new Date()).state,
+                service: service.kind === "beating" ? { kind: service.kind } : { kind: service.kind, why: service.why },
+              }
+            : undefined
         // The table and stop come from the same authority read as this listing.
         const overrides = overrideFacts(reading.overrides, Date.now())
         // What was queried, where it looked, and what it left out — said on the
@@ -2156,10 +2251,12 @@ export async function coreQueueCommand(
             observation,
             changes: documentRows.map((row) => row.row),
             journal: journalFact(journals),
+            // The runner belongs to the whole queue, even when a selector hides every row.
+            ...(runnerStatus === undefined ? {} : { runner: runnerStatus }),
             pause: pause ?? null,
             // The everyday reader of a stopped line: always present, null while
             // the line runs, so a stop can never be read as absent.
-            stopped: stopFact(pause),
+            stopped,
             // Always present: an empty array is "no overrides", never an absent field.
             overrides,
             ...(scope === undefined ? {} : { scope }),
@@ -2171,7 +2268,7 @@ export async function coreQueueCommand(
           // Pre-M8 a repository has exactly one queue: the target's branch, on
           // this repository. M8 turns this list of one into N.
           queues: [{ branch: config.target.branch, label: config.target.branch, path: repo }],
-          runner: await readRunnerFacts(workdir),
+          runner,
           // Every row, per run, whatever the filter: the box counts the queue,
           // not the view, and a change checked twice made two decisions.
           decisions: decisionsOfRows(unfiltered),
@@ -2181,7 +2278,7 @@ export async function coreQueueCommand(
           rows,
           unfiltered,
           changes,
-          stopped: stopFact(pause),
+          stopped,
           overrides,
           ...(drafts === undefined
             ? {}

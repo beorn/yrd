@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: queue log path comes from a temporary boundary repository>
  * @failure A queue run's log is prose in the plan and nothing in the code, so
  *          what a queue run did is readable only by reading four WARN rows on
  *          stderr and guessing. Nothing holds the record stream in place, so the rebuild at

@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: gitlink cases use temporary repos and a named git-super binary>
  * Settling at submit and merge: git-super raises every held-back gitlink to its
  * submodule's newest main. An authored gitlink main does not carry waits without
  * ending the change or blocking the next entry; an object no remote can supply

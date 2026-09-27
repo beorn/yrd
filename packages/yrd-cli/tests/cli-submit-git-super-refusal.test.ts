@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: submit refusal runs against a temporary local repository>
  * @failure yrd submit refusal when git-super fails inlines git-super stderr into one
  *          4,300-character line with literal \n escapes, so line filters swallow the
  *          entire reason and hide the failing step, command, exit code, and git error.

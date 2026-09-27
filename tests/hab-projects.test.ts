@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk vendor/yrd/packages/*\/src/**
  * @failure Hab queue-runner declarations drift into implicit paths or commands whose argv no longer identifies the repository they operate on.
  * @level l2
  * @consumer Hallohuman Hab composition loading vendor/yrd/hab.projects.ts

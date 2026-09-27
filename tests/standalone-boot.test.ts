@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk vendor/yrd/packages/*\/package.json vendor/yrd/package.json vendor/yrd/bun.lock
  * @failure A dependency's published surface drifts stale relative to what the
  * CLI imports — e.g. a fixed npm package version whose `dist` predates an export
  * the CLI now uses — so a fresh `bun install` in a standalone clone produces
