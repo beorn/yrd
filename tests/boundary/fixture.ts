@@ -19,6 +19,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { changeRef, overrideRef, pauseRef } from "../../packages/yrd-queue-core/src/index.ts"
 import { runYrdProcess } from "../../packages/yrd-cli/src/cli.ts"
+import { birthEventQueue } from "../../packages/yrd-cli/tests/support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../../packages/yrd-cli/src/types.ts"
 import { installDeclaredYrdEntry } from "../../packages/yrd-cli/tests/support/declared-yrd-entry.ts"
 
@@ -91,7 +92,10 @@ export type BoundaryRepository = Readonly<{
  * environment assignments on the command itself, because a check runs through
  * `sh -c` — so two cases in one file never share process state.
  */
-export function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryRepository> {
+export function boundaryRepository(
+  plan: FakeCheckPlan,
+  format: "event" | "legacy" = "event",
+): Promise<BoundaryRepository> {
   return buildBoundaryRepository((checkLog) => ({
     checks: [
       {
@@ -106,7 +110,7 @@ export function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryReposit
       },
     ],
     ...(plan.hooks === true ? { hooks: true } : {}),
-  }))
+  }), format)
 }
 
 /** A branch at one head, submitted to the queue. */
@@ -782,8 +786,8 @@ function phasedChecks(checks: readonly PhasedCheck[]): string {
 }
 
 /** A throwaway repository whose target carries the checks and files the case names. */
-export function boundaryRepositoryWith(plan: BoundaryPlan): Promise<BoundaryRepository> {
-  return buildBoundaryRepository(() => plan)
+export function boundaryRepositoryWith(plan: BoundaryPlan, format: "event" | "legacy" = "event"): Promise<BoundaryRepository> {
+  return buildBoundaryRepository(() => plan, format)
 }
 
 /**
@@ -793,7 +797,10 @@ export function boundaryRepositoryWith(plan: BoundaryPlan): Promise<BoundaryRepo
  * names. The plan is a function of the log paths because a check's `run:`
  * string has to name its log, and the log lives under the root this makes.
  */
-async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPlan): Promise<BoundaryRepository> {
+async function buildBoundaryRepository(
+  planOf: (checkLog: string) => BoundaryPlan,
+  format: "event" | "legacy",
+): Promise<BoundaryRepository> {
   const root = await mkdtemp(join(tmpdir(), "yrd-boundary-"))
   roots.push(root)
   const repoPath = join(root, "repo")
@@ -828,6 +835,7 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd", ...extra.map(([path]) => path))
   await git(repo, "commit", "-qm", "main")
   await git(repo, "push", "-q", "-u", "origin", "main")
+  if (format === "event") await birthEventQueue(repo)
   return { repo, origin, checkLog, hookLog }
 }
 

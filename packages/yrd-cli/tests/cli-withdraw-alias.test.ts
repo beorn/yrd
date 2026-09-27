@@ -5,6 +5,7 @@
  *           operator writes by hand, and an alias that is a second
  *           implementation drifts from `yrd queue withdraw` the first time
  *           either spelling grows a flag.
+ * Legacy withdraw fixture; rewritten in event format by 25041 strict-reader retirement.
  * @consumer the operator ending a change at the prompt · the stuck record's
  *           cures, which name withdraw first · the /yrd skill, which keeps
  *           `yrd queue withdraw` working
@@ -84,7 +85,8 @@ function shapeOf(text: string, branch: string): string {
 
 /** The state `yrd list --json` reads for one branch. */
 async function stateOf(work: string, branch: string): Promise<string | undefined> {
-  const listed = await yrd(work, "list", "--json")
+  // Legacy subject, retired with 25041: read its change refs through the remote path.
+  const listed = await yrd(work, "list", "--json", "--fresh")
   expect(listed.exitCode, listed.report).toBe(0)
   const rows = (JSON.parse(listed.stdout) as { changes: readonly { branch: string; state: string }[] }).changes
   return rows.find((row) => row.branch === branch)?.state

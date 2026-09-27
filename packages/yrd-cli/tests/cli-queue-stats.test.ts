@@ -6,12 +6,13 @@
  *           on `yrd queue list --json | jq`, 2a71e626).
  * @consumer the operator's retro · pm-metrics (@hh/tooling/pm-metrics)
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { createEventQueue, createEventStore, gitIn, readConfig, submit } from "@yrd/queue-core"
+import { gitIn, submit } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
+import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -49,7 +50,7 @@ async function yrd(cwd: string, ...args: string[]): Promise<Ran> {
  * from it, and one branch pushed without a submit (plan E2): the smallest
  * queue with every number the stats command counts.
  */
-async function queueWithOneChangeAndOnePush(eventFormat = false): Promise<string> {
+async function queueWithOneChangeAndOnePush(): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-stats-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -65,18 +66,7 @@ async function queueWithOneChangeAndOnePush(eventFormat = false): Promise<string
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
-  if (eventFormat) {
-    const head = (await git(["rev-parse", "main"])).trim()
-    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
-    if (config === undefined) throw new Error("fixture main lost .yrd.yml")
-    await createEventQueue(
-      createEventStore(work, "origin", git.selection),
-      "main",
-      head,
-      config,
-      new Date("2026-09-26T15:00:00.000Z"),
-    )
-  }
+  await birthEventQueue(work)
   await git(["checkout", "--quiet", "-b", "task/one", "main"])
   writeFileSync(join(work, "pass.txt"), "pass\n")
   await git(["add", "."])
@@ -94,13 +84,12 @@ async function queueWithOneChangeAndOnePush(eventFormat = false): Promise<string
   await git(["commit", "--quiet", "-m", "task/pushed-only is pushed and never submitted"])
   await git(["push", "--quiet", "origin", "task/pushed-only"])
   await git(["checkout", "--quiet", "main"])
-  mkdirSync(join(root, "queue"), { recursive: true })
   return work
 }
 
 describe("yrd queue stats through the process entry", () => {
   it("counts the change rows of an event-format queue", async () => {
-    const work = await queueWithOneChangeAndOnePush(true)
+    const work = await queueWithOneChangeAndOnePush()
     const listed = await yrd(work, "queue", "list", "--json")
     expect(listed.exitCode, listed.report).toBe(0)
     const changes = (JSON.parse(listed.stdout) as { changes: readonly { branch: string }[] }).changes
@@ -121,7 +110,7 @@ describe("yrd queue stats through the process entry", () => {
    * @level l3 @consumer operator using queue stats for the default week or a historical window
    */
   it("applies the draft window to pushed-only branches on an event queue", async () => {
-    const work = await queueWithOneChangeAndOnePush(true)
+    const work = await queueWithOneChangeAndOnePush()
     const git = gitIn(work)
     await git(["checkout", "--quiet", "-b", "task/old-pushed-only", "main"])
     writeFileSync(join(work, "old-note.txt"), "old pushed-only branch\n")

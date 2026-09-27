@@ -16,6 +16,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { stripAnsi } from "@silvery/ansi"
 import { gitIn, submit } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
+import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -66,6 +67,7 @@ async function queueWithOneChange(): Promise<string> {
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
+  await birthEventQueue(work)
   await git(["checkout", "--quiet", "-b", "task/one", "main"])
   writeFileSync(join(work, "pass.txt"), "pass\n")
   await git(["add", "."])
@@ -105,6 +107,7 @@ async function queueWithMergedCoincidence(): Promise<string> {
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
+  await birthEventQueue(work)
   // The coincidence: branch TEXT says `merged`, but the change is only queued.
   await git(["checkout", "--quiet", "-b", "task/merged-ball-conditional-close", "main"])
   writeFileSync(join(work, "coincidence.txt"), "coincidence\n")
@@ -157,7 +160,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(lines.slice(2, header).join("\n")).toContain("no run journal was read")
     const row = lines.find((line) => line.includes("task/one") && !line.includes("RUNNER"))
     expect(row, plain.report).toBeDefined()
-    expect(row).toContain("○ submitted")
+    expect(row).toContain("○ queued")
     expect(row).toContain("task/one")
     expect(row).toContain("does its work")
     expect(row).toContain("@dev/10")
@@ -191,8 +194,8 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(trimmed(stripAnsi(colored.stdout))).toEqual(trimmed(plain.stdout))
     const row = colored.stdout.split("\n").find((line) => stripAnsi(line).includes("task/one"))
     expect(row, colored.report).toBeDefined()
-    // The STATUS cell — glyph and word — is painted: an SGR sequence opens before `submitted`.
-    expect(row).toMatch(/\[[0-9;]*m[^]*○ submitted/u)
+    // The STATUS cell — glyph and word — is painted: an SGR sequence opens before `queued`.
+    expect(row).toMatch(/\[[0-9;]*m[^]*○ queued/u)
   })
 
   it("lays the page out to the terminal's width, and to 120 columns for a pipe", async () => {
@@ -217,7 +220,10 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(plain.stdout).not.toContain(ESC)
     const document = JSON.parse(plain.stdout) as Record<string, unknown>
     // `overrides` is always present (25296 C5): an empty array is "no merge check held off".
-    expect(Object.keys(document).sort()).toEqual(["changes", "journal", "observation", "overrides", "pause", "stopped"])
+    expect(Object.keys(document).sort()).toEqual([
+      "asOf", "changes", "journal", "observation", "overrides", "pause", "scope", "source", "stopped",
+    ])
+    expect(document["source"]).toBe("local")
     expect(document["overrides"]).toEqual([])
     expect((document as { observation: unknown }).observation).toMatchObject({ contract: "native", notices: [] })
     const [row] = document["changes"] as readonly Record<string, unknown>[]
@@ -255,7 +261,8 @@ describe("a state name means the state", () => {
    */
   it("keeps the real merge beside its own coincidence, rather than stopping at the row that only looks like an answer", async () => {
     const cwd = await queueWithMergedCoincidence()
-    const ran = await yrd(cwd, { color: false, columns: 120 }, "list", "--json", "merged")
+    // The direct merge bypasses the queue writer; request a remote refresh.
+    const ran = await yrd(cwd, { color: false, columns: 120 }, "list", "--json", "--fresh", "merged")
 
     expect(ran.exitCode, ran.report).toBe(0)
     const document = JSON.parse(ran.stdout) as Record<string, unknown>
@@ -339,12 +346,14 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
     // joins the shape here (AC1): a zero-row filter is exactly the case that
     // must say what it matched against, and JSON gets the same notice the page does.
     expect(Object.keys(documentOf(flagged)).sort()).toEqual([
+      "asOf",
       "changes",
       "journal",
       "observation",
       "overrides",
       "pause",
       "scope",
+      "source",
       "stopped",
     ])
     expect(documentOf(flagged)["changes"], flagged.report).toEqual([])
@@ -381,7 +390,7 @@ describe("a filter matching nothing says so loudly, and stays exit 0 unless aske
     const expected = "0 of 1 change(s) match merged. Checked branch, subject, run, failure and state."
     expect(human.stdout, human.report).toContain(expected)
     const document = JSON.parse(json.stdout) as Record<string, unknown>
-    expect(document["scope"], json.report).toBe(expected)
+    expect(document["scope"], json.report).toContain(expected)
   })
 
   it("opts into exit 1 on that same zero with --require-match, never exit 2, and leaves a real match at exit 0", async () => {

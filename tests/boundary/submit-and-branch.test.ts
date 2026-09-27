@@ -9,6 +9,7 @@
  *          test.
  * @level   l3
  * @consumer `yrd queue submit` · a submitter pushing with plain git · `yrd queue run`
+ * Legacy change-ref fixture; rewritten in event format by 25041 strict-reader retirement.
  *
  * Area B of the M4 gate: the submit path and the branch, written from
  * /hh/pm/@i/10-yrd/plan.md § The final design and nothing else. Black box —
@@ -61,7 +62,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     { label: "submit", argv: ["submit"] },
     { label: "queue submit", argv: ["queue", "submit"] },
   ])("$label previews and submits a stale but composable branch without rewriting it", async ({ argv }) => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     const branch = "24099-stale"
     const head = await commitOnBranch(repo, branch)
     const peer = await secondWorkingRepo(origin, "other", "other@example.invalid")
@@ -105,7 +106,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     { label: "submit", argv: ["submit"] },
     { label: "queue submit", argv: ["queue", "submit"] },
   ])("$label rejects the retired --rebase flag without changing refs", async ({ argv }) => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     const branch = "24099-retired-rebase"
     await commitOnBranch(repo, branch)
     const beforeLocal = await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
@@ -121,7 +122,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   // <branch>` to the `origin` remote. The yrd remote gets no branch, and no
   // ref under `refs/yrd/changes/` is ever written.
   it("one push puts the branch and its opened record at the yrd remote", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     await addYrdRemote(repo, origin)
     const branch = "24099-widget"
     const head = await commitOnBranch(repo, branch)
@@ -144,7 +145,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
    * option it does implement must reach the code that acts on it.
    */
   it("a dry run of the target refuses like the submit, and puts nothing at the remote", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     await addYrdRemote(repo, origin)
     const before = await refs(origin)
 
@@ -156,7 +157,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   })
 
   it("a dry run says what it would open and puts nothing at the remote", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     await addYrdRemote(repo, origin)
     const branch = "24099-dry"
     const head = await commitOnBranch(repo, branch)
@@ -180,7 +181,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   })
 
   it("uses origin as the repository and does not add a declaration-selected remote", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     expect(await remoteNames(repo)).not.toContain("yrd")
     const branch = "24099-remote"
     const head = await commitOnBranch(repo, branch)
@@ -199,7 +200,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   // values are in the record commit, not where. The time needs no assertion: a
   // commit carries one.
   it("the opened record names the submitter, the target and the issue", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     await addYrdRemote(repo, origin)
     await setSubmitter(repo, "Ada Submitter", "ada@example.invalid")
     const branch = "24099-widget"
@@ -222,7 +223,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   // today: red — `yrd submit` is a verb, and does exactly what `queue submit`
   // does today: `refs/yrd/submit/<branch>` on `origin`, no change ref.
   it("`yrd submit` is the alias, and does the same thing", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     await addYrdRemote(repo, origin)
     const branch = "24099-alias"
     const head = await commitOnBranch(repo, branch)
@@ -237,7 +238,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   // today: red — the second submit exits 0, but both heads went to the one
   // ref `refs/yrd/submit/<branch>`, so the first head's change is gone.
   it("a new push of the branch is a new head, so a new change, and the first change stays", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     await addYrdRemote(repo, origin)
     const branch = "24099-twice"
     const head1 = await commitOnBranch(repo, branch)
@@ -261,7 +262,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   // now has does not descend from the one the remote carries, and it still goes
   // up, because the submitter is the one who moved it.
   it("a rebased head that does not descend from the last one still goes up", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     await addYrdRemote(repo, origin)
     const branch = "24099-rebased"
     const head1 = await commitOnBranch(repo, branch)
@@ -297,7 +298,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
    * the submit exits 1: today a name collision IS prevented, by accident.
    */
   it("a branch-name collision is not prevented: the second submitter opens their own change", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     await addYrdRemote(repo, origin)
     await setSubmitter(repo, "Ada Submitter", "ada@example.invalid")
     const branch = "24099-shared"
@@ -334,7 +335,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
    * name first while it stands.
    */
   it("a branch named like another change's <branch>/<sha> opens its own change beside it: the change's name is one segment", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     await addYrdRemote(repo, origin)
     const branch = "24099-widget"
     const head1 = await commitOnBranch(repo, branch)
@@ -370,7 +371,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
   // the opposite: that the next queue run opened the change itself, with
   // `Submitter: unknown`.)
   it("a bare `git push yrd <branch>` is not a change: the queue run neither judges nor opens it, and a submit later does (E2)", async () => {
-    const { repo, origin, checkLog } = await boundaryRepository({ exit: 0 })
+    const { repo, origin, checkLog } = await boundaryRepository({ exit: 0 }, "legacy")
     await addYrdRemote(repo, origin)
     const branch = "24099-bare"
     const head = await commitOnBranch(repo, branch)
@@ -401,7 +402,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
   // today: red — the submit puts nothing at `refs/heads/<branch>`, so there is
   // no branch to take out and no change ref to leave standing.
   it("`git push yrd :<branch>` takes the branch out, and its changes stay", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const { repo, origin } = await boundaryRepository({ exit: 0 }, "legacy")
     await addYrdRemote(repo, origin)
     const branch = "24099-withdrawn"
     const head = await commitOnBranch(repo, branch)
@@ -434,7 +435,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
    * change ref, so there is nothing to delete and nothing to end.
    */
   it("a change whose branch is gone ends withdrawn with the reason `deleted`, and tells its submitter once", async () => {
-    const { repo, origin, hookLog } = await boundaryRepository({ exit: 0, hooks: true })
+    const { repo, origin, hookLog } = await boundaryRepository({ exit: 0, hooks: true }, "legacy")
     await addYrdRemote(repo, origin)
     const branch = "24099-gone"
     const head = await commitOnBranch(repo, branch)
@@ -477,7 +478,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
    * today: red — the submit writes no change ref, so there is nothing to end.
    */
   it("a change whose branch no longer points at its head ends withdrawn with `replaced`, and sends nothing about it", async () => {
-    const { repo, origin, hookLog } = await boundaryRepository({ exit: 0, hooks: true })
+    const { repo, origin, hookLog } = await boundaryRepository({ exit: 0, hooks: true }, "legacy")
     await addYrdRemote(repo, origin)
     const branch = "24099-moved"
     const head1 = await commitOnBranch(repo, branch)

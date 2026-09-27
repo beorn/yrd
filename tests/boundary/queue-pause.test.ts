@@ -1,4 +1,5 @@
 /**
+ * Legacy pause-ref fixture; rewritten in event format by 25041 strict-reader retirement.
  * @failure An explicit round cannot process admitted work while paused, clears
  *          the pause, or loses its reason in the run log.
  * @level   l3
@@ -18,7 +19,7 @@ afterEach(removeTemporaryRoots)
 
 describe("an explicit round keeps its pause", () => {
   it("merges admitted work, logs the pause reason and leaves admission paused", async () => {
-    const { repo } = await boundaryRepository({ exit: 0 })
+    const { repo } = await boundaryRepository({ exit: 0 }, "legacy")
     const submitted = await submitOneCommit(repo, "paused1")
     const pause = await runYrd(repo, "queue", "pause", "--reason", "rebuilding the core", "--notify", "@cto", "--json")
     expect(pause.exitCode, pause.report).toBe(0)
@@ -34,7 +35,8 @@ describe("an explicit round keeps its pause", () => {
       expect.objectContaining({ kind: "pause", state: "paused", reason: "rebuilding the core", by: "@cto" }),
     )
     for (const record of records) expect(record, run.report).not.toHaveProperty("garage")
-    const listed = await runYrd(repo, "queue", "list", "--json")
+    // Legacy subject, retired with 25041: read its pause ref through the remote path.
+    const listed = await runYrd(repo, "queue", "list", "--json", "--fresh")
     expect(listed.exitCode, listed.report).toBe(0)
     expect(JSON.parse(listed.stdout)).toMatchObject({
       pause: { kind: "paused", reason: "rebuilding the core", by: "@cto" },

@@ -12,6 +12,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { parseQueueAddress, queueDirectory } from "../../packages/yrd-cli/src/address.ts"
 import { git } from "./fixture.ts"
 import { installSelectedGit } from "../../packages/yrd-cli/tests/support/selected-git.ts"
+import { birthEventQueue } from "../../packages/yrd-cli/tests/support/event-queue-birth.ts"
 import {
   createEventQueue,
   createEventStore,
@@ -78,6 +79,7 @@ describe("a queue started by address on a host with no checkout", () => {
     await git(author, "add", ".yrd.yml", "notify.sh")
     await git(author, "commit", "--quiet", "-m", "declare main queue")
     await git(author, "push", "--quiet", "origin", "main")
+    await birthEventQueue(author, "main", { localStore: false })
     await git(author, "checkout", "--quiet", "-b", "task/uri")
     writeFileSync(join(author, "change.txt"), "from uri\n")
     writeFileSync(join(author, "notify.sh"), "exit 42\n")

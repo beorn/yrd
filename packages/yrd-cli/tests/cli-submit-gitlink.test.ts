@@ -14,6 +14,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
+import { birthEventQueue } from "./support/event-queue-birth.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -136,6 +137,7 @@ async function world(): Promise<World> {
   await git(["commit", "--quiet", "-m", "root with two components"])
   const base = (await git(["rev-parse", "HEAD"])).trim()
   await git(["push", "--quiet", "origin", "main"])
+  await birthEventQueue(work)
 
   // The root still records `old`; each declared component remote holds `held`.
   // `unheld` exists in a local checkout only, so local object presence cannot
