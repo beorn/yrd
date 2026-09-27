@@ -178,7 +178,11 @@ describe("the queue declaration grammar", () => {
     ["retired workdir", "workdir: /var/tmp/yrd\n", /unknown key workdir .*git config yrd\.workdir/u],
     ["retired scratch", "scratch: /var/tmp/yrd\n", /unknown key scratch .*git config yrd\.workdir/u],
     ["retired owner", "owner: '@cto'\n", /unknown key owner .*the queue addresses nobody.*notify:/u],
-    ["retired target", "target: origin#develop\n", /unknown key target .*--queue <branch>/u],
+    [
+      "retired target",
+      "target: origin#develop\n",
+      /unknown key target.*target: is not read; submit resolves the queue from --queue or the origin head/u,
+    ],
     ["retired remote", "remote: origin#develop\n", /unknown key remote .*--queue <branch>/u],
     [
       "false program-root opt-in",
