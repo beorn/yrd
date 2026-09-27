@@ -181,7 +181,10 @@ async function world(check = "test -f pass.txt"): Promise<World> {
   await git(["push", "--quiet", "origin", "main"])
   const workdir = join(root, "queue")
   mkdirSync(workdir, { recursive: true })
-  return { git, work, workdir }
+  const w = { git, work, workdir }
+  // Since 25041 a queue is its event ref: submit refuses a target without one.
+  await createWorldEventQueue(w)
+  return w
 }
 
 /** A change on its own branch, submitted; `passes` decides what the declared check will say about it. */
@@ -222,16 +225,6 @@ describe("event queue observation refusals", () => {
    */
   it("event list and stats refuse an invalid root observation", async () => {
     const w = await world()
-    const head = (await w.git(["rev-parse", "main"])).trim()
-    const config = await readConfig(w.git, head, { branch: "main", remote: "origin" })
-    if (config === undefined) throw new Error("fixture main lost .yrd.yml")
-    await createEventQueue(
-      createEventStore(w.work, "origin", gitIn(w.work).selection),
-      "main",
-      head,
-      config,
-      new Date(),
-    )
 
     const executable = join(w.workdir, "invalid-observer.sh")
     const selected = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin/git-super")
@@ -1210,7 +1203,6 @@ async function createWorldEventQueue(w: World, at = new Date()): Promise<string>
 describe("event-queue runner stages end-to-end into runnerLine and stage strip (25716)", () => {
   it("drives createWorldEventQueue into runnerLine and the stage strip", async () => {
     const w = await world("test -f pass.txt")
-    await createWorldEventQueue(w)
     await change(w, "task/event-step", true)
     await drain(w)
 
@@ -1293,7 +1285,6 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
 
   it("shows no stages from a previous run for a newly queued change re-submitted at the same head (25716 P4)", async () => {
     const w = await world("test -f pass.txt")
-    await createWorldEventQueue(w)
     await change(w, "task/resubmit-step", false)
     await drain(w)
 
@@ -1336,7 +1327,6 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
   // @i/10-yrd/25936: a merge round with every check off writes synthesized result records to run.log
   it("writes synthesized result records to run.log so yrd list --json carries startedAt and log, and journal has phase merge results (25936)", async () => {
     const w = await world('"true"')
-    await createWorldEventQueue(w)
     await change(w, "task/all-checks-off", false)
     await drain(w)
 
@@ -1373,7 +1363,6 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
 describe("bare watch declared queues", () => {
   it("reads independent snapshots and detail callbacks for the same head in two repository queues", async () => {
     const first = await world()
-    await createWorldEventQueue(first)
     await change(first, "task/shared", true)
     const root = dirname(first.work)
     const otherRemote = join(root, "other.git")
