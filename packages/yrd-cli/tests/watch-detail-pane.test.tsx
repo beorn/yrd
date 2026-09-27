@@ -135,19 +135,27 @@ describe("26242: watch detail pane at 140x50", () => {
     const { lines } = await paint140x50()
     const note = lines.find((line) => line.includes("does not name this check"))
     const status = lines.find((line) => /failed exit=/u.test(line))
+    const log = lines.find((line) => line.includes("LONG CHECK LOG 01"))
     expect(note).toBeDefined()
     expect(status).toBeDefined()
-    expect(Math.abs(leadingSpaces(note!) - leadingSpaces(status!))).toBeLessThanOrEqual(1)
+    expect(log).toBeDefined()
+    const edge = leadingSpaces(log!)
+    expect(Math.abs(leadingSpaces(note!) - edge)).toBeLessThanOrEqual(1)
+    expect(Math.abs(leadingSpaces(status!) - edge)).toBeLessThanOrEqual(1)
   })
 
   it("row 2: each fact appears once", async () => {
-    const { text } = await paint140x50()
+    const { text, lines } = await paint140x50()
     expect(text).not.toMatch(/Failed affected-tests failed/u)
     expect(text).not.toMatch(/\(err=/u)
     expect(text.match(/× affected-tests/g)?.length ?? 0).toBe(1)
     expect(text.match(/0:01/g)?.length ?? 0).toBeLessThanOrEqual(1)
     const failureHits = [...text.matchAll(/it failed \(affected-tests\)/giu)].length
     expect(failureHits).toBe(1)
+    expect(text).not.toMatch(/Failed\s+It failed/u)
+    const heading = lines.find((line) => /it failed \(affected-tests\)/iu.test(line))
+    expect(heading).toBeDefined()
+    expect((heading!.match(/failed/giu) ?? []).length).toBe(1)
   })
 
   it("row 3: detail grows into free rows and a cut log says how many lines follow", async () => {
@@ -159,6 +167,10 @@ describe("26242: watch detail pane at 140x50", () => {
     const gap = lines.slice(tableRow + 1, statusBox).filter((line) => line.trim() === "").length
     expect(gap).toBeLessThanOrEqual(3)
     expect(text).toMatch(/\d+ more lines/u)
+    const more = lines.findIndex((line) => /\d+ more lines/u.test(line))
+    expect(more).toBeGreaterThan(-1)
+    expect(lines[more]).toMatch(/│/u)
+    expect(lines.slice(more + 1).some((line) => /╰/u.test(line))).toBe(true)
   })
 
   it("row 4: RUNNER keeps its rounded box; inner dash sits under RUN", async () => {

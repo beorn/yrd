@@ -299,6 +299,10 @@ function DetailScroll({
   children: ReactNode
 }) {
   const omitted = Math.max(0, controller.maxScroll - controller.scrollOffset)
+  useInput((_input, key) => {
+    if (key.pageDown) controller.scrollBy(Math.max(1, controller.viewportHeight - 2))
+    if (key.pageUp) controller.scrollBy(-Math.max(1, controller.viewportHeight - 2))
+  })
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       <ScrollArea controller={controller} scrollbar={false}>
@@ -341,11 +345,7 @@ export function WatchDetail({
   /** The runner's snapshot when the RUNNER row is selected: live round source (25557). */
   runnerSnapshot?: WatchSnapshot
 }) {
-  const scroll = useScrollController()
-  useInput((_input, key) => {
-    if (key.pageDown) scroll.scrollBy(Math.max(1, scroll.viewportHeight - 2))
-    if (key.pageUp) scroll.scrollBy(-Math.max(1, scroll.viewportHeight - 2))
-  })
+  const runnerScroll = useScrollController()
   const now = useNow()
 
   if (runnerSnapshot !== undefined) {
@@ -357,7 +357,7 @@ export function WatchDetail({
     const selectedSubIndex = resolved.selectedSubIndex
 
     return (
-      <DetailScroll controller={scroll}>
+      <DetailScroll controller={runnerScroll}>
         <Box flexDirection="column" minWidth={0} paddingX={1} gap={1}>
           <Box flexDirection="column" minWidth={0}>
             <Box flexDirection="row" gap={1}>
@@ -401,6 +401,7 @@ export function WatchDetail({
                   stage={stage}
                   outputs={outputs}
                   selectedSubIndex={selectedSubIndex}
+                  fill={false}
                 />
               </TabPanel>
             ))}
@@ -431,65 +432,67 @@ export function WatchDetail({
   const selectedSubIndex = resolved.selectedSubIndex
   const migratedWithoutChecks = isMigratedWithoutCheckDetail(detail)
   return (
-    <DetailScroll controller={scroll}>
-      <Box flexDirection="column" minWidth={0} paddingX={1}>
-        {/* The status box at the VERY top, no identity row above it (items 1, 23). */}
-        <RunStatusBox run={detail.run} joinedRun={joinedRun} />
-        {/* The change list under it (items 2, 24): one row per change in the run. */}
-        <ChangeList members={[row]} />
-        <Box height={1} flexShrink={0} />
-        {row.diagnostic === undefined ? null : (
-          <Text color="$fg-error" wrap="wrap">
-            {row.diagnostic}
-          </Text>
-        )}
-        {migratedWithoutChecks ? (
-          <Text color="$fg-warning" wrap="wrap">
-            Migrated change has no check-step detail; open Checking for the retained record and old check logs.
-          </Text>
-        ) : detail.note === undefined ? null : (
-          <Text color="$fg-warning" wrap="wrap">
-            {detail.note}
-          </Text>
-        )}
-        {detail.checks.length === 0 && !migratedWithoutChecks ? (
-          <Text color="$fg-muted">no check-step detail is recorded for this change</Text>
-        ) : null}
-        <Tabs
-          variant="filled"
-          value={tab}
-          onChange={(value: string) => {
-            onSelect?.(value)
-          }}
-        >
-          <TabList flexWrap="wrap">
-            <Tab key={CHANGES_TAB} value={CHANGES_TAB}>
-              Timeline{(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? "" : " ⚠"}
-              {"\n"}
-              <Text color="$fg-muted">{cutCounter(detail)}</Text>
-            </Tab>
-            {STAGE_TABS.map((stage) => (
-              <Tab key={stage} value={stage}>
-                <StageTabLabel detail={detail} stage={stage} />
-              </Tab>
-            ))}
-          </TabList>
-          <TabPanel key={CHANGES_TAB} value={CHANGES_TAB}>
-            {(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? null : (
-              <Text color="$fg-warning" wrap="wrap">
-                {diagnosticLines(row, detail.journal).join("\n")}
-              </Text>
-            )}
-            <ChangeBox detail={detail} diffOpen={diffOpen} diff={diff} onToggleDiff={onToggleDiff} />
-          </TabPanel>
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
+      {/* The status box at the VERY top, no identity row above it (items 1, 23). */}
+      <RunStatusBox run={detail.run} joinedRun={joinedRun} />
+      {/* The change list under it (items 2, 24): one row per change in the run. */}
+      <ChangeList members={[row]} />
+      <Box height={1} flexShrink={0} />
+      {row.diagnostic === undefined ? null : (
+        <Text color="$fg-error" wrap="wrap">
+          {row.diagnostic}
+        </Text>
+      )}
+      {migratedWithoutChecks ? (
+        <Text color="$fg-warning" wrap="wrap">
+          Migrated change has no check-step detail; open Checking for the retained record and old check logs.
+        </Text>
+      ) : detail.note === undefined ? null : (
+        <Text color="$fg-warning" wrap="wrap">
+          {detail.note}
+        </Text>
+      )}
+      {detail.checks.length === 0 && !migratedWithoutChecks ? (
+        <Text color="$fg-muted">no check-step detail is recorded for this change</Text>
+      ) : null}
+      <Box flexGrow={1} minHeight={0} minWidth={0} flexDirection="column">
+      <Tabs
+        variant="filled"
+        value={tab}
+        onChange={(value: string) => {
+          onSelect?.(value)
+        }}
+      >
+        <TabList flexWrap="wrap">
+          <Tab key={CHANGES_TAB} value={CHANGES_TAB}>
+            Timeline{(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? "" : " ⚠"}
+            {"\n"}
+            <Text color="$fg-muted">{cutCounter(detail)}</Text>
+          </Tab>
           {STAGE_TABS.map((stage) => (
-            <TabPanel key={stage} value={stage}>
-              <StageTabPanel detail={detail} stage={stage} outputs={outputs} selectedSubIndex={selectedSubIndex} />
-            </TabPanel>
+            <Tab key={stage} value={stage}>
+              <StageTabLabel detail={detail} stage={stage} />
+            </Tab>
           ))}
-        </Tabs>
+        </TabList>
+        <TabPanel key={CHANGES_TAB} value={CHANGES_TAB}>
+          {(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? null : (
+            <Text color="$fg-warning" wrap="wrap">
+              {diagnosticLines(row, detail.journal).join("\n")}
+            </Text>
+          )}
+          <ChangeBox detail={detail} diffOpen={diffOpen} diff={diff} onToggleDiff={onToggleDiff} />
+        </TabPanel>
+        {STAGE_TABS.map((stage) => (
+          <TabPanel key={stage} value={stage}>
+            <Box flexGrow={1} minHeight={0} minWidth={0} flexDirection="column">
+              <StageTabPanel detail={detail} stage={stage} outputs={outputs} selectedSubIndex={selectedSubIndex} />
+            </Box>
+          </TabPanel>
+        ))}
+      </Tabs>
       </Box>
-    </DetailScroll>
+    </Box>
   )
 }
 
@@ -733,12 +736,15 @@ function StageTabPanel({
   stage,
   outputs,
   selectedSubIndex,
+  fill = true,
 }: {
   detail: ChangeDetail
   stage: StageTabName
   outputs: ReadonlyMap<string, DiffText>
   selectedSubIndex?: number
+  fill?: boolean
 }) {
+  const scroll = useScrollController()
   const skipped = isStageSkipped(detail, stage)
   if (skipped) {
     return (
@@ -761,12 +767,17 @@ function StageTabPanel({
   const info = stageInfo(detail, stage)
   const borderColor = CHECK_COLOR[info.state]
 
-  return (
-    <TitledBox borderColor={borderColor} titleRight={stage}>
+  const body = (
+    <>
       {stage === "provisioning" && <ProvisioningStageBody detail={detail} outputs={outputs} />}
       {stage === "checking" && <CheckingStageBody detail={detail} selectedSubIndex={selectedSubIndex} />}
       {stage === "merging" && <MergingStageBody detail={detail} outputs={outputs} />}
       {stage === "deprovisioning" && <DeprovisioningStageBody detail={detail} outputs={outputs} />}
+    </>
+  )
+  return (
+    <TitledBox fill={fill} borderColor={borderColor} titleRight={stage}>
+      {fill ? <DetailScroll controller={scroll}>{body}</DetailScroll> : body}
     </TitledBox>
   )
 }
@@ -1524,13 +1535,11 @@ function CheckBody({ check }: { check: CheckPanel }) {
           longer names has no command to show and says so, rather than
           rendering an empty prompt that reads as a command that did nothing. */}
       {check.spec === undefined ? (
-        <MarkerRow>
-          <Text color="$fg-muted" wrap="wrap">
-            {check.name === "setup"
-              ? "the target's setup command, run once in the fresh worktree before any check"
-              : "the declaration this change was judged by does not name this check"}
-          </Text>
-        </MarkerRow>
+        <Text color="$fg-muted" wrap="wrap">
+          {check.name === "setup"
+            ? "the target's setup command, run once in the fresh worktree before any check"
+            : "the declaration this change was judged by does not name this check"}
+        </Text>
       ) : (
         <MarkerRow marker={<Text color="$fg-info">$</Text>}>
           <Text wrap="wrap" minWidth={0}>
@@ -1538,31 +1547,25 @@ function CheckBody({ check }: { check: CheckPanel }) {
           </Text>
         </MarkerRow>
       )}
-      <MarkerRow>
-        <Text color="$fg-muted" wrap="truncate">
-          {check.state === "not-run"
-            ? "NOT RUN"
-            : check.state === "unmeasured"
-              ? "unmeasured — no result recorded"
-              : check.state}
-          {exit}
-        </Text>
-      </MarkerRow>
+      <Text color="$fg-muted" wrap="truncate">
+        {check.state === "not-run"
+          ? "NOT RUN"
+          : check.state === "unmeasured"
+            ? "unmeasured — no result recorded"
+            : check.state}
+        {exit}
+      </Text>
       {/* The REAL path, as a link that opens it (S2.21). A path we do not have
           is absent, never a link to nowhere. */}
       {check.log === undefined ? null : (
-        <MarkerRow>
-          <Text color="$fg-muted" wrap="truncate">
-            {hyperlink(check.log, pathUrl(check.log))}
-          </Text>
-        </MarkerRow>
+        <Text color="$fg-muted" wrap="truncate">
+          {hyperlink(check.log, pathUrl(check.log))}
+        </Text>
       )}
       {check.output === undefined || check.output === "" ? (
-        <MarkerRow>
-          <Text color="$fg-muted" wrap="wrap">
-            {check.why ?? "no output was read"}
-          </Text>
-        </MarkerRow>
+        <Text color="$fg-muted" wrap="wrap">
+          {check.why ?? "no output was read"}
+        </Text>
       ) : (
         <Text>{check.output}</Text>
       )}
