@@ -3114,6 +3114,40 @@ it("settles a direct-merge notice on the queue chain across an empty journal", a
   ])
 })
 
+/** @failure An old observed event fell outside Gitomic's default 50-event read,
+ * crashing every later queue round even though its notice was settled.
+ * @level l2 @consumer Hab's yrd service
+ */
+it("reads a settled direct notice beyond the default event window", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const direct = await pushAroundQueue(w, "direct-notice-depth.txt")
+  const options = {
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+  } satisfies QueueRunOptions
+
+  expect((await queueRun(options)).directMerges).toEqual([direct])
+  const observed = (await readEventQueue(store, "main")).observed[direct]
+  if (observed === undefined) throw new Error("fixture did not record the direct merge")
+  await appendOpsCutover(store, w.git, "main", w.target, new Date(), "@chief")
+  for (let index = 0; index < 25; index++) {
+    await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "depth", at: new Date() })
+    await writeQueueEvent(store, "main", { type: "resumed", by: "operator", reason: "depth", at: new Date() })
+  }
+  expect(
+    (await (await openEvents({ ...store, ref: queueRef("main") })).events()).some((event) => event.id === observed.id),
+  ).toBe(false)
+
+  const restarted = await queueRun({ ...options, workdir: join(w.workdir, "fresh-depth-journal") })
+  expect(restarted.directMerges).toEqual([])
+  expect(messages(w)).toEqual([
+    { change: direct, record: "merged-direct", endingId: observed.id, endedAt: expect.any(String) },
+  ])
+}, 60_000)
+
 /** @failure 25736: an exhausted direct-notice queue transaction escaped as an unknown round error.
  * @level l2 @consumer Hab's yrd service and direct-merge notification recipient
  */

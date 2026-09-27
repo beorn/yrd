@@ -458,7 +458,7 @@ export async function eventQueueRun(
   }
   const tellDirect = async (commit: string, eventId: string): Promise<void> => {
     if (!options.notify?.some((entry) => entry.on.includes("merged-direct"))) return
-    const observed = (await (await openEvents({ ...store, ref: queueRef(queue) })).events()).find(
+    const observed = (await (await openEvents({ ...store, ref: queueRef(queue) })).events({ limit: 1024 })).find(
       (event) => event.id === eventId,
     )
     if (observed === undefined) throw new Error(`event queue ${url}#${queue}: direct notice has no event ${eventId}`)
