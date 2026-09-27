@@ -27,6 +27,8 @@ export type RunnerClaim = Readonly<{
   /** Present only while a change is selected. */
   holding?: string
   since: string
+  /** Current phase bound; absent on unbounded states and in legacy claims. */
+  deadline?: string
 }>
 
 export type RunnerClaimJudgment = Readonly<{
@@ -35,7 +37,7 @@ export type RunnerClaimJudgment = Readonly<{
 }>
 
 const SUBJECT = "yrd runner claim"
-const ORDER = ["Runner", "Started", "At", "Beat", "State", "Holding", "Since"] as const
+const ORDER = ["Runner", "Started", "At", "Beat", "State", "Holding", "Since", "Deadline"] as const
 const REQUIRED = ["Runner", "Started", "At", "Beat", "State", "Since"] as const
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u
 
@@ -76,6 +78,13 @@ function checked(claim: RunnerClaim): RunnerClaim {
   if (!(RUNNER_CLAIM_STATES as readonly string[]).includes(claim.state)) {
     throw new TypeError(`runner claim State is invalid: ${JSON.stringify(claim.state)}`)
   }
+  if (claim.deadline !== undefined) {
+    const deadline = instant(claim.deadline, "Deadline")
+    if (deadline < since) throw new TypeError("runner claim Deadline must be at or after Since")
+    if (claim.state === "idle" || claim.state === "stuck" || claim.state === "paused" || claim.state === "stopped") {
+      throw new TypeError(`runner claim Deadline is invalid for ${claim.state} State`)
+    }
+  }
   if (claim.holding !== undefined) {
     const change = parseChangeName(claim.holding)
     if (change === undefined) {
@@ -98,7 +107,8 @@ export function formatRunnerClaim(input: RunnerClaim): string {
     `Started: ${claim.started}\nAt: ${claim.at}\nBeat: ${String(claim.beatMs)}ms\n` +
     `State: ${claim.state}\n` +
     (claim.holding === undefined ? "" : `Holding: ${claim.holding}\n`) +
-    `Since: ${claim.since}\n`
+    `Since: ${claim.since}\n` +
+    (claim.deadline === undefined ? "" : `Deadline: ${claim.deadline}\n`)
   )
 }
 
@@ -115,8 +125,9 @@ export function parseRunnerClaim(body: string): RunnerClaim {
     if (match === null) throw new TypeError(`runner claim malformed trailer: ${JSON.stringify(line)}`)
     const key = match[1]
     const value = match[2]
-    if (key === undefined || value === undefined)
+    if (key === undefined || value === undefined) {
       throw new TypeError(`runner claim malformed trailer: ${JSON.stringify(line)}`)
+    }
     const order = (ORDER as readonly string[]).indexOf(key)
     if (order < 0) throw new TypeError(`runner claim unknown trailer ${key}`)
     if (values.has(key)) throw new TypeError(`runner claim duplicate ${key} trailer`)
@@ -145,6 +156,7 @@ export function parseRunnerClaim(body: string): RunnerClaim {
     state: required(values, "State") as RunnerClaimState,
     ...(values.has("Holding") ? { holding: required(values, "Holding") } : {}),
     since: required(values, "Since"),
+    ...(values.has("Deadline") ? { deadline: required(values, "Deadline") } : {}),
   })
 }
 

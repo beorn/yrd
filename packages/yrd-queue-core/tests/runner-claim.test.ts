@@ -37,6 +37,19 @@ describe("runner claim", () => {
     })
   })
 
+  it("round trips a declared phase deadline and rejects one before its phase start", () => {
+    const bounded = { ...claim, deadline: "2026-09-27T12:30:30.000Z" }
+    const message = formatRunnerClaim(bounded)
+    expect(message).toContain("Since: 2026-09-27T12:00:30.000Z\nDeadline: 2026-09-27T12:30:30.000Z\n")
+    expect(parseRunnerClaim(message)).toEqual(bounded)
+    expect(() => formatRunnerClaim({ ...bounded, deadline: "2026-09-27T12:00:29.999Z" })).toThrow(/Deadline/)
+    expect(() =>
+      parseRunnerClaim(message.replace("Deadline: 2026-09-27T12:30:30.000Z", "Deadline: yesterday")),
+    ).toThrow(/Deadline/)
+    // Readers must still parse an older writer so they can label its missing deadline explicitly.
+    expect(parseRunnerClaim(formatRunnerClaim(claim))).toEqual(claim)
+  })
+
   it("refuses malformed, missing, duplicated, and unknown trailers", () => {
     const message = formatRunnerClaim(claim)
     expect(() => parseRunnerClaim(message.replace("Beat: 60000ms", "Beat: 0ms"))).toThrow(/Beat/)
