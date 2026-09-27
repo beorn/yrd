@@ -11,11 +11,11 @@
  * @consumer the operator reading `yrd list` and `yrd watch`
  */
 
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { gracefulStopHealthDocument, QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, runId } from "@yrd/queue-core"
+import { gracefulStopHealthDocument, openLog, QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, runId } from "@yrd/queue-core"
 import { SERVICE } from "../src/queue-health.ts"
 import { clock } from "../src/watch-format.ts"
 import {
@@ -176,6 +176,41 @@ describe("readRunnerFacts", () => {
     expect(facts.latest?.queue).toBeUndefined()
     expect(facts.latest?.gitlink).toBeUndefined()
     expect(facts.latest?.checks).toBeUndefined()
+  })
+
+  /** @failure The fixture above put a PID before the header, reversing the real producer order. @level l1 */
+  it("reads the real journal-open to PID-write order without calling a live run malformed", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-watch-startup-order-"))
+    const log = openLog(join(workdir, "logs"), () => NOW)
+    // openLog names a run but creates no visible journal until the header write.
+    expect(existsSync(log.path)).toBe(false)
+    const before = await readRunnerFacts(workdir, NOW)
+    expect(before.latest).toBeUndefined()
+    expect(
+      runnerWord(
+        {
+          ...before,
+          published: {
+            signal: "fresh",
+            claim: {
+              Runner: "queue-host/42",
+              Started: NOW.toISOString(),
+              At: NOW.toISOString(),
+              Beat: "60000ms",
+              State: "provisioning",
+              Since: NOW.toISOString(),
+            },
+          },
+        },
+        false,
+      ),
+    ).toBe("provisioning")
+    // queueRun writes this header before claiming its worktree PID file.
+    log.write({ kind: "run", pid: process.pid, target: "main", gitlink: "a".repeat(40), checks: [] })
+    expect(existsSync(join(workdir, "worktrees", log.id, ".pid"))).toBe(false)
+    const during = await readRunnerFacts(workdir, NOW)
+    expect(during.latest?.alive).toBe(true)
+    expect(during.latest?.target).toBe("main")
   })
 
   /**
@@ -344,6 +379,23 @@ describe("readRunnerService, the loop's own liveness", () => {
     expect(service.cause).toContain("process 2147483647")
     expect(service.why).toContain("stopped outside a graceful stop")
     expect(service.since).toBeUndefined()
+  })
+
+  /** @failure A stopped row did not name its writer's host or the exact supervisor cause command. @level l1 */
+  it("points a dead writer's row to its exact supervisor exit cause", async () => {
+    const pid = 2_147_483_647
+    const raw = JSON.parse(healthDocument({ pid, staleAfterMs: 5 * 60_000 })) as Record<string, unknown>
+    const facts = raw.facts as Record<string, unknown>
+    const since = new Date(NOW.getTime() - 60_000).toISOString()
+    facts.runnerClaim = { host: "queue-host", pid, started: since, at: since, beatMs: 60_000, state: "idle", since }
+    const workdir = workdirWith({ ageMs: 1_000, health: JSON.stringify(raw) })
+    const service = await readRunnerService(workdir, NOW)
+    expect(service.kind).toBe("stopped")
+    if (service.kind !== "stopped") throw new Error("not stopped")
+    const line = runnerLine({ journalDir: workdir, service }, NOW)
+    expect(line.state).toBe("stopped")
+    expect(line.detail).toContain("process 2147483647 on queue-host")
+    expect(line.detail).toContain("hh-hab ps yrd --json")
   })
 
   it("reads a graceful stop's last document as who stopped the service and why (25430)", async () => {
@@ -536,6 +588,25 @@ describe("runnerWord, the one word", () => {
     // death, not a check in progress: `bandOf` sends that row back to waiting
     // and this row says why. It is emphatically not `checking`.
     expect(runnerWord(facts({ alive: true }, STOPPED), true)).toBe("stopped")
+  })
+
+  /** @failure A recent runner ref hid a service exit from the queue row. @level l1 */
+  it("shows a measured service stop even while its old runner ref is fresh", () => {
+    const claim = {
+      Runner: "queue-host/42",
+      Started: NOW.toISOString(),
+      At: NOW.toISOString(),
+      Beat: "60000ms",
+      State: "checking" as const,
+      Since: NOW.toISOString(),
+    }
+    const stopped: RunnerFacts = {
+      ...facts({ alive: false }, STOPPED),
+      published: { signal: "fresh", claim },
+    }
+    expect(runnerWord(stopped, true)).toBe("stopped")
+    expect(runnerLine(stopped, NOW).detail).toContain(STOPPED.cause)
+    expect(runnerWord({ ...stopped, published: { signal: "silent", claim } }, true)).toBe("stopped")
   })
 
   /**
@@ -1084,6 +1155,19 @@ describe("the line's flow on the runner's row (25669)", () => {
       waiting: 11,
     })
     expect(line.holds).toBe("nothing under a check, and 11 in line")
+  })
+
+  /** @failure The ordinary runner row hid how long its oldest queued change waited. @level l1 */
+  it("shows the oldest waiting change's age before the stall alarm", async () => {
+    const ordinary = {
+      ...flow,
+      slow: false,
+      unjudgedForMs: minutes(8),
+      oldestWaiting: { branch: "task/oldest", openedAt: new Date(NOW.getTime() - minutes(25)).toISOString() },
+    }
+    const workdir = workdirWith({ ageMs: 1_000, health: healthDocument({ flow: ordinary, staleAfterMs: minutes(5) }) })
+    const service = await readRunnerService(workdir, NOW)
+    expect(runnerLine(facts(service), NOW, { waiting: 11 }).holds).toContain("oldest waiting task/oldest for 25:00")
   })
 
   it("says stalled, with the threshold, once the service pages the line", () => {

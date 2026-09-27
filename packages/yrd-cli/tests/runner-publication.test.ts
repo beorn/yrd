@@ -10,6 +10,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, readRemoteCommit, runnerRef, type RunnerClaim } from "@yrd/queue-core"
 import { readPublishedRunner, RunnerPublisher } from "../src/runner-publication.ts"
+import { runnerLine } from "../src/watch-runner.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -48,9 +49,9 @@ async function fixture() {
   )
   const ref = runnerRef("main")
   const remoteTip = () => readRemoteCommit(git, "origin", ref)
-  const replace = async (claim: RunnerClaim) => {
+  const replace = async (claim: RunnerClaim, tail = "") => {
     const tree = (await git(["mktree"], "")).trim()
-    const body = `yrd runner claim\n\nRunner: ${claim.host}/${String(claim.pid)}\nStarted: ${claim.started}\nAt: ${claim.at}\nBeat: ${String(claim.beatMs)}ms\nState: ${claim.state}\nSince: ${claim.since}\n`
+    const body = `yrd runner claim\n\nRunner: ${claim.host}/${String(claim.pid)}\nStarted: ${claim.started}\nAt: ${claim.at}\nBeat: ${String(claim.beatMs)}ms\nState: ${claim.state}\nSince: ${claim.since}\n${tail}`
     const oid = (await git(["commit-tree", tree, "-m", body])).trim()
     const prior = await remoteTip()
     await git(["push", "--quiet", `--force-with-lease=${ref}:${prior ?? "0".repeat(40)}`, "origin", `${oid}:${ref}`])
@@ -60,6 +61,26 @@ async function fixture() {
 }
 
 describe("runner ref publication", () => {
+  /** @failure A newer claim looked fresh by beat but hid trailers this reader could not judge. @level l2 */
+  it("keeps a future trailer in the published claim and names it on the human row", async () => {
+    const f = await fixture()
+    const deadline = new Date(Date.parse(f.own.at) + 30 * 60_000).toISOString()
+    const tip = await f.replace({ ...f.own, state: "checking" }, `Deadline: ${deadline}\nDue: later\n`)
+    const published = await readPublishedRunner(f.git, "main", "origin", tip, new Date(f.own.at))
+    expect(published).toMatchObject({
+      signal: "fresh",
+      claim: { Deadline: deadline, Due: "later" },
+      phase: { status: "within" },
+      unjudgedTrailers: ["Due"],
+    })
+    expect(
+      runnerLine(
+        { journalDir: "/no-local-journal", service: { kind: "absent", why: "no local document" }, published },
+        new Date(f.own.at),
+      ).detail,
+    ).toContain("unjudged trailers: Due")
+  })
+
   it("uses the shared deadline judgment for a fresh remote claim", async () => {
     const f = await fixture()
     const now = Date.parse(f.own.at)
