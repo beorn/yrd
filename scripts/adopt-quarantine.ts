@@ -18,6 +18,7 @@ import {
   type QueueLocation,
 } from "../packages/yrd-queue-core/src/index.ts"
 import { openEvents } from "../packages/yrd-queue-core/src/git.ts"
+import { project } from "../packages/yrd-queue-core/src/events.ts"
 import { refuseMaintenance } from "../packages/yrd-queue-core/src/submit.ts"
 
 type Kind = "move" | "repair" | "history"
@@ -31,7 +32,12 @@ type AdoptionItem = Readonly<{
   sourceOid: string
   targetRef: string
   targetOid: string | null
+  sourceAfterApply: "deleted" | "kept"
   events: readonly ({ type: "unchanged" } | { type: "opened" | "cancelled"; at: "apply-time"; [key: string]: string })[]
+  appendedCount?: number
+  dropReason?: string
+  liveEvent?: string
+  diagnostic?: string
   originalText?: string
 }>
 
@@ -159,7 +165,7 @@ function sourcePrefix(queue: string): string {
   return queueRefPrefix(queue).replace(/^refs\/yrd\//u, "refs/yrd-quarantine/") + "/changes/"
 }
 
-async function targetState(
+async function inspectTarget(
   store: QueueLocation,
   kind: Kind,
   sourceEvents: readonly Event[],
@@ -167,15 +173,62 @@ async function targetState(
   targetRef: string,
   targetOid: string | null,
   originalText: string | undefined,
-): Promise<State> {
-  if (targetOid === null) return "pending"
+): Promise<
+  Readonly<{ state: State; appendedCount?: number; dropReason?: string; liveEvent?: string; diagnostic?: string }>
+> {
   if (kind === "move") {
-    if (targetOid === sourceOid) return "adopted"
-    return sourceEvents.some((event) => event.id === targetOid) ? "pending" : "conflict"
+    if (targetOid === null)
+      return { state: "conflict", diagnostic: "live target is absent; reviewed move requires an exact live OID" }
+    if (targetOid === sourceOid) return { state: "adopted", appendedCount: 0 }
+    // chainsUnder reconstructs events through the first parent of each commit.
+    const liveIndex = sourceEvents.findIndex((event) => event.id === targetOid)
+    if (liveIndex < 0)
+      return { state: "conflict", diagnostic: "live target is not on the quarantine first-parent chain" }
+    const live = sourceEvents[liveIndex]
+    const appended = sourceEvents.slice(liveIndex + 1)
+    const drop = appended[0]
+    const details = {
+      appendedCount: appended.length,
+      dropReason: drop === undefined ? "absent" : (value(drop, "Reason") ?? "absent"),
+      liveEvent: live?.type ?? "absent",
+    }
+    if (appended.length !== 1 || drop?.type !== "cancelled" || details.dropReason !== "dropped") {
+      return {
+        state: "conflict",
+        ...details,
+        diagnostic: "appended first-parent commits are not exactly one cancelled DROP event",
+      }
+    }
+    const liveAt = live === undefined ? undefined : value(live, "Time")
+    const dropAt = value(drop, "Time")
+    if (
+      liveAt === undefined ||
+      dropAt === undefined ||
+      !Number.isFinite(Date.parse(liveAt)) ||
+      !Number.isFinite(Date.parse(dropAt)) ||
+      Date.parse(dropAt) < Date.parse(liveAt)
+    ) {
+      return {
+        state: "conflict",
+        ...details,
+        diagnostic: `DROP Time ${dropAt ?? "absent"} precedes or cannot compare with live Time ${liveAt ?? "absent"}`,
+      }
+    }
+    try {
+      project(sourceEvents, targetRef, store.repo)
+    } catch (error) {
+      return {
+        state: "conflict",
+        ...details,
+        diagnostic: `writer projection refused replay: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+    return { state: "pending", ...details }
   }
+  if (targetOid === null) return { state: kind === "repair" ? "pending" : "conflict" }
   const events = await (await openEvents({ ...store, ref: targetRef })).events()
   if (events.at(-1)?.id !== targetOid) throw new Error(`${targetRef}: target moved during read from ${targetOid}`)
-  if (kind === "history") return events.some((event) => event.id === sourceOid) ? "contained" : "conflict"
+  if (kind === "history") return { state: events.some((event) => event.id === sourceOid) ? "contained" : "conflict" }
   if (
     events.length === 2 &&
     events[0]?.type === "opened" &&
@@ -184,9 +237,9 @@ async function targetState(
     value(events[1], "Reason") === "dropped" &&
     events[1].content.includes(originalText ?? "\u0000")
   ) {
-    return "adopted"
+    return { state: "adopted" }
   }
-  return "conflict"
+  return { state: "conflict" }
 }
 
 async function planQuarantine(options: Options): Promise<{ plan: AdoptionPlan; store: QueueLocation }> {
@@ -212,7 +265,7 @@ async function planQuarantine(options: Options): Promise<{ plan: AdoptionPlan; s
     const targetOid = targets.get(targetRef) ?? null
     const originalText =
       kind === "repair" ? (await store.backend.readCommit(options.repo, sourceOid)).message.trimEnd() : undefined
-    const state = await targetState(store, kind, events, sourceOid, targetRef, targetOid, originalText)
+    const inspected = await inspectTarget(store, kind, events, sourceOid, targetRef, targetOid, originalText)
     const eventPlan: AdoptionItem["events"] =
       kind === "repair"
         ? [
@@ -229,11 +282,12 @@ async function planQuarantine(options: Options): Promise<{ plan: AdoptionPlan; s
     items.push({
       branch,
       kind,
-      state,
+      ...inspected,
       sourceRef: ref,
       sourceOid,
       targetRef,
       targetOid,
+      sourceAfterApply: kind === "move" ? "deleted" : "kept",
       events: eventPlan,
       ...(originalText === undefined ? {} : { originalText }),
     })
@@ -293,14 +347,17 @@ async function applyQuarantine(
     const updates = [
       { ref: queueRef(options.queue), expect: plan.queueTip, oid: plan.queueTip },
       ...moves.flatMap((item) => [
-        { ref: item.sourceRef, expect: item.sourceOid, oid: item.sourceOid },
         { ref: item.targetRef, expect: item.targetOid ?? "0".repeat(item.sourceOid.length), oid: item.sourceOid },
+        { ref: item.sourceRef, expect: item.sourceOid, oid: null },
       ]),
     ]
     const result = await store.backend.publish(options.repo, updates, options.remote)
     for (const item of moves) {
       if (!result.outcomes.some((row) => row.ref === item.targetRef && row.outcome === "updated")) {
         throw new Error(`${item.targetRef}: MULTI did not report target creation`)
+      }
+      if (!result.outcomes.some((row) => row.ref === item.sourceRef && row.outcome === "deleted")) {
+        throw new Error(`${item.sourceRef}: MULTI did not report quarantine deletion`)
       }
       applied.push({ branch: item.branch, kind: item.kind, targetOid: item.sourceOid })
     }
@@ -348,7 +405,7 @@ async function applyQuarantine(
     if (
       written === undefined ||
       targets.get(item.targetRef) !== written.targetOid ||
-      sources.get(item.sourceRef) !== item.sourceOid
+      (item.kind === "move" ? sources.has(item.sourceRef) : sources.get(item.sourceRef) !== item.sourceOid)
     ) {
       throw new Error(`${item.branch}: postflight ref mismatch; inspect live target and quarantine source before retry`)
     }
@@ -389,7 +446,7 @@ async function main(): Promise<void> {
       queue: result.plan.queue,
       queueTip: result.plan.queueTip,
       applied: result.applied,
-      quarantineRefsDeleted: 0,
+      quarantineRefsDeleted: result.applied.filter((item) => item.kind === "move").length,
     },
     options.json,
   )

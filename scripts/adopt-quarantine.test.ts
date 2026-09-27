@@ -192,7 +192,7 @@ it("plans the exact old refs, moves the valid chain, and repairs the cancelled-o
     expect.arrayContaining([expect.objectContaining({ branch: "task/bad", state: "cancelled" })]),
   )
   expect(git(work, "ls-remote", "origin", "refs/yrd-quarantine/main/changes/task/bad")).toContain(badTip)
-  expect(git(work, "ls-remote", "origin", "refs/yrd-quarantine/main/changes/task/good")).toContain(goodTip)
+  expect(git(work, "ls-remote", "origin", "refs/yrd-quarantine/main/changes/task/good")).toBe("")
 })
 
 it("refuses a diverged live target before writing any quarantine adoption", async () => {
