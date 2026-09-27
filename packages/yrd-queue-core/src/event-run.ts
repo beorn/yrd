@@ -1282,11 +1282,13 @@ export async function eventQueueRun(
       const results: EventCheck[] = []
       let attemptedRetry = false
       let decisionResults: EventCheck[] = []
+      let skippedByOverride = new Set<string>()
       let setupDecision:
         | { kind: "failed" | "stuck"; reason: string; fault?: ReturnType<typeof transportFaultIn> }
         | undefined
       for (let attempt = 1; attempt <= 2; attempt++) {
         const startOfAttempt = results.length
+        skippedByOverride = new Set()
         for (const phase of ["submit", "merge"] as const) {
           if (options.noCheck === true) {
             continue
@@ -1319,17 +1321,16 @@ export async function eventQueueRun(
             }
             continue
           }
-          const checks = options.checks.filter(
-            (check) =>
-              check.run !== "true" &&
-              (check.on ?? ["merge"]).includes(phase) &&
-              !(
-                phase === "merge" &&
-                operational.overrides.entries.some(
-                  (entry) => entry.check === check.name && isActive(entry, options.now?.() ?? Date.now()),
-                )
-              ),
-          )
+          const checks = options.checks.filter((check) => {
+            if (check.run === "true" || !(check.on ?? ["merge"]).includes(phase)) return false
+            const overridden =
+              phase === "merge" &&
+              operational.overrides.entries.some(
+                (entry) => entry.check === check.name && isActive(entry, options.now?.() ?? Date.now()),
+              )
+            if (overridden) skippedByOverride.add(check.name)
+            return !overridden
+          })
           // A declared setup still runs when this phase has no check to run, unless every declared check is off (then the phase was skipped above).
           if (checks.length === 0 && options.setup === undefined) continue
           const logDir = join(
@@ -1675,7 +1676,17 @@ export async function eventQueueRun(
             run.result === "pass" && options.checks.some((check) => check.name === run.name && check.run !== "true"),
         )
         .map(({ run }) => run.log)
-      const checkReason = passedLogs.length === 0 ? undefined : `merge checks passed; logs: ${passedLogs.join(", ")}`
+      const skippedChecks = options.checks.flatMap((check) => {
+        if (options.noCheck === true) return [`${check.name} (no-check mode)`]
+        if (check.run === "true") return [`${check.name} (configured off)`]
+        if (skippedByOverride.has(check.name)) return [`${check.name} (merge override)`]
+        return []
+      })
+      const checkReason =
+        [
+          ...(passedLogs.length === 0 ? [] : [`merge checks passed; logs: ${passedLogs.join(", ")}`]),
+          ...(skippedChecks.length === 0 ? [] : [`skipped checks: ${skippedChecks.join(", ")}`]),
+        ].join("; ") || undefined
       tip = await appendOwnedChange(store, queue, branch, tip, {
         type: "merging",
         at: new Date(),

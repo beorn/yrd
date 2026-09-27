@@ -1230,6 +1230,7 @@ it("applies an event override to merge checks and runs the check after clear", a
   )
   const off = await queueRun(await w.options({ exit: 0, on: ["merge"] }))
   expect(off).toMatchObject({ exitCode: 0, merged: ["task/override-off"] })
+  expect((await readStatus(store, "main", "task/override-off")).reason).toContain("verify (merge override)")
   expect(existsSync(w.checkLog) ? readFileSync(w.checkLog, "utf8").trim() : "").toBe("")
   await writeQueueOverride(
     store,
@@ -1721,6 +1722,8 @@ it("cites only measured check logs in a mixed event run (26089)", async () => {
   const measured = checkLogFor(outcome, "task/mixed-checks", "merge", "verify")
   const status = await readStatus(store, "main", "task/mixed-checks")
   expect(status.reason).toContain(measured)
+  expect(status.reason).toContain("off-submit (configured off)")
+  expect(status.reason).toContain("off-merge (configured off)")
   expect(status.reason).not.toContain("off-submit.log")
   expect(status.reason).not.toContain("off-merge.log")
   expect(readFileSync(measured, "utf8")).toContain("measured")
@@ -8591,6 +8594,7 @@ describe("skipping setup and worktree when every declared check is off (25716 ro
 
   it("writes no pass result records on an event queue under noCheck when a check has a real program (25936 P2)", async () => {
     const w = await world()
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
     await createWorldEventQueue(w)
     await submitCommit(w, "task/nocheck-event", "nocheck-event.txt")
     const opts = await w.options({ exit: 0 })
@@ -8601,6 +8605,7 @@ describe("skipping setup and worktree when every declared check is off (25716 ro
       notify: [],
     })
     expect(outcome.merged).toEqual(["task/nocheck-event"])
+    expect((await readStatus(store, "main", "task/nocheck-event")).reason).toContain("real-check (no-check mode)")
     const results = logRecords(outcome).filter((r) => r.kind === "result" && r.name === "real-check")
     expect(results).toEqual([])
   })
