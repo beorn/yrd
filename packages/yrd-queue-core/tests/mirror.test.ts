@@ -154,8 +154,9 @@ describe("refreshMirror", () => {
     })
     expect(refreshed.outcome).toBe("fetched")
     expect(readRemoteCalls(counted.dir).verbs.fetch).toBe(1)
-    expect(mirrorRefreshedAt(created.path)).toEqual({
-      at: refreshed.refreshedAt,
+    expect(mirrorRefreshedAt(created.path)).toEqual(refreshed.refreshedAt)
+    expect(JSON.parse(readFileSync(join(created.path, MIRROR_REFRESHED_AT), "utf8"))).toEqual({
+      at: refreshed.refreshedAt.toISOString(),
       remote: "origin",
       refspecs,
     })
@@ -175,8 +176,12 @@ describe("refreshMirror", () => {
     await expect(
       refreshMirror({ path: created.path, url, gitIn: through(counted.env), refspecs, maxAgeMs: 60_000 }),
     ).rejects.toThrow("does not cover")
-    writeFileSync(join(created.path, MIRROR_REFRESHED_AT), `${new Date().toISOString()}\n`)
-    expect(() => mirrorRefreshedAt(created.path)).toThrow(`${created.path}/${MIRROR_REFRESHED_AT}`)
+    const legacyAt = new Date()
+    writeFileSync(join(created.path, MIRROR_REFRESHED_AT), `${legacyAt.toISOString()}\n`)
+    expect(mirrorRefreshedAt(created.path)).toEqual(legacyAt)
+    await expect(
+      refreshMirror({ path: created.path, url, gitIn: through(counted.env), refspecs, maxAgeMs: 60_000 }),
+    ).rejects.toThrow(`${created.path}/${MIRROR_REFRESHED_AT}`)
   })
 
   it("creates a bare mirror with gc off and a refreshed-at stamp, then fetches and prunes on refresh", async () => {
@@ -194,7 +199,7 @@ describe("refreshMirror", () => {
     expect((await mirror(["rev-parse", "--is-bare-repository"])).trim()).toBe("true")
     expect((await mirror(["rev-parse", "refs/heads/main"])).trim()).toBe(await head(work, env))
     const stamped = mirrorRefreshedAt(created.path)
-    expect(stamped).toEqual({ at: created.refreshedAt, remote: "origin", refspecs: ["+refs/*:refs/*"] })
+    expect(stamped).toEqual(created.refreshedAt)
 
     writeFileSync(join(work, "more.txt"), "more\n")
     await git(["add", "--all"])

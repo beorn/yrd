@@ -104,7 +104,7 @@ export function mirrorLocation(root: string, url: string): MirrorLocation | unde
 }
 
 /** The last completed, scoped refresh. An older instant alone certifies no ref set. */
-export function mirrorRefreshedAt(path: string): MirrorStamp | undefined {
+function readMirrorStamp(path: string): MirrorStamp | undefined {
   const stamp = join(path, MIRROR_REFRESHED_AT)
   if (!existsSync(stamp)) return undefined
   const raw = readFileSync(stamp, "utf8").trim()
@@ -133,9 +133,20 @@ export function mirrorRefreshedAt(path: string): MirrorStamp | undefined {
   return { at, remote: record.remote, refspecs: record.refspecs as string[] }
 }
 
+/** The last completed refresh instant; kept as a Date for existing callers. */
+export function mirrorRefreshedAt(path: string): Date | undefined {
+  const stamp = join(path, MIRROR_REFRESHED_AT)
+  if (!existsSync(stamp)) return undefined
+  const raw = readFileSync(stamp, "utf8").trim()
+  const legacy = new Date(raw)
+  if (!Number.isNaN(legacy.getTime())) return legacy
+  return readMirrorStamp(path)?.at
+}
+
 function recordedScope(path: string, legacyMayRefresh: boolean): MirrorStamp | undefined {
+  if (mirrorRefreshedAt(path) === undefined) return undefined
   try {
-    return mirrorRefreshedAt(path)
+    return readMirrorStamp(path)
   } catch (error) {
     if (legacyMayRefresh && existsSync(join(path, MIRROR_REFRESHED_AT))) {
       const raw = readFileSync(join(path, MIRROR_REFRESHED_AT), "utf8").trim()
