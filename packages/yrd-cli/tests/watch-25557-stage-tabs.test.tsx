@@ -19,6 +19,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import React from "react"
 import { describe, expect, it } from "vitest"
+import { Tab, TabList, Tabs } from "silvery"
 import { bufferToStyledText, render } from "silvery/test"
 import { createTerminal } from "@termless/core"
 import { createGhosttyBackend, initGhostty } from "@termless/ghostty"
@@ -61,7 +62,7 @@ function baseSnapshot(overrides: Partial<WatchSnapshot> = {}): WatchSnapshot {
 }
 
 describe("25557: stage tabs in yrd watch detail pane", () => {
-  it("row 2: silvery Tabs filled variant is used with 1-col gap and background fill", async () => {
+  it("row 2: the stage tabs are silvery's standard filled Tabs, cell for cell", async () => {
     const detail: ChangeDetail = {
       row: {
         branch: "task/feature",
@@ -119,23 +120,54 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
     expect(app.text).toContain("merging")
     expect(app.text).toContain("deprovisioning")
 
-    // In filled variant, tabs have standard inner padding (2 spaces horizontal, 1 line vertical)
+    // No yrd-only styling (@cto 8e9f6421): the strip must be exactly what the INSTALLED silvery draws for
+    // filled Tabs with the same labels. Silvery's own tabs-filled tests pin what that standard is (padding,
+    // gap, fill), so this row holds on every silvery version yrd resolves.
     const lines = app.text.split("\n")
-    const provLineIdx = lines.findIndex((l) => l.includes("provisioning"))
-    expect(provLineIdx).toBeGreaterThan(0)
-    const provLine = lines[provLineIdx] ?? ""
-    const provCol = provLine.indexOf("provisioning")
-    expect(provCol).toBeGreaterThanOrEqual(2)
+    const nameRow = lines.findIndex((line) => line.includes("Timeline") && line.includes("deprovisioning"))
+    expect(nameRow).toBeGreaterThanOrEqual(0)
+    const names = ["Timeline", "provisioning", "checking", "merging", "deprovisioning"]
+    const nameCols = names.map((name) => lines[nameRow]!.indexOf(name))
+    // Each label's second line, read where its name starts, up to the next run of padding.
+    const seconds = nameCols.map((col) => lines[nameRow + 1]!.slice(col).split(/\s{2,}/u)[0]!.trim())
+    const bgKey = (bg: unknown) => JSON.stringify(bg)
+    const tabBgs = nameCols.map((col) => bgKey(app.cell(col, nameRow).bg))
+    const active = tabBgs.findIndex((bg) => tabBgs.filter((other) => other === bg).length === 1)
+    expect(active).toBeGreaterThanOrEqual(0)
 
-    // Pin standard inner padding via termless cell inspection:
-    // Top padding line (provLineIdx - 1) has tab background fill
-    expect(app.cell(provCol, provLineIdx - 1).bg).not.toBeNull()
-    // 2 cells horizontal padding to the left of the label have tab background fill
-    expect(app.cell(provCol - 1, provLineIdx).bg).not.toBeNull()
-    expect(app.cell(provCol - 2, provLineIdx).bg).not.toBeNull()
-    // The label cell itself has tab background fill
-    expect(app.cell(provCol, provLineIdx).bg).not.toBeNull()
-
+    const reference = render(
+      <Tabs variant="filled" value={String(active)}>
+        <TabList flexWrap="wrap">
+          {names.map((name, at) => (
+            <Tab key={name} value={String(at)}>
+              {name}
+              {"\n"}
+              {seconds[at]}
+            </Tab>
+          ))}
+        </TabList>
+      </Tabs>,
+      { cols: 120, rows: 8 },
+    )
+    await settle(reference)
+    const refLines = reference.text.split("\n")
+    const refRow = refLines.findIndex((line) => line.includes("Timeline"))
+    const refCol = refLines[refRow]!.indexOf("Timeline")
+    const dx = nameCols[0]! - refCol
+    const dy = nameRow - refRow
+    // The strip is every reference cell with a fill: the tabs, their padding, and the gaps between them.
+    let compared = 0
+    for (let y = 0; y < refLines.length; y++) {
+      for (let x = 0; x < 120 - dx; x++) {
+        const want = reference.cell(x, y)
+        if (want.bg === null) continue
+        const got = app.cell(x + dx, y + dy)
+        expect({ at: [x, y], char: got.char, bg: got.bg }).toEqual({ at: [x, y], char: want.char, bg: want.bg })
+        compared++
+      }
+    }
+    expect(compared).toBeGreaterThan(names.join("").length)
+    reference.unmount()
     app.unmount()
   })
 
