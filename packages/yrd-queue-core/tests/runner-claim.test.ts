@@ -67,7 +67,23 @@ describe("runner claim", () => {
     ).toBe("unbounded")
   })
 
-  it("refuses malformed, missing, duplicated, and unknown trailers", () => {
+  /** @failure Older readers treated every future claim trailer as an unreadable runner. @level l1 */
+  it("ignores unique future trailers only after all known trailers", () => {
+    const message = formatRunnerClaim(claim)
+    const future = `${message}Due: 2026-09-27T13:00:00.000Z\nTrace: two  spaces\n`
+    expect(parseRunnerClaim(future)).toEqual({
+      ...claim,
+      unknownTrailers: ["Due: 2026-09-27T13:00:00.000Z", "Trace: two  spaces"],
+    })
+    expect(formatRunnerClaim(parseRunnerClaim(future))).toBe(future)
+    expect(() => parseRunnerClaim(message.replace("Since: ", "Step: merge\nSince: "))).toThrow(
+      /unknown.*before|known.*after/,
+    )
+    expect(() => parseRunnerClaim(`${message}Step: merge\nAt: ${claim.at}\n`)).toThrow(/known.*after/)
+    expect(() => parseRunnerClaim(`${message}Step: merge\nStep: publish\n`)).toThrow(/duplicate Step/)
+  })
+
+  it("refuses malformed, missing, and duplicated known trailers", () => {
     const message = formatRunnerClaim(claim)
     expect(() => parseRunnerClaim(message.replace("Beat: 60000ms", "Beat: 0ms"))).toThrow(/Beat/)
     expect(() => parseRunnerClaim(message.replace("Beat: 60000ms", "Beat: 29999ms"))).toThrow(/Beat/)
@@ -78,6 +94,6 @@ describe("runner claim", () => {
     expect(() => parseRunnerClaim(message.replace("Since: 2026-09-27T12:00:30.000Z\n", ""))).toThrow(/Since/)
     expect(() => parseRunnerClaim(message.replace("Beat: 60000ms\n", "Beat: 60000ms\n\n"))).toThrow(/malformed trailer/)
     expect(() => parseRunnerClaim(message + "At: 2026-09-27T12:01:00.000Z\n")).toThrow(/duplicate At/)
-    expect(() => parseRunnerClaim(message + "Step: check\n")).toThrow(/unknown.*Step/)
+    expect(() => parseRunnerClaim(message + "Step=check\n")).toThrow(/malformed trailer/)
   })
 })
