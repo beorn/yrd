@@ -13,6 +13,7 @@
  * do not have the hh-dev superproject's vendored packages masking a stale
  * public dependency.
  */
+import { existsSync } from "node:fs"
 import { copyFile, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -42,7 +43,7 @@ describe("standalone CLI boot", () => {
       await copyFile(join(REPO_ROOT, "package.json"), join(root, "package.json"))
       await copyFile(join(REPO_ROOT, "bun.lock"), join(root, "bun.lock"))
       for (const entry of await readdir(join(REPO_ROOT, "packages"), { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue
+        if (!entry.isDirectory() || !existsSync(join(REPO_ROOT, "packages", entry.name, "package.json"))) continue
         const packageDir = join(root, "packages", entry.name)
         await mkdir(packageDir, { recursive: true })
         await copyFile(join(REPO_ROOT, "packages", entry.name, "package.json"), join(packageDir, "package.json"))

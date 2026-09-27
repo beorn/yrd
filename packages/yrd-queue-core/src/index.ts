@@ -251,3 +251,6 @@ export type {
   DeleteCandidateRefResult,
   SweepCandidateRefsOptions,
 } from "./candidate-refs.ts"
+
+export { yrdQueueRunnerDeclarations } from "./runner-declarations.ts"
+export type { YrdQueueRunnerDeclaration } from "./runner-declarations.ts"
