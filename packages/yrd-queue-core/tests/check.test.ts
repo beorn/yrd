@@ -227,6 +227,21 @@ describe("a queue-owned program root", () => {
     expect(requests[1]?.env?.HH_HEAVY_QUEUE_CALLER).toBe("1")
   })
 
+  /** @failure A declared passthrough could turn a candidate check into a narrowed base check.
+   * @level l1 @consumer queue check runner and affected-tests scope gate
+   */
+  it("refuses a candidate check inheriting settled-base selection", async () => {
+    const where = place("candidate-base-selector")
+    await expect(
+      runCheck({
+        ...where,
+        queueRun: true,
+        env: { YRD_SETTLED_BASE_AFFECTED_IDS: "one" },
+        spec: { name: "candidate", run: "exit 0", environmentPassthrough: ["YRD_SETTLED_BASE_AFFECTED_IDS"] },
+      }),
+    ).rejects.toThrow("YRD_SETTLED_BASE_AFFECTED_IDS")
+  })
+
   it("overwrites passed-through and check-requested program roots only for an explicit opt-in", async () => {
     const where = place("program-root")
     const programRoot = join(where.cwd, "target-program")

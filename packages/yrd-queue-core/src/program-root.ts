@@ -30,6 +30,8 @@ export type ProgramRootCheck = Readonly<{
   log: QueueRunLog
   setup?: string
   extraEnv?: Readonly<Record<string, string>>
+  /** Journaled base scope; the base attribution token itself does not narrow a check. */
+  scope?: "full" | "narrowed"
   tier?: "normal" | "long"
   /** The event runner owns this check; manual program-root checks omit it. */
   queueRun?: boolean
@@ -334,7 +336,9 @@ export async function programRootCheck(run: ProgramRootCheck): Promise<CheckResu
       head: run.head,
       name: spec.name,
       phase,
-      ...(phase === "base" ? { scope: run.extraEnv === undefined ? ("full" as const) : ("narrowed" as const) } : {}),
+      ...(phase === "base"
+        ? { scope: run.scope ?? (run.extraEnv === undefined ? ("full" as const) : ("narrowed" as const)) }
+        : {}),
       ...(spec.scripts === undefined || spec.scripts.length === 0 ? {} : { scripts: spec.scripts }),
     }
     const start = new Date().toISOString()
@@ -352,7 +356,13 @@ export async function programRootCheck(run: ProgramRootCheck): Promise<CheckResu
       programRoot: program.path,
       tier: run.tier,
     })
-    recordProgramResult(run, { ...about, end: new Date().toISOString(), start }, result)
+    const endedAbout = { ...about, end: new Date().toISOString(), start }
+    if (phase === "base") {
+      recordProgramEnd(run, endedAbout, result)
+      recordProgramVerdict(run, endedAbout, result, "queue")
+    } else {
+      recordProgramResult(run, endedAbout, result)
+    }
     return result
   } finally {
     try {
