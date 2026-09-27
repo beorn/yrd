@@ -70,22 +70,6 @@ export function targetName(target: Target): string {
   return `${target.remote}#${target.branch}`
 }
 
-/**
- * The target a string spells, or undefined when it is not one. Read from the
- * RIGHT, because the remote may be a URL and a URL may carry a `#`, while a
- * branch name may not.
- */
-export function parseTarget(text: string): Target | undefined {
-  const cut = text.lastIndexOf("#")
-  if (cut <= 0) return undefined
-  const branch = text.slice(cut + 1)
-  if (branch === "") return undefined
-  return { branch, remote: text.slice(0, cut) }
-}
-
-/** What a declaration that does not spell a target is told, in one sentence. */
-const TARGET_GRAMMAR = "must be <remote>#<branch>, e.g. origin#main"
-
 /** The one line that shows what `notify:` looks like, wherever it has to be shown. */
 const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]"
 
@@ -275,42 +259,6 @@ function readIgnore(value: unknown): readonly string[] {
   })
 }
 
-export type Hints = Readonly<{
-  /** The target the file names, when it names one this reader understands. */
-  target?: Target
-  /** Why the commit's `.yrd.yml` hinted nothing, when it exists and could not be read. */
-  problem?: string
-}>
-
-/**
- * What a commit's `.yrd.yml` says about where its queue is: `target:`, when the
- * file exists and reads. This is a hint for FINDING the queue, never authority:
- * the declaration at the target is what judges, so a branch that rewrites or
- * breaks its own `.yrd.yml` still submits and is judged by the target's rules,
- * and D2 bills it at merge. A file that exists and cannot be read hints nothing
- * and says so in `problem`, and so does one whose `target:` this reader does
- * not understand — including the two-key shape it used to have, where `remote:`
- * and a bare branch name each defaulted on their own.
- *
- * `where` names the file in `problem`.
- */
-export function hintsIn(text: string, where = ".yrd.yml"): Hints {
-  let raw: unknown
-  try {
-    raw = Bun.YAML.parse(text)
-  } catch (error) {
-    return { problem: `${where} does not parse: ${error instanceof Error ? error.message : String(error)}` }
-  }
-  if (!isRecord(raw)) return { problem: `${where} is not a mapping` }
-  if (raw.remote !== undefined) {
-    return { problem: `${where} names remote:, which is now the left side of target: ${TARGET_GRAMMAR}` }
-  }
-  if (raw.target === undefined) return {}
-  const target = typeof raw.target === "string" ? parseTarget(raw.target) : undefined
-  if (target === undefined) return { problem: `${where} target: ${TARGET_GRAMMAR}` }
-  return { target }
-}
-
 /**
  * A named list of commands: `- name: {run, on, …}`, the one shape `checks:` and
  * `notify:` share. Both are "these commands, each for these occasions", so both
@@ -461,7 +409,7 @@ const RETIRED: Readonly<Record<string, string>> = {
   remote: "select the queue with --queue <branch> at origin or --queue <repo>#<queue>",
   scratch: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   workdir: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
-  target: "the branch carrying .yrd.yml is the queue; select it with --queue <branch> or --queue <repo>#<queue>",
+  target: "target: is not read; submit resolves the queue from --queue or the origin head",
 }
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */
