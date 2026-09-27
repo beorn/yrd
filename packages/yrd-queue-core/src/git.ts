@@ -35,6 +35,7 @@ import {
   verboseSshRetryEnvironment,
 } from "git-super/process"
 import type { QueueObservation } from "./remote.ts"
+import { remoteSeam } from "./remote-calls.ts"
 
 /** Git's expected old value when a ref must be absent. */
 export const ABSENT = "0".repeat(40)
@@ -278,11 +279,17 @@ export function gitIn(
   const invoke = async (originalArgs: readonly string[], input?: string, observation = false) => {
     const args = Object.freeze([...originalArgs])
     const attempt = async (attemptEnv: NodeJS.ProcessEnv | undefined) => {
+      const seam = remoteSeam()
+      const source = attemptEnv ?? globalThis.process.env
+      const runEnv =
+        seam !== undefined && source.GIT_TRACE2_ENV_VARS?.split(",").includes("YRD_SEAM")
+          ? { ...(attemptEnv ?? gitEnvironment(source)), YRD_SEAM: seam }
+          : attemptEnv
       let evidence = await invokeGit(
         runner,
         { args, cwd, ...(selection === undefined ? {} : { selection }) },
         options,
-        attemptEnv,
+        runEnv,
         input,
         observation,
       )
@@ -742,6 +749,9 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const count = Number.isInteger(declared) && declared >= 0 ? declared : 0
   return {
     ...env,
+    ...(remoteSeam() !== undefined && env.GIT_TRACE2_ENV_VARS?.split(",").includes("YRD_SEAM")
+      ? { YRD_SEAM: remoteSeam() }
+      : {}),
     GIT_COMMITTER_EMAIL: `yrd@${hostname()}`,
     GIT_COMMITTER_NAME: "yrd",
     GIT_CONFIG_COUNT: String(count + 2),

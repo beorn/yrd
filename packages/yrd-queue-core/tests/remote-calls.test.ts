@@ -10,8 +10,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn } from "../src/git.ts"
-import { readRemoteCalls, traceRemoteCalls } from "../src/remote-calls.ts"
+import { gitIn, readRemoteCommit } from "../src/git.ts"
+import { readRemoteCalls, traceRemoteCalls, withRemoteSeam } from "../src/remote-calls.ts"
 
 const roots: string[] = []
 
@@ -81,6 +81,41 @@ describe("remote calls are counted from git's trace2 event log", () => {
     rmSync(join(root, "unread", "trace2"), { recursive: true })
     expect(() => unread.end()).toThrow(/trace2 directory/u)
     expect(existsSync(join(root, "unread", "trace2"))).toBe(false)
+  })
+
+  it("attributes real Git and Gitomic remote reads to their calling seams (25626)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-remote-seams-"))
+    roots.push(root)
+    const seed = join(root, "seed")
+    mkdirSync(seed)
+    const git = gitIn(seed)
+    await git(["init", "--quiet", "--initial-branch=main"])
+    await git([
+      "-c",
+      "user.email=seams@yrd.test",
+      "-c",
+      "user.name=yrd",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "one",
+    ])
+    const remote = join(root, "remote.git")
+    await gitIn(root)(["clone", "--quiet", "--bare", seed, remote])
+    const traced = traceRemoteCalls(join(root, "trace2"), { seams: true })
+    const caller = gitIn(seed, undefined, undefined, { env: { ...process.env, ...traced.env } })
+    expect(await withRemoteSeam("readRemoteCommit", () => readRemoteCommit(caller, remote, "refs/heads/main"))).toMatch(
+      /^[0-9a-f]{40}$/u,
+    )
+    await withRemoteSeam("listBranch", () => caller(["ls-remote", remote, "refs/heads/main"]))
+    const calls = traced.end()
+    expect(calls.seams).toMatchObject({
+      readRemoteCommit: { fetch: 1 },
+      listBranch: { "ls-remote": 1 },
+    })
+    expect(calls.seams.unattributed).toBeUndefined()
+    expect(calls.unreadable).toBe(0)
   })
 
   it("refuses a trace directory that does not exist, rather than reporting zero calls", () => {

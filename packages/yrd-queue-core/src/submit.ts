@@ -30,6 +30,7 @@ import { type PauseRecord } from "./pause.ts"
 import { remoteUrl } from "./remote.ts"
 import { changeInput, changesRef, decide, initial, project, queueFormat, queueRef, readEventOps } from "./events.ts"
 import { verifyCandidate, type Verification } from "./verifying.ts"
+import { withRemoteSeam } from "./remote-calls.ts"
 
 export type SubmitRequest = Readonly<{
   /** The branch being submitted: the change's own. */
@@ -336,9 +337,9 @@ export async function inspectSubmitAtHead(
 }
 
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
-  const inspected = await inspectSubmit(git, remote, request)
+  const inspected = await withRemoteSeam("inspectSubmit", () => inspectSubmit(git, remote, request))
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-  return submitEvent(git, remote, request, root, inspected)
+  return withRemoteSeam("submitEvent", () => submitEvent(git, remote, request, root, inspected))
 }
 
 async function submitEvent(
@@ -349,7 +350,9 @@ async function submitEvent(
   inspected: SubmitInspection,
 ): Promise<Submitted> {
   const head = inspected.head
-  const published = await publishMovedGitlinks(git, root, inspected.targetHead, head)
+  const published = await withRemoteSeam("publishMovedGitlinks", () =>
+    publishMovedGitlinks(git, root, inspected.targetHead, head),
+  )
   const store = createEventStore(root, remote, selectionFor(git))
   const ref = changesRef(request.target.branch, request.branch)
   const branchRef = `refs/heads/${request.branch}`
