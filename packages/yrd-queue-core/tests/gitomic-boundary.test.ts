@@ -30,7 +30,8 @@ describe("the Yrd Gitomic boundary", () => {
         (path) =>
           /^packages\/[^/]+\/(?:src|scripts)\/.*\.[cm]?[jt]sx?$/u.test(path) && !/\.test\.[cm]?[jt]sx?$/u.test(path),
       )
-      .map((path) => ({ path, count: readFileSync(new URL(path, repo), "utf8").split("Record:").length - 1 }))
+      // The trailer key, not an identifier ending in it (`onRecord:`); `\n` is the key inside a regex literal.
+      .map((path) => ({ path, count: readFileSync(new URL(path, repo), "utf8").match(/(?:^|[^\w$]|\\n)Record:/gmu)?.length ?? 0 }))
       .filter(({ count }) => count > 0)
     expect(hits).toEqual([{ path: "packages/yrd-queue-core/src/pause.ts", count: 1 }])
   })

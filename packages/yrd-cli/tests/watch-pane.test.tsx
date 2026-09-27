@@ -1112,7 +1112,9 @@ describe("the pane's keys and the detail's identity", () => {
             },
           ]),
       )
-      const app = render(<WatchPane snapshot={snapshot({ rows })} live={false} open={open} />, { cols, rows: 40 })
+      // Tall enough that the padded stage tabs (25557) leave the check's output above the fold:
+      // this test is about which run opens, not about the fold.
+      const app = render(<WatchPane snapshot={snapshot({ rows })} live={false} open={open} />, { cols, rows: 50 })
       await settle(app)
       app.press("ArrowDown")
       await settle(app)
@@ -5282,11 +5284,15 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
 
     // 3. Gap check: between provisioning and checking there must be a 1-column gap without tab bg
     const provEnd = provCol + "provisioning".length
-    // Col at provEnd is padding inside provisioning tab
-    expect(app.cell(provEnd, tabsY).bg).toStrictEqual(provBg)
-    // Next col is the blank gap between tabs (distinct from tab bgs)
-    expect(app.cell(provEnd + 1, tabsY).bg).not.toStrictEqual(provBg)
-    expect(app.cell(provEnd + 1, tabsY).bg).not.toStrictEqual(checkingBg)
+    // The filled tab's inner padding is inside the provisioning tab; its width is silvery's (25557), so measure it
+    const sameBg = (col: number, bg: typeof provBg) => JSON.stringify(app.cell(col, tabsY).bg) === JSON.stringify(bg)
+    let gap = provEnd
+    while (gap < checkingCol && sameBg(gap, provBg)) gap++
+    expect(gap).toBeGreaterThan(provEnd)
+    // Then exactly one blank column between tabs (distinct from tab bgs), and the checking tab starts
+    expect(app.cell(gap, tabsY).bg).not.toStrictEqual(provBg)
+    expect(app.cell(gap, tabsY).bg).not.toStrictEqual(checkingBg)
+    expect(app.cell(gap + 1, tabsY).bg).toStrictEqual(checkingBg)
 
     // 4. Truecolor assertion: must have 24-bit truecolor escapes and no 16-color fallback
     assertCaptureTruecolor(ansi)
