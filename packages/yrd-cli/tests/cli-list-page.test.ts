@@ -16,6 +16,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { stripAnsi } from "@silvery/ansi"
 import { gitIn, submit } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
+import { declareEventQueue } from "./support/event-queue.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -66,6 +67,7 @@ async function queueWithOneChange(): Promise<string> {
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
+  await declareEventQueue(work)
   await git(["checkout", "--quiet", "-b", "task/one", "main"])
   writeFileSync(join(work, "pass.txt"), "pass\n")
   await git(["add", "."])
@@ -105,6 +107,7 @@ async function queueWithMergedCoincidence(): Promise<string> {
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
+  await declareEventQueue(work)
   // The coincidence: branch TEXT says `merged`, but the change is only queued.
   await git(["checkout", "--quiet", "-b", "task/merged-ball-conditional-close", "main"])
   writeFileSync(join(work, "coincidence.txt"), "coincidence\n")

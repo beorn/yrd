@@ -21,6 +21,7 @@ import { gitIn, readJournals, type Git, type LogRecord } from "@yrd/queue-core"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { workdirOf } from "../src/workdir.ts"
+import { declareEventQueue } from "./support/event-queue.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
@@ -45,7 +46,7 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stdout(): string }> {
 
 type World = Readonly<{ git: Git; work: string; workdir: string }>
 
-async function world(): Promise<World> {
+async function world(declare = true): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-check-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -61,6 +62,7 @@ async function world(): Promise<World> {
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue and one check"])
   await git(["push", "--quiet", "origin", "main"])
+  if (declare) await declareEventQueue(work)
   const workdir = join(root, "queue")
   mkdirSync(workdir, { recursive: true })
   return { git, work, workdir }
@@ -221,7 +223,7 @@ describe("yrd check judges HEAD, never the invoking tree", () => {
  * @consumer Authors need the queue's protected P/C lifecycle without any merge possibility.
  */
 async function protectedWorld(setup = "true"): Promise<World> {
-  const w = await world()
+  const w = await world(false)
   writeFileSync(
     join(w.work, "program.sh"),
     [
@@ -245,6 +247,7 @@ async function protectedWorld(setup = "true"): Promise<World> {
   await w.git(["add", "."])
   await w.git(["commit", "--quiet", "-m", "target declares protected check"])
   await w.git(["push", "--quiet", "origin", "main"])
+  await declareEventQueue(w.work)
   return w
 }
 
