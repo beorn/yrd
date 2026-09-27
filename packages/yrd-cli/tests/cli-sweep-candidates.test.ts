@@ -86,7 +86,7 @@ async function createFixture(eventFormat = false) {
 
 describe("`yrd sweep-candidates` CLI", () => {
   it("runs dry-run and identifies stranded candidate refs", async () => {
-    const { work, git, createCommit } = await createFixture()
+    const { work, git, createCommit } = await createFixture(true)
     const sha1 = await createCommit("c1")
     const sha2 = await createCommit("c2")
 
@@ -106,7 +106,7 @@ describe("`yrd sweep-candidates` CLI", () => {
   })
 
   it("deletes stranded candidate refs on origin", async () => {
-    const { work, git, createCommit } = await createFixture()
+    const { work, git, createCommit } = await createFixture(true)
     const sha1 = await createCommit("c1")
 
     await git(["push", "--quiet", "origin", `${sha1}:refs/heads/yrd/candidates/${sha1}`])
@@ -136,50 +136,6 @@ describe("`yrd sweep-candidates` CLI", () => {
     // Candidate ref was NOT deleted
     const remoteRefs = await git(["ls-remote", "--refs", "origin", "refs/heads/yrd/candidates/*"])
     expect(remoteRefs).toContain(`refs/heads/yrd/candidates/${sha1}`)
-  })
-
-  it("preserves active candidate refs in legacy mode while deleting merged ones", async () => {
-    const { work, git, createCommit } = await createFixture(false)
-
-    // Submit an active change to the queue
-    await git(["checkout", "--quiet", "-b", "task/queued", "main"])
-    writeFileSync(join(work, "pass.txt"), "pass\n")
-    await git(["add", "."])
-    await git(["commit", "--quiet", "-m", "task/queued work"])
-    const shaQueued = (await git(["rev-parse", "HEAD"])).trim()
-    await git(["checkout", "--quiet", "main"])
-
-    await submit(git, "origin", {
-      branch: "task/queued",
-      submitter: "@dev/10",
-      target: { branch: "main", remote: "origin" },
-    })
-
-    // Create a non-active (merged/idle) commit
-    const shaMerged = await createCommit("merged-work")
-
-    // Push two candidate refs for queued change and two for merged change
-    await git(["push", "--quiet", "origin", `${shaQueued}:refs/heads/yrd/candidates/${shaQueued}`])
-    await git(["push", "--quiet", "origin", `${shaQueued}:refs/yrd/candidates/${shaQueued}`])
-    await git(["push", "--quiet", "origin", `${shaMerged}:refs/heads/yrd/candidates/${shaMerged}`])
-    await git(["push", "--quiet", "origin", `${shaMerged}:refs/yrd/candidates/${shaMerged}`])
-
-    const run = await yrd(work, "queue", "sweep-candidates")
-    expect(run.exitCode, run.report).toBe(0)
-    expect(run.stdout).toContain("deleted 2")
-
-    // The queued change's two candidate refs survived
-    const remoteRefs = await git([
-      "ls-remote",
-      "--refs",
-      "origin",
-      "refs/heads/yrd/candidates/*",
-      "refs/yrd/candidates/*",
-    ])
-    expect(remoteRefs).toContain(`refs/heads/yrd/candidates/${shaQueued}`)
-    expect(remoteRefs).toContain(`refs/yrd/candidates/${shaQueued}`)
-    // The merged change's refs were deleted
-    expect(remoteRefs).not.toContain(shaMerged)
   })
 
   it("preserves active candidate refs in event mode while deleting merged ones", async () => {
@@ -227,7 +183,7 @@ describe("`yrd sweep-candidates` CLI", () => {
   })
 
   it("retains candidate refs whose object differs from its name", async () => {
-    const { work, git, createCommit } = await createFixture()
+    const { work, git, createCommit } = await createFixture(true)
     const sha1 = await createCommit("c1")
     const sha2 = await createCommit("c2")
 
