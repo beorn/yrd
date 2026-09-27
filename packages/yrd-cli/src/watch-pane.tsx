@@ -1641,6 +1641,7 @@ function Table({
             nav
             active={active}
             overflowIndicator
+            scrollbar={false}
             virtualization="index"
             estimateHeight={(index: number) => {
               const item = items[index]

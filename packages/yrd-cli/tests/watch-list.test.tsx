@@ -237,7 +237,7 @@ describe("CHANGES column capping and title preservation (25716)", () => {
       app.unmount()
     })
 
-    it(`renders a 120-char error without squeezing out title in Silvery terminal at ${cols} columns`, async () => {
+    it(`renders a failed row without an err= suffix squeezing the title at ${cols} columns`, async () => {
       const row: Row = {
         branch: "task/short-branch",
         head: "deadbeef".padEnd(40, "0"),

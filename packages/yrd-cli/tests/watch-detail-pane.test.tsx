@@ -178,5 +178,9 @@ describe("26242: watch detail pane at 140x50", () => {
     expect(dashAt).toBeGreaterThanOrEqual(runAt - 1)
     expect(dashAt).toBeLessThan(changesAt)
     expect(holdsAt).toBeGreaterThanOrEqual(changesAt - 2)
+    // The ListView scrollbar thumb must not paint over the box's right corner.
+    const titleEnd = runnerTitle!.replace(/\s+$/u, "")
+    expect(titleEnd.slice(-1)).toBe("╮")
+    expect(text).not.toMatch(/█/u)
   })
 })
