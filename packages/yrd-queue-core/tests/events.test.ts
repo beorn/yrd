@@ -235,6 +235,29 @@ describe("ADR-0028 run-index lookup", () => {
     )
   })
 
+  it("publishes one index when two activators race, naming the winning tip in the refusal (26193)", async () => {
+    // The sequential duplicate test cannot prove the absent-ref lease survives two simultaneous reads.
+    const { location, beforeNextPublish } = remoteMemStore("run-index-activation-race")
+    const { commit } = await fixtureCommit(location)
+    await seedEventQueue(location, "main", commit, new Date("2026-09-27T12:00:00Z"))
+    let winner: string | undefined
+    beforeNextPublish(async () => {
+      winner = await activateRunIndex(location, "main", new Date("2026-09-27T12:01:01Z"))
+    })
+
+    let refusal: unknown
+    try {
+      await activateRunIndex(location, "main", new Date("2026-09-27T12:01:00Z"))
+    } catch (error) {
+      refusal = error
+    }
+    if (winner === undefined) throw new Error("racing activator did not publish")
+    expect(String(refusal)).toContain(`${runIndexRef("main")} is at ${winner}, not absent`)
+    const refs = await location.backend.listRefs?.(location.repo, runIndexRef("main"))
+    expect(refs?.size).toBe(1)
+    expect(refs?.get(runIndexRef("main"))).toBe(winner)
+  })
+
   it("distinguishes an unknown number from a stored run record without scanning history (26193)", async () => {
     const { location } = remoteMemStore("run-index-lookup")
     const { genesis, commit } = await fixtureCommit(location)
