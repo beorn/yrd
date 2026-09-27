@@ -32,6 +32,8 @@ import {
 } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
 import { appendChangeEvent } from "../src/events.ts"
+import { mergeBases } from "../src/git.ts"
+import { publishMovedGitlinks } from "../src/submit.ts"
 import { gitSuperBin, siblingGitSuperBin, superprojectRoot } from "../../../tests/support/git-super-bin.ts"
 
 // The root Vitest project seals PATH in its setup beforeEach. Reassert this
@@ -235,6 +237,84 @@ it("runs a gitlink-bearing event change through the checked candidate", async ()
   const state = await readStatus(eventStore(w), "main", "task/event-gitlink")
   expect(state).toMatchObject({ status: "merged", commit: head })
   expect(state.candidate).toBe(await remoteTip(w.git, "refs/heads/main"))
+})
+
+/** @failure A stale file-only branch spent remote calls retaining old component pins it never changed (26231).
+ * @level l1 @consumer Yrd submit's per-operation SSH budget
+ */
+it("does not publish a stale target's component pins for a file-only branch", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await w.git(["checkout", "--quiet", "-b", "task/stale-file", "main"])
+  writeFileSync(join(w.work, "change.txt"), "file-only work\n")
+  await w.git(["add", "change.txt"])
+  await w.git(["commit", "--quiet", "-m", "file-only work"])
+  await w.git(["checkout", "--quiet", "main"])
+
+  const newer = await advanceSubmodule(w, "new main component pin")
+  const sub = gitIn(join(w.work, "submodule"))
+  await sub(["fetch", "--quiet", "origin", "main"])
+  await sub(["checkout", "--quiet", newer])
+  await w.git(["add", "submodule"])
+  await w.git(["commit", "--quiet", "-m", "advance component on main"])
+  await w.git(["push", "--quiet", "origin", "main"])
+
+  const result = await submit(w.git, "origin", {
+    branch: "task/stale-file",
+    submitter: "@dev/11",
+    target: { branch: "main", remote: "origin" },
+  })
+  expect(result.verifying.state).toBe("verified")
+  expect(result.published).toEqual([])
+})
+
+it("publishes exactly the component pin a branch authored", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "authored-pin")
+  await w.git(["checkout", "--quiet", "-b", "task/authored-pin", "main"])
+  const sub = gitIn(join(w.work, "submodule"))
+  await sub(["fetch", "--quiet", "origin", "ahead-authored-pin"])
+  await sub(["checkout", "--quiet", ahead])
+  await w.git(["add", "submodule"])
+  await w.git(["commit", "--quiet", "-m", "author component pin"])
+  await w.git(["checkout", "--quiet", "main"])
+
+  const result = await submit(w.git, "origin", {
+    branch: "task/authored-pin",
+    submitter: "@dev/11",
+    target: { branch: "main", remote: "origin" },
+  })
+  expect(result.published.map(({ path, sha }) => ({ path, sha }))).toEqual([{ path: "submodule", sha: ahead }])
+})
+
+it("does not publish a pin unchanged at one of several criss-cross merge bases", async () => {
+  const w = await world()
+  await w.git(["checkout", "--quiet", "-b", "left", "main"])
+  writeFileSync(join(w.work, "left.txt"), "left\n")
+  await w.git(["add", "left.txt"])
+  await w.git(["commit", "--quiet", "-m", "left work"])
+  const left = (await w.git(["rev-parse", "HEAD"])).trim()
+
+  await w.git(["checkout", "--quiet", "-b", "right", "main"])
+  const newer = await advanceSubmodule(w, "right pin")
+  const sub = gitIn(join(w.work, "submodule"))
+  await sub(["fetch", "--quiet", "origin", "main"])
+  await sub(["checkout", "--quiet", newer])
+  await w.git(["add", "submodule"])
+  await w.git(["commit", "--quiet", "-m", "right pin"])
+  const right = (await w.git(["rev-parse", "HEAD"])).trim()
+
+  await w.git(["checkout", "--quiet", "left"])
+  await w.git(["merge", "--quiet", "--no-ff", right, "-m", "left merges right"])
+  const leftMerge = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["checkout", "--quiet", "right"])
+  await w.git(["merge", "--quiet", "--no-ff", left, "-m", "right merges left"])
+  const rightMerge = (await w.git(["rev-parse", "HEAD"])).trim()
+
+  const bases = await mergeBases(w.git, leftMerge, rightMerge)
+  expect(new Set(bases)).toEqual(new Set([left, right]))
+  expect(await publishMovedGitlinks(w.git, w.work, bases, leftMerge)).toEqual([])
 })
 
 /** @failure A gitlink compose refusal ended without one successful notice to its submitter (25741).
@@ -950,6 +1030,45 @@ it("keeps a nested behind-main event pin without publishing either child", async
     .split(/\s+/u)[0]
   expect(leaf).toBe(nested.leafMain)
   expect(nested.leafRecorded).not.toBe(nested.leafMain)
+})
+
+it("publishes a nested pin that the branch authored", async () => {
+  const w = await world()
+  await addNestedSubmodule(w)
+  await createWorldEventQueue(w)
+  const root = dirname(w.work)
+  const leafWork = gitIn(join(root, "leaf-work"))
+  await leafWork(["checkout", "--quiet", "-b", "nested-feature", "main"])
+  writeFileSync(join(root, "leaf-work", "leaf.txt"), "authored leaf\n")
+  await leafWork(["commit", "--quiet", "-am", "author nested leaf"])
+  const leafAhead = (await leafWork(["rev-parse", "HEAD"])).trim()
+  await leafWork(["push", "--quiet", "origin", "nested-feature"])
+
+  const subWork = gitIn(join(root, "submodule-work"))
+  await subWork(["checkout", "--quiet", "-b", "nested-feature", "main"])
+  const leaf = gitIn(join(root, "submodule-work", "apps", "leaf"))
+  await leaf(["fetch", "--quiet", "origin", "nested-feature"])
+  await leaf(["checkout", "--quiet", leafAhead])
+  await subWork(["add", "apps/leaf"])
+  await subWork(["commit", "--quiet", "-m", "author nested pin"])
+  const subAhead = (await subWork(["rev-parse", "HEAD"])).trim()
+  await subWork(["push", "--quiet", "origin", "nested-feature"])
+
+  await w.git(["checkout", "--quiet", "-b", "task/nested-pin", "main"])
+  const sub = gitIn(join(w.work, "submodule"))
+  await sub(["fetch", "--quiet", "origin", "nested-feature"])
+  await sub(["checkout", "--quiet", subAhead])
+  await sub(["submodule", "update", "--init", "--recursive"])
+  await w.git(["add", "submodule"])
+  await w.git(["commit", "--quiet", "-m", "carry nested pin"])
+  await w.git(["checkout", "--quiet", "main"])
+
+  const result = await submit(w.git, "origin", {
+    branch: "task/nested-pin",
+    submitter: "@dev/11",
+    target: { branch: "main", remote: "origin" },
+  })
+  expect(result.published.map(({ path }) => path)).toEqual(["submodule", "submodule/apps/leaf"])
 })
 
 async function gitlinkAt(w: World, commit: string): Promise<string> {

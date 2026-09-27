@@ -1003,15 +1003,20 @@ export async function configValue(git: Git, name: string): Promise<string | unde
   }
 }
 
-/** The merge base of two commits, or undefined when their histories are unrelated. */
-export async function mergeBase(git: Git, left: string, right: string): Promise<string | undefined> {
+/** Every best common ancestor; criss-cross histories can have more than one. */
+export async function mergeBases(git: Git, left: string, right: string): Promise<readonly string[]> {
   try {
-    const out = (await git(["merge-base", left, right])).trim()
-    return out === "" ? undefined : out
+    const out = (await git(["merge-base", "--all", left, right])).trim()
+    return out === "" ? [] : out.split("\n")
   } catch (error) {
-    if (isExit(error, 1)) return undefined
+    if (isExit(error, 1)) return []
     throw error
   }
+}
+
+/** One merge base for consumers that need only a history boundary. */
+export async function mergeBase(git: Git, left: string, right: string): Promise<string | undefined> {
+  return (await mergeBases(git, left, right))[0]
 }
 
 function isExit(error: unknown, code: number): boolean {

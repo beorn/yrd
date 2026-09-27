@@ -25,7 +25,7 @@ import { join } from "node:path"
 import { ABSENT, Conflict, createEventStore, listRefs, openEvents, selectionFor, type Event } from "./git.ts"
 import { readEventChain } from "./event-read.ts"
 import { targetName, type Target } from "./config.ts"
-import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, type Git } from "./git.ts"
+import { gitIn, gitlinkRows, isAncestor, mergeBase, mergeBases, readRemoteCommit, type Git } from "./git.ts"
 import { type PauseRecord } from "./pause.ts"
 import { remoteUrl } from "./remote.ts"
 import {
@@ -125,12 +125,19 @@ const ZERO_SHA = /^0+$/u
 export async function publishMovedGitlinks(
   git: Git,
   root: string,
-  from: string,
+  from: string | readonly string[],
   to: string,
   prefix = "",
 ): Promise<readonly PublishedGitlink[]> {
   const published: PublishedGitlink[] = []
-  for (const row of await gitlinkRows(git, from, to)) {
+  const bases = typeof from === "string" ? [from] : from
+  if (bases.length === 0) throw new Error(`cannot publish gitlinks in ${root}: no merge base`)
+  const spans = await Promise.all(bases.map((base) => gitlinkRows(git, base, to)))
+  const byBase = spans.map((rows) => new Map(rows.map((row) => [row.path, row])))
+  for (const row of spans[0] ?? []) {
+    // In criss-cross history a pin is branch-authored only if it differs
+    // from every best common ancestor, not just Git's first merge base.
+    if (!byBase.every((rows) => rows.has(row.path))) continue
     if (row.newMode !== "160000" || ZERO_SHA.test(row.sha)) continue
     const path = prefix === "" ? row.path : `${prefix}/${row.path}`
     const checkout = join(root, row.path)
@@ -191,7 +198,13 @@ export async function publishMovedGitlinks(
     }
     // A moved submodule may itself have moved a gitlink: the nested pin has to
     // be fetchable too, from ITS remote, or the queue cannot materialize km.
-    const before = row.oldMode === "160000" ? (await git(["rev-parse", `${from}:${row.path}`])).trim() : EMPTY_TREE
+    const before = await Promise.all(
+      bases.map(async (base, index) =>
+        byBase[index]?.get(row.path)?.oldMode === "160000"
+          ? (await git(["rev-parse", `${base}:${row.path}`])).trim()
+          : EMPTY_TREE,
+      ),
+    )
     published.push(...(await publishMovedGitlinks(child, checkout, before, row.sha, path)))
   }
   return published
@@ -219,7 +232,9 @@ export type SubmitInspection = Readonly<{
 }>
 
 type SubmitOps = Awaited<ReturnType<typeof readEventOpsWithRefs>>
-type SubmitAdmission = Readonly<Omit<SubmitInspection, "verifying"> & { root: string; operational: SubmitOps }>
+type SubmitAdmission = Readonly<
+  Omit<SubmitInspection, "verifying"> & { root: string; bases: readonly string[]; operational: SubmitOps }
+>
 
 export function refuseMaintenance(
   stop: PauseRecord | undefined,
@@ -280,7 +295,7 @@ export async function inspectSubmitAtHead(
 ): Promise<SubmitInspection> {
   const admitted = await admitSubmitAtHead(git, remote, request, head)
   const verifying = await composeSubmit(git, request, admitted)
-  const { root: _root, operational: _operational, ...inspection } = admitted
+  const { root: _root, bases: _bases, operational: _operational, ...inspection } = admitted
   return { ...inspection, verifying }
 }
 
@@ -310,7 +325,8 @@ async function admitSubmitAtHead(
       `nothing new to submit: ${targetName(request.target)} at ${targetHead} already contains ${request.branch} at ${head}; ${bound}`,
     )
   }
-  const base = await mergeBase(git, head, targetHead)
+  const bases = await mergeBases(git, head, targetHead)
+  const base = bases[0]
   if (base === undefined) {
     throw new Error(
       `${request.branch} at ${head} has no common base with ${targetName(request.target)}; found no merge base, expected ${targetHead}. Start a change from that target; ${bound}`,
@@ -335,6 +351,7 @@ async function admitSubmitAtHead(
     head,
     targetHead,
     base,
+    bases,
     root,
     operational,
     ...(issue === undefined ? {} : { issue }),
@@ -377,10 +394,10 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const admitted = await withRemoteSeam("inspectSubmit", () => admitSubmitAtHead(git, remote, request, head))
   const published = await withRemoteSeam("publishMovedGitlinks", () =>
-    publishMovedGitlinks(git, admitted.root, admitted.targetHead, head),
+    publishMovedGitlinks(git, admitted.root, admitted.bases, head),
   )
   const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted))
-  const { root, operational, ...inspection } = admitted
+  const { root, bases: _bases, operational, ...inspection } = admitted
   return withRemoteSeam("submitEvent", () =>
     submitEvent(git, remote, request, root, { ...inspection, verifying }, operational, published),
   )
