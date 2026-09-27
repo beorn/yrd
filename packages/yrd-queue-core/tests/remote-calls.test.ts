@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, readRemoteCommit } from "../src/git.ts"
+import { createLegacyBackend, gitIn, readRemoteCommit } from "../src/git.ts"
 import { readRemoteCalls, traceRemoteCalls, withRemoteSeam } from "../src/remote-calls.ts"
 
 const roots: string[] = []
@@ -117,6 +117,38 @@ describe("remote calls are counted from git's trace2 event log", () => {
     })
     expect(calls.seams.unattributed).toMatchObject({ "ls-remote": 1 })
     expect(calls.unreadable).toBe(0)
+  })
+
+  it("labels each fetch on one long-lived Gitomic backend with its calling seam", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-gitomic-seams-"))
+    roots.push(root)
+    const seed = join(root, "seed")
+    mkdirSync(seed)
+    const git = gitIn(seed)
+    await git(["init", "--quiet", "--initial-branch=main"])
+    await git([
+      "-c",
+      "user.email=seams@yrd.test",
+      "-c",
+      "user.name=yrd",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "one",
+    ])
+    const remote = join(root, "remote.git")
+    await gitIn(root)(["clone", "--quiet", "--bare", seed, remote])
+    const traced = traceRemoteCalls(join(root, "trace2"), { seams: true })
+    const backend = createLegacyBackend()
+    const store = (await git(["rev-parse", "--absolute-git-dir"])).trim()
+    if (backend.fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs")
+    await withRemoteSeam("firstRead", () => backend.fetchRefs!(store, "refs/heads/main", remote))
+    await withRemoteSeam("secondRead", () => backend.fetchRefs!(store, "refs/heads/main", remote))
+    const calls = traced.end()
+    expect(calls.seams.firstRead?.fetch).toBe(1)
+    expect(calls.seams.secondRead?.fetch).toBe(1)
+    expect(calls.seams.unattributed).toBeUndefined()
   })
 
   it("refuses a trace directory that does not exist, rather than reporting zero calls", () => {

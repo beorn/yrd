@@ -279,12 +279,8 @@ export function gitIn(
   const invoke = async (originalArgs: readonly string[], input?: string, observation = false) => {
     const args = Object.freeze([...originalArgs])
     const attempt = async (attemptEnv: NodeJS.ProcessEnv | undefined) => {
-      const seam = remoteSeam()
-      const source = attemptEnv ?? globalThis.process.env
       const runEnv =
-        seam !== undefined && source.GIT_TRACE2_ENV_VARS?.split(",").includes("YRD_SEAM")
-          ? { ...(attemptEnv ?? gitEnvironment(source)), YRD_SEAM: seam }
-          : attemptEnv
+        remoteSeam() === undefined ? attemptEnv : seamEnvironment(attemptEnv ?? gitEnvironment(globalThis.process.env))
       let evidence = await invokeGit(
         runner,
         { args, cwd, ...(selection === undefined ? {} : { selection }) },
@@ -749,9 +745,6 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const count = Number.isInteger(declared) && declared >= 0 ? declared : 0
   return {
     ...env,
-    ...(remoteSeam() !== undefined && env.GIT_TRACE2_ENV_VARS?.split(",").includes("YRD_SEAM")
-      ? { YRD_SEAM: remoteSeam() }
-      : {}),
     GIT_COMMITTER_EMAIL: `yrd@${hostname()}`,
     GIT_COMMITTER_NAME: "yrd",
     GIT_CONFIG_COUNT: String(count + 2),
@@ -760,6 +753,14 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     [`GIT_CONFIG_KEY_${count + 1}`]: "push.recurseSubmodules",
     [`GIT_CONFIG_VALUE_${count + 1}`]: "no",
   }
+}
+
+/** Attach the current call's trace label at the spawn boundary, never at runner or store creation. */
+function seamEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const seam = remoteSeam()
+  return seam !== undefined && base.GIT_TRACE2_ENV_VARS?.split(",").includes("YRD_SEAM")
+    ? { ...base, YRD_SEAM: seam }
+    : base
 }
 
 /** The one configured Gitomic backend for every legacy queue ref operation. */
@@ -771,37 +772,62 @@ export function createLegacyBackend(gitExecutable = "git"): GitomicBackend {
       gitExecutable,
       remoteTimeoutMs: GIT_ROOT_INVOCATION_MS,
     })
-    const { fetchRefs, listRefs } = backend
-    if (fetchRefs === undefined || listRefs === undefined) {
-      throw new Error("yrd: the selected Gitomic shell backend lacks fetchRefs or listRefs")
+    const { fetchRefs, listRefs, fetchRemote, compareAndSwapRemote, publish } = backend
+    if (
+      fetchRefs === undefined ||
+      listRefs === undefined ||
+      fetchRemote === undefined ||
+      compareAndSwapRemote === undefined ||
+      publish === undefined
+    ) {
+      throw new Error("yrd: the selected Gitomic shell backend lacks a required remote operation")
     }
-    return { backend, fetchRefs: fetchRefs.bind(backend), listRefs: listRefs.bind(backend) }
+    return {
+      backend,
+      fetchRefs: fetchRefs.bind(backend),
+      listRefs: listRefs.bind(backend),
+      fetchRemote: fetchRemote.bind(backend),
+      compareAndSwapRemote: compareAndSwapRemote.bind(backend),
+      publish: publish.bind(backend),
+    }
   }
   const first = makeReader(baseEnv)
+  const readerForCall = () => {
+    const env = seamEnvironment(baseEnv)
+    return { env, reader: env === baseEnv ? first : makeReader(env) }
+  }
   return {
     ...first.backend,
-    fetchRefs: (repo, refs, remote) =>
-      retryLegacyPublickeyRead(
+    fetchRefs: (repo, refs, remote) => {
+      const { env, reader } = readerForCall()
+      return retryLegacyPublickeyRead(
         "fetch",
         repo,
         remote,
         refs,
-        baseEnv,
-        () => first.fetchRefs(repo, refs, remote),
+        env,
+        () => reader.fetchRefs(repo, refs, remote),
         (env) => makeReader(env).fetchRefs(repo, refs, remote),
-      ),
-    listRefs: (repo, prefix, remote) =>
-      remote === undefined
-        ? first.listRefs(repo, prefix)
-        : retryLegacyPublickeyRead(
-            "ls-remote",
-            repo,
-            remote,
-            prefix,
-            baseEnv,
-            () => first.listRefs(repo, prefix, remote),
-            (env) => makeReader(env).listRefs(repo, prefix, remote),
-          ),
+      )
+    },
+    listRefs: (repo, prefix, remote) => {
+      if (remote === undefined) return first.listRefs(repo, prefix)
+      const { env, reader } = readerForCall()
+      return retryLegacyPublickeyRead(
+        "ls-remote",
+        repo,
+        remote,
+        prefix,
+        env,
+        () => reader.listRefs(repo, prefix, remote),
+        (env) => makeReader(env).listRefs(repo, prefix, remote),
+      )
+    },
+    fetchRemote: (repo, ref, remote) => readerForCall().reader.fetchRemote(repo, ref, remote),
+    compareAndSwapRemote: (repo, ref, next, expected, remote) =>
+      readerForCall().reader.compareAndSwapRemote(repo, ref, next, expected, remote),
+    publish: (repo, updates, remote) =>
+      remote === undefined ? first.publish(repo, updates) : readerForCall().reader.publish(repo, updates, remote),
   }
 }
 

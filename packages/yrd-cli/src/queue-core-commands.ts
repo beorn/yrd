@@ -609,8 +609,8 @@ export async function coreQueueCommand(
   const captured = await withRemoteSeam("declaration", declaration)
   if (captured === undefined) return noQueueOnTarget(targetLabel)
   const config = captured.config
-  const eventStore = withRemoteSeam("queueFormat", () => createEventStore(repo, config.target.remote, selection))
-  if ((await queueFormat(eventStore, config.target.branch)) !== "event") {
+  const eventStore = createEventStore(repo, config.target.remote, selection)
+  if ((await withRemoteSeam("queueFormat", () => queueFormat(eventStore, config.target.branch))) !== "event") {
     throw new Error(
       `${config.target.remote}#${config.target.branch} uses a legacy Record ref; expected ${queueRef(config.target.branch)}`,
     )
