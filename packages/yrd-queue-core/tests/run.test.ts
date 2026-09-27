@@ -958,7 +958,7 @@ it("records a missing event check log as stuck instead of retrying it (26089)", 
   })
 })
 
-/** @failure Event admission accepted on-submit and setup declarations without running either before landing.
+/** @failure Event admission or the queue-owned notification setup ran without the queue caller marker.
  * @level l3 @consumer queue operator and submitter
  */
 it("runs submit and merge checks with setup before each phase and retains both verdicts", async () => {
@@ -968,11 +968,13 @@ it("runs submit and merge checks with setup before each phase and retains both v
   await submitCommit(w, "task/two-phases", "one.txt")
   const options = await w.options({ exit: 0, on: ["submit", "merge"], setup: w.setupCommand(0) })
 
-  const outcome = await queueRun({ ...options, notify: [] })
+  const outcome = await queueRun(options)
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/two-phases"] })
-  expect(readFileSync(w.checkLog, "utf8").match(/setup cwd=/gu)).toHaveLength(2)
-  expect(readFileSync(w.checkLog, "utf8").trim().split("\n")).toEqual(
+  const checkLines = readFileSync(w.checkLog, "utf8").trim().split("\n")
+  expect(checkLines.filter((line) => line.startsWith("setup cwd="))).toHaveLength(3)
+  expect(checkLines.find((line) => /^setup cwd=.*\/notify repo=/u.test(line))).toMatch(/ queue=1$/u)
+  expect(checkLines).toEqual(
     expect.arrayContaining([
       expect.stringMatching(/^setup cwd=.* queue=1$/u),
       expect.stringMatching(/^check cwd=.* queue=1$/u),
