@@ -1036,12 +1036,12 @@ describe("the timing a one-row page prints under its row (24196)", () => {
     ).toBe(0)
 
     const lines = page.stdout().split("\n")
-    const row = lines.find((line) => line.includes("task/good") && line.includes("○ submitted")) ?? ""
+    const row = lines.find((line) => line.includes("task/good") && line.includes("○ queued")) ?? ""
     expect(row, page.stdout()).toContain("task/good")
     // AGE is real age; RUN is — with no attempt (item 5, 24196). The one-row timing line
-    // under `next:` is still the cell's duration word, never Age or Wait time.
+    // under the row's notice (`○ queued #1` since 25041's event rows) is the cell's duration word, never Age or Wait time.
     expect(row.trimEnd(), page.stdout()).toMatch(/\d+:\d+ \/ —\s*$/u)
-    const notice = lines.findIndex((line) => line.includes("next: "))
+    const notice = lines.findIndex((line) => /^○ queued #\d/u.test(line))
     expect(lines[notice + 1]?.trim(), page.stdout()).toMatch(/^waiting \d/u)
     expect(page.stdout()).not.toContain("Age")
     expect(page.stdout()).not.toContain("Wait time")
