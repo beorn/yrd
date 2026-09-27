@@ -167,18 +167,8 @@ type Delivery = "sent" | "none" | "failed"
  */
 const REFUSED_EXIT = 4
 
-/**
- * How many times one ending is handed to a name that gives no receipt: the
- * first telling and exactly one more round. Counted from the ending's own
- * records, so nothing new is stored.
- */
-const ATTEMPTS = 2
-
 /** How long one notify entry may run before the queue stops waiting for its answer. */
 const NOTIFY_TIMEOUT_MS = 60_000
-
-/** One entry's turn: which entry, how it went, and the reason when the transport refused it. */
-type Handed = Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>
 
 /**
  * Give one record to every `notify:` entry that wants this ending, in the order
@@ -239,6 +229,7 @@ export async function dispatchNotifications(
         {
           targetSha: context.targetSha,
           process: runner,
+          queueRun: true,
           ...(context.env === undefined ? {} : { env: context.env }),
           ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
           ...(context.setup === undefined
