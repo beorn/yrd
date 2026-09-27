@@ -16,8 +16,8 @@
  *   writes nothing to its journal until it ends, so any reading that called a
  *   quiet journal dead called every round longer than its threshold dead too.
  *
- * The queue core has no resident status wire (deleted at M6) and the watch
- * depends on no supervisor, so this is the whole instrument. TWO pure
+ * The runner ref supplies the remote status wire; these files add the local
+ * journal and service detail without consulting a supervisor. TWO pure
  * functions turn it into the runner's row on the flow page: {@link runnerWord}
  * picks one word from THE ONE WORD TABLE against one named threshold, and
  * {@link runnerLine} says what it holds, since when and whether it is alive.
@@ -26,9 +26,8 @@
  * is under a check.
  *
  * Off the queue's own machine there is no journal, and {@link RunnerFacts.absent}
- * carries the sentence that says where it looked. Never a blank, never a zero —
- * and never an invented status: the runner publishes none of its own yet, so
- * the row reads `?` there rather than a guess dressed as a reading.
+ * carries the sentence that says where it looked. The published claim supplies
+ * the phase and beat when present; an absent or unreadable claim is named.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
@@ -46,6 +45,7 @@ import {
 import { readQueueHealth, SERVICE } from "./queue-health.ts"
 import { clock, mediaDuration } from "./watch-format.ts"
 import { STATE_WORDS, type RunnerState } from "./watch-words.ts"
+import type { PublishedRunner } from "./runner-publication.ts"
 
 /** The run's `.pid` file name, as `claimWorktrees` in the core spells it. */
 const RUN_PID = ".pid"
@@ -159,8 +159,10 @@ export type RunnerFacts = Readonly<{
   absent?: string
   /** The newest run journal on this machine. */
   latest?: RunnerRun
-  /** What the service's own heartbeat document says: the ONE liveness reading. */
+  /** What the service's local heartbeat document says. */
   service: RunnerService
+  /** The remote runner ref, read with the queue refs; available on every machine. */
+  published?: PublishedRunner
   /** Round lock holder if currently held by an active process. */
   roundLockHolder?: RoundLockHolder
 }>
@@ -743,6 +745,11 @@ export function runnerWord(
   underCheck: boolean,
   stopped?: StopFact | null,
 ): RunnerState {
+  if (facts?.published?.signal === "silent") return "silent"
+  if (facts?.published?.signal === "fresh") {
+    const state = facts.published.claim?.State
+    if (state !== undefined) return state
+  }
   if (stopped !== undefined && stopped !== null) return stopped.change === null ? "paused" : "stuck"
   switch (facts?.service.kind) {
     case "stopped":
@@ -881,6 +888,8 @@ function runnerLineOf(
   const beat = latest === undefined ? undefined : since(latest.lastWriteAt)
   const at = latest === undefined ? {} : { at: latest.startedAt }
   const service = facts?.service
+  const published = facts?.published
+  const publishedClaim = published?.claim
   // 24470: a run that threw in its Git preamble is host-only detail, and this
   // line is where host-only detail goes. It earns no WORD of its own — the
   // ruled eight have none for it — but the journal's last Git row IS the
@@ -905,7 +914,12 @@ function runnerLineOf(
         ].join(" · "))
   // A health document that is there and is not a document decides no word, so
   // it would go unsaid entirely if it were not said here.
-  const detail = service?.kind === "unreadable" ? `${service.why} · ${found}` : found
+  const localDetail = service?.kind === "unreadable" ? `${service.why} · ${found}` : found
+  const publishedDetail =
+    published?.signal === "fresh" || published?.signal === "silent"
+      ? `published status from runner ref: ${published.signal}, ${publishedClaim?.State ?? "unreadable state"} since ${publishedClaim?.Since ?? "unknown"}, beat at ${publishedClaim?.At ?? "unknown"}`
+      : published?.why
+  const detail = publishedDetail === undefined ? localDetail : `${publishedDetail} · ${localDetail}`
   switch (state) {
     case "provisioning":
     case "checking":
@@ -980,6 +994,10 @@ function runnerLineOf(
       } else if (holding !== undefined) {
         durationText = `${word} ${since(holding.since)}`
         holdsText = `${holding.branch}${holding.subject === undefined ? "" : ` ${holding.subject}`}`
+      } else if (publishedClaim?.Holding !== undefined) {
+        const sinceAt = new Date(publishedClaim.Since)
+        durationText = `${word} ${since(sinceAt)}`
+        holdsText = publishedClaim.Holding
       } else {
         durationText = `${word} 0:00`
         holdsText = `${word}`
@@ -998,9 +1016,10 @@ function runnerLineOf(
     }
     case "stuck":
     case "paused": {
-      const stop = stopped as StopFact
-      const stoppedAt = new Date(stop.since)
-      const change = stop.change === null ? undefined : stop.change.slice(0, stop.change.lastIndexOf("@"))
+      const stop = stopped ?? undefined
+      const stoppedAt = new Date(stop?.since ?? publishedClaim?.Since ?? now.toISOString())
+      const change =
+        stop === undefined || stop.change === null ? undefined : stop.change.slice(0, stop.change.lastIndexOf("@"))
       return {
         ...at,
         // NOT the pause record's own sentence: that is the loud line at the top
@@ -1009,12 +1028,14 @@ function runnerLineOf(
         detail,
         duration: `${word} ${since(stoppedAt)}`,
         holds:
-          change === undefined
-            ? `paused: by ${stop.by === "" ? "an operator" : stop.by} since ${clock(stoppedAt)} · resume: yrd queue resume`
-            : // The spec's cure text, with ONE correction: the verb is
-              // `yrd queue withdraw` (cli.ts). There is no `yrd cancel`, and a
-              // cure a reader cannot run is worse than no cure at all.
-              `line stopped at ${change} since ${clock(stoppedAt)} — fix and yrd merge <fix>, or yrd queue withdraw ${change}, or yrd queue resume`,
+          stop === undefined
+            ? `${word} since ${clock(stoppedAt)}${publishedClaim?.Holding === undefined ? "" : ` on ${publishedClaim.Holding}`}`
+            : change === undefined
+              ? `paused: by ${stop.by === "" ? "an operator" : stop.by} since ${clock(stoppedAt)} · resume: yrd queue resume`
+              : // The spec's cure text, with ONE correction: the verb is
+                // `yrd queue withdraw` (cli.ts). There is no `yrd cancel`, and a
+                // cure a reader cannot run is worse than no cure at all.
+                `line stopped at ${change} since ${clock(stoppedAt)} — fix and yrd merge <fix>, or yrd queue withdraw ${change}, or yrd queue resume`,
         state,
       }
     }
@@ -1031,10 +1052,21 @@ function runnerLineOf(
         state,
       }
     }
+    case "silent": {
+      return {
+        ...at,
+        detail,
+        holds: `runner silent since ${publishedClaim?.At ?? "an unreadable instant"}; inspect the queue service on ${publishedClaim?.Runner ?? "the queue machine"}`,
+        state,
+      }
+    }
     case "unpublished": {
       return {
         detail,
-        holds: `no runner status published at origin (refs/yrd/${queue}/runner)`,
+        holds:
+          published?.signal === "unreadable"
+            ? `runner status unreadable: ${published.why ?? "the remote claim could not be read"}`
+            : `no runner status published at origin (refs/yrd/${queue}/runner)`,
         state,
       }
     }

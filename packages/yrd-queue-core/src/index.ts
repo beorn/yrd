@@ -30,8 +30,11 @@ export {
   pauseRef,
   queueRefPrefix,
   runIndexRef,
+  runnerRef,
   refOfChange,
 } from "./refs.ts"
+export { formatRunnerClaim, judgeRunnerClaim, parseRunnerClaim, RUNNER_CLAIM_STATES } from "./runner-claim.ts"
+export type { RunnerClaim, RunnerClaimJudgment, RunnerClaimState } from "./runner-claim.ts"
 export type { Change } from "./refs.ts"
 export { activateRunIndex, lookupRunIndex, runIndexPath, RUN_INDEX_CODES } from "./run-index.ts"
 export type { RunIndexLookup, RunIndexRecord } from "./run-index.ts"

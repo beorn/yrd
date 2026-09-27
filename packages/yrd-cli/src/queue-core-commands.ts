@@ -139,6 +139,7 @@ import {
   type QueueHealthDocument,
   type ServiceIntentFact,
   type QueueRunOutcome,
+  type RunnerClaim,
   type RoundLine,
   type PauseRecord,
   type RuntimeGitlinkOff,
@@ -171,6 +172,7 @@ import { stripAnsi } from "@silvery/ansi"
 import { STATE_WORDS, clock, diagnosticLines, firstLine, mediaDuration, timingLine } from "./watch-format.ts"
 import { readRunnerFacts, readRunnerService, type RunnerFacts } from "./watch-runner.ts"
 import { runnerOf } from "./watch-runner-reading.ts"
+import { readPublishedRunner, RunnerPublisher } from "./runner-publication.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
   DEFAULT_WINDOW_MS,
@@ -681,12 +683,30 @@ export async function coreQueueCommand(
     tier?: "normal" | "long",
     stopAtMs?: number,
     noCheck?: boolean,
+    onRecord?: (record: LogRecord) => void,
   ): Promise<QueueRunOutcome | ReadFailedRound | RetryExhaustedRound | undefined> => {
     let outcome: QueueRunOutcome
     try {
       assertPlainEventQueueConfig(config, "run")
+      const baseOptions = runOptions(
+        repo,
+        declared,
+        workdir,
+        selection,
+        options.env,
+        options.log,
+        options.populateReference,
+      )
       outcome = await queueRun({
-        ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
+        ...baseOptions,
+        ...(onRecord === undefined
+          ? {}
+          : {
+              render: (record: LogRecord) => {
+                baseOptions.render(record)
+                onRecord(record)
+              },
+            }),
         branchDeletionGraceMs:
           Math.max(1, request.command === "up" ? (request.intervalSeconds ?? 15) : 15) * 1000 + 60_000,
         foreground: request.command === "run" || request.command === "merge",
@@ -786,6 +806,7 @@ export async function coreQueueCommand(
       stallMs?: number
       stop?: AbortSignal
       noCheck?: boolean
+      onRecord?: (record: LogRecord) => void
       waiting?: Readonly<{
         onWait: (wait: RoundLockWait) => void
         onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>) => void
@@ -862,7 +883,7 @@ export async function coreQueueCommand(
       if (before !== undefined) return before
       let outcome: Awaited<ReturnType<typeof oneRound>>
       try {
-        outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck)
+        outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck, round.onRecord)
       } finally {
         // An otherwise empty round can still publish queue observations or
         // cleanup. Long foreground runs repeat rounds before command exit.
@@ -1552,6 +1573,7 @@ export async function coreQueueCommand(
       }
       /** The last document written, which every heartbeat restates with its clocks and the line's flow re-judged. */
       let stated: QueueHealthDocument | undefined
+      let publicationStatus = "unpublished: the runner has not attempted its remote claim"
       /**
        * THE LINE'S FLOW (25669), as the loop last knew it: read off each round's
        * outcome, marked open while a round runs, and judged against the declared
@@ -1620,7 +1642,12 @@ export async function coreQueueCommand(
        * written is visible as itself.
        */
       const writeHealth = (document: QueueHealthDocument): QueueHealthDocument => {
-        const written = writtenHealthDocument(document, writer, heartbeat, new Date())
+        const written = writtenHealthDocument(
+          { ...document, facts: { ...document.facts, publication: publicationStatus } },
+          writer,
+          heartbeat,
+          new Date(),
+        )
         stated = written
         persistHealth(written)
         return written
@@ -1647,6 +1674,85 @@ export async function coreQueueCommand(
             }; the declared health probe reads the last document written until its deadline, then reads it overdue`,
           )
         }
+      }
+      const runnerBeatMs = Math.max(30_000, heartbeat.intervalMs)
+      let runnerState: RunnerClaim["state"] = "idle"
+      let holding: string | undefined
+      let runnerSince = writer.startedAt
+      const runnerClaim = (at: Date = new Date()): RunnerClaim => ({
+        host: hostname(),
+        pid: writer.pid,
+        started: writer.startedAt,
+        at: at.toISOString(),
+        beatMs: runnerBeatMs,
+        state: runnerState,
+        ...(holding === undefined ? {} : { holding }),
+        since: runnerSince,
+      })
+      const publisher = new RunnerPublisher(
+        git,
+        config.target.remote,
+        config.target.branch,
+        (status) => {
+          const recovering = publicationStatus.startsWith("failed ")
+          publicationStatus =
+            status.kind === "failed" ? `failed ${status.cause} at ${status.at}` : `fresh at ${status.at}`
+          if (stated !== undefined && (status.kind === "failed" || recovering)) writeHealth(stated)
+        },
+        (line) => {
+          log?.warn?.(line)
+          io.stderr(`yrd: ${line}\n`)
+        },
+      )
+      const setRunnerState = (state: RunnerClaim["state"], selected?: string): void => {
+        if (runnerState === state && holding === selected) return
+        if (runnerState !== state) runnerSince = new Date().toISOString()
+        runnerState = state
+        holding = selected
+        void publisher.publish(runnerClaim())
+      }
+      const recordRunnerState = (record: LogRecord): void => {
+        const selected =
+          typeof record.branch === "string" && typeof record.head === "string"
+            ? `${record.branch}@${record.head}`
+            : undefined
+        if (record.kind === "check" && record.end === undefined) {
+          setRunnerState(record.name === "setup" ? "provisioning" : "checking", selected)
+        } else if (record.kind === "step" && record.end === undefined) {
+          setRunnerState(
+            record.phase === "merge"
+              ? "merging"
+              : record.name === "remove" ||
+                  record.name === "retain" ||
+                  record.name === "deprovision" ||
+                  record.name === "retire"
+                ? "deprovisioning"
+                : "provisioning",
+            selected,
+          )
+        } else if (record.kind === "merge") {
+          setRunnerState("merging", selected)
+        }
+      }
+      const runnerConflictExit = (): YrdCliExitCode | undefined => {
+        const conflict = publisher.conflict
+        if (conflict === undefined) return undefined
+        const cause = conflict.message
+        const base = lineDocument(lastStop, 0)
+        writeHealth({
+          ...base,
+          state: "unhealthy",
+          error: {
+            code: "runner-conflict",
+            cause,
+            resolution: [`Stop the other live runner named at ${publisher.ref} before restarting this service.`],
+          },
+          facts: {
+            ...base.facts,
+            "runner-conflict": `${conflict.other.host}/${String(conflict.other.pid)} ${conflict.other.started}`,
+          },
+        })
+        return 2
       }
       // WHO STARTED IT AND WHY (25430): the supervisor's start intent when it
       // gave one, else the plain default, as resume's is "pause lifted". Keyed
@@ -1890,6 +1996,10 @@ export async function coreQueueCommand(
           { exitCode: 0, from: gitlink.sha, gitlink: gitlink.path, reason: "gitlink-moved", to: now },
           moved,
         )
+        runnerState = "stopped"
+        holding = undefined
+        runnerSince = new Date().toISOString()
+        await publisher.publish(runnerClaim())
         return 0
       }
       // THE LINE AS IT STANDS AT START, read from the queue event chain and written before round 1 opens
@@ -1909,12 +2019,20 @@ export async function coreQueueCommand(
           `the line's stop cannot be read at start: ${error instanceof Error ? error.message : String(error)}`,
         )
       }
+      if (lastStop !== undefined) {
+        runnerState = "paused"
+        runnerSince = new Date().toISOString()
+      }
       writeHealth(lineDocument(lastStop, 0))
+      await publisher.publish(runnerClaim())
+      const startupConflict = runnerConflictExit()
+      if (startupConflict !== undefined) return startupConflict
       // THE HEARTBEAT (24523 D6): one timer for the whole loop, restating the last
       // document on a fixed interval through open rounds, idle sleeps, a stopped
       // line and the relaunch wait alike. Rounds are awaited child processes, so
       // the event loop is free to write, and the document is fresh exactly while
       // its writer lives. The `finally` clears it on every way out of the loop.
+      let nextRunnerBeat = Date.now() + runnerBeatMs
       const beat = setInterval(() => {
         // Re-judged, not merely restated (25669): a stall that develops inside one
         // long round — the 09-24 specimen was a single 50-minute round — pages on
@@ -1922,6 +2040,10 @@ export async function coreQueueCommand(
         const reading = flowReading()
         if (stated !== undefined) {
           writeHealth(reading === undefined ? stated : withLineFlow(stated, lastStop, reading, new Date(), readFailure))
+        }
+        if (Date.now() >= nextRunnerBeat) {
+          nextRunnerBeat = Date.now() + runnerBeatMs
+          void publisher.publish(runnerClaim(), true)
         }
         void notePhase()
       }, heartbeat.intervalMs)
@@ -1939,15 +2061,20 @@ export async function coreQueueCommand(
         clearInterval(beat)
         const intent = readUnitIntent("stop", options.env ?? process.env, writer.startedAt)
         if (intent.kind === "none") log?.warn?.(`stopping without a recorded reason: ${intent.why}`)
-        persistHealth(
-          gracefulStopHealthDocument(
-            SERVICE,
-            intent.kind === "intent" ? intent.fact : { since: new Date().toISOString() },
-            lastStop,
-          ),
+        const graceful = gracefulStopHealthDocument(
+          SERVICE,
+          intent.kind === "intent" ? intent.fact : { since: new Date().toISOString() },
+          lastStop,
         )
-        offTerminate()
-        terminate.reraise()
+        stated = graceful
+        persistHealth(graceful)
+        runnerState = "stopped"
+        holding = undefined
+        runnerSince = new Date().toISOString()
+        void publisher.publish(runnerClaim()).finally(() => {
+          offTerminate()
+          terminate.reraise()
+        })
       })
       /**
        * A round the service waits for — a `yrd merge` or `yrd queue run` in the
@@ -1977,6 +2104,8 @@ export async function coreQueueCommand(
       }
       try {
         for (;;) {
+          const conflict = runnerConflictExit()
+          if (conflict !== undefined) return conflict
           // A carrier that needs a remote ref owns its own startup condition.
           // Keep the process and heartbeat alive while @chief activates an old
           // queue's run index; no round may allocate a number before it exists.
@@ -2044,6 +2173,7 @@ export async function coreQueueCommand(
           }
           // The declaration again under the lock, as the target holds it now: a
           // correct edit at the target is the next round's, never a restart's.
+          if (lastStop === undefined) setRunnerState("provisioning")
           const ran = await lockedRound({
             before: async (declared) => {
               // The round opens now, judged against the threshold THIS round's
@@ -2061,7 +2191,10 @@ export async function coreQueueCommand(
             stallMs: request.roundLockStallMs,
             stop: request.stop,
             waiting,
+            onRecord: recordRunnerState,
           })
+          const afterRoundConflict = runnerConflictExit()
+          if (afterRoundConflict !== undefined) return afterRoundConflict
           if (typeof ran === "number") return ran
           if ("kind" in ran) {
             if (ran.kind === "retry-exhausted") {
@@ -2113,6 +2246,7 @@ export async function coreQueueCommand(
           if (lastRelease !== undefined) lastRelease = latestQueue.release?.id
           setChainPressure(latestQueue.writePressure)
           lastStuck = outcome.pendingStuck ?? outcome.stuck
+          setRunnerState(lastStuck.length > 0 ? "stuck" : lastStop === undefined ? "idle" : "paused")
           openedAt = undefined
           flow = flowAfterRound(flow, outcome, new Date())
           const document = writeHealth(lineDocument(lastStop, sleepMs))
@@ -2133,6 +2267,12 @@ export async function coreQueueCommand(
       } finally {
         clearInterval(beat)
         offTerminate()
+        if (stopped() && publisher.conflict === undefined) {
+          runnerState = "stopped"
+          holding = undefined
+          runnerSince = new Date().toISOString()
+          await publisher.publish(runnerClaim())
+        }
       }
     }
     case "list": {
@@ -2213,13 +2353,16 @@ export async function coreQueueCommand(
         // change has left the line is over, and a reader must not see it.
         const pause = reading.pause
         const stopped = stopFact(pause)
-        const runner = await readRunnerFacts(workdir)
-        const service = runner.service
+        const published = await readPublishedRunner(git, config.target.branch, config.target.remote, reading.runnerTip)
+        const localRunner = await readRunnerFacts(workdir)
+        const runner: RunnerFacts = { ...localRunner, published }
+        const service = localRunner.service
         const runnerStatus =
           options.json === true
             ? {
-                state: runnerOf({ unfiltered, runner, stopped }, new Date()).state,
+                state: runnerOf({ unfiltered, runner: localRunner, stopped }, new Date()).state,
                 service: service.kind === "beating" ? { kind: service.kind } : { kind: service.kind, why: service.why },
+                published,
               }
             : undefined
         // The table and stop come from the same authority read as this listing.
@@ -3960,6 +4103,8 @@ function areRefMapsEqual(
 
 export type EventListingResult = Readonly<{
   format: "event"
+  /** One status claim read with the queue refs, outside change authority and observation fences. */
+  runnerTip?: string
   all: readonly Row[]
   document: readonly Row[]
   history: ReadonlyMap<string, readonly EventHistoryRow[]>
@@ -4012,6 +4157,8 @@ export async function readEventListing(
   }> = {},
 ): Promise<EventListingResult> {
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
+  const runnerRefName = `${queueRefPrefix(config.target.branch)}/runner`
+  const changePrefix = `${queuePrefix}changes/`
   const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}`
   const cache = eventListingCaches.get(cacheKey)
   const nowMs =
@@ -4029,13 +4176,26 @@ export async function readEventListing(
       },
       checked: [],
       fence: {
-        prefixes: ["refs/heads/", queuePrefix],
+        // The runner beats independently. The observer compares every selected
+        // prefix against the remote, so the broad queue prefix would still
+        // fence the runner even after removing it from refs below.
+        prefixes: [
+          ...new Set([
+            "refs/heads/",
+            changePrefix,
+            ...[...qRefs.keys()].filter((ref) => !ref.startsWith(changePrefix)),
+          ]),
+        ],
         refs: [...qRefs, ...bRefs].map(([ref, oid]) => ({ ref, oid })),
       },
     })
 
   // 1. Fetch event refs first
-  const queueRefs = await listRefs(queuePrefix, store)
+  const listedRefs = await listRefs(queuePrefix, store)
+  const runnerTip = listedRefs.get(runnerRefName)
+  // A heartbeat moves on its own cadence. It must not invalidate change-state
+  // caching or make an otherwise stable Git observation fence fail.
+  const queueRefs = new Map([...listedRefs].filter(([ref]) => ref !== runnerRefName))
 
   const eventRefsUnchanged =
     cache !== undefined && cache.targetOid === targetOid && areRefMapsEqual(cache.queueRefs, queueRefs)
@@ -4080,6 +4240,7 @@ export async function readEventListing(
   ) {
     return {
       ...cache.reading,
+      ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
       observation: await observe(cache.queueRefs, cache.branchRefs),
       journals: readJournals(join(workdir, "logs")),
     }
@@ -4114,6 +4275,7 @@ export async function readEventListing(
     cache.lastHeadListingAt = headListingAt
     return {
       ...cache.reading,
+      ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
       observation: await observe(cache.queueRefs, branchRefs),
       journals: readJournals(join(workdir, "logs")),
     }
@@ -4235,6 +4397,7 @@ export async function readEventListing(
   }
   const reading: EventListingResult = {
     format: "event",
+    ...(runnerTip === undefined ? {} : { runnerTip }),
     all,
     document,
     history: titledHistory,

@@ -233,7 +233,11 @@ describe("`yrd list` prints the watch's page, once", () => {
     ])
     expect(document["source"]).toBe("local")
     expect(document["overrides"]).toEqual([])
-    expect(document["runner"]).toEqual({ state: "unpublished", service: { kind: "absent", why: expect.any(String) } })
+    expect(document["runner"]).toEqual({
+      state: "unpublished",
+      service: { kind: "absent", why: expect.any(String) },
+      published: { signal: "absent", why: expect.any(String) },
+    })
     expect((document as { observation: unknown }).observation).toMatchObject({ contract: "native", notices: [] })
     const [row] = document["changes"] as readonly Record<string, unknown>[]
     expect(row).toMatchObject({ branch: "task/one", position: 1, state: "queued", submitter: "@dev/10" })
@@ -369,6 +373,7 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
     expect(documentOf(flagged)["runner"]).toEqual({
       state: "unpublished",
       service: { kind: "absent", why: expect.any(String) },
+      published: { signal: "absent", why: expect.any(String) },
     })
     expect(documentOf(positional)["changes"], positional.report).toEqual([])
     // And 22301's own specimen, the other way round: a non-matching state must
@@ -416,8 +421,36 @@ describe("the JSON runner is independent of selected change rows (#24570)", () =
     const filteredDoc = JSON.parse(filtered.stdout) as Record<string, unknown>
     expect(populatedDoc["changes"]).toHaveLength(1)
     expect(filteredDoc["changes"]).toEqual([])
-    expect(populatedDoc["runner"]).toEqual({ state: "idle", service: { kind: "beating" } })
+    expect(populatedDoc["runner"]).toEqual({
+      state: "idle",
+      service: { kind: "beating" },
+      published: { signal: "absent", why: expect.any(String) },
+    })
     expect(filteredDoc["runner"]).toEqual(populatedDoc["runner"])
+  })
+
+  /** @failure An off-machine reader could see only its missing local journal, even while the queue published a fresh runner claim. */
+  it("reads the published runner on populated and zero-row documents, then judges its age", async () => {
+    const work = await queueWithOneChange()
+    const git = gitIn(work)
+    const tree = (await git(["mktree"], "")).trim()
+    const at = new Date().toISOString()
+    const body = `yrd runner claim\n\nRunner: host/42\nStarted: ${at}\nAt: ${at}\nBeat: 60000ms\nState: checking\nHolding: task/one@${"a".repeat(40)}\nSince: ${at}\n`
+    const claim = (await git(["commit-tree", tree, "-m", body])).trim()
+    await git(["push", "--quiet", "origin", `${claim}:refs/yrd/main/runner`])
+
+    const populated = await yrd(work, { color: false }, "list", "--json")
+    const filtered = await yrd(work, { color: false }, "list", "--json", "__no_such_change__")
+    expect(populated.exitCode, populated.report).toBe(0)
+    expect(filtered.exitCode, filtered.report).toBe(0)
+    const first = JSON.parse(populated.stdout) as { runner: Record<string, unknown> }
+    const second = JSON.parse(filtered.stdout) as { runner: Record<string, unknown> }
+    expect(first.runner).toMatchObject({
+      published: { signal: "fresh", claim: { Runner: "host/42", State: "checking" } },
+    })
+    expect(second.runner.published).toEqual(first.runner.published)
+    expect(first.runner.state).toBe("unpublished")
+    expect(first.runner.service).toMatchObject({ kind: "absent" })
   })
 })
 
