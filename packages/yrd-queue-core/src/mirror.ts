@@ -111,8 +111,8 @@ function readMirrorStamp(path: string): MirrorStamp | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
-  } catch {
-    throw new Error(`${stamp} has no complete remote/refspec freshness record`)
+  } catch (error) {
+    throw new Error(`${stamp} has no complete remote/refspec freshness record`, { cause: error })
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(`${stamp} has no complete remote/refspec freshness record`)

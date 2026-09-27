@@ -1385,7 +1385,7 @@ it("refuses event teardown until an executor exists", async () => {
   const w = await world()
   await createWorldEventQueue(w)
   await expect(queueRun({ ...(await w.options({ exit: 0 })), notify: [], teardown: "true" })).rejects.toThrow(
-    /teardown:.*25065/u,
+    /cannot run an event queue with teardown: this declaration feature has no event runner executor; remove teardown from \.yrd\.yml to run on an event queue/u,
   )
 })
 

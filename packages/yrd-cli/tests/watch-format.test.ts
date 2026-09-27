@@ -112,18 +112,18 @@ describe("ref-write diagnostic lines", () => {
 })
 
 describe("the one glyph table", () => {
-  it("shows event statuses literally while preserving legacy queue words", () => {
+  // 25041: a queue is its events, so no row carries a legacy word (`submitted`) or a legacy state (`deferred` is
+  // an event type; a deferred change stays `checking`, events.ts). Their rows went with the legacy reader.
+  it("shows event statuses literally", () => {
     expect(stateWord({ state: "queued", format: "event" })).toBe("queued")
     expect(stateWord({ state: "verifying", format: "event" })).toBe("verifying")
     expect(stateWord({ state: "cancelled", format: "event" })).toBe("cancelled")
-    expect(stateWord({ state: "queued" })).toBe("submitted")
     expect(stateGlyph({ state: "verifying", format: "event" })).toBe("◉")
   })
 
   it("overlays the working glyph on any state while a check runs, and keeps the state's glyph otherwise", () => {
     expect(stateGlyph({ state: "queued" })).toBe("○")
     expect(stateGlyph({ state: "failed" })).toBe("×")
-    expect(stateGlyph({ state: "deferred" as any })).toBe("☾")
     expect(
       stateGlyph({ live: { check: "typecheck", phase: "submit", run: "q-x", since: new Date() }, state: "queued" }),
     ).toBe("◉")

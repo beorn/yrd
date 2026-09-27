@@ -3,8 +3,6 @@ import { accessSync, constants, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import pkg from "../package.json" with { type: "json" }
 
-/** The git-yrd distribution version, embedded by the production bundle. */
-export const YRD_VERSION = pkg.version
 const GIT_TIMEOUT_MS = 5_000
 const DISTRIBUTION_PACKAGE_NAME = "git-yrd"
 
@@ -24,6 +22,22 @@ export function yrdSourceRoot(start = import.meta.dirname): string | undefined {
     directory = parent
   }
 }
+
+export function readDistributionVersion(sourceRoot = yrdSourceRoot()): string {
+  if (sourceRoot !== undefined) {
+    try {
+      const candidate = JSON.parse(readFileSync(join(sourceRoot, "package.json"), "utf8")) as { version?: unknown }
+      if (typeof candidate.version === "string") return candidate.version
+    } catch {
+      // silent-fallback-allow: malformed or unreadable distribution package.json
+      // falls back to the embedded package version.
+    }
+  }
+  return pkg.version
+}
+
+/** The git-yrd distribution version, read from the distribution package.json or embedded package fallback. */
+export const YRD_VERSION = readDistributionVersion()
 
 function sourceGit(args: readonly string[]): { status: number; stdout: string } {
   // `git yrd` may inherit GIT_DIR/GIT_WORK_TREE/GIT_PREFIX from its caller.
