@@ -53,6 +53,11 @@ export function runIndexRef(queue: string): string {
   return `${queueRefPrefix(queue)}/runs`
 }
 
+/** The queue's event chain. */
+export function queueRef(queue: string): string {
+  return `${queueRefPrefix(queue)}/queue`
+}
+
 /** The operational pause ref one queue owns. */
 export function pauseRef(queue: string): string {
   return `${queueRefPrefix(queue)}/pause`

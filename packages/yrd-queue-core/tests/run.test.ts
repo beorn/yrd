@@ -38,6 +38,7 @@ import {
   drop,
   gitIn,
   mergedByRun,
+  lookupRunIndex,
   pauseRef,
   queueRef,
   queueRefPrefix,
@@ -344,6 +345,13 @@ it("runs a check-free event change through one atomic merge", async () => {
   const outcome = await queueRun(options)
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-run"] })
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([expect.objectContaining({ kind: "run-number", number: 1, run: outcome.run })]),
+  )
+  expect(await lookupRunIndex(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", 1)).toMatchObject({
+    kind: "known",
+    record: { id: outcome.run },
+  })
   // The line as the round read it, before its merge (25669): what the service
   // judges a stall from. Nothing was judged before this round.
   expect(outcome.line).toEqual({
@@ -363,6 +371,18 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(message).toContain("Issue: @i/10-yrd/1")
   expect(message).toContain("Submitter: @dev/2")
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
+})
+
+it("leaves an idle event round unnumbered and the next index value at one (26193)", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [], failed: [], stuck: [] })
+  expect(logRecords(outcome).some((record) => record.kind === "run-number")).toBe(false)
+  expect(await lookupRunIndex(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", 1)).toEqual({
+    kind: "unknown",
+    number: 1,
+  })
 })
 
 /** @failure One malformed change chain ended the service round before healthy changes could merge (25658).

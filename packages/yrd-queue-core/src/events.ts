@@ -1,11 +1,13 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
+import { open } from "gitomic"
 import { Conflict } from "./git.ts"
 import { listRefs, openEvents } from "./git.ts"
 import { readEventChain, readEventChains } from "./event-read.ts"
 import { EVENT_READ_LIMIT } from "./event-read.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
-import { overrideRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
+import { overrideRef, pauseRef, queueRef, queueRefPrefix, runIndexRef, type Change } from "./refs.ts"
+export { queueRef } from "./refs.ts"
 import { readM2Pause, type PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
 import { createLegacyBackend, gitIn, refAt } from "./git.ts"
@@ -23,6 +25,13 @@ import {
   type OverrideWrite,
 } from "./override.ts"
 import { deleteCandidateRefsForShas } from "./candidate-refs.ts"
+import {
+  nextRunNumber,
+  primeRunIndexKeptRef,
+  runIndexPath,
+  writeRunIndexGenesis,
+  type RunIndexIdentity,
+} from "./run-index.ts"
 
 export const CHANGE_STATUSES = [
   "draft",
@@ -296,10 +305,6 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
 }
 
 /** Queue life is a chain at one reserved leaf, distinct from branch changes. */
-export function queueRef(queue: string): string {
-  return `${queueRefPrefix(queue)}/queue`
-}
-
 /** One chain for a branch's entire sequence of changes. */
 export function changesRef(queue: string, branch: string): string {
   assertBranch(branch)
@@ -858,6 +863,7 @@ export async function createEventQueue(
     )
   }
   assertPlainEventQueueConfig(config, "create")
+  const indexTip = await writeRunIndexGenesis(store, at)
   const result = await (
     await openEvents({ ...store, ref, writer: "yrd" })
   ).append(
@@ -872,7 +878,7 @@ export async function createEventQueue(
         keeps: [commit],
       },
     ],
-    { expect: null },
+    { expect: null, also: [{ ref: runIndexRef(queue), expect: null, oid: indexTip }] },
   )
   const created = result.events[0]?.id
   if (created === undefined) throw new Error(`${ref} in ${store.repo}: created event was not written`)
@@ -1716,7 +1722,24 @@ export async function appendChangeEvent(
   if (write.writer === QUEUE_RUN_WRITER) {
     throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
   }
-  return appendDecision(store, queue, branch, selectedTip, write)
+  return (await appendDecision(store, queue, branch, selectedTip, write)).event
+}
+
+/** Allocate a run number in the same leased push as this round's first change event. */
+export async function appendNumberedChangeEvent(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+  selectedTip: string,
+  write: ChangeWrite,
+  identity: RunIndexIdentity,
+): Promise<Readonly<{ event: string; number: number }>> {
+  if (write.writer === QUEUE_RUN_WRITER) {
+    throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
+  }
+  const result = await appendDecision(store, queue, branch, selectedTip, write, undefined, identity)
+  if (result.number === undefined) throw new Error(`${runIndexRef(queue)}: numbered publication returned no run number`)
+  return { event: result.event, number: result.number }
 }
 
 /** The sole event append that attributes a merge to this queue run; both refs are leased. */
@@ -1737,6 +1760,33 @@ export async function appendPublishedMerge(
   }>,
   onPrepared?: (oid: Oid) => void,
 ): Promise<string> {
+  return (await publishedMergeDecision(store, queue, branch, selectedTip, request, onPrepared)).event
+}
+
+/** Allocate a number when a merge is the round's first durable publication. */
+export async function appendNumberedPublishedMerge(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+  selectedTip: string,
+  request: Parameters<typeof appendPublishedMerge>[4],
+  identity: RunIndexIdentity,
+  onPrepared?: (oid: Oid) => void,
+): Promise<Readonly<{ event: string; number: number }>> {
+  const result = await publishedMergeDecision(store, queue, branch, selectedTip, request, onPrepared, identity)
+  if (result.number === undefined) throw new Error(`${runIndexRef(queue)}: numbered merge returned no run number`)
+  return { event: result.event, number: result.number }
+}
+
+async function publishedMergeDecision(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+  selectedTip: string,
+  request: Parameters<typeof appendPublishedMerge>[4],
+  onPrepared?: (oid: Oid) => void,
+  numbered?: RunIndexIdentity,
+): Promise<Readonly<{ event: string; number?: number }>> {
   if (request.commit === request.targetExpect) {
     throw new TypeError(`published merge needs the target to move from ${request.targetExpect}`)
   }
@@ -1794,6 +1844,7 @@ export async function appendPublishedMerge(
       },
     },
     onPrepared,
+    numbered,
   )
 }
 
@@ -1804,7 +1855,8 @@ async function appendDecision(
   selectedTip: string,
   write: ChangeWrite,
   onPrepared?: (oid: Oid) => void,
-): Promise<string> {
+  numbered?: RunIndexIdentity,
+): Promise<Readonly<{ event: string; number?: number }>> {
   const queueTip = (await readEventQueue(store, queue)).tip
   const history = await readChangeEvents(store, queue, branch, selectedTip)
   const input = changeInput(write.type, {
@@ -1835,6 +1887,73 @@ async function appendDecision(
       ? [{ ref: queueRef(queue), expect: queueTip, oid: queueTip }, ...(write.also ?? [])]
       : write.also
   const chain = await openEvents({ ...store, ref, writer: write.writer ?? "yrd" })
+  if (numbered !== undefined) {
+    const indexRef = runIndexRef(queue)
+    if (
+      numbered.id === "" ||
+      numbered.host === "" ||
+      numbered.actor === "" ||
+      Number.isNaN(Date.parse(numbered.startedAt))
+    ) {
+      throw new TypeError(`${indexRef}: run identity needs id, startedAt, host and actor`)
+    }
+    await primeRunIndexKeptRef(store, queue)
+    const index = await open({
+      repo: store.repo,
+      remote: store.remote,
+      ref: indexRef,
+      backend: store.backend,
+      writer: "yrd",
+      ...(store.retryBudgetMs === undefined ? {} : { retryBudgetMs: store.retryBudgetMs }),
+    })
+    let stagedEvent: Oid | undefined
+    let allocated: number | undefined
+    let updates: readonly AlsoRef[] = []
+    const fetch = [...new Set([ref, queueRef(queue), ...(also ?? []).map((update) => update.ref)])]
+    await index.transact(
+      async (map, _base, attempt) => {
+        if (attempt?.tips.get(ref) !== selectedTip) {
+          throw new Conflict(
+            `${ref} moved before the numbered decision: expected ${selectedTip}, read ${attempt?.tips.get(ref) ?? "absent"}`,
+            { refs: [ref] },
+          )
+        }
+        const number = nextRunNumber(await map.get("next"), indexRef)
+        if (!Number.isSafeInteger(number + 1)) {
+          throw new Error(`${indexRef}: next ${number} exceeds the safe run-number range`)
+        }
+        const path = runIndexPath(number)
+        if (await map.has(path)) throw new Error(`${indexRef}:${path} already exists while next is ${number}`)
+        const staged = await chain.stage(planned, { expect: selectedTip })
+        stagedEvent = staged.head
+        allocated = number
+        onPrepared?.(staged.head)
+        updates = [...(also ?? []), ...((await write.prepareAlso?.(staged.head)) ?? [])]
+        for (const update of updates) {
+          if (attempt?.tips.get(update.ref) !== (update.expect ?? undefined)) {
+            throw new Conflict(
+              `${update.ref} moved before the numbered decision: expected ${update.expect ?? "absent"}, read ${attempt?.tips.get(update.ref) ?? "absent"}`,
+              { refs: [update.ref] },
+            )
+          }
+        }
+        map.set("next", String(number + 1))
+        map.set(path, JSON.stringify({ ...numbered, firstQueueTip: queueTip }))
+      },
+      `allocate run for ${ref}`,
+      {
+        fetch,
+        beside: () => {
+          if (stagedEvent === undefined) throw new Error(`${indexRef}: numbered event was not staged`)
+          return [{ ref, expect: selectedTip, oid: stagedEvent }, ...updates]
+        },
+      },
+    )
+    if (stagedEvent === undefined || allocated === undefined) {
+      throw new Error(`${indexRef}: numbered publication landed without an event or number`)
+    }
+    return { event: stagedEvent, number: allocated }
+  }
   // A transport error can arrive after the atomic push landed. The merge
   // publisher needs the exact event OID before that call so its remote read can
   // distinguish this attempt from another writer with identical trailers.
@@ -1850,7 +1969,7 @@ async function appendDecision(
         })()
   const written = result.events.findLast((event) => event.type === write.type)?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: ${write.type} event was not written`)
-  return written
+  return { event: written }
 }
 
 /** End a branch and delete its name in the same leased publish. */

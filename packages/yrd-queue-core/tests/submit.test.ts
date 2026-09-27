@@ -6,6 +6,7 @@ import { afterAll, describe, expect, it, vi } from "vitest"
 import { createProcess, type Process } from "@yrd/process"
 import * as verifying from "../src/verifying.ts"
 import {
+  appendNumberedChangeEvent,
   changesRef,
   createEventQueue,
   createEventStore,
@@ -13,7 +14,9 @@ import {
   inspectSubmit,
   issueOf,
   listChangeHistories,
+  lookupRunIndex,
   queueRef,
+  runIndexRef,
   readConfig,
   readStatus,
   refAt,
@@ -28,7 +31,7 @@ afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
 type World = Readonly<{ git: Git; work: string; remote: string; target: string }>
-async function world(): Promise<World> {
+async function world(createQueue = true): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-core-submit-"))
   roots.push(root)
   const remote = join(root, "remote.git")
@@ -48,7 +51,9 @@ async function world(): Promise<World> {
   const target = (await git(["rev-parse", "HEAD"])).trim()
   const config = await readConfig(git, target, { branch: "main", remote: "origin" })
   if (config === undefined) throw new Error(`fixture target ${target} lost .yrd.yml`)
-  await createEventQueue(createEventStore(work, "origin", selectionFor(git)), "main", target, config, new Date())
+  if (createQueue) {
+    await createEventQueue(createEventStore(work, "origin", selectionFor(git)), "main", target, config, new Date())
+  }
   return { git, remote, target, work }
 }
 async function branchWithCommit(w: World, branch: string, file: string): Promise<string> {
@@ -76,6 +81,71 @@ function store(w: World) {
   return createEventStore(w.work, "origin", selectionFor(w.git))
 }
 describe("event submit", () => {
+  it("births the queue and empty run index together; an occupied index lease leaves no queue (26193)", async () => {
+    const born = await world()
+    expect(await remoteRefs(born)).toEqual(["refs/heads/main", queueRef("main"), runIndexRef("main")])
+    expect(await lookupRunIndex(createEventStore(born.work, "origin", selectionFor(born.git)), "main", 1)).toEqual({
+      kind: "unknown",
+      number: 1,
+    })
+
+    const rejected = await world(false)
+    await rejected.git(["push", "--quiet", "origin", `HEAD:${runIndexRef("main")}`])
+    const config = await readConfig(rejected.git, rejected.target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture lost queue config")
+    await expect(
+      createEventQueue(
+        createEventStore(rejected.work, "origin", selectionFor(rejected.git)),
+        "main",
+        rejected.target,
+        config,
+        new Date(),
+      ),
+    ).rejects.toThrow()
+    expect(await remoteRefs(rejected)).toEqual(["refs/heads/main", runIndexRef("main")])
+  })
+
+  it("allocates the first run number with its first durable change event (26193)", async () => {
+    const w = await world()
+    const head = await branchWithCommit(w, "task/numbered", "numbered.txt")
+    await submit(w.git, "origin", {
+      branch: "task/numbered",
+      submitter: "author",
+      target: { branch: "main", remote: "origin" },
+    })
+    const status = await readStatus(store(w), "main", "task/numbered")
+    if (status.tip === undefined) throw new Error("fixture submission has no change tip")
+    const before = await w.git([
+      "ls-remote",
+      "--refs",
+      "origin",
+      changesRef("main", "task/numbered"),
+      runIndexRef("main"),
+    ])
+    const written = await appendNumberedChangeEvent(
+      store(w),
+      "main",
+      "task/numbered",
+      status.tip,
+      { type: "verifying", at: new Date(), commit: head },
+      { id: "opaque-run-1", startedAt: "2026-09-27T12:00:00.000Z", host: "hh", actor: "yrd" },
+    )
+    expect(written.number).toBe(1)
+    expect(written.event).toMatch(/^[0-9a-f]{40}$/u)
+    expect(await lookupRunIndex(store(w), "main", 1)).toMatchObject({
+      kind: "known",
+      record: { id: "opaque-run-1" },
+    })
+    const after = await w.git([
+      "ls-remote",
+      "--refs",
+      "origin",
+      changesRef("main", "task/numbered"),
+      runIndexRef("main"),
+    ])
+    expect(after).not.toBe(before)
+  })
+
   /** @failure Maintenance admits a submit after the queue is stopped. */
   it("refuses maintenance before publishing the branch or event, including preview", async () => {
     const w = await world()
@@ -271,7 +341,7 @@ describe("event submit", () => {
     ).rejects.toThrow("target.txt")
     expect((await w.git(["status", "--porcelain"])).trim()).toBe("")
     expect(await refAt(w.git, "refs/heads/task/conflict")).toBe(head)
-    expect(await remoteRefs(w)).toEqual(["refs/heads/main", queueRef("main")])
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main", queueRef("main"), runIndexRef("main")])
     expect((await remoteRefs(w)).filter((ref) => ref.includes("/changes/"))).toEqual([])
   })
 
@@ -284,7 +354,7 @@ describe("event submit", () => {
       target: { remote: "origin", branch: "main" },
     })
     await expect(attempt).rejects.toThrow("nothing new to submit")
-    expect(await remoteRefs(w)).toEqual(["refs/heads/main", queueRef("main")])
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main", queueRef("main"), runIndexRef("main")])
   })
 
   it("refuses unrelated history without treating Git failures as a missing base", async () => {
@@ -309,7 +379,7 @@ describe("event submit", () => {
         target: { remote: "origin", branch: "main" },
       }),
     ).rejects.toThrow("missing-object")
-    expect(await remoteRefs(w)).toEqual(["refs/heads/main", queueRef("main")])
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main", queueRef("main"), runIndexRef("main")])
   })
 
   /** @failure Submit publishes a branch without its opened event. */

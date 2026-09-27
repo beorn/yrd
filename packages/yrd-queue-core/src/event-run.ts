@@ -1,11 +1,14 @@
 /** Run a change from the event projection, leasing its merge with the queue. */
 import { mkdirSync, readFileSync } from "node:fs"
+import { hostname } from "node:os"
 import { dirname, join } from "node:path"
 import { Conflict, RetriesExhausted, openEvents } from "./git.ts"
 import { readEventAt } from "./event-read.ts"
 
 import {
   appendChangeEvent,
+  appendNumberedChangeEvent,
+  appendNumberedPublishedMerge,
   appendPublishedMerge,
   changesRef,
   expireQueueOverrides,
@@ -37,7 +40,7 @@ import {
   recordProgramVerdict,
   recordSynthesizedPassResults,
 } from "./program-root.ts"
-import { queueRefPrefix } from "./refs.ts"
+import { queueRefPrefix, runIndexRef } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { publishCheckedChildren } from "./publication.ts"
 import { prepareWorktree, SETUP, SetupFailed } from "./worktree.ts"
@@ -210,6 +213,7 @@ export async function eventQueueRun(
   }
   const queue = options.target.branch
   const { git, gitOptions, hooksPath, log, selected, url } = prepared
+  const runIdentity = { id: log.id, startedAt: new Date().toISOString(), host: hostname(), actor: "yrd" }
   const writeStuck = (
     branch: string,
     head: string,
@@ -293,13 +297,42 @@ export async function eventQueueRun(
     }
   }
   const owned = new Set<string>()
+  let runNumber: number | undefined
+  const recordRunNumber = (number: number): void => {
+    if (runNumber !== undefined) throw new Error(`${runIndexRef(queue)}: run ${log.id} was numbered twice`)
+    runNumber = number
+    log.write({ kind: "run-number", number, queue, ref: runIndexRef(queue) })
+  }
   const appendOwnedChange = async (...args: Parameters<typeof appendChangeEvent>): Promise<string> => {
-    const oid = await appendChangeEvent(...args)
+    const oid =
+      runNumber === undefined
+        ? await (async () => {
+            const written = await appendNumberedChangeEvent(...args, runIdentity)
+            recordRunNumber(written.number)
+            return written.event
+          })()
+        : await appendChangeEvent(...args)
     owned.add(oid)
     return oid
   }
   const appendOwnedMerge = async (...args: Parameters<typeof appendPublishedMerge>): Promise<string> => {
-    const oid = await appendPublishedMerge(...args)
+    const oid =
+      runNumber === undefined
+        ? await (async () => {
+            const [store, targetQueue, branch, selectedTip, request, onPrepared] = args
+            const written = await appendNumberedPublishedMerge(
+              store,
+              targetQueue,
+              branch,
+              selectedTip,
+              request,
+              runIdentity,
+              onPrepared,
+            )
+            recordRunNumber(written.number)
+            return written.event
+          })()
+        : await appendPublishedMerge(...args)
     owned.add(oid)
     return oid
   }
