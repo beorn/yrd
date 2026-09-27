@@ -10,7 +10,7 @@
  */
 
 import { spawn } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -32,6 +32,40 @@ afterAll(() => {
   }
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
+
+/**
+ * Who has the lock file open, from /proc: the diagnosis a "still held" failure owes. This row went red twice in
+ * yrd CI (#66, #72) and passed 30/30 locally, so its failure must name the holder instead of only saying true.
+ */
+function openers(path: string): string {
+  if (process.platform !== "linux") return `(no /proc on ${process.platform})`
+  const found: string[] = []
+  for (const pid of readdirSync("/proc").filter((entry) => /^\d+$/u.test(entry))) {
+    let fds: string[]
+    try {
+      fds = readdirSync(`/proc/${pid}/fd`)
+    } catch {
+      continue // silent-fallback-allow: a process that exited or is not ours has no fds to read; the scan continues.
+    }
+    for (const fd of fds) {
+      let target: string
+      try {
+        target = readlinkSync(`/proc/${pid}/fd/${fd}`)
+      } catch {
+        continue // silent-fallback-allow: the fd closed between listing and reading it.
+      }
+      if (target !== path) continue
+      let cmd = "?"
+      try {
+        cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ").trim()
+      } catch {
+        // silent-fallback-allow: the opener exited while we read it; its pid is still reported.
+      }
+      found.push(`pid ${pid} fd ${fd}: ${cmd}`)
+    }
+  }
+  return found.length === 0 ? `no process has ${path} open` : found.join("; ")
+}
 
 function lockFile(): string {
   const root = mkdtempSync(join(tmpdir(), "yrd-round-lock-"))
@@ -99,7 +133,8 @@ describe("the round lock across processes", () => {
     // The instrument before the conclusion: the child it started still runs.
     expect(running(child), `child ${String(child)}`).toBe(true)
 
-    expect(isFlockHeld(path)).toBe(false)
+    const held = isFlockHeld(path)
+    expect(held, held ? `held after the holder died; openers: ${openers(path)}` : "").toBe(false)
     const next = tryAcquireFlock(path)
     expect(next, `the lock is still held while child ${String(child)} runs`).not.toBeNull()
     next?.release()
