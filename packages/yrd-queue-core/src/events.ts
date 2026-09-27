@@ -937,6 +937,7 @@ export async function readEventOpsWithRefs(
   git: Git,
   queue: string,
   _targetSha: string,
+  listed?: Readonly<{ refs: ReadonlyMap<string, Oid>; validatedPauseTip: string | null }>,
 ): Promise<Readonly<{ ops: EventOps; listedQueueTip: string | null; pauseTip: string | null }>> {
   const projected = await readEventQueue(store, queue)
   if (projected.opsCutover === undefined || projected.ops === undefined) {
@@ -947,14 +948,16 @@ export async function readEventOpsWithRefs(
       `${store.remote}#${queue}: ${queueRef(queue)} has no event ops authority; expected an ops-cutover event`,
     )
   }
-  const refs = await listRefs(queueRefPrefix(queue), store)
+  const refs = listed?.refs ?? (await listRefs(queueRefPrefix(queue), store))
   const pauseTip = refs.get(pauseRef(queue)) ?? null
   if (refs.has(overrideRef(queue))) {
     throw new Error(
       `${store.remote}#${queue}: legacy override ref ${overrideRef(queue)} remains after ${projected.opsCutover}`,
     )
   }
-  if (pauseTip !== null) {
+  // An identical OID carries the exact M2 body admission already validated.
+  // A changed tip needs the full content check before the caller leases it.
+  if (pauseTip !== null && listed?.validatedPauseTip !== pauseTip) {
     const fence = await readM2Pause(
       store.remote === undefined ? gitIn(store.repo, undefined, store.selection) : git,
       store.remote,
