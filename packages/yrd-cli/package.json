@@ -8,14 +8,21 @@
   },
   "dependencies": {
     "@bearly/flock": "^0.1.1",
-    "@silvery/ansi": "^0.24.0",
-    "@silvery/commander": "^0.24.0",
+    "@silvery/ansi": "^0.25.0",
+    "@silvery/commander": "^0.25.0",
     "@yrd/bay": "workspace:*",
     "@yrd/process": "workspace:*",
     "@yrd/queue-core": "workspace:*",
     "gitomic": "^0.4.0",
     "loggily": "^0.11.0",
     "react": "^19.2.0",
-    "silvery": "^0.24.2"
+    "silvery": "^0.25.0"
+  },
+  "devDependencies": {
+    "@termless/core": "^0.9.1",
+    "@termless/ghostty": "^0.9.1",
+    "@termless/ghostty-native": "^0.9.1",
+    "@termless/xtermjs": "^0.9.1",
+    "git-super": "^0.1.0"
   }
 }

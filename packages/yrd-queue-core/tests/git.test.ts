@@ -8,6 +8,7 @@ import { gitIn } from "../src/git.ts"
 import * as gitRunner from "../src/git.ts"
 import { openLog, readRunLog } from "../src/log.ts"
 import { gitSuperExecution } from "../src/verifying.ts"
+import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
 it("requires a Git runner's fixed selection before opening Gitomic", () => {
   const selected = {
@@ -736,7 +737,7 @@ exec ${JSON.stringify(nativeGit)} "$@"
       root,
       undefined,
       {
-        executable: resolve(import.meta.dirname, "../../../../git-super/bin/git-super"),
+        executable: join(gitSuperBin, "git-super"),
         contract: "root-v1",
         scope: "local",
         origin: "actual binary fixture",

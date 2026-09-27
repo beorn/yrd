@@ -90,13 +90,10 @@ import { appendChangeEvent, appendPublishedMerge } from "../src/events.ts"
 import { eventNoticeOwed } from "../src/event-run.ts"
 import { settledBaseCommit } from "../src/settled-base.ts"
 import { prepareWorktree, SetupFailed } from "../src/worktree.ts"
+import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
 const roots: string[] = []
 // The real queue child needs GitSuper even when the worker's PATH is sealed.
-const gitSuperBin = resolve(import.meta.dirname, "../../../../git-super/bin")
-if (!existsSync(gitSuperBin)) {
-  throw new Error(`git-super bin directory not found at ${gitSuperBin}`)
-}
 const CHANGES = queueRefPrefix("main")
 const PAUSE_REF = pauseRef("main")
 // A rival writer's stuck record is a whole incident, as every real one is: since
