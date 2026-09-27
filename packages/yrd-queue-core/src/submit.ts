@@ -23,6 +23,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Conflict, createEventStore, listRefs, openEvents, selectionFor, type Event } from "./git.ts"
+import { readEventChain } from "./event-read.ts"
 import { targetName, type Target } from "./config.ts"
 import { ABSENT, legacyStore, recordCommit } from "./legacy-records.ts"
 import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, type Git } from "./git.ts"
@@ -269,7 +270,7 @@ export async function inspectSubmitAtHead(
       const ref = changesRef(request.target.branch, request.branch)
       const chain = await openEvents({ ...store, ref })
       if ((await chain.head()) !== null) {
-        refuseMergedSubmit(await chain.events({ limit: 1024 }), ref, root, request.branch, head)
+        refuseMergedSubmit(await readEventChain(chain), ref, root, request.branch, head)
       }
     }
     throw new Error(

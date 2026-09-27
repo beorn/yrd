@@ -10,6 +10,7 @@ import { createMemBackend } from "gitomic/mem"
 import { Conflict, open } from "gitomic"
 import type { GitomicBackend } from "gitomic"
 import { gitIn } from "../src/git.ts"
+import { readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
 import { pauseRef } from "../src/refs.ts"
 import { encodeOps, type OpsState } from "../src/ops-state.ts"
@@ -1954,19 +1955,76 @@ describe("the queue-format boundary", () => {
     await expect(readEventQueueWithChanges(location, "lab")).rejects.toThrow(/refs\/yrd\/lab\/queue.*must be created/)
   })
 
-  it("rejects a queue chain beyond the complete-read limit through the combined read", async () => {
+  it("reads a queue chain beyond one page through the combined read", async () => {
     const { store, location } = remoteMemStore("yrd-long-concurrent-list")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
     const queueTip = await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
     const branch = await openEvents({ ...store, ref: queueRef("lab") })
-    await branch.append(
-      Array.from({ length: 1024 }, () => input("resumed")),
-      { expect: queueTip },
+    let tip = queueTip
+    for (let i = 0; i < 1024; i++) {
+      const written = await branch.append(
+        [
+          {
+            type: "started",
+            props: [
+              ["Queue", tip],
+              ["Time", "2026-09-22T14:00:00.000Z"],
+            ],
+          },
+        ],
+        { expect: tip },
+      )
+      if (written.head === null) throw new Error("fixture start event was not written")
+      tip = written.head
+    }
+    expect((await readEventQueueWithChanges(location, "lab")).queue.created).toBe(queueTip)
+  })
+
+  it("pages a listed change chain beyond 1024 events without dropping its opening", async () => {
+    const { store, location } = remoteMemStore("yrd-long-change-list")
+    const branch = "task/long"
+    const ref = changesRef("lab", branch)
+    const chain = await openEvents({ ...store, ref })
+    const written = await chain.append(
+      Array.from({ length: 1025 }, () => input("marker")),
+      { expect: null },
     )
-    await expect(readEventQueueWithChanges(location, "lab")).rejects.toThrow(
-      /refs\/yrd\/lab\/queue.*exceeds 1024 events/,
-    )
+    const first = written.events[0]?.id
+    if (first === undefined) throw new Error("fixture did not write the opening event")
+    const listed = await readEventChains(ref.slice(0, -branch.length), location)
+    expect(listed.get(ref)).toHaveLength(1025)
+    expect(listed.get(ref)?.[0]?.id).toBe(first)
+  })
+
+  it("reports event-chain pressure at three quarters of Gitomic's write cap", async () => {
+    const { store, location } = remoteMemStore("yrd-chain-pressure")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    let tip = await seedEventQueue(location, "lab", commit, new Date(Date.now() - 60_000))
+    const chain = await openEvents({ ...store, ref: queueRef("lab") })
+    const append = async (): Promise<void> => {
+      const written = await chain.append(
+        [
+          {
+            type: "started",
+            props: [
+              ["Queue", tip],
+              ["Time", new Date().toISOString()],
+            ],
+          },
+        ],
+        { expect: tip },
+      )
+      if (written.head === null) throw new Error("fixture start event was not written")
+      tip = written.head
+    }
+    for (let i = 0; i < 766; i++) await append()
+    expect((await readEventQueue(location, "lab")).writePressure).toBeUndefined()
+    await append()
+    const pressure = (await readEventQueue(location, "lab")).writePressure
+    expect(pressure).toMatchObject({ count: 768, limit: 1024, warningAt: 768 })
+    expect(Date.parse(pressure?.projectedCrossing ?? "")).toBeGreaterThan(Date.now())
   })
 
   it("ignores and unignores only an existing open change with a reason and actor", async () => {

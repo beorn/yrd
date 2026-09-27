@@ -12,6 +12,16 @@ function refCommands(text: string): string[] {
 }
 
 describe("the legacy Gitomic boundary", () => {
+  it("routes every production event-chain read through the named Yrd read policy", () => {
+    // @source-grep: the P0 direct notice read fell back to Gitomic's default 50;
+    // the policy is the only production site allowed to call these raw readers.
+    const sites = readdirSync(new URL("../src/", import.meta.url))
+      .filter((name) => name.endsWith(".ts"))
+      .flatMap((name) => [...source(name).matchAll(/(?:\.events|\bchainsUnder)\s*\(/gu)].map(() => name))
+    expect(sites.length).toBeGreaterThan(0)
+    expect(sites.filter((name) => name !== "event-read.ts")).toEqual([])
+  })
+
   it("owns every legacy queue ref read and write", () => {
     // Source-text checks are invisible to import-based test selection. Enumerate
     // every ref-command site so a new site requires an explicit boundary review.

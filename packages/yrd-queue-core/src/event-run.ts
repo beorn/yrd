@@ -2,6 +2,7 @@
 import { mkdirSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { Conflict, RetriesExhausted, openEvents } from "./git.ts"
+import { readEventAt } from "./event-read.ts"
 
 import {
   appendChangeEvent,
@@ -458,10 +459,15 @@ export async function eventQueueRun(
   }
   const tellDirect = async (commit: string, eventId: string): Promise<void> => {
     if (!options.notify?.some((entry) => entry.on.includes("merged-direct"))) return
-    const observed = (await (await openEvents({ ...store, ref: queueRef(queue) })).events({ limit: 1024 })).find(
-      (event) => event.id === eventId,
-    )
-    if (observed === undefined) throw new Error(`event queue ${url}#${queue}: direct notice has no event ${eventId}`)
+    const ref = queueRef(queue)
+    const recorded = await readEventQueue(store, queue)
+    if (recorded.observed[commit]?.id !== eventId) {
+      throw new Error(`event queue ${url}#${queue}: direct notice lost observed ${commit} at ${eventId}`)
+    }
+    const observed = await readEventAt(await openEvents({ ...store, ref }), eventId, ref, store.repo)
+    if (observed.type !== "observed") {
+      throw new Error(`${ref} in ${store.repo}: direct notice event ${eventId} is ${observed.type}, expected observed`)
+    }
     for (const entry of options.notify ?? []) {
       if (!entry.on.includes("merged-direct")) continue
       const state = await readEventQueue(store, queue)
