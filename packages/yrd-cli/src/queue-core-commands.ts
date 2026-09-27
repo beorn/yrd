@@ -3098,7 +3098,7 @@ function describeRun(
  *
  * Read from this round's own log rather than the remote: the `end()` step
  * that pushed a change to `stuck` wrote the complete incident to `outcome.log`
- * in the same call (run.ts), so this is that run's own record of why, never a
+ * in the same call (event-run.ts), so this is that run's own record of why, never a
  * second, possibly-later reading of the change ref.
  */
 function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
@@ -3121,7 +3121,7 @@ function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
       filled(row.next) &&
       filled(row.owner)
     if (!complete) {
-      // Every stuck ending writes a complete incident (run.ts `stuckWrite`);
+      // Every stuck ending writes a complete incident (event-run.ts `writeStuck`);
       // this is the guard against a future ending that stops doing so, not an
       // expected path — it still names the branch rather than saying nothing.
       return `stuck ${branch}: no complete incident in this run's log (${outcome.log}); see \`yrd queue show ${branch}\``

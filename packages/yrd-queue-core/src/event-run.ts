@@ -57,7 +57,8 @@ import {
   overrideNotice,
 } from "./with-notify.ts"
 import { changeName } from "./refs.ts"
-import { transportFaultIn } from "./setup-transport.ts"
+import { setupStuckCode, setupStuckNext, transportFaultIn } from "./setup-transport.ts"
+import { incidentTrailers, type Incident } from "./incident.ts"
 import { readRootChanges } from "./root-changes.ts"
 import { mergedBy } from "./git.ts"
 import { settledBaseCommit } from "./settled-base.ts"
@@ -207,6 +208,30 @@ export async function eventQueueRun(
   }
   const queue = options.target.branch
   const { git, gitOptions, hooksPath, log, selected, url } = prepared
+  const writeStuck = (
+    branch: string,
+    head: string,
+    cause: Readonly<{ code: string; subject: string; via: string; next: string; saw?: string }>,
+  ): void => {
+    const incident: Incident = {
+      code: cause.code,
+      subject: cause.subject.replace(/\s+/gu, " ").trim(),
+      via: `${cause.via} in yrd queue ${queue} [${log.id}]`,
+      evidence: log.path,
+      next: `${cause.next}; ${stuckCures(branch)}`,
+      owner: "the queue operator",
+    }
+    incidentTrailers(incident)
+    log.write({
+      kind: "change",
+      branch,
+      head,
+      decision: "stuck",
+      reason: incident.subject,
+      ...incident,
+      ...(cause.saw === undefined ? {} : { saw: cause.saw }),
+    })
+  }
   const runTransaction = async <T>(
     site: QueueRunEventRetryExhausted["site"],
     marker: string,
@@ -856,7 +881,13 @@ export async function eventQueueRun(
     ...(roundLine.lastJudgedAt === undefined ? {} : { lastJudgedAt: roundLine.lastJudgedAt }),
   })
   read.line = roundLine
-  const writeStuckStop = async (branch: string, head: string, event: string, reason: string): Promise<void> => {
+  const writeStuckStop = async (
+    branch: string,
+    head: string,
+    event: string,
+    reason: string,
+    next?: string,
+  ): Promise<void> => {
     const current = await readEventOps(store, git, queue, target)
     if (
       current.stop?.cause === "stuck" &&
@@ -882,7 +913,7 @@ export async function eventQueueRun(
       cause: "stuck",
       change: { branch, head, event },
       reason,
-      next: stuckCures(branch),
+      next: next === undefined ? stuckCures(branch) : `${next}; ${stuckCures(branch)}`,
     })
   }
   const standing = remaining.find((change) => change.status === "stuck")
@@ -900,12 +931,11 @@ export async function eventQueueRun(
         stuckEvent.id,
         standing.reason ?? "queue could not judge this change",
       )
-      log.write({
-        kind: "change",
-        branch: standing.branch,
-        head: standing.commit,
-        decision: "stuck",
-        reason: standing.reason ?? "queue could not judge this change",
+      writeStuck(standing.branch, standing.commit, {
+        code: "yrd-stuck-held",
+        subject: standing.reason ?? "queue could not judge this change",
+        via: "held change",
+        next: "inspect the standing stuck event and repair its cause before resuming the queue",
       })
       return result(2, observedMerged, [], [standing.branch])
     }
@@ -973,7 +1003,13 @@ export async function eventQueueRun(
       })
       await writeStuckStop(branch, head, ended, oneLine)
       await tell(branch, "stuck", ended)
-      log.write({ kind: "change", branch, head, decision: "stuck", reason: oneLine, saw: child.evidence })
+      writeStuck(branch, head, {
+        code: "yrd-publication-refused",
+        subject: oneLine,
+        via: "component publication",
+        next: "repair the named component remote/ref, then resume the queue",
+        saw: child.evidence,
+      })
       return result(2, observedMerged, failed, [branch])
     }
     let preparedMerge: string | undefined
@@ -1192,7 +1228,12 @@ export async function eventQueueRun(
             })
             await writeStuckStop(branch, head, ended, stuckReason)
             await tell(branch, "stuck", ended)
-            log.write({ kind: "change", branch, head, decision: "stuck", reason: stuckReason })
+            writeStuck(branch, head, {
+              code: "yrd-publication-refused",
+              subject: stuckReason,
+              via: "merge publication",
+              next: "inspect the publication refusal and remote refs, then resume the queue",
+            })
             return result(2, observedMerged, failed, [branch])
           }
         }
@@ -1626,9 +1667,20 @@ export async function eventQueueRun(
           reason: setupDecision.reason,
           ...(attemptedRetry && setupDecision.kind === "stuck" ? { retry: { retried: 1 as const } } : {}),
         })
-        if (setupDecision.kind === "stuck") await writeStuckStop(branch, head, ended, setupDecision.reason)
+        if (setupDecision.kind === "stuck") {
+          await writeStuckStop(branch, head, ended, setupDecision.reason, setupStuckNext(setupDecision.fault))
+        }
         await tell(branch, setupDecision.kind, ended)
-        log.write({ kind: "change", branch, head, decision: setupDecision.kind, reason: setupDecision.reason })
+        if (setupDecision.kind === "stuck") {
+          writeStuck(branch, head, {
+            code: setupStuckCode(setupDecision.fault),
+            subject: `${setupDecision.reason}${setupDecision.fault === undefined ? "" : `; ${setupDecision.fault.signature}: ${setupDecision.fault.line}`}`,
+            via: "setup",
+            next: setupStuckNext(setupDecision.fault),
+          })
+        } else {
+          log.write({ kind: "change", branch, head, decision: setupDecision.kind, reason: setupDecision.reason })
+        }
         if (setupDecision.kind === "stuck") return result(2, observedMerged, failed, [branch])
         failed.push(branch)
         continue
@@ -1668,7 +1720,12 @@ export async function eventQueueRun(
         })
         await writeStuckStop(branch, head, ended, reason)
         await tell(branch, "stuck", ended)
-        log.write({ kind: "change", branch, head, decision: "stuck", reason: stoppedCheck.name })
+        writeStuck(branch, head, {
+          code: "yrd-check-unresolved",
+          subject: reason,
+          via: `check ${stoppedCheck.name}`,
+          next: "inspect the named check log and repair the check or its environment, then resume the queue",
+        })
         return result(2, observedMerged, failed, [branch])
       }
       if (stoppedCheck?.result === "deferred") {
