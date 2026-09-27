@@ -14,26 +14,22 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, readQueue, submit, type Git } from "../src/index.ts"
+import {
+  createEventQueue,
+  createEventStore,
+  gitIn,
+  listChanges,
+  listRefs,
+  readConfig,
+  readDrafts,
+  submit,
+  type Git,
+} from "../src/index.ts"
 
 const roots: string[] = []
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
-
-type Draft = Readonly<{
-  branch: string
-  head: string
-  committedAt?: Date
-  author?: string
-  movedSinceSubmit: boolean
-}>
-type DraftReading = Readonly<{ dated: readonly Draft[]; undated: readonly Draft[] }>
-type ReadDrafts = (
-  git: Git,
-  read: Awaited<ReturnType<typeof readQueue>>,
-  options: Readonly<{ targetSha: string; since?: Date }>,
-) => Promise<DraftReading>
 
 describe("the one definition of a draft (24196, A2-set-v3)", () => {
   it("is a head nobody submitted AT THAT HEAD, off the target, outside yrd/* and preserve/*, inside the window, read in three batches with the ancestry walk over present in-window heads only", async () => {
@@ -73,6 +69,10 @@ describe("the one definition of a draft (24196, A2-set-v3)", () => {
     await dated(work, ago(5 * hour))(["commit", "--quiet", "--allow-empty", "-m", "the target moves on"])
     await git(["push", "--quiet", "origin", "main"])
     const target = (await git(["rev-parse", "HEAD"])).trim()
+    const store = createEventStore(work, "origin", git.selection)
+    const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture target lost .yrd.yml")
+    await createEventQueue(store, "main", target, config, now)
     const commitOn = async (name: string, at: Date, author = "yrd"): Promise<string> => {
       await git(["checkout", "--quiet", name])
       writeFileSync(join(work, `${name.replaceAll("/", "-")}-${String(at.getTime())}.txt`), `${name}\n`)
@@ -95,9 +95,9 @@ describe("the one definition of a draft (24196, A2-set-v3)", () => {
     // Submitted once, then pushed again: the new head has no change ref of its own.
     await pushed("task/moved", ago(3 * hour))
     await submitted("task/moved")
-    // Move the submitted branch from another clone, so the queue reader does
-    // not already have the new object. readQueue must fetch submitted branch
-    // heads before readDrafts can date this moved-since-submit draft.
+    // Move the submitted branch from another clone, so this reader does not
+    // already have the new object. The watch loader fetches unread draft heads
+    // before the next read can date this moved-since-submit draft.
     await seed(["clone", "--quiet", remote, other])
     const elsewhere = gitIn(other)
     await elsewhere(["config", "user.email", "queue@yrd.test"])
@@ -124,10 +124,15 @@ describe("the one definition of a draft (24196, A2-set-v3)", () => {
     }
     const absent = (await elsewhere(["rev-parse", "task/elsewhere"])).trim()
 
-    const read = await readQueue(git, "origin", "main", target)
-    const derivation = ((await import("../src/index.ts")) as unknown as Readonly<Record<string, unknown>>)[
-      "readDrafts"
-    ] as ReadDrafts | undefined
+    await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", moved])
+    const refs = await listRefs("refs/heads/", store)
+    const changes = await listChanges(store, "main")
+    const read = {
+      heads: new Map([...refs].map(([ref, head]) => [ref.slice("refs/heads/".length), head])),
+      changes: [...changes].flatMap(([branch, change]) =>
+        change.commit === undefined ? [] : [{ change: { branch, head: change.commit } }],
+      ),
+    }
     const calls: { command: string; input: string }[] = []
     const counted: Git = async (args, input) => {
       calls.push({ command: args[0] ?? "", input: input ?? "" })
@@ -135,10 +140,7 @@ describe("the one definition of a draft (24196, A2-set-v3)", () => {
     }
     const draftsFor = async (since: Date | undefined) => {
       calls.length = 0
-      const reading =
-        derivation === undefined
-          ? { dated: [], undated: [] }
-          : await derivation(counted, read, { targetSha: target, ...(since === undefined ? {} : { since }) })
+      const reading = await readDrafts(counted, read, { targetSha: target, ...(since === undefined ? {} : { since }) })
       return {
         batches: calls.map((call) => call.command),
         dated: reading.dated.map((draft) => ({ ...draft, committedAt: draft.committedAt?.toISOString() })),
