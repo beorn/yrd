@@ -5,12 +5,12 @@
     "": {
       "name": "git-yrd",
       "dependencies": {
-        "@silvery/ansi": "^0.24.0",
-        "@silvery/commander": "^0.24.0",
-        "@silvery/scope": "^0.24.0",
+        "@silvery/ansi": "^0.25.0",
+        "@silvery/commander": "^0.25.0",
+        "@silvery/scope": "^0.25.0",
         "loggily": "github:beorn/loggily#1d92a8d782daf8e9d2a5131d7dec988f2f1d0a0b",
         "react": "^19.2.0",
-        "silvery": "^0.24.2",
+        "silvery": "^0.25.0",
         "zod": "^4.4.3",
       },
       "devDependencies": {
@@ -36,15 +36,15 @@
       "version": "0.0.1",
       "dependencies": {
         "@bearly/flock": "^0.1.1",
-        "@silvery/ansi": "^0.24.0",
-        "@silvery/commander": "^0.24.0",
+        "@silvery/ansi": "^0.25.0",
+        "@silvery/commander": "^0.25.0",
         "@yrd/bay": "workspace:*",
         "@yrd/process": "workspace:*",
         "@yrd/queue-core": "workspace:*",
         "gitomic": "^0.4.0",
         "loggily": "^0.11.0",
         "react": "^19.2.0",
-        "silvery": "^0.24.2",
+        "silvery": "^0.25.0",
       },
       "devDependencies": {
         "@termless/core": "^0.9.1",
@@ -58,7 +58,7 @@
       "name": "@yrd/process",
       "version": "0.0.1",
       "dependencies": {
-        "@silvery/scope": "^0.24.0",
+        "@silvery/scope": "^0.25.0",
         "git-super": "^0.1.0",
         "loggily": "^0.11.0",
         "zod": "^4.4.3",
@@ -199,17 +199,17 @@
 
     "@shikijs/vscode-textmate": ["@shikijs/vscode-textmate@10.0.2", "", {}, "sha512-83yeghZ2xxin3Nj8z1NMd/NCuca+gsYXswywDy5bHvwlWL8tpTQmzGeUuHd9FC3E/SBEMvzJRwWEOz5gGes9Qg=="],
 
-    "@silvery/ansi": ["@silvery/ansi@0.24.0", "", { "dependencies": { "@silvery/color": "0.24.0", "string-width": "^8.2.2" } }, "sha512-LpPrwg1KFM+AKy0NHvWLtYDBxu3BvESOwe9pJAeXrQwAw/fcQGP9dP9tUq2bt6bw05NCNYx7FTJFLZ410RW5fg=="],
+    "@silvery/ansi": ["@silvery/ansi@0.25.0", "", { "dependencies": { "@silvery/color": "0.25.0", "string-width": "^8.2.2" } }, "sha512-HSamER48g8Mz1AT+AylBwT9TiRSXBjCsONYd/D1msLoUBlMCvgohWZCZilhNJmy1O8FNJno+cE3WY34pJ4DV6Q=="],
 
-    "@silvery/color": ["@silvery/color@0.24.0", "", {}, "sha512-wavyqnqsg2bsEKrChOmiHZvlElgzjjv9EdELLMmkp+3iZmpM8R9jchPwdPTXvW4FQwRz8cQAPH74taBIGywtww=="],
+    "@silvery/color": ["@silvery/color@0.25.0", "", {}, "sha512-oLmbimH3HB+zCjeR3piqoKlsGVenvAHYnDzpmFiMXcN6I/g+P2WgyfDX+O01BNNh8abjnb4tAkaPf22L7IJeqg=="],
 
     "@silvery/command": ["@silvery/command@0.23.2", "", {}, "sha512-/JhPzi2VTlleF+uYREkV5SdZm5CfimGCwq3XoKBTXbozK+p4zOFyoRoFGPBnToqQCYQb6x0R8nGX9ag3HZjfbw=="],
 
-    "@silvery/commander": ["@silvery/commander@0.24.0", "", { "dependencies": { "@silvery/ansi": "0.24.0", "commander": ">=15.0.0", "zod": ">=3.0.0" } }, "sha512-/Hv3GyLppOK+uA+TMvTLwiNNSYu2rb9axzs+f8OgQtqLA9RdV3KxXV0+RMim1hpMnuxt/DO2H6lQkjzbn/syng=="],
+    "@silvery/commander": ["@silvery/commander@0.25.0", "", { "dependencies": { "@silvery/ansi": "0.25.0", "commander": ">=15.0.0", "zod": ">=3.0.0" } }, "sha512-blk0lzrtmRNxXU1bTyDuIWymQ0cQMVBgdI234JajkB1LiIlRUtEGXD2SIQo26+C3gXHkQVW7BsojwtgUz0HQuQ=="],
 
-    "@silvery/scope": ["@silvery/scope@0.24.0", "", {}, "sha512-5OiIbcnOr3lELatBzTvg41/N3B91P8UA9vl1LPdid7ofLpvhcfYLbYmIlyAk/OYNFHVGuNiWqd6FImxO0CC6JA=="],
+    "@silvery/scope": ["@silvery/scope@0.25.0", "", {}, "sha512-KfH/vsTcLjMC19ksnhMMNZYFU7EUj3y3uIRtKbnbrSRkne01SBypxeJ0cUSR/ebfaaPVjr4f5Me2BKysFcPY8g=="],
 
-    "@silvery/syntax": ["@silvery/syntax@0.24.0", "", { "dependencies": { "shiki": "^4.3.1" } }, "sha512-tb0ToMc900X/1aT74Qk7CCZvDwjfo4GjjTlzFCLVKpDYVdOShPxT7KgNXQvadqIohY9oPtSSFKsmeKfjEvEt9Q=="],
+    "@silvery/syntax": ["@silvery/syntax@0.25.0", "", { "dependencies": { "shiki": "^4.3.1" } }, "sha512-agXF7MkJIFyqnMS5seCTf5fZ2jkz1shHO6h3dh2BbSUFCFMGyj28qUmHirDNChv2YTS5iyMnFqs7mQ04uy0D3g=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
@@ -433,7 +433,7 @@
 
     "siginfo": ["siginfo@2.0.0", "", {}, "sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g=="],
 
-    "silvery": ["silvery@0.24.2", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.24.0", "@silvery/commander": "0.24.0", "@silvery/syntax": "0.24.0", "@termless/core": ">=0.9.1 <1.0.0", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": ">=0.9.1 <1.0.0", "@termless/ghostty-native": ">=0.9.1 <1.0.0", "@termless/test": ">=0.9.1 <1.0.0", "@termless/xtermjs": ">=0.9.1 <1.0.0", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"], "bin": { "silvery": "dist/bin/silvery.js" } }, "sha512-LQe2LGwpK4UeN+KwHQP9pr0knWxxttTQTwxrBXa6k03orl9TlBXMv/+awsdqRaO7wx5IDK37d6ZHO7pSBzJfLw=="],
+    "silvery": ["silvery@0.25.0", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.25.0", "@silvery/commander": "0.25.0", "@silvery/syntax": "0.25.0", "@termless/core": ">=0.9.1 <1.0.0", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": ">=0.9.1 <1.0.0", "@termless/ghostty-native": ">=0.9.1 <1.0.0", "@termless/test": ">=0.9.1 <1.0.0", "@termless/xtermjs": ">=0.9.1 <1.0.0", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"], "bin": { "silvery": "dist/bin/silvery.js" } }, "sha512-6srsCixCQ+JbErcrxI44cgySNF2gxa8O/r6hsMMpuhVmfsNl3nLNsk3mPYLyCr4Um2cgi0QhaP1e5J5AJQCCbQ=="],
 
     "slice-ansi": ["slice-ansi@8.0.0", "", { "dependencies": { "ansi-styles": "^6.2.3", "is-fullwidth-code-point": "^5.1.0" } }, "sha512-stxByr12oeeOyY2BlviTNQlYV5xOj47GirPr4yA1hE9JCtxfQN0+tVbkxwCtYDQWhEKWFHsEK48ORg5jrouCAg=="],
 
@@ -514,6 +514,8 @@
     "git-super/silvery": ["silvery@0.23.2", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.23.2", "@silvery/commander": "0.23.2", "@termless/core": "^0.8.1", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": "^0.8.2", "@termless/ghostty-native": "^0.8.1", "@termless/test": "^0.8.1", "@termless/xtermjs": "^0.8.1", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"] }, "sha512-jAdZJi0PkNJ3iibn6kdlqkXSsjrOi32gPpsNPerUp8ilxfy2WodtZ+FgCQ75CPSbjYbSmwtev+pvL0AHwYw3Vg=="],
 
     "playwright/fsevents": ["fsevents@2.3.2", "", { "os": "darwin" }, "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA=="],
+
+    "silvery/loggily": ["loggily@github:beorn/loggily#1d92a8d", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-1d92a8d", "sha512-lvo1aCXuF91rptD3AP5urG/hmkzidekunoykiIdN1fZYif+Vtv7cRxO1UWtE4mv9MvAIBjR2gLC7jG3vBAfJeA=="],
 
     "@yrd/bay/git-super/@bearly/flock": ["@bearly/flock@0.1.0", "", {}, "sha512-L9qQPH3Df+xKaFfOoYOamyL00CmRltbvilx0XfXzylFw76MRMN4SrhydxrVc4ROsZ5nkVZE0prl3G3zv3ZOH5w=="],
 
