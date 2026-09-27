@@ -133,6 +133,8 @@ export type QueueConfig = Readonly<{
   archiveAfter: "never"
   /** Whole-branch Bun.Glob patterns that suppress unsubmitted drafts. */
   ignore: readonly string[]
+  /** Target-owned command that resolves a raw issue reference to its canonical identity. */
+  issueResolver?: readonly string[]
   checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
   setup?: string
@@ -179,12 +181,14 @@ export function parseConfig(
   const notify = readNotify(raw.notify)
   const setup = optionalString(raw, "setup")
   const teardown = optionalString(raw, "teardown")
+  const issueResolver = readIssueResolver(raw.issueResolver)
   return {
     archiveAfter: readArchiveAfter(raw["archive-after"]),
     blob,
     checks: readChecks(raw.checks),
     health: readHealth(raw.health),
     ignore: readIgnore(raw.ignore),
+    ...(issueResolver === undefined ? {} : { issueResolver }),
     notify,
     setup,
     teardown,
@@ -408,7 +412,28 @@ function readChecks(value: unknown): readonly CheckSpec[] {
 // consumer, and one nobody reads is still refused. A fresh worktree has
 // submodules and nothing else, so the target says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
-const TOP_KEYS = ["archive-after", "checks", "health", "ignore", "setup", "teardown", "notify"] as const
+const TOP_KEYS = [
+  "archive-after",
+  "checks",
+  "health",
+  "ignore",
+  "issueResolver",
+  "setup",
+  "teardown",
+  "notify",
+] as const
+
+function readIssueResolver(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return undefined
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((part) => typeof part !== "string" || part === "" || /[\r\n\0]/.test(part))
+  ) {
+    throw new Error(".yrd.yml issueResolver: must be a non-empty argv list of single-line strings")
+  }
+  return value as string[]
+}
 
 /**
  * A key the declaration used to read, and where its meaning went. A typo is

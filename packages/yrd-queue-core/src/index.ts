@@ -159,7 +159,7 @@ export { directMergeCommits, directMergeLine, eventDirectMergeCommits } from "./
 export { refuseTarget, inspectSubmit, inspectSubmitAtHead, freshnessLine, submit, issueOf } from "./submit.ts"
 export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
 export type { PinCarrierPin, PreparedPinCarrier } from "./pin-carrier.ts"
-export type { IssueResolution } from "./submit.ts"
+export type { IssueResolution, IssueResolver } from "./submit.ts"
 export { withdraw, NothingToWithdraw } from "./withdraw.ts"
 export type { WithdrawRequest, Withdrawn, WithdrawnChange } from "./withdraw.ts"
 export {
