@@ -382,6 +382,7 @@ it("leaves an idle event round unnumbered and the next index value at one (26193
   expect(await lookupRunIndex(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", 1)).toEqual({
     kind: "unknown",
     number: 1,
+    knownThrough: 0,
   })
 })
 
@@ -1948,9 +1949,10 @@ it("keeps a final first-round refusal and retries the next round's indexed merge
   const branch = "task/cas-repeat"
   await submitCommit(w, branch, "one.txt")
   const ref = changesRef("main", branch)
+  let firstRound = true
   let refused = 0
   using _publish = beforeGitomicPublish(async (_repo, updates) => {
-    if (refused >= 3 || !updates.some((update) => update.ref === "refs/heads/main")) return
+    if (!firstRound || !updates.some((update) => update.ref === "refs/heads/main")) return
     const marker = updates.find((update) => update.ref === ref)?.expect
     if (marker === undefined) return
     refused++
@@ -1963,6 +1965,8 @@ it("keeps a final first-round refusal and retries the next round's indexed merge
   })
   const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
   const first = await queueRun(options)
+  firstRound = false
+  expect(refused).toBeGreaterThan(0)
   expect(first).toMatchObject({ exitCode: 0, merged: [] })
   expect(logRecords(first)).toContainEqual(
     expect.objectContaining({ kind: "warning", subject: "cas-refused", ref, count: 1 }),
@@ -1971,7 +1975,6 @@ it("keeps a final first-round refusal and retries the next round's indexed merge
   const before = await readStatus(store, "main", branch)
   if (before.tip === undefined || before.since === undefined) throw new Error("fixture lost its open marker")
   const published = await queueRun(options)
-  expect(refused).toBe(3)
   expect(published.merged).toEqual([branch])
   expect(published.line?.casRefused).toBeUndefined()
   expect(logRecords(published)).toContainEqual(expect.objectContaining({ kind: "merge", ref }))

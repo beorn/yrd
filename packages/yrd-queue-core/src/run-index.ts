@@ -1,6 +1,6 @@
 /** Direct reads of one queue's authoritative numbered-run tree. */
 import { randomUUID } from "node:crypto"
-import type { GitomicBackend, Oid } from "gitomic"
+import type { GitomicBackend, Oid } from "./git.ts"
 import type { QueueLocation } from "./events.ts"
 import { queueRef, runIndexRef } from "./refs.ts"
 

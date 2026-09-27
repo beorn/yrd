@@ -32,6 +32,7 @@ import {
   gracefulStopHealthDocument,
   listChanges,
   queueRef,
+  runIndexRef,
   readConfig,
   readEventQueue,
   readEventQueueWithChanges,
@@ -1777,7 +1778,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const refs = ["for-each-ref", "--format=%(refname) %(objectname)"]
     const yrdRefs = async (): Promise<readonly string[]> =>
       (await remote(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).trim().split("\n").sort()
-    const expectedYrdRefs = [queueRef("release/1.x"), malformedRef].sort()
+    const expectedYrdRefs = [queueRef("release/1.x"), runIndexRef("release/1.x"), malformedRef].sort()
     const before = await git(refs)
     const fetchHead = (await git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
     writeFileSync(fetchHead, "another command's fetch result\n")
@@ -1978,14 +1979,14 @@ describe("a queue is the selected origin branch carrying config", () => {
     for (const selector of [[], ["--queue", "main"]]) {
       const run = capture(outside)
       expect(await runYrdProcess(["bun", "yrd", "queue", verb, ...selector, ...reason, "--json"], run.io)).toBe(2)
-      expect(run.stderr()).toContain("inside a clone or pass --queue <repo>#<queue>")
+      expect(run.stderr()).toContain("inside a clone or pass --queue <repo>@<branch>")
     }
     const operand = "https://forge.example/team/repo.git#"
     const malformed = capture(outside)
     expect(
       await runYrdProcess(["bun", "yrd", "queue", verb, "--queue", operand, ...reason, "--json"], malformed.io),
     ).toBe(2)
-    expect(malformed.stderr()).toContain(`queue address '${operand}' must be <repo>#<queue>`)
+    expect(malformed.stderr()).toContain(`queue address '${operand}' must be <repo>@<branch>`)
     expect(malformed.stdout()).toBe("")
   })
 
