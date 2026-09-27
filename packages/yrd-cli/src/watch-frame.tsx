@@ -368,12 +368,14 @@ export function ListStack({
   pills,
   stats,
   paddingX = 0,
+  fill = true,
 }: {
   snapshot: WatchSnapshot
   children: ReactNode
   pills?: ReactNode
   stats?: ReactNode
   paddingX?: number
+  fill?: boolean
 }) {
   // Nothing to say is said by nothing: the native contract observes the root
   // queue only, every round, and a clean root-v1 round has no notice. A
@@ -387,7 +389,14 @@ export function ListStack({
       : observation
   const failed = said?.contract === "root-v1" && said.outcome !== "observed"
   return (
-    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={paddingX}>
+    <Box
+      flexDirection="column"
+      flexGrow={fill ? 1 : 0}
+      flexShrink={fill ? 1 : 0}
+      minHeight={0}
+      minWidth={0}
+      paddingX={paddingX}
+    >
       {said === undefined ? null : (
         <Box flexDirection="column" flexShrink={0}>
           <Text {...(failed ? { bold: true, color: "$fg-error" } : {})}>{said.message}</Text>

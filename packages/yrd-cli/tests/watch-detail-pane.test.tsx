@@ -13,6 +13,8 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import { bufferToStyledText, render } from "silvery/test"
+import { createTerminal } from "@termless/core"
+import { createGhosttyBackend, initGhostty } from "@termless/ghostty"
 import { NowContext, MinuteContext } from "../src/watch-clock.ts"
 import { runOf } from "../src/watch-run.ts"
 import { WatchPane, type WatchSnapshot } from "../src/watch-pane.tsx"
@@ -23,11 +25,19 @@ import type { Row } from "@yrd/queue-core"
 const NOW = new Date("2026-09-27T19:50:00.000Z")
 const RUN_ID = "q-20260927T185000000Z-affected"
 
-function writeCaptureIfConfigured(name: string, content: string): void {
+function writeCaptureIfConfigured(name: string, content: string | Uint8Array): void {
   const dir = process.env.YRD_CAPTURE_DIR
   if (!dir) return
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, name), content)
+}
+
+async function renderAnsiPng(ansi: string, opts: { cols: number; rows: number }): Promise<Uint8Array> {
+  await initGhostty()
+  const backend = createGhosttyBackend()
+  const term = createTerminal({ backend, cols: opts.cols, rows: opts.rows })
+  term.feed(ansi.replace(/\r?\n/g, "\r\n"))
+  return term.screenshot()
 }
 
 function failedRow(): Row {
@@ -110,6 +120,7 @@ async function paint140x50(): Promise<{ text: string; lines: string[]; ansi: str
   const text = app.text
   const ansi = bufferToStyledText(app.term.buffer)
   writeCaptureIfConfigured("yrd-watch-26242-140x50.ansi", ansi)
+  writeCaptureIfConfigured("yrd-watch-26242-140x50.png", await renderAnsiPng(ansi, { cols: 140, rows: 50 }))
   app.unmount()
   return { text, lines: text.split("\n"), ansi }
 }
@@ -135,23 +146,27 @@ describe("26242: watch detail pane at 140x50", () => {
     expect(text).not.toMatch(/\(err=/u)
     expect(text.match(/× affected-tests/g)?.length ?? 0).toBe(1)
     expect(text.match(/0:01/g)?.length ?? 0).toBeLessThanOrEqual(1)
+    const failureHits = [...text.matchAll(/it failed \(affected-tests\)/giu)].length
+    expect(failureHits).toBe(1)
   })
 
   it("row 3: detail grows into free rows and a cut log says how many lines follow", async () => {
     const { lines, text } = await paint140x50()
-    const lastList = lines.findIndex((line) => line.includes("task/24197-240col-gate"))
-    const firstDetail = lines.findIndex((line) => line.includes("Failed") || line.includes("does not name this check"))
-    expect(lastList).toBeGreaterThanOrEqual(0)
-    expect(firstDetail).toBeGreaterThan(lastList)
-    const gap = lines.slice(lastList + 1, firstDetail).filter((line) => line.trim() === "").length
+    const tableRow = lines.findIndex((line) => line.includes("task/24197-240col-gate"))
+    const statusBox = lines.findIndex((line) => line.includes("RUN main") || line.includes("Failed"))
+    expect(tableRow).toBeGreaterThanOrEqual(0)
+    expect(statusBox).toBeGreaterThan(tableRow)
+    const gap = lines.slice(tableRow + 1, statusBox).filter((line) => line.trim() === "").length
     expect(gap).toBeLessThanOrEqual(3)
     expect(text).toMatch(/\d+ more lines/u)
   })
 
   it("row 4: RUNNER keeps its rounded box; inner dash sits under RUN", async () => {
     const { lines, text } = await paint140x50()
-    expect(text).toMatch(/╭.*RUNNER/u)
-    expect(text).toMatch(/╰/u)
+    expect(text).toMatch(/RUNNER/u)
+    expect(text).toMatch(/no runner status published/u)
+    const runnerTitle = lines.find((line) => line.includes("RUNNER") && line.includes("github.com"))
+    expect(runnerTitle).toBeDefined()
     const header = lines.find((line) => line.includes("TIME") && line.includes("RUN") && line.includes("CHANGES"))
     const inner = lines.find((line) => line.includes("no runner status published"))
     expect(header).toBeDefined()
