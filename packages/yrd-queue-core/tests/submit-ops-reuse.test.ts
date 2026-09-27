@@ -26,7 +26,7 @@ import {
 } from "../src/index.ts"
 import { openEvents } from "../src/git.ts"
 import { readEventChain } from "../src/event-read.ts"
-import { overrideRef, pauseRef } from "../src/refs.ts"
+import { pauseRef } from "../src/refs.ts"
 import { traceRemoteCalls } from "../src/remote-calls.ts"
 
 const roots: string[] = []
@@ -236,18 +236,27 @@ describe("submit reuses a fenced admission observation", () => {
     await noPublication(w)
   })
 
-  it("rereads and refuses a legacy override appearing before publication", async () => {
+  /** @failure A stale legacy ref blocks submit after M6 although only the runner judges it. */
+  it("admits submit without an override-ref read when a stale ref appears before publication (26235)", async () => {
     const w = await world()
-    await expect(
-      submit(
+    const legacyRef = "refs/yrd/main/override"
+    const trace = traceRemoteCalls(join(w.root, "trace-legacy-ref"), { seams: true })
+    let calls: ReturnType<typeof trace.end>
+    try {
+      const result = await submit(
         beforePublication(w, async () => {
-          await w.git(["push", "--quiet", "origin", `${w.target}:${overrideRef("main")}`])
+          await w.git(["push", "--quiet", "origin", `${w.target}:${legacyRef}`])
         }),
         "origin",
         request,
-      ),
-    ).rejects.toThrow(/legacy override ref/u)
-    await noPublication(w)
+      )
+      expect(result.retry).toBe(false)
+    } finally {
+      calls = trace.end()
+    }
+    expect(calls.seams.submitEvent).toMatchObject({ "ls-remote": 3, push: 1 })
+    expect(calls.unreadable).toBe(0)
+    expect((await w.git(["ls-remote", "origin", changesRef("main", "task/probe")])).trim()).not.toBe("")
   })
 
   it("rereads and refuses maintenance appearing before publication", async () => {

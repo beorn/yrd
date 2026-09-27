@@ -113,6 +113,18 @@ export class QueueRunEventRetryExhausted extends Error {
   }
 }
 
+/** An obsolete authority ref must be removed before this queue can judge a round. */
+export class LegacyOverridePresent extends Error {
+  override readonly name = "LegacyOverridePresent"
+
+  constructor(
+    readonly ref: string,
+    readonly oid: string,
+  ) {
+    super(`legacy override ref ${ref} at ${oid} remains; @chief must verify, fold or delete it`)
+  }
+}
+
 function discardedJudgementReason(current: EventChange, error: unknown): string {
   const failed = error instanceof Error ? error.message : String(error)
   return current.ending === undefined
@@ -388,6 +400,9 @@ export async function eventQueueRun(
   log.write({ kind: "queue", queue: queueName(options.target, url) })
   const prefix = queueRefPrefix(queue)
   const advertised = await listRefs(prefix, store)
+  const legacyRef = `${prefix}/override`
+  const legacyOid = advertised.get(legacyRef)
+  if (legacyOid !== undefined) throw new LegacyOverridePresent(legacyRef, legacyOid)
   const targetRef = `refs/heads/${queue}`
   const target = (await listRefs(targetRef, store)).get(targetRef)
   if (target === undefined) throw new Error(`event queue ${url}#${queue}: missing target ${targetRef}`)
