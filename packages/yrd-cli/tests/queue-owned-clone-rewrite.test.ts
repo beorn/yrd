@@ -94,4 +94,29 @@ describe("resolveQueueLocation behind a transport rewrite", () => {
     expect(named.address?.canonical).toBe(address)
     expect(parseQueueAddress(commandsName).canonical).toBe(address)
   }, 60_000)
+
+  /** @failure An addressed reader launched from another repository reads that caller's Git refs while naming the requested queue's workdir; a combined watch then shows the wrong queue's changes.
+   * @level l2 @consumer bare watch aggregating two declared repository queues
+   */
+  it("reads an addressed queue from its own clone when launched inside a different repository", async () => {
+    const { env, root } = await fixture()
+    const inside = join(root, "inside")
+    await gitIn(root, undefined, undefined, { env })(["clone", "--quiet", transport, inside])
+
+    const other = join(root, "other")
+    mkdirSync(other)
+    const otherGit = gitIn(other, undefined, undefined, { env })
+    await otherGit(["init", "--quiet", "--initial-branch=main"])
+    writeFileSync(join(other, "other.txt"), "other queue\n")
+    await otherGit(["add", "--all"])
+    await otherGit([...author, "commit", "--quiet", "--message", "add other queue"])
+
+    const requested = `${other}#main`
+    const location = await resolveQueueLocation(inside, requested, env, "reader")
+    expect(location.address?.canonical).toBe(requested)
+    expect(location.repo).not.toBe(inside)
+    expect((await gitIn(location.repo, undefined, undefined, { env })(["show", "main:other.txt"])).trim()).toBe(
+      "other queue",
+    )
+  }, 60_000)
 })

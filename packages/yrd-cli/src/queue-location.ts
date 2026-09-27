@@ -195,7 +195,7 @@ export async function resolveQueueLocation(
   }
   const host = await hostWorkdir(cwd, env, git)
   const workdir = queueRoot(host, address)
-  if (context !== "queue" && inside !== undefined) {
+  if (inside !== undefined && (context === "submit" || (context === "reader" && !addressed))) {
     return {
       address,
       selection,
