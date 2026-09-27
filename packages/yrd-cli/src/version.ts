@@ -1,18 +1,19 @@
 import { cleanGitEnvironment, gitFailure } from "@yrd/process"
 import { accessSync, constants, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
-import distribution from "../../../package.json" with { type: "json" }
+import pkg from "../package.json" with { type: "json" }
 
 /** The git-yrd distribution version, embedded by the production bundle. */
-export const YRD_VERSION = distribution.version
+export const YRD_VERSION = pkg.version
 const GIT_TIMEOUT_MS = 5_000
+const DISTRIBUTION_PACKAGE_NAME = "git-yrd"
 
 export function yrdSourceRoot(start = import.meta.dirname): string | undefined {
   let directory = start
   for (;;) {
     try {
       const candidate = JSON.parse(readFileSync(join(directory, "package.json"), "utf8")) as { name?: unknown }
-      if (candidate.name === distribution.name) return directory
+      if (candidate.name === DISTRIBUTION_PACKAGE_NAME) return directory
     } catch {
       // silent-fallback-allow: version diagnostics walk through directories
       // that normally have no package.json. Failure to find the owning package
