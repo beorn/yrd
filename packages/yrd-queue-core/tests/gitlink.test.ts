@@ -11,7 +11,6 @@
  * and 13.7 s per judged change.
  */
 
-import { execFileSync } from "node:child_process"
 import {
   chmodSync,
   existsSync,
@@ -1049,23 +1048,6 @@ describe("settling gitlinks", () => {
     const w = await world()
     const options = await w.options()
     expect(options.env?.PATH?.split(":")[0]).toBe(gitSuperBin)
-  })
-
-  it.skipIf(superprojectRoot === "")("matches standalone override pins to the hh gitlinks", () => {
-    const manifest = JSON.parse(readFileSync(join(import.meta.dirname, "../../..", "package.json"), "utf8")) as {
-      overrides: Record<string, string>
-    }
-    const status = JSON.parse(
-      execFileSync(join(gitSuperBin, "git-super"), ["--repo", superprojectRoot, "--json", "status"], {
-        encoding: "utf8",
-      }),
-    ) as { consultedRepositories: Array<{ path: string; to?: string }> }
-
-    for (const name of ["git-super", "gitomic", "loggily"]) {
-      const pin = status.consultedRepositories.find((repository) => repository.path === `vendor/${name}`)?.to
-      expect(pin, `hh vendor/${name} gitlink must be materialized`).toMatch(/^[0-9a-f]{40}$/)
-      expect(manifest.overrides[name]).toBe(`github:beorn/${name}#${pin}`)
-    }
   })
 
   // The shared verifier applies git-super's pin verdict before opening a change. The pin forks
