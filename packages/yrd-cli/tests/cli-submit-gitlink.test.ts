@@ -462,3 +462,91 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     expect((await gitIn(join(w.root, "one.git"))(["rev-parse", "refs/heads/main"])).trim()).toBe(one.unheld)
   }, 90_000)
 })
+
+describe("ordinary submit with a local-only component pin", () => {
+  /** @failure Submit composes before publishing the component pin, so git-super cannot fetch it.
+   * @level l2 @consumer yrd submit of a root carrier with a locally committed component
+   */
+  it("publishes the pin before composing and opening the root carrier", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const git = gitIn(w.work)
+    const child = gitIn(join(w.work, one.path))
+    await child(["fetch", "--quiet", one.work, one.unheld])
+    await child(["checkout", "--quiet", one.unheld])
+    await git(["checkout", "--quiet", "-b", "task/local-only-pin", "main"])
+    await git(["add", one.path])
+    await git(["commit", "--quiet", "-m", "pin local component\n\nRefs: 25720"])
+
+    const pinRef = `refs/git-super/pins/${one.unheld}`
+    expect(await gitIn(join(w.root, "one.git"))(["for-each-ref", "--format=%(objectname)", pinRef])).toBe("")
+    // A fresh composer has only the component remote. Gate git-super's merge on
+    // that remote's pin ref, then let the real merge run once it is published.
+    const bin = join(w.root, "bin")
+    mkdirSync(bin)
+    const wrapper = join(bin, "git-super")
+    writeFileSync(
+      wrapper,
+      [
+        "#!/usr/bin/env bun",
+        'import { spawnSync } from "node:child_process"',
+        `const args = process.argv.slice(2)`,
+        `if (args.includes("merge")) {`,
+        `  const probe = spawnSync("git", ["--git-dir", ${JSON.stringify(join(w.root, "one.git"))}, "show-ref", "--verify", "--quiet", ${JSON.stringify(pinRef)}])`,
+        `  if (probe.error) throw probe.error`,
+        `  if (probe.status === 1) {`,
+        `    console.log(JSON.stringify({ state: "failed", partial: false, detail: { code: "pin-not-published", phase: "compose", message: "component remote lacks ${pinRef}" }, gitlinks: [] }))`,
+        `    process.exit(2)`,
+        `  }`,
+        `  if (probe.status !== 0) throw new Error("component pin probe failed: " + String(probe.status))`,
+        `}`,
+        `const ran = spawnSync(${JSON.stringify(join(import.meta.dirname, "../../../node_modules/.bin/git-super"))}, args, { stdio: "inherit" })`,
+        `if (ran.error) throw ran.error`,
+        `process.exit(ran.status ?? 2)`,
+      ].join("\n"),
+    )
+    chmodSync(wrapper, 0o755)
+    const previousPath = process.env.PATH
+    process.env.PATH = `${bin}:${previousPath ?? ""}`
+    let ran: Awaited<ReturnType<typeof yrd>>
+    try {
+      ran = await yrd(w.work, "submit", "task/local-only-pin", "--issue", "25720", "--submitter", "@dev/1", "--json")
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+    expect(ran.exitCode, ran.report).toBe(0)
+    expect(
+      (JSON.parse(ran.stdout) as { published: readonly { path: string; sha: string; state: string }[] }).published,
+    ).toContainEqual(expect.objectContaining({ path: one.path, sha: one.unheld, state: "published" }))
+    expect((await gitIn(join(w.root, "one.git"))(["rev-parse", pinRef])).trim()).toBe(one.unheld)
+    expect(await remoteHead(w.remote, "task/local-only-pin")).toBe((await git(["rev-parse", "HEAD"])).trim())
+  }, 90_000)
+
+  /** @failure A rejected pin publication leaves a generic compose refusal, obscuring the remote and ref.
+   * @level l2 @consumer yrd submit when a component remote refuses its retention ref
+   */
+  it("names a rejected component pin publication before opening a root change", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const git = gitIn(w.work)
+    const child = gitIn(join(w.work, one.path))
+    await child(["fetch", "--quiet", one.work, one.unheld])
+    await child(["checkout", "--quiet", one.unheld])
+    await git(["checkout", "--quiet", "-b", "task/rejected-local-pin", "main"])
+    await git(["add", one.path])
+    await git(["commit", "--quiet", "-m", "pin rejected component\n\nRefs: 25720"])
+
+    const pinRef = `refs/git-super/pins/${one.unheld}`
+    const hook = join(w.root, "one.git", "hooks", "pre-receive")
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n")
+    chmodSync(hook, 0o755)
+    const ran = await yrd(w.work, "submit", "task/rejected-local-pin", "--issue", "25720", "--submitter", "@dev/1")
+    expect(ran.exitCode, ran.report).toBe(2)
+    expect(ran.stderr, ran.report).toContain(`could not publish ${one.path}@${one.unheld}`)
+    expect(ran.stderr, ran.report).toContain(one.remote)
+    expect(ran.stderr, ran.report).toContain(pinRef)
+    expect(await gitIn(join(w.root, "one.git"))(["for-each-ref", "--format=%(objectname)", pinRef])).toBe("")
+    expect(await refs(w.remote)).not.toContain("refs/heads/task/rejected-local-pin")
+  }, 90_000)
+})
