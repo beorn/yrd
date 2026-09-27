@@ -5,12 +5,13 @@
  * @level l2 (`coreQueueCommand` against a real remote and clone)
  * @consumer Every queue command.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   CHANGE_STATUSES,
+  MIRROR_REFRESHED_AT,
   appendOpsCutover,
   assertPlainEventQueueConfig,
   changeInput,
@@ -26,6 +27,7 @@ import {
   queueRef,
   readConfig,
   readEventQueue,
+  readRemoteCalls,
   readQueue,
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
@@ -132,6 +134,104 @@ async function createQueue(repo: string, queue: string, commit: string, at: Date
   if (config === undefined) throw new Error(`fixture target ${commit} lost .yrd.yml`)
   return createEventQueue(createEventStore(repo, "origin", gitIn(repo).selection), queue, commit, config, at)
 }
+
+it("reads a fresh queue-owned store without remote Git calls and refreshes once on a miss (25626)", async () => {
+  const repo = await world('checks:\n  - verify: {run: "true"}\n')
+  const git = gitIn(repo)
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+  await appendOpsCutover(createEventStore(repo, "origin", git.selection), git, "main", target, new Date(), "@chief")
+  const root = dirname(repo)
+  const remote = join(root, "remote.git")
+  const owned = join(root, "owned")
+  await gitIn(root)(["clone", "--quiet", "--no-checkout", remote, owned])
+  const options = {
+    json: true,
+    queue: "main",
+    workdir: join(root, "queue"),
+    localStatusStore: { path: owned, transport: remote },
+  } as const
+  const previousTrace = process.env.GIT_TRACE2_EVENT
+  const firstTrace = join(root, "first-trace")
+  const warmTrace = join(root, "warm-trace")
+  mkdirSync(firstTrace)
+  mkdirSync(warmTrace)
+  try {
+    process.env.GIT_TRACE2_EVENT = firstTrace
+    const first = capture(repo)
+    expect(await coreQueueCommand(repo, first.io, { command: "list" }, options), first.stderr()).toBe(0)
+    expect(JSON.parse(first.stdout())).toMatchObject({ source: "local", asOf: expect.any(String) })
+    expect(readRemoteCalls(firstTrace).verbs.fetch).toBe(1)
+
+    process.env.GIT_TRACE2_EVENT = warmTrace
+    const warm = capture(repo)
+    expect(await coreQueueCommand(repo, warm.io, { command: "list" }, options), warm.stderr()).toBe(0)
+    const shown = capture(repo)
+    expect(
+      await coreQueueCommand(repo, shown.io, { command: "show", branch: "task/absent" }, options),
+      shown.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(shown.stdout())).toMatchObject({ source: "local", asOf: expect.any(String) })
+    expect(readRemoteCalls(warmTrace).verbs).toEqual({})
+    expect(readRemoteCalls(warmTrace).unreadable).toBe(0)
+  } finally {
+    if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT
+    else process.env.GIT_TRACE2_EVENT = previousTrace
+  }
+  await expect(
+    coreQueueCommand(
+      repo,
+      capture(repo).io,
+      { command: "list" },
+      {
+        ...options,
+        localStatusStore: { path: join(root, "absent"), transport: remote },
+      },
+    ),
+  ).rejects.toThrow(join(root, "absent"))
+  writeFileSync(join(owned, MIRROR_REFRESHED_AT), "{broken\n")
+  await expect(coreQueueCommand(repo, capture(repo).io, { command: "list" }, options)).rejects.toThrow(
+    join(owned, MIRROR_REFRESHED_AT),
+  )
+  await gitIn(owned)(["checkout", "--quiet", "main"])
+  unlinkSync(join(owned, MIRROR_REFRESHED_AT))
+  await expect(coreQueueCommand(repo, capture(repo).io, { command: "list" }, options)).rejects.toThrow(
+    "index with checked-out files",
+  )
+})
+
+it("names an observed legacy ref in the local refusal and reads it through the fresh path (25626)", async () => {
+  const repo = await world("{}\n")
+  const git = gitIn(repo)
+  await git(["checkout", "--quiet", "-b", "task/legacy"])
+  writeFileSync(join(repo, "legacy.txt"), "legacy work\n")
+  await git(["add", "legacy.txt"])
+  await git(["commit", "--quiet", "-m", "legacy work"])
+  const submitted = capture(repo)
+  expect(
+    await runYrdProcess(["bun", "yrd", "submit", "task/legacy", "--queue", "main", "--json"], submitted.io),
+    submitted.stderr(),
+  ).toBe(0)
+  const root = dirname(repo)
+  const remote = join(root, "remote.git")
+  const owned = join(root, "owned")
+  await gitIn(root)(["clone", "--quiet", "--no-checkout", remote, owned])
+  const options = {
+    json: true,
+    queue: "main",
+    workdir: join(root, "queue"),
+    localStatusStore: { path: owned, transport: remote },
+  } as const
+  await expect(coreQueueCommand(repo, capture(repo).io, { command: "list" }, options)).rejects.toThrow(
+    /no event marker .*observed legacy change ref .*use --fresh/,
+  )
+  const fresh = capture(repo)
+  expect(
+    await coreQueueCommand(repo, fresh.io, { command: "list" }, { json: true, queue: "main" }),
+    fresh.stderr(),
+  ).toBe(0)
+  expect(fresh.stdout()).toContain("task/legacy")
+})
 
 describe("a queue is the selected origin branch carrying config", () => {
   it("refuses an option-shaped raw issue before invoking the target resolver", async () => {
@@ -452,9 +552,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).changes
     expect(allHistory.filter((row) => row.branch === branch)).toEqual(history)
     const cliBulk = capture(repo)
-    expect(await runYrdProcess(["bun", "yrd", "queue", "show", "--all", "--json", "--queue", "main"], cliBulk.io)).toBe(
-      0,
-    )
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "show", "--all", "--json", "--fresh", "--queue", "main"], cliBulk.io),
+    ).toBe(0)
     expect(
       (JSON.parse(cliBulk.stdout()) as { changes: readonly { branch: string }[] }).changes.filter(
         (row) => row.branch === branch,
@@ -2027,7 +2127,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       ]) {
         const run = capture(nested)
         expect(
-          await runYrdProcess(["bun", "yrd", ...command, "--queue", selector, "--json"], run.io),
+          await runYrdProcess(
+            ["bun", "yrd", ...command, "--queue", selector, "--json", ...(command[0] === "watch" ? [] : ["--fresh"])],
+            run.io,
+          ),
           run.stderr(),
         ).toBe(0)
         expect(run.stdout()).toContain("task/topic")
