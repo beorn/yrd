@@ -1206,6 +1206,50 @@ it("restores target-owned scripts before an event check runs", async () => {
   ])
 })
 
+/** @failure A parser-and-key carrier failed with an unknown key but told the author only to fix .yrd.yml.
+ * @level l3 @consumer change author reading the queue's failed record
+ */
+it("explains the parser-first order after a parser commit lands and the following key is unknown", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+
+  await w.git(["checkout", "--quiet", "-b", "task/parser-support", "main"])
+  const parser = join(w.work, "packages/yrd-queue-core/src/config.ts")
+  mkdirSync(dirname(parser), { recursive: true })
+  writeFileSync(parser, 'export const supportedKeys = ["newKey"]\n')
+  await w.git(["add", "packages/yrd-queue-core/src/config.ts"])
+  await w.git(["commit", "--quiet", "-m", "teach the parser about newKey"])
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", {
+    branch: "task/parser-support",
+    submitter: "@dev/1",
+    target: { branch: "main", remote: "origin" },
+    issue: "@i/10-yrd/26224",
+  })
+  expect(await queueRun(await w.options({ exit: 0 }))).toMatchObject({ exitCode: 0, merged: ["task/parser-support"] })
+
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  expect(await w.git(["show", "origin/main:packages/yrd-queue-core/src/config.ts"])).toContain("newKey")
+  await w.git(["checkout", "--quiet", "-b", "task/new-config-key", "origin/main"])
+  writeFileSync(join(w.work, ".yrd.yml"), "newKey: true\n")
+  await w.git(["add", ".yrd.yml"])
+  await w.git(["commit", "--quiet", "-m", "use a key introduced by the parser"])
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", {
+    branch: "task/new-config-key",
+    submitter: "@dev/1",
+    target: { branch: "main", remote: "origin" },
+    issue: "@i/10-yrd/26224",
+  })
+
+  expect(await queueRun(await w.options({ exit: 0 }))).toMatchObject({ exitCode: 1, failed: ["task/new-config-key"] })
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/new-config-key") })).events()
+  const reason = events.find((event) => event.type === "failed")?.props.find(([key]) => key === "Reason")?.[1]
+  expect(reason).toContain("unknown key newKey")
+  expect(reason).toMatch(/land parser support first/u)
+})
+
 /** @failure An event ending gave the notifier no message or repeatable receipt after the journal vanished.
  * @level l3 @consumer queue operator and notified recipient
  */

@@ -162,6 +162,11 @@ export class InvalidQueueConfig extends Error {
   override readonly name = "InvalidQueueConfig"
 }
 
+/** An undeclared key, distinguished from malformed values so the queue can name the parser upgrade order. */
+export class UnknownConfigKey extends Error {
+  override readonly name = "UnknownConfigKey"
+}
+
 export async function readConfig(git: Git, commit: string, target: Target): Promise<QueueConfig | undefined> {
   const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
   if (blob === undefined) return undefined
@@ -462,10 +467,10 @@ function onlyKeys(record: Record<string, unknown>, known: readonly string[], whe
   const unknown = Object.keys(record).filter((key) => !known.includes(key))
   if (unknown.length === 0) return
   const retired = unknown.map((key) => RETIRED[key]).filter((cure): cure is string => cure !== undefined)
-  throw new Error(
+  const message =
     `${where}: unknown key ${unknown.join(", ")} (known: ${known.join(", ")})` +
-      (retired.length === 0 ? "" : `; ${retired.join("; ")}`),
-  )
+    (retired.length === 0 ? "" : `; ${retired.join("; ")}`)
+  throw retired.length === 0 ? new UnknownConfigKey(message) : new Error(message)
 }
 
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {
