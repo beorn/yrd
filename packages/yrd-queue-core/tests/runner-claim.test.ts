@@ -120,6 +120,17 @@ describe("runner claim", () => {
     expect(bound).toBe((30 + 2 * attempt + attribution) * 60_000)
   })
 
+  /** @failure A long-tier round inherited normal check timeouts and published Due before its checks could finish. @level l1 */
+  it("budgets each long-tier check timeout in the round and attribution allowance", () => {
+    const checks = [
+      { name: "long-check", run: "test", on: ["merge"] as const, timeoutMs: 60_000, long: { timeoutMs: 90_000 } },
+    ]
+    const normal = roundBoundMs(checks, undefined, 2)
+    const long = roundBoundMs(checks, undefined, 2, "long")
+    // Two candidates, two attempts each, and at most one attribution per candidate.
+    expect(long - normal).toBe(2 * (2 + 1) * 30_000)
+  })
+
   /** @failure A new writer inserted its plan before the old reader's known tail and made the claim unreadable. @level l1 */
   it("leaves Due, Round, and Candidates as the old reader's unjudged tail", () => {
     const message = formatRunnerClaim({
