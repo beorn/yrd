@@ -1,6 +1,6 @@
 /** Direct reads of one queue's authoritative numbered-run tree. */
 import { randomUUID } from "node:crypto"
-import type { GitomicBackend, Oid } from "gitomic"
+import type { GitomicBackend, Oid } from "./git.ts"
 import type { QueueLocation } from "./events.ts"
 import { queueRef, runIndexRef } from "./refs.ts"
 
@@ -56,8 +56,10 @@ export function queueReadWithRunIndex(
       backend: {
         ...store.backend,
         fetchRefs: async (repo, refs, remote, options) => {
-          const tips = await fetchRefs(repo, refs, remote, options)
-          if (Array.isArray(refs) && refs.includes(eventsRef) && refs.includes(indexRef)) {
+          const queueRead = Array.isArray(refs) && refs.includes(eventsRef)
+          const requested = queueRead && !refs.includes(indexRef) ? (refs as readonly string[]).concat(indexRef) : refs
+          const tips = await fetchRefs(repo, requested, remote, queueRead ? { ...options, absent: "omit" } : options)
+          if (queueRead) {
             const tip = tips.get(indexRef)
             if (tip === undefined) {
               throw new Error(

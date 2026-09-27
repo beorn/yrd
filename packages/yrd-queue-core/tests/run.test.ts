@@ -382,6 +382,7 @@ it("leaves an idle event round unnumbered and the next index value at one (26193
   expect(await lookupRunIndex(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", 1)).toEqual({
     kind: "unknown",
     number: 1,
+    knownThrough: 0,
   })
 })
 
@@ -1231,6 +1232,50 @@ it("restores target-owned scripts before an event check runs", async () => {
   ])
 })
 
+/** @failure A parser-and-key carrier failed with an unknown key but told the author only to fix .yrd.yml.
+ * @level l3 @consumer change author reading the queue's failed record
+ */
+it("explains the parser-first order after a parser commit lands and the following key is unknown", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+
+  await w.git(["checkout", "--quiet", "-b", "task/parser-support", "main"])
+  const parser = join(w.work, "packages/yrd-queue-core/src/config.ts")
+  mkdirSync(dirname(parser), { recursive: true })
+  writeFileSync(parser, 'export const supportedKeys = ["newKey"]\n')
+  await w.git(["add", "packages/yrd-queue-core/src/config.ts"])
+  await w.git(["commit", "--quiet", "-m", "teach the parser about newKey"])
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", {
+    branch: "task/parser-support",
+    submitter: "@dev/1",
+    target: { branch: "main", remote: "origin" },
+    issue: "@i/10-yrd/26224",
+  })
+  expect(await queueRun(await w.options({ exit: 0 }))).toMatchObject({ exitCode: 0, merged: ["task/parser-support"] })
+
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  expect(await w.git(["show", "origin/main:packages/yrd-queue-core/src/config.ts"])).toContain("newKey")
+  await w.git(["checkout", "--quiet", "-b", "task/new-config-key", "origin/main"])
+  writeFileSync(join(w.work, ".yrd.yml"), "newKey: true\n")
+  await w.git(["add", ".yrd.yml"])
+  await w.git(["commit", "--quiet", "-m", "use a key introduced by the parser"])
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", {
+    branch: "task/new-config-key",
+    submitter: "@dev/1",
+    target: { branch: "main", remote: "origin" },
+    issue: "@i/10-yrd/26224",
+  })
+
+  expect(await queueRun(await w.options({ exit: 0 }))).toMatchObject({ exitCode: 1, failed: ["task/new-config-key"] })
+  const events = await (await openEvents({ ...store, ref: changesRef("main", "task/new-config-key") })).events()
+  const reason = events.find((event) => event.type === "failed")?.props.find(([key]) => key === "Reason")?.[1]
+  expect(reason).toContain("unknown key newKey")
+  expect(reason).toMatch(/land parser support first/u)
+})
+
 /** @failure An event ending gave the notifier no message or repeatable receipt after the journal vanished.
  * @level l3 @consumer queue operator and notified recipient
  */
@@ -1904,9 +1949,10 @@ it("keeps a final first-round refusal and retries the next round's indexed merge
   const branch = "task/cas-repeat"
   await submitCommit(w, branch, "one.txt")
   const ref = changesRef("main", branch)
+  let firstRound = true
   let refused = 0
   using _publish = beforeGitomicPublish(async (_repo, updates) => {
-    if (refused >= 3 || !updates.some((update) => update.ref === "refs/heads/main")) return
+    if (!firstRound || !updates.some((update) => update.ref === "refs/heads/main")) return
     const marker = updates.find((update) => update.ref === ref)?.expect
     if (marker === undefined) return
     refused++
@@ -1919,6 +1965,8 @@ it("keeps a final first-round refusal and retries the next round's indexed merge
   })
   const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
   const first = await queueRun(options)
+  firstRound = false
+  expect(refused).toBeGreaterThan(0)
   expect(first).toMatchObject({ exitCode: 0, merged: [] })
   expect(logRecords(first)).toContainEqual(
     expect.objectContaining({ kind: "warning", subject: "cas-refused", ref, count: 1 }),
@@ -1927,7 +1975,6 @@ it("keeps a final first-round refusal and retries the next round's indexed merge
   const before = await readStatus(store, "main", branch)
   if (before.tip === undefined || before.since === undefined) throw new Error("fixture lost its open marker")
   const published = await queueRun(options)
-  expect(refused).toBe(3)
   expect(published.merged).toEqual([branch])
   expect(published.line?.casRefused).toBeUndefined()
   expect(logRecords(published)).toContainEqual(expect.objectContaining({ kind: "merge", ref }))

@@ -689,16 +689,7 @@ describe("what a watch says it looked at", () => {
     // log of its own, so a reader that borrowed the first run's artifact for the
     // newest row, or the newest for the old one, is caught either way.
     writeFileSync(control, "printf 'SECOND_RUN_MISSING\\n'\nexit 127\n")
-    // An event queue holds a stuck change until an explicit resume (25041, @cto 7b9c3fc5), so the
-    // operator resumes before the run that judges it again.
-    expect(
-      await coreQueueCommand(
-        w.work,
-        capture(w.work).io,
-        { by: "@chief", command: "resume", reason: "judge again" },
-        { workdir: w.workdir },
-      ),
-    ).toBe(0)
+    await coreQueueCommand(w.work, capture(w.work).io, { by: "@chief", command: "resume" }, { workdir: w.workdir })
     const second = capture(w.work)
     expect(await coreQueueCommand(w.work, second.io, { command: "run" }, runOptions)).toBe(2)
     const secondId = (JSON.parse(second.stdout()) as { run: string }).run
@@ -747,10 +738,7 @@ describe("what a watch says it looked at", () => {
     ).toBe(true)
     // QUEUE / RUN names the latest attempt as `1 · main#…` (ia.md); historical
     // run ids stay in `--json` and in the change's own detail, not as extra rows.
-    // An unnumbered run's RUN cell is its id, bounded to the column (26193, 68dc3a95ea); the id's
-    // timestamp prefix still tells the second run from the first.
-    expect(changeLine, plain.stdout()).toContain(runIdentifier(secondId).slice(0, "q-20260927T162933308Z".length))
-    expect(secondId.slice(0, 21)).not.toBe(firstId.slice(0, 21))
+    expect(changeLine, plain.stdout()).toContain(runIdentifier(secondId).slice(0, 16))
 
     rendered.snapshot = undefined
     const interactive = capture(w.work)

@@ -29,7 +29,7 @@ import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
 import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
-import { InvalidQueueConfig, queueName, readConfig } from "./config.ts"
+import { InvalidQueueConfig, UnknownConfigKey, queueName, readConfig } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
 import { recentCasRefusalStreak, recentCasRefusals, recentPublicationNotLanded, type QueueRunLog } from "./log.ts"
 import {
@@ -964,8 +964,7 @@ export async function eventQueueRun(
   const standing = remaining.find((change) => change.status === "stuck")
   if (standing !== undefined) {
     const retryNamedStuck =
-      options.foreground === true &&
-      (options.only === undefined || (options.only.branch === standing.branch && options.only.head === standing.commit))
+      options.foreground === true && options.only?.branch === standing.branch && options.only.head === standing.commit
     if (!retryNamedStuck && !(await queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)))) {
       const stuckEvent = histories.get(standing.branch)?.events.findLast((event) => event.type === "stuck")
       if (stuckEvent === undefined) {
@@ -1384,13 +1383,17 @@ export async function eventQueueRun(
         await readConfig(git, candidate, options.target)
       } catch (error) {
         if (!(error instanceof InvalidQueueConfig)) throw error
+        const reason =
+          error.cause instanceof UnknownConfigKey
+            ? `${error.message}; the candidate is read by the running Yrd parser: if this key is intentional, land parser support first and run a Yrd version that recognizes it before submitting the config change`
+            : error.message
         const ended = await appendOwnedChange(store, queue, branch, tip, {
           type: "failed",
           at: new Date(),
-          reason: error.message,
+          reason,
         })
         await tell(branch, "failed", ended)
-        log.write({ kind: "change", branch, head, decision: "failed", reason: error.message })
+        log.write({ kind: "change", branch, head, decision: "failed", reason })
         failed.push(branch)
         continue
       }

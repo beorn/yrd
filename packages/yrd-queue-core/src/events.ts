@@ -881,16 +881,8 @@ export async function createEventQueue(
 
 /** Read and validate the queue declaration and its current operator stop. */
 export async function readEventQueue(store: QueueReadStore, queue: string): Promise<EventQueue> {
-  return readEventQueueWithFetch(store, queue)
-}
-
-async function readEventQueueWithFetch(
-  store: QueueReadStore,
-  queue: string,
-  fetch?: readonly string[],
-): Promise<EventQueue> {
   const ref = queueRef(queue)
-  const events = await readEventChain(await openEvents({ ...store, ref, ...(fetch === undefined ? {} : { fetch }) }))
+  const events = await readEventChain(await openEvents({ ...store, ref }))
   const projected = projectEventQueue(events, ref, store.repo)
   const warningAt = Math.ceil(EVENT_READ_LIMIT * 0.75)
   let writePressure: EventQueueProjection["writePressure"]
@@ -1876,13 +1868,7 @@ async function appendDecision(
   retry?: Readonly<{ deadline: number; attempts: number; budgetMs: number }>,
 ): Promise<Readonly<{ event: string; number?: number }>> {
   const indexRead = numbered === undefined ? undefined : queueReadWithRunIndex(store, queue)
-  const queueTip = (
-    await readEventQueueWithFetch(
-      indexRead?.store ?? store,
-      queue,
-      numbered === undefined ? undefined : [runIndexRef(queue)],
-    )
-  ).tip
+  const queueTip = (await readEventQueue(indexRead?.store ?? store, queue)).tip
   const history = await readChangeEvents(store, queue, branch, selectedTip)
   const input = changeInput(write.type, {
     queueTip,
