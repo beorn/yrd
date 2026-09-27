@@ -18,6 +18,7 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { runYrdProcess } from "../../packages/yrd-cli/src/cli.ts"
+import { birthEventQueue } from "../../packages/yrd-cli/tests/support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../../packages/yrd-cli/src/types.ts"
 import { installDeclaredYrdEntry } from "../../packages/yrd-cli/tests/support/declared-yrd-entry.ts"
 
@@ -254,7 +255,6 @@ export async function queueRunOnce(repo: string): Promise<QueueRunResult> {
  */
 export async function changeStandings(repo: string): Promise<Readonly<Record<string, string>>> {
   const listed = capture(repo)
-  // The one table: every change keyed by branch and head, with its derived state.
   expectZero(await yrd(repo, listed.io, "queue", "list", "--json"), "queue list", listed)
   const parsed = JSON.parse(listed.stdout()) as { changes: readonly { branch: string; head: string; state: string }[] }
   return Object.fromEntries(parsed.changes.map((change) => [`${change.branch}@${change.head}`, change.state]))
@@ -658,6 +658,7 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd", ...extra.map(([path]) => path))
   await git(repo, "commit", "-qm", "main")
   await git(repo, "push", "-q", "-u", "origin", "main")
+  await birthEventQueue(repo)
   return { repo, origin, checkLog, hookLog }
 }
 

@@ -2133,7 +2133,9 @@ export async function coreQueueCommand(
           config.ignore.length === 0
             ? undefined
             : `Excluded draft heads matching .yrd.yml ignore: ${config.ignore.map((pattern) => JSON.stringify(pattern)).join(", ")}.`
-        const scopeParts = [statusLine(), baseScope, filteredScope, ignoreScope].filter((part) => part !== undefined)
+        // The filter result must be visible on the one-line page even when
+        // the local source and event-store scope are long.
+        const scopeParts = [filteredScope, statusLine(), baseScope, ignoreScope].filter((part) => part !== undefined)
         const scope = scopeParts.length === 0 ? undefined : scopeParts.join(" ")
         return {
           observation,
