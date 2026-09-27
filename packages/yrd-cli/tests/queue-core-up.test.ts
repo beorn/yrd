@@ -3343,6 +3343,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     const stop = new AbortController()
     let terminate: ((signal?: NodeJS.Signals) => void) | undefined
     let reraised: NodeJS.Signals | undefined
+    let subscribedAfterSignal = false
     const env = { ...process.env }
     delete env.HAB_UNIT_INTENT_FILE
     expect(
@@ -3366,6 +3367,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
           },
           afterHealth: () => {
             terminate?.("SIGTERM")
+            subscribedAfterSignal = terminate !== undefined
             stop.abort()
           },
         },
@@ -3373,6 +3375,9 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       ),
       run.stderr(),
     ).toBe(0)
+    expect(subscribedAfterSignal, "the next signal must use the process default while publication is pending").toBe(
+      false,
+    )
     expect(reraised).toBe("SIGTERM")
     expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({
       state: "absent",

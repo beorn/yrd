@@ -2195,6 +2195,10 @@ export async function coreQueueCommand(
       // reading, which says the service stopped outside a graceful stop.
       const terminate = request.terminate ?? processTerminate
       const offTerminate = terminate.on((received) => {
+        // A stopped claim can wait on a hung remote write. Unsubscribe now so
+        // a second signal uses the process default instead of re-entering this
+        // handler while the first publish is pending.
+        offTerminate()
         clearInterval(beat)
         const intent = readUnitIntent("stop", options.env ?? process.env, writer.startedAt)
         const signal = received ?? "SIGTERM"
@@ -2213,10 +2217,7 @@ export async function coreQueueCommand(
           stated = graceful
           persistHealth(graceful)
         }
-        void publisher.publish(stoppedRunnerClaim()).finally(() => {
-          offTerminate()
-          terminate.reraise(signal)
-        })
+        void publisher.publish(stoppedRunnerClaim()).finally(() => terminate.reraise(signal))
       })
       /**
        * A round the service waits for — a `yrd merge` or `yrd queue run` in the
