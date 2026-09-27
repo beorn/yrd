@@ -256,11 +256,11 @@ describe("CHANGES column capping and title preservation (25716)", () => {
         await app.waitForLayoutStable()
       })
       const line = app.lines[0] ?? ""
-      // Both title, branch, and truncated error must be visible in the rendered terminal line
+      // Failed reason is the status/detail once (26242); CHANGES keeps title and branch.
       expect(line).toContain("feat(yrd):")
       expect(line).toContain("task/short")
-      expect(line).toContain("err=")
-      expect(line).toContain("…")
+      expect(line).not.toContain("err=")
+      expect(changesSuffix(row)).toBeUndefined()
       app.unmount()
     })
 

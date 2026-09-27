@@ -1271,10 +1271,15 @@ function SingleWatchPane({
       )
     ) : tier === "below" ? (
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        <Box flexShrink={0} minWidth={0}>
+        {/* Content-sized while the list is short so the detail grows into free
+            rows (26242). flexShrink lets a long list scroll so overflow
+            indicators and the address dialog stay on screen (25418). */}
+        <Box flexGrow={0} flexShrink={1} minHeight={0} minWidth={0}>
           {list}
         </Box>
-        {detailPane}
+        <Box flexGrow={1} minHeight={DETAIL_NATURAL_HEIGHT} minWidth={0}>
+          {detailPane}
+        </Box>
       </Box>
     ) : (
       <SplitPane

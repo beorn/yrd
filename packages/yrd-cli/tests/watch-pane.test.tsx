@@ -769,8 +769,12 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
     const names = lines.findIndex((line) => /Timeline.*provisioning.*checking.*merging.*deprovisioning/u.test(line))
     expect(names).toBeGreaterThan(-1)
     expect(lines[names + 1]).toMatch(/cut 1\/1.*− not journaled.*× failed.*− not run.*− not journaled/u)
-    // The failed check's remedy leads its own tab, which the detail opens on.
-    expect(text).toContain("@chief — it failed")
+    // The failure sentence lives in the status box once; the checking tab does
+    // not repeat the remedy (26242).
+    expect(text).toMatch(/it failed \(test\)/iu)
+    expect(text).toContain("@chief")
+    expect([...text.matchAll(/it failed \(test\)/giu)].length).toBe(1)
+    expect(text).not.toContain("@chief — it failed")
   })
 
   it("reads `✓ Merged as <sha> at <time>` on one line for a merged change (item 1, 25441)", async () => {
@@ -5537,7 +5541,10 @@ it("navigates a numbered run by bare address with one selected queue and reports
   await app.press("Enter")
   await settle(app)
   expect(app.text).toContain("known in the run index")
-  expect(app.text).toMatch(/detail\s+is unavailable/u)
+  // The RUN box wraps the sentence at its inner width (26242 dash under RUN);
+  // both halves stay visible, with the box border between them.
+  expect(app.text).toContain("detail")
+  expect(app.text).toContain("is unavailable")
   app.unmount()
 })
 
