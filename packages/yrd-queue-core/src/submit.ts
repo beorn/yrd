@@ -412,6 +412,10 @@ async function submitEvent(
       refs.get(queueRef(request.target.branch)) === admittedOps.ops.queue.tip &&
       (refs.get(pauseRef(request.target.branch)) ?? null) === admittedOps.pauseTip &&
       !refs.has(overrideRef(request.target.branch))
+    // ADR-0022: the just-listed refs are the first attempt's observation.
+    // Reusing them widens the residual unfenced legacy-override interval by
+    // one queue-chain read; M6 has no writer and 26235 retires that read.
+    // The pause body is reused only when its OID matches admission's validated M2.
     // ADR-0022: the read after a rejected CAS is the next attempt's base.
     // Reusing it has the same accepted unfenced legacy-override interval as
     // 25626's first-attempt reuse; a stuck pause depends on a separate change
@@ -421,7 +425,13 @@ async function submitEvent(
         ? afterConflict
         : reuse
           ? admittedOps
-          : await readEventOpsWithRefs(store, git, request.target.branch, inspected.targetHead)
+          : await readEventOpsWithRefs(
+              store,
+              git,
+              request.target.branch,
+              inspected.targetHead,
+              refs === undefined ? undefined : { refs, validatedPauseTip: admittedOps.pauseTip },
+            )
     const { ops, pauseTip } = operational
     refuseMaintenance(ops.stop, remote, request.target.branch, published)
     const branchAt = (await listRefs(branchRef, store)).get(branchRef) ?? null
