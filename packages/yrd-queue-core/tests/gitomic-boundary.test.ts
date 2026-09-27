@@ -59,7 +59,6 @@ describe("the Yrd Gitomic boundary", () => {
       // The host mirror's own `fetch --prune` (25570 row 1): it refreshes a store of hosted repositories and reads
       // or writes no queue ref.
       "mirror.ts": ["fetch"],
-      "override.ts": ["push", "push"],
       // The gitlink carrier (fae9be0590, 25823): an object-only fetch of the component pin it carries, proving the queue
       // can fetch it, and a read of the local refs/heads/<branch> it would create. Neither reads or writes a queue ref.
       "pin-carrier.ts": ["fetch", "for-each-ref"],
