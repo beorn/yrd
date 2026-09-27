@@ -341,7 +341,7 @@ it.each([
   expect(await submoduleMain(w)).toBe(childBefore)
   const state = await readStatus(eventStore(w), "main", "task/raised-check")
   expect(state.status).toBe(status)
-  if (cause === "raised pin") expect(state.reason).toBe("yrd-settled-base-check-failed")
+  if (cause === "raised pin") expect(state.reason).toContain("settled base submodule-check fail")
 })
 
 /** @failure Rechecking only the failed check misses an earlier phase check that prepared or validated its ground.
@@ -367,6 +367,49 @@ it("runs the declared base phase in order through the failed check", async () =>
   const baseChecks = rows.filter((row) => row.kind === "result" && row.phase === "base")
   expect(baseChecks.map((row) => row.name)).toEqual(["prefix"])
   expect(baseChecks[0]).toMatchObject({ result: "fail", whose: "queue" })
+})
+
+/** @failure A base cleanup error replaces an already measured attribution verdict or hides its check log.
+ * @level l3 @consumer queue operator and submitter reading a terminal change
+ */
+it.each([
+  { cause: "candidate", command: "test ! -e task-cleanup-check.txt", status: "failed", exitCode: 1 },
+  { cause: "base", command: "exit 1", status: "stuck", exitCode: 2 },
+])("retains the $cause verdict when settled-base cleanup fails", async ({ command, status, exitCode }) => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await submitFile(w, "task/cleanup-check")
+  await advanceSubmodule(w, "four")
+  await using real = createProcess({ cwd: w.work })
+  let baseCheckRan = false
+  let cleanupRejected = false
+  const process: Process = {
+    ...real,
+    run(request) {
+      if (request.env?.YRD_CHECK_SCOPE === "settled-base-attribution") baseCheckRan = true
+      if (baseCheckRan && !cleanupRejected && request.argv.includes("worktree") && request.argv.includes("prune")) {
+        cleanupRejected = true
+        throw new Error("fixture settled-base cleanup failed")
+      }
+      return real.run(request)
+    },
+  }
+  const rows: Array<{ kind: string; reason?: string }> = []
+
+  const outcome = await queueRun({
+    ...(await w.options({ run: command, on: ["merge"] })),
+    notify: [],
+    process,
+    render: (row) => rows.push(row),
+  })
+
+  expect(baseCheckRan).toBe(true)
+  expect(cleanupRejected).toBe(true)
+  expect(outcome.exitCode).toBe(exitCode)
+  const state = await readStatus(eventStore(w), "main", "task/cleanup-check")
+  expect(state.status).toBe(status)
+  if (status === "stuck") expect(state.reason).toContain("submodule-check")
+  expect(rows.some((row) => row.kind === "warning" && row.reason?.includes("settled-base cleanup"))).toBe(true)
 })
 
 /** @failure A final check offer could be lost or a malformed later offer could be silently treated as absent.

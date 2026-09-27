@@ -1945,7 +1945,12 @@ export async function eventQueueRun(
               try {
                 await baseWorktree.remove()
               } catch (error) {
-                baseProblem = `settled base removal failed: ${error instanceof Error ? error.message : String(error)}`
+                log.write({
+                  kind: "warning",
+                  branch,
+                  head,
+                  reason: `settled-base cleanup failed after attribution: ${error instanceof Error ? error.message : String(error)}`,
+                })
               }
             }
           }
@@ -1960,7 +1965,7 @@ export async function eventQueueRun(
               type: "stuck",
               at: new Date(),
               ...evidence,
-              reason: code,
+              reason,
             })
             await writeStuckStop(branch, head, ended, reason)
             await tell(branch, "stuck", ended)
