@@ -6,7 +6,7 @@
  * @consumer every queue run, `yrd check` and `yrd env` compose — all borrow from one reference
  */
 
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { acquireExclusive } from "git-super/exclusive"
@@ -14,7 +14,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, type Git } from "../src/git.ts"
 import type { LogWrite } from "../src/log.ts"
 import { GitlinkNotOnRemote, populateReferenceStores, ReferenceUnpopulated } from "../src/reference.ts"
-import { freshWorktree, reapWorktrees, registeredWorktrees } from "../src/worktree.ts"
+import { freshWorktree, registeredWorktrees } from "../src/worktree.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
@@ -250,9 +250,9 @@ describe("populateReferenceStores", () => {
  * @failure A queue prune runs while another git-super worktree mutation of the
  * same repository is in flight, bypassing its worktree mutation lock (26240).
  * @level l2 (real repositories and real Git)
- * @consumer reapWorktrees at queue start and Worktree.remove
+ * @consumer Worktree.remove after a queue check
  */
-describe("queue prunes share git-super's worktree lock", () => {
+describe("queue worktree removal shares git-super's worktree lock", () => {
   async function lockedRepository(
     name: string,
   ): Promise<Readonly<{ root: string; repo: string; git: Git; commit: string; lock: string }>> {
@@ -280,25 +280,6 @@ describe("queue prunes share git-super's worktree lock", () => {
     ])
     return first === running
   }
-
-  it("reap waits to forget a stale registration until the lock is free", async () => {
-    const { commit, git, lock, root } = await lockedRepository("reap")
-    const stale = join(root, "stale")
-    await git(["worktree", "add", "--quiet", "--detach", stale, commit])
-    renameSync(stale, join(root, "moved-away"))
-
-    const held = await acquireExclusive(lock, {}, "a bay being provisioned")
-    let reaping: Promise<unknown> | undefined
-    try {
-      reaping = reapWorktrees(git, join(root, "worktrees"), "this-run")
-      expect(await stillRunningAfter(reaping, 500)).toBe(true)
-      expect(await registered(git)).toContain(stale)
-    } finally {
-      held.release()
-    }
-    await reaping
-    expect(await registered(git)).not.toContain(stale)
-  })
 
   it("remove drops the directory first and waits to forget registration", async () => {
     const { commit, git, lock, repo, root } = await lockedRepository("remove")
