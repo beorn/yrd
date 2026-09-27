@@ -1897,47 +1897,31 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
       )
     }
   }
-  if (state.ending !== undefined && state.reason !== "dropped" && state.status !== "merged") {
-    const note = request.note?.trim()
-    if (note === undefined || note === "") {
-      throw new Error(`${ref} in ${store.repo}: dropping an ended change requires --reason`)
-    }
-    if (selectedTip === null) throw new Error(`${ref} in ${store.repo}: ended change has no chain tip`)
-    if (state.commit === undefined) throw new Error(`${ref} in ${store.repo}: ended change has no kept head`)
-    const input = changeInput("cancelled", {
-      queueTip,
-      at: new Date(),
-      commit: state.commit,
-      reason: "dropped",
-      by: request.by,
-      title: `dropped ${branch}`,
-      content: note,
-    })
-    const result = await chain.append(decide(history, input), {
-      expect: selectedTip,
-      ...(head === undefined ? {} : { also: [{ ref: branchRef, expect: head, oid: null }] }),
-    })
-    const written = result.events.findLast((event) => event.type === "cancelled")?.id
-    if (written === undefined) throw new Error(`${ref} in ${store.repo}: dropped event was not written`)
-    if (head !== undefined) await deleteCandidateRefsForShas(gitIn(store.repo), store.repo, store.remote, [head])
-    return { queue, branch, event: written, head: state.commit }
+  const alreadyDropped = state.status === "cancelled" && state.reason === "dropped"
+  const retiringEnded = state.ending !== undefined && !alreadyDropped && state.status !== "merged"
+  const note = request.note?.trim()
+  if (retiringEnded && !note) {
+    throw new Error(`${ref} in ${store.repo}: dropping an ended change requires --reason`)
   }
   if (head === undefined) {
-    if (state.ending !== undefined && state.reason === "dropped") {
+    if (alreadyDropped && state.ending !== undefined) {
       const ending = history.findLast((event) => event.id === state.ending?.id)
       if (ending === undefined) throw new Error(`${ref} in ${store.repo}: missing dropped ending ${state.ending.id}`)
       return { queue, branch, event: ending.id, head: keptCommit(ending) }
     }
-    const disposition = isOpen(state.status)
-      ? `its open change must end cancelled (deleted) by the deleted-branch observer`
-      : state.ending === undefined
-        ? `there is no branch to drop`
-        : `its change already ended ${state.ending.kind} at ${state.ending.id}; there is no branch to drop`
-    throw new Error(
-      `${branchRef} in ${store.repo}${store.remote === undefined ? "" : ` at ${store.remote}`} is absent; ${disposition}`,
-    )
+    if (!retiringEnded) {
+      const disposition = isOpen(state.status)
+        ? `its open change must end cancelled (deleted) by the deleted-branch observer`
+        : state.ending === undefined
+          ? `there is no branch to drop`
+          : `its change already ended ${state.ending.kind} at ${state.ending.id}; there is no branch to drop`
+      throw new Error(
+        `${branchRef} in ${store.repo}${store.remote === undefined ? "" : ` at ${store.remote}`} is absent; ${disposition}`,
+      )
+    }
   }
-  if (state.ending !== undefined) {
+  if (state.ending !== undefined && !retiringEnded) {
+    if (head === undefined) throw new Error(`${branchRef} in ${store.repo}: ended branch is absent`)
     if (store.backend.publish === undefined) {
       throw new Error("Gitomic backend lacks publish for dropped branch deletion")
     }
@@ -1954,28 +1938,30 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
     return { queue, branch, event: state.ending.id, head }
   }
   const at = new Date()
+  const keptHead = retiringEnded ? state.commit : head
+  if (keptHead === undefined) throw new Error(`${ref} in ${store.repo}: dropped change has no kept head`)
   const input = changeInput("cancelled", {
     queueTip,
     at,
-    commit: head,
+    commit: keptHead,
     reason: "dropped",
     by: request.by,
     title: `dropped ${branch}`,
-    ...(request.note === undefined ? {} : { content: request.note }),
+    ...(note === undefined ? {} : { content: note }),
   })
   const planned =
     selectedTip === null
-      ? [changeInput("opened", { queueTip, at, commit: head, by: request.by }), input]
+      ? [changeInput("opened", { queueTip, at, commit: keptHead, by: request.by }), input]
       : decide(history, input)
   const result = await chain.append(planned, {
     expect: selectedTip,
     // The event keeps H, so this branch delete only removes its name.
-    also: [{ ref: branchRef, expect: head, oid: null }],
+    ...(head === undefined ? {} : { also: [{ ref: branchRef, expect: head, oid: null }] }),
   })
   const written = result.events.findLast((event) => event.type === "cancelled")?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: dropped event was not written`)
-  await deleteCandidateRefsForShas(gitIn(store.repo), store.repo, store.remote, [head])
-  return { queue, branch, event: written, head }
+  if (head !== undefined) await deleteCandidateRefsForShas(gitIn(store.repo), store.repo, store.remote, [head])
+  return { queue, branch, event: written, head: keptHead }
 }
 
 type ChangeHistory = Readonly<{ state: EventChange; events: readonly Event[] }>
