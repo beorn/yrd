@@ -917,21 +917,21 @@ async function readEventQueueWithFetch(
   return result
 }
 
-/** Read event ops and reject any remaining legacy override authority. */
-export async function readEventOps(
+type EventOps = Readonly<{
+  source: "event"
+  queue: EventQueue
+  pause?: PauseRecord
+  stop?: PauseRecord
+  overrides: OverrideTable
+}>
+
+/** Read event ops together with the exact remote refs whose legacy fences were checked. */
+export async function readEventOpsWithRefs(
   store: QueueReadStore,
   git: Git,
   queue: string,
   _targetSha: string,
-): Promise<
-  Readonly<{
-    source: "event"
-    queue: EventQueue
-    pause?: PauseRecord
-    stop?: PauseRecord
-    overrides: OverrideTable
-  }>
-> {
+): Promise<Readonly<{ ops: EventOps; listedQueueTip: string | null; pauseTip: string | null }>> {
   const projected = await readEventQueue(store, queue)
   if (projected.opsCutover === undefined || projected.ops === undefined) {
     if (store.remote === undefined) {
@@ -942,12 +942,13 @@ export async function readEventOps(
     )
   }
   const refs = await listRefs(queueRefPrefix(queue), store)
+  const pauseTip = refs.get(pauseRef(queue)) ?? null
   if (refs.has(overrideRef(queue))) {
     throw new Error(
       `${store.remote}#${queue}: legacy override ref ${overrideRef(queue)} remains after ${projected.opsCutover}`,
     )
   }
-  if (refs.has(pauseRef(queue))) {
+  if (pauseTip !== null) {
     const fence = await readM2Pause(
       store.remote === undefined ? gitIn(store.repo, undefined, store.selection) : git,
       store.remote,
@@ -955,18 +956,32 @@ export async function readEventOps(
       projected.created,
       store.remote === undefined ? refs.get(pauseRef(queue)) : undefined,
     )
-    if (fence?.sha !== refs.get(pauseRef(queue))) {
+    if (fence?.sha !== pauseTip) {
       throw new Error(`${store.remote}#${queue}: ${pauseRef(queue)} changed during the M2 tip read`)
     }
   }
   const stop = await eventLineStop(store, queue, projected.ops.pause)
   return {
-    source: "event",
-    queue: projected,
-    pause: projected.ops.pause,
-    stop,
-    overrides: { sha: projected.tip, entries: projected.ops.overrides },
+    ops: {
+      source: "event",
+      queue: projected,
+      pause: projected.ops.pause,
+      stop,
+      overrides: { sha: projected.tip, entries: projected.ops.overrides },
+    },
+    listedQueueTip: refs.get(queueRef(queue)) ?? null,
+    pauseTip,
   }
+}
+
+/** Read event ops and reject any remaining legacy override authority. */
+export async function readEventOps(
+  store: QueueReadStore,
+  git: Git,
+  queue: string,
+  targetSha: string,
+): Promise<EventOps> {
+  return (await readEventOpsWithRefs(store, git, queue, targetSha)).ops
 }
 
 /** The event equivalent of the legacy stuck-stop derivation. */
