@@ -3876,7 +3876,21 @@ interface EventListingCache {
   targetOid: string
   branchRefs: ReadonlyMap<string, string>
   lastHeadListingAt: number
+  /** The journal facts the rows' overlay was joined from; a change here is a change to the rows. */
+  journalPrint: string
   reading: EventListingResult
+}
+
+/** What of the run journal an event row shows: each change's newest run and the check running now. */
+function journalPrint(journals: Journals): string {
+  return JSON.stringify(
+    [...journals.runs].map(([key, runs]) => [
+      key,
+      runs[0]?.id,
+      runs.find((run) => run.running !== undefined)?.running?.name,
+      runs.length,
+    ]),
+  )
 }
 
 const eventListingCaches = new Map<string, EventListingCache>()
@@ -3913,8 +3927,30 @@ export async function readEventListing(
   // 1. Fetch event refs first
   const queueRefs = await listRefs(queuePrefix, store)
 
+  // The rows carry this machine's journal overlay, so a journal that moved is a reading that moved.
+  const listJournals = readJournals(join(workdir, "logs"))
+  const listJournalPrint = journalPrint(listJournals)
   const eventRefsUnchanged =
-    cache !== undefined && cache.targetOid === targetOid && areRefMapsEqual(cache.queueRefs, queueRefs)
+    cache !== undefined &&
+    cache.targetOid === targetOid &&
+    areRefMapsEqual(cache.queueRefs, queueRefs) &&
+    cache.journalPrint === listJournalPrint
+  // Every read observes the root: a cached reading answers what the queue holds, never whether the
+  // root observation still stands, and a refresh must see an observation turn invalid.
+  const observeRoot = async (branchRefs: ReadonlyMap<string, string>): Promise<GitObservation> =>
+    git.observe({
+      version: 1,
+      root: {
+        remote: await remoteUrl(git, config.target.remote),
+        targetRef: `refs/heads/${config.target.branch}`,
+        targetOid,
+      },
+      checked: [],
+      fence: {
+        prefixes: ["refs/heads/", queuePrefix],
+        refs: [...queueRefs, ...branchRefs].map(([ref, oid]) => ({ ref, oid })),
+      },
+    })
 
   const headListingRecent = cache !== undefined && nowMs - cache.lastHeadListingAt < 60_000
 
@@ -3922,7 +3958,8 @@ export async function readEventListing(
   if (options?.forceFresh !== true && eventRefsUnchanged && headListingRecent) {
     return {
       ...cache.reading,
-      journals: readJournals(join(workdir, "logs")),
+      journals: listJournals,
+      observation: await observeRoot(cache.branchRefs),
     }
   }
 
@@ -3942,7 +3979,8 @@ export async function readEventListing(
     cache.lastHeadListingAt = headListingAt
     return {
       ...cache.reading,
-      journals: readJournals(join(workdir, "logs")),
+      journals: listJournals,
+      observation: await observeRoot(branchRefs),
     }
   }
 
@@ -4002,7 +4040,6 @@ export async function readEventListing(
   )
   const listNow =
     options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
-  const listJournals = readJournals(join(workdir, "logs"))
   const selected = eventListRows(segmentStates, [...drafts.dated, ...drafts.undated], {
     all: options.all,
     drafts: options.drafts,
@@ -4066,19 +4103,7 @@ export async function readEventListing(
       : eventRows(new Map(), window === "all" ? [...windowDated, ...drafts.undated] : folded.rows)
   const all = titled([...selected.table, ...invalidRows, ...directRows, ...windowDrafts])
   const document = titled([...selected.document, ...invalidRows, ...directRows])
-  const observation = await git.observe({
-    version: 1,
-    root: {
-      remote: await remoteUrl(git, config.target.remote),
-      targetRef: `refs/heads/${config.target.branch}`,
-      targetOid,
-    },
-    checked: [],
-    fence: {
-      prefixes: ["refs/heads/", queuePrefix],
-      refs: [...queueRefs, ...branchRefs].map(([ref, oid]) => ({ ref, oid })),
-    },
-  })
+  const observation = await observeRoot(branchRefs)
   const operational = await readEventOps(store, git, config.target.branch, targetOid)
   if (operational.queue.tip !== queue.tip) {
     throw new Error(
@@ -4106,6 +4131,7 @@ export async function readEventListing(
     targetOid,
     branchRefs,
     lastHeadListingAt: headListingAt,
+    journalPrint: listJournalPrint,
     reading,
   })
 
