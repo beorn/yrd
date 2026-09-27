@@ -1285,14 +1285,6 @@ export async function coreQueueCommand(
       }
     }
     case "withdraw": {
-      if (
-        (await queueFormat(createEventStore(repo, config.target.remote, selection), config.target.branch)) === "event"
-      ) {
-        io.stderr(
-          `yrd: ${config.target.remote}#${config.target.branch} is an event queue; use yrd drop ${request.branch}\n`,
-        )
-        return 1
-      }
       try {
         const taken = await withdraw(git, config.target.remote, {
           branch: request.branch,
