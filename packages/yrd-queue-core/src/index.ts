@@ -223,6 +223,7 @@ export {
   QUEUE_HEALTH_SCHEMA,
   queueHealthExitCode,
   gracefulStopHealthDocument,
+  exitedHealthDocument,
   relaunchStalledHealthDocument,
   ROUND_BUDGET_MS,
   ROUND_LOCK,
@@ -248,6 +249,7 @@ export type {
   QueueHealthState,
   QueueHealthVerdict,
   ServiceIntentFact,
+  ServiceExitFact,
   StallThreshold,
 } from "./service-health.ts"
 

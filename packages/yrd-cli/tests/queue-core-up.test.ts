@@ -1140,6 +1140,40 @@ describe("yrd queue up, the service", () => {
     expect(records(run)[1]).toEqual({ ...STUCK, why: "origin/main no longer carries a .yrd.yml" })
   })
 
+  /** @failure The service exited permanently when its target removed the runtime gitlink, but its last document still said running. @level l2 */
+  it("writes the absent runtime gitlink as its terminal cause", async () => {
+    const w = await gitlinkWorld()
+    const run = capture(w.work)
+    let rounds = 0
+    const exit = await w.command(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        afterRound: async () => {
+          rounds += 1
+          if (rounds !== 1) return
+          await w.git(["update-index", "--force-remove", "--", "submodule"])
+          await w.git(["commit", "--quiet", "-m", "target removes runtime gitlink"])
+          await w.git(["push", "--quiet", "origin", "main"])
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+    expect(exit, run.stderr()).toBe(2)
+    expect(rounds).toBe(1)
+    expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({
+      state: "absent",
+      facts: {
+        serviceExited: {
+          kind: "gitlink-absent",
+          detail: expect.stringContaining("runtime gitlink submodule is absent"),
+        },
+      },
+    })
+  })
+
   it("ends the loop, exit 0, when the round it ran merged the change that moves its own gitlink", async () => {
     const w = await gitlinkWorld()
     await submitGitlink(w, "task/gitlink", w.b)
@@ -2161,11 +2195,8 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(run.stdout()).toContain("no longer carries a .yrd.yml")
   })
 
-  // The other half of that control: a PERMANENT exit leaves the last round's
-  // document behind rather than overwriting it with a claim about a loop that
-  // has ended. The supervisor learns about a terminal exit from the exit, and
-  // this file must not contradict it by inventing a state nobody measured.
-  it("writes no document for the round it never ran", async () => {
+  // A permanent exit states its detected cause in the service's last document.
+  it("writes the unreadable declaration into the stopped row's last document", async () => {
     const w = await world()
     const run = capture(w.work)
     let rounds = 0
@@ -2186,8 +2217,12 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     )
     expect(rounds).toBe(1)
     const left = await readQueueHealth(w.workdir, SERVICE)
-    expect(left.state).toBe("healthy")
-    expect(left.verdict).toEqual({ kind: "running" })
+    expect(left).toMatchObject({
+      state: "absent",
+      verdict: { kind: "stopped" },
+      facts: { serviceExited: { kind: "declaration-unreadable", exitCode: 2 } },
+    })
+    expect(left.facts?.serviceExited).toMatchObject({ detail: expect.stringContaining("no longer carries a .yrd.yml") })
   })
 })
 
@@ -3301,11 +3336,55 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({ state: "absent" })
   }, 30_000)
 
+  /** @failure A signal without a supervisor stop intent was labeled as a graceful stop with no reason. @level l2 */
+  it("writes an uncommanded SIGTERM as a terminal signal, then re-raises", async () => {
+    const w = await world()
+    const run = capture(w.work)
+    const stop = new AbortController()
+    let terminate: ((signal?: NodeJS.Signals) => void) | undefined
+    let reraised: NodeJS.Signals | undefined
+    const env = { ...process.env }
+    delete env.HAB_UNIT_INTENT_FILE
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          terminate: {
+            on: (handler) => {
+              terminate = handler
+              return () => {
+                terminate = undefined
+              }
+            },
+            reraise: (signal) => {
+              reraised = signal
+            },
+          },
+          afterHealth: () => {
+            terminate?.("SIGTERM")
+            stop.abort()
+          },
+        },
+        { env, workdir: w.workdir },
+      ),
+      run.stderr(),
+    ).toBe(0)
+    expect(reraised).toBe("SIGTERM")
+    expect(await readQueueHealth(w.workdir, SERVICE)).toMatchObject({
+      state: "absent",
+      facts: { serviceExited: { kind: "signal", signal: "SIGTERM" } },
+    })
+  }, 30_000)
+
   // 25430 fix-forward (@cto 16ab7d00). A stop intent written before this process
   // started (stale from a prior run), or one with a missing or unparseable `at`,
-  // is rejected as "no intent": the document records "no stop reason was recorded"
-  // without falling back to `now`.
-  it("a stale or unparseable stop intent writes no stop reason into the last document (25430, @cto 16ab7d00)", async () => {
+  // is rejected as "no intent": the last document names the uncommanded signal
+  // and the rejected intent, without borrowing yesterday's operator reason.
+  it("a stale or unparseable stop intent leaves a terminal signal, never an invented graceful stop", async () => {
     const w = await world()
     const intentFile = join(mkdtempSync(join(tmpdir(), "yrd-intent-stale-")), "intent.json")
     // Stale: written yesterday before this process started.
@@ -3356,11 +3435,14 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       state: "absent",
       verdict: { kind: "stopped" },
       facts: {
-        why: expect.stringMatching(/^stopped since .+: no stop reason was recorded$/),
+        serviceExited: {
+          kind: "signal",
+          signal: "SIGTERM",
+          detail: expect.stringContaining("before this process started"),
+        },
       },
     })
-    expect(lastStale.facts?.serviceStopped).not.toHaveProperty("by")
-    expect(lastStale.facts?.serviceStopped).not.toHaveProperty("reason")
+    expect(lastStale.facts?.serviceStopped).toBeUndefined()
 
     // Missing / unparseable at: also treated as no intent (no fallback to now)
     const stop2 = new AbortController()
@@ -3404,11 +3486,10 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       state: "absent",
       verdict: { kind: "stopped" },
       facts: {
-        why: expect.stringMatching(/^stopped since .+: no stop reason was recorded$/),
+        serviceExited: { kind: "signal", signal: "SIGTERM", detail: expect.stringContaining("no valid timestamp") },
       },
     })
-    expect(lastMissingAt.facts?.serviceStopped).not.toHaveProperty("by")
-    expect(lastMissingAt.facts?.serviceStopped).not.toHaveProperty("reason")
+    expect(lastMissingAt.facts?.serviceStopped).toBeUndefined()
   }, 30_000)
 
   // 25466. `hab up yrd --reason` writes the start intent before the spawn; the

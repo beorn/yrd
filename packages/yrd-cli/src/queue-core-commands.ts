@@ -123,6 +123,7 @@ import {
   type FlowReading,
   type LineFlow,
   gracefulStopHealthDocument,
+  exitedHealthDocument,
   writtenHealthDocument,
   runtimeGitlinkPath,
   stopFact,
@@ -143,6 +144,7 @@ import {
   type LogRecord,
   type QueueConfig,
   type QueueHealthDocument,
+  type ServiceExitFact,
   type ServiceIntentFact,
   type QueueRunOutcome,
   type RunnerClaim,
@@ -261,23 +263,25 @@ const sourceAtLoad = await (async () => {
 
 /** The termination signal a running service answers with its last document (25430). */
 export type TerminatePort = Readonly<{
-  /** Call `handler` on termination; answers the unsubscribe. */
-  on: (handler: () => void) => () => void
+  /** Call `handler` with the termination signal; answers the unsubscribe. */
+  on: (handler: (signal?: NodeJS.Signals) => void) => () => void
   /** End the process as the signal would have, after the handler ran. */
-  reraise: () => void
+  reraise: (signal?: NodeJS.Signals) => void
 }>
 
 const processTerminate: TerminatePort = {
   on: (handler) => {
-    process.on("SIGTERM", handler)
+    const signals = ["SIGTERM", "SIGHUP", "SIGINT"] as const
+    const listeners = signals.map((signal) => ({ signal, listener: () => handler(signal) }))
+    for (const { signal, listener } of listeners) process.on(signal, listener)
     return () => {
-      process.off("SIGTERM", handler)
+      for (const { signal, listener } of listeners) process.off(signal, listener)
     }
   },
   // Re-raised with no listener left, so the process dies OF the signal exactly
   // as before: the service's `restart: "on-codes"` keeps a signal terminal.
-  reraise: () => {
-    process.kill(process.pid, "SIGTERM")
+  reraise: (signal = "SIGTERM") => {
+    process.kill(process.pid, signal)
   },
 }
 
@@ -817,6 +821,7 @@ export async function coreQueueCommand(
       stop?: AbortSignal
       noCheck?: boolean
       onRecord?: (record: LogRecord) => void
+      onTerminalDeclaration?: (detail: string) => void
       waiting?: Readonly<{
         onWait: (wait: RoundLockWait) => void
         onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>) => void
@@ -885,11 +890,15 @@ export async function coreQueueCommand(
       try {
         declared = await declaration()
       } catch (error) {
-        return stuck(
-          `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`,
-        )
+        const detail = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
+        round.onTerminalDeclaration?.(detail)
+        return stuck(detail)
       }
-      if (declared === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
+      if (declared === undefined) {
+        const detail = `${targetLabel} no longer carries a .yrd.yml`
+        round.onTerminalDeclaration?.(detail)
+        return stuck(detail)
+      }
       const before = await round.before?.(declared)
       if (before !== undefined) return before
       let outcome: Awaited<ReturnType<typeof oneRound>>
@@ -1708,6 +1717,17 @@ export async function coreQueueCommand(
           )
         }
       }
+      const terminalExit = (kind: ServiceExitFact["kind"], detail: string): YrdCliExitCode => {
+        const exited = exitedHealthDocument(SERVICE, {
+          kind,
+          detail,
+          exitCode: 2,
+          at: new Date().toISOString(),
+        })
+        stated = exited
+        persistHealth(exited)
+        return stuck(detail)
+      }
       const runnerBeatMs = Math.max(30_000, heartbeat.intervalMs)
       let runnerState: RunnerClaim["state"] = "idle"
       let holding: string | undefined
@@ -1956,7 +1976,8 @@ export async function coreQueueCommand(
         let waitingFacts: Readonly<Record<string, unknown>> = {}
         for (;;) {
           if (now === undefined) {
-            return stuck(
+            return terminalExit(
+              "gitlink-absent",
               `runtime gitlink ${gitlink.path} is absent at captured target ${targetOid}; restore it before restarting this service`,
             )
           }
@@ -2102,7 +2123,8 @@ export async function coreQueueCommand(
             throw error
           }
           const latest = await declaration()
-          if (latest === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
+          if (latest === undefined)
+            return terminalExit("declaration-unreadable", `${targetLabel} no longer carries a .yrd.yml`)
           targetOid = latest.oid
           now = await gitlinkAt(git, targetOid, gitlink.path)
         }
@@ -2162,30 +2184,38 @@ export async function coreQueueCommand(
         }
         void notePhase()
       }, heartbeat.intervalMs)
-      // THE GRACEFUL STOP (25430). A signal carries no reason, so the supervisor
-      // wrote its stop intent before sending it; this reads it and leaves ONE
-      // last document saying who stopped the service and why, then dies of the
-      // signal as it always did. Synchronous from start to re-raise, and the
+      // THE SIGNAL EXIT (25430, 24570). A signal carries no reason. When the
+      // supervisor wrote a current stop intent first, the last document says
+      // who stopped the service. Without one, it names the terminal signal and
+      // the missing or invalid intent. Synchronous from start to re-raise, and the
       // heartbeat is cleared first, so nothing writes over the last document.
       // Under @cto 16ab7d00, readUnitIntent verifies the intent's `at` is at or
       // after writer.startedAt so a previous stop's intent is never read.
       // A SIGKILL runs none of this: its last document ages into the overdue
       // reading, which says the service stopped outside a graceful stop.
       const terminate = request.terminate ?? processTerminate
-      const offTerminate = terminate.on(() => {
+      const offTerminate = terminate.on((received) => {
         clearInterval(beat)
         const intent = readUnitIntent("stop", options.env ?? process.env, writer.startedAt)
-        if (intent.kind === "none") log?.warn?.(`stopping without a recorded reason: ${intent.why}`)
-        const graceful = gracefulStopHealthDocument(
-          SERVICE,
-          intent.kind === "intent" ? intent.fact : { since: new Date().toISOString() },
-          lastStop,
-        )
-        stated = graceful
-        persistHealth(graceful)
+        const signal = received ?? "SIGTERM"
+        if (intent.kind === "none") {
+          log?.warn?.(`stopping without a recorded reason: ${intent.why}`)
+          const exited = exitedHealthDocument(SERVICE, {
+            kind: "signal",
+            detail: `${signal} arrived without a stop intent: ${intent.why}`,
+            signal,
+            at: new Date().toISOString(),
+          })
+          stated = exited
+          persistHealth(exited)
+        } else {
+          const graceful = gracefulStopHealthDocument(SERVICE, intent.fact, lastStop)
+          stated = graceful
+          persistHealth(graceful)
+        }
         void publisher.publish(stoppedRunnerClaim()).finally(() => {
           offTerminate()
-          terminate.reraise()
+          terminate.reraise(signal)
         })
       })
       /**
@@ -2311,6 +2341,16 @@ export async function coreQueueCommand(
             stop: request.stop,
             waiting,
             onRecord: recordRunnerState,
+            onTerminalDeclaration: (detail) => {
+              const exited = exitedHealthDocument(SERVICE, {
+                kind: "declaration-unreadable",
+                detail,
+                exitCode: 2,
+                at: new Date().toISOString(),
+              })
+              stated = exited
+              persistHealth(exited)
+            },
           })
           const afterRoundConflict = runnerConflictExit()
           if (afterRoundConflict !== undefined) return afterRoundConflict

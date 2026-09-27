@@ -752,6 +752,29 @@ export function relaunchStalledHealthDocument(
  */
 export type ServiceIntentFact = Readonly<{ since: string; by?: string; reason?: string }>
 
+/** An off-relaunch exit that the service observed before it stopped. */
+export type ServiceExitFact = Readonly<{
+  kind: "declaration-unreadable" | "gitlink-absent" | "signal"
+  detail: string
+  at: string
+  exitCode?: number
+  signal?: string
+}>
+
+/** The last health document for a terminal exit whose cause the service knows. */
+export function exitedHealthDocument(service: string, serviceExited: ServiceExitFact): QueueHealthDocument {
+  return {
+    schema: QUEUE_HEALTH_SCHEMA,
+    service,
+    state: "absent",
+    verdict: { kind: "stopped" },
+    facts: {
+      why: `service exited: ${serviceExited.detail}`,
+      serviceExited,
+    },
+  }
+}
+
 /**
  * The operator-facing line for a graceful stop, from its own fact, in the
  * watch's two words (@cto 3ced1b26): "stopped by <seat> since <time>: <reason>"

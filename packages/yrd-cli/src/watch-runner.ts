@@ -40,6 +40,7 @@ import {
   type RoundLine,
   type QueueHealthDocument,
   type ServiceIntentFact,
+  type ServiceExitFact,
   type StopFact,
 } from "@yrd/queue-core"
 import { readQueueHealth, SERVICE } from "./queue-health.ts"
@@ -258,6 +259,19 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
       ...(Number.isNaN(since.getTime()) ? {} : { since }),
     }
   }
+  const exited = serviceExitedFact(document)
+  if (exited === "unreadable") {
+    return { kind: "unreadable", why: `health document in ${workdir} has malformed facts.serviceExited` }
+  }
+  if (exited !== undefined) {
+    return {
+      cause: `service exited (${exited.kind}${exited.signal === undefined ? "" : ` ${exited.signal}`}): ${exited.detail}`,
+      graceful: false,
+      kind: "stopped",
+      why: `service exited at ${exited.at}: ${exited.detail}`,
+      since: new Date(exited.at),
+    }
+  }
   if (document.state === "absent") {
     // The reader carries the sentence on `facts.why`, never on `error`: an
     // `absent` document with a typed error is refused by the supervisor's own
@@ -349,6 +363,35 @@ function serviceStoppedFact(document: QueueHealthDocument): ServiceIntentFact | 
     ...(typeof by === "string" ? { by } : {}),
     ...(typeof reason === "string" ? { reason } : {}),
   }
+}
+
+/** A service's own terminal exit fact; malformed facts remain loud. */
+function serviceExitedFact(document: QueueHealthDocument): ServiceExitFact | "unreadable" | undefined {
+  const raw = document.facts?.serviceExited
+  if (raw === undefined) return undefined
+  if (
+    document.state !== "absent" ||
+    document.verdict?.kind !== "stopped" ||
+    document.error !== undefined ||
+    document.facts?.staleAfter !== undefined
+  )
+    return "unreadable"
+  if (typeof raw !== "object" || raw === null) return "unreadable"
+  const fact = raw as Readonly<Record<string, unknown>>
+  if (
+    (fact.kind !== "declaration-unreadable" && fact.kind !== "gitlink-absent" && fact.kind !== "signal") ||
+    typeof fact.detail !== "string" ||
+    fact.detail.length === 0 ||
+    typeof fact.at !== "string" ||
+    !Number.isFinite(Date.parse(fact.at)) ||
+    new Date(Date.parse(fact.at)).toISOString() !== fact.at ||
+    (fact.exitCode !== undefined && (!Number.isSafeInteger(fact.exitCode) || Number(fact.exitCode) < 0)) ||
+    (fact.kind === "signal"
+      ? typeof fact.signal !== "string" || fact.signal.length === 0
+      : fact.signal !== undefined)
+  )
+    return "unreadable"
+  return fact as ServiceExitFact
 }
 
 /**

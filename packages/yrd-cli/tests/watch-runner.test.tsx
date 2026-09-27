@@ -15,7 +15,14 @@ import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "n
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { gracefulStopHealthDocument, openLog, QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, runId } from "@yrd/queue-core"
+import {
+  exitedHealthDocument,
+  gracefulStopHealthDocument,
+  openLog,
+  QUEUE_HEALTH_DOCUMENT,
+  QUEUE_HEALTH_SCHEMA,
+  runId,
+} from "@yrd/queue-core"
 import { SERVICE } from "../src/queue-health.ts"
 import { clock } from "../src/watch-format.ts"
 import {
@@ -396,6 +403,25 @@ describe("readRunnerService, the loop's own liveness", () => {
     expect(line.state).toBe("stopped")
     expect(line.detail).toContain("process 2147483647 on queue-host")
     expect(line.detail).toContain("hh-hab ps yrd --json")
+  })
+
+  /** @failure The service knew why it exited, but the stopped queue row named only a dead writer. @level l1 */
+  it("reads a detected off-relaunch exit from the service's last document", async () => {
+    const exited = exitedHealthDocument(SERVICE, {
+      kind: "gitlink-absent",
+      detail: "runtime gitlink vendor/yrd is absent at the target",
+      exitCode: 2,
+      at: NOW.toISOString(),
+    })
+    const workdir = workdirWith({ ageMs: 1_000, health: JSON.stringify(exited) })
+    const service = await readRunnerService(workdir, NOW)
+    expect(service).toMatchObject({ kind: "stopped", cause: expect.stringContaining("gitlink vendor/yrd is absent") })
+    expect(runnerLine({ journalDir: workdir, service }, NOW).detail).toContain("gitlink vendor/yrd is absent")
+    const invalid = { ...exited, error: { code: "invented", cause: "wrong", resolution: [] } }
+    expect(await readRunnerService(workdirWith({ ageMs: 1_000, health: JSON.stringify(invalid) }), NOW)).toMatchObject({
+      kind: "unreadable",
+      why: expect.stringContaining("malformed facts.serviceExited"),
+    })
   })
 
   it("reads a graceful stop's last document as who stopped the service and why (25430)", async () => {
