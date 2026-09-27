@@ -90,8 +90,8 @@ describe("the pointer in the live pane", () => {
     }
   })
 
-  /** @failure A detail that only scrolls its tab cannot reach the rest of the pane with a wheel and PageDown.
-   * @level l2 @consumer operator reading a long change in yrd watch (26187)
+  /** @failure PageDown and wheel on a long Changes body must scroll the body while Timeline chrome stays (26242).
+   * @level l2 @consumer operator reading a long change in yrd watch (26187, 26242)
    */
   it("scrolls a long opened detail with the wheel and PageDown", async () => {
     using term = createTermless({ cols: 100, rows: 31 })
@@ -138,20 +138,23 @@ describe("the pointer in the live pane", () => {
       await sleep(100)
       await handle.waitForLayoutStable()
       const paged = term.screen.getText()
-      expect(paged).not.toContain("Timeline")
+      expect(paged).toContain("Timeline")
       expect(paged).not.toContain("SCROLL-LINE-000")
+      expect(paged).not.toBe(top)
       await captureFrame("after-pagedown")
 
       sendInput("\x1b[5~")
       await sleep(100)
       await handle.waitForLayoutStable()
-      expect(term.screen.getText()).toContain("Timeline")
+      const pagedBack = term.screen.getText()
+      expect(pagedBack).toContain("Timeline")
+      expect(pagedBack).toContain("SCROLL-LINE-000")
 
       await term.mouse.wheel(80, 18, 32)
       await sleep(100)
       await handle.waitForLayoutStable()
       const wheeled = term.screen.getText()
-      expect(wheeled).not.toContain("Timeline")
+      expect(wheeled).toContain("Timeline")
       expect(wheeled).not.toContain("SCROLL-LINE-000")
       expect(wheeled).not.toBe(top)
       await captureFrame("after-wheel")
