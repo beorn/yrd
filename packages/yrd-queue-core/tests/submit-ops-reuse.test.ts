@@ -143,6 +143,85 @@ describe("submit reuses a fenced admission observation", () => {
     expect(calls.seams.unattributed).toBeUndefined()
   })
 
+  it("bounds one-push reads when only the queue tip advances after admission", async () => {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", selectionFor(w.git))
+    const trace = traceRemoteCalls(join(w.root, "trace-moved-queue"), { seams: true })
+    let calls: ReturnType<typeof trace.end>
+    try {
+      const result = await submit(
+        beforePublication(w, async () => {
+          await writeQueueEvent(store, "main", {
+            type: "observed",
+            commit: w.target,
+            by: "yrd-run",
+            at: new Date(),
+          })
+        }),
+        "origin",
+        request,
+      )
+      expect(result.retry).toBe(false)
+      expect(result.stop).toBeUndefined()
+    } finally {
+      calls = trace.end()
+    }
+    const publication = calls.seams.submitEvent
+    const remoteCalls = (publication?.["ls-remote"] ?? 0) + (publication?.fetch ?? 0) + (publication?.push ?? 0)
+    expect(publication?.push).toBe(1)
+    expect(remoteCalls, JSON.stringify(publication)).toBeLessThanOrEqual(8)
+    expect(calls.unreadable).toBe(0)
+  })
+
+  it("bounds one-push reads when a stale stuck pause arrives after admission", async () => {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", selectionFor(w.git))
+    const tip = (await readEventQueue(store, "main")).tip
+    const opened = await (
+      await openEvents({ ...store, ref: changesRef("main", "task/stuck"), writer: "@dev/11" })
+    ).append([changeInput("opened", { queueTip: tip, at: new Date(), commit: w.target, by: "@dev/11" })], {
+      expect: null,
+    })
+    if (opened.head === null) throw new Error("fixture stuck change has no opened event tip")
+    const stuck = await appendChangeEvent(store, "main", "task/stuck", opened.head, {
+      type: "stuck",
+      at: new Date(),
+      reason: "fixture needs repair",
+    })
+    await appendChangeEvent(store, "main", "task/stuck", stuck, {
+      type: "cancelled",
+      at: new Date(),
+      reason: "withdrawn",
+    })
+    const trace = traceRemoteCalls(join(w.root, "trace-stale-stuck"), { seams: true })
+    let calls: ReturnType<typeof trace.end>
+    try {
+      const result = await submit(
+        beforePublication(w, async () => {
+          await writeQueueEvent(store, "main", {
+            type: "paused",
+            cause: "stuck",
+            by: "@chief",
+            reason: "repair task/stuck",
+            at: new Date(),
+            change: { branch: "task/stuck", head: w.target, event: stuck },
+          })
+        }),
+        "origin",
+        request,
+      )
+      expect(result.retry).toBe(false)
+      expect(result.stop).toBeUndefined()
+    } finally {
+      calls = trace.end()
+    }
+    const publication = calls.seams.submitEvent
+    const remoteCalls = (publication?.["ls-remote"] ?? 0) + (publication?.fetch ?? 0) + (publication?.push ?? 0)
+    expect(publication?.push).toBe(1)
+    expect(remoteCalls, JSON.stringify(publication)).toBeLessThanOrEqual(8)
+    expect(calls.unreadable).toBe(0)
+  })
+
   it("rereads and refuses an M2 tip changed before publication", async () => {
     const w = await world()
     await expect(
