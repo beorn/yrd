@@ -96,6 +96,7 @@ import {
   freshnessLine,
   readRemoteCommit,
   refreshMirror,
+  invalidateMirrorStamp,
   refAt,
   readDrafts,
   DRAFT_WINDOW_MS,
@@ -603,6 +604,9 @@ export async function coreQueueCommand(
   const refuseMissingEventMarker = async (eventRemote: string, name: string): Promise<never> => {
     const prefix = queueRefPrefix(name)
     const refs = await listRefs(`${prefix}/`, statusEventStore(eventRemote))
+    if (refs.size === 0) {
+      throw new Error(`no queue exists at ${prefix}/ in queue status store ${repo}: observed no refs under that prefix`)
+    }
     const legacy = [...refs.keys()].find((ref) => parseChangeRef(name, ref) !== undefined)
     const observed =
       legacy === undefined
@@ -641,6 +645,27 @@ export async function coreQueueCommand(
   const resolveIssue = issueResolver(config, repo, env)
   const workdir = options.workdir ?? (await workdirOf(git))
   mkdirSync(workdir, { recursive: true })
+  const invalidateStatusSnapshot = async (): Promise<void> => {
+    // The queue-owned clone is the list/show reader. A remote write can leave
+    // its refs and 60-second stamp behind, so its next read must fetch once.
+    await invalidateMirrorStamp(join(workdir, "repo"), await remoteUrl(git, config.target.remote))
+  }
+  const directWriter =
+    request.command === "pause" ||
+    request.command === "resume" ||
+    request.command === "withdraw" ||
+    request.command === "drop" ||
+    request.command === "ignore" ||
+    request.command === "unignore" ||
+    request.command === "merge" ||
+    (request.command === "submit" && request.dryRun !== true) ||
+    (request.command === "override" && request.action !== "list") ||
+    (request.command === "adopt-legacy" && request.apply)
+  await using _invalidateAfterWriter = {
+    async [Symbol.asyncDispose](): Promise<void> {
+      if (directWriter) await invalidateStatusSnapshot()
+    },
+  }
 
   /** The one shape a command that could not judge answers with (plan § The queue run). */
   const stuck = (why: string): YrdCliExitCode => {
@@ -853,7 +878,16 @@ export async function coreQueueCommand(
       if (declared === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
       const before = await round.before?.(declared)
       if (before !== undefined) return before
-      const outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck)
+      let outcome: Awaited<ReturnType<typeof oneRound>>
+      try {
+        outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck)
+      } finally {
+        // An otherwise empty round can still publish queue observations or
+        // cleanup. Long foreground runs repeat rounds before command exit.
+        if (request.command === "up" || request.command === "run" || request.command === "merge") {
+          await invalidateStatusSnapshot()
+        }
+      }
       return outcome === undefined ? 2 : "kind" in outcome ? outcome : { declared, outcome }
     } finally {
       lock.release()

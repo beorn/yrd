@@ -263,6 +263,7 @@ export type { RemoteCalls } from "./remote-calls.ts"
 export {
   MIRROR_LOCK_WAIT_MS,
   MIRROR_REFRESHED_AT,
+  invalidateMirrorStamp,
   mirrorLocation,
   mirrorRefreshedAt,
   MirrorUnavailable,

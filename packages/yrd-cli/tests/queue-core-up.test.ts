@@ -58,6 +58,7 @@ import {
   readRemoteCommit,
   readRunLog,
   readStatus,
+  readStop,
   ROUND_LOCK,
   runId,
   setBranchIgnored,
@@ -4421,11 +4422,16 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     return (await w.git(["merge-base", head, await mainAt(w)])).trim() === head
   }
 
-  /** The stop `yrd list --json` reads: `null` while the line runs. */
+  /** Legacy fixture; rewritten in event format by 25041 strict-reader retirement. */
   async function stopOf(w: World): Promise<unknown> {
-    const listed = await yrd(w, "list", "--json")
-    expect(listed.exitCode, listed.report).toBe(0)
-    return (JSON.parse(listed.stdout) as { stopped: unknown }).stopped
+    const { stop } = await readStop(w.git, "origin", "main", await mainAt(w))
+    return stop === undefined
+      ? null
+      : {
+          by: stop.by,
+          cause: stop.cause,
+          change: stop.change === undefined ? null : `${stop.change.branch}@${stop.change.head}`,
+        }
   }
 
   /**
