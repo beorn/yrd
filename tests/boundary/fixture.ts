@@ -259,8 +259,8 @@ export async function queueRunOnce(repo: string): Promise<QueueRunResult> {
  */
 export async function changeStandings(repo: string): Promise<Readonly<Record<string, string>>> {
   const listed = capture(repo)
-  // The one table: every change keyed by branch and head, with its derived state.
-  expectZero(await yrd(repo, listed.io, "queue", "list", "--json"), "queue list", listed)
+  // Legacy ref subjects use the remote reader, since they have no event status store.
+  expectZero(await yrd(repo, listed.io, "queue", "list", "--json", "--fresh"), "queue list", listed)
   const parsed = JSON.parse(listed.stdout()) as { changes: readonly { branch: string; head: string; state: string }[] }
   return Object.fromEntries(parsed.changes.map((change) => [`${change.branch}@${change.head}`, change.state]))
 }

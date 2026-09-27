@@ -75,8 +75,9 @@ type PlanRow = Readonly<Record<string, unknown>> & { branch?: unknown; head?: un
 async function changesListed(
   repo: string,
   latest = false,
+  fresh = false,
 ): Promise<{ rows: readonly PlanRow[]; result: YrdJsonResult }> {
-  const result = await yrdJson(repo, "queue", "list", ...(latest ? ["--latest"] : []))
+  const result = await yrdJson(repo, "queue", "list", ...(latest ? ["--latest"] : []), ...(fresh ? ["--fresh"] : []))
   if (result.exitCode !== 0) throw new Error(`queue list did not answer\n${result.report}`)
   if (typeof result.json !== "object" || result.json === null) {
     throw new Error(`queue list answered with no JSON object, so it named no changes\n${result.report}`)
@@ -155,10 +156,10 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(row.position, result.report).toBe(1)
   })
 
-  it("checked — a change whose checks passed but which has not merged is checked", async () => {
-    // Two changes and one queue run: the first in line merges, the second is
-    // left checked. There is no other way, at the boundary, to reach the state
-    // between "checks passed" and "merged".
+  it("queued — after one event round merges the first change, the next still waits", async () => {
+    // The event runner does not publish a checked state between a passing
+    // verdict and its merge. One round merges the first and leaves the next
+    // queued. 25041 retires the legacy checked-state witness.
     const { repo } = await boundaryRepository({ exit: 0 })
     const first = await submitOneCommit(repo, "alpha")
     const second = await submitOneCommit(repo, "beta")
@@ -167,7 +168,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
 
     const { rows, result } = await changesListed(repo)
     expect(stateOf(rowFor(rows, first.branch, result.report), result.report), result.report).toBe("merged")
-    expect(stateOf(rowFor(rows, second.branch, result.report), result.report), result.report).toBe("checked")
+    expect(stateOf(rowFor(rows, second.branch, result.report), result.report), result.report).toBe("queued")
   })
 
   it("stuck — a change the queue could not judge keeps its place in line", async () => {
@@ -216,14 +217,16 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     // around the queue in the garage shows merged, and the next queue run appends the
     // merged record so the tip catches up)". The state is read from git, so the
     // reader answers merged with the record table still saying queued.
-    const { repo } = await boundaryRepository({ exit: 0 })
+    // Legacy ancestry projection; the event reader records a direct target row instead.
+    const { repo } = await boundaryRepository({ exit: 0 }, "legacy")
     const { branch, headSha } = await submitOneCommit(repo, "byhand")
 
     const before = await targetTip(repo)
     const tip = await mergeAroundQueue(repo, headSha)
     expect(tip, "the direct merge did not move the target").not.toBe(before)
 
-    const { rows, result } = await changesListed(repo)
+    // The merge bypassed the queue writer, so the caller requests a remote refresh.
+    const { rows, result } = await changesListed(repo, false, true)
     const row = rowFor(rows, branch, result.report)
     expect(stateOf(row, result.report), `the head is an ancestor of the target\n${result.report}`).toBe("merged")
     expect(row.position, `a merged change holds no place in line\n${result.report}`).toBeUndefined()
@@ -300,7 +303,8 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     const reader = await secondReader(origin)
 
     const queued = await changesListed(repo)
-    const queuedElsewhere = await changesListed(reader)
+    // This checkout holds Git data but has no queue-owned local status clone.
+    const queuedElsewhere = await changesListed(reader, false, true)
     expect(
       stateOf(rowFor(queuedElsewhere.rows, branch, queuedElsewhere.result.report), queuedElsewhere.result.report),
       `the queue's own checkout says '${stateOf(rowFor(queued.rows, branch, queued.result.report), queued.result.report)}'\n${queuedElsewhere.result.report}`,
@@ -309,7 +313,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     await queueRunOnce(repo)
     await refreshSecondReader(reader)
 
-    const merged = await changesListed(reader)
+    const merged = await changesListed(reader, false, true)
     expect(stateOf(rowFor(merged.rows, branch, merged.result.report), merged.result.report), merged.result.report).toBe(
       "merged",
     )
@@ -336,6 +340,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     // 24095: both changes share one check name. A later
     // pass must not replace the earlier failure's bytes, or its list pointer.
     // Merely proving one log is readable missed that regression.
+    // Legacy list exposes run/log bytes; 25041 retires this witness with readChange.
     const { repo } = await boundaryRepositoryWith({
       checks: [
         {
@@ -343,12 +348,12 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
           run: 'if test -f red.txt; then echo "FAIL red"; exit 1; else echo "PASS green"; fi',
         },
       ],
-    })
+    }, "legacy")
     const red = await submitOneCommit(repo, "red")
     const outcome = await queueRunOnce(repo)
     expect(outcome.exitCode, outcome.report).toBe(1)
 
-    const first = await changesListed(repo, true)
+    const first = await changesListed(repo, true, true)
     const failed = rowFor(first.rows, red.branch, first.result.report)
 
     // Retry the SAME head before another change advances main. A stale submit
@@ -357,7 +362,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(retry.exitCode, retry.report).toBe(0)
     const retried = await queueRunOnce(repo)
     expect(retried.exitCode, retried.report).toBe(1)
-    const latest = await changesListed(repo, true)
+    const latest = await changesListed(repo, true, true)
     const redAgain = rowFor(latest.rows, red.branch, latest.result.report)
     expect(stateOf(redAgain, latest.result.report)).toBe("failed")
     expect(redAgain.log).not.toBe(failed.log)
@@ -369,7 +374,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(next.exitCode, next.report).toBe(0)
 
     // Default history is separately broken: historical-run-rows-use-latest-result pairs old rows with the latest result.
-    const { rows, result } = await changesListed(repo, true)
+    const { rows, result } = await changesListed(repo, true, true)
     const passed = rowFor(rows, green.branch, result.report)
     const retainedFailure = rowFor(rows, red.branch, result.report)
     expect(stateOf(retainedFailure, result.report)).toBe("failed")

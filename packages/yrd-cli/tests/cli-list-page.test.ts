@@ -85,10 +85,8 @@ async function queueWithOneChange(): Promise<string> {
 /**
  * A queue with a change whose branch NAME coincides with the term `merged`
  * (the live specimen, `task/merged-ball-conditional-close`) but whose own
- * state stays `queued`, alongside a second change actually merged — landed
- * directly onto the target, bypassing the queue entirely, which is enough for
- * `readChange` to call it `merged` by ancestry (queue-core/src/state.ts:71,
- * "a direct merge in the garage still shows as merged"). The defect this
+ * state stays `queued`, alongside a second change actually merged by one
+ * event queue round. The defect this
  * pins is not a wrong count: it is one row that only LOOKS like an answer.
  */
 async function queueWithMergedCoincidence(): Promise<string> {
@@ -108,8 +106,23 @@ async function queueWithMergedCoincidence(): Promise<string> {
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
   await birthEventQueue(work)
+  // The real merge: nothing in its own branch or subject says `merged`.
+  await git(["checkout", "--quiet", "-b", "task/direct", "main"])
+  writeFileSync(join(work, "direct.txt"), "direct\n")
+  writeFileSync(join(work, "pass.txt"), "pass\n")
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "task/direct lands directly"])
+  await git(["checkout", "--quiet", "main"])
+  await submit(git, "origin", {
+    branch: "task/direct",
+    submitter: "@dev/11",
+    target: { branch: "main", remote: "origin" },
+  })
+  const round = await yrd(work, { color: false }, "queue", "run", "--json")
+  expect(round.exitCode, round.report).toBe(0)
+  await git(["fetch", "--quiet", "origin", "main"])
   // The coincidence: branch TEXT says `merged`, but the change is only queued.
-  await git(["checkout", "--quiet", "-b", "task/merged-ball-conditional-close", "main"])
+  await git(["checkout", "--quiet", "-b", "task/merged-ball-conditional-close", "origin/main"])
   writeFileSync(join(work, "coincidence.txt"), "coincidence\n")
   await git(["add", "."])
   await git(["commit", "--quiet", "-m", "fix(yrd): condition merged bead closure on full acceptance"])
@@ -119,19 +132,6 @@ async function queueWithMergedCoincidence(): Promise<string> {
     submitter: "@dev/10",
     target: { branch: "main", remote: "origin" },
   })
-  // The real merge: nothing in its own branch or subject says `merged`.
-  await git(["checkout", "--quiet", "-b", "task/direct", "main"])
-  writeFileSync(join(work, "direct.txt"), "direct\n")
-  await git(["add", "."])
-  await git(["commit", "--quiet", "-m", "task/direct lands directly"])
-  await git(["checkout", "--quiet", "main"])
-  await submit(git, "origin", {
-    branch: "task/direct",
-    submitter: "@dev/11",
-    target: { branch: "main", remote: "origin" },
-  })
-  await git(["merge", "--quiet", "--ff-only", "task/direct"])
-  await git(["push", "--quiet", "origin", "main"])
   mkdirSync(join(root, "queue"), { recursive: true })
   return work
 }
@@ -164,7 +164,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(row).toContain("task/one")
     expect(row).toContain("does its work")
     expect(row).toContain("@dev/10")
-    expect(plain.stdout).toContain("1 change(s)")
+    expect(plain.stdout).toContain("1 waiting")
     // The runner is a ROW between what waits and what is done, always there:
     // off the queue's own machine it says its status is not published rather
     // than guessing, and nothing invents one to avoid printing `?`.
@@ -261,8 +261,7 @@ describe("a state name means the state", () => {
    */
   it("keeps the real merge beside its own coincidence, rather than stopping at the row that only looks like an answer", async () => {
     const cwd = await queueWithMergedCoincidence()
-    // The direct merge bypasses the queue writer; request a remote refresh.
-    const ran = await yrd(cwd, { color: false, columns: 120 }, "list", "--json", "--fresh", "merged")
+    const ran = await yrd(cwd, { color: false, columns: 120 }, "list", "--json", "merged")
 
     expect(ran.exitCode, ran.report).toBe(0)
     const document = JSON.parse(ran.stdout) as Record<string, unknown>
@@ -276,7 +275,7 @@ describe("a state name means the state", () => {
     // The message, not only the count: both rows counted as matches, so the
     // numerator is 2 — the denominator is however many rows this fixture's
     // queue reading carries in total, which is not this test's concern.
-    expect(document["scope"], ran.report).toMatch(/^2 of \d+ change\(s\) match merged$/u)
+    expect(document["scope"], ran.report).toMatch(/^2 of \d+ change\(s\) match merged\b/u)
   })
 })
 

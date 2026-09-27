@@ -4,6 +4,7 @@
  *          pin under another branch; any of those makes a root pin unsafe.
  * @level   l2 (the public CLI, real bare remotes, real submodules and queue refs)
  * @consumer seats using `yrd submit --gitlink` instead of hand-building a carrier
+ * Legacy pause, withdraw and branch-retirement fixture; rewritten by 25041 strict-reader retirement.
  * @reach   fs-walk vendor/yrd/packages/yrd-cli/src/**
  * @testonly none
  */
@@ -14,7 +15,6 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
-import { birthEventQueue } from "./support/event-queue-birth.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -137,7 +137,6 @@ async function world(): Promise<World> {
   await git(["commit", "--quiet", "-m", "root with two components"])
   const base = (await git(["rev-parse", "HEAD"])).trim()
   await git(["push", "--quiet", "origin", "main"])
-  await birthEventQueue(work)
 
   // The root still records `old`; each declared component remote holds `held`.
   // `unheld` exists in a local checkout only, so local object presence cannot
@@ -178,7 +177,8 @@ async function assertCarrier(
     expect((await git(["ls-tree", head, path])).trim()).toBe(`160000 commit ${sha}\t${path}`)
   }
   expect(await git(["show", "-s", "--format=%B", head])).toContain("Refs: 25804")
-  const listed = await yrd(w.work, "list", "--json")
+  // Legacy subject, retired with 25041: read its change refs through the remote path.
+  const listed = await yrd(w.work, "list", "--json", "--fresh")
   expect(listed.exitCode, listed.report).toBe(0)
   expect(
     (JSON.parse(listed.stdout) as { changes: readonly { branch: string }[] }).changes.some(

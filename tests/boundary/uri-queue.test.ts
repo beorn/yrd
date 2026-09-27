@@ -117,7 +117,7 @@ describe("a queue started by address on a host with no checkout", () => {
     ])
     expect(submitExit, `${submitStderr}\n${submitStdout}`).toBe(0)
     expect(await git(remote, "for-each-ref", "--format=%(refname)", "refs/yrd/main/")).toContain(
-      "refs/yrd/main/task/uri@",
+      "refs/yrd/main/changes/task/uri",
     )
 
     const address = `${remote}#main`
@@ -190,11 +190,11 @@ describe("a queue started by address on a host with no checkout", () => {
       .find((call) => call?.name === "push")
     expect(authorPush, "selected author Git saw no push verb").toBeDefined()
     expect(authorPush?.tail).toContain("--atomic")
-    // Three leases in one atomic push: the task branch, the queue ref, and the pause fence that serializes intake
-    // with queue pause and the format cutover (d7fda91051, 25646).
+    // Three leases in one atomic event push: task branch, change chain, and
+    // queue tip. The queue tip fences intake against a racing maintenance event.
     const leases = authorPush?.tail.filter((arg) => arg.startsWith("--force-with-lease=")) ?? []
     expect(leases).toHaveLength(3)
-    expect(leases.some((arg) => arg.startsWith("--force-with-lease=refs/yrd/main/pause:"))).toBe(true)
+    expect(leases.some((arg) => arg.startsWith("--force-with-lease=refs/yrd/main/queue:"))).toBe(true)
     expect(
       selectedCalls.some(
         ({ cwd, args }) =>
