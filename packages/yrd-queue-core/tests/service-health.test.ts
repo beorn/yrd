@@ -18,6 +18,7 @@ import {
 } from "../src/service-health.ts"
 import type { PauseRecord } from "../src/pause.ts"
 import type { RunnerClaim } from "../src/runner-claim.ts"
+import { judgeRunnerDue } from "../src/runner-claim.ts"
 
 // A stuck change STOPS THE LINE (the andon, operator 2026-09-16): the queue
 // pauses itself naming the change, the service stays up holding the stop, and
@@ -402,6 +403,43 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
   test("idle is not stalled: nothing waiting never reads stalled, however long since the last judgement", () => {
     const flow = { lastJudgedAt: "2026-09-24T09:00:00.000Z", waiting: 0 }
     expect(lineStall(flow, threshold, at("20:00:00"))).toBeUndefined()
+  })
+
+  /** @failure Phase transitions could keep a round green after its total published Due. @level l1 */
+  test("whole-round Due pages with the same cause in the live and stored health readings", () => {
+    const now = new Date("2026-09-24T20:53:00.001Z")
+    const claim: RunnerClaim = {
+      host: "queue-host",
+      pid: 42,
+      started: "2026-09-24T19:00:00.000Z",
+      round: "2026-09-24T19:35:00.000Z",
+      due: "2026-09-24T20:50:00.000Z",
+      candidates: 3,
+      at: "2026-09-24T20:53:00.000Z",
+      beatMs: 60_000,
+      state: "checking",
+      since: "2026-09-24T20:45:00.000Z",
+      deadline: "2026-09-24T21:15:00.000Z",
+    }
+    const flow = {
+      waiting: 3,
+      oldestWaiting: oldest,
+      roundOpen: { startedAt: "2026-09-24T19:35:00.000Z", phase: "hold" },
+    }
+    const reason = judgeRunnerDue(claim, now).reason
+    expect(lineStall(flow, threshold, new Date("2026-09-24T20:53:00.000Z"), claim)).toBeUndefined()
+    expect(lineStall(flow, threshold, now, claim)).toMatchObject({ shape: "total-round", cause: reason })
+    const live = roundHealthDocument("yrd", undefined, INTERVAL, now, { flow, threshold, claim })
+    expect(live.error?.cause).toBe(reason)
+    const stored = roundHealthDocument("yrd", undefined, INTERVAL, new Date("2026-09-24T20:52:59.000Z"), {
+      flow,
+      threshold,
+      claim,
+    })
+    expect(
+      believableHealthDocument({ ...stored, facts: { ...stored.facts, runnerClaim: claim, runnerPhase: "hold" } }, now)
+        .error?.cause,
+    ).toBe(reason)
   })
 
   test("the clock starts at the later of the last judgement and the oldest change's opening, so a submit after idle hours does not page at once", () => {

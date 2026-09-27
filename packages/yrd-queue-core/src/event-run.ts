@@ -28,7 +28,7 @@ import { eventRows } from "./event-table.ts"
 import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
 import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
-import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
+import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, TRANSPORT_RETRY_LIMIT, type CheckResult } from "./check.ts"
 import { InvalidQueueConfig, UnknownConfigKey, queueName, readConfig } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
 import { recentCasRefusalStreak, recentCasRefusals, recentPublicationNotLanded, type QueueRunLog } from "./log.ts"
@@ -1531,7 +1531,7 @@ export async function eventQueueRun(
           ...(fault === undefined ? {} : { fault }),
         }
       }
-      for (let attempt = 1; attempt <= 2; attempt++) {
+      for (let attempt = 1; attempt <= 1 + TRANSPORT_RETRY_LIMIT; attempt++) {
         const startOfAttempt = results.length
         skippedByOverride = new Set()
         for (const phase of ["submit", "merge"] as const) {

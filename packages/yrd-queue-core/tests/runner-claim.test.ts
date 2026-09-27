@@ -5,7 +5,15 @@
  * @testonly none
  */
 import { describe, expect, it } from "vitest"
-import { formatRunnerClaim, judgeRunnerClaim, judgeRunnerDeadline, parseRunnerClaim, runnerRef } from "../src/index.ts"
+import {
+  formatRunnerClaim,
+  judgeRunnerClaim,
+  judgeRunnerDeadline,
+  judgeRunnerDue,
+  parseRunnerClaim,
+  roundBoundMs,
+  runnerRef,
+} from "../src/index.ts"
 
 const claim = {
   host: "queue-host",
@@ -67,13 +75,85 @@ describe("runner claim", () => {
     ).toBe("unbounded")
   })
 
+  /** @failure A cycling round could stay within each phase bound while exceeding its total declared plan. @level l1 */
+  it("round trips one immutable round plan and judges Due after three beats", () => {
+    const planned = {
+      ...claim,
+      round: "2026-09-27T12:00:10.000Z",
+      due: "2026-09-27T13:15:10.000Z",
+      candidates: 3,
+    }
+    const message = formatRunnerClaim(planned)
+    expect(message).toContain(
+      "Deadline: 2026-09-27T12:30:30.000Z\nDue: 2026-09-27T13:15:10.000Z\nRound: 2026-09-27T12:00:10.000Z\nCandidates: 3\n",
+    )
+    expect(parseRunnerClaim(message)).toEqual(planned)
+    expect(judgeRunnerDue(planned, new Date("2026-09-27T13:18:10.000Z")).status).toBe("within")
+    expect(judgeRunnerDue(planned, new Date("2026-09-27T13:18:10.001Z"))).toMatchObject({
+      status: "overdue",
+      reason: "round past its total declared bound (1h15m for 3 candidates, started 2026-09-27T12:00:10.000Z)",
+    })
+  })
+
+  it("refuses an incomplete or incoherent round plan", () => {
+    const planned = { ...claim, round: "2026-09-27T12:00:10.000Z", due: "2026-09-27T13:15:10.000Z", candidates: 3 }
+    expect(() => formatRunnerClaim({ ...planned, round: "2026-09-27T12:00:31.000Z" })).toThrow(/Round.*Since/)
+    expect(() => formatRunnerClaim({ ...planned, candidates: 0 })).toThrow(/Candidates/)
+    expect(() => formatRunnerClaim({ ...planned, due: undefined })).toThrow(/Round.*Due|Due.*Round/)
+    expect(() => formatRunnerClaim({ ...planned, due: planned.round })).toThrow(/Round.*Due|Due.*Round/)
+    const message = formatRunnerClaim(planned)
+    expect(() => parseRunnerClaim(message.replace("Candidates: 3", "Candidates: 03"))).toThrow(/Candidates/)
+    expect(() => parseRunnerClaim(message.replace("Candidates: 3", "Candidates: 3e0"))).toThrow(/Candidates/)
+  })
+
+  /** @failure A protected check's P and C setup runs were omitted from the whole-round Due. @level l1 */
+  it("includes both program-root worktrees and setup runs in each declared phase", () => {
+    const bound = roundBoundMs(
+      [{ name: "protected", run: "test", on: ["submit", "merge"], timeoutMs: 5 * 60_000, programRoot: true }],
+      "true",
+      1,
+    )
+    // 30m line read; two attempts of: 5 other steps, 2 phase worktrees,
+    // 4 protected worktrees, 2 checks, 6 setups; one settled-base allowance.
+    const attempt = 5 * 30 + 2 * 2 * 30 + 4 * 2 * 30 + 2 * 5 + 6 * 30
+    const attribution = 2 * 30 + 5 * 2 * 30 + 5 * 30 + 2 * 5
+    expect(bound).toBe((30 + 2 * attempt + attribution) * 60_000)
+  })
+
+  /** @failure A new writer inserted its plan before the old reader's known tail and made the claim unreadable. @level l1 */
+  it("leaves Due, Round, and Candidates as the old reader's unjudged tail", () => {
+    const message = formatRunnerClaim({
+      ...claim,
+      round: "2026-09-27T12:00:10.000Z",
+      due: "2026-09-27T13:15:10.000Z",
+      candidates: 3,
+    })
+    // The pre-Due reader ended its known schema at Deadline. It required all
+    // known trailers first, then preserved unique names in the unknown tail.
+    const oldKnown = new Set(["Runner", "Started", "At", "Beat", "State", "Holding", "Since", "Deadline"])
+    const trailers = message.trimEnd().split("\n").slice(2)
+    const firstUnknown = trailers.findIndex((line) => !oldKnown.has(line.split(": ")[0] ?? ""))
+    expect(trailers.slice(0, firstUnknown).map((line) => line.split(": ")[0])).toEqual([
+      "Runner",
+      "Started",
+      "At",
+      "Beat",
+      "State",
+      "Holding",
+      "Since",
+      "Deadline",
+    ])
+    expect(trailers.slice(firstUnknown).map((line) => line.split(": ")[0])).toEqual(["Due", "Round", "Candidates"])
+    expect(new Set(trailers.slice(firstUnknown).map((line) => line.split(": ")[0])).size).toBe(3)
+  })
+
   /** @failure Older readers treated every future claim trailer as an unreadable runner. @level l1 */
   it("ignores unique future trailers only after all known trailers", () => {
     const message = formatRunnerClaim(claim)
-    const future = `${message}Due: 2026-09-27T13:00:00.000Z\nTrace: two  spaces\n`
+    const future = `${message}Intent: 2026-09-27T13:00:00.000Z\nTrace: two  spaces\n`
     expect(parseRunnerClaim(future)).toEqual({
       ...claim,
-      unknownTrailers: ["Due: 2026-09-27T13:00:00.000Z", "Trace: two  spaces"],
+      unknownTrailers: ["Intent: 2026-09-27T13:00:00.000Z", "Trace: two  spaces"],
     })
     expect(formatRunnerClaim(parseRunnerClaim(future))).toBe(future)
     expect(() => parseRunnerClaim(message.replace("Since: ", "Step: merge\nSince: "))).toThrow(

@@ -29,6 +29,10 @@ export type RunnerClaim = Readonly<{
   since: string
   /** Current phase bound; absent on unbounded states and in legacy claims. */
   deadline?: string
+  /** Fixed whole-round plan, published together after the current line is read. */
+  due?: string
+  round?: string
+  candidates?: number
   /** Verbatim append-only trailers written by a newer runner. */
   unknownTrailers?: readonly string[]
 }>
@@ -43,8 +47,25 @@ export type RunnerDeadlineJudgment = Readonly<{
   reason: string
 }>
 
+export type RunnerDueJudgment = Readonly<{
+  status: "within" | "overdue" | "unavailable" | "unbounded" | "unreadable"
+  reason: string
+}>
+
 const SUBJECT = "yrd runner claim"
-const ORDER = ["Runner", "Started", "At", "Beat", "State", "Holding", "Since", "Deadline"] as const
+const ORDER = [
+  "Runner",
+  "Started",
+  "At",
+  "Beat",
+  "State",
+  "Holding",
+  "Since",
+  "Deadline",
+  "Due",
+  "Round",
+  "Candidates",
+] as const
 const REQUIRED = ["Runner", "Started", "At", "Beat", "State", "Since"] as const
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u
 
@@ -60,6 +81,13 @@ function required(values: ReadonlyMap<string, string>, key: string): string {
   const value = values.get(key)
   if (value === undefined) throw new TypeError(`runner claim missing ${key} trailer`)
   return value
+}
+
+function candidatesOf(value: string): number {
+  if (!/^[1-9]\d*$/u.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new TypeError(`runner claim Candidates must be a positive safe integer: ${JSON.stringify(value)}`)
+  }
+  return Number(value)
 }
 
 function checked(claim: RunnerClaim): RunnerClaim {
@@ -90,6 +118,22 @@ function checked(claim: RunnerClaim): RunnerClaim {
     if (deadline < since) throw new TypeError("runner claim Deadline must be at or after Since")
     if (claim.state === "idle" || claim.state === "stuck" || claim.state === "paused" || claim.state === "stopped") {
       throw new TypeError(`runner claim Deadline is invalid for ${claim.state} State`)
+    }
+  }
+  if (claim.due !== undefined || claim.round !== undefined || claim.candidates !== undefined) {
+    if (claim.due === undefined || claim.round === undefined || claim.candidates === undefined) {
+      throw new TypeError("runner claim Due, Round and Candidates must appear together")
+    }
+    const round = instant(claim.round, "Round")
+    const due = instant(claim.due, "Due")
+    if (round < started) throw new TypeError("runner claim Round must be at or after Started")
+    if (round > since) throw new TypeError("runner claim Round must be at or before Since")
+    if (round >= due) throw new TypeError("runner claim Round must be before Due")
+    if (!Number.isSafeInteger(claim.candidates) || claim.candidates < 1) {
+      throw new TypeError("runner claim Candidates must be a positive safe integer")
+    }
+    if (claim.state === "idle" || claim.state === "stuck" || claim.state === "paused" || claim.state === "stopped") {
+      throw new TypeError(`runner claim Due is invalid for ${claim.state} State`)
     }
   }
   const unknownKeys = new Set<string>()
@@ -135,6 +179,9 @@ export function formatRunnerClaim(input: RunnerClaim): string {
     (claim.holding === undefined ? "" : `Holding: ${claim.holding}\n`) +
     `Since: ${claim.since}\n` +
     (claim.deadline === undefined ? "" : `Deadline: ${claim.deadline}\n`) +
+    (claim.due === undefined
+      ? ""
+      : `Due: ${claim.due}\nRound: ${claim.round}\nCandidates: ${String(claim.candidates)}\n`) +
     (claim.unknownTrailers?.map((line) => `${line}\n`).join("") ?? "")
   )
 }
@@ -198,6 +245,9 @@ export function parseRunnerClaim(body: string): RunnerClaim {
     ...(values.has("Holding") ? { holding: required(values, "Holding") } : {}),
     since: required(values, "Since"),
     ...(values.has("Deadline") ? { deadline: required(values, "Deadline") } : {}),
+    ...(values.has("Due") ? { due: required(values, "Due") } : {}),
+    ...(values.has("Round") ? { round: required(values, "Round") } : {}),
+    ...(values.has("Candidates") ? { candidates: candidatesOf(required(values, "Candidates")) } : {}),
     ...(unknownTrailers.length === 0 ? {} : { unknownTrailers }),
   })
 }
@@ -249,4 +299,40 @@ export function judgeRunnerDeadline(claim: RunnerClaim, now: Date): RunnerDeadli
     status: "within",
     reason: `phase Deadline ${claim.deadline} is within three ${String(claim.beatMs)}ms beats`,
   }
+}
+
+/** The same total-plan verdict for a remote ref and the local health document. */
+export function judgeRunnerDue(claim: RunnerClaim, now: Date): RunnerDueJudgment {
+  checked(claim)
+  if (claim.state === "idle" || claim.state === "stuck" || claim.state === "paused" || claim.state === "stopped") {
+    return { status: "unbounded", reason: `${claim.state} has no open round plan` }
+  }
+  if (claim.due === undefined || claim.round === undefined || claim.candidates === undefined) {
+    return {
+      status: "unavailable",
+      reason: "round Due unavailable: the line plan is not published or the writer predates Due",
+    }
+  }
+  const current = now.getTime()
+  if (!Number.isFinite(current)) return { status: "unreadable", reason: "reader clock is invalid" }
+  const round = Date.parse(claim.round)
+  if (current < round - 30_000) {
+    return {
+      status: "unreadable",
+      reason: `clock-skew: Round is ${String(round - current)}ms ahead of the reader clock`,
+    }
+  }
+  const due = Date.parse(claim.due)
+  if (current > due + 3 * claim.beatMs) {
+    const minutes = Math.floor((due - round) / 60_000)
+    const bound =
+      minutes < 60
+        ? `${String(minutes)}m`
+        : `${String(Math.floor(minutes / 60))}h${String(minutes % 60).padStart(2, "0")}m`
+    return {
+      status: "overdue",
+      reason: `round past its total declared bound (${bound} for ${String(claim.candidates)} candidates, started ${claim.round})`,
+    }
+  }
+  return { status: "within", reason: `round Due ${claim.due} is within three ${String(claim.beatMs)}ms beats` }
 }

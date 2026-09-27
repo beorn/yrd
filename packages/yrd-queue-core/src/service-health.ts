@@ -21,7 +21,7 @@
 
 import { stopFact, stuckCures, type PauseRecord } from "./pause.ts"
 import { changeName } from "./refs.ts"
-import { judgeRunnerDeadline, type RunnerClaim } from "./runner-claim.ts"
+import { judgeRunnerDeadline, judgeRunnerDue, type RunnerClaim } from "./runner-claim.ts"
 
 export const QUEUE_HEALTH_SCHEMA = "hab-service-health/2" as const
 
@@ -331,7 +331,11 @@ export type FlowReading = Readonly<{ flow: LineFlow; threshold: StallThreshold; 
 export type RoundReadFailure = Readonly<{ ref: string; error: string; count: number }>
 
 /** A stalled line: how long no change has been judged, which of the two shapes it is, and the sentence that says so. */
-export type LineStall = Readonly<{ forMs: number; shape: "slow-round" | "stopped-line" | "cas-refused"; cause: string }>
+export type LineStall = Readonly<{
+  forMs: number
+  shape: "slow-round" | "total-round" | "stopped-line" | "cas-refused"
+  cause: string
+}>
 
 /** The code a stalled line pages with, beside `queue-round-stuck`. */
 export const STALLED_LINE_CODE = "queue-line-stalled"
@@ -379,10 +383,11 @@ export function lineStall(
   let fallback = ""
   if (flow.roundOpen !== undefined && claim !== undefined) {
     const deadline = judgeRunnerDeadline(claim, now)
-    if (deadline.status === "within") return undefined
     if (deadline.status === "overdue") {
       return phaseDeadlineStall(claim, flow.roundOpen.phase ?? claim.state, now)
     }
+    if (judgeRunnerDue(claim, now).status === "overdue") return roundDueStall(claim, now)
+    if (deadline.status === "within") return undefined
     fallback = `${deadline.reason}; 45m fallback; `
   }
   const forMs = unjudgedFor(flow, now)
@@ -415,6 +420,18 @@ export function lineStall(
     cause: `no round running; ${last} while ${String(flow.waiting)} waited; ${observation}`,
     forMs,
     shape: "stopped-line",
+  }
+}
+
+function roundDueStall(claim: RunnerClaim, now: Date): LineStall {
+  const judgment = judgeRunnerDue(claim, now)
+  if (judgment.status !== "overdue" || claim.due === undefined) {
+    throw new Error(`round is not overdue: ${judgment.reason}`)
+  }
+  return {
+    forMs: now.getTime() - Date.parse(claim.due),
+    shape: "total-round",
+    cause: judgment.reason,
   }
 }
 
@@ -522,6 +539,8 @@ function flowFact(
     ...reading.flow,
     ...(reading.claim?.deadline === undefined ? {} : { deadline: reading.claim.deadline }),
     ...(reading.claim === undefined ? {} : { deadlineJudgment: judgeRunnerDeadline(reading.claim, now).status }),
+    ...(reading.claim?.due === undefined ? {} : { due: reading.claim.due }),
+    ...(reading.claim === undefined ? {} : { dueJudgment: judgeRunnerDue(reading.claim, now).status }),
     stallAfterMs: reading.threshold.ms,
     stallAfterDeclared: reading.threshold.declared,
     ...(unjudgedForMs === undefined ? {} : { slow: unjudgedForMs > ROUND_BUDGET_MS, unjudgedForMs }),
@@ -540,7 +559,9 @@ function stalledFailure(stall: LineStall, flow: LineFlow): QueueHealthFailure {
         ? `Read the refused publication rows in the last round journals for ${flow.casRefused?.ref ?? "the change"}; repair persistent ref contention, then let the queue retry.`
         : stall.shape === "slow-round"
           ? "A round is running: read its journal (yrd queue list shows the RUNNER line and the round's log) to see which check or step it is in and whether that phase is making progress."
-          : "No round is judging anything: read the last round's journal and the service's own log for why rounds complete without taking a change.",
+          : stall.shape === "total-round"
+            ? "The whole round exceeded its published plan: read its journal and the RUNNER line to find which candidate or phase is consuming the bound."
+            : "No round is judging anything: read the last round's journal and the service's own log for why rounds complete without taking a change.",
       ...(oldest === undefined
         ? []
         : [`The oldest waiting change, its records and its log: yrd queue show ${oldest}.`]),
@@ -549,7 +570,9 @@ function stalledFailure(stall: LineStall, flow: LineFlow): QueueHealthFailure {
         ? "This page clears when this change publishes successfully."
         : stall.shape === "slow-round"
           ? "This page clears when the phase advances within its new bound or a change is judged; it never clears merely because time passes."
-          : "This page clears on the next judgement — a change merged, failed or recorded stuck — and never by itself.",
+          : stall.shape === "total-round"
+            ? "This page clears when the round ends; a phase advance or one judgement does not reset the round's total bound."
+            : "This page clears on the next judgement — a change merged, failed or recorded stuck — and never by itself.",
     ],
   }
 }
@@ -620,14 +643,16 @@ export function believableHealthDocument(document: QueueHealthDocument, now: Dat
   }
   try {
     const claim = stored as RunnerClaim
-    if (judgeRunnerDeadline(claim, now).status !== "overdue") return document
+    const phaseOverdue = judgeRunnerDeadline(claim, now).status === "overdue"
+    const roundOverdue = judgeRunnerDue(claim, now).status === "overdue"
+    if (!phaseOverdue && !roundOverdue) return document
     const phase = typeof document.facts?.runnerPhase === "string" ? document.facts.runnerPhase : claim.state
-    const stall = phaseDeadlineStall(claim, phase, now)
+    const stall = phaseOverdue ? phaseDeadlineStall(claim, phase, now) : roundDueStall(claim, now)
     return {
       ...document,
       state: "unhealthy",
       error: stalledFailure(stall, {}),
-      facts: { ...document.facts, phaseOverdue: true },
+      facts: { ...document.facts, ...(phaseOverdue ? { phaseOverdue: true } : { roundOverdue: true }) },
     }
   } catch (error) {
     return unreadableHealthDocument(
