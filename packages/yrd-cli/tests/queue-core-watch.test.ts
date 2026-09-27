@@ -561,7 +561,7 @@ describe("what a watch says it looked at", () => {
     expect(human.stdout()).toContain("task/other")
     expect(human.stderr()).toContain("incomplete incident")
     expect(human.stderr()).toContain("missing subject, via, evidence, next, owner")
-    expect(human.stderr()).toContain("the row was skipped — fix the writer (24408)")
+    expect(human.stderr()).toContain("the row was skipped — fix the writer (26230)")
 
     const json = capture(w.work)
     await coreQueueCommand(w.work, json.io, { command: "list" }, { json: true, workdir: w.workdir })
@@ -590,7 +590,7 @@ describe("what a watch says it looked at", () => {
     expect(row?.malformed?.[0]).toContain("incomplete incident")
     expect(row?.malformed?.[0]).toContain("missing subject, via, evidence, next, owner")
     expect(row?.next?.because).toContain("missing subject, via, evidence, next, owner")
-    expect(row?.next?.because).toContain("the row was skipped — fix the writer (24408)")
+    expect(row?.next?.because).toContain("the row was skipped — fix the writer (26230)")
     expect(listed.changes.find((change) => change.branch === "task/other")?.malformed).toBeUndefined()
     // Narration is stderr's; the product a consumer parses stays on stdout.
     expect(json.stderr()).toBe("")

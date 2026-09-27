@@ -1002,10 +1002,10 @@ export async function eventQueueRun(
       return result(2, observedMerged, [], [standing.branch])
     }
     log.write({
-      kind: "change",
+      kind: "observation",
+      subject: "queue-resumed",
       branch: standing.branch,
       head: standing.commit,
-      decision: "retry",
       reason: "queue resumed",
     })
   }
@@ -1314,7 +1314,7 @@ export async function eventQueueRun(
         kind: "change",
         branch,
         head,
-        decision: "retry",
+        decision: "deferred",
         reason: "root target moved after component publication",
       })
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch], undefined, movedTarget)
