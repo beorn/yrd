@@ -5417,3 +5417,103 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
     })
   })
 })
+
+describe("independent queue watch (22949)", () => {
+  it("shows each queue's runner and rows, aggregates visible stats, and focuses a selected header without stealing digit toggles", async () => {
+    // Same change identity in both repositories: metadata-only queue fixtures cannot catch source mixing.
+    const first = snapshot({
+      queue: "example.test/one#main",
+      queues: [{ branch: "main", label: "one", path: "/one" }],
+      rows: [{ row: row({ subject: "first repository", position: 1, run: RUN_ID }) }],
+      decisions: [],
+    })
+    const second = snapshot({
+      queue: "example.test/two#main",
+      queues: [{ branch: "main", label: "two", path: "/two" }],
+      rows: [{ row: row({ subject: "second repository", position: 1, run: RUN_ID }) }, { row: failedRow() }],
+      decisions: [],
+      pause: "second queue is held",
+    })
+    const app = render(
+      <WatchPane
+        snapshot={first}
+        sources={[
+          { id: "one#main", label: "one", snapshot: first },
+          { id: "two#main", label: "two", snapshot: second },
+        ]}
+        live={false}
+      />,
+      { cols: 352, rows: 117 },
+    )
+    await settle(app)
+    expect(app.text).toContain("[1] YRD QUEUE example.test/one#main (/one)")
+    expect(app.text).toContain("example.test/two#main")
+    expect(app.text.match(/RUNNER/gu)?.length).toBe(2)
+    expect(app.text).toContain("first repository")
+    expect(app.text).toContain("2 waiting")
+    expect(app.text).toContain("second repository")
+    expect(app.text).toContain("second queue is held")
+    if (process.env.YRD_CAPTURE_DIR) {
+      const ansi = bufferToStyledText(app.term.buffer)
+      writeCaptureIfConfigured("22949-multi-queue-352x117.ansi", ansi)
+      writeCaptureIfConfigured(
+        "22949-multi-queue-352x117.png",
+        await renderAnsiScreenshot(ansi, { cols: 352, rows: 117 }),
+      )
+    }
+    app.press("s")
+    await settle(app)
+    expect(app.text).toContain("[1] one")
+    expect(app.text).toContain("[2] two")
+    app.press("2")
+    await settle(app)
+    expect(app.text).not.toContain("example.test/two#main")
+    expect(app.text.match(/RUNNER/gu)?.length).toBe(1)
+    app.press("2")
+    app.press("Home")
+    app.press("Enter")
+    await settle(app)
+    expect(app.text).toContain("example.test/one#main")
+    expect(app.text).not.toContain("example.test/two#main")
+    app.press("Escape")
+    await settle(app)
+    expect(app.text).toContain("example.test/two#main")
+    app.unmount()
+  })
+})
+
+it("keeps each queue's last good reading and retries failures without delaying another queue (22949)", async () => {
+  const first = snapshot({ queue: "first#main", rows: [{ row: row({ subject: "first initial" }) }], decisions: [] })
+  const second = snapshot({ queue: "second#main", rows: [{ row: failedRow() }], decisions: [] })
+  let fail = true
+  const loadFirst = vi.fn(async () => {
+    if (fail) throw new Error("first remote unavailable")
+    return snapshot({ ...first, rows: [{ row: row({ subject: "first recovered" }) }] })
+  })
+  const loadSecond = vi.fn(async () => snapshot({ ...second, rows: [{ row: row({ subject: "second refreshed" }) }] }))
+  const app = render(
+    <WatchPane
+      snapshot={first}
+      sources={[
+        { id: "first", label: "first", snapshot: first, load: loadFirst },
+        { id: "second", label: "second", snapshot: second, load: loadSecond },
+      ]}
+      intervalMs={30}
+      unfocusedIntervalMs={30}
+      live
+    />,
+    { cols: 160, rows: 50 },
+  )
+  await waitFor(() => {
+    expect(current(app)).toContain("first remote unavailable")
+    expect(current(app)).toContain("second refreshed")
+  })
+  expect(current(app)).toContain("first initial")
+  expect(current(app)).toContain("unmeasured: first")
+  fail = false
+  await waitFor(() => {
+    expect(current(app)).toContain("first recovered")
+    expect(current(app)).not.toContain("first remote unavailable")
+  })
+  app.unmount()
+})

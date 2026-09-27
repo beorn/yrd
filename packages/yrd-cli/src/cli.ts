@@ -36,7 +36,7 @@ import { closeEnvironment, listEnvironments, openEnvironment } from "./env-comma
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere } from "./declaration.ts"
-import { resolveQueueLocation, type QueueLocation } from "./queue-location.ts"
+import { resolveDeclaredQueueLocations, resolveQueueLocation, type QueueLocation } from "./queue-location.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { legendLines } from "./watch-words.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
@@ -727,6 +727,113 @@ function buildProgram(
       all?: boolean
       drafts?: boolean
       fresh?: boolean
+    }
+    // A bare interactive watch follows the same declaration set as the runners.
+    // Selected watches retain their single-queue ending and exit-code contract.
+    if (
+      watch === true &&
+      queue === undefined &&
+      json !== true &&
+      interactiveHere() &&
+      (filters === undefined || filters.length === 0) &&
+      status === undefined
+    ) {
+      const { yrdQueueRunnerDeclarations } = await import("git-yrd/hab-projects")
+      const declared = await resolveDeclaredQueueLocations(cwd(), yrdQueueRunnerDeclarations, env)
+      if (declared.length > 0) {
+        const sources: import("./watch-pane.tsx").WatchSource[] = []
+        for (const entry of declared) {
+          const id = `${entry.declaration.repository.name}#${entry.declaration.queue.base}`
+          let reader: import("./watch-pane.tsx").WatchSource | undefined
+          const initialize = async (initial?: typeof entry) => {
+            const resolved = initial ?? (await resolveDeclaredQueueLocations(cwd(), [entry.declaration], env))[0]
+            if (resolved === undefined) throw new Error(`declared queue ${id} did not resolve`)
+            if (resolved.kind === "unreadable") throw resolved.error
+            const location = resolved.location
+            const diagnostics: string[] = []
+            const taken = await coreQueueCommand(
+              location.repo,
+              {
+                ...io,
+                stderr: (text) => {
+                  diagnostics.push(text)
+                  io.stderr(text)
+                },
+              },
+              listRequest([], { interval, latest, watch, requireMatch, all, drafts }),
+              {
+                selection: location.selection,
+                populateReference: location.owned,
+                queue: location.queue,
+                workdir: location.workdir,
+                env,
+                log: log(),
+                watchSource: (source) => {
+                  reader = source
+                },
+              },
+            )
+            if (reader?.snapshot === undefined) {
+              throw new Error(
+                `reading ${id} exited ${String(taken)}: ${diagnostics.join("").trim() || "no queue snapshot returned"}`,
+              )
+            }
+            return reader.snapshot
+          }
+          let snapshot: import("./watch-pane.tsx").WatchSnapshot | undefined
+          let error: string | undefined
+          try {
+            snapshot = await initialize(entry)
+          } catch (failure: unknown) {
+            error = failure instanceof Error ? failure.message : String(failure)
+          }
+          sources.push({
+            id,
+            label: id,
+            snapshot,
+            error,
+            load: async (request) => {
+              if (reader === undefined) return initialize()
+              if (reader.load === undefined) throw new Error(`${id} has no refresh reader`)
+              return reader.load(request)
+            },
+            open: async (row) => {
+              if (reader?.open === undefined) throw new Error(`${id} has no detail reader`)
+              return reader.open(row)
+            },
+            loadDiff: async (row) => {
+              if (reader?.loadDiff === undefined) throw new Error(`${id} has no diff reader`)
+              return reader.loadDiff(row)
+            },
+            loadCommandOutput: async (command) => {
+              if (reader?.loadCommandOutput === undefined) throw new Error(`${id} has no command-output reader`)
+              return reader.loadCommandOutput(command)
+            },
+          })
+        }
+        const { WatchPane } = await import("./watch-pane.tsx")
+        const { run } = await import("silvery/runtime")
+        const { createElement } = await import("react")
+        const { WATCH_RUN_OPTIONS } = await import("./watch-run-options.ts")
+        const snapshot = sources.find((source) => source.snapshot !== undefined)?.snapshot ?? {
+          queue: "Declared queues",
+          queues: [],
+          rows: [],
+          unfiltered: [],
+          at: new Date(),
+        }
+        const app = await run(
+          createElement(WatchPane, {
+            sources,
+            snapshot,
+            intervalMs: Math.max(1, interval ?? 5) * 1000,
+          }),
+          WATCH_RUN_OPTIONS,
+        )
+        await app.waitUntilExit()
+        setExit(0)
+        return
+      }
     }
     const location = await resolveQueueLocation(cwd(), queue, env, "reader")
     const taken = await coreQueueCommand(

@@ -120,9 +120,13 @@ import { TimeText } from "./watch-primitives.tsx"
 import type { RunnerFacts, RunnerLine } from "./watch-runner.ts"
 import { decisionsOfRows, lastDayBucket, statsSummary, type RunDecision } from "./watch-stats.ts"
 
-export type WatchPaneItem =
-  | { kind: "row"; item: WatchRow; key: string }
-  | { kind: "runner"; line: RunnerLine; key: string }
+type QueueItemContext = { sourceId?: string; snapshot?: WatchSnapshot; digit?: number }
+export type WatchPaneItem = QueueItemContext &
+  (
+    | { kind: "row"; item: WatchRow; key: string }
+    | { kind: "runner"; line: RunnerLine; key: string }
+    | { kind: "queue"; label: string; key: string }
+  )
 
 export function RunnerDetailPane({ snapshot }: { snapshot: WatchSnapshot }) {
   const now = useNow()
@@ -242,20 +246,22 @@ type HeldDetail = Readonly<{ key: string; tipAt: number | undefined; detail: Cha
 
 const HELD_DETAILS = 2
 
-export function WatchPane({
-  snapshot,
-  load,
-  open,
-  loadDiff,
-  loadCommandOutput,
-  intervalMs = 5000,
-  unfocusedIntervalMs = 30000,
-  focused: focusedProp,
-  now: nowProp,
-  live = true,
-  onEnding,
-}: {
+export type WatchSource = Readonly<{
+  id: string
+  label: string
+  snapshot?: WatchSnapshot
+  error?: string
+  load?: (request?: Readonly<{ draftWindow: DraftWindow }>) => Promise<WatchSnapshot>
+  open?: (row: WatchRow) => Promise<ChangeDetail>
+  loadDiff?: (row: WatchRow) => Promise<DiffText>
+  loadCommandOutput?: (command: JournalCommand) => Promise<DiffText>
+}>
+
+type WatchPaneProps = {
   snapshot: WatchSnapshot
+  initialKey?: string
+  queueShortcuts?: boolean
+  sources?: readonly WatchSource[]
   /** One reading of the queue, with the drafts of the window asked for. The pane calls it on a timer and on `w`, and never reads anything itself. */
   load?: (request?: Readonly<{ draftWindow: DraftWindow }>) => Promise<WatchSnapshot>
   /** One change's detail, for the row under the cursor. Absent in a test of the table alone. */
@@ -272,11 +278,374 @@ export function WatchPane({
   live?: boolean
   /** Called with the ending's code when every watched change has ended, so the command can exit with it. */
   onEnding?: (code: 0 | 1 | 2) => void
+}
+
+export function WatchPane(props: WatchPaneProps) {
+  const source = props.sources?.length === 1 ? props.sources[0] : undefined
+  if (source?.snapshot !== undefined && source.error === undefined) {
+    return (
+      <SingleWatchPane
+        {...props}
+        snapshot={source.snapshot}
+        load={source.load}
+        open={source.open}
+        loadDiff={source.loadDiff}
+        loadCommandOutput={source.loadCommandOutput}
+      />
+    )
+  }
+  if (props.sources !== undefined && props.sources.length > 0) {
+    return <QueuesWatchPane {...props} sources={props.sources} />
+  }
+  return <SingleWatchPane {...props} />
+}
+
+/** Each declared queue owns one in-flight refresh and its own retry clock. A slow queue never delays another. */
+function QueueRefresh({
+  source,
+  draftWindow,
+  intervalMs,
+  live,
+  onRead,
+}: {
+  source: WatchSource
+  draftWindow: DraftWindow
+  intervalMs: number
+  live: boolean
+  onRead: (id: string, snapshot: WatchSnapshot | undefined, error: string | undefined) => void
 }) {
+  const inFlight = useRef(false)
+  const previous = useRef({ draftWindow, intervalMs })
+  useScopeEffect(
+    (scope) => {
+      if (!live || source.load === undefined) return
+      let cancelled = false
+      const load = source.load
+      const immediate = previous.current.draftWindow !== draftWindow || intervalMs < previous.current.intervalMs
+      previous.current = { draftWindow, intervalMs }
+      void (async () => {
+        let first = true
+        while (!cancelled && !scope.signal.aborted) {
+          if (!first || !immediate) await scope.sleep(intervalMs)
+          first = false
+          if (cancelled || scope.signal.aborted) return
+          if (inFlight.current) continue
+          inFlight.current = true
+          try {
+            const next = await load({ draftWindow })
+            if (!cancelled && !scope.signal.aborted) onRead(source.id, next, undefined)
+          } catch (error: unknown) {
+            if (!cancelled && !scope.signal.aborted) onRead(source.id, undefined, firstLine(error))
+          } finally {
+            inFlight.current = false
+          }
+        }
+      })().catch((error: unknown) => {
+        if (!cancelled && !scope.signal.aborted) onRead(source.id, undefined, firstLine(error))
+      })
+      return () => {
+        cancelled = true
+      }
+    },
+    [source, draftWindow, intervalMs, live, onRead],
+  )
+  return null
+}
+
+function QueuesWatchPane({
+  sources,
+  snapshot,
+  live = true,
+  intervalMs = 5000,
+  unfocusedIntervalMs = 30000,
+  focused: focusedProp,
+  now,
+  ...props
+}: WatchPaneProps & { sources: readonly WatchSource[] }) {
+  const { columns, rows: terminalRows } = useWindowSize()
+  const terminalFocused = useTerminalFocused()
+  const focused = focusedProp ?? terminalFocused !== false
+  const [readings, setReadings] = useState(
+    () => new Map(sources.map((source) => [source.id, { snapshot: source.snapshot, error: source.error }])),
+  )
+  const [hidden, setHidden] = useState<ReadonlySet<string>>(new Set())
+  const [focus, setFocus] = useState<{ id: string; rowKey?: string } | undefined>()
+  const [cursorKey, setCursorKey] = useState<string | undefined>()
+  const [buckets, setBuckets] = useState<ReadonlySet<StatusBucket>>(new Set(BUCKETS))
+  const [statsOpen, setStatsOpen] = useState(false)
+  const [draftWindow, setDraftWindow] = useState<DraftWindow>("7d")
+  const listRef = useRef<ListViewHandle | null>(null)
+  const onRead = useCallback((id: string, next: WatchSnapshot | undefined, error: string | undefined) => {
+    setReadings((was) => {
+      const updated = new Map(was)
+      updated.set(id, { snapshot: next ?? was.get(id)?.snapshot, error })
+      return updated
+    })
+  }, [])
+  const visible = sources
+    .filter((source) => !hidden.has(source.id))
+    .map((source) => ({ ...source, ...readings.get(source.id), digit: sources.indexOf(source) + 1 }))
+  const multiple = visible.length > 1
+  const selectedSource = sources.find((source) => source.id === focus?.id)
+  const focusedSnapshot = focus === undefined ? undefined : readings.get(focus.id)?.snapshot
+  const measured = visible.filter(
+    (source) =>
+      source.snapshot !== undefined &&
+      source.error === undefined &&
+      source.snapshot.journalAbsent === undefined &&
+      source.snapshot.decisions !== undefined,
+  )
+  const visibleRows = (reading: WatchSnapshot) =>
+    bandedRows(
+      reading.rows.filter((item) => buckets.has(bucketOf(item.row))),
+      false,
+    )
+  const rows = visible.flatMap((source) => (source.snapshot === undefined ? [] : visibleRows(source.snapshot)))
+  const decisions = measured.flatMap((source) =>
+    source.snapshot === undefined ? [] : decisionsOfRows(visibleRows(source.snapshot)),
+  )
+  const at =
+    now ??
+    visible.reduce(
+      (latest, source) => (source.snapshot !== undefined && source.snapshot.at > latest ? source.snapshot.at : latest),
+      snapshot.at,
+    )
+  const unmeasured = visible.filter((source) => !measured.includes(source)).map((source) => source.label)
+  const measuredRows = measured.flatMap((source) => (source.snapshot === undefined ? [] : visibleRows(source.snapshot)))
+  const waiting = measured.reduce(
+    (count, source) =>
+      count + (source.snapshot === undefined ? 0 : lineOf(visibleRows(source.snapshot)).waiting.length),
+    0,
+  )
+  const statsLine =
+    statsSummary(
+      {
+        drafts: draftsSaid(measuredRows, {
+          window: draftWindow,
+          unread: measured.reduce((count, source) => count + (source.snapshot?.drafts?.unread ?? 0), 0),
+          older: measured.reduce((count, source) => count + (source.snapshot?.drafts?.older ?? 0), 0),
+        }),
+        waiting,
+      },
+      measured.length === 0 ? undefined : lastDayBucket(decisions, at),
+      unmeasured.length > 0 ? `unmeasured: ${unmeasured.join(", ")}` : undefined,
+    ) + (measured.length > 0 && unmeasured.length > 0 ? ` · unmeasured: ${unmeasured.join(", ")}` : "")
+  const items: WatchPaneItem[] = visible.flatMap((source) => {
+    const reading = source.snapshot
+    const context = { sourceId: source.id, snapshot: reading, digit: source.digit }
+    const header: WatchPaneItem = {
+      ...context,
+      kind: "queue",
+      label: `${multiple ? `[${source.digit}] ` : ""}${source.label} — Enter to focus`,
+      key: `${source.id}:queue`,
+    }
+    if (reading === undefined) return [header]
+    const grouped = visibleRows(reading)
+    const rowItems = (band: Band): WatchPaneItem[] =>
+      grouped
+        .filter((item) => bandOf(item.row, false) === band)
+        .map((item) => ({ ...context, kind: "row", item, key: `${source.id}:${watchRowKey(item)}` }))
+    return [
+      header,
+      ...rowItems("drafts"),
+      ...rowItems("waiting"),
+      { ...context, kind: "runner", line: runnerOf(reading, at), key: `${source.id}:runner` } as WatchPaneItem,
+      ...rowItems("done"),
+    ]
+  })
+  const cursor = Math.max(
+    0,
+    items.findIndex((item) => item.key === cursorKey),
+  )
+  useInput((input, key) => {
+    const character = key.text ?? input
+    if (key.escape && focus !== undefined) {
+      setFocus(undefined)
+      return undefined
+    }
+    if (character !== undefined && /^[1-9]$/u.test(character)) {
+      const source = sources[Number(character) - 1]
+      if (source !== undefined && source.id === focus?.id && !hidden.has(source.id)) setFocus(undefined)
+      if (source !== undefined) {
+        setHidden((was) => {
+          const next = new Set(was)
+          if (next.has(source.id)) next.delete(source.id)
+          else next.add(source.id)
+          return next
+        })
+      }
+      return undefined
+    }
+    if (character === "w") setDraftWindow((was) => (was === "7d" ? "all" : "7d"))
+    if (focus !== undefined) return undefined
+    if (character === "q") return "exit"
+    if (key.return || character === " ") {
+      const item = items[cursor]
+      if (item?.sourceId !== undefined && readings.get(item.sourceId)?.snapshot !== undefined) {
+        setFocus({ id: item.sourceId, ...(item.kind === "row" ? { rowKey: watchRowKey(item.item) } : {}) })
+      }
+    }
+    if (character === "s") setStatsOpen((was) => !was)
+    if (character === "a") {
+      setHidden(new Set())
+      setBuckets(new Set(BUCKETS))
+    }
+    const bucket = ({ o: "open", r: "running", d: "done", f: "failed" } as const)[
+      character?.toLowerCase() as "o" | "r" | "d" | "f"
+    ]
+    if (bucket !== undefined) {
+      setBuckets((was) => {
+        const next = new Set(was)
+        if (next.has(bucket)) next.delete(bucket)
+        else next.add(bucket)
+        return next
+      })
+    }
+    return undefined
+  })
+  // The existing single-queue pane owns all change details and caches. Remounting for another queue isolates equal change/run identities.
+  return (
+    <>
+      {sources.map((source) => (
+        <QueueRefresh
+          key={source.id}
+          source={source}
+          draftWindow={draftWindow}
+          intervalMs={focused ? intervalMs : unfocusedIntervalMs}
+          live={live}
+          onRead={onRead}
+        />
+      ))}
+      {selectedSource !== undefined && readings.get(selectedSource.id)?.error !== undefined ? (
+        <Text color="$fg-warning">
+          {selectedSource.label}: read failed — {readings.get(selectedSource.id)?.error}; showing last good reading{" "}
+          {focusedSnapshot === undefined ? "unmeasured" : clock(focusedSnapshot.at, { seconds: true })}
+        </Text>
+      ) : null}
+      {selectedSource !== undefined && focusedSnapshot !== undefined ? (
+        <SingleWatchPane
+          key={selectedSource.id}
+          {...props}
+          snapshot={focusedSnapshot}
+          initialKey={focus?.rowKey}
+          queueShortcuts={false}
+          load={undefined}
+          open={selectedSource.open}
+          loadDiff={selectedSource.loadDiff}
+          loadCommandOutput={selectedSource.loadCommandOutput}
+          now={now}
+          live={live}
+        />
+      ) : (
+        <NowProvider readAt={at} live={live}>
+          <Box flexDirection="column" flexGrow={1} minHeight={0}>
+            {visible.map((source) =>
+              source.snapshot === undefined ? (
+                <Text key={source.id} bold color="$fg-warning">
+                  {multiple ? `[${source.digit}] ` : ""}YRD {source.label}: unreadable — {source.error}
+                </Text>
+              ) : (
+                <TopLine
+                  key={source.id}
+                  queue={`${source.snapshot.queue} (${source.snapshot.queues[0]?.path ?? source.label})`}
+                  queueDigit={multiple ? source.digit : undefined}
+                  queueFirst
+                  status={{
+                    ...queueLineStatus(source.snapshot, at),
+                    timer: (
+                      <LiveStatusTimer
+                        snapshot={source.snapshot}
+                        fallback={queueLineStatus(source.snapshot, at).timer}
+                      />
+                    ),
+                  }}
+                  columns={columns}
+                  live={live}
+                  onStatusClick={() => setFocus({ id: source.id })}
+                />
+              ),
+            )}
+            {visible
+              .filter((source) => source.snapshot?.pause !== undefined)
+              .map((source) => (
+                <Text key={source.id} color="$fg-warning">
+                  {source.label}: {source.snapshot?.pause}
+                </Text>
+              ))}
+            <Text color="$fg-muted">
+              {" "}
+              {statsOpen ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} STATS · {statsLine}
+            </Text>
+            {statsOpen
+              ? visible.map((source) => (
+                  <Box key={source.id} flexDirection="column">
+                    <Text>
+                      {multiple ? `[${source.digit}] ` : ""}
+                      {source.label}
+                      {!measured.includes(source) ? " · unmeasured" : ""}
+                    </Text>
+                    {measured.includes(source) ? (
+                      <StatsBox
+                        decisions={source.snapshot === undefined ? [] : decisionsOfRows(visibleRows(source.snapshot))}
+                        columns={columns - 2}
+                        timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
+                      />
+                    ) : null}
+                  </Box>
+                ))
+              : null}
+            <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={1}>
+              <Table
+                items={items}
+                rows={rows}
+                columns={columns - 2}
+                snapshot={snapshot}
+                multipleQueues={multiple}
+                empty={visible.length === 0 ? "no queues visible — press a to show all" : "nothing in line"}
+                cursor={cursor}
+                listRef={listRef}
+                active
+                live={live}
+                onCursor={(index) => setCursorKey(items[index]?.key)}
+              />
+            </Box>
+            {visible
+              .filter((source) => source.error !== undefined)
+              .map((source) => (
+                <Text key={source.id} color="$fg-warning">
+                  {source.label}: read failed — {source.error}
+                  {source.snapshot !== undefined
+                    ? `; last good reading ${clock(source.snapshot.at, { seconds: true })}`
+                    : "; unmeasured"}
+                </Text>
+              ))}
+          </Box>
+        </NowProvider>
+      )}
+    </>
+  )
+}
+
+function SingleWatchPane({
+  snapshot,
+  initialKey,
+  queueShortcuts = true,
+  load,
+  open,
+  loadDiff,
+  loadCommandOutput,
+  intervalMs = 5000,
+  unfocusedIntervalMs = 30000,
+  focused: focusedProp,
+  now: nowProp,
+  live = true,
+  onEnding,
+}: WatchPaneProps) {
   const { columns, rows: terminalRows } = useWindowSize()
   const tier = watchTier(columns, terminalRows)
   const helpWidth = Math.min(columns - 4, HELP_MAX_WIDTH)
   const [shown, setShown] = useState(snapshot)
+  useEffect(() => setShown(snapshot), [snapshot])
   const [failure, setFailure] = useState<Error | undefined>(undefined)
   const [readFailure, setReadFailure] = useState<ReadFailure | undefined>(undefined)
   const [detailFailure, setDetailFailure] = useState<(ReadFailure & { key: string }) | undefined>(undefined)
@@ -288,7 +657,7 @@ export function WatchPane({
   const [tab, setTab] = useState<string | undefined>(undefined)
   /** The row the cursor is on, by identity; undefined at the top, following the newest. */
   const [cursorRow, setCursorRow] = useState<WatchRow | undefined>(undefined)
-  const [cursorItemKey, setCursorItemKey] = useState<string | undefined>(undefined)
+  const [cursorItemKey, setCursorItemKey] = useState<string | undefined>(initialKey)
   const [buckets, setBuckets] = useState<ReadonlySet<StatusBucket>>(new Set(BUCKETS))
   const [visibleQueues, setVisibleQueues] = useState<ReadonlySet<string> | undefined>(undefined)
   const [held, setHeld] = useState<readonly HeldDetail[]>([])
@@ -297,7 +666,7 @@ export function WatchPane({
   // A command's output, once read: its row is written when it has finished, so the file never changes after.
   const [outputs, setOutputs] = useState<ReadonlyMap<string, DiffText>>(new Map())
   const [statsOpen, setStatsOpen] = useState(false)
-  const centeredRunner = useRef(false)
+  const centeredRunner = useRef(initialKey !== undefined)
   const shouldCenterRunner = useRef(false)
   const listRef = useRef<ListViewHandle | null>(null)
   /** The drafts the reader asked for, read by every round: a round begun before `w` must not undo it. */
@@ -650,7 +1019,7 @@ export function WatchPane({
         }
       })()
     }
-    if (character !== undefined && /^[1-9]$/u.test(character)) {
+    if (queueShortcuts && character !== undefined && /^[1-9]$/u.test(character)) {
       const queue = shown.queues[Number(character) - 1]
       if (queue !== undefined) toggleQueue(queue.label)
     }
@@ -1016,6 +1385,7 @@ function DraftDetail({ row }: { row: Row }) {
  * high, which is how the STATS border landed on the footer once already.
  */
 function Table({
+  multipleQueues,
   items,
   rows,
   columns,
@@ -1027,6 +1397,7 @@ function Table({
   onCursor,
   live,
 }: {
+  multipleQueues?: boolean
   items: readonly WatchPaneItem[]
   rows: readonly WatchRow[]
   columns: number
@@ -1046,11 +1417,12 @@ function Table({
   const minute = useMinute()
   const runner = runnerOf(snapshot, minute)
   const queue = { digit: 1, label: snapshot.queues[0]?.label ?? snapshot.queue }
-  const isSingleQueue = snapshot.queues.length <= 1
-  const layout = listLayout(rows, columns, minute, runner, queue, {
+  const isSingleQueue = multipleQueues === undefined ? snapshot.queues.length <= 1 : !multipleQueues
+  const baseLayout = listLayout(rows, columns, minute, runner, queue, {
     singleQueue: isSingleQueue,
     separateColumns: true,
   })
+  const layout = multipleQueues ? { ...baseLayout, isFullQueue: true, qWidth: 3 } : baseLayout
   const plan: BandPlan = bandPlan(rows, columns - 4)
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
@@ -1080,6 +1452,7 @@ function Table({
             estimateHeight={(index: number) => {
               const item = items[index]
               if (item === undefined) return 1
+              if (item.kind === "queue") return 1
               if (item.kind === "runner") return 5
               const rowIndex = rows.indexOf(item.item)
               return (separatorBefore(rows, rowIndex) === undefined ? 1 : 2) + bandHeight(plan.before.get(rowIndex))
@@ -1091,15 +1464,27 @@ function Table({
             onItemHover={() => undefined}
             onCursor={onCursor}
             renderItem={(item: WatchPaneItem, index: number, meta: { isHovered: boolean }) => {
+              if (item.kind === "queue") {
+                return (
+                  <Text bold inverse={index === cursor}>
+                    {item.label}
+                  </Text>
+                )
+              }
+              const itemSnapshot = item.snapshot ?? snapshot
+              const itemQueue = {
+                digit: item.digit ?? queue.digit,
+                label: itemSnapshot.queues[0]?.label ?? itemSnapshot.queue,
+              }
               if (item.kind === "runner") {
                 return (
                   <RunnerTitledBox
                     line={item.line}
-                    snapshot={snapshot}
+                    snapshot={itemSnapshot}
                     layout={layout}
                     cursor={index === cursor}
-                    queueDigit={queue.digit}
-                    queueLabel={queue.label}
+                    queueDigit={itemQueue.digit}
+                    queueLabel={multipleQueues ? `[${itemQueue.digit}]` : itemQueue.label}
                   />
                 )
               }
@@ -1113,8 +1498,8 @@ function Table({
                   cursor={index === cursor}
                   hovered={meta.isHovered}
                   live={live}
-                  queueDigit={queue.digit}
-                  queueLabel={queue.label}
+                  queueDigit={itemQueue.digit}
+                  queueLabel={multipleQueues ? `[${itemQueue.digit}]` : itemQueue.label}
                 />
               )
               if (separator === undefined && brk === undefined) return row
@@ -1154,7 +1539,11 @@ function endingOf(rows: readonly WatchRow[]): 0 | 1 | 2 | undefined {
   // A draft is no change, so it neither holds the watch open nor ends it.
   const states: readonly Row["state"][] = rows.map((row) => row.row.state).filter((state) => state !== "draft")
   if (states.length === 0) return undefined
-  if (states.some((state) => state === "queued" || state === "verifying" || state === "checking" || state === "merging")) return undefined
+  if (
+    states.some((state) => state === "queued" || state === "verifying" || state === "checking" || state === "merging")
+  ) {
+    return undefined
+  }
   if (states.some((state) => state === "stuck")) return 2
   if (states.some((state) => state === "failed" || state === "cancelled")) return 1
   return 0
