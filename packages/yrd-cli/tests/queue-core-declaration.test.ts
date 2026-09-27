@@ -35,6 +35,7 @@ import {
 import { openEvents } from "gitomic/events"
 import { assertEventListingFence, coreQueueCommand, openEventDetail, readListing } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { issueResolver } from "../src/issue-resolver.ts"
 import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
@@ -133,6 +134,19 @@ async function createQueue(repo: string, queue: string, commit: string, at: Date
 }
 
 describe("a queue is the selected origin branch carrying config", () => {
+  it("refuses an option-shaped raw issue before invoking the target resolver", async () => {
+    const command = ["sh", "-c", 'touch resolver-ran; printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"]
+    const repo = await world(`issueResolver: ${JSON.stringify(command)}\n`)
+    const git = gitIn(repo)
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture lost target issue resolver")
+    const resolve = issueResolver(config, repo)
+    if (resolve === undefined) throw new Error("fixture lost target issue resolver")
+    await expect(resolve("--repo=/x/state-model")).rejects.toThrow(/raw issue reference.*starts with '-'/u)
+    expect(existsSync(join(repo, "resolver-ran"))).toBe(false)
+  })
+
   it("uses the target's issue resolver even when the candidate changes its declaration", async () => {
     const targetResolver = ["sh", "-c", 'printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"]
     const repo = await world(`issueResolver: ${JSON.stringify(targetResolver)}\n`)
