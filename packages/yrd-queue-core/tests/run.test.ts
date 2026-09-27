@@ -1180,7 +1180,9 @@ it("restores target-owned scripts before an event check runs", async () => {
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await w.git(["checkout", "--quiet", "-b", "task/script-overlay", "main"])
-  writeFileSync(join(w.work, ".yrd.yml"), "changed by branch\n")
+  // A valid mapping that differs from the target's `{}`: since 2726605213 an invalid candidate .yrd.yml fails the
+  // change before any check runs, so the overlay is only observable through a declaration the queue accepts.
+  writeFileSync(join(w.work, ".yrd.yml"), "{ }\n")
   writeFileSync(join(w.work, "one.txt"), "one\n")
   await w.git(["add", ".yrd.yml", "one.txt"])
   await w.git(["commit", "--quiet", "-m", "rewrite protected script"])
