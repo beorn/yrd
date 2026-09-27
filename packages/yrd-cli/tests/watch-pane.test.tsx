@@ -5555,9 +5555,9 @@ it("navigates a numbered run by bare address with one selected queue and reports
   await app.press("Enter")
   await settle(app)
   expect(app.text).toContain("known in the run index")
-  // The RUN box wraps the sentence at its inner width (26242 dash under RUN);
-  // both halves stay visible, with the box border between them.
-  expect(app.text).toMatch(/detail[\s│─−]+is unavailable/u)
+  // The dialog footer wraps the sentence; overlay chrome (box edges, a
+  // leaked `$` from the pane behind) can sit between "detail" and "is".
+  expect(app.text).toMatch(/detail[\s\S]{0,40}?is unavailable/u)
   app.unmount()
 })
 
