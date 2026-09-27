@@ -104,7 +104,7 @@ describe("a check's log while the check runs", () => {
     expect(readFileSync(path, "utf8")).not.toContain("--- stderr ---")
   })
 
-  it("gives a check that says nothing an empty log rather than no log", async () => {
+  it("gives a silent passing check a non-empty execution receipt", async () => {
     const where = place("quiet")
     const path = checkLogPath(where.logDir, "quiet")
 
@@ -112,7 +112,7 @@ describe("a check's log while the check runs", () => {
 
     expect(result.result).toBe("pass")
     expect(existsSync(path)).toBe(true)
-    expect(readFileSync(path, "utf8")).toBe("")
+    expect(readFileSync(path, "utf8")).toContain("[yrd: check emitted no output; process exited 0]")
   })
 })
 
@@ -133,6 +133,29 @@ describe("a check log is written once", () => {
     // collision does not spend its whole bound running a check whose evidence it
     // could never publish.
     expect(existsSync(sentinel), "the check ran even though its log path was taken").toBe(false)
+  })
+
+  /** @failure A check exits zero after its log path disappears, and the queue records a pass with no evidence.
+   * @level l1 @consumer queue operator and submitter
+   */
+  it("records a missing completed log as unmeasured", async () => {
+    const where = place("lost")
+    const path = checkLogPath(where.logDir, "lost")
+    const driver = stubDriver(["completed\n"])
+    const process: Process = {
+      ...driver,
+      run: async (request) => {
+        const result = await driver.run(request)
+        rmSync(path)
+        return result
+      },
+    }
+
+    const result = await runCheck({ ...where, spec: { name: "lost", run: "exit 0" }, process })
+
+    expect(result).toMatchObject({ result: "stuck", exit: "unsettled" })
+    expect(result.why).toContain(path)
+    expect(result.why).toContain("missing")
   })
 })
 

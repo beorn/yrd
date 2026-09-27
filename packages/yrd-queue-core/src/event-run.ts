@@ -1278,17 +1278,7 @@ export async function eventQueueRun(
       const candidate = verified.verifying.candidate
       const raises = (await readRootChanges(git, candidate))?.changes ?? []
       tip = await appendOwnedChange(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })
-      const checkLogs = (["submit", "merge"] as const).flatMap((phase) =>
-        (options.noCheck === true ? [] : options.checks.filter((check) => (check.on ?? ["merge"]).includes(phase))).map(
-          (check) =>
-            checkLogPath(join(options.workdir, "checks", `${branch}@${head}`, log.id, "attempt-1", phase), check.name),
-        ),
-      )
-      tip = await appendOwnedChange(store, queue, branch, tip, {
-        type: "checking",
-        at: new Date(),
-        ...(checkLogs.length === 0 ? {} : { reason: `check logs: ${checkLogs.join(", ")}` }),
-      })
+      tip = await appendOwnedChange(store, queue, branch, tip, { type: "checking", at: new Date() })
       const results: EventCheck[] = []
       let attemptedRetry = false
       let decisionResults: EventCheck[] = []
@@ -1578,7 +1568,18 @@ export async function eventQueueRun(
         const stoppedThisAttempt = decisionResults.find(({ run }) => run.result !== "pass")
         if (attempt === 1 && stoppedThisAttempt?.run.result === "stuck") {
           const check = stoppedThisAttempt.run
-          const fault = transportFaultIn(`${readFileSync(check.log, "utf8")}\n${check.why ?? ""}`)
+          let checkLog = ""
+          try {
+            checkLog = readFileSync(check.log, "utf8")
+          } catch (error) {
+            log.write({
+              kind: "warning",
+              branch,
+              head,
+              reason: `retry attribution could not read check log ${check.log}: ${error instanceof Error ? error.message : String(error)}`,
+            })
+          }
+          const fault = transportFaultIn(`${checkLog}\n${check.why ?? ""}`)
           if (fault !== undefined) {
             attemptedRetry = true
             log.write({
@@ -1668,7 +1669,13 @@ export async function eventQueueRun(
         log.write({ kind: "change", branch, head, decision: "deferred", reason })
         return result(failed.length > 0 ? 1 : 0, observedMerged, failed, [], [branch])
       }
-      const checkReason = checkLogs.length === 0 ? undefined : `merge checks passed; logs: ${checkLogs.join(", ")}`
+      const passedLogs = decisionResults
+        .filter(
+          ({ run }) =>
+            run.result === "pass" && options.checks.some((check) => check.name === run.name && check.run !== "true"),
+        )
+        .map(({ run }) => run.log)
+      const checkReason = passedLogs.length === 0 ? undefined : `merge checks passed; logs: ${passedLogs.join(", ")}`
       tip = await appendOwnedChange(store, queue, branch, tip, {
         type: "merging",
         at: new Date(),

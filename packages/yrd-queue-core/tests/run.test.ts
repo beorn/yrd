@@ -1698,6 +1698,56 @@ it("runs a configured event change's default merge check before merging", async 
   expect(deciding?.links).toEqual([await remoteTarget(w)])
 })
 
+/** @failure A merged event says disabled checks passed and cites log paths that no check wrote.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("cites only measured check logs in a mixed event run (26089)", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/mixed-checks", "one.txt")
+
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [
+      { name: "off-submit", run: "true", on: ["submit"] },
+      { name: "verify", run: "echo measured" },
+      { name: "off-merge", run: "true" },
+    ],
+    notify: [],
+  })
+
+  expect(outcome.merged).toEqual(["task/mixed-checks"])
+  const measured = checkLogFor(outcome, "task/mixed-checks", "merge", "verify")
+  const status = await readStatus(store, "main", "task/mixed-checks")
+  expect(status.reason).toContain(measured)
+  expect(status.reason).not.toContain("off-submit.log")
+  expect(status.reason).not.toContain("off-merge.log")
+  expect(readFileSync(measured, "utf8")).toContain("measured")
+})
+
+/** @failure An absent check log throws during transport retry detection, so the queue never records its unmeasured verdict.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("records a missing event check log as stuck instead of retrying it (26089)", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/lost-check-log", "one.txt")
+
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [{ name: "verify", run: `find "${join(w.workdir, "checks")}" -name verify.log -delete` }],
+    notify: [],
+  })
+
+  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/lost-check-log"], merged: [] })
+  expect(await readStatus(store, "main", "task/lost-check-log")).toMatchObject({
+    status: "stuck",
+    reason: expect.stringContaining("missing after completion"),
+  })
+})
+
 /** @failure Event admission accepted on-submit and setup declarations without running either before landing.
  * @level l3 @consumer queue operator and submitter
  */
@@ -8518,6 +8568,9 @@ describe("skipping setup and worktree when every declared check is off (25716 ro
       phase: "merge",
       result: "pass",
     })
+    expect(readFileSync(checkLogFor(outcome, "task/synth", "merge", "c1"), "utf8")).toContain(
+      "configured off; no command ran",
+    )
   })
 
   // @i/10-yrd/25936 P2: under noCheck, allDeclaredChecksOff must not write result pass, exit 0 for real checks that never ran
