@@ -689,6 +689,7 @@ describe("what a watch says it looked at", () => {
     // log of its own, so a reader that borrowed the first run's artifact for the
     // newest row, or the newest for the old one, is caught either way.
     writeFileSync(control, "printf 'SECOND_RUN_MISSING\\n'\nexit 127\n")
+    await coreQueueCommand(w.work, capture(w.work).io, { by: "@chief", command: "resume" }, { workdir: w.workdir })
     const second = capture(w.work)
     expect(await coreQueueCommand(w.work, second.io, { command: "run" }, runOptions)).toBe(2)
     const secondId = (JSON.parse(second.stdout()) as { run: string }).run
@@ -737,7 +738,7 @@ describe("what a watch says it looked at", () => {
     ).toBe(true)
     // QUEUE / RUN names the latest attempt as `1 · main#…` (ia.md); historical
     // run ids stay in `--json` and in the change's own detail, not as extra rows.
-    expect(changeLine, plain.stdout()).toContain(runIdentifier(secondId))
+    expect(changeLine, plain.stdout()).toContain(runIdentifier(secondId).slice(0, 16))
 
     rendered.snapshot = undefined
     const interactive = capture(w.work)
