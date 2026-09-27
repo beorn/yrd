@@ -14,6 +14,7 @@ import {
   gitIn,
   inspectSubmit,
   issueOf,
+  normalizeIssueReference,
   listChangeHistories,
   lookupRunIndex,
   queueRef,
@@ -366,6 +367,47 @@ describe("event submit", () => {
     })
     expect(submitted.issue?.issue).toBe(canonical)
     expect((await readStatus(store(w), "main", "task/26050")).issue).toBe(canonical)
+  })
+
+  /** @failure An absolute vault path and a vault-relative bead reference refuse as conflicting bindings (25719).
+   * @level l2 @consumer Yrd submit and its opened change record
+   */
+  it("submits one canonical issue when branch history uses absolute vault path and vault-relative spellings (25719)", async () => {
+    const w = await world()
+    const branch = "task/25488-delivery"
+    await branchWithCommit(w, branch, "change.txt")
+    await w.git(["checkout", "--quiet", branch])
+    const canonical =
+      "@ag/hab/25488-a-services-designed-relaunch-can-page-health-not-measured-when-the-probe-reads-the-runner-that-just-exited"
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", `first\n\nRefs: /hh/pm/${canonical}.md`])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", `second\n\nRefs: ${canonical}`])
+    const submitted = await submit(w.git, "origin", {
+      branch,
+      submitter: "author",
+      target: { remote: "origin", branch: "main" },
+    })
+    expect(submitted.issue?.issue).toBe(canonical)
+    expect((await readStatus(store(w), "main", branch)).issue).toBe(canonical)
+  })
+
+  it("refusal for conflicting issue bindings says which trailer to fix (25719)", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/conflict", "change.txt")
+    await w.git(["checkout", "--quiet", "task/conflict"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "first\n\nRefs: @ag/hab/25488-first"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "second\n\nRefs: @ag/hab/25489-second"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await expect(issueOf(w.git, "task/conflict", head, w.target)).rejects.toThrow(`fix trailer at ${head}`)
+  })
+
+  it("normalizes issue reference forms (25719)", () => {
+    expect(normalizeIssueReference("/hh/pm/@ag/hab/25488-foo.md")).toBe("@ag/hab/25488-foo")
+    expect(normalizeIssueReference("./@ag/hab/25488-foo.md")).toBe("@ag/hab/25488-foo")
+    expect(normalizeIssueReference("@ag/hab/25488-foo.md")).toBe("@ag/hab/25488-foo")
+    expect(normalizeIssueReference("@ag/hab/25488-foo")).toBe("@ag/hab/25488-foo")
+    expect(normalizeIssueReference("/repo/pm/@scope/leaf")).toBe("@scope/leaf")
+    expect(normalizeIssueReference("25488")).toBe("25488")
+    expect(normalizeIssueReference("canonical-issue")).toBe("canonical-issue")
   })
 
   it("names both canonical issues for a real conflict and refuses resolver failure", async () => {

@@ -555,10 +555,11 @@ export async function issueOf(
   }
   let binding: IssueResolution | undefined
   const canonical = async (raw: string): Promise<string> => {
-    if (resolveIssue === undefined) return raw
+    const normalized = normalizeIssueReference(raw)
+    if (resolveIssue === undefined) return normalized
     let resolved: string
     try {
-      resolved = await resolveIssue(raw)
+      resolved = await resolveIssue(normalized)
     } catch (cause) {
       throw new Error(`cannot resolve issue ${JSON.stringify(raw)} for ${branch}: ${String(cause)}`, { cause })
     }
@@ -570,7 +571,7 @@ export async function issueOf(
     ) {
       throw new Error(`issue resolver returned no single-line canonical issue for ${JSON.stringify(raw)} on ${branch}`)
     }
-    return resolved
+    return normalizeIssueReference(resolved)
   }
   const records = history.split("\0")
   if (records.pop() !== "") {
@@ -594,7 +595,7 @@ export async function issueOf(
       if (binding === undefined) binding = { issue: canonicalIssue, source: "binding", commit }
       else if (binding.issue !== canonicalIssue) {
         throw new Error(
-          `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${canonicalIssue} at ${commit}`,
+          `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${canonicalIssue} at ${commit}; fix trailer at ${commit}`,
         )
       }
     }
@@ -603,7 +604,7 @@ export async function issueOf(
     const canonicalDeclared = declared === undefined ? undefined : await canonical(declared)
     if (canonicalDeclared !== undefined && canonicalDeclared !== binding.issue) {
       throw new Error(
-        `declared issue ${canonicalDeclared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}`,
+        `declared issue ${canonicalDeclared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; fix trailer at ${binding.commit}`,
       )
     }
     return binding
@@ -611,4 +612,25 @@ export async function issueOf(
   if (declared !== undefined) return { issue: await canonical(declared), source: "declared" }
   const legacy = /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
   return legacy === undefined ? undefined : { issue: await canonical(legacy), source: "legacy-branch" }
+}
+
+/**
+ * Normalize a bead reference spelling before resolution and comparison.
+ *
+ * An absolute path under the vault root (e.g. `/hh/pm/@ag/hab/25488-...`),
+ * a trailing `.md`, and the vault-relative path (`@ag/hab/25488-...`) all
+ * name one issue (25719).
+ */
+export function normalizeIssueReference(raw: string): string {
+  let issue = raw.trim()
+  if (issue.endsWith(".md")) {
+    issue = issue.slice(0, -3)
+  }
+  const atIndex = issue.indexOf("/@")
+  if (atIndex >= 0) {
+    issue = issue.slice(atIndex + 1)
+  } else if (issue.startsWith("./@")) {
+    issue = issue.slice(2)
+  }
+  return issue
 }
