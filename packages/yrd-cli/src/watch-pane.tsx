@@ -72,7 +72,6 @@ import {
 import type { GitObservation, JournalCommand, OverrideFact, Row, StopFact } from "@yrd/queue-core"
 import { NowProvider, useMinute, useNow } from "./watch-clock.ts"
 import {
-  RUNNER_GLYPH,
   RUNNING_GLYPH,
   STATE_WORDS,
   clock,
@@ -84,7 +83,15 @@ import {
   stateGlyph,
   toHms,
 } from "./watch-format.ts"
-import { WatchDetail, commandKey, commandsOfTab, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
+import {
+  WatchDetail,
+  commandKey,
+  commandsOfTab,
+  isRoundInFlight,
+  runnerDetailFromSnapshot,
+  type ChangeDetail,
+  type DiffText,
+} from "./watch-detail.tsx"
 import {
   BUCKETS,
   ListHeader,
@@ -129,29 +136,7 @@ export type WatchPaneItem = QueueItemContext &
   )
 
 export function RunnerDetailPane({ snapshot }: { snapshot: WatchSnapshot }) {
-  const now = useNow()
-  const runner = runnerOf(snapshot, now)
-  const color = STATE_WORDS[runner.state].color
-  return (
-    <Box flexDirection="column" paddingX={1} gap={1} minWidth={0}>
-      <Box flexDirection="row" gap={1}>
-        <Text bold color={color}>
-          {RUNNER_GLYPH} RUNNER {STATE_WORDS[runner.state].word}
-        </Text>
-        {runner.duration ? <Text color="$fg-muted">({runner.duration})</Text> : null}
-      </Box>
-      <Box flexDirection="column">
-        <Text color="$fg-muted">
-          Queue: <Text color="$fg">{snapshot.queue}</Text>
-        </Text>
-        <Text color="$fg-muted">
-          Detail: <Text color="$fg">{runner.detail}</Text>
-        </Text>
-        {snapshot.stopped ? <Text color="$fg-error">Stopped: {snapshot.stopped.cause}</Text> : null}
-        {snapshot.runner?.absent ? <Text color="$fg-muted">Journal: {snapshot.runner.absent}</Text> : null}
-      </Box>
-    </Box>
-  )
+  return <WatchDetail runnerSnapshot={snapshot} />
 }
 
 /** Everything one reading of the queue put on screen. The pane renders it and reads nothing itself. */
@@ -641,6 +626,8 @@ function SingleWatchPane({
   live = true,
   onEnding,
 }: WatchPaneProps) {
+  const liveNow = useNow()
+  const now = nowProp ?? liveNow
   const { columns, rows: terminalRows } = useWindowSize()
   const tier = watchTier(columns, terminalRows)
   const helpWidth = Math.min(columns - 4, HELP_MAX_WIDTH)
@@ -884,8 +871,9 @@ function SingleWatchPane({
     }
   }, [diffOpen, draft, loadDiff, selected, selectedKey, diffs])
 
-  // A stage tab's commands, read when the tab opens and never again.
-  const openedDetail = held.find((entry) => entry.key === selectedKey)?.detail
+  const roundInFlight = isRoundInFlight(shown, now)
+  const currentRunnerDetail = isRunnerSelected && roundInFlight ? runnerDetailFromSnapshot(shown, now) : undefined
+  const openedDetail = currentRunnerDetail ?? held.find((entry) => entry.key === selectedKey)?.detail
   useEffect(() => {
     if (loadCommandOutput === undefined || openedDetail === undefined) return
     const missing = commandsOfTab(openedDetail, tab).filter(
@@ -1032,37 +1020,41 @@ function SingleWatchPane({
   if (failure !== undefined) throw failure
 
   const detail = heldDetail?.detail
-  const detailContent =
-    isRunnerSelected && runnerHolds === undefined ? (
-      <RunnerDetailPane snapshot={shown} />
-    ) : draft !== undefined ? (
-      <DraftDetail row={draft} />
-    ) : (
-      <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
-          <Text bold color="$fg-warning" wrap="truncate">
-            {readFailureLine(
-              "this change's read",
-              detailFailure,
-              heldDetail === undefined ? "" : "; the detail shown is the last good read",
-            )}
-          </Text>
-        )}
-        <WatchDetail
-          detail={detail}
-          change={selected?.row}
-          joinedRun={selected?.run !== undefined}
-          {...(tab === undefined ? {} : { selected: tab })}
-          onSelect={setTab}
-          diffOpen={diffOpen}
-          {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
-          onToggleDiff={() => {
-            setDiffOpen((was) => !was)
-          }}
-          outputs={outputs}
-        />
-      </Box>
-    )
+  const detailContent = isRunnerSelected ? (
+    <WatchDetail
+      runnerSnapshot={shown}
+      {...(tab === undefined ? {} : { selected: tab })}
+      onSelect={setTab}
+      outputs={outputs}
+    />
+  ) : draft !== undefined ? (
+    <DraftDetail row={draft} />
+  ) : (
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+      {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
+        <Text bold color="$fg-warning" wrap="truncate">
+          {readFailureLine(
+            "this change's read",
+            detailFailure,
+            heldDetail === undefined ? "" : "; the detail shown is the last good read",
+          )}
+        </Text>
+      )}
+      <WatchDetail
+        detail={detail}
+        change={selected?.row}
+        joinedRun={selected?.run !== undefined}
+        {...(tab === undefined ? {} : { selected: tab })}
+        onSelect={setTab}
+        diffOpen={diffOpen}
+        {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
+        onToggleDiff={() => {
+          setDiffOpen((was) => !was)
+        }}
+        outputs={outputs}
+      />
+    </Box>
+  )
 
   const detailPane = (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} backgroundColor={DETAIL_BG}>
@@ -1071,7 +1063,7 @@ function SingleWatchPane({
     </Box>
   )
 
-  const showDetail = opened && !(isRunnerSelected && runnerHolds === undefined)
+  const showDetail = opened && (!isRunnerSelected || roundInFlight)
   // The width the list pane gets: the whole terminal, or its share of a split.
   const listColumns = showDetail && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) : columns
   const list = (
