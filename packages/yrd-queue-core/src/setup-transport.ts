@@ -28,6 +28,9 @@ export type TransportFault = Readonly<{
   line: string
 }>
 
+const SETUP_UNREACHABLE_CODE = "yrd-setup-unreachable"
+const SETUP_UNUSABLE_CODE = "yrd-setup-unusable"
+
 /** Bound on the evidence line a record carries. A record is not a log. */
 const MAX_LINE = 300
 
@@ -86,4 +89,17 @@ export function transportFaultIn(text: string): TransportFault | undefined {
     }
   }
   return undefined
+}
+
+/** Keep the incident's code and remedy paired with the transport classifier. */
+export function setupStuckCode(fault: TransportFault | undefined): string {
+  return fault === undefined ? SETUP_UNUSABLE_CODE : SETUP_UNREACHABLE_CODE
+}
+
+export function setupStuckNext(fault: TransportFault | undefined): string {
+  if (fault === undefined) return "repair the queue setup, then run yrd queue run"
+  return (
+    `nothing here is the change's fault: setup could not reach a remote (${fault.signature}), ` +
+    "and the round's one retry could not either; once the remote answers, run yrd queue run or resume the queue"
+  )
 }
