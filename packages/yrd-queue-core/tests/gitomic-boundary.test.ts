@@ -81,7 +81,7 @@ describe("the Yrd Gitomic boundary", () => {
     // The run's one fetch (the composing checkout's commit) lives in settled-base.ts.
     const run = source("run.ts")
     expect(refCommands(run), "queue run").toEqual([])
-    expect(run).toContain("publishCheckedChildren(")
+    expect(source("event-run.ts")).toContain("publishCheckedChildren(")
     const settledBase = source("settled-base.ts")
     expect(refCommands(settledBase), "settled base").toEqual(["fetch"])
     expect(settledBase).toContain('await options.git(["fetch", "--quiet", composing.path, commit])')
