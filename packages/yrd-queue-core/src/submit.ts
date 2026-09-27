@@ -28,8 +28,20 @@ import { targetName, type Target } from "./config.ts"
 import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, type Git } from "./git.ts"
 import { type PauseRecord } from "./pause.ts"
 import { remoteUrl } from "./remote.ts"
-import { changeInput, changesRef, decide, initial, project, queueFormat, queueRef, readEventOps } from "./events.ts"
+import {
+  changeInput,
+  changesRef,
+  decide,
+  initial,
+  project,
+  queueFormat,
+  queueRef,
+  readEventOps,
+  readEventOpsWithRefs,
+} from "./events.ts"
+import { overrideRef, pauseRef, queueRefPrefix } from "./refs.ts"
 import { verifyCandidate, type Verification } from "./verifying.ts"
+import { withRemoteSeam } from "./remote-calls.ts"
 
 export type SubmitRequest = Readonly<{
   /** The branch being submitted: the change's own. */
@@ -206,9 +218,10 @@ export type SubmitInspection = Readonly<{
   stop?: PauseRecord
 }>
 
-type SubmitAdmission = Readonly<Omit<SubmitInspection, "verifying"> & { root: string }>
+type SubmitOps = Awaited<ReturnType<typeof readEventOpsWithRefs>>
+type SubmitAdmission = Readonly<Omit<SubmitInspection, "verifying"> & { root: string; operational: SubmitOps }>
 
-function refuseMaintenance(
+export function refuseMaintenance(
   stop: PauseRecord | undefined,
   remote: string,
   queue: string,
@@ -267,7 +280,7 @@ export async function inspectSubmitAtHead(
 ): Promise<SubmitInspection> {
   const admitted = await admitSubmitAtHead(git, remote, request, head)
   const verifying = await composeSubmit(git, request, admitted)
-  const { root: _root, ...inspection } = admitted
+  const { root: _root, operational: _operational, ...inspection } = admitted
   return { ...inspection, verifying }
 }
 
@@ -315,13 +328,15 @@ async function admitSubmitAtHead(
       `${remote}#${request.target.branch} uses a legacy Record ref; expected ${queueRef(request.target.branch)}`,
     )
   }
-  const stop = (await readEventOps(store, git, request.target.branch, targetHead)).stop
+  const operational = await readEventOpsWithRefs(store, git, request.target.branch, targetHead)
+  const stop = operational.ops.stop
   refuseMaintenance(stop, remote, request.target.branch)
   return {
     head,
     targetHead,
     base,
     root,
+    operational,
     ...(issue === undefined ? {} : { issue }),
     ...(stop === undefined ? {} : { stop }),
   }
@@ -360,11 +375,15 @@ async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitA
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   refuseTarget(request.branch, request.target.branch)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
-  const admitted = await admitSubmitAtHead(git, remote, request, head)
-  const published = await publishMovedGitlinks(git, admitted.root, admitted.targetHead, head)
-  const verifying = await composeSubmit(git, request, admitted)
-  const { root, ...inspection } = admitted
-  return submitEvent(git, remote, request, root, { ...inspection, verifying }, published)
+  const admitted = await withRemoteSeam("inspectSubmit", () => admitSubmitAtHead(git, remote, request, head))
+  const published = await withRemoteSeam("publishMovedGitlinks", () =>
+    publishMovedGitlinks(git, admitted.root, admitted.targetHead, head),
+  )
+  const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted))
+  const { root, operational, ...inspection } = admitted
+  return withRemoteSeam("submitEvent", () =>
+    submitEvent(git, remote, request, root, { ...inspection, verifying }, operational, published),
+  )
 }
 
 async function submitEvent(
@@ -373,6 +392,7 @@ async function submitEvent(
   request: SubmitRequest,
   root: string,
   inspected: SubmitInspection,
+  admittedOps: SubmitOps,
   published: readonly PublishedGitlink[],
 ): Promise<Submitted> {
   const head = inspected.head
@@ -381,7 +401,20 @@ async function submitEvent(
   const branchRef = `refs/heads/${request.branch}`
   const chain = await openEvents({ ...store, ref, writer: request.submitter })
   for (let attempt = 0; attempt < 2; attempt++) {
-    const ops = await readEventOps(store, git, request.target.branch, inspected.targetHead)
+    const refs = attempt === 0 ? await listRefs(queueRefPrefix(request.target.branch), store) : undefined
+    // The unchanged tip names the same append-only queue history. A matching M2
+    // ref is the same validated fence; a stop needs its change chain reread.
+    const reuse =
+      refs !== undefined &&
+      admittedOps.ops.stop === undefined &&
+      admittedOps.listedQueueTip === admittedOps.ops.queue.tip &&
+      refs.get(queueRef(request.target.branch)) === admittedOps.ops.queue.tip &&
+      (refs.get(pauseRef(request.target.branch)) ?? null) === admittedOps.pauseTip &&
+      !refs.has(overrideRef(request.target.branch))
+    const operational = reuse
+      ? admittedOps
+      : await readEventOpsWithRefs(store, git, request.target.branch, inspected.targetHead)
+    const { ops, pauseTip } = operational
     refuseMaintenance(ops.stop, remote, request.target.branch, published)
     const branchAt = (await listRefs(branchRef, store)).get(branchRef) ?? null
     const input = changeInput("opened", {
@@ -427,11 +460,16 @@ async function submitEvent(
           also: [
             { ref: branchRef, expect: branchAt, oid: head },
             { ref: queueRef(request.target.branch), expect: ops.queue.tip, oid: ops.queue.tip },
+            ...(pauseTip === null ? [] : [{ ref: pauseRef(request.target.branch), expect: pauseTip, oid: pauseTip }]),
           ],
         },
       )
     } catch (error) {
-      if (!(error instanceof Conflict) || !error.refs.includes(queueRef(request.target.branch))) throw error
+      if (
+        !(error instanceof Conflict) ||
+        !error.refs.some((ref) => ref === queueRef(request.target.branch) || ref === pauseRef(request.target.branch))
+      )
+        throw error
       const moved = await readEventOps(store, git, request.target.branch, inspected.targetHead)
       refuseMaintenance(moved.stop, remote, request.target.branch, published)
       if (attempt === 0) continue

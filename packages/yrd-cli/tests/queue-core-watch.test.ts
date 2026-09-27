@@ -25,15 +25,7 @@ import {
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join, resolve } from "node:path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
-import {
-  createEventQueue,
-  createEventStore,
-  gitIn,
-  readConfig,
-  readJournals,
-  submit,
-  type Git,
-} from "@yrd/queue-core"
+import { createEventQueue, createEventStore, gitIn, readConfig, readJournals, submit, type Git } from "@yrd/queue-core"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
@@ -1003,7 +995,7 @@ describe("the queue line under a selector (24196)", () => {
       },
       page.stdout(),
     ).toEqual({
-      queueLine: "2 waiting: 2 submitted · 1 draft (7d)",
+      queueLine: "2 waiting: 2 queued · 1 draft (7d)",
       rail: "nothing under a check, and 2 in line",
       scope: true,
     })

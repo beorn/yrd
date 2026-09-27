@@ -61,6 +61,7 @@ import {
   ModalOverlay,
   SplitPane,
   Text,
+  TextInput,
   clampSplitPaneRatio,
   resolveSplitPaneLayout,
   useInput,
@@ -72,7 +73,6 @@ import {
 import type { GitObservation, JournalCommand, OverrideFact, Row, StopFact } from "@yrd/queue-core"
 import { NowProvider, useMinute, useNow } from "./watch-clock.ts"
 import {
-  RUNNER_GLYPH,
   RUNNING_GLYPH,
   STATE_WORDS,
   clock,
@@ -84,7 +84,15 @@ import {
   stateGlyph,
   toHms,
 } from "./watch-format.ts"
-import { WatchDetail, commandKey, commandsOfTab, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
+import {
+  WatchDetail,
+  commandKey,
+  commandsOfTab,
+  isRoundInFlight,
+  runnerDetailFromSnapshot,
+  type ChangeDetail,
+  type DiffText,
+} from "./watch-detail.tsx"
 import {
   BUCKETS,
   ListHeader,
@@ -119,6 +127,51 @@ import {
 import { TimeText } from "./watch-primitives.tsx"
 import type { RunnerFacts, RunnerLine } from "./watch-runner.ts"
 import { decisionsOfRows, lastDayBucket, statsSummary, type RunDecision } from "./watch-stats.ts"
+import { parseQueueAddress, parseRunAddress } from "./address.ts"
+
+type ResolvedWatchRun = Readonly<{ canonical: string; id: string; number: number; startedAt?: string }>
+
+function RunAddressDialog({
+  value,
+  onChange,
+  onSubmit,
+  onClose,
+  error,
+}: {
+  value: string
+  onChange: (value: string) => void
+  onSubmit: (value: string) => void
+  onClose: () => void
+  error?: string
+}) {
+  return (
+    <ModalOverlay onClose={onClose}>
+      <ModalDialog
+        title="Run address"
+        width={110}
+        height={10}
+        footer={
+          error === undefined ? (
+            "Enter to navigate · Escape to close"
+          ) : (
+            <Text color="$fg-error" wrap="wrap">
+              {error}
+            </Text>
+          )
+        }
+      >
+        <TextInput
+          prompt="> "
+          placeholder="#7 or host/path@branch#7"
+          isActive
+          value={value}
+          onChange={onChange}
+          onSubmit={onSubmit}
+        />
+      </ModalDialog>
+    </ModalOverlay>
+  )
+}
 
 type QueueItemContext = { sourceId?: string; snapshot?: WatchSnapshot; digit?: number }
 export type WatchPaneItem = QueueItemContext &
@@ -129,29 +182,7 @@ export type WatchPaneItem = QueueItemContext &
   )
 
 export function RunnerDetailPane({ snapshot }: { snapshot: WatchSnapshot }) {
-  const now = useNow()
-  const runner = runnerOf(snapshot, now)
-  const color = STATE_WORDS[runner.state].color
-  return (
-    <Box flexDirection="column" paddingX={1} gap={1} minWidth={0}>
-      <Box flexDirection="row" gap={1}>
-        <Text bold color={color}>
-          {RUNNER_GLYPH} RUNNER {STATE_WORDS[runner.state].word}
-        </Text>
-        {runner.duration ? <Text color="$fg-muted">({runner.duration})</Text> : null}
-      </Box>
-      <Box flexDirection="column">
-        <Text color="$fg-muted">
-          Queue: <Text color="$fg">{snapshot.queue}</Text>
-        </Text>
-        <Text color="$fg-muted">
-          Detail: <Text color="$fg">{runner.detail}</Text>
-        </Text>
-        {snapshot.stopped ? <Text color="$fg-error">Stopped: {snapshot.stopped.cause}</Text> : null}
-        {snapshot.runner?.absent ? <Text color="$fg-muted">Journal: {snapshot.runner.absent}</Text> : null}
-      </Box>
-    </Box>
-  )
+  return <WatchDetail runnerSnapshot={snapshot} />
 }
 
 /** Everything one reading of the queue put on screen. The pane renders it and reads nothing itself. */
@@ -238,6 +269,7 @@ const HELP = [
   "o r d f      toggle status filter              a        show everything",
   "s            expand or fold STATS              w        drafts of 7d, or every draft",
   "g            the RUNNER box, then the top      G        the bottom",
+  "n            navigate to a numbered run",
   "The watch writes nothing. Stop a change by moving its ref or pausing the queue.",
 ]
 
@@ -255,6 +287,7 @@ export type WatchSource = Readonly<{
   open?: (row: WatchRow) => Promise<ChangeDetail>
   loadDiff?: (row: WatchRow) => Promise<DiffText>
   loadCommandOutput?: (command: JournalCommand) => Promise<DiffText>
+  resolveRunAddress?: (address: string) => Promise<ResolvedWatchRun>
 }>
 
 type WatchPaneProps = {
@@ -270,6 +303,9 @@ type WatchPaneProps = {
   loadDiff?: (row: WatchRow) => Promise<DiffText>
   /** One git command's output from the round's raw files, read only when its stage tab opens (25441). */
   loadCommandOutput?: (command: JournalCommand) => Promise<DiffText>
+  resolveRunAddress?: (address: string) => Promise<ResolvedWatchRun>
+  onNavigateRun?: (address: string) => Promise<void>
+  navigationSerial?: number
   intervalMs?: number
   unfocusedIntervalMs?: number
   focused?: boolean
@@ -291,6 +327,7 @@ export function WatchPane(props: WatchPaneProps) {
         open={source.open}
         loadDiff={source.loadDiff}
         loadCommandOutput={source.loadCommandOutput}
+        resolveRunAddress={source.resolveRunAddress}
       />
     )
   }
@@ -369,11 +406,15 @@ function QueuesWatchPane({
     () => new Map(sources.map((source) => [source.id, { snapshot: source.snapshot, error: source.error }])),
   )
   const [hidden, setHidden] = useState<ReadonlySet<string>>(new Set())
-  const [focus, setFocus] = useState<{ id: string; rowKey?: string } | undefined>()
+  const [focus, setFocus] = useState<{ id: string; rowKey?: string; serial?: number } | undefined>()
+  const nextNavigationSerial = useRef(1)
   const [cursorKey, setCursorKey] = useState<string | undefined>()
   const [buckets, setBuckets] = useState<ReadonlySet<StatusBucket>>(new Set(BUCKETS))
   const [statsOpen, setStatsOpen] = useState(false)
   const [draftWindow, setDraftWindow] = useState<DraftWindow>("7d")
+  const [addressOpen, setAddressOpen] = useState(false)
+  const [addressError, setAddressError] = useState<string | undefined>()
+  const [addressValue, setAddressValue] = useState("")
   const listRef = useRef<ListViewHandle | null>(null)
   const onRead = useCallback((id: string, next: WatchSnapshot | undefined, error: string | undefined) => {
     setReadings((was) => {
@@ -385,6 +426,48 @@ function QueuesWatchPane({
   const visible = sources
     .filter((source) => !hidden.has(source.id))
     .map((source) => ({ ...source, ...readings.get(source.id), digit: sources.indexOf(source) + 1 }))
+  const navigateRun = async (operand: string): Promise<void> => {
+    const address = operand.trim()
+    let target: (typeof visible)[number] | undefined
+    if (address.startsWith("#")) {
+      if (focus !== undefined) target = visible.find((source) => source.id === focus.id)
+      else if (visible.length === 1) target = visible[0]
+      else throw new Error("bare #N needs exactly one selected queue; enter a full remote run address")
+    } else {
+      const parsed = parseRunAddress(address)
+      target = visible.find(
+        (source) =>
+          source.snapshot !== undefined &&
+          parseQueueAddress(source.snapshot.queue).canonical === parsed.queue.canonical,
+      )
+      if (target === undefined) {
+        throw new Error(`${parsed.canonical}: no selected Watch queue matches ${parsed.queue.canonical}`)
+      }
+    }
+    if (target?.resolveRunAddress === undefined) {
+      throw new Error(`${target?.label ?? address}: run lookup is unavailable`)
+    }
+    const found = await target.resolveRunAddress(address)
+    const reading = readings.get(target.id)?.snapshot
+    const row = reading?.unfiltered.find((item) => (item.run?.id ?? item.row.run) === found.id)
+    if (row === undefined) {
+      throw new Error(
+        `${found.canonical} is known in the run index (${found.id}${found.startedAt === undefined ? "" : `, started ${found.startedAt}`}); detail is unavailable in the current Watch rows`,
+      )
+    }
+    setFocus({ id: target.id, rowKey: watchRowKey(row), serial: nextNavigationSerial.current++ })
+  }
+  const submitAddress = (address: string): void => {
+    void (async () => {
+      try {
+        await navigateRun(address)
+        setAddressError(undefined)
+        setAddressOpen(false)
+      } catch (error: unknown) {
+        setAddressError(firstLine(error))
+      }
+    })()
+  }
   const multiple = visible.length > 1
   const selectedSource = sources.find((source) => source.id === focus?.id)
   const focusedSnapshot = focus === undefined ? undefined : readings.get(focus.id)?.snapshot
@@ -459,6 +542,16 @@ function QueuesWatchPane({
   )
   useInput((input, key) => {
     const character = key.text ?? input
+    if (addressOpen) {
+      if (key.escape) setAddressOpen(false)
+      return undefined
+    }
+    if (character === "n" && focus === undefined) {
+      setAddressError(undefined)
+      setAddressValue("")
+      setAddressOpen(true)
+      return undefined
+    }
     if (key.escape && focus !== undefined) {
       setFocus(undefined)
       return undefined
@@ -528,11 +621,14 @@ function QueuesWatchPane({
           {...props}
           snapshot={focusedSnapshot}
           initialKey={focus?.rowKey}
+          navigationSerial={focus?.serial}
           queueShortcuts={false}
           load={undefined}
           open={selectedSource.open}
           loadDiff={selectedSource.loadDiff}
           loadCommandOutput={selectedSource.loadCommandOutput}
+          resolveRunAddress={selectedSource.resolveRunAddress}
+          onNavigateRun={navigateRun}
           now={now}
           live={live}
         />
@@ -604,7 +700,7 @@ function QueuesWatchPane({
                 empty={visible.length === 0 ? "no queues visible — press a to show all" : "nothing in line"}
                 cursor={cursor}
                 listRef={listRef}
-                active
+                active={!addressOpen}
                 live={live}
                 onCursor={(index) => setCursorKey(items[index]?.key)}
               />
@@ -622,6 +718,15 @@ function QueuesWatchPane({
           </Box>
         </NowProvider>
       )}
+      {addressOpen ? (
+        <RunAddressDialog
+          value={addressValue}
+          onChange={setAddressValue}
+          onSubmit={submitAddress}
+          onClose={() => setAddressOpen(false)}
+          error={addressError}
+        />
+      ) : null}
     </>
   )
 }
@@ -629,11 +734,14 @@ function QueuesWatchPane({
 function SingleWatchPane({
   snapshot,
   initialKey,
+  navigationSerial,
   queueShortcuts = true,
   load,
   open,
   loadDiff,
   loadCommandOutput,
+  resolveRunAddress,
+  onNavigateRun,
   intervalMs = 5000,
   unfocusedIntervalMs = 30000,
   focused: focusedProp,
@@ -641,6 +749,8 @@ function SingleWatchPane({
   live = true,
   onEnding,
 }: WatchPaneProps) {
+  const liveNow = useNow()
+  const now = nowProp ?? liveNow
   const { columns, rows: terminalRows } = useWindowSize()
   const tier = watchTier(columns, terminalRows)
   const helpWidth = Math.min(columns - 4, HELP_MAX_WIDTH)
@@ -654,6 +764,9 @@ function SingleWatchPane({
   // operator's open/closed choice instead of reopening it behind their back.
   const [opened, setOpened] = useState(() => tier !== "full")
   const [helpOpen, setHelpOpen] = useState(false)
+  const [addressOpen, setAddressOpen] = useState(false)
+  const [addressError, setAddressError] = useState<string | undefined>()
+  const [addressValue, setAddressValue] = useState("")
   const [tab, setTab] = useState<string | undefined>(undefined)
   /** The row the cursor is on, by identity; undefined at the top, following the newest. */
   const [cursorRow, setCursorRow] = useState<WatchRow | undefined>(undefined)
@@ -884,8 +997,9 @@ function SingleWatchPane({
     }
   }, [diffOpen, draft, loadDiff, selected, selectedKey, diffs])
 
-  // A stage tab's commands, read when the tab opens and never again.
-  const openedDetail = held.find((entry) => entry.key === selectedKey)?.detail
+  const roundInFlight = isRoundInFlight(shown, now)
+  const currentRunnerDetail = isRunnerSelected && roundInFlight ? runnerDetailFromSnapshot(shown, now) : undefined
+  const openedDetail = currentRunnerDetail ?? held.find((entry) => entry.key === selectedKey)?.detail
   useEffect(() => {
     if (loadCommandOutput === undefined || openedDetail === undefined) return
     const missing = commandsOfTab(openedDetail, tab).filter(
@@ -926,6 +1040,24 @@ function SingleWatchPane({
     setBuckets(new Set(BUCKETS))
     setVisibleQueues(undefined)
   }
+  const lastNavigationSerial = useRef<number | undefined>(undefined)
+  useEffect(() => {
+    if (
+      navigationSerial === undefined ||
+      navigationSerial === lastNavigationSerial.current ||
+      initialKey === undefined
+    ) {
+      return
+    }
+    lastNavigationSerial.current = navigationSerial
+    const item = shown.unfiltered.find((candidate) => watchRowKey(candidate) === initialKey)
+    if (item === undefined) return
+    setBuckets(new Set(BUCKETS))
+    setVisibleQueues(undefined)
+    setCursorRow(item)
+    setCursorItemKey(initialKey)
+    setOpened(true)
+  }, [navigationSerial, initialKey, shown.unfiltered])
   const toggleQueue = (queueLabel: string): void => {
     setVisibleQueues((was) => {
       const every = new Set(shown.queues.map((queue) => queue.label))
@@ -943,6 +1075,32 @@ function SingleWatchPane({
     const item = visibleItems[index]
     setCursorItemKey(item?.kind === "row" && index === 0 ? undefined : item?.key)
     setCursorRow(item?.kind === "row" && index === 0 ? undefined : item?.kind === "row" ? item.item : undefined)
+  }
+
+  const submitAddress = (operand: string): void => {
+    void (async () => {
+      try {
+        if (onNavigateRun !== undefined) await onNavigateRun(operand)
+        else {
+          if (resolveRunAddress === undefined) throw new Error(`${shown.queue}: run lookup is unavailable`)
+          const found = await resolveRunAddress(operand.trim())
+          const item = shown.unfiltered.find((candidate) => (candidate.run?.id ?? candidate.row.run) === found.id)
+          if (item === undefined) {
+            throw new Error(
+              `${found.canonical} is known in the run index (${found.id}${found.startedAt === undefined ? "" : `, started ${found.startedAt}`}); detail is unavailable in the current Watch rows`,
+            )
+          }
+          showAll()
+          setCursorRow(item)
+          setCursorItemKey(watchRowKey(item))
+          setOpened(true)
+        }
+        setAddressError(undefined)
+        setAddressOpen(false)
+      } catch (error: unknown) {
+        setAddressError(firstLine(error))
+      }
+    })()
   }
 
   // The RUNNER box, centred: where `g` goes first and what a click on the top line's status area opens (25416).
@@ -963,6 +1121,16 @@ function SingleWatchPane({
 
   useInput((input, key) => {
     const character = key.text ?? input
+    if (addressOpen) {
+      if (key.escape) setAddressOpen(false)
+      return undefined
+    }
+    if (character === "n") {
+      setAddressError(undefined)
+      setAddressValue("")
+      setAddressOpen(true)
+      return undefined
+    }
     if (character === "?") {
       setHelpOpen((was) => !was)
       return undefined
@@ -1032,37 +1200,41 @@ function SingleWatchPane({
   if (failure !== undefined) throw failure
 
   const detail = heldDetail?.detail
-  const detailContent =
-    isRunnerSelected && runnerHolds === undefined ? (
-      <RunnerDetailPane snapshot={shown} />
-    ) : draft !== undefined ? (
-      <DraftDetail row={draft} />
-    ) : (
-      <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
-          <Text bold color="$fg-warning" wrap="truncate">
-            {readFailureLine(
-              "this change's read",
-              detailFailure,
-              heldDetail === undefined ? "" : "; the detail shown is the last good read",
-            )}
-          </Text>
-        )}
-        <WatchDetail
-          detail={detail}
-          change={selected?.row}
-          joinedRun={selected?.run !== undefined}
-          {...(tab === undefined ? {} : { selected: tab })}
-          onSelect={setTab}
-          diffOpen={diffOpen}
-          {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
-          onToggleDiff={() => {
-            setDiffOpen((was) => !was)
-          }}
-          outputs={outputs}
-        />
-      </Box>
-    )
+  const detailContent = isRunnerSelected ? (
+    <WatchDetail
+      runnerSnapshot={shown}
+      {...(tab === undefined ? {} : { selected: tab })}
+      onSelect={setTab}
+      outputs={outputs}
+    />
+  ) : draft !== undefined ? (
+    <DraftDetail row={draft} />
+  ) : (
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+      {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
+        <Text bold color="$fg-warning" wrap="truncate">
+          {readFailureLine(
+            "this change's read",
+            detailFailure,
+            heldDetail === undefined ? "" : "; the detail shown is the last good read",
+          )}
+        </Text>
+      )}
+      <WatchDetail
+        detail={detail}
+        change={selected?.row}
+        joinedRun={selected?.run !== undefined}
+        {...(tab === undefined ? {} : { selected: tab })}
+        onSelect={setTab}
+        diffOpen={diffOpen}
+        {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
+        onToggleDiff={() => {
+          setDiffOpen((was) => !was)
+        }}
+        outputs={outputs}
+      />
+    </Box>
+  )
 
   const detailPane = (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} backgroundColor={DETAIL_BG}>
@@ -1071,7 +1243,7 @@ function SingleWatchPane({
     </Box>
   )
 
-  const showDetail = opened && !(isRunnerSelected && runnerHolds === undefined)
+  const showDetail = opened && (!isRunnerSelected || roundInFlight)
   // The width the list pane gets: the whole terminal, or its share of a split.
   const listColumns = showDetail && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) : columns
   const list = (
@@ -1084,7 +1256,7 @@ function SingleWatchPane({
         empty={shown.rows.length === 0 ? "nothing in line" : "no change matches the filters"}
         cursor={at}
         listRef={listRef}
-        active={!showDetail || tier !== "full"}
+        active={!addressOpen && (!showDetail || tier !== "full")}
         live={live}
         onCursor={pointAt}
       />
@@ -1191,7 +1363,7 @@ function SingleWatchPane({
           <Box height={1} flexShrink={0}>
             <Text bold color="$fg-warning" wrap="truncate">
               {`⚠︎ the row under the cursor left the table: ${vanished.row.branch}@${vanished.row.head.slice(0, 12)}${
-                vanished.run === undefined ? "" : ` ${runShortName(label, vanished.run.id)}`
+                vanished.run === undefined ? "" : ` ${runShortName(label, vanished.run.id, vanished.run.number)}`
               }; the cursor stays on its neighbour, Home follows the newest again`}
             </Text>
           </Box>
@@ -1215,6 +1387,15 @@ function SingleWatchPane({
               ))}
             </ModalDialog>
           </ModalOverlay>
+        ) : null}
+        {addressOpen ? (
+          <RunAddressDialog
+            value={addressValue}
+            onChange={setAddressValue}
+            onSubmit={submitAddress}
+            onClose={() => setAddressOpen(false)}
+            error={addressError}
+          />
         ) : null}
       </Box>
     </NowProvider>

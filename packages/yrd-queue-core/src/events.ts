@@ -1,11 +1,22 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
-import { Conflict } from "./git.ts"
+import { Conflict, RetriesExhausted } from "./git.ts"
 import { listRefs, openEvents } from "./git.ts"
 import { readEventChain, readEventChains } from "./event-read.ts"
 import { EVENT_READ_LIMIT } from "./event-read.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
-import { overrideRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
+import {
+  assertBranch,
+  changesRef,
+  overrideRef,
+  pauseRef,
+  queueRef,
+  queueRefPrefix,
+  runIndexRef,
+  type Change,
+} from "./refs.ts"
+export { queueRef } from "./refs.ts"
+export { changesRef } from "./refs.ts"
 import { readM2Pause, type PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
 import { createLegacyBackend, gitIn, refAt } from "./git.ts"
@@ -23,6 +34,7 @@ import {
   type OverrideWrite,
 } from "./override.ts"
 import { deleteCandidateRefsForShas } from "./candidate-refs.ts"
+import { queueReadWithRunIndex, stageRunIndexEntry, writeRunIndexGenesis, type RunIndexIdentity } from "./run-index.ts"
 
 export const CHANGE_STATUSES = [
   "draft",
@@ -295,33 +307,6 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   }
 }
 
-/** Queue life is a chain at one reserved leaf, distinct from branch changes. */
-export function queueRef(queue: string): string {
-  return `${queueRefPrefix(queue)}/queue`
-}
-
-/** One chain for a branch's entire sequence of changes. */
-export function changesRef(queue: string, branch: string): string {
-  assertBranch(branch)
-  return `${queueRefPrefix(queue)}/changes/${branch}`
-}
-
-function assertBranch(branch: string): void {
-  if (
-    branch.length === 0 ||
-    branch === "@" ||
-    branch.startsWith("/") ||
-    branch.endsWith("/") ||
-    branch.includes("..") ||
-    branch.includes("@{") ||
-    branch.endsWith(".") ||
-    /[\x00-\x20\x7f~^:?*[\\]/u.test(branch) ||
-    branch.split("/").some((part) => part.length === 0 || part.startsWith(".") || part.endsWith(".lock"))
-  ) {
-    throw new TypeError(`invalid branch for an event ref: ${JSON.stringify(branch)}`)
-  }
-}
-
 type EventShape = Pick<Event, "id" | "type" | "props" | "links"> & Partial<Pick<Event, "writer">>
 
 /** What the queue projection reads; a not-yet-written event is validated in this shape, never as a full Event. */
@@ -473,6 +458,11 @@ function advanceChange(
     reason: prop(event, EVENT_TRAILERS.reason),
     ...(type === "verifying" ? { deferred: undefined, lastNotifiable: undefined } : {}),
     ...(type === "stuck" ? { lastNotifiable: { id: event.id, kind: "stuck" as const } } : {}),
+    ...(prop(event, EVENT_TRAILERS.run) !== undefined
+      ? { run: prop(event, EVENT_TRAILERS.run) }
+      : state.run !== undefined
+        ? { run: state.run }
+        : {}),
   }
 }
 
@@ -577,6 +567,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         notices: _previousNotices,
         lastNotifiable: _previousNotifiable,
         diagnostic: _previousDiagnostic,
+        run: _previousRun,
         ...fresh
       } = next
       return {
@@ -590,6 +581,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         endedAt: undefined,
         ending: undefined,
         reason: undefined,
+        run: undefined,
       }
     }
     case "verifying":
@@ -607,6 +599,8 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       // Dropping a branch records the last head being deleted even when no
       // change was open. This is also the first event for an unsubmitted branch.
       if (!isOpen(state.status) && event.type === "cancelled" && reason === "dropped") {
+        // A branch cleanup cannot turn a landed change back into cancelled.
+        if (state.status === "merged") return endingRefusal(state, event)
         return {
           ...next,
           status: "cancelled",
@@ -655,6 +649,11 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         lastNotifiable: { kind: event.type, id: event.id },
         endedAt: at,
         reason,
+        ...(prop(event, EVENT_TRAILERS.run) !== undefined
+          ? { run: prop(event, EVENT_TRAILERS.run) }
+          : state.run !== undefined
+            ? { run: state.run }
+            : {}),
       }
     }
     case "merged":
@@ -858,6 +857,7 @@ export async function createEventQueue(
     )
   }
   assertPlainEventQueueConfig(config, "create")
+  const indexTip = await writeRunIndexGenesis(store, at)
   const result = await (
     await openEvents({ ...store, ref, writer: "yrd" })
   ).append(
@@ -872,7 +872,7 @@ export async function createEventQueue(
         keeps: [commit],
       },
     ],
-    { expect: null },
+    { expect: null, also: [{ ref: runIndexRef(queue), expect: null, oid: indexTip }] },
   )
   const created = result.events[0]?.id
   if (created === undefined) throw new Error(`${ref} in ${store.repo}: created event was not written`)
@@ -881,8 +881,16 @@ export async function createEventQueue(
 
 /** Read and validate the queue declaration and its current operator stop. */
 export async function readEventQueue(store: QueueReadStore, queue: string): Promise<EventQueue> {
+  return readEventQueueWithFetch(store, queue)
+}
+
+async function readEventQueueWithFetch(
+  store: QueueReadStore,
+  queue: string,
+  fetch?: readonly string[],
+): Promise<EventQueue> {
   const ref = queueRef(queue)
-  const events = await readEventChain(await openEvents({ ...store, ref }))
+  const events = await readEventChain(await openEvents({ ...store, ref, ...(fetch === undefined ? {} : { fetch }) }))
   const projected = projectEventQueue(events, ref, store.repo)
   const warningAt = Math.ceil(EVENT_READ_LIMIT * 0.75)
   let writePressure: EventQueueProjection["writePressure"]
@@ -923,21 +931,21 @@ export async function readEventQueue(store: QueueReadStore, queue: string): Prom
   return result
 }
 
-/** Read event ops and reject any remaining legacy override authority. */
-export async function readEventOps(
+type EventOps = Readonly<{
+  source: "event"
+  queue: EventQueue
+  pause?: PauseRecord
+  stop?: PauseRecord
+  overrides: OverrideTable
+}>
+
+/** Read event ops together with the exact remote refs whose legacy fences were checked. */
+export async function readEventOpsWithRefs(
   store: QueueReadStore,
   git: Git,
   queue: string,
   _targetSha: string,
-): Promise<
-  Readonly<{
-    source: "event"
-    queue: EventQueue
-    pause?: PauseRecord
-    stop?: PauseRecord
-    overrides: OverrideTable
-  }>
-> {
+): Promise<Readonly<{ ops: EventOps; listedQueueTip: string | null; pauseTip: string | null }>> {
   const projected = await readEventQueue(store, queue)
   if (projected.opsCutover === undefined || projected.ops === undefined) {
     if (store.remote === undefined) {
@@ -948,12 +956,13 @@ export async function readEventOps(
     )
   }
   const refs = await listRefs(queueRefPrefix(queue), store)
+  const pauseTip = refs.get(pauseRef(queue)) ?? null
   if (refs.has(overrideRef(queue))) {
     throw new Error(
       `${store.remote}#${queue}: legacy override ref ${overrideRef(queue)} remains after ${projected.opsCutover}`,
     )
   }
-  if (refs.has(pauseRef(queue))) {
+  if (pauseTip !== null) {
     const fence = await readM2Pause(
       store.remote === undefined ? gitIn(store.repo, undefined, store.selection) : git,
       store.remote,
@@ -961,18 +970,32 @@ export async function readEventOps(
       projected.created,
       store.remote === undefined ? refs.get(pauseRef(queue)) : undefined,
     )
-    if (fence?.sha !== refs.get(pauseRef(queue))) {
+    if (fence?.sha !== pauseTip) {
       throw new Error(`${store.remote}#${queue}: ${pauseRef(queue)} changed during the M2 tip read`)
     }
   }
   const stop = await eventLineStop(store, queue, projected.ops.pause)
   return {
-    source: "event",
-    queue: projected,
-    pause: projected.ops.pause,
-    stop,
-    overrides: { sha: projected.tip, entries: projected.ops.overrides },
+    ops: {
+      source: "event",
+      queue: projected,
+      pause: projected.ops.pause,
+      stop,
+      overrides: { sha: projected.tip, entries: projected.ops.overrides },
+    },
+    listedQueueTip: refs.get(queueRef(queue)) ?? null,
+    pauseTip,
   }
+}
+
+/** Read event ops and reject any remaining legacy override authority. */
+export async function readEventOps(
+  store: QueueReadStore,
+  git: Git,
+  queue: string,
+  targetSha: string,
+): Promise<EventOps> {
+  return (await readEventOpsWithRefs(store, git, queue, targetSha)).ops
 }
 
 /** The event equivalent of the legacy stuck-stop derivation. */
@@ -1716,7 +1739,24 @@ export async function appendChangeEvent(
   if (write.writer === QUEUE_RUN_WRITER) {
     throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
   }
-  return appendDecision(store, queue, branch, selectedTip, write)
+  return (await appendDecision(store, queue, branch, selectedTip, write)).event
+}
+
+/** Allocate a run number in the same leased push as this round's first change event. */
+export async function appendNumberedChangeEvent(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+  selectedTip: string,
+  write: ChangeWrite,
+  identity: RunIndexIdentity,
+): Promise<Readonly<{ event: string; number: number }>> {
+  if (write.writer === QUEUE_RUN_WRITER) {
+    throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
+  }
+  const result = await appendDecision(store, queue, branch, selectedTip, write, undefined, identity)
+  if (result.number === undefined) throw new Error(`${runIndexRef(queue)}: numbered publication returned no run number`)
+  return { event: result.event, number: result.number }
 }
 
 /** The sole event append that attributes a merge to this queue run; both refs are leased. */
@@ -1737,6 +1777,33 @@ export async function appendPublishedMerge(
   }>,
   onPrepared?: (oid: Oid) => void,
 ): Promise<string> {
+  return (await publishedMergeDecision(store, queue, branch, selectedTip, request, onPrepared)).event
+}
+
+/** Allocate a number when a merge is the round's first durable publication. */
+export async function appendNumberedPublishedMerge(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+  selectedTip: string,
+  request: Parameters<typeof appendPublishedMerge>[4],
+  identity: RunIndexIdentity,
+  onPrepared?: (oid: Oid) => void,
+): Promise<Readonly<{ event: string; number: number }>> {
+  const result = await publishedMergeDecision(store, queue, branch, selectedTip, request, onPrepared, identity)
+  if (result.number === undefined) throw new Error(`${runIndexRef(queue)}: numbered merge returned no run number`)
+  return { event: result.event, number: result.number }
+}
+
+async function publishedMergeDecision(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+  selectedTip: string,
+  request: Parameters<typeof appendPublishedMerge>[4],
+  onPrepared?: (oid: Oid) => void,
+  numbered?: RunIndexIdentity,
+): Promise<Readonly<{ event: string; number?: number }>> {
   if (request.commit === request.targetExpect) {
     throw new TypeError(`published merge needs the target to move from ${request.targetExpect}`)
   }
@@ -1794,6 +1861,7 @@ export async function appendPublishedMerge(
       },
     },
     onPrepared,
+    numbered,
   )
 }
 
@@ -1804,8 +1872,17 @@ async function appendDecision(
   selectedTip: string,
   write: ChangeWrite,
   onPrepared?: (oid: Oid) => void,
-): Promise<string> {
-  const queueTip = (await readEventQueue(store, queue)).tip
+  numbered?: RunIndexIdentity,
+  retry?: Readonly<{ deadline: number; attempts: number; budgetMs: number }>,
+): Promise<Readonly<{ event: string; number?: number }>> {
+  const indexRead = numbered === undefined ? undefined : queueReadWithRunIndex(store, queue)
+  const queueTip = (
+    await readEventQueueWithFetch(
+      indexRead?.store ?? store,
+      queue,
+      numbered === undefined ? undefined : [runIndexRef(queue)],
+    )
+  ).tip
   const history = await readChangeEvents(store, queue, branch, selectedTip)
   const input = changeInput(write.type, {
     queueTip,
@@ -1835,6 +1912,42 @@ async function appendDecision(
       ? [{ ref: queueRef(queue), expect: queueTip, oid: queueTip }, ...(write.also ?? [])]
       : write.also
   const chain = await openEvents({ ...store, ref, writer: write.writer ?? "yrd" })
+  if (numbered !== undefined) {
+    const indexRef = runIndexRef(queue)
+    if (
+      numbered.id === "" ||
+      numbered.host === "" ||
+      numbered.actor === "" ||
+      Number.isNaN(Date.parse(numbered.startedAt))
+    ) {
+      throw new TypeError(`${indexRef}: run identity needs id, startedAt, host and actor`)
+    }
+    if (indexRead === undefined) throw new Error(`${indexRef}: numbered queue read was absent`)
+    const staged = await chain.stage(planned, { expect: selectedTip })
+    onPrepared?.(staged.head)
+    const updates = [...(also ?? []), ...((await write.prepareAlso?.(staged.head)) ?? [])]
+    const index = await stageRunIndexEntry(store, queue, indexRead.tip(), numbered, queueTip, write.at)
+    try {
+      await staged.publish({ also: [{ ref: indexRef, expect: indexRead.tip(), oid: index.next }, ...updates] })
+    } catch (error) {
+      if (
+        error instanceof Conflict &&
+        error.refs.length > 0 &&
+        error.refs.every((lost) => lost === indexRef || lost === queueRef(queue))
+      ) {
+        const budgetMs = retry?.budgetMs ?? store.retryBudgetMs ?? 30_000
+        const deadline = retry?.deadline ?? Date.now() + budgetMs
+        if (Date.now() >= deadline) throw new RetriesExhausted((retry?.attempts ?? 0) + 1, budgetMs, { cause: error })
+        return appendDecision(store, queue, branch, selectedTip, write, onPrepared, numbered, {
+          deadline,
+          attempts: (retry?.attempts ?? 0) + 1,
+          budgetMs,
+        })
+      }
+      throw error
+    }
+    return { event: staged.head, number: index.number }
+  }
   // A transport error can arrive after the atomic push landed. The merge
   // publisher needs the exact event OID before that call so its remote read can
   // distinguish this attempt from another writer with identical trailers.
@@ -1850,7 +1963,7 @@ async function appendDecision(
         })()
   const written = result.events.findLast((event) => event.type === write.type)?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: ${write.type} event was not written`)
-  return written
+  return { event: written }
 }
 
 /** End a branch and delete its name in the same leased publish. */
@@ -1869,22 +1982,7 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   const fetchRefs = store.backend.fetchRefs
   if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs for dropped branch commit")
   const head = (await fetchRefs(store.repo, branchRef, store.remote)).get(branchRef)
-  if (head === undefined) {
-    if (state.ending !== undefined && state.reason === "dropped") {
-      const ending = history.findLast((event) => event.id === state.ending?.id)
-      if (ending === undefined) throw new Error(`${ref} in ${store.repo}: missing dropped ending ${state.ending.id}`)
-      return { queue, branch, event: ending.id, head: keptCommit(ending) }
-    }
-    const disposition = isOpen(state.status)
-      ? `its open change must end cancelled (deleted) by the deleted-branch observer`
-      : state.ending === undefined
-        ? `there is no branch to drop`
-        : `its change already ended ${state.ending.kind} at ${state.ending.id}; there is no branch to drop`
-    throw new Error(
-      `${branchRef} in ${store.repo}${store.remote === undefined ? "" : ` at ${store.remote}`} is absent; ${disposition}`,
-    )
-  }
-  if (state.ending !== undefined) {
+  if (state.ending !== undefined && head !== undefined) {
     const kept = history.flatMap((event) => event.links)
     if (!kept.includes(head)) {
       const lastKept = kept.at(-1)
@@ -1894,6 +1992,32 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
           `See 25658 P3: drop an ended branch head reachable from origin/main through the one ancestry implementation.`,
       )
     }
+  }
+  const alreadyDropped = state.status === "cancelled" && state.reason === "dropped"
+  const retiringEnded = state.ending !== undefined && !alreadyDropped && state.status !== "merged"
+  const note = request.note?.trim()
+  if (retiringEnded && !note) {
+    throw new Error(`${ref} in ${store.repo}: dropping an ended change requires --reason`)
+  }
+  if (head === undefined) {
+    if (alreadyDropped && state.ending !== undefined) {
+      const ending = history.findLast((event) => event.id === state.ending?.id)
+      if (ending === undefined) throw new Error(`${ref} in ${store.repo}: missing dropped ending ${state.ending.id}`)
+      return { queue, branch, event: ending.id, head: keptCommit(ending) }
+    }
+    if (!retiringEnded) {
+      const disposition = isOpen(state.status)
+        ? `its open change must end cancelled (deleted) by the deleted-branch observer`
+        : state.ending === undefined
+          ? `there is no branch to drop`
+          : `its change already ended ${state.ending.kind} at ${state.ending.id}; there is no branch to drop`
+      throw new Error(
+        `${branchRef} in ${store.repo}${store.remote === undefined ? "" : ` at ${store.remote}`} is absent; ${disposition}`,
+      )
+    }
+  }
+  if (state.ending !== undefined && !retiringEnded) {
+    if (head === undefined) throw new Error(`${branchRef} in ${store.repo}: ended branch is absent`)
     if (store.backend.publish === undefined) {
       throw new Error("Gitomic backend lacks publish for dropped branch deletion")
     }
@@ -1910,28 +2034,30 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
     return { queue, branch, event: state.ending.id, head }
   }
   const at = new Date()
+  const keptHead = retiringEnded ? state.commit : head
+  if (keptHead === undefined) throw new Error(`${ref} in ${store.repo}: dropped change has no kept head`)
   const input = changeInput("cancelled", {
     queueTip,
     at,
-    commit: head,
+    commit: keptHead,
     reason: "dropped",
     by: request.by,
     title: `dropped ${branch}`,
-    ...(request.note === undefined ? {} : { content: request.note }),
+    ...(note === undefined ? {} : { content: note }),
   })
   const planned =
     selectedTip === null
-      ? [changeInput("opened", { queueTip, at, commit: head, by: request.by }), input]
+      ? [changeInput("opened", { queueTip, at, commit: keptHead, by: request.by }), input]
       : decide(history, input)
   const result = await chain.append(planned, {
     expect: selectedTip,
     // The event keeps H, so this branch delete only removes its name.
-    also: [{ ref: branchRef, expect: head, oid: null }],
+    ...(head === undefined ? {} : { also: [{ ref: branchRef, expect: head, oid: null }] }),
   })
   const written = result.events.findLast((event) => event.type === "cancelled")?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: dropped event was not written`)
-  await deleteCandidateRefsForShas(gitIn(store.repo), store.repo, store.remote, [head])
-  return { queue, branch, event: written, head }
+  if (head !== undefined) await deleteCandidateRefsForShas(gitIn(store.repo), store.repo, store.remote, [head])
+  return { queue, branch, event: written, head: keptHead }
 }
 
 type ChangeHistory = Readonly<{ state: EventChange; events: readonly Event[] }>

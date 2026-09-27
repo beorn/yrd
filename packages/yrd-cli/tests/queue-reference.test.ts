@@ -64,5 +64,11 @@ describe("resolveQueueLocation", () => {
     const reopened = await resolveQueueLocation(outside, `${product}#main`, env)
     expect(reopened.repo).toBe(location.repo)
     expect(reopened.referenceStores).toEqual([])
+
+    // ADR-0028's @ spelling must select the same queue-owned clone from outside a checkout.
+    // Address parsing alone cannot catch resolveQueueLocation treating it as an unqualified remote.
+    const human = await resolveQueueLocation(outside, `${product}@main`, env)
+    expect(human.repo).toBe(location.repo)
+    expect(human.address?.canonical).toBe(location.address?.canonical)
   }, 60_000)
 })

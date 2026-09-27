@@ -12,7 +12,8 @@ import type { GitomicBackend } from "gitomic"
 import { gitIn } from "../src/git.ts"
 import { readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
-import { pauseRef } from "../src/refs.ts"
+import { pauseRef, runIndexRef } from "../src/refs.ts"
+import { activateRunIndex, lookupRunIndex } from "../src/run-index.ts"
 import { encodeOps, type OpsState } from "../src/ops-state.ts"
 import { queueResumedAfter } from "../src/index.ts"
 import {
@@ -61,12 +62,15 @@ function remoteMemStore(repo: string) {
       if (hook !== undefined) await hook()
       return localPublish(name, updates)
     },
-    fetchRefs: async (name, refs) => {
+    fetchRefs: async (name, refs, _remote, options) => {
       if (typeof refs === "string") return localRefs(name, refs)
       const found = new Map<string, string>()
       for (const ref of refs) {
         const oid = (await localRefs(name, ref)).get(ref)
-        if (oid === undefined) throw new Error(`missing fixture ref ${ref}`)
+        if (oid === undefined) {
+          if (options?.absent === "omit") continue
+          throw new Error(`missing fixture ref ${ref}`)
+        }
         found.set(ref, oid)
       }
       return found
@@ -184,8 +188,104 @@ function landed(inputs: readonly EventInput[], firstId: string): Event[] {
 describe("ADR-0017 ref tree", () => {
   it("has a queue chain and exactly one change chain per branch, with queue encoding", () => {
     expect(queueRef("feature/main")).toBe("refs/yrd/feature%2Fmain/queue")
+    expect(runIndexRef("feature/main")).toBe("refs/yrd/feature%2Fmain/runs")
     expect(changesRef("feature/main", "task/42-one")).toBe("refs/yrd/feature%2Fmain/changes/task/42-one")
     expect(() => changesRef("main", "../escape")).toThrow(/branch/)
+  })
+})
+
+describe("ADR-0028 run-index lookup", () => {
+  async function fixtureCommit(
+    location: ReturnType<typeof remoteMemStore>["location"],
+  ): Promise<{ genesis: string; commit: string }> {
+    const genesis = await location.backend.writeGenesis?.(location.repo)
+    if (genesis === undefined) throw new Error("fixture lacks Gitomic genesis")
+    const commit = await location.backend.writeCommit(location.repo, {
+      parent: genesis,
+      time: 1_790_510_400,
+      changes: new Map([[".yrd.yml", "target: main\n"]]),
+      message: "queue fixture",
+      writer: "fixture",
+      instance: "run-index-test",
+      seq: 1,
+    })
+    return { genesis, commit }
+  }
+
+  it("refuses an existing queue whose index has not been explicitly activated (26193)", async () => {
+    // A missing index on an existing queue must not silently reseed at one.
+    const { location } = remoteMemStore("run-index-missing")
+    const { commit } = await fixtureCommit(location)
+    await seedEventQueue(location, "main", commit, new Date("2026-09-27T12:00:00Z"))
+    await expect(lookupRunIndex(location, "main", 1)).rejects.toThrow(/E_RUN_INDEX_MISSING.*refs\/yrd\/main\/runs/u)
+  })
+
+  it("activates only an existing queue and refuses a second creation lease (26193)", async () => {
+    const { location } = remoteMemStore("run-index-activation")
+    await expect(activateRunIndex(location, "main", new Date("2026-09-27T12:00:00Z"))).rejects.toThrow(
+      /refs\/yrd\/main\/queue.*absent/u,
+    )
+    const { commit } = await fixtureCommit(location)
+    await seedEventQueue(location, "main", commit, new Date("2026-09-27T12:00:00Z"))
+    const tip = await activateRunIndex(location, "main", new Date("2026-09-27T12:01:00Z"))
+    expect(tip).toMatch(/^[0-9a-f]{40}$/u)
+    expect(await lookupRunIndex(location, "main", 1)).toEqual({ kind: "unknown", number: 1, knownThrough: 0 })
+    await expect(activateRunIndex(location, "main", new Date("2026-09-27T12:02:00Z"))).rejects.toThrow(
+      /refs\/yrd\/main\/runs.*already exists/u,
+    )
+  })
+
+  it("publishes one index when two activators race, naming the winning tip in the refusal (26193)", async () => {
+    // The sequential duplicate test cannot prove the absent-ref lease survives two simultaneous reads.
+    const { location, beforeNextPublish } = remoteMemStore("run-index-activation-race")
+    const { commit } = await fixtureCommit(location)
+    await seedEventQueue(location, "main", commit, new Date("2026-09-27T12:00:00Z"))
+    let winner: string | undefined
+    beforeNextPublish(async () => {
+      winner = await activateRunIndex(location, "main", new Date("2026-09-27T12:01:01Z"))
+    })
+
+    let refusal: unknown
+    try {
+      await activateRunIndex(location, "main", new Date("2026-09-27T12:01:00Z"))
+    } catch (error) {
+      refusal = error
+    }
+    if (winner === undefined) throw new Error("racing activator did not publish")
+    expect(String(refusal)).toContain(`${runIndexRef("main")} is at ${winner}, not absent`)
+    const refs = await location.backend.listRefs?.(location.repo, runIndexRef("main"))
+    expect(refs?.size).toBe(1)
+    expect(refs?.get(runIndexRef("main"))).toBe(winner)
+  })
+
+  it("distinguishes an unknown number from a stored run record without scanning history (26193)", async () => {
+    const { location } = remoteMemStore("run-index-lookup")
+    const { genesis, commit } = await fixtureCommit(location)
+    if (location.backend.publish === undefined) throw new Error("fixture lacks Gitomic publish")
+    const firstQueueTip = await seedEventQueue(location, "main", commit, new Date("2026-09-27T12:00:00Z"))
+    const indexRef = runIndexRef("main")
+    await location.backend.publish(location.repo, [{ ref: indexRef, expect: "0".repeat(40), oid: genesis }], "origin")
+    await expect(lookupRunIndex(location, "main", 1)).rejects.toThrow(/E_RUN_INDEX_CORRUPT.*next/u)
+    const index = await open({ repo: location.repo, backend: location.backend, ref: indexRef, writer: "yrd" })
+    await index.transact(async (map) => {
+      map.set("next", "2")
+      map.set(
+        "by-number/0/1",
+        JSON.stringify({
+          id: "opaque-run-id",
+          startedAt: "2026-09-27T12:00:00Z",
+          host: "hh",
+          actor: "yrd",
+          firstQueueTip,
+        }),
+      )
+    }, "record first run")
+    expect(await lookupRunIndex(location, "main", 1)).toMatchObject({
+      kind: "known",
+      number: 1,
+      record: { id: "opaque-run-id", firstQueueTip },
+    })
+    expect(await lookupRunIndex(location, "main", 2)).toEqual({ kind: "unknown", number: 2, knownThrough: 1 })
   })
 })
 
@@ -808,6 +908,27 @@ describe("ADR-0016 event fold", () => {
     expect(dropped.since).toBeUndefined()
     expect(evolve(dropped, event("merged", "d".repeat(40), [["Commit", A]], [A])).status).toBe("merged")
   })
+
+  // @failure a malformed drop event after a landing turns a merged change into cancelled (26223).
+  it("refuses a dropped ending after merge without changing the merged projection", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const merged = evolve(opened, event("merged", B, [["Commit", A]], [A]))
+    expect(() =>
+      evolve(
+        merged,
+        event(
+          "cancelled",
+          "c".repeat(40),
+          [
+            ["Reason", "dropped"],
+            ["Commit", A],
+          ],
+          [A],
+        ),
+      ),
+    ).toThrow(/cancelled.*follows merged/)
+    expect(merged.status).toBe("merged")
+  })
 })
 
 describe("the queue-format boundary", () => {
@@ -890,6 +1011,9 @@ describe("the queue-format boundary", () => {
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
     const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    await expect(drop(location, { queue: "lab", branch: "task/never", by: "@dev/2" })).rejects.toThrow(
+      /there is no branch to drop/,
+    )
     const branchRef = "refs/heads/task/absent"
     const branch = await open({ ...store, ref: branchRef })
     const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
@@ -909,14 +1033,24 @@ describe("the queue-format boundary", () => {
       [changeInput("failed", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), reason: "check failed" })],
       { expect: opened.head },
     )
-    await expect(drop(location, { queue: "lab", branch: "task/absent", by: "@dev/2" })).rejects.toThrow(
-      /refs\/heads\/task\/absent.*already ended failed.*no branch to drop/,
-    )
+    await expect(drop(location, { queue: "lab", branch: "task/absent", by: "@dev/2" })).rejects.toThrow(/--reason/)
     expect(await chain.head()).toBe(failed.head)
+    const dropped = await drop(location, {
+      queue: "lab",
+      branch: "task/absent",
+      by: "@dev/2",
+      note: "owner retired the failed change",
+    })
+    expect(await readStatus(location, "lab", "task/absent")).toMatchObject({
+      status: "cancelled",
+      reason: "dropped",
+      commit: head,
+    })
+    expect((await chain.events()).at(-1)).toMatchObject({ id: dropped.event, type: "cancelled", links: [head] })
   })
 
-  // @failure a drop after a failed ending replaces the failed notice event and stops the queue judge (25658).
-  it("deletes an already-ended branch whose head is kept without changing its ending or queued notice", async () => {
+  // @failure an owner drop after a failed ending deletes the name but leaves Df seeing a failure (26223).
+  it("records an owner drop after an ended change and deletes its kept branch in one publish", async () => {
     const { store, location } = remoteMemStore("yrd-event-drop-ended")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
@@ -934,10 +1068,82 @@ describe("the queue-format boundary", () => {
     )
     const before = await readStatus(location, "lab", "task/ended")
     expect(before.lastNotifiable).toMatchObject({ kind: "failed", id: failed.head })
-    await drop(location, { queue: "lab", branch: "task/ended", by: "@dev/2" })
+    await expect(drop(location, { queue: "lab", branch: "task/ended", by: "@dev/2" })).rejects.toThrow(/--reason/)
+    expect(await branch.head()).toBe(head)
     expect(await chain.head()).toBe(failed.head)
+    const dropped = await drop(location, {
+      queue: "lab",
+      branch: "task/ended",
+      by: "@dev/2",
+      note: "owner retired the failed change",
+    })
+    expect(await chain.head()).toBe(dropped.event)
     expect((await listRefs("refs/heads/task/ended", store)).size).toBe(0)
-    expect(await readStatus(location, "lab", "task/ended")).toEqual(before)
+    expect(await readStatus(location, "lab", "task/ended")).toMatchObject({
+      status: "cancelled",
+      reason: "dropped",
+      commit: head,
+    })
+    expect((await chain.events()).at(-1)).toMatchObject({
+      id: dropped.event,
+      type: "cancelled",
+      links: [head],
+      content: "owner retired the failed change",
+      props: expect.arrayContaining([
+        ["By", "@dev/2"],
+        ["Reason", "dropped"],
+      ]),
+    })
+  })
+
+  it("only deletes the branch name of a merged change", async () => {
+    const { store, location } = remoteMemStore("yrd-event-drop-merged")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/merged" })
+    const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+    const chain = await openEvents({ ...store, ref: changesRef("lab", "task/merged") })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      { expect: null },
+    )
+    const merged = await chain.append(
+      [changeInput("merged", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: head })],
+      { expect: opened.head },
+    )
+    await drop(location, { queue: "lab", branch: "task/merged", by: "@dev/2" })
+    expect(await chain.head()).toBe(merged.head)
+    expect((await listRefs("refs/heads/task/merged", store)).size).toBe(0)
+    expect((await readStatus(location, "lab", "task/merged")).status).toBe("merged")
+  })
+
+  // @failure a rival branch move after an ended drop publishes would retire work the event did not keep (26223).
+  it("leaves an ended change untouched when its branch-delete lease loses", async () => {
+    const { store, location, beforeNextPublish } = remoteMemStore("yrd-event-drop-ended-race")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+    const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/ended-race" })
+    const head = (await branch.transact(async (map) => map.set("work", "one"), "work")).oid
+    const chain = await openEvents({ ...store, ref: changesRef("lab", "task/ended-race") })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      { expect: null },
+    )
+    const failed = await chain.append(
+      [changeInput("failed", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), reason: "check failed" })],
+      { expect: opened.head },
+    )
+    let rival = ""
+    beforeNextPublish(async () => {
+      rival = (await branch.transact(async (map) => map.set("work", "two"), "rival head")).oid
+    })
+    await expect(
+      drop(location, { queue: "lab", branch: "task/ended-race", by: "@dev/2", note: "retire" }),
+    ).rejects.toBeInstanceOf(Conflict)
+    expect(await branch.head()).toBe(rival)
+    expect(await chain.head()).toBe(failed.head)
   })
 
   // @failure delete-only drop loses a branch's newer, unkept commit (ADR-0018 / 25658).
@@ -958,9 +1164,9 @@ describe("the queue-format boundary", () => {
       { expect: opened.head },
     )
     const advanced = (await branch.transact(async (map) => map.set("work", "two"), "push after ending")).oid
-    await expect(drop(location, { queue: "lab", branch: "task/advanced", by: "@dev/2" })).rejects.toThrow(
-      new RegExp(`task/advanced.*${advanced}.*${kept}`),
-    )
+    await expect(
+      drop(location, { queue: "lab", branch: "task/advanced", by: "@dev/2", note: "retire" }),
+    ).rejects.toThrow(new RegExp(`task/advanced.*${advanced}.*${kept}`))
     expect(await branch.head()).toBe(advanced)
     expect(await chain.head()).toBe(failed.head)
   })

@@ -22,23 +22,28 @@
 
 export {
   changeName,
+  changesRef,
   encodeQueueComponent,
   parseChangeName,
   parseChangeRef,
   overrideRef,
   pauseRef,
   queueRefPrefix,
+  runIndexRef,
   refOfChange,
 } from "./refs.ts"
 export type { Change } from "./refs.ts"
+export { activateRunIndex, lookupRunIndex, runIndexPath, RUN_INDEX_CODES } from "./run-index.ts"
+export type { RunIndexLookup, RunIndexRecord } from "./run-index.ts"
 export {
   CHANGE_EVENT_TYPES,
   CHANGE_STATUSES,
   EVENT_TRAILERS,
   adoptedChange,
   appendChangeEvent,
+  appendNumberedChangeEvent,
+  appendNumberedPublishedMerge,
   changeInput,
-  changesRef,
   createEventQueue,
   createLocalEventStore,
   decide,
@@ -47,6 +52,7 @@ export {
   evolve,
   enumerateChangeSegments,
   initial,
+  isOpen,
   listChangeHistories,
   listChanges,
   queueFormat,
@@ -215,7 +221,7 @@ export type { RuntimeGitlinkDecision, RuntimeGitlinkOff, RuntimeGitlinkPath } fr
 
 export { programRootCheck } from "./program-root.ts"
 
-export { readRemoteCalls, remoteCallsLine, traceRemoteCalls } from "./remote-calls.ts"
+export { readRemoteCalls, remoteCallsLine, traceRemoteCalls, withRemoteSeam } from "./remote-calls.ts"
 export type { RemoteCalls } from "./remote-calls.ts"
 export {
   MIRROR_LOCK_WAIT_MS,

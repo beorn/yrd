@@ -56,12 +56,16 @@ import {
   clock,
   diagnosticLines,
   mediaDuration,
+  RUNNER_GLYPH,
   stateColor,
   stateGlyph,
   withoutGitConflictsBlock,
 } from "./watch-format.ts"
+import { runnerOf } from "./watch-frame.tsx"
+import type { WatchSnapshot } from "./watch-pane.tsx"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
-import { runTitle, statusLineOf, timingRows, type WatchRun } from "./watch-run.ts"
+import { runTitle, statusLineOf, stepsOf, timingRows, type WatchRun } from "./watch-run.ts"
+import { STATE_WORDS, type RunnerState } from "./watch-words.ts"
 
 /**
  * A check with what its log actually held. The output is read by whatever
@@ -121,6 +125,171 @@ function isMigratedWithoutCheckDetail(detail: ChangeDetail): boolean {
   return detail.checks.length === 0 && detail.note?.startsWith("Migrated change has no check-step detail") === true
 }
 
+export function isRoundInFlight(snapshot: WatchSnapshot, now: Date): boolean {
+  const runner = runnerOf(snapshot, now)
+  const isRunningState =
+    runner.state === "provisioning" ||
+    runner.state === "checking" ||
+    runner.state === "merging" ||
+    runner.state === "deprovisioning"
+  const hasActiveStep = snapshot.runner?.latest?.activeStep !== undefined
+  const holdsLiveChange = snapshot.unfiltered.some((item) => item.row.live !== undefined)
+  return isRunningState || hasActiveStep || holdsLiveChange
+}
+
+export function defaultRunnerTab(state: RunnerState): StageTabName {
+  if (state === "checking") return "checking"
+  if (state === "merging") return "merging"
+  if (state === "deprovisioning") return "deprovisioning"
+  return "provisioning"
+}
+
+export function runnerDetailFromSnapshot(snapshot: WatchSnapshot, now: Date): ChangeDetail {
+  const runner = runnerOf(snapshot, now)
+  const latest = snapshot.runner?.latest
+  const activeStep = latest?.activeStep
+  const steps = latest?.steps ?? []
+  const effectiveChecks = latest?.effectiveChecks ?? latest?.checks ?? []
+
+  const rowBranch = activeStep?.branch ?? "runner"
+  const rowHead = activeStep?.head ?? "HEAD"
+  const rowState: Row["state"] =
+    runner.state === "merging"
+      ? "merging"
+      : runner.state === "checking" || runner.state === "provisioning" || runner.state === "deprovisioning"
+        ? "checking"
+        : "queued"
+
+  const row: Row = {
+    branch: rowBranch,
+    head: rowHead,
+    state: rowState,
+    at: latest?.startedAt ?? now,
+    live: {
+      run: latest?.id ?? "run",
+      check: activeStep?.name ?? "round",
+      phase: activeStep?.phase ?? "provisioning",
+      since: activeStep?.start ?? latest?.startedAt ?? now,
+    },
+  }
+
+  const journalSteps: JournalStep[] = []
+  for (const s of steps) {
+    if (s.kind === "step") {
+      const ms = s.end !== undefined ? s.end.getTime() - s.start.getTime() : undefined
+      journalSteps.push({
+        name: s.name,
+        phase: s.phase,
+        startedAt: s.start,
+        ...(s.end !== undefined ? { endedAt: s.end } : {}),
+        ...(ms !== undefined ? { ms } : {}),
+        commands: [],
+        parts: [],
+      })
+    }
+  }
+
+  if (activeStep?.kind === "step") {
+    const existing = journalSteps.find(
+      (s) => s.name === activeStep.name && s.phase === activeStep.phase && s.endedAt === undefined,
+    )
+    if (!existing) {
+      journalSteps.push({
+        name: activeStep.name,
+        phase: activeStep.phase,
+        startedAt: activeStep.start,
+        commands: [],
+        parts: [],
+      })
+    }
+  }
+
+  const checks: CheckPanel[] = []
+  const stepChecks = steps.filter((s) => s.kind === "check")
+  const allOff = effectiveChecks.length > 0 && effectiveChecks.every((c) => c === "true" || c === "off")
+
+  if (allOff) {
+    checks.push({
+      name: "checks",
+      state: "off",
+    })
+  } else {
+    for (const name of effectiveChecks) {
+      if (name === "true" || name === "off") {
+        checks.push({
+          name: "checks",
+          state: "off",
+        })
+        continue
+      }
+      const matching = stepChecks.findLast((s) => s.name === name)
+      const isRunning = activeStep?.kind === "check" && activeStep.name === name
+      if (matching !== undefined) {
+        if (matching.end !== undefined) {
+          const ms = matching.end.getTime() - matching.start.getTime()
+          checks.push({
+            name,
+            phase: matching.phase,
+            state: "passed",
+            result: { result: "pass", ms },
+          })
+        } else {
+          checks.push({
+            name,
+            phase: matching.phase,
+            state: "running",
+          })
+        }
+      } else if (isRunning) {
+        checks.push({
+          name,
+          phase: activeStep.phase,
+          state: "running",
+        })
+      } else {
+        checks.push({
+          name,
+          state: "not-run",
+        })
+      }
+    }
+
+    for (const s of stepChecks) {
+      if (!checks.some((c) => c.name === s.name)) {
+        const ms = s.end !== undefined ? s.end.getTime() - s.start.getTime() : undefined
+        checks.push({
+          name: s.name,
+          phase: s.phase,
+          state: s.end !== undefined ? "passed" : "running",
+          ...(ms !== undefined ? { result: { result: "pass", ms } } : {}),
+        })
+      }
+    }
+  }
+
+  return {
+    row,
+    run: {
+      kind: "queue",
+      id: latest?.id ?? "run",
+      label: snapshot.queue,
+      row,
+      steps: stepsOf(checks, row),
+    },
+    journal: {
+      id: latest?.id ?? "run",
+      branch: rowBranch,
+      head: rowHead,
+      startedAt: latest?.startedAt ?? now,
+      at: latest?.startedAt ?? now,
+      commands: [],
+      checks: [],
+      steps: journalSteps,
+    },
+    checks,
+  }
+}
+
 export function WatchDetail({
   detail,
   change,
@@ -131,8 +300,9 @@ export function WatchDetail({
   diff,
   onToggleDiff,
   outputs = new Map(),
+  runnerSnapshot,
 }: {
-  detail: ChangeDetail | undefined
+  detail?: ChangeDetail | undefined
   /** The selected change's identity, displayed when loading detail (25630 Row 22). */
   change?: string | Pick<Row, "branch" | "head">
   /** True when the row is one run's view of the change, not the change's current state. */
@@ -145,12 +315,78 @@ export function WatchDetail({
   onToggleDiff?: () => void
   /** The git commands' output read so far, keyed by {@link commandKey}; the pane asks for a stage's when its tab opens. */
   outputs?: ReadonlyMap<string, DiffText>
+  /** The runner's snapshot when the RUNNER row is selected: live round source (25557). */
+  runnerSnapshot?: WatchSnapshot
 }) {
   const scroll = useScrollController()
   useInput((_input, key) => {
     if (key.pageDown) scroll.scrollBy(Math.max(1, scroll.viewportHeight - 2))
     if (key.pageUp) scroll.scrollBy(-Math.max(1, scroll.viewportHeight - 2))
   })
+  const now = useNow()
+
+  if (runnerSnapshot !== undefined) {
+    const runner = runnerOf(runnerSnapshot, now)
+    const color = STATE_WORDS[runner.state].color
+    const effectiveDetail = detail ?? runnerDetailFromSnapshot(runnerSnapshot, now)
+    const resolved = resolveTab(selected ?? defaultRunnerTab(runner.state), effectiveDetail)
+    const tab = resolved.tab
+    const selectedSubIndex = resolved.selectedSubIndex
+
+    return (
+      <ScrollArea controller={scroll}>
+        <Box flexDirection="column" minWidth={0} paddingX={1} gap={1}>
+          <Box flexDirection="column" minWidth={0}>
+            <Box flexDirection="row" gap={1}>
+              <Text bold color={color}>
+                {RUNNER_GLYPH} RUNNER {STATE_WORDS[runner.state].word}
+              </Text>
+              {runner.duration ? <Text color="$fg-muted">({runner.duration})</Text> : null}
+            </Box>
+            <Box flexDirection="column">
+              <Text color="$fg-muted">
+                Queue: <Text color="$fg">{runnerSnapshot.queue}</Text>
+              </Text>
+              <Text color="$fg-muted">
+                Detail: <Text color="$fg">{runner.detail}</Text>
+              </Text>
+              {runnerSnapshot.stopped ? <Text color="$fg-error">Stopped: {runnerSnapshot.stopped.cause}</Text> : null}
+              {runnerSnapshot.runner?.absent ? (
+                <Text color="$fg-muted">Journal: {runnerSnapshot.runner.absent}</Text>
+              ) : null}
+            </Box>
+          </Box>
+          <Box height={1} flexShrink={0} />
+          <Tabs
+            variant="filled"
+            value={tab}
+            onChange={(value: string) => {
+              onSelect?.(value)
+            }}
+          >
+            <TabList flexWrap="wrap">
+              {STAGE_TABS.map((stage) => (
+                <Tab key={stage} value={stage}>
+                  <StageTabLabel detail={effectiveDetail} stage={stage} />
+                </Tab>
+              ))}
+            </TabList>
+            {STAGE_TABS.map((stage) => (
+              <TabPanel key={stage} value={stage}>
+                <StageTabPanel
+                  detail={effectiveDetail}
+                  stage={stage}
+                  outputs={outputs}
+                  selectedSubIndex={selectedSubIndex}
+                />
+              </TabPanel>
+            ))}
+          </Tabs>
+        </Box>
+      </ScrollArea>
+    )
+  }
+
   if (detail === undefined) {
     const changeName = typeof change === "object" ? changeId(change) : change
     if (changeName !== undefined) {
@@ -287,105 +523,120 @@ export function stageSkipReason(detail: ChangeDetail, stage: StageTabName): stri
   return "skipped"
 }
 
-export function stageInfo(
-  detail: ChangeDetail,
-  stage: StageTabName,
-): {
+type StageInfoResult = {
   state: CheckView["state"]
   said?: string
   since?: Date
   ms?: number
-} {
+}
+
+function provisioningStageInfo(detail: ChangeDetail): StageInfoResult {
   const steps = detail.journal?.steps ?? []
-  if (stage === "provisioning") {
-    const compose = steps.find((s) => s.name === "compose")
-    const prepare = steps.find((s) => s.name === "prepare")
-    if (compose === undefined && prepare === undefined) {
+  const compose = steps.find((s) => s.name === "compose")
+  const prepare = steps.find((s) => s.name === "prepare")
+  if (compose === undefined && prepare === undefined) {
+    return { said: " not journaled", state: "not-run" }
+  }
+  const threw = compose?.threw === true || prepare?.threw === true
+  const running =
+    (compose !== undefined && compose.endedAt === undefined) || (prepare !== undefined && prepare.endedAt === undefined)
+  const ms = (compose?.ms ?? 0) + (prepare?.ms ?? 0)
+  const state: CheckView["state"] = threw ? "failed" : running ? "running" : "passed"
+  return {
+    ms: ms > 0 ? ms : undefined,
+    said: running
+      ? undefined
+      : threw
+        ? ms > 0
+          ? ` ${mediaDuration(ms)}`
+          : " failed"
+        : ms > 0
+          ? ` ${mediaDuration(ms)}`
+          : " passed",
+    since: running ? (compose?.startedAt ?? prepare?.startedAt) : undefined,
+    state,
+  }
+}
+
+function checkingStageInfo(detail: ChangeDetail): StageInfoResult {
+  const unmeasured = detail.checks.find((c) => c.state === "unmeasured" && c.result === undefined)
+  if (unmeasured) return { said: " unended", state: "unmeasured" }
+  const checks = detail.checks.filter((c) => c.phase !== "base" && c.name !== "setup")
+  if (checks.length === 0) return { said: " not run", state: "not-run" }
+  if (checks.every((c) => c.state === "not-run")) return { said: " not run", state: "not-run" }
+  const failed = checks.find((c) => c.state === "failed" || c.state === "stuck")
+  if (failed) return { said: " failed", state: failed.state }
+  const running = checks.find((c) => c.state === "running")
+  if (running) {
+    const since = detail.row.live?.since
+    return { since, state: "running" }
+  }
+  const totalMs = checks.reduce((acc, c) => acc + (c.result?.ms ?? 0), 0)
+  return {
+    ms: totalMs > 0 ? totalMs : undefined,
+    said: totalMs > 0 ? ` ${mediaDuration(totalMs)}` : " passed",
+    state: "passed",
+  }
+}
+
+function mergingStageInfo(detail: ChangeDetail): StageInfoResult {
+  const steps = detail.journal?.steps ?? []
+  const publish = steps.find((s) => s.name === "publish" || s.name === "components")
+  const merge = steps.find((s) => s.name === "merge" || s.name === "push")
+  const notify = steps.find((s) => s.name === "notify")
+  const running =
+    (publish !== undefined && publish.endedAt === undefined) ||
+    (merge !== undefined && merge.endedAt === undefined) ||
+    (notify !== undefined && notify.endedAt === undefined)
+  const ms = (publish?.ms ?? 0) + (merge?.ms ?? 0) + (notify?.ms ?? 0)
+  if (running) return { since: merge?.startedAt ?? publish?.startedAt ?? notify?.startedAt, state: "running" }
+  const threw = publish?.threw === true || merge?.threw === true || notify?.threw === true
+  if (threw) {
+    return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " failed", state: "failed" }
+  }
+  if (detail.row.state === "merged") {
+    if (publish === undefined && merge === undefined && notify === undefined) {
       return { said: " not journaled", state: "not-run" }
     }
-    const threw = compose?.threw === true || prepare?.threw === true
-    const running =
-      (compose !== undefined && compose.endedAt === undefined) ||
-      (prepare !== undefined && prepare.endedAt === undefined)
-    const ms = (compose?.ms ?? 0) + (prepare?.ms ?? 0)
-    const state: CheckView["state"] = threw ? "failed" : running ? "running" : "passed"
-    return {
-      ms: ms > 0 ? ms : undefined,
-      said: running
-        ? undefined
-        : threw
-          ? ms > 0
-            ? ` ${mediaDuration(ms)}`
-            : " failed"
-          : ms > 0
-            ? ` ${mediaDuration(ms)}`
-            : " passed",
-      since: running ? (compose?.startedAt ?? prepare?.startedAt) : undefined,
-      state,
-    }
-  }
-  if (stage === "checking") {
-    const unmeasured = detail.checks.find((c) => c.state === "unmeasured" && c.result === undefined)
-    if (unmeasured) return { said: " unended", state: "unmeasured" }
-    const checks = detail.checks.filter((c) => c.phase !== "base" && c.name !== "setup")
-    if (checks.length === 0) return { said: " not run", state: "not-run" }
-    if (checks.every((c) => c.state === "not-run")) return { said: " not run", state: "not-run" }
-    const failed = checks.find((c) => c.state === "failed" || c.state === "stuck")
-    if (failed) return { said: " failed", state: failed.state }
-    const running = checks.find((c) => c.state === "running")
-    if (running) {
-      const since = detail.row.live?.since
-      return { since, state: "running" }
-    }
-    const totalMs = checks.reduce((acc, c) => acc + (c.result?.ms ?? 0), 0)
-    return {
-      ms: totalMs > 0 ? totalMs : undefined,
-      said: totalMs > 0 ? ` ${mediaDuration(totalMs)}` : " passed",
-      state: "passed",
-    }
-  }
-  if (stage === "merging") {
-    const publish = steps.find((s) => s.name === "publish" || s.name === "components")
-    const merge = steps.find((s) => s.name === "merge" || s.name === "push")
-    const notify = steps.find((s) => s.name === "notify")
-    const running =
-      (publish !== undefined && publish.endedAt === undefined) ||
-      (merge !== undefined && merge.endedAt === undefined) ||
-      (notify !== undefined && notify.endedAt === undefined)
-    const ms = (publish?.ms ?? 0) + (merge?.ms ?? 0) + (notify?.ms ?? 0)
-    if (running) return { since: merge?.startedAt ?? publish?.startedAt ?? notify?.startedAt, state: "running" }
-    const threw = publish?.threw === true || merge?.threw === true || notify?.threw === true
-    if (threw) {
-      return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " failed", state: "failed" }
-    }
-    if (detail.row.state === "merged") {
-      if (publish === undefined && merge === undefined && notify === undefined) {
-        return { said: " not journaled", state: "not-run" }
-      }
-      return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
-    }
-    return { said: " not run", state: "not-run" }
-  }
-  if (stage === "deprovisioning") {
-    const remove = steps.find((s) => s.name === "remove" || s.name === "retain")
-    const retire = steps.find((s) => s.name === "retire")
-    const running =
-      (remove !== undefined && remove.endedAt === undefined) || (retire !== undefined && retire.endedAt === undefined)
-    const ms = (remove?.ms ?? 0) + (retire?.ms ?? 0)
-    if (running) return { since: remove?.startedAt ?? retire?.startedAt, state: "running" }
-    const threw = remove?.threw === true || retire?.threw === true
-    if (threw) {
-      return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " failed", state: "failed" }
-    }
-    if (detail.row.state === "merged" || detail.row.state === "failed") {
-      if (remove === undefined && retire === undefined) {
-        return { said: " not journaled", state: "not-run" }
-      }
-      return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
-    }
-    return { said: " not run", state: "not-run" }
+    return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
   }
   return { said: " not run", state: "not-run" }
+}
+
+function deprovisioningStageInfo(detail: ChangeDetail): StageInfoResult {
+  const steps = detail.journal?.steps ?? []
+  const remove = steps.find((s) => s.name === "remove" || s.name === "retain")
+  const retire = steps.find((s) => s.name === "retire")
+  const running =
+    (remove !== undefined && remove.endedAt === undefined) || (retire !== undefined && retire.endedAt === undefined)
+  const ms = (remove?.ms ?? 0) + (retire?.ms ?? 0)
+  if (running) return { since: remove?.startedAt ?? retire?.startedAt, state: "running" }
+  const threw = remove?.threw === true || retire?.threw === true
+  if (threw) {
+    return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " failed", state: "failed" }
+  }
+  if (detail.row.state === "merged" || detail.row.state === "failed") {
+    if (remove === undefined && retire === undefined) {
+      return { said: " not journaled", state: "not-run" }
+    }
+    return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
+  }
+  return { said: " not run", state: "not-run" }
+}
+
+export function stageInfo(detail: ChangeDetail, stage: StageTabName): StageInfoResult {
+  switch (stage) {
+    case "provisioning":
+      return provisioningStageInfo(detail)
+    case "checking":
+      return checkingStageInfo(detail)
+    case "merging":
+      return mergingStageInfo(detail)
+    case "deprovisioning":
+      return deprovisioningStageInfo(detail)
+    default:
+      return { said: " not run", state: "not-run" }
+  }
 }
 
 export function resolveTab(
@@ -578,7 +829,7 @@ function CheckingStageBody({ detail, selectedSubIndex }: { detail: ChangeDetail;
 
   if (selectedSubIndex !== undefined && detail.checks[selectedSubIndex] !== undefined) {
     const selectedCheck = detail.checks[selectedSubIndex]
-    const remedy = detail.run.steps[selectedSubIndex]?.remedy
+    const remedy = detail.run.steps?.[selectedSubIndex]?.remedy
     return (
       <Box flexDirection="column" minWidth={0}>
         {detail.checks.length > 1 ? (
@@ -628,7 +879,7 @@ function CheckingStageBody({ detail, selectedSubIndex }: { detail: ChangeDetail;
         <Text color="$fg-muted">no declared checks</Text>
       ) : (
         declaredChecks.map((check, at) => {
-          const remedy = detail.run.steps[at]?.remedy
+          const remedy = detail.run.steps?.[at]?.remedy
           return (
             <Box key={`${check.name}-${check.phase ?? ""}-${at}`} flexDirection="column" minWidth={0}>
               <Box flexDirection="row" minWidth={0} gap={1}>

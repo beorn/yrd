@@ -38,6 +38,7 @@ import {
   drop,
   gitIn,
   mergedByRun,
+  lookupRunIndex,
   pauseRef,
   queueRef,
   queueRefPrefix,
@@ -344,6 +345,13 @@ it("runs a check-free event change through one atomic merge", async () => {
   const outcome = await queueRun(options)
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-run"] })
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([expect.objectContaining({ kind: "run-number", number: 1, run: outcome.run })]),
+  )
+  expect(await lookupRunIndex(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", 1)).toMatchObject({
+    kind: "known",
+    record: { id: outcome.run },
+  })
   // The line as the round read it, before its merge (25669): what the service
   // judges a stall from. Nothing was judged before this round.
   expect(outcome.line).toEqual({
@@ -363,6 +371,18 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(message).toContain("Issue: @i/10-yrd/1")
   expect(message).toContain("Submitter: @dev/2")
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
+})
+
+it("leaves an idle event round unnumbered and the next index value at one (26193)", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [], failed: [], stuck: [] })
+  expect(logRecords(outcome).some((record) => record.kind === "run-number")).toBe(false)
+  expect(await lookupRunIndex(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", 1)).toEqual({
+    kind: "unknown",
+    number: 1,
+  })
 })
 
 /** @failure One malformed change chain ended the service round before healthy changes could merge (25658).
@@ -457,6 +477,9 @@ it("sends two failed endings when the same head is resubmitted", async () => {
   ])
   expect(messages(w).map((message) => message.endingId)).toEqual([expect.any(String), expect.any(String)])
   expect(messages(w)[0]?.endingId).not.toBe(messages(w)[1]?.endingId)
+  expect(messages(w)[0]?.priorReason).toBeUndefined()
+  expect(messages(w)[1]?.priorReason).toBe(messages(w)[0]?.reason)
+  expect(messages(w)[1]?.priorReason).toBeDefined()
 })
 
 /** @failure 25041: a second stuck event for the same branch@head reused the first notice identity.
@@ -1180,7 +1203,9 @@ it("restores target-owned scripts before an event check runs", async () => {
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await w.git(["checkout", "--quiet", "-b", "task/script-overlay", "main"])
-  writeFileSync(join(w.work, ".yrd.yml"), "changed by branch\n")
+  // A valid mapping that differs from the target's `{}`: since 2726605213 an invalid candidate .yrd.yml fails the
+  // change before any check runs, so the overlay is only observable through a declaration the queue accepts.
+  writeFileSync(join(w.work, ".yrd.yml"), "{ }\n")
   writeFileSync(join(w.work, "one.txt"), "one\n")
   await w.git(["add", ".yrd.yml", "one.txt"])
   await w.git(["commit", "--quiet", "-m", "rewrite protected script"])
@@ -1433,7 +1458,10 @@ it("refuses event teardown until an executor exists", async () => {
   )
 })
 
-it("retains a deferred check and leaves it for the long tier", async () => {
+/** @failure A deferred change stayed in the queue but its submitter and supervisor never heard why (25741 P3).
+ * @level l3 @consumer queue submitter and supervisor
+ */
+it("retains a deferred check, notifies both recipients once, and leaves it for the long tier", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
@@ -1441,7 +1469,10 @@ it("retains a deferred check and leaves it for the long tier", async () => {
   const base = await w.options({ exit: 0 })
   const deferred = {
     ...base,
-    notify: [],
+    notify: [
+      { name: "submitter", on: ["deferred" as const], run: w.notifier },
+      { name: "supervisor", on: ["deferred" as const], run: w.notifier },
+    ],
     checks: [
       {
         ...base.checks[0]!,
@@ -1452,6 +1483,14 @@ it("retains a deferred check and leaves it for the long tier", async () => {
 
   const outcome = await queueRun(deferred)
   expect(outcome).toMatchObject({ exitCode: 0, deferred: ["task/deferred-event"], merged: [] })
+  expect(messages(w)).toMatchObject([
+    { record: "deferred", submitter: "@dev/2", projectedMs: 3_600_000, boundMs: 1_800_000 },
+    { record: "deferred", submitter: "@dev/2", projectedMs: 3_600_000, boundMs: 1_800_000 },
+  ])
+  expect(Object.values((await readStatus(store, "main", "task/deferred-event")).notices ?? {})).toMatchObject([
+    { to: "submitter", result: "delivered" },
+    { to: "supervisor", result: "delivered" },
+  ])
   expect(await readStatus(store, "main", "task/deferred-event")).toMatchObject({
     status: "queued",
     deferred: { check: "verify", phase: "merge", projectedMs: 3_600_000, boundMs: 1_800_000 },
@@ -1469,6 +1508,7 @@ it("retains a deferred check and leaves it for the long tier", async () => {
   const normal = await queueRun(deferred)
   expect(normal).toMatchObject({ exitCode: 0, merged: [], failed: [], stuck: [] })
   expect((await readStatus(store, "main", "task/deferred-event")).tip).toBe(tip)
+  expect(messages(w)).toHaveLength(2)
 })
 
 /** @failure A deferred change could be ignored by the long tier or lose the declared check phase.
@@ -1900,8 +1940,8 @@ it("fails a round with the unreadable remote ref named after publication", async
   )
 })
 
-/** @failure 25708: the service lost its repeated-refusal count across rounds and could not clear the page. */
-it("counts repeated CAS refusals in round journals and resets after publication", async () => {
+/** @failure 26193: the first indexed merge could lose its target lease, consume a number, or miss the eventual merge. */
+it("keeps a final first-round refusal and retries the next round's indexed merge atomically", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
@@ -1922,18 +1962,16 @@ it("counts repeated CAS refusals in round journals and resets after publication"
     })
   })
   const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
-  for (const count of [1, 2, 3]) {
-    const outcome = await queueRun(options)
-    expect(outcome).toMatchObject({ exitCode: 0, merged: [] })
-    expect(logRecords(outcome)).toContainEqual(
-      expect.objectContaining({ kind: "warning", subject: "cas-refused", ref, count }),
-    )
-    expect(outcome.line?.casRefused?.count).toBe(count === 3 ? 3 : undefined)
-    expect((await readStatus(store, "main", branch)).status).toBe("merging")
-  }
+  const first = await queueRun(options)
+  expect(first).toMatchObject({ exitCode: 0, merged: [] })
+  expect(logRecords(first)).toContainEqual(
+    expect.objectContaining({ kind: "warning", subject: "cas-refused", ref, count: 1 }),
+  )
+  expect((await readStatus(store, "main", branch)).status).toBe("merging")
   const before = await readStatus(store, "main", branch)
   if (before.tip === undefined || before.since === undefined) throw new Error("fixture lost its open marker")
   const published = await queueRun(options)
+  expect(refused).toBe(3)
   expect(published.merged).toEqual([branch])
   expect(published.line?.casRefused).toBeUndefined()
   expect(logRecords(published)).toContainEqual(expect.objectContaining({ kind: "merge", ref }))

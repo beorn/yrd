@@ -147,6 +147,17 @@ export function isChargedFailure(reason: string | undefined): boolean {
   return !UNCHARGED.has(reason ?? "")
 }
 
+/** Shared failure-reason classification for focused mutation coverage and prior failure folding. */
+export function sameFailureReason(reasons: readonly (string | undefined)[]): string | undefined {
+  // No length check: an empty list has no first element, and the absent-reason
+  // guard below already refuses `undefined`. Mutation control found the extra
+  // condition unkillable by any test, which is what an unreachable branch looks
+  // like from the outside.
+  const first = reasons[0]
+  if (first === undefined || first === "") return undefined
+  return reasons.every((reason) => reason === first) ? first : undefined
+}
+
 /** How one notify entry went: it took the record, there was none to take it, or it exited non-zero. */
 type Delivery = "sent" | "none" | "failed"
 

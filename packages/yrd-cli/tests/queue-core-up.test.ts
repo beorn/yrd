@@ -426,6 +426,13 @@ describe("yrd queue up, the service", () => {
     ).toBe(0)
     expect(run.stderr()).toContain(`legacy branch-name fallback: ${branch} -> 24472`)
     expect(records(run)[0]).toMatchObject({ issue: "24472", issueSource: "legacy-branch" })
+    if (!dryRun) {
+      expect(run.stderr()).toMatch(/seam\.declaration\.fetch=1/u)
+      expect(run.stderr()).toMatch(/seam\.inspectSubmit\.fetch=[1-9]/u)
+      expect(run.stderr()).toMatch(/seam\.submitEvent\.(?:fetch|ls-remote)=/u)
+      expect(run.stderr()).not.toContain("seam.unattributed.")
+      expect(run.stderr()).not.toContain("seam.submit.setup.")
+    }
   })
 
   // THE OPERATOR'S CONDITION (2026-09-16): submits are accepted while the line

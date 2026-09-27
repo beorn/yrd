@@ -1,15 +1,70 @@
 /**
  * @failure Two spellings of one queue make two clones, or two queues in one
- * repository share a clone/ref directory, so host-started queue work reads or
- * writes the wrong authority.
+ * repository share a clone/ref directory, or a run address resolves under a
+ * different queue/number, so host-started work reads the wrong authority.
  * @level l1 (pure address and path boundary)
  * @consumer Queue-owner commands invoked outside a clone.
  */
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { parseQueueAddress, queueDirectory, queueRoot } from "../src/address.ts"
+import { formatQueueAddress, parseQueueAddress, parseRunAddress, queueDirectory, queueRoot } from "../src/address.ts"
 
 describe("a queue's canonical address", () => {
+  it("maps the decided human @ spelling onto the same stored queue key (26193)", () => {
+    // ADR-0028 keeps ADR-0011's Git/workdir identity while changing the human spelling.
+    // Existing tests cover only # input, so they cannot catch a second clone for @ input.
+    expect(parseQueueAddress("beorn/hh@main").canonical).toBe(parseQueueAddress("beorn/hh#main").canonical)
+  })
+
+  it("refuses a numeric # suffix without an explicit queue branch (26193)", () => {
+    // #123 could name a numeric branch or an unqualified run; choosing one silently changes identity.
+    expect(() => parseQueueAddress("beorn/hh#123")).toThrow(/ambiguous/u)
+  })
+
+  it("preserves a legacy branch @ and decodes the new %40 spelling to the same key (26193)", () => {
+    // The legacy delimiter is the first # even when @ occurs later in the branch.
+    const legacy = parseQueueAddress("beorn/hh#release@2026")
+    const human = parseQueueAddress("beorn/hh@release%402026")
+    expect(legacy.queue).toBe("release@2026")
+    expect(human.queue).toBe("release@2026")
+    expect(human.canonical).toBe(legacy.canonical)
+  })
+
+  it("round-trips a literal percent without treating its tail as an escape (26193)", () => {
+    const queue = parseQueueAddress("beorn/hh@release%2540")
+    expect(queue.queue).toBe("release%40")
+    expect(formatQueueAddress(queue)).toBe("github.com/beorn/hh@release%2540")
+    expect(queue.canonical).toBe(parseQueueAddress("beorn/hh#release%40").canonical)
+  })
+
+  it.each(["beorn/hh@release@2026", "beorn/hh@release%402026%23", "beorn/hh@release%4a"])(
+    "refuses an unescaped or unsupported branch delimiter %s (26193)",
+    (operand) => {
+      expect(() => parseQueueAddress(operand)).toThrow(`queue address '${operand}'`)
+    },
+  )
+
+  it("refuses a # bearing branch even when escaped in the human form (26193)", () => {
+    expect(() => parseQueueAddress("beorn/hh@release%232026")).toThrow(/#.*branch/u)
+  })
+
+  it("prints the one remote queue form and parses a numbered run under it (26193)", () => {
+    const queue = parseQueueAddress("beorn/hh#release@2026")
+    expect(formatQueueAddress(queue)).toBe("github.com/beorn/hh@release%402026")
+    expect(parseRunAddress("beorn/hh@release%402026#3")).toMatchObject({
+      canonical: "github.com/beorn/hh@release%402026#3",
+      number: 3,
+      queue: { canonical: queue.canonical },
+    })
+  })
+
+  it.each(["beorn/hh@main#0", "beorn/hh@main#03", "beorn/hh@main#3x", "beorn/hh#3"])(
+    "refuses an invalid or ambiguous run suffix %s (26193)",
+    (operand) => {
+      expect(() => parseRunAddress(operand)).toThrow()
+    },
+  )
+
   it("assumes github.com for owner/repo and builds transport from the canonical repository", () => {
     const address = parseQueueAddress("beorn/hh#main")
     expect(address).toMatchObject({
