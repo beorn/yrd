@@ -783,6 +783,21 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   for (const [name, value] of Object.entries(source)) {
     if (name.startsWith("LC_") && value !== undefined) env[name] = value
   }
+  if (
+    run.queueRun === true &&
+    run.extraEnv?.YRD_CHECK_SCOPE !== "settled-base-attribution" &&
+    (env.YRD_SETTLED_BASE_AFFECTED_IDS !== undefined || env.YRD_CHECK_SCOPE !== undefined)
+  ) {
+    throw new Error(
+      `candidate check ${run.spec.name} inherited YRD_SETTLED_BASE_AFFECTED_IDS or YRD_CHECK_SCOPE; these are reserved for Yrd's settled-base attribution run`,
+    )
+  }
+  // A base comparison gets only the offer read from this candidate's log.
+  // A passthrough declaration cannot silently make a full base run narrow.
+  if (run.extraEnv?.YRD_CHECK_SCOPE === "settled-base-attribution") {
+    delete env.YRD_SETTLED_BASE_AFFECTED_IDS
+    delete env.YRD_CHECK_SCOPE
+  }
   // What this check asked its own next run for. After the declaration, so a
   // check can narrow a scope its passthrough also names, and before the
   // `YRD_*` trio below, which is the queue's word and not the check's.

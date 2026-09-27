@@ -320,6 +320,93 @@ it("keeps both event root and child mains still when the candidate check fails",
   expect(state.candidate).toBeDefined()
 })
 
+/** @failure A raised component regression was charged to a candidate whose authored file was absent from the failing base.
+ * @level l3 @consumer queue operator and submitter
+ * The existing failed-check fixture moves an authored gitlink, so it never exercises a queue-raised pin.
+ */
+it.each([
+  { cause: "candidate", command: "test ! -e task-raised-check.txt", status: "failed", exitCode: 1 },
+  { cause: "raised pin", command: 'test "$(cat submodule/lib.txt)" = three', status: "stuck", exitCode: 2 },
+])("attributes a failed check on a raised gitlink to $cause", async ({ cause, command, status, exitCode }) => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await submitFile(w, "task/raised-check")
+  const rootBefore = await remoteTip(w.git, "refs/heads/main")
+  const childBefore = await advanceSubmodule(w, "four")
+
+  const outcome = await queueRun({ ...(await w.options({ run: command, on: ["merge"] })), notify: [] })
+
+  expect(outcome.exitCode).toBe(exitCode)
+  expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
+  expect(await submoduleMain(w)).toBe(childBefore)
+  const state = await readStatus(eventStore(w), "main", "task/raised-check")
+  expect(state.status).toBe(status)
+  if (cause === "raised pin") expect(state.reason).toBe("yrd-settled-base-check-failed")
+})
+
+/** @failure Rechecking only the failed check misses an earlier phase check that prepared or validated its ground.
+ * @level l3 @consumer queue operator attributing raised-pin failures
+ */
+it("runs the declared base phase in order through the failed check", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await submitFile(w, "task/prefix-check")
+  await advanceSubmodule(w, "four")
+  const rows: Array<{ kind: string; phase?: string; name?: string; result?: string; whose?: string }> = []
+  const outcome = await queueRun({
+    ...(await w.options()),
+    checks: [
+      { name: "prefix", on: ["merge"], run: "test -e task-prefix-check.txt" },
+      { name: "failed", on: ["merge"], run: "exit 1" },
+    ],
+    notify: [],
+    render: (row) => rows.push(row),
+  })
+
+  expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/prefix-check"] })
+  const baseChecks = rows.filter((row) => row.kind === "result" && row.phase === "base")
+  expect(baseChecks.map((row) => row.name)).toEqual(["prefix"])
+  expect(baseChecks[0]).toMatchObject({ result: "fail", whose: "queue" })
+})
+
+/** @failure A final check offer could be lost or a malformed later offer could be silently treated as absent.
+ * @level l3 @consumer queue operator reading the base check journal
+ */
+it.each([
+  {
+    offer: "usable",
+    candidate: 'printf \'YRD-BASE-NARROWING {"env":{"YRD_SETTLED_BASE_AFFECTED_IDS":"one"}}\\n\'; exit 1',
+    base: 'test "$YRD_SETTLED_BASE_AFFECTED_IDS" = one',
+    scope: "narrowed",
+    refused: false,
+  },
+  {
+    offer: "malformed last",
+    candidate:
+      'printf \'YRD-BASE-NARROWING {"env":{"YRD_SETTLED_BASE_AFFECTED_IDS":"one"}}\\nYRD-BASE-NARROWING not-json\\n\'; exit 1',
+    base: 'test -z "$YRD_SETTLED_BASE_AFFECTED_IDS"',
+    scope: "full",
+    refused: true,
+  },
+])("journals the $offer offer and base scope", async ({ candidate, base, scope, refused }) => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await submitFile(w, "task/marker-check")
+  await advanceSubmodule(w, "four")
+  const rows: Array<{ kind: string; phase?: string; scope?: string }> = []
+  const run = `if [ "$YRD_CHECK_SCOPE" = settled-base-attribution ]; then ${base}; else ${candidate}; fi`
+
+  const outcome = await queueRun({
+    ...(await w.options({ run, on: ["merge"] })),
+    notify: [],
+    render: (row) => rows.push(row),
+  })
+
+  expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/marker-check"] })
+  expect(rows.some((row) => row.kind === "check" && row.phase === "base" && row.scope === scope)).toBe(true)
+  expect(rows.some((row) => row.kind === "narrowing")).toBe(refused)
+})
+
 /** @failure A third component value could be silently recomposed after a durable marker.
  * @level l3 @consumer queue operator
  * The frozen source must remain visible for repair when Git-super refuses its lease.

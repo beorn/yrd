@@ -35,6 +35,7 @@ import { recentCasRefusalStreak, recentCasRefusals, recentPublicationNotLanded, 
 import {
   ProgramSubjectSetupFailed,
   programRootCheck,
+  recordProgramEnd,
   recordProgramResult,
   recordProgramStart,
   recordProgramVerdict,
@@ -68,6 +69,7 @@ import { incidentTrailers, type Incident } from "./incident.ts"
 import { readRootChanges } from "./root-changes.ts"
 import { mergedBy } from "./git.ts"
 import { settledBaseCommit } from "./settled-base.ts"
+import { narrowingOf } from "./narrowing.ts"
 
 function endingTime(event: Event, context: string): string {
   const time = event.props.find(([key]) => key === EVENT_TRAILERS.time)?.[1]
@@ -1783,6 +1785,194 @@ export async function eventQueueRun(
         run: log.id,
       }
       if (stoppedCheck?.result === "fail") {
+        // A raised gitlink belongs to the queue's settled ground. Re-run the
+        // declared phase through this check on target + raises, without the
+        // submitter's authored content, before charging the submitter.
+        if (raises.length > 0 && stopped !== undefined) {
+          const offer = await narrowingOf(stoppedCheck.log)
+          if (offer.kind === "refused") {
+            log.write({
+              kind: "narrowing",
+              branch,
+              head,
+              name: stoppedCheck.name,
+              reason: offer.why,
+              scope: "full",
+            })
+          }
+          const baseScope = offer.kind === "narrowed" ? ("narrowed" as const) : ("full" as const)
+          const extraEnv = {
+            ...(offer.kind === "narrowed" ? offer.env : {}),
+            YRD_CHECK_SCOPE: "settled-base-attribution",
+          }
+          const baseLogDir = join(
+            options.workdir,
+            "checks",
+            `${branch}@${head}`,
+            log.id,
+            `attempt-${String(stopped.attempt)}`,
+            "base",
+          )
+          const baseTmpdir = join(options.workdir, "tmp")
+          let baseFailure: CheckResult | undefined
+          let baseProblem: string | undefined
+          let baseWorktree
+          try {
+            const baseCommit = await settledBaseCommit({
+              git,
+              repo: options.repo,
+              targetSha: target,
+              raises,
+              path: join(
+                options.workdir,
+                "worktrees",
+                log.id,
+                "compose",
+                "base",
+                `${branch.replaceAll("/", "_")}-${String(stopped.attempt)}`,
+              ),
+              branch,
+              env: options.env,
+              gitOptions,
+              populateReference: options.populateReference,
+              process: options.process,
+              selection: options.selection,
+            })
+            baseWorktree = await prepareWorktree(
+              git,
+              options.repo,
+              baseCommit,
+              join(
+                options.workdir,
+                "worktrees",
+                log.id,
+                `${branch.replaceAll("/", "_")}-check-base-${String(stopped.attempt)}`,
+              ),
+              {
+                targetSha: target,
+                queueRun: true,
+                populateReference: options.populateReference,
+                selection: options.selection,
+                gitOptions,
+                process: options.process,
+                env: options.env,
+                ...(options.setup === undefined
+                  ? {}
+                  : { setup: { run: options.setup, logDir: baseLogDir, tmpdir: baseTmpdir } }),
+              },
+            )
+            const phaseChecks = decisionResults.filter(({ phase }) => phase === stopped.phase)
+            for (const row of phaseChecks) {
+              const check = options.checks.find(({ name }) => name === row.run.name)
+              if (check === undefined) {
+                throw new Error(
+                  `the declared ${stopped.phase} check ${row.run.name} disappeared before base attribution`,
+                )
+              }
+              // Earlier checks can prepare the ground for the failed check.
+              // Only the failed check receives the scope it offered.
+              const scope = row.run.name === stoppedCheck.name ? baseScope : "full"
+              const checkEnv =
+                row.run.name === stoppedCheck.name ? extraEnv : { YRD_CHECK_SCOPE: "settled-base-attribution" }
+              let checked: CheckResult
+              if (check.programRoot === true) {
+                checked = await programRootCheck({
+                  queueRun: true,
+                  git,
+                  repo: options.repo,
+                  targetSha: target,
+                  tree: baseWorktree.tree,
+                  spec: check,
+                  branch,
+                  head,
+                  phase: "base",
+                  root: join(
+                    options.workdir,
+                    "worktrees",
+                    log.id,
+                    "program",
+                    "base",
+                    String(stopped.attempt),
+                    check.name,
+                  ),
+                  logDir: baseLogDir,
+                  tmpdir: baseTmpdir,
+                  log,
+                  setup: options.setup,
+                  env: options.env,
+                  extraEnv: checkEnv,
+                  scope,
+                  process: options.process,
+                  selection: options.selection,
+                  gitOptions,
+                  populateReference: options.populateReference,
+                  tier: options.tier,
+                })
+              } else {
+                await restoreScripts(
+                  { git, targetSha: target, process: options.process, selection: options.selection, gitOptions },
+                  check,
+                  baseWorktree.path,
+                )
+                const start = new Date().toISOString()
+                const about = { branch, head, name: check.name, phase: "base", scope, start }
+                recordProgramStart({ log }, { ...about, log: checkLogPath(baseLogDir, check.name) })
+                checked = await runCheck({
+                  queueRun: true,
+                  cwd: baseWorktree.path,
+                  tree: baseWorktree.tree,
+                  logDir: baseLogDir,
+                  tmpdir: baseTmpdir,
+                  spec: check,
+                  process: options.process,
+                  env: options.env,
+                  extraEnv: checkEnv,
+                  tier: options.tier,
+                })
+                const endedAbout = { ...about, end: new Date().toISOString() }
+                recordProgramEnd({ log }, endedAbout, checked)
+                recordProgramVerdict({ log }, endedAbout, checked, "queue")
+              }
+              if (checked.result !== "pass") {
+                baseFailure = checked
+                break
+              }
+            }
+          } catch (error) {
+            baseProblem = error instanceof Error ? error.message : String(error)
+          } finally {
+            if (baseWorktree !== undefined) {
+              try {
+                await baseWorktree.remove()
+              } catch (error) {
+                baseProblem = `settled base removal failed: ${error instanceof Error ? error.message : String(error)}`
+              }
+            }
+          }
+          if (baseProblem !== undefined || baseFailure !== undefined) {
+            const baseUnresolved = baseProblem !== undefined || baseFailure?.result !== "fail"
+            const code = baseUnresolved ? "yrd-check-unresolved" : "yrd-settled-base-check-failed"
+            const reason =
+              baseProblem !== undefined
+                ? `${stoppedCheck.name} failed on candidate; settled base could not be judged: ${baseProblem}`
+                : `${stoppedCheck.name} failed on candidate; settled base ${baseFailure?.name} ${baseFailure?.result} (log ${baseFailure?.log})`
+            const ended = await appendOwnedChange(store, queue, branch, tip, {
+              type: "stuck",
+              at: new Date(),
+              ...evidence,
+              reason: code,
+            })
+            await writeStuckStop(branch, head, ended, reason)
+            await tell(branch, "stuck", ended)
+            writeStuck(branch, head, {
+              code,
+              subject: reason,
+              via: `check ${stoppedCheck.name} on the settled base`,
+              next: "inspect the named settled-base check log and raised component, repair the cause, then resume the queue",
+            })
+            return result(2, observedMerged, failed, [branch])
+          }
+        }
         const ended = await appendOwnedChange(store, queue, branch, tip, {
           type: "failed",
           at: new Date(),
