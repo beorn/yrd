@@ -648,7 +648,16 @@ it("closes the round's journal with every remote call it made, counted from git'
     expect.objectContaining({ oldestBranch: "task/event-counted", waiting: 1 }),
   ])
   const counted = rows.at(-1)
-  expect(counted).toMatchObject({ kind: "remote-calls", unreadable: 0 })
+  expect(counted).toMatchObject({
+    kind: "remote-calls",
+    unreadable: 0,
+    refresh_boundary: "GIT_SUPER_PHASE=refresh on component-main fetch",
+    refresh_calls: expect.any(Array),
+    beyond_refresh_calls: expect.any(Array),
+  })
+  expect(Number(counted?.refresh_ssh_children) + Number(counted?.beyond_refresh_ssh_children)).toBe(
+    Number(counted?.ssh_children),
+  )
   // The merge fetched and published: both are real remote calls, and every git process wrote its log.
   expect(counted?.fetch).toEqual(expect.any(Number))
   expect(counted?.push).toEqual(expect.any(Number))

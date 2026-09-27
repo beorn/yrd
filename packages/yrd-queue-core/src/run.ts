@@ -18,7 +18,7 @@ import { queueFormat, queueRef } from "./events.ts"
 import { eventQueueRun } from "./event-run.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { overrideLine, type OverrideEntry, type OverrideTable } from "./override.ts"
-import { remoteCallsRow, traceRemoteCalls } from "./remote-calls.ts"
+import { roundRemoteCallsRow, traceRemoteCalls } from "./remote-calls.ts"
 import { remoteUrl } from "./remote.ts"
 import type { Change } from "./refs.ts"
 import type { PlumbingLog } from "./worktree.ts"
@@ -224,11 +224,11 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // git-super's children, writes git's trace2 event log under the run's own directory, and one `remote-calls`
   // row counts them when the round ends, however it ends. Set in both environments a round's Git reads from; a
   // check's environment is built, never inherited, so a check's own git is not counted here.
-  const traced = traceRemoteCalls(join(options.workdir, "logs", log.id, "trace2"))
+  const traced = traceRemoteCalls(join(options.workdir, "logs", log.id, "trace2"), { refresh: true })
   if (options.env !== undefined) options = { ...options, env: { ...options.env, ...traced.env } }
   resources.defer(() => {
     try {
-      log.write({ kind: "remote-calls", ...remoteCallsRow(traced.end()) })
+      log.write({ kind: "remote-calls", ...roundRemoteCallsRow(traced.end()) })
     } catch (error) {
       // The count is evidence about the round, never its outcome: an unreadable trace is a named warning row.
       log.write({
