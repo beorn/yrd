@@ -1,0 +1,334 @@
+/**
+ * @failure Submit rereads the unchanged queue chain and M2 fence before publication, spending remote calls without
+ *          improving the atomic leases (25626).
+ * @level   l1 (real bare remote and Git trace2 processes)
+ * @consumer yrd submit's admission and publication path
+ * @testonly none
+ */
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterAll, describe, expect, it } from "vitest"
+import {
+  appendChangeEvent,
+  changeInput,
+  changesRef,
+  createEventQueue,
+  createEventStore,
+  gitIn,
+  queueRef,
+  readConfig,
+  readEventQueue,
+  selectionFor,
+  submit,
+  writeQueueEvent,
+  type Git,
+} from "../src/index.ts"
+import { openEvents } from "../src/git.ts"
+import { overrideRef, pauseRef } from "../src/refs.ts"
+import { traceRemoteCalls } from "../src/remote-calls.ts"
+
+const roots: string[] = []
+afterAll(() => {
+  for (const root of roots) rmSync(root, { recursive: true, force: true })
+})
+
+type World = {
+  root: string
+  work: string
+  remote: string
+  git: ReturnType<typeof gitIn>
+  fence: string
+  target: string
+  created: string
+}
+async function world(): Promise<World> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-submit-ops-"))
+  roots.push(root)
+  const remote = join(root, "remote.git")
+  const work = join(root, "work")
+  const seed = gitIn(root)
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, work])
+  const git = gitIn(work)
+  await git(["config", "user.email", "queue@yrd.test"])
+  await git(["config", "user.name", "yrd"])
+  await git(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(work, ".yrd.yml"), "{}\n")
+  await git(["add", ".yrd.yml"])
+  await git(["commit", "--quiet", "-m", "base"])
+  await git(["push", "--quiet", "origin", "main"])
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error(`fixture target ${target} lost .yrd.yml`)
+  const created = await createEventQueue(
+    createEventStore(work, "origin", selectionFor(git)),
+    "main",
+    target,
+    config,
+    new Date(),
+  )
+  const tree = (await git(["rev-parse", `${target}^{tree}`])).trim()
+  const fence = (
+    await git([
+      "commit-tree",
+      tree,
+      "-p",
+      target,
+      "-m",
+      `moved to event format at ${created}\n\nRecord: paused\nPaused-By: yrd-ops-cutover\nPaused-At: 2026-09-27T00:40:59.853Z\nCause: maintenance\n`,
+    ])
+  ).trim()
+  await git(["push", "--quiet", "origin", `${fence}:${pauseRef("main")}`])
+  await git(["checkout", "--quiet", "-b", "task/probe", "main"])
+  await git(["commit", "--quiet", "--allow-empty", "-m", "work"])
+  await git(["checkout", "--quiet", "main"])
+  return { root, work, remote, git, fence, target, created }
+}
+
+const request = {
+  branch: "task/probe",
+  target: { branch: "main", remote: "origin" },
+  submitter: "@dev/11",
+}
+
+/** A real runner with one mutation between admission and the submit-event prefix listing. */
+function beforePublication(w: World, mutate: () => Promise<void>): Git {
+  let done = false
+  const git: Git = async (args, input) => {
+    if (!done && args[0] === "diff-tree") {
+      done = true
+      await mutate()
+    }
+    return w.git(args, input)
+  }
+  return Object.assign(git, { selection: selectionFor(w.git) })
+}
+
+async function moveM2(w: World): Promise<string> {
+  const tree = (await w.git(["rev-parse", `${w.target}^{tree}`])).trim()
+  const next = (
+    await w.git([
+      "commit-tree",
+      tree,
+      "-p",
+      w.fence,
+      "-m",
+      `moved to event format at ${w.created}\n\nRecord: paused\nPaused-By: yrd-ops-cutover\nPaused-At: 2026-09-27T00:41:00.000Z\nCause: maintenance\n`,
+    ])
+  ).trim()
+  await w.git(["push", "--quiet", "origin", `${next}:${pauseRef("main")}`])
+  return next
+}
+
+async function noPublication(w: World): Promise<void> {
+  expect((await w.git(["ls-remote", "origin", "refs/heads/task/probe"])).trim()).toBe("")
+  expect((await w.git(["ls-remote", "origin", changesRef("main", "task/probe")])).trim()).toBe("")
+}
+
+describe("submit reuses a fenced admission observation", () => {
+  it("keeps the live M2 fence and saves the repeated chain read on an unchanged queue", async () => {
+    const w = await world()
+    const trace = traceRemoteCalls(join(w.root, "trace"), { seams: true })
+    let calls: ReturnType<typeof trace.end>
+    try {
+      const result = await submit(w.git, "origin", request)
+      expect(result.retry).toBe(false)
+    } finally {
+      calls = trace.end()
+    }
+    expect(calls.seams.submitEvent).toMatchObject({ "ls-remote": 3, push: 1 })
+    expect(calls.seams.submitEvent?.fetch ?? 0).toBe(0)
+    expect(calls.seams.unattributed).toBeUndefined()
+  })
+
+  it("rereads and refuses an M2 tip changed before publication", async () => {
+    const w = await world()
+    await expect(
+      submit(
+        beforePublication(w, async () => {
+          await moveM2(w)
+        }),
+        "origin",
+        request,
+      ),
+    ).rejects.toThrow(/second commit atop an M2 fence/u)
+    await noPublication(w)
+  })
+
+  it("rereads and refuses a legacy override appearing before publication", async () => {
+    const w = await world()
+    await expect(
+      submit(
+        beforePublication(w, async () => {
+          await w.git(["push", "--quiet", "origin", `${w.target}:${overrideRef("main")}`])
+        }),
+        "origin",
+        request,
+      ),
+    ).rejects.toThrow(/legacy override ref/u)
+    await noPublication(w)
+  })
+
+  it("rereads and refuses maintenance appearing before publication", async () => {
+    const w = await world()
+    await expect(
+      submit(
+        beforePublication(w, async () => {
+          await writeQueueEvent(createEventStore(w.work, "origin", selectionFor(w.git)), "main", {
+            type: "paused",
+            by: "@chief",
+            cause: "maintenance",
+            reason: "intake migration",
+            at: new Date(),
+          })
+        }),
+        "origin",
+        request,
+      ),
+    ).rejects.toThrow(/submission stopped for maintenance/u)
+    await noPublication(w)
+  })
+
+  it("rederives an admitted stuck stop rather than reusing its change-chain projection", async () => {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", selectionFor(w.git))
+    const tip = (await readEventQueue(store, "main")).tip
+    const opened = await (
+      await openEvents({ ...store, ref: changesRef("main", "task/stuck"), writer: "@dev/11" })
+    ).append([changeInput("opened", { queueTip: tip, at: new Date(), commit: w.target, by: "@dev/11" })], {
+      expect: null,
+    })
+    if (opened.head === null) throw new Error("fixture stuck change has no opened event tip")
+    const stuck = await appendChangeEvent(store, "main", "task/stuck", opened.head, {
+      type: "stuck",
+      at: new Date(),
+      reason: "fixture needs repair",
+    })
+    await writeQueueEvent(store, "main", {
+      type: "paused",
+      cause: "stuck",
+      by: "@chief",
+      reason: "repair task/stuck",
+      at: new Date(),
+      change: { branch: "task/stuck", head: w.target, event: stuck },
+    })
+    const trace = traceRemoteCalls(join(w.root, "trace-stuck"), { seams: true })
+    let calls: ReturnType<typeof trace.end>
+    try {
+      const result = await submit(w.git, "origin", request)
+      expect(result.stop).toMatchObject({ cause: "stuck", change: { branch: "task/stuck", head: w.target } })
+    } finally {
+      calls = trace.end()
+    }
+    expect(calls.seams.submitEvent?.fetch ?? 0).toBeGreaterThan(0)
+  })
+
+  it("rejects a pause ref change after the listing through the atomic pause lease", async () => {
+    const w = await world()
+    const next = await moveM2(w)
+    await w.git([
+      "push",
+      "--quiet",
+      "--force-with-lease=" + pauseRef("main") + ":" + next,
+      "origin",
+      `${w.fence}:${pauseRef("main")}`,
+    ])
+    const script = join(w.root, "git-race.sh")
+    const marker = join(w.root, "race-pending")
+    writeFileSync(marker, "pending\n")
+    writeFileSync(
+      script,
+      `#!/bin/sh\ncase " $* " in\n  *ls-remote*refs/yrd/main/*)
+    if [ "\${YRD_SEAM-}" = submitEvent ] && [ -f '${marker}' ]; then
+      git "$@" > '${w.root}/listed' || exit $?
+      git -C '${w.remote}' update-ref '${pauseRef("main")}' '${next}' '${w.fence}' || exit $?
+      rm '${marker}'
+      cat '${w.root}/listed'
+      exit 0
+    fi;;
+esac
+exec git "$@"
+`,
+    )
+    chmodSync(script, 0o755)
+    const runner = gitIn(w.work, undefined, { ...selectionFor(w.git), executable: script })
+    const trace = traceRemoteCalls(join(w.root, "trace-race"), { seams: true })
+    try {
+      await expect(submit(runner, "origin", request)).rejects.toThrow(/second commit atop an M2 fence/u)
+    } finally {
+      trace.end()
+    }
+    await noPublication(w)
+  })
+
+  it("refreshes and refuses maintenance that lands after the listing", async () => {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", selectionFor(w.git))
+    const before = (await readEventQueue(store, "main")).tip
+    const paused = await writeQueueEvent(store, "main", {
+      type: "paused",
+      by: "@chief",
+      cause: "maintenance",
+      reason: "migration after listing",
+      at: new Date(),
+    })
+    await w.git(["-C", w.remote, "update-ref", queueRef("main"), before, paused])
+    const script = join(w.root, "git-maintenance-race.sh")
+    const marker = join(w.root, "maintenance-pending")
+    writeFileSync(marker, "pending\n")
+    writeFileSync(
+      script,
+      `#!/bin/sh\ncase " $* " in\n  *ls-remote*refs/yrd/main/*)
+    if [ "\${YRD_SEAM-}" = submitEvent ] && [ -f '${marker}' ]; then
+      git "$@" > '${w.root}/listed' || exit $?
+      git -C '${w.remote}' update-ref '${queueRef("main")}' '${paused}' '${before}' || exit $?
+      rm '${marker}'
+      cat '${w.root}/listed'
+      exit 0
+    fi;;
+esac
+exec git "$@"
+`,
+    )
+    chmodSync(script, 0o755)
+    const runner = gitIn(w.work, undefined, { ...selectionFor(w.git), executable: script })
+    const trace = traceRemoteCalls(join(w.root, "trace-maintenance"), { seams: true })
+    try {
+      await expect(submit(runner, "origin", request)).rejects.toThrow(/submission stopped for maintenance/u)
+    } finally {
+      trace.end()
+    }
+    expect(existsSync(marker)).toBe(false)
+    await noPublication(w)
+  })
+
+  it("fails loudly when the fresh prefix listing fails", async () => {
+    const w = await world()
+    const script = join(w.root, "git-listing-fail.sh")
+    const marker = join(w.root, "listing-pending")
+    writeFileSync(marker, "pending\n")
+    writeFileSync(
+      script,
+      `#!/bin/sh\ncase " $* " in\n  *ls-remote*refs/yrd/main/*)
+    if [ "\${YRD_SEAM-}" = submitEvent ] && [ -f '${marker}' ]; then
+      rm '${marker}'
+      echo 'fixture fresh prefix listing failed' >&2
+      exit 73
+    fi;;
+esac
+exec git "$@"
+`,
+    )
+    chmodSync(script, 0o755)
+    const runner = gitIn(w.work, undefined, { ...selectionFor(w.git), executable: script })
+    const trace = traceRemoteCalls(join(w.root, "trace-fail"), { seams: true })
+    try {
+      await expect(submit(runner, "origin", request)).rejects.toThrow(/fixture fresh prefix listing failed/u)
+    } finally {
+      trace.end()
+    }
+    expect(existsSync(marker)).toBe(false)
+    await noPublication(w)
+  })
+})
