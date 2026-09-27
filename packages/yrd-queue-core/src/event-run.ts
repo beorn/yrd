@@ -1416,6 +1416,7 @@ export async function eventQueueRun(
                 ),
                 {
                   targetSha: target,
+                  queueRun: true,
                   populateReference: options.populateReference,
                   selection: options.selection,
                   gitOptions,
@@ -1465,6 +1466,7 @@ export async function eventQueueRun(
                 join(options.workdir, "worktrees", log.id, `${branch.replaceAll("/", "_")}-base-${String(attempt)}`),
                 {
                   targetSha: target,
+                  queueRun: true,
                   populateReference: options.populateReference,
                   selection: options.selection,
                   gitOptions,
@@ -1549,6 +1551,7 @@ export async function eventQueueRun(
               let checked: CheckResult
               if (check.programRoot === true) {
                 checked = await programRootCheck({
+                  queueRun: true,
                   git,
                   repo: options.repo,
                   targetSha: target,
@@ -1579,6 +1582,7 @@ export async function eventQueueRun(
                 const about = { branch, head, name: check.name, phase: evidencePhase, start }
                 recordProgramStart({ log }, { ...about, log: checkLogPath(logDir, check.name) })
                 checked = await runCheck({
+                  queueRun: true,
                   cwd: worktree.path,
                   tree: worktree.tree,
                   logDir,

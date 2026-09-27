@@ -204,7 +204,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
       'i=0; while [ -n "${FAKE_HOLD:-}" ] && [ ! -f "$FAKE_HOLD" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done',
       `if [ "$i" -gt 0 ]; then echo "held" >> "${startedLog}"; fi`,
       'sleep "${FAKE_SLEEP:-0}"',
-      `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
+      `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none} queue=\${HH_HEAVY_QUEUE_CALLER:-none}" >> "${checkLog}"`,
       'if [ -f one.txt ] || [ "${FAKE_EVERYWHERE:-0}" = 1 ]; then exit "${FAKE_EXIT:-0}"; fi',
       "exit 0",
       "",
@@ -219,7 +219,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     setupScript,
     [
       "#!/bin/sh",
-      `echo "setup cwd=$(pwd) repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
+      `echo "setup cwd=$(pwd) repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none} queue=\${HH_HEAVY_QUEUE_CALLER:-none}" >> "${checkLog}"`,
       'exit "${1:-0}"',
       "",
     ].join("\n"),
@@ -972,6 +972,12 @@ it("runs submit and merge checks with setup before each phase and retains both v
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/two-phases"] })
   expect(readFileSync(w.checkLog, "utf8").match(/setup cwd=/gu)).toHaveLength(2)
+  expect(readFileSync(w.checkLog, "utf8").trim().split("\n")).toEqual(
+    expect.arrayContaining([
+      expect.stringMatching(/^setup cwd=.* queue=1$/u),
+      expect.stringMatching(/^check cwd=.* queue=1$/u),
+    ]),
+  )
   expect(logRecords(outcome)).toEqual(
     expect.arrayContaining([
       expect.objectContaining({ kind: "result", name: "verify", phase: "submit", result: "pass" }),

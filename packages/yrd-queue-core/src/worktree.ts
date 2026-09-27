@@ -374,6 +374,7 @@ export type RunSetup = Readonly<{
   starting?: (about: Readonly<{ start: string; log: string }>) => void
   process?: Process
   env?: NodeJS.ProcessEnv
+  queueRun?: boolean
 }>
 
 export type PrepareWorktree = Readonly<{
@@ -397,6 +398,8 @@ export type PrepareWorktree = Readonly<{
   plumbing?: PlumbingLog
   process?: Process
   env?: NodeJS.ProcessEnv
+  /** Set only by the event queue runner; setup otherwise uses seat admission. */
+  queueRun?: boolean
 }>
 
 /** A worktree, plus what every program run in it is told about the tree it judges. */
@@ -569,6 +572,7 @@ export async function runSetup(options: RunSetup): Promise<SetupRan> {
   const result = await runCheck({
     cwd,
     env: options.env,
+    queueRun: options.queueRun,
     logDir: setup.logDir,
     process: options.process,
     tmpdir: setup.tmpdir,
@@ -633,6 +637,7 @@ export async function prepareWorktree(
       await runSetup({
         cwd: worktree.path,
         env: options.env,
+        queueRun: options.queueRun,
         process: options.process,
         record: options.record,
         setup,

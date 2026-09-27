@@ -129,6 +129,8 @@ export type RunCheck = Readonly<{
   env?: NodeJS.ProcessEnv
   /** Which check tier is running: normal (default) or long. */
   tier?: "normal" | "long"
+  /** Set only by the event queue runner; manual checks default to seat admission. */
+  queueRun?: boolean
   /**
    * An optional check-supplied scope for a base run (26180). It joins the environment after the declaration's
    * passthrough and before the queue's own `YRD_*` statements, which stay
@@ -785,6 +787,10 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   // check can narrow a scope its passthrough also names, and before the
   // `YRD_*` trio below, which is the queue's word and not the check's.
   for (const [name, value] of Object.entries(run.extraEnv ?? {})) env[name] = value
+  // Scheduling ownership is the queue runner's statement, not a property of
+  // the candidate SHA or a value a manual check can pass through.
+  delete env.HH_HEAVY_QUEUE_CALLER
+  if (run.queueRun === true) env.HH_HEAVY_QUEUE_CALLER = "1"
   // Last, so they cannot be inherited over: what the check is judging is the
   // queue's own statement about the tree it just prepared, and a check told a
   // stale base by the environment would select the wrong work and say nothing.

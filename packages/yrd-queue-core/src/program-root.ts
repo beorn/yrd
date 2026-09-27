@@ -31,6 +31,8 @@ export type ProgramRootCheck = Readonly<{
   setup?: string
   extraEnv?: Readonly<Record<string, string>>
   tier?: "normal" | "long"
+  /** The event runner owns this check; manual program-root checks omit it. */
+  queueRun?: boolean
 }> &
   Pick<PrepareWorktree, "env" | "process" | "selection" | "gitOptions" | "populateReference" | "plumbing">
 
@@ -272,6 +274,7 @@ async function prepareProgramRoot(
   }
   return prepareWorktree(run.git, run.repo, commit, join(run.root, stage === "target" ? "P" : "C"), {
     env: run.env,
+    queueRun: run.queueRun,
     process: run.process,
     selection: run.selection,
     gitOptions: run.gitOptions,
@@ -339,6 +342,7 @@ export async function programRootCheck(run: ProgramRootCheck): Promise<CheckResu
     const result = await runCheck({
       cwd: subject.path,
       env: run.env,
+      queueRun: run.queueRun,
       process: run.process,
       logDir: run.logDir,
       tmpdir: run.tmpdir,

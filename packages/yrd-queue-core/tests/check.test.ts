@@ -200,6 +200,33 @@ function stubDriver(
  * @consumer Queue checks that opt into the immutable program-root capability.
  */
 describe("a queue-owned program root", () => {
+  /** @failure A manual candidate check inherits a queue marker and steals reserved host slots.
+   * @level l1 @consumer Yrd check, retained-environment validation, and queue event runner.
+   */
+  it("mints the heavy queue marker only for queue-owned checks", async () => {
+    const requests: ProcessRequest[] = []
+    const process: Process = {
+      run: (request) => {
+        requests.push(request)
+        return Promise.resolve({ durationMs: 1, exitCode: 0, signal: null, stderr: "", stdout: "", timedOut: false })
+      },
+      close: () => Promise.resolve(),
+      [Symbol.asyncDispose]: () => Promise.resolve(),
+    }
+    const poisoned = { HH_HEAVY_QUEUE_CALLER: "inherited" }
+    const spec = { environmentPassthrough: ["HH_HEAVY_QUEUE_CALLER"], name: "manual", run: "unused" }
+    await runCheck({
+      ...place("manual-queue-marker"),
+      env: poisoned,
+      extraEnv: { HH_HEAVY_QUEUE_CALLER: "declared" },
+      process,
+      spec,
+    })
+    await runCheck({ ...place("owned-queue-marker"), env: poisoned, process, queueRun: true, spec })
+    expect(requests[0]?.env?.HH_HEAVY_QUEUE_CALLER).toBeUndefined()
+    expect(requests[1]?.env?.HH_HEAVY_QUEUE_CALLER).toBe("1")
+  })
+
   it("overwrites passed-through and check-requested program roots only for an explicit opt-in", async () => {
     const where = place("program-root")
     const programRoot = join(where.cwd, "target-program")
