@@ -85,6 +85,11 @@ export function pauseRef(queue: string): string {
   return `${queueRefPrefix(queue)}/pause`
 }
 
+/** The replaceable, observed claim made by the one runner for this queue. */
+export function runnerRef(queue: string): string {
+  return `${queueRefPrefix(queue)}/runner`
+}
+
 /** The merge-check override ref one queue owns (override.ts). */
 export function overrideRef(queue: string): string {
   return `${queueRefPrefix(queue)}/override`

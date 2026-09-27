@@ -74,16 +74,11 @@ export const RUNNER_STATES = [
  * writing one down would make a derived fact durable and let it go stale
  * (@i/10-yrd/24523).
  *
- * `silent` means the runner's own beat is overdue, read from the status it
- * publishes at `refs/yrd/<queue>/runner`. **S1 publishes no such ref, so S1
- * never prints `silent`** — and it is NOT derived from a run journal's mtime
- * instead, which is ruled out: that reading called a healthy queue between
- * rounds dead and a dead queue alive by turns. What S1 loses by not having it
- * is narrower than it looks and is named rather than hidden: a runner whose
- * event loop is held publishes nothing at either place, and `stopped` below
- * catches it from the health document; what waits for S2 is a beat published
- * where a clone can read it, so this page says the same word off the queue's
- * machine as on it. The incident that makes that matter is @i/10-yrd/24486 —
+ * `silent` means the runner's own published beat at
+ * `refs/yrd/<queue>/runner` is older than three Beats. It is NEVER derived
+ * from a run journal's mtime: that reading called a healthy queue between
+ * rounds dead and a dead queue alive by turns. The incident that makes the
+ * remote beat matter is @i/10-yrd/24486 —
  * three rows sat queued with no live check while the service was down, and a
  * fourth seat submitted into it.
  *
@@ -97,10 +92,7 @@ export const RUNNER_STATES = [
 export const RUNNER_SIGNALS = ["silent", "stopped", "unpublished"] as const
 
 /**
- * The runner words a reading can actually produce today, on the queue's own
- * machine or off it. The rest are defined so that S2 FILLS this table rather
- * than editing it, and {@link legendLines} says which is which rather than
- * promising a word no reading can reach.
+ * The runner words a reading can produce on the queue's own machine or off it.
  */
 export const RUNNER_STATES_SAID = [
   "idle",
@@ -108,6 +100,7 @@ export const RUNNER_STATES_SAID = [
   "checking",
   "merging",
   "deprovisioning",
+  "silent",
   "stopped",
   "stuck",
   "paused",
