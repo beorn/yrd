@@ -321,6 +321,8 @@ export function shortenAddress(address: string, maxLen: number): string {
  * Right: elapsed timer as hh:mm:ss in grey, and stop reason if stopped with a reason.
  */
 export function TopLine({
+  queueDigit,
+  queueFirst = false,
   queue,
   queues,
   status,
@@ -328,6 +330,8 @@ export function TopLine({
   live = false,
   onStatusClick,
 }: {
+  queueFirst?: boolean
+  queueDigit?: number
   queue?: string
   queues?: readonly WatchQueue[]
   /** @deprecated Preserved for compatibility */
@@ -350,15 +354,32 @@ export function TopLine({
   const statusGaps = Math.max(0, statusParts.length - 1)
   const statusRightLen = statusParts.reduce((a, b) => a + b, 0) + statusGaps
 
-  const runnerDigitsLen = showRunnerDigits
-    ? (queues ?? []).map(() => 3).reduce((a, b) => a + b, 0) + ((queues?.length ?? 0) - 1) + 1
-    : 0
+  const runnerDigitsLen =
+    queueDigit !== undefined
+      ? 4
+      : showRunnerDigits
+        ? (queues ?? []).map(() => 3).reduce((a, b) => a + b, 0) + ((queues?.length ?? 0) - 1) + 1
+        : 0
   // Left side prefix: marker (1) + gap (1) + runner digits + YRD (3) + gap (1) + status word + gap (1) + separator before right group (1)
-  const leftPrefixLen = 1 + 1 + runnerDigitsLen + 3 + 1 + status.word.length + 1 + 1
+  const leftPrefixLen = 1 + 1 + runnerDigitsLen + 3 + 1 + status.word.length + 1 + 1 + (queueFirst ? 6 : 0)
   const availableForAddress =
     columns !== undefined ? Math.max(0, columns - leftPrefixLen - statusRightLen - 2) : undefined
   const displayAddress =
     availableForAddress !== undefined ? shortenAddress(queueAddress, availableForAddress) : queueAddress
+
+  const marker = (
+    <Box onClick={onStatusClick} flexShrink={0}>
+      {live && status.pulse ? (
+        <Pulse synchronized colors={["$fg-on-inverse", status.color]} intervalMs={900} flexShrink={0}>
+          {status.marker}
+        </Pulse>
+      ) : (
+        <Text color={status.color} flexShrink={0}>
+          {status.marker}
+        </Text>
+      )}
+    </Box>
+  )
 
   return (
     <Box
@@ -373,17 +394,8 @@ export function TopLine({
       backgroundColor="$bg-inverse"
     >
       <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" gap={1}>
-        <Box onClick={onStatusClick} flexShrink={0}>
-          {live && status.pulse ? (
-            <Pulse synchronized colors={["$fg-on-inverse", status.color]} intervalMs={900} flexShrink={0}>
-              {status.marker}
-            </Pulse>
-          ) : (
-            <Text color={status.color} flexShrink={0}>
-              {status.marker}
-            </Text>
-          )}
-        </Box>
+        {queueFirst ? null : marker}
+        {queueDigit === undefined ? null : <Text color="$fg-on-inverse-muted">[{queueDigit}]</Text>}
         {showRunnerDigits
           ? (queues ?? []).map((_, index) => (
               <Text key={index} color="$fg-on-inverse-muted" flexShrink={0}>
@@ -394,12 +406,25 @@ export function TopLine({
         <Text bold color="$fg-on-inverse" flexShrink={0}>
           YRD
         </Text>
+        {queueFirst ? (
+          <Text bold color="$fg-on-inverse" flexShrink={0}>
+            QUEUE
+          </Text>
+        ) : null}
+        {queueFirst ? (
+          <Text color="$fg-on-inverse" wrap="truncate">
+            {displayAddress}
+          </Text>
+        ) : null}
+        {queueFirst ? marker : null}
         <Text bold color={status.color} flexShrink={0}>
           {status.word}
         </Text>
-        <Text color="$fg-on-inverse" wrap="truncate">
-          {displayAddress}
-        </Text>
+        {queueFirst ? null : (
+          <Text color="$fg-on-inverse" wrap="truncate">
+            {displayAddress}
+          </Text>
+        )}
       </Box>
       <Box
         flexDirection="row"
