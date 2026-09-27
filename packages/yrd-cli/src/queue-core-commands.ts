@@ -170,6 +170,7 @@ import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
 import { STATE_WORDS, clock, diagnosticLines, firstLine, mediaDuration, timingLine } from "./watch-format.ts"
 import { readRunnerFacts, readRunnerService, type RunnerFacts } from "./watch-runner.ts"
+import { runnerOf } from "./watch-runner-reading.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
   DEFAULT_WINDOW_MS,
@@ -2127,6 +2128,16 @@ export async function coreQueueCommand(
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = reading.pause
+        const stopped = stopFact(pause)
+        const runner = await readRunnerFacts(workdir)
+        const service = runner.service
+        const runnerStatus =
+          options.json === true
+            ? {
+                state: runnerOf({ unfiltered, runner, stopped }, new Date()).state,
+                service: service.kind === "beating" ? { kind: service.kind } : { kind: service.kind, why: service.why },
+              }
+            : undefined
         // The table and stop come from the same authority read as this listing.
         const overrides = overrideFacts(reading.overrides, Date.now())
         // What was queried, where it looked, and what it left out — said on the
@@ -2156,10 +2167,12 @@ export async function coreQueueCommand(
             observation,
             changes: documentRows.map((row) => row.row),
             journal: journalFact(journals),
+            // The runner belongs to the whole queue, even when a selector hides every row.
+            ...(runnerStatus === undefined ? {} : { runner: runnerStatus }),
             pause: pause ?? null,
             // The everyday reader of a stopped line: always present, null while
             // the line runs, so a stop can never be read as absent.
-            stopped: stopFact(pause),
+            stopped,
             // Always present: an empty array is "no overrides", never an absent field.
             overrides,
             ...(scope === undefined ? {} : { scope }),
@@ -2171,7 +2184,7 @@ export async function coreQueueCommand(
           // Pre-M8 a repository has exactly one queue: the target's branch, on
           // this repository. M8 turns this list of one into N.
           queues: [{ branch: config.target.branch, label: config.target.branch, path: repo }],
-          runner: await readRunnerFacts(workdir),
+          runner,
           // Every row, per run, whatever the filter: the box counts the queue,
           // not the view, and a change checked twice made two decisions.
           decisions: decisionsOfRows(unfiltered),
@@ -2181,7 +2194,7 @@ export async function coreQueueCommand(
           rows,
           unfiltered,
           changes,
-          stopped: stopFact(pause),
+          stopped,
           overrides,
           ...(drafts === undefined
             ? {}
