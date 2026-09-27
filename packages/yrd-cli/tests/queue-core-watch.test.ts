@@ -726,7 +726,9 @@ describe("what a watch says it looked at", () => {
     // any row now, and while the line is stopped it names the change it
     // stopped at, so it is told apart by its own word and not by its shape.
     const pageLines = plain.stdout().split("\n")
-    const stuckIndex = pageLines.findIndex((line) => line.includes(`stuck=${String(original.reason)}`))
+    // The reason line is the composed diagnosis, cut to the column, so the change's row is found by
+    // its branch and state.
+    const stuckIndex = pageLines.findIndex((line) => line.includes("task/history") && line.includes("◌ stuck"))
     expect(stuckIndex, plain.stdout()).toBeGreaterThanOrEqual(0)
     const changeLine = pageLines[stuckIndex]?.includes("task/history")
       ? pageLines[stuckIndex]
