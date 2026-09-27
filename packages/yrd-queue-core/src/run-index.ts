@@ -58,7 +58,7 @@ export function queueReadWithRunIndex(
         fetchRefs: async (repo, refs, remote, options) => {
           const queueRead = Array.isArray(refs) && refs.includes(eventsRef)
           const requested = queueRead && !refs.includes(indexRef) ? (refs as readonly string[]).concat(indexRef) : refs
-          const tips = await fetchRefs(repo, requested, remote, options)
+          const tips = await fetchRefs(repo, requested, remote, queueRead ? { ...options, absent: "omit" } : options)
           if (queueRead) {
             const tip = tips.get(indexRef)
             if (tip === undefined) {
