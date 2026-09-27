@@ -126,6 +126,47 @@ describe("remote calls are counted from git's trace2 event log", () => {
     expect(submitTrace.end().sshChildren).toBe(1)
   }, 60_000)
 
+  it("names an SSH clone even when Git has not defined its destination repository", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-round-clone-"))
+    roots.push(root)
+    const seed = join(root, "seed")
+    mkdirSync(seed)
+    const git = gitIn(seed)
+    await git(["init", "--quiet", "--initial-branch=main"])
+    await git([
+      "-c",
+      "user.email=calls@yrd.test",
+      "-c",
+      "user.name=yrd",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "one",
+    ])
+    const remote = join(root, "remote.git")
+    await gitIn(root)(["clone", "--quiet", "--bare", seed, remote])
+    const ssh = join(root, "fake-ssh")
+    writeFileSync(ssh, '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n')
+    chmodSync(ssh, 0o755)
+    for (const [label, source] of [
+      ["uri", `ssh://calls.invalid${remote}`],
+      ["scp", `git@calls.invalid:${remote}`],
+    ] as const) {
+      const trace = traceRemoteCalls(join(root, `trace2-${label}`), { refresh: true })
+      await gitIn(root, undefined, undefined, {
+        env: { ...process.env, ...trace.env, GIT_SSH_COMMAND: ssh },
+      })(["clone", "--quiet", "--bare", source, join(root, `target-${label}.git`)])
+
+      expect(roundRemoteCallsRow(trace.end())).toMatchObject({
+        ssh_children: 1,
+        refresh_ssh_children: 0,
+        beyond_refresh_ssh_children: 1,
+        beyond_refresh_calls: [`1 clone @ ${source}`],
+      })
+    }
+  }, 60_000)
+
   it("removes its trace directory once it has counted it, so no round leaves its trace2 log behind", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-remote-calls-removed-"))
     roots.push(root)

@@ -53,22 +53,29 @@ function describeSshCall(
   sshChildren: number,
   requireRefreshTag: boolean,
 ): RemoteCalls["sshCalls"][number] {
-  if (command === undefined || argv === undefined || repository === undefined) {
-    return { command: "unknown", repository: repository ?? "unknown", refresh, sshChildren }
+  // Git clone starts its SSH transport before it has a repository to report in def_repo.
+  // Its exact SSH source is still present in the process's start argv.
+  const cloneSources =
+    command === "clone" && argv !== undefined
+      ? argv.filter((arg) => arg.startsWith("ssh://") || /^[^@\s]+@[^:\s]+:/u.test(arg))
+      : []
+  const namedRepository = repository ?? (cloneSources.length === 1 ? cloneSources[0] : undefined)
+  if (command === undefined || argv === undefined || namedRepository === undefined) {
+    return { command: "unknown", repository: namedRepository ?? "unknown", refresh, sshChildren }
   }
   const dryRun = argv.includes("--dry-run") ? " --dry-run" : ""
   const mainRef = argv.some((arg) => /^\+refs\/heads\/[^:]+:refs\/remotes\/origin\/[^:]+$/u.test(arg))
   const mainFetch = command === "fetch" && argv.includes("--no-tags") && argv.includes("origin") && mainRef
   if (refresh) {
     if (!mainFetch) {
-      throw new Error(`Trace2 tagged a non-component-main SSH call as refresh: ${command} in ${repository}`)
+      throw new Error(`Trace2 tagged a non-component-main SSH call as refresh: ${command} in ${namedRepository}`)
     }
   } else if (mainFetch && requireRefreshTag) {
     throw new Error(
-      `Trace2 found an untagged component-main refresh fetch in ${repository}; round SSH split cannot be proven`,
+      `Trace2 found an untagged component-main refresh fetch in ${namedRepository}; round SSH split cannot be proven`,
     )
   }
-  return { command: `${command}${dryRun}`, repository, refresh, sshChildren }
+  return { command: `${command}${dryRun}`, repository: namedRepository, refresh, sshChildren }
 }
 
 /** Count the remote calls recorded under one trace2 directory. A directory that is not there is refused. */
