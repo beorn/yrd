@@ -25,6 +25,7 @@ import {
   type Git,
 } from "../src/index.ts"
 import { openEvents } from "../src/git.ts"
+import { readEventChain } from "../src/event-read.ts"
 import { overrideRef, pauseRef } from "../src/refs.ts"
 import { traceRemoteCalls } from "../src/remote-calls.ts"
 
@@ -301,6 +302,59 @@ exec git "$@"
     }
     expect(existsSync(marker)).toBe(false)
     await noPublication(w)
+  })
+
+  /** @failure A CAS conflict duplicates the queue projection and lifts a submit over twenty SSH children (26231). */
+  it("bounds publication reads when an operator pause lands after the queue listing", async () => {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", selectionFor(w.git))
+    const before = (await readEventQueue(store, "main")).tip
+    const paused = await writeQueueEvent(store, "main", {
+      type: "paused",
+      by: "@chief",
+      cause: "operator",
+      reason: "routine pause after listing",
+      at: new Date(),
+    })
+    await w.git(["-C", w.remote, "update-ref", queueRef("main"), before, paused])
+    const script = join(w.root, "git-operator-race.sh")
+    const marker = join(w.root, "operator-pending")
+    writeFileSync(marker, "pending\n")
+    writeFileSync(
+      script,
+      `#!/bin/sh\ncase " $* " in\n  *ls-remote*refs/yrd/main/*)
+    if [ "\${YRD_SEAM-}" = submitEvent ] && [ -f '${marker}' ]; then
+      git "$@" > '${w.root}/listed' || exit $?
+      git -C '${w.remote}' update-ref '${queueRef("main")}' '${paused}' '${before}' || exit $?
+      rm '${marker}'
+      cat '${w.root}/listed'
+      exit 0
+    fi;;
+esac
+exec git "$@"
+`,
+    )
+    chmodSync(script, 0o755)
+    const runner = gitIn(w.work, undefined, { ...selectionFor(w.git), executable: script })
+    const trace = traceRemoteCalls(join(w.root, "trace-operator-race"), { seams: true })
+    let calls: ReturnType<typeof trace.end>
+    try {
+      const result = await submit(runner, "origin", request)
+      expect(result.retry).toBe(false)
+      expect(result.stop?.cause).toBe("operator")
+    } finally {
+      calls = trace.end()
+    }
+    expect(existsSync(marker)).toBe(false)
+    expect(
+      (await readEventChain(await openEvents({ ...store, ref: changesRef("main", request.branch) }))).map(
+        (event) => event.type,
+      ),
+    ).toEqual(["opened"])
+    const publication = calls.seams.submitEvent
+    const remoteCalls = (publication?.["ls-remote"] ?? 0) + (publication?.fetch ?? 0) + (publication?.push ?? 0)
+    expect(remoteCalls, JSON.stringify(publication)).toBeLessThanOrEqual(12)
+    expect(calls.unreadable).toBe(0)
   })
 
   it("fails loudly when the fresh prefix listing fails", async () => {

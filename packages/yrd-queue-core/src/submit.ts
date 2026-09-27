@@ -400,6 +400,7 @@ async function submitEvent(
   const ref = changesRef(request.target.branch, request.branch)
   const branchRef = `refs/heads/${request.branch}`
   const chain = await openEvents({ ...store, ref, writer: request.submitter })
+  let afterConflict: SubmitOps | undefined
   for (let attempt = 0; attempt < 2; attempt++) {
     const refs = attempt === 0 ? await listRefs(queueRefPrefix(request.target.branch), store) : undefined
     // The unchanged tip names the same append-only queue history. A matching M2
@@ -411,9 +412,16 @@ async function submitEvent(
       refs.get(queueRef(request.target.branch)) === admittedOps.ops.queue.tip &&
       (refs.get(pauseRef(request.target.branch)) ?? null) === admittedOps.pauseTip &&
       !refs.has(overrideRef(request.target.branch))
-    const operational = reuse
-      ? admittedOps
-      : await readEventOpsWithRefs(store, git, request.target.branch, inspected.targetHead)
+    // ADR-0022: the read after a rejected CAS is the next attempt's base.
+    // Reusing it has the same accepted unfenced legacy-override interval as
+    // 25626's first-attempt reuse; a stuck pause depends on a separate change
+    // ref, so it must be rederived on the second attempt.
+    const operational =
+      attempt === 1 && afterConflict !== undefined && afterConflict.ops.pause?.cause !== "stuck"
+        ? afterConflict
+        : reuse
+          ? admittedOps
+          : await readEventOpsWithRefs(store, git, request.target.branch, inspected.targetHead)
     const { ops, pauseTip } = operational
     refuseMaintenance(ops.stop, remote, request.target.branch, published)
     const branchAt = (await listRefs(branchRef, store)).get(branchRef) ?? null
@@ -468,11 +476,16 @@ async function submitEvent(
       if (
         !(error instanceof Conflict) ||
         !error.refs.some((ref) => ref === queueRef(request.target.branch) || ref === pauseRef(request.target.branch))
-      )
+      ) {
         throw error
+      }
+      if (attempt === 0) {
+        afterConflict = await readEventOpsWithRefs(store, git, request.target.branch, inspected.targetHead)
+        refuseMaintenance(afterConflict.ops.stop, remote, request.target.branch, published)
+        continue
+      }
       const moved = await readEventOps(store, git, request.target.branch, inspected.targetHead)
       refuseMaintenance(moved.stop, remote, request.target.branch, published)
-      if (attempt === 0) continue
       throw error
     }
     const opened = retryOpened ?? result.events.findLast((event) => event.type === "opened")?.id
