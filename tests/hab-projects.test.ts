@@ -3,6 +3,8 @@
  * @level l2
  * @consumer Hallohuman Hab composition loading vendor/yrd/hab.projects.ts
  */
+import { spawnSync } from "node:child_process"
+import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import hab, { yrdQueueRunnerDeclarations } from "../hab.projects.ts"
 
@@ -82,5 +84,25 @@ describe("Yrd Hab runner declarations", () => {
     // service stays up with an unhealthy page whose owner is @chief, the seat
     // that decides stop-line matters. The page reaches whoever this names.
     expect(hab.services["yrd"]?.owner).toBe("@chief")
+  })
+
+  it("asserts no file under packages/*/src imports outside its package directory", () => {
+    // 22949 defect and 26191 cure (@cto): a package under packages/* must not import
+    // outside its own package directory via '../../../' paths.
+    const root = resolve(import.meta.dirname, "..")
+    const git = spawnSync(
+      "git",
+      [
+        "grep",
+        "--no-index",
+        "-nE",
+        "(from\\s+[\"'].*\\.\\./\\.\\./\\.\\./|import\\s*\\(?\\s*[\"'].*\\.\\./\\.\\./\\.\\./)",
+        "--",
+        "packages/*/src/**",
+      ],
+      { cwd: root, encoding: "utf8" },
+    )
+    const matches = git.stdout.trim()
+    expect(matches).toBe("")
   })
 })

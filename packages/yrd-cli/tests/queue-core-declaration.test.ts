@@ -67,7 +67,7 @@ it("refuses future event queue and check keys by name", () => {
     blob: "a".repeat(40),
   }
   expect(() => assertPlainEventQueueConfig({ ...plain, futureQueueFeature: true } as QueueConfig, "run")).toThrow(
-    /queue key futureQueueFeature:.*25065/u,
+    /queue key futureQueueFeature: this declaration feature has no event runner executor; remove queue key futureQueueFeature from \.yrd\.yml to run on an event queue/u,
   )
   expect(() =>
     assertPlainEventQueueConfig({ ...plain, futureQueueFeature: undefined } as QueueConfig, "run"),
@@ -83,7 +83,9 @@ it("refuses future event queue and check keys by name", () => {
       },
       "run",
     ),
-  ).toThrow(/check key futureCheckFeature:.*25065/u)
+  ).toThrow(
+    /check key futureCheckFeature: \(verify\): this declaration feature has no event runner executor; remove check key futureCheckFeature from \.yrd\.yml to run on an event queue/u,
+  )
   expect(() =>
     assertPlainEventQueueConfig(
       {
@@ -362,7 +364,9 @@ describe("a queue is the selected origin branch carrying config", () => {
           config,
           new Date("2026-09-22T14:00:00.000Z"),
         ),
-      ).rejects.toThrow(new RegExp(`${feature}.*25065`))
+      ).rejects.toThrow(
+        /cannot create an event queue with teardown: this declaration feature has no event runner executor; remove teardown from \.yrd\.yml to run on an event queue/u,
+      )
 
       expect(await git(["ls-remote", "--refs", "origin", queueRef("main")])).toBe("")
       expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])).toBe(before)
@@ -402,7 +406,37 @@ describe("a queue is the selected origin branch carrying config", () => {
         undefined as unknown as QueueConfig,
         new Date("2026-09-22T14:00:00.000Z"),
       ),
-    ).rejects.toThrow(/no declared QueueConfig.*#25040 does not invent a default/u)
+    ).rejects.toThrow(
+      /cannot create event queue main at .*: the pinned commit has no declared QueueConfig; declare checks in \.yrd\.yml at that commit before creating an event queue/u,
+    )
+    expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])).toBe("")
+  })
+
+  it("refuses event queue creation when the pinned commit has no .yrd.yml", async () => {
+    const repo = await world()
+    const git = gitIn(repo)
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const config: QueueConfig = {
+      target: { remote: "origin", branch: "main" },
+      archiveAfter: "never",
+      checks: [{ name: "verify", run: "true" }],
+      health: { declared: false, stallAfterMs: 45 * 60_000 },
+      ignore: [],
+      notify: [],
+      blob: "a".repeat(40),
+    }
+
+    await expect(
+      createEventQueue(
+        createEventStore(repo, "origin", gitIn(repo).selection),
+        "main",
+        target,
+        config,
+        new Date("2026-09-22T14:00:00.000Z"),
+      ),
+    ).rejects.toThrow(
+      /cannot create event queue main at .*: the pinned commit has no \.yrd\.yml; declare checks in \.yrd\.yml at that commit before creating an event queue/u,
+    )
     expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])).toBe("")
   })
 

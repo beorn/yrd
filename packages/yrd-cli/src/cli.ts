@@ -30,7 +30,7 @@
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { join } from "node:path"
 import { drainOutput } from "loggily"
-import { parseDuration } from "@yrd/queue-core"
+import { parseDuration, yrdQueueRunnerDeclarations } from "@yrd/queue-core"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
 import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
@@ -738,7 +738,6 @@ function buildProgram(
       (filters === undefined || filters.length === 0) &&
       status === undefined
     ) {
-      const { yrdQueueRunnerDeclarations } = await import("../../../hab.projects.ts")
       const declared = await resolveDeclaredQueueLocations(cwd(), yrdQueueRunnerDeclarations, env)
       if (declared.length > 0) {
         const sources: import("./watch-pane.tsx").WatchSource[] = []

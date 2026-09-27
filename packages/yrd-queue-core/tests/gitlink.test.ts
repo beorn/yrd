@@ -11,7 +11,7 @@
  * and 13.7 s per judged change.
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, beforeEach, expect, it, vi } from "vitest"
@@ -235,6 +235,41 @@ it("runs a gitlink-bearing event change through the checked candidate", async ()
   const state = await readStatus(eventStore(w), "main", "task/event-gitlink")
   expect(state).toMatchObject({ status: "merged", commit: head })
   expect(state.candidate).toBe(await remoteTip(w.git, "refs/heads/main"))
+})
+
+/** @failure A gitlink compose refusal ended without one successful notice to its submitter (25741).
+ * @level l3 @consumer the submitter of a change with a diverged component pin
+ */
+it("sends one failed notice for a gitlink that cannot compose", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "submitted-feature")
+  const head = await submitGitlink(w, "task/diverged-pin", ahead)
+  await advanceSubmodule(w, "main changed after submit")
+  const noticeLog = join(dirname(w.work), "compose-refusal-notice.jsonl")
+  const options: QueueRunOptions = {
+    ...(await w.options()),
+    checks: [],
+    notify: [{ name: "submitter", on: ["failed"], run: `cat >> ${noticeLog}` }],
+  }
+
+  const outcome = await queueRun(options)
+  expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/diverged-pin"], merged: [] })
+  const status = await readStatus(eventStore(w), "main", "task/diverged-pin")
+  expect(status).toMatchObject({ status: "failed", commit: head })
+  expect(status.reason).toContain("gitlink-compose-refused")
+  expect(status.reason).toContain("submodule")
+  expect(Object.values(status.notices ?? {})).toMatchObject([{ result: "delivered", to: "submitter" }])
+  const notices = readFileSync(noticeLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+  expect(notices).toMatchObject([
+    { record: "failed", change: `task/diverged-pin@${head}`, submitter: "@dev/2", failures: 1 },
+  ])
+
+  await queueRun(options)
+  expect(readFileSync(noticeLog, "utf8").trim().split("\n")).toHaveLength(1)
 })
 
 /** @failure A green root could become visible before its component main carried the checked pin.

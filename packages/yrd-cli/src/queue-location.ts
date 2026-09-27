@@ -11,10 +11,10 @@ import {
   type Git,
   type GitSelection,
   type ReferenceStore,
+  type YrdQueueRunnerDeclaration,
 } from "@yrd/queue-core"
 import { parseQueueAddress, queueDirectory, queueRoot, type QueueAddress } from "./address.ts"
 import { repositoryHere } from "./declaration.ts"
-import type { YrdQueueRunnerDeclaration } from "../../../hab.projects.ts"
 
 export type QueueLocation = Readonly<{
   repo: string
