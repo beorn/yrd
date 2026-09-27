@@ -73,6 +73,11 @@ export type CheckSpec = Readonly<{
 export const DEFAULT_CHECK_BOUND_MS = 30 * 60 * 1000
 export const TRANSPORT_RETRY_LIMIT = 1
 
+/** The timeout the check runner will actually give this declaration and tier. */
+export function effectiveCheckTimeoutMs(spec: CheckSpec, tier: "normal" | "long" = "normal"): number {
+  return (tier === "long" ? spec.long?.timeoutMs : undefined) ?? spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
+}
+
 /** Detection bounds for steps that cannot be cancelled safely mid-operation. */
 export const STEP_BOUNDS_MS = {
   "line-read": 30 * 60 * 1000,
@@ -98,7 +103,12 @@ export const STEP_STATES = {
 } as const satisfies Record<keyof typeof STEP_BOUNDS_MS, RunnerClaimState>
 
 /** The declared upper bound for one frozen line, including one transport retry. */
-export function roundBoundMs(checks: readonly CheckSpec[], setup: string | undefined, candidates: number): number {
+export function roundBoundMs(
+  checks: readonly CheckSpec[],
+  setup: string | undefined,
+  candidates: number,
+  tier: "normal" | "long" = "normal",
+): number {
   if (!Number.isSafeInteger(candidates) || candidates < 1) {
     throw new TypeError(`round Candidates must be a positive safe integer: ${String(candidates)}`)
   }
@@ -114,7 +124,7 @@ export function roundBoundMs(checks: readonly CheckSpec[], setup: string | undef
   const phaseWorktrees = STEP_BOUNDS_MS.prepare + STEP_BOUNDS_MS.remove
   const perCandidateSteps = baseCandidateSteps + phaseWorktrees * (1 + 2 * programRootOccurrences)
   const declaredChecks = activeChecks.reduce(
-    (sum, check) => sum + (check.on ?? ["merge"]).length * (check.timeoutMs ?? DEFAULT_CHECK_BOUND_MS),
+    (sum, check) => sum + (check.on ?? ["merge"]).length * effectiveCheckTimeoutMs(check, tier),
     0,
   )
   const setupBounds =
@@ -124,7 +134,8 @@ export function roundBoundMs(checks: readonly CheckSpec[], setup: string | undef
   const perCandidate = perCandidateSteps + declaredChecks + setupBounds
   // After a failed check, settled-base attribution can run its declared phase
   // once more, including its own worktree, setup, and protected P/C worktrees.
-  // The failed phase is unknown when the line is read, so budget all checks.
+  // A failure is final, so attribution can run at most once per candidate.
+  // Its phase is unknown when the line is read, so budget all checks.
   const attribution =
     activeChecks.length === 0
       ? 0
@@ -886,8 +897,7 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   // set it only after its declaration and absolute queue argument agreed.
   delete env.YRD_PROGRAM_ROOT
   if (programRoot !== undefined) env.YRD_PROGRAM_ROOT = programRoot
-  const timeoutMs =
-    (run.tier === "long" ? run.spec.long?.timeoutMs : undefined) ?? run.spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
+  const timeoutMs = effectiveCheckTimeoutMs(run.spec, run.tier)
   delete env.YRD_CHECK_TIMEOUT_MS
   env.YRD_CHECK_TIMEOUT_MS = String(timeoutMs)
   delete env.YRD_CHECK_TIER
