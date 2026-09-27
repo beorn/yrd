@@ -11,7 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { createLegacyBackend, gitIn, readRemoteCommit } from "../src/git.ts"
-import { readRemoteCalls, traceRemoteCalls, withRemoteSeam } from "../src/remote-calls.ts"
+import { readRemoteCalls, roundRemoteCallsRow, traceRemoteCalls, withRemoteSeam } from "../src/remote-calls.ts"
 
 const roots: string[] = []
 
@@ -61,6 +61,62 @@ describe("remote calls are counted from git's trace2 event log", () => {
     expect(calls.remoteMs).toBeGreaterThan(0)
     expect(calls.unreadable).toBe(0)
     expect(calls.processes).toBeGreaterThanOrEqual(4)
+  }, 60_000)
+
+  /** @failure A round's total hid the 15 component-main refreshes, so its beyond-refresh SSH cost was unknowable. */
+  it("keeps a proven refresh split and names the SSH commands after Trace2 is removed (26232)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-round-refresh-"))
+    roots.push(root)
+    const seed = join(root, "seed")
+    mkdirSync(seed)
+    const git = gitIn(seed)
+    await git(["init", "--quiet", "--initial-branch=main"])
+    await git([
+      "-c",
+      "user.email=calls@yrd.test",
+      "-c",
+      "user.name=yrd",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "one",
+    ])
+    const remote = join(root, "remote.git")
+    await gitIn(root)(["clone", "--quiet", "--bare", seed, remote])
+    const ssh = join(root, "fake-ssh")
+    writeFileSync(ssh, '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n')
+    chmodSync(ssh, 0o755)
+    const trace = traceRemoteCalls(join(root, "trace2"), { refresh: true })
+    const base = { ...process.env, ...trace.env, GIT_SSH_COMMAND: ssh }
+    const url = `ssh://calls.invalid${remote}`
+    await git(["remote", "add", "origin", url])
+    await gitIn(seed, undefined, undefined, { env: { ...base, GIT_SUPER_PHASE: "refresh" } })([
+      "fetch",
+      "--no-tags",
+      "origin",
+      "+refs/heads/main:refs/remotes/origin/main",
+    ])
+    await gitIn(seed, undefined, undefined, { env: base })(["ls-remote", url, "refs/heads/main"])
+    const row = roundRemoteCallsRow(trace.end())
+    expect(row).toMatchObject({
+      ssh_children: 2,
+      refresh_ssh_children: 1,
+      beyond_refresh_ssh_children: 1,
+      unreadable: 0,
+    })
+    expect(row.refresh_calls).toEqual([`1 fetch @ ${seed}`])
+    expect(row.beyond_refresh_calls).toEqual([`1 ls-remote @ ${seed}`])
+    expect(existsSync(join(root, "trace2"))).toBe(false)
+
+    // An older git-super still makes the same refresh fetch but cannot mark it;
+    // the round must warn instead of publishing a plausible zero refresh count.
+    const oldTrace = traceRemoteCalls(join(root, "old-trace2"), { refresh: true })
+    await gitIn(seed, undefined, undefined, {
+      env: { ...process.env, ...oldTrace.env, GIT_SSH_COMMAND: ssh },
+    })(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+    expect(() => roundRemoteCallsRow(oldTrace.end())).toThrow(/untagged component-main refresh/u)
+    expect(existsSync(join(root, "old-trace2"))).toBe(false)
   }, 60_000)
 
   it("removes its trace directory once it has counted it, so no round leaves its trace2 log behind", async () => {
