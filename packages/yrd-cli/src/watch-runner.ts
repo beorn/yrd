@@ -684,55 +684,14 @@ function running(pid: number): boolean {
  * (watch-words.ts), because the flow page draws the runner as a row in the same
  * STATUS column as every change.
  *
- * The ladder, and every rung of it is a fact somebody WROTE DOWN:
- *
- * 1. `stuck` / `paused` — the line is not moving BY DECISION, read from the
- *    queue's own stop record (queue-core `stopFact`). It is first because it is
- *    a GIT fact and so is readable from any clone: a stop outranks both a live
- *    check and a missing journal, because a stop halts the line and a row still
- *    marked live under one is the residue of a run that ended.
- * 2. `stopped` — the reader proved the writer gone, or its document is overdue
- *    and the watch keeps its prior stopped word for that unmeasured case.
- *    No deadline is picked here: {@link readRunnerService} reads the writer's.
- * 3. `checking` — a change is under a check RIGHT NOW **and** the document is
- *    believable. THE PREDICATE IS NOT "THE PROCESS EXISTS" (items 1 and 5): it
- *    used to be `facts.latest.alive`, and because the service is a long-running
- *    `yrd queue up --interval 120` under hab, that was true nearly always, so
- *    the marker said `running` in every state it existed to tell apart.
- *    `underCheck` is supplied by the caller from the SAME derivation the status
- *    pills use (`bucketOf(row) === "running"`, i.e. `row.live !== undefined`),
- *    so "a change is under a check" has one home and this cannot drift from the
- *    rows below it. A live row over an unbelievable document is the residue of
- *    a death, and `bandOf` sends it back to waiting while this row says why.
- * 4. `idle` — the document is believable and nothing is live.
- * 5. `?` — nothing local to read at all: no document and no journal. The runner
- *    publishes no status of its own yet, so off its machine there is nothing to
- *    read and the row says so. An implementer who invents a source to avoid
- *    printing `?` has broken S2's acceptance before S2 starts.
- *
- * THE HAND-RUNNER EDGE, last because it is the residue of the ladder: a journal
- * and no usable document, which is what `yrd queue run` by hand leaves behind
- * (24523 C5) — it writes no document at all. The only local liveness fact left
- * is the run's own pid, read above, so under a live check row a run that does
- * not answer reads `stopped` and one that does reads `checking`, which is the
- * same rung 3 with the run's pid standing in for the document. Nothing live
- * reads `idle`.
- *
- * `checking` rather than `idle` there is deliberate: the alternative draws a
- * page that contradicts itself three times over, measured 2026-09-17 on a
- * rendered hand-runner page — the header line says `checking task/x for
- * 30:00`, the change's own row says `checking`, and the runner's row between
- * them says `idle · nothing in line` above its own second line saying `alive`.
- * `holdsChange` then reads false, so the change under a check is drawn in the
- * WAITING band under a rule counting it as waiting.
- *
- * NOTHING HERE MEASURES SILENCE, and that is a ruling, not an oversight (@cto,
- * relayed by @chief). `silent` is read from the beat the runner publishes at
- * `refs/yrd/<queue>/runner` from S2. It is NOT derived from a journal's mtime,
- * and neither is any other word: {@link RunnerFacts.latest} still carries
- * `lastWriteAt` because the row's second line reports it as an age, and a
- * reading that turned that age into a word printed a red `stopped` over every
- * check that ran longer than the threshold.
+ * The queue's stop record is an authoritative Git fact and wins over any
+ * runner status. A fresh runner ref then supplies its phase on every machine;
+ * an overdue ref says `silent`. When that claim is absent or unreadable, the
+ * local health document and journal supply what they can. An empty local
+ * reading says `unpublished` rather than inventing a phase. The hand-runner
+ * case has a journal but no service document, so its own pid supplies local
+ * liveness. Journal age never supplies `silent`: a healthy long check writes
+ * no new journal boundary until it finishes.
  *
  * The incident this ladder answers is @i/10-yrd/24486 — measured 2026-09-11
  * during an outage, three rows sat queued with no live check on any of them
@@ -745,12 +704,12 @@ export function runnerWord(
   underCheck: boolean,
   stopped?: StopFact | null,
 ): RunnerState {
+  if (stopped !== undefined && stopped !== null) return stopped.change === null ? "paused" : "stuck"
   if (facts?.published?.signal === "silent") return "silent"
   if (facts?.published?.signal === "fresh") {
     const state = facts.published.claim?.State
     if (state !== undefined) return state
   }
-  if (stopped !== undefined && stopped !== null) return stopped.change === null ? "paused" : "stuck"
   switch (facts?.service.kind) {
     case "stopped":
     case "unknown":

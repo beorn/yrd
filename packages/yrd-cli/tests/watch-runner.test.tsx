@@ -458,11 +458,7 @@ describe("runnerWord, the one word", () => {
     expect(runnerWord(facts({ alive: true }), true, STUCK)).toBe("stuck")
   })
 
-  /**
-   * S1 does not invent a status source: the runner publishes none of its own
-   * until S2, so a reading with no journal of its own says so rather than
-   * guessing — and says it whether or not a stop stands.
-   */
+  /** A missing local journal and absent published claim cannot supply a phase. */
   it("is `?` with nothing local to read at all: no document and no journal", () => {
     const off: RunnerFacts = { journalDir: "/w/logs", absent: "none", service: { kind: "absent", why: "none" } }
     expect(runnerWord(off, false)).toBe("unpublished")
@@ -491,9 +487,14 @@ describe("runnerWord, the one word", () => {
       published: { signal: "fresh", claim },
     }
     expect(runnerWord(off, false)).toBe("checking")
+    // The stop is a published queue fact and can arrive after the last beat.
+    // It must outrank that fresh but now superseded health claim.
+    expect(runnerWord(off, false, PAUSED)).toBe("paused")
+    expect(runnerWord(off, false, STUCK)).toBe("stuck")
     expect(runnerLine(off, NOW).holds).toContain("task/one@")
     const silent: RunnerFacts = { ...off, published: { signal: "silent", claim } }
     expect(runnerWord(silent, false)).toBe("silent")
+    expect(runnerWord(silent, false, PAUSED)).toBe("paused")
     expect(runnerLine(silent, NOW).holds).toContain("runner silent since")
   })
 
