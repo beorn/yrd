@@ -5,12 +5,22 @@
  * @level l2 (`coreQueueCommand` against a real remote and clone)
  * @consumer Every queue command.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   CHANGE_STATUSES,
+  MIRROR_REFRESHED_AT,
   assertPlainEventQueueConfig,
   changeInput,
   changesRef,
@@ -25,6 +35,7 @@ import {
   readConfig,
   readEventQueue,
   readEventQueueWithChanges,
+  readRemoteCalls,
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
   watchRows,
@@ -32,6 +43,7 @@ import {
 import { openEvents } from "gitomic/events"
 import { assertEventListingFence, coreQueueCommand, openEventDetail } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { issueResolver } from "../src/issue-resolver.ts"
 import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
@@ -129,7 +141,126 @@ async function createQueue(repo: string, queue: string, commit: string, at: Date
   return createEventQueue(createEventStore(repo, remote, git.selection), queue, commit, config, at)
 }
 
+it("reads a fresh queue-owned store without remote Git calls and refreshes once on a miss (25626)", async () => {
+  const repo = await world('checks:\n  - verify: {run: "true"}\n')
+  const git = gitIn(repo)
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+  const root = dirname(repo)
+  const remote = join(root, "remote.git")
+  const owned = join(root, "owned")
+  await gitIn(root)(["clone", "--quiet", "--no-checkout", remote, owned])
+  const options = {
+    json: true,
+    queue: "main",
+    workdir: join(root, "queue"),
+    localStatusStore: { path: owned, transport: remote },
+  } as const
+  const previousTrace = process.env.GIT_TRACE2_EVENT
+  const firstTrace = join(root, "first-trace")
+  const warmTrace = join(root, "warm-trace")
+  mkdirSync(firstTrace)
+  mkdirSync(warmTrace)
+  try {
+    process.env.GIT_TRACE2_EVENT = firstTrace
+    const first = capture(repo)
+    expect(await coreQueueCommand(repo, first.io, { command: "list" }, options), first.stderr()).toBe(0)
+    expect(JSON.parse(first.stdout())).toMatchObject({ source: "local", asOf: expect.any(String) })
+    expect(readRemoteCalls(firstTrace).verbs.fetch).toBe(1)
+
+    process.env.GIT_TRACE2_EVENT = warmTrace
+    const warm = capture(repo)
+    expect(await coreQueueCommand(repo, warm.io, { command: "list" }, options), warm.stderr()).toBe(0)
+    const shown = capture(repo)
+    expect(
+      await coreQueueCommand(repo, shown.io, { command: "show", branch: "task/absent" }, options),
+      shown.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(shown.stdout())).toMatchObject({ source: "local", asOf: expect.any(String) })
+    expect(readRemoteCalls(warmTrace).verbs).toEqual({})
+    expect(readRemoteCalls(warmTrace).unreadable).toBe(0)
+  } finally {
+    if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT
+    else process.env.GIT_TRACE2_EVENT = previousTrace
+  }
+  await expect(
+    coreQueueCommand(
+      repo,
+      capture(repo).io,
+      { command: "list" },
+      {
+        ...options,
+        localStatusStore: { path: join(root, "absent"), transport: remote },
+      },
+    ),
+  ).rejects.toThrow(join(root, "absent"))
+  writeFileSync(join(owned, MIRROR_REFRESHED_AT), "{broken\n")
+  await expect(coreQueueCommand(repo, capture(repo).io, { command: "list" }, options)).rejects.toThrow(
+    join(owned, MIRROR_REFRESHED_AT),
+  )
+  await gitIn(owned)(["checkout", "--quiet", "main"])
+  unlinkSync(join(owned, MIRROR_REFRESHED_AT))
+  await expect(coreQueueCommand(repo, capture(repo).io, { command: "list" }, options)).rejects.toThrow(
+    "index with checked-out files",
+  )
+})
+
+it("refreshes local status after an event queue write in the same workdir (25626)", async () => {
+  const repo = await world("{}\n")
+  const git = gitIn(repo)
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+  const workdir = join(dirname(repo), "queue")
+  const owned = join(workdir, "repo")
+  const remote = join(dirname(repo), "remote.git")
+  mkdirSync(workdir)
+  await gitIn(workdir)(["clone", "--quiet", "--no-checkout", remote, owned])
+  const options = { json: true, queue: "main", workdir, localStatusStore: { path: owned, transport: remote } } as const
+  const before = capture(repo)
+  expect(await coreQueueCommand(repo, before.io, { command: "list" }, options), before.stderr()).toBe(0)
+  expect(JSON.parse(before.stdout())).toMatchObject({ stopped: null })
+
+  const paused = capture(repo)
+  expect(
+    await coreQueueCommand(
+      repo,
+      paused.io,
+      { command: "pause", by: "@dev/11", reason: "repair" },
+      { json: true, queue: "main", workdir },
+    ),
+    paused.stderr(),
+  ).toBe(0)
+  const previousTrace = process.env.GIT_TRACE2_EVENT
+  const trace = join(dirname(repo), "after-write-trace")
+  mkdirSync(trace)
+  try {
+    process.env.GIT_TRACE2_EVENT = trace
+    const after = capture(repo)
+    expect(await coreQueueCommand(repo, after.io, { command: "list" }, options), after.stderr()).toBe(0)
+    expect(JSON.parse(after.stdout())).toMatchObject({ source: "local", stopped: { by: "@dev/11", cause: "operator" } })
+    const warm = capture(repo)
+    expect(await coreQueueCommand(repo, warm.io, { command: "list" }, options), warm.stderr()).toBe(0)
+    expect(readRemoteCalls(trace).verbs).toEqual({ fetch: 1 })
+  } finally {
+    if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT
+    else process.env.GIT_TRACE2_EVENT = previousTrace
+  }
+})
+
 describe("a queue is the selected origin branch carrying config", () => {
+  it("refuses an option-shaped raw issue before invoking the target resolver", async () => {
+    const command = ["sh", "-c", 'touch resolver-ran; printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"]
+    const repo = await world(`issueResolver: ${JSON.stringify(command)}\n`)
+    const git = gitIn(repo)
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture lost target issue resolver")
+    const resolve = issueResolver(config, repo)
+    if (resolve === undefined) throw new Error("fixture lost target issue resolver")
+    await expect(resolve("--repo=/x/state-model")).rejects.toThrow(/raw issue reference.*starts with '-'/u)
+    expect(existsSync(join(repo, "resolver-ran"))).toBe(false)
+  })
+
   it("uses the target's issue resolver even when the candidate changes its declaration", async () => {
     const targetResolver = ["sh", "-c", 'printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"]
     const repo = await world(`issueResolver: ${JSON.stringify(targetResolver)}\n`)
@@ -435,9 +566,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).changes
     expect(allHistory.filter((row) => row.branch === branch)).toEqual(history)
     const cliBulk = capture(repo)
-    expect(await runYrdProcess(["bun", "yrd", "queue", "show", "--all", "--json", "--queue", "main"], cliBulk.io)).toBe(
-      0,
-    )
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "show", "--all", "--json", "--fresh", "--queue", "main"], cliBulk.io),
+    ).toBe(0)
     expect(
       (JSON.parse(cliBulk.stdout()) as { changes: readonly { branch: string }[] }).changes.filter(
         (row) => row.branch === branch,
@@ -1935,7 +2066,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       ]) {
         const run = capture(nested)
         expect(
-          await runYrdProcess(["bun", "yrd", ...command, "--queue", selector, "--json"], run.io),
+          await runYrdProcess(
+            ["bun", "yrd", ...command, "--queue", selector, "--json", ...(command[0] === "watch" ? [] : ["--fresh"])],
+            run.io,
+          ),
           run.stderr(),
         ).toBe(0)
         expect(run.stdout()).toContain("task/topic")

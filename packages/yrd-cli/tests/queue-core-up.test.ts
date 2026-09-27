@@ -16,6 +16,7 @@
  */
 
 import * as fs from "node:fs"
+import { execFileSync } from "node:child_process"
 import {
   chmodSync,
   cpSync,
@@ -1090,7 +1091,13 @@ describe("yrd queue up, the service", () => {
     const off = rows.filter((row) => row.message.startsWith("the relaunch exit is off"))
     expect(off, JSON.stringify(rows)).toHaveLength(1)
     expect(off[0]?.level).toBe("warn")
-    expect(off[0]?.message).toContain("records no gitlink")
+    // Inside hh a superproject records this runtime, so the captured target is what lacks the gitlink; a
+    // standalone clone has no superproject at all, and the line says that instead.
+    const yrdRoot = resolve(import.meta.dirname, "../../..")
+    const superproject = execFileSync("git", ["-C", yrdRoot, "rev-parse", "--show-superproject-working-tree"], {
+      encoding: "utf8",
+    }).trim()
+    expect(off[0]?.message).toContain(superproject === "" ? "no superproject records" : "records no gitlink")
     // And it reaches stderr too, so a person watching the service sees it
     // without a log level set.
     expect(run.stderr()).toContain("the relaunch exit is off")
@@ -3250,11 +3257,17 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     return (await w.git(["merge-base", head, await mainAt(w)])).trim() === head
   }
 
-  /** The stop `yrd list --json` reads: `null` while the line runs. */
+  /** The same event stop that queue list and the runner read. */
   async function stopOf(w: World): Promise<unknown> {
-    const listed = await yrd(w, "list", "--json")
-    expect(listed.exitCode, listed.report).toBe(0)
-    return (JSON.parse(listed.stdout) as { stopped: unknown }).stopped
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const { stop } = await readEventOps(store, w.git, "main", await mainAt(w))
+    return stop === undefined
+      ? null
+      : {
+          by: stop.by,
+          cause: stop.cause,
+          change: stop.change === undefined ? null : `${stop.change.branch}@${stop.change.head}`,
+        }
   }
 
   /**

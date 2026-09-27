@@ -39,23 +39,25 @@
     "fix": "oxlint --fix . && oxfmt --write ."
   },
   "dependencies": {
-    "@silvery/ansi": "^0.24.0",
-    "@silvery/commander": "^0.24.0",
-    "@silvery/scope": "^0.24.0",
-    "loggily": "^0.11.0",
+    "@silvery/ansi": "^0.25.0",
+    "@silvery/commander": "^0.25.0",
+    "@silvery/scope": "^0.25.0",
+    "loggily": "github:beorn/loggily#1d92a8d782daf8e9d2a5131d7dec988f2f1d0a0b",
     "react": "^19.2.0",
-    "silvery": "^0.24.2",
+    "silvery": "^0.25.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
     "@types/react": "^19.2.0",
+    "@yrd/queue-core": "workspace:*",
+    "git-super": "^0.1.0",
     "typescript": "^6.0.3",
     "vitest": "4.1.9"
   },
   "overrides": {
-    "git-super": "github:beorn/git-super#664111e05ea704f052352be4fdb741964c60e5fb",
-    "gitomic": "^0.4.0",
-    "loggily": "^0.11.0"
+    "git-super": "github:beorn/git-super#e9e427473c540e0a2ea0e3dfdfce68da5f48f040",
+    "gitomic": "github:beorn/gitomic#2a7f47cbb5b61a0bfe6b936c62fa796fcd96b62c",
+    "loggily": "github:beorn/loggily#1d92a8d782daf8e9d2a5131d7dec988f2f1d0a0b"
   }
 }

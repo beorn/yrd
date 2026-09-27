@@ -7,12 +7,13 @@
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn } from "../src/git.ts"
 import type { LogWrite } from "../src/log.ts"
 import { GitlinkNotOnRemote, populateReferenceStores, ReferenceUnpopulated } from "../src/reference.ts"
 import { freshWorktree } from "../src/worktree.ts"
+import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
@@ -34,10 +35,6 @@ const author = ["-c", "user.email=reference@yrd.test", "-c", "user.name=yrd"] as
  * test asserting that the compose refuses would then be asserting something
  * about the machine it ran on.
  */
-const gitSuperBin = resolve(import.meta.dirname, "../../../../git-super/bin")
-if (!existsSync(gitSuperBin)) {
-  throw new Error(`git-super bin directory not found at ${gitSuperBin}`)
-}
 const superEnv = { ...process.env, PATH: `${gitSuperBin}:${process.env.PATH ?? ""}` }
 
 /** A Git that composes through the pinned build, and hands the same PATH to whatever it starts. */

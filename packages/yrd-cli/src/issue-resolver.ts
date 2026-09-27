@@ -10,6 +10,11 @@ export function issueResolver(config: QueueConfig, cwd: string, env?: NodeJS.Pro
     let pending = cache.get(raw)
     if (pending !== undefined) return pending
     pending = (async () => {
+      if (raw.startsWith("-")) {
+        throw new Error(
+          `target .yrd.yml issueResolver raw issue reference ${JSON.stringify(raw)} starts with '-' and would be parsed as an option; no resolver command ran`,
+        )
+      }
       const argv = [...command, raw]
       const label = JSON.stringify(command)
       await using process = createProcess({ cwd, env })

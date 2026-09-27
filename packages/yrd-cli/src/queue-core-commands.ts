@@ -14,6 +14,7 @@
  */
 
 import {
+  existsSync,
   appendFileSync,
   mkdirSync,
   mkdtempSync,
@@ -45,11 +46,13 @@ import {
   eventRows,
   enumerateChangeSegments,
   createEventStore,
+  createLocalEventStore,
   selectionFor,
   listRefs,
   queueFormat,
   queueRef,
   queueRefPrefix,
+  parseChangeRef,
   changesRef,
   readChangeEvents,
   readEventQueue,
@@ -82,6 +85,8 @@ import {
   preparePinCarrier,
   freshnessLine,
   readRemoteCommit,
+  refreshMirror,
+  invalidateMirrorStamp,
   refAt,
   readDrafts,
   submit,
@@ -95,6 +100,7 @@ import {
   parseUntil,
   type OverrideFact,
   type OverrideEntry,
+  type QueueReadStore,
   type OverrideTable,
   type PinCarrierPin,
   notifyOutsideRound,
@@ -474,6 +480,8 @@ export async function coreQueueCommand(
     selection?: GitSelection
     /** A terminal with a keyboard on the other end: the watch draws its pane instead of printing rounds. */
     interactive?: boolean
+    /** One-shot list/show opt-in: an existing queue-owned clone, never a writer's authority. */
+    localStatusStore?: Readonly<{ path: string; transport: string }>
     /**
      * Whether `repo` is the queue's own clone (`QueueLocation.owned`). Only
      * then may a compose populate the submodule stores it borrows from;
@@ -508,6 +516,15 @@ export async function coreQueueCommand(
   // its environment. A dry run pushes nothing and is not counted.
   using traced = submitCalls(request, options.env, io)
   const env = traced.env
+  if (options.localStatusStore !== undefined) {
+    if (request.command !== "list" && request.command !== "show") {
+      throw new Error("the local queue status store is only for list/show")
+    }
+    if (!existsSync(options.localStatusStore.path)) {
+      throw new Error(`queue status store ${options.localStatusStore.path} is absent`)
+    }
+    repo = options.localStatusStore.path
+  }
   const selection = options.selection ?? (await resolveGitSelection(repo, { env }))
   const git = gitIn(repo, undefined, selection, { env })
   const log = options.log?.child("queue")
@@ -515,6 +532,52 @@ export async function coreQueueCommand(
   const queue = options.queue ?? (await originHead(git))
   const target = { branch: queue, remote }
   const targetLabel = `${remote}/${queue}`
+  const localStatus = options.localStatusStore
+  let statusAsOf: string | undefined
+  if (localStatus !== undefined) {
+    const actual = await remoteUrl(git, remote)
+    if (actual !== localStatus.transport) {
+      throw new Error(`queue status store ${repo} has ${remote} ${actual}, expected ${localStatus.transport}`)
+    }
+    // The event prefix and all heads include the target, every chain and every draft.
+    // A 60 s window is below ADR-0022's 120 s age disclosure, matches watch's
+    // process cache, and is shorter than the measured queue round cadence.
+    const refspecs = [
+      `+refs/heads/${queue}:refs/heads/${queue}`,
+      `+${queueRefPrefix(queue)}/*:${queueRefPrefix(queue)}/*`,
+      "+refs/heads/*:refs/heads/*",
+    ]
+    const refreshed = await refreshMirror({
+      path: repo,
+      url: actual,
+      gitIn: (cwd) => gitIn(cwd, undefined, selection, { env }),
+      refspecs,
+      maxAgeMs: 60_000,
+    })
+    statusAsOf = refreshed.refreshedAt.toISOString()
+  }
+  const statusSource = localStatus === undefined ? "remote" : "local"
+  const statusFact = () => ({ source: statusSource, asOf: statusAsOf ?? new Date().toISOString() })
+  const statusLine = (): string => {
+    const { asOf } = statusFact()
+    const ageMs = Date.now() - Date.parse(asOf)
+    return `Source: ${statusSource}; as of ${asOf}${ageMs < 120_000 ? "" : ` (${Math.floor(ageMs / 1000)}s old)`}.`
+  }
+  const statusEventStore = (eventRemote: string): QueueReadStore =>
+    localStatus === undefined ? createEventStore(repo, eventRemote, selection) : createLocalEventStore(repo, selection)
+  const refuseMissingEventMarker = async (eventRemote: string, name: string): Promise<never> => {
+    const prefix = queueRefPrefix(name)
+    const refs = await listRefs(`${prefix}/`, statusEventStore(eventRemote))
+    if (refs.size === 0) {
+      throw new Error(`no queue exists at ${prefix}/ in queue status store ${repo}: observed no refs under that prefix`)
+    }
+    const legacy = [...refs.keys()].find((ref) => parseChangeRef(name, ref) !== undefined)
+    const observed =
+      legacy === undefined
+        ? `no event marker ${queueRef(name)} and no legacy change ref under ${prefix}/`
+        : `no event marker ${queueRef(name)}; observed legacy change ref ${legacy}`
+    throw new Error(`queue status store ${repo} has ${observed}; use --fresh for this reading`)
+  }
   type CapturedDeclaration = Readonly<{ config: QueueConfig; oid: string }>
   // The target's declaration as the target holds it now: fetched, read in full
   // and held to its keys, then the remote it names resolved. Undefined when the
@@ -523,7 +586,10 @@ export async function coreQueueCommand(
   // one-shot command; the service reads again before every round, so an edit at
   // the target takes effect on the next round.
   const declaration = async (): Promise<CapturedDeclaration | undefined> => {
-    const oid = await readRemoteCommit(git, remote, `refs/heads/${queue}`)
+    const oid =
+      localStatus === undefined
+        ? await readRemoteCommit(git, remote, `refs/heads/${queue}`)
+        : await refAt(git, `refs/heads/${queue}`)
     if (oid === undefined) throw new Error(`the target ${targetLabel} is not at ${remote}`)
     let declared: QueueConfig | undefined
     try {
@@ -549,6 +615,26 @@ export async function coreQueueCommand(
   const resolveIssue = issueResolver(config, repo, env)
   const workdir = options.workdir ?? (await workdirOf(git))
   mkdirSync(workdir, { recursive: true })
+  const invalidateStatusSnapshot = async (): Promise<void> => {
+    // The queue-owned clone is the list/show reader. A remote write can leave
+    // its refs and 60-second stamp behind, so its next read must fetch once.
+    await invalidateMirrorStamp(join(workdir, "repo"), await remoteUrl(git, config.target.remote))
+  }
+  const directWriter =
+    request.command === "pause" ||
+    request.command === "resume" ||
+    request.command === "withdraw" ||
+    request.command === "drop" ||
+    request.command === "ignore" ||
+    request.command === "unignore" ||
+    request.command === "merge" ||
+    (request.command === "submit" && request.dryRun !== true) ||
+    (request.command === "override" && request.action !== "list")
+  await using _invalidateAfterWriter = {
+    async [Symbol.asyncDispose](): Promise<void> {
+      if (directWriter) await invalidateStatusSnapshot()
+    },
+  }
 
   /** The one shape a command that could not judge answers with (plan § The queue run). */
   const stuck = (why: string): YrdCliExitCode => {
@@ -748,7 +834,16 @@ export async function coreQueueCommand(
       if (declared === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
       const before = await round.before?.(declared)
       if (before !== undefined) return before
-      const outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck)
+      let outcome: Awaited<ReturnType<typeof oneRound>>
+      try {
+        outcome = await oneRound(declared, round.only, round.tier, round.stopAtMs, round.noCheck)
+      } finally {
+        // An otherwise empty round can still publish queue observations or
+        // cleanup. Long foreground runs repeat rounds before command exit.
+        if (request.command === "up" || request.command === "run" || request.command === "merge") {
+          await invalidateStatusSnapshot()
+        }
+      }
       return outcome === undefined ? 2 : "kind" in outcome ? outcome : { declared, outcome }
     } finally {
       lock.release()
@@ -1996,7 +2091,14 @@ export async function coreQueueCommand(
       > => {
         // JSON keeps one row per opened segment and per local run. The human
         // table keeps each branch's current segment only.
-        const reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, eventStore, {
+        const selectedStore = statusEventStore(declared.config.target.remote)
+        if (
+          localStatus !== undefined &&
+          (await queueFormat(selectedStore, declared.config.target.branch)) === "legacy"
+        ) {
+          await refuseMissingEventMarker(declared.config.target.remote, declared.config.target.branch)
+        }
+        const reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, selectedStore, {
           all: request.all,
           drafts: request.drafts,
         })
@@ -2031,11 +2133,12 @@ export async function coreQueueCommand(
           config.ignore.length === 0
             ? undefined
             : `Excluded draft heads matching .yrd.yml ignore: ${config.ignore.map((pattern) => JSON.stringify(pattern)).join(", ")}.`
-        const scopeParts = [baseScope, filteredScope, ignoreScope].filter((part) => part !== undefined)
+        const scopeParts = [statusLine(), baseScope, filteredScope, ignoreScope].filter((part) => part !== undefined)
         const scope = scopeParts.length === 0 ? undefined : scopeParts.join(" ")
         return {
           observation,
           data: {
+            ...statusFact(),
             observation,
             changes: documentRows.map((row) => row.row),
             journal: journalFact(journals),
@@ -2552,16 +2655,16 @@ export async function coreQueueCommand(
         io.stderr("yrd: queue show needs a branch or --all --json\n")
         return 2
       }
+      if (options.json !== true) io.stdout(`${statusLine()}\n`)
       {
-        const reading = await readEventListing(
-          git,
-          config,
-          repo,
-          workdir,
-          captured.oid,
-          createEventStore(repo, config.target.remote, selection),
-          { all: true, directHistory: request.all === true },
-        )
+        const selectedStore = statusEventStore(config.target.remote)
+        if (localStatus !== undefined && (await queueFormat(selectedStore, config.target.branch)) === "legacy") {
+          await refuseMissingEventMarker(config.target.remote, config.target.branch)
+        }
+        const reading = await readEventListing(git, config, repo, workdir, captured.oid, selectedStore, {
+          all: true,
+          directHistory: request.all === true,
+        })
         if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
           io.stderr(`${reading.observation.message}\n`)
           return 2
@@ -2618,6 +2721,7 @@ export async function coreQueueCommand(
           io,
           options.json,
           {
+            ...statusFact(),
             queue: name,
             changes: histories,
             journal: journalFact(reading.journals),
@@ -3682,7 +3786,7 @@ export async function readEventListing(
   repo: string,
   workdir: string,
   targetOid: string,
-  store: ReturnType<typeof createEventStore>,
+  store: QueueReadStore,
   options: Readonly<{
     all?: boolean
     directHistory?: boolean

@@ -57,16 +57,22 @@ export type MirrorRefresh = Readonly<{
   refreshedAt: Date
 }>
 
-export type RefreshMirrorOptions = Readonly<{
-  /** The store root; the mirror is at {@link mirrorLocation}'s path under it. */
-  root: string
-  url: string
-  /** One Git bound to a directory, as the caller instruments it (reference.ts takes the same). */
-  gitIn: (cwd: string) => Git
-  /** Skip the remote when the last refresh is younger than this. Absent: always refresh. */
-  maxAgeMs?: number
-  lockWaitMs?: number
-}>
+export type MirrorStamp = Readonly<{ at: Date; remote: string; refspecs: readonly string[] }>
+
+export type RefreshMirrorOptions = Readonly<
+  {
+    url: string
+    /** One Git bound to a directory, as the caller instruments it (reference.ts takes the same). */
+    gitIn: (cwd: string) => Git
+    /** Skip the remote when the last refresh is younger than this. Absent: always refresh. */
+    maxAgeMs?: number
+    lockWaitMs?: number
+    /** Exact refs the display reads. An owned queue clone supplies these. */
+    refspecs?: readonly string[]
+  } & ({ root: string; path?: never } | { path: string; root?: never })
+>
+
+const MIRROR_REFSPECS = ["+refs/*:refs/*"] as const
 
 /** A mirror that could not be created, refreshed or locked; the message names which and why. */
 export class MirrorUnavailable extends Error {
@@ -97,13 +103,65 @@ export function mirrorLocation(root: string, url: string): MirrorLocation | unde
   return { host, owner, repo, path: join(root, host, owner, `${repo}.git`) }
 }
 
-/** The last completed refresh of the mirror at `path`, or undefined when it has none. */
+/** The last completed, scoped refresh. An older instant alone certifies no ref set. */
+function readMirrorStamp(path: string): MirrorStamp | undefined {
+  const stamp = join(path, MIRROR_REFRESHED_AT)
+  if (!existsSync(stamp)) return undefined
+  const raw = readFileSync(stamp, "utf8").trim()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error(`${stamp} has no complete remote/refspec freshness record`)
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${stamp} has no complete remote/refspec freshness record`)
+  }
+  const record = parsed as Record<string, unknown>
+  const at = new Date(typeof record.at === "string" ? record.at : "")
+  if (
+    Number.isNaN(at.getTime()) ||
+    at.getTime() > Date.now() + 5_000 ||
+    typeof record.remote !== "string" ||
+    record.remote === "" ||
+    !Array.isArray(record.refspecs) ||
+    record.refspecs.length === 0 ||
+    !record.refspecs.every((ref) => typeof ref === "string" && ref !== "")
+  ) {
+    throw new Error(`${stamp} has no complete remote/refspec freshness record`)
+  }
+  return { at, remote: record.remote, refspecs: record.refspecs as string[] }
+}
+
+/** The last completed refresh instant; kept as a Date for existing callers. */
 export function mirrorRefreshedAt(path: string): Date | undefined {
   const stamp = join(path, MIRROR_REFRESHED_AT)
   if (!existsSync(stamp)) return undefined
-  const read = new Date(readFileSync(stamp, "utf8").trim())
-  if (Number.isNaN(read.getTime())) throw new Error(`${stamp} holds no instant`)
-  return read
+  const raw = readFileSync(stamp, "utf8").trim()
+  const legacy = new Date(raw)
+  if (!Number.isNaN(legacy.getTime())) return legacy
+  return readMirrorStamp(path)?.at
+}
+
+function recordedScope(path: string, legacyMayRefresh: boolean): MirrorStamp | undefined {
+  if (mirrorRefreshedAt(path) === undefined) return undefined
+  try {
+    return readMirrorStamp(path)
+  } catch (error) {
+    if (legacyMayRefresh && existsSync(join(path, MIRROR_REFRESHED_AT))) {
+      const raw = readFileSync(join(path, MIRROR_REFRESHED_AT), "utf8").trim()
+      if (!Number.isNaN(new Date(raw).getTime())) return undefined
+    }
+    throw error
+  }
+}
+
+function covers(stamp: MirrorStamp | undefined, remote: string, refspecs: readonly string[]): stamp is MirrorStamp {
+  return (
+    stamp !== undefined &&
+    stamp.remote === remote &&
+    refspecs.every((ref) => stamp.refspecs.includes(ref) || stamp.refspecs.includes("+refs/*:refs/*"))
+  )
 }
 
 /**
@@ -116,11 +174,16 @@ export function mirrorRefreshedAt(path: string): Date | undefined {
  */
 export async function refreshMirror(options: RefreshMirrorOptions): Promise<MirrorRefresh> {
   const started = Date.now()
-  const location = mirrorLocation(options.root, options.url)
-  if (location === undefined) {
+  const location = options.path === undefined ? mirrorLocation(options.root, options.url) : undefined
+  if (options.path === undefined && location === undefined) {
     throw new MirrorUnavailable(options.url, undefined, `${options.url} names no hosted repository`)
   }
-  const { path } = location
+  const path = options.path ?? (location as MirrorLocation).path
+  if (options.path !== undefined && !existsSync(path)) {
+    throw new MirrorUnavailable(options.url, path, "the selected queue store is absent")
+  }
+  const remote = "origin"
+  const refspecs = options.refspecs ?? MIRROR_REFSPECS
   const asked = new Date()
   const result = async (outcome: MirrorRefresh["outcome"], refreshedAt: Date): Promise<MirrorRefresh> => ({
     url: options.url,
@@ -130,19 +193,58 @@ export async function refreshMirror(options: RefreshMirrorOptions): Promise<Mirr
     bytes: await storeBytes(options.gitIn(path)),
     refreshedAt,
   })
-  const before = mirrorRefreshedAt(path)
-  if (options.maxAgeMs !== undefined && before !== undefined && asked.getTime() - before.getTime() < options.maxAgeMs) {
-    return result("fresh", before)
+  const before = recordedScope(path, options.path === undefined)
+  if (options.path !== undefined && before !== undefined && !covers(before, remote, refspecs)) {
+    throw new MirrorUnavailable(
+      options.url,
+      path,
+      `${join(path, MIRROR_REFRESHED_AT)} does not cover the requested remote and refs`,
+    )
+  }
+  if (
+    options.maxAgeMs !== undefined &&
+    covers(before, remote, refspecs) &&
+    asked.getTime() - before.at.getTime() < options.maxAgeMs
+  ) {
+    return result("fresh", before.at)
   }
   using _lock = await lockMirror(options.url, path, options.lockWaitMs ?? MIRROR_LOCK_WAIT_MS)
-  const meanwhile = mirrorRefreshedAt(path)
-  if (meanwhile !== undefined && meanwhile.getTime() >= asked.getTime()) return await result("coalesced", meanwhile)
+  const meanwhile = recordedScope(path, options.path === undefined)
+  if (options.path !== undefined && meanwhile !== undefined && !covers(meanwhile, remote, refspecs)) {
+    throw new MirrorUnavailable(
+      options.url,
+      path,
+      `${join(path, MIRROR_REFRESHED_AT)} does not cover the requested remote and refs`,
+    )
+  }
+  if (covers(meanwhile, remote, refspecs) && meanwhile.at.getTime() >= asked.getTime()) {
+    return await result("coalesced", meanwhile.at)
+  }
   const outcome = existsSync(path) ? await fetchMirror(options, path) : await createMirror(options, path)
   const refreshedAt = new Date()
   const stamp = join(path, MIRROR_REFRESHED_AT)
-  writeFileSync(`${stamp}.tmp`, `${refreshedAt.toISOString()}\n`)
+  writeFileSync(`${stamp}.tmp`, `${JSON.stringify({ at: refreshedAt.toISOString(), remote, refspecs })}\n`)
   renameSync(`${stamp}.tmp`, stamp)
   return await result(outcome, refreshedAt)
+}
+
+/**
+ * A queue writer invalidates the local status view after publishing remote refs.
+ * Use the refresh lock so an in-flight fetch cannot publish a fresh stamp after
+ * this unlink. An absent store has no cached view and its first reader creates it.
+ */
+export async function invalidateMirrorStamp(path: string, url: string): Promise<void> {
+  if (!existsSync(path)) return
+  try {
+    using _lock = await lockMirror(url, path, MIRROR_LOCK_WAIT_MS)
+    rmSync(join(path, MIRROR_REFRESHED_AT), { force: true })
+  } catch (error) {
+    throw new MirrorUnavailable(
+      url,
+      path,
+      `status stamp could not be invalidated: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
 }
 
 async function lockMirror(url: string, path: string, waitMs: number): Promise<FlockHandle> {
@@ -191,7 +293,21 @@ async function createMirror(options: RefreshMirrorOptions, path: string): Promis
 
 async function fetchMirror(options: RefreshMirrorOptions, path: string): Promise<"fetched"> {
   try {
-    await options.gitIn(path)(["fetch", "--prune", "--quiet", "origin"])
+    if (options.path !== undefined) {
+      const git = options.gitIn(path)
+      const bare = (await git(["rev-parse", "--is-bare-repository"])).trim() === "true"
+      if (!bare && (await git(["ls-files", "--stage"])).trim() !== "") {
+        throw new Error(`${path} has an index with checked-out files; scoped refresh cannot update its HEAD branch`)
+      }
+    }
+    await options.gitIn(path)([
+      "fetch",
+      "--prune",
+      "--quiet",
+      ...(options.path === undefined ? [] : ["--update-head-ok"]),
+      "origin",
+      ...(options.refspecs ?? []),
+    ])
   } catch (error) {
     throw new MirrorUnavailable(options.url, path, remoteFailure("fetching", error))
   }
@@ -219,13 +335,16 @@ async function storeBytes(git: Git): Promise<number> {
 /** One declared submodule whose mirror was not refreshed or whose own declarations were not read. */
 export type MirrorSkip = Readonly<{ path: string; url: string; reason: string }>
 
-export type RefreshDeclaredOptions = Omit<RefreshMirrorOptions, "url"> &
-  Readonly<{
-    /** The repository whose declarations are read. */
-    repo: string
-    /** The commit whose `.gitmodules` is read; nested levels are read at their gitlinks, inside their mirrors. */
-    commit?: string
-  }>
+export type RefreshDeclaredOptions = Readonly<{
+  root: string
+  gitIn: (cwd: string) => Git
+  maxAgeMs?: number
+  lockWaitMs?: number
+  /** The repository whose declarations are read. */
+  repo: string
+  /** The commit whose `.gitmodules` is read; nested levels are read at their gitlinks, inside their mirrors. */
+  commit?: string
+}>
 
 /**
  * Refresh the mirror of every hosted repository `commit` declares, at every
@@ -258,7 +377,18 @@ export async function refreshDeclaredMirrors(
         skipped.push({ path: named, url, reason: `${url} names no hosted repository` })
         continue
       }
-      if (!refreshed.has(location.path)) refreshed.set(location.path, await refreshMirror({ ...options, url }))
+      if (!refreshed.has(location.path)) {
+        refreshed.set(
+          location.path,
+          await refreshMirror({
+            root: options.root,
+            url,
+            gitIn: options.gitIn,
+            ...(options.maxAgeMs === undefined ? {} : { maxAgeMs: options.maxAgeMs }),
+            ...(options.lockWaitMs === undefined ? {} : { lockWaitMs: options.lockWaitMs }),
+          }),
+        )
+      }
       const mirror = options.gitIn(location.path)
       if (!(await holdsCommit(mirror, sha))) {
         skipped.push({

@@ -28,6 +28,7 @@
  */
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
+import { join } from "node:path"
 import { drainOutput } from "loggily"
 import { parseDuration } from "@yrd/queue-core"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
@@ -35,7 +36,7 @@ import { closeEnvironment, listEnvironments, openEnvironment } from "./env-comma
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere } from "./declaration.ts"
-import { resolveQueueLocation } from "./queue-location.ts"
+import { resolveQueueLocation, type QueueLocation } from "./queue-location.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { legendLines } from "./watch-words.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
@@ -651,6 +652,10 @@ function buildProgram(
    * are what the reader wanted.
    */
   const interactiveHere = (): boolean => process.stdin.isTTY === true && process.stdout.isTTY === true
+  const localStatusStore = (location: QueueLocation): Readonly<{ path: string; transport: string }> => {
+    if (location.address === undefined) throw new Error(`queue at ${location.repo} has no selected address`)
+    return { path: join(location.workdir, "repo"), transport: location.address.transport }
+  }
 
   /**
    * `queue list` and `yrd watch` are ONE command (README 1069): the alias is
@@ -698,6 +703,7 @@ function buildProgram(
       .option("--drafts", "include unsubmitted branch heads on event queues")
       .option("--status <state>", "select by state: exactly the same as giving <state> as a filter term")
       .option("--json", "emit stable JSON: result belongs to the run named by run; state is the current change state")
+      .option("--fresh", "ask the remote instead of the queue-owned local status store")
       .option("--queue <value>", QUEUE_HELP)
       .option("--interval <seconds>", "seconds between refreshes while watching (default 5)", int)
       .option(
@@ -710,7 +716,7 @@ function buildProgram(
   const STATES_HELP = legendLines().join("\n")
   const WATCH_FLAG_HELP = "refresh until the selected change ends, exiting with its code as yrd check does"
   const queueList = async (filters: readonly string[] | undefined, options: unknown): Promise<void> => {
-    const { interval, json, latest, status, watch, queue, requireMatch, all, drafts } = options as {
+    const { interval, json, latest, status, watch, queue, requireMatch, all, drafts, fresh } = options as {
       interval?: number
       json?: boolean
       latest?: boolean
@@ -720,6 +726,7 @@ function buildProgram(
       requireMatch?: boolean
       all?: boolean
       drafts?: boolean
+      fresh?: boolean
     }
     const location = await resolveQueueLocation(cwd(), queue, env, "reader")
     const taken = await coreQueueCommand(
@@ -734,6 +741,7 @@ function buildProgram(
         json,
         env,
         interactive: interactiveHere(),
+        ...(fresh === true || watch === true ? {} : { localStatusStore: localStatusStore(location) }),
         log: log(),
       },
     )
@@ -798,9 +806,10 @@ function buildProgram(
     .description("the branch's changes, each check's result and log")
     .option("--all", "all branches and their change segments as JSON")
     .option("--json", "emit stable JSON")
+    .option("--fresh", "ask the remote instead of the queue-owned local status store")
     .option("--queue <value>", QUEUE_HELP)
     .action(async (branch, options) => {
-      const { all, json, queue } = options as { all?: boolean; json?: boolean; queue?: string }
+      const { all, json, queue, fresh } = options as { all?: boolean; json?: boolean; queue?: string; fresh?: boolean }
       const location = await resolveQueueLocation(cwd(), queue, env, "reader")
       const taken = await coreQueueCommand(
         location.repo,
@@ -818,6 +827,7 @@ function buildProgram(
           populateReference: location.owned,
           queue: location.queue,
           workdir: location.workdir,
+          ...(fresh === true ? {} : { localStatusStore: localStatusStore(location) }),
         },
       )
       setExit(taken)

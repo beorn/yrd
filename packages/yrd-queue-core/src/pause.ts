@@ -61,14 +61,16 @@ export function stopFact(stop: PauseRecord | undefined): StopFact | null {
 /** Read only the permanent M2 tip. Other legacy pause records are refused. */
 export async function readM2Pause(
   git: Git,
-  remote: string,
+  remote: string | undefined,
   queue: string,
   created: string,
+  knownSha?: string,
 ): Promise<PauseRecord | undefined> {
   const ref = pauseRef(queue)
-  const sha = await readRemoteCommit(git, remote, ref)
+  if (remote === undefined && knownSha === undefined) throw new Error(`local ${ref}: M2 tip was not supplied`)
+  const sha = knownSha ?? (remote === undefined ? undefined : await readRemoteCommit(git, remote, ref))
   if (sha === undefined) return undefined
-  const where = `${remote}#${queue} ${ref} at ${sha}`
+  const where = `${remote ?? "local"}#${queue} ${ref} at ${sha}`
   const body = await git(["show", "-s", "--format=%B", sha])
   const fields =
     /^moved to event format at ([0-9a-f]{40}(?:[0-9a-f]{24})?)\n\nRecord: paused\nPaused-By: yrd-ops-cutover\nPaused-At: ([^\n]+)\nCause: maintenance\n{1,2}$/u.exec(

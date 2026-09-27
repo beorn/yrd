@@ -8,7 +8,7 @@ import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 import { overrideRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
 import { readM2Pause, type PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
-import { gitIn, refAt } from "./git.ts"
+import { createLegacyBackend, gitIn, refAt } from "./git.ts"
 import type { Git, GitSelection } from "./git.ts"
 import type { QueueConfig } from "./config.ts"
 import { checkTrailer, readCheckTrailer } from "./check.ts"
@@ -768,6 +768,22 @@ export type QueueLocation = Readonly<{
   /** Passed through to Gitomic's event-chain retry loop; a run chooses its own default. */
   retryBudgetMs?: number
 }>
+/** A snapshot already refreshed into local refs. It has no remote to publish to. */
+export type LocalQueueReadStore = Readonly<{
+  repo: string
+  selection: GitSelection
+  backend: GitomicBackend
+  remote?: never
+}>
+export type QueueReadStore = QueueLocation | LocalQueueReadStore
+
+export function createLocalEventStore(
+  repo: string,
+  selection: GitSelection,
+  backend: GitomicBackend = createLegacyBackend(selection.executable),
+): LocalQueueReadStore {
+  return { repo, selection, backend }
+}
 export type DropRequest = Readonly<{ queue: string; branch: string; by: string; note?: string }>
 export type Dropped = Readonly<{ queue: string; branch: string; head: string; event: string }>
 export type SetBranchIgnoredRequest = Readonly<
@@ -806,7 +822,7 @@ const validatedQueue = Symbol("validated event queue")
 export type EventQueue = EventQueueProjection & Readonly<{ [validatedQueue]: true }>
 const queueLocations = new WeakMap<
   EventQueue,
-  Readonly<{ repo: string; remote: string; queue: string; backend?: GitomicBackend }>
+  Readonly<{ repo: string; remote: string | undefined; queue: string; backend?: GitomicBackend }>
 >()
 
 /** The first event declares a queue and keeps the commit carrying .yrd.yml. */
@@ -864,7 +880,7 @@ export async function createEventQueue(
 }
 
 /** Read and validate the queue declaration and its current operator stop. */
-export async function readEventQueue(store: QueueLocation, queue: string): Promise<EventQueue> {
+export async function readEventQueue(store: QueueReadStore, queue: string): Promise<EventQueue> {
   const ref = queueRef(queue)
   const events = await readEventChain(await openEvents({ ...store, ref }))
   const projected = projectEventQueue(events, ref, store.repo)
@@ -909,7 +925,7 @@ export async function readEventQueue(store: QueueLocation, queue: string): Promi
 
 /** Read event ops and reject any remaining legacy override authority. */
 export async function readEventOps(
-  store: QueueLocation,
+  store: QueueReadStore,
   git: Git,
   queue: string,
   _targetSha: string,
@@ -924,6 +940,9 @@ export async function readEventOps(
 > {
   const projected = await readEventQueue(store, queue)
   if (projected.opsCutover === undefined || projected.ops === undefined) {
+    if (store.remote === undefined) {
+      throw new Error(`${store.repo}: local status cannot read pre-cutover ops; use --fresh`)
+    }
     throw new Error(
       `${store.remote}#${queue}: ${queueRef(queue)} has no event ops authority; expected an ops-cutover event`,
     )
@@ -935,7 +954,13 @@ export async function readEventOps(
     )
   }
   if (refs.has(pauseRef(queue))) {
-    const fence = await readM2Pause(git, store.remote, queue, projected.created)
+    const fence = await readM2Pause(
+      store.remote === undefined ? gitIn(store.repo, undefined, store.selection) : git,
+      store.remote,
+      queue,
+      projected.created,
+      store.remote === undefined ? refs.get(pauseRef(queue)) : undefined,
+    )
     if (fence?.sha !== refs.get(pauseRef(queue))) {
       throw new Error(`${store.remote}#${queue}: ${pauseRef(queue)} changed during the M2 tip read`)
     }
@@ -952,7 +977,7 @@ export async function readEventOps(
 
 /** The event equivalent of the legacy stuck-stop derivation. */
 async function eventLineStop(
-  store: QueueLocation,
+  store: QueueReadStore,
   queue: string,
   pause: PauseRecord | undefined,
 ): Promise<PauseRecord | undefined> {
@@ -1561,7 +1586,7 @@ export function resetQueueFormatCache(): void {
 }
 
 /** One advertisement selects the format. An event queue with no changes is empty. Cached once per process. */
-export async function queueFormat(store: QueueLocation, queue: string): Promise<"event" | "legacy"> {
+export async function queueFormat(store: QueueReadStore, queue: string): Promise<"event" | "legacy"> {
   const key = `${store.repo}#${store.remote ?? ""}#${queue}`
   const cached = formatCache.get(key)
   if (cached !== undefined) return cached
@@ -1938,7 +1963,7 @@ function projectChangeHistories(
 
 /** Read the validated queue and its change chains concurrently for a listing. */
 export async function readEventQueueWithChanges(
-  store: QueueLocation,
+  store: QueueReadStore,
   queue: string,
 ): Promise<Readonly<{ queue: EventQueue } & ChangeHistories>> {
   const prefix = `${queueRefPrefix(queue)}/changes/`
