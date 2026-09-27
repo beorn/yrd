@@ -36,6 +36,11 @@ export type RunnerClaimJudgment = Readonly<{
   reason: string
 }>
 
+export type RunnerDeadlineJudgment = Readonly<{
+  status: "within" | "overdue" | "unavailable" | "unbounded" | "unreadable"
+  reason: string
+}>
+
 const SUBJECT = "yrd runner claim"
 const ORDER = ["Runner", "Started", "At", "Beat", "State", "Holding", "Since", "Deadline"] as const
 const REQUIRED = ["Runner", "Started", "At", "Beat", "State", "Since"] as const
@@ -102,6 +107,15 @@ function checked(claim: RunnerClaim): RunnerClaim {
 /** Full root-commit message; Beat's unit is integer milliseconds. */
 export function formatRunnerClaim(input: RunnerClaim): string {
   const claim = checked(input)
+  if (
+    claim.deadline === undefined &&
+    (claim.state === "provisioning" ||
+      claim.state === "checking" ||
+      claim.state === "merging" ||
+      claim.state === "deprovisioning")
+  ) {
+    throw new TypeError(`runner claim Deadline is required for ${claim.state} State`)
+  }
   return (
     `${SUBJECT}\n\nRunner: ${claim.host}/${String(claim.pid)}\n` +
     `Started: ${claim.started}\nAt: ${claim.at}\nBeat: ${String(claim.beatMs)}ms\n` +
@@ -176,4 +190,35 @@ export function judgeRunnerClaim(claim: RunnerClaim, now: Date): RunnerClaimJudg
     }
   }
   return { status: "fresh", reason: `runner At is within three ${String(claim.beatMs)}ms beats` }
+}
+
+/** One declared-bound judgment for remote claims and local health documents. */
+export function judgeRunnerDeadline(claim: RunnerClaim, now: Date): RunnerDeadlineJudgment {
+  checked(claim)
+  if (claim.state === "idle" || claim.state === "stuck" || claim.state === "paused" || claim.state === "stopped") {
+    return { status: "unbounded", reason: `${claim.state} has no phase deadline` }
+  }
+  if (claim.deadline === undefined) {
+    return { status: "unavailable", reason: "deadline unavailable: writer predates Deadline" }
+  }
+  const current = now.getTime()
+  if (!Number.isFinite(current)) return { status: "unreadable", reason: "reader clock is invalid" }
+  const since = Date.parse(claim.since)
+  if (current < since - 30_000) {
+    return {
+      status: "unreadable",
+      reason: `clock-skew: phase Since is ${String(since - current)}ms ahead of the reader clock`,
+    }
+  }
+  const deadline = Date.parse(claim.deadline) + 3 * claim.beatMs
+  if (current > deadline) {
+    return {
+      status: "overdue",
+      reason: `phase Deadline ${claim.deadline} passed more than three ${String(claim.beatMs)}ms beats ago`,
+    }
+  }
+  return {
+    status: "within",
+    reason: `phase Deadline ${claim.deadline} is within three ${String(claim.beatMs)}ms beats`,
+  }
 }

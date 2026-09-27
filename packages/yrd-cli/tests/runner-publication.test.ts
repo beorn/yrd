@@ -60,6 +60,19 @@ async function fixture() {
 }
 
 describe("runner ref publication", () => {
+  it("uses the shared deadline judgment for a fresh remote claim", async () => {
+    const f = await fixture()
+    const now = Date.parse(f.own.at)
+    const since = new Date(now - 40 * 60_000).toISOString()
+    const deadline = new Date(now - 10 * 60_000).toISOString()
+    await f.publisher.publish({ ...f.own, started: since, since, deadline, state: "checking" })
+    expect(await readPublishedRunner(f.git, "main", "origin", await f.remoteTip(), new Date(now))).toMatchObject({
+      signal: "fresh",
+      claim: { Deadline: deadline },
+      phase: { status: "overdue" },
+    })
+  })
+
   it("creates a leased parentless claim readable without a local journal", async () => {
     const f = await fixture()
     await f.publisher.publish(f.own)
@@ -96,7 +109,11 @@ describe("runner ref publication", () => {
         const old = new Date(Date.now() - 4 * 60_000).toISOString()
         await f.replace({ ...f.own, host: "predecessor", pid: 7, started: old, at: old, since: old })
       }
-      await f.publisher.publish({ ...f.own, state: "checking" })
+      await f.publisher.publish({
+        ...f.own,
+        state: "checking",
+        deadline: new Date(Date.parse(f.own.since) + 30 * 60_000).toISOString(),
+      })
       const after = await f.remoteTip()
       expect(after, scenario).not.toBe(first)
       expect(await readPublishedRunner(f.git, "main", "origin", after), scenario).toMatchObject({
@@ -122,7 +139,11 @@ describe("runner ref publication", () => {
     const live = await fixture()
     await live.publisher.publish(live.own)
     const rival = await live.replace({ ...live.own, host: "rival", pid: 8, state: "checking" })
-    await live.publisher.publish({ ...live.own, state: "provisioning" })
+    await live.publisher.publish({
+      ...live.own,
+      state: "provisioning",
+      deadline: new Date(Date.parse(live.own.since) + 30 * 60_000).toISOString(),
+    })
     expect(live.publisher.conflict?.name).toBe("RunnerConflict")
     expect(await live.remoteTip()).toBe(rival)
     expect(live.statuses.at(-1)).toBe("failed")

@@ -46,6 +46,7 @@ import {
   createEventStore,
   changesRef,
   formatRunnerClaim,
+  parseRunnerClaim,
   gitIn,
   parseQueueHealthDocument,
   queueRef,
@@ -362,6 +363,7 @@ describe("yrd queue up, the service", () => {
           beatMs: 60_000,
           state: "checking",
           since: now,
+          deadline: new Date(Date.parse(now) + 30 * 60_000).toISOString(),
         }),
       ])
     ).trim()
@@ -425,6 +427,21 @@ describe("yrd queue up, the service", () => {
       )
       const before = await readRemoteCommit(w.git, "origin", runnerRef("main"))
       expect(before).toBeDefined()
+      await vi.waitFor(
+        async () => {
+          const tip = await readRemoteCommit(w.git, "origin", runnerRef("main"))
+          if (tip === undefined) throw new Error("runner ref absent while check runs")
+          const claim = parseRunnerClaim(await w.git(["show", "-s", "--format=%B", tip]))
+          expect(claim).toMatchObject({ state: "checking", deadline: expect.any(String) })
+          if (claim.deadline === undefined) throw new Error("checking claim has no declared Deadline")
+          expect(Date.parse(claim.deadline) - Date.parse(claim.since)).toBe(30 * 60_000)
+          expect((await readQueueHealth(w.workdir, SERVICE)).facts?.runnerClaim).toMatchObject({
+            state: "checking",
+            deadline: claim.deadline,
+          })
+        },
+        { timeout: 10_000, interval: 100 },
+      )
       await vi.waitFor(
         async () => {
           expect((await readRunnerFacts(w.workdir)).latest?.activeStep?.kind).toBe("check")
@@ -2305,6 +2322,40 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     expect(published.writes, "documents published after the loop returned").toHaveLength(written)
     return { exit, roundEnds, stderr: run.stderr(), workdir: w.workdir, writes: [...published.writes] }
   }
+
+  it("publishes a new deadline at each merging step, even while State stays merging", async () => {
+    const w = await world()
+    await oneChange(w, "task/deadline-steps")
+    using published = await publishedHealth(w.workdir)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        ...HEARTBEAT,
+        afterHealth: () => stop.abort(),
+      },
+      { json: true, workdir: w.workdir },
+    )
+    expect(exit, run.stderr()).toBe(0)
+    const merging = published.writes
+      .map(({ document }) => ({ phase: document.facts?.runnerPhase, claim: document.facts?.runnerClaim }))
+      .filter(
+        ({ claim }) => typeof claim === "object" && claim !== null && "state" in claim && claim.state === "merging",
+      )
+    expect(merging.map(({ phase }) => phase)).toContain("publish")
+    expect(merging.map(({ phase }) => phase)).toContain("merge")
+    for (const { phase, claim } of merging) {
+      expect(phase).toEqual(expect.any(String))
+      expect(claim).toMatchObject({ since: expect.any(String), deadline: expect.any(String) })
+      if (typeof claim !== "object" || claim === null || !("since" in claim) || !("deadline" in claim)) continue
+      expect(Date.parse(String(claim.deadline)) - Date.parse(String(claim.since))).toBe(30 * 60_000)
+    }
+  }, 30_000)
 
   // T1 (D6 as refined). A round is held open for three staleness windows —
   // the test-scale stand-in for a round past ROUND_BUDGET_MS, which 31 of

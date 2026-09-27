@@ -41,6 +41,7 @@ import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, statSync, writ
 import { isAbsolute, join } from "node:path"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import type { JournalCheck } from "./log.ts"
+import type { RunnerClaimState } from "./runner-claim.ts"
 
 /**
  * A check as the target declares it — the whole declaration, in one type.
@@ -70,6 +71,28 @@ export type CheckSpec = Readonly<{
 }>
 
 export const DEFAULT_CHECK_BOUND_MS = 30 * 60 * 1000
+
+/** Detection bounds for steps that cannot be cancelled safely mid-operation. */
+export const STEP_BOUNDS_MS = {
+  compose: 30 * 60 * 1000,
+  worktree: 30 * 60 * 1000,
+  prepare: 30 * 60 * 1000,
+  remove: 30 * 60 * 1000,
+  publish: 30 * 60 * 1000,
+  merge: 30 * 60 * 1000,
+  notify: 30 * 60 * 1000,
+} as const
+
+/** The one mapping from a timed step to the state its claim publishes. */
+export const STEP_STATES = {
+  compose: "provisioning",
+  worktree: "provisioning",
+  prepare: "provisioning",
+  remove: "deprovisioning",
+  publish: "merging",
+  merge: "merging",
+  notify: "merging",
+} as const satisfies Record<keyof typeof STEP_BOUNDS_MS, RunnerClaimState>
 
 /**
  * The line a check writes when it has already computed a pass/fail, before any

@@ -5,7 +5,7 @@
  * @testonly none
  */
 import { describe, expect, it } from "vitest"
-import { formatRunnerClaim, judgeRunnerClaim, parseRunnerClaim, runnerRef } from "../src/index.ts"
+import { formatRunnerClaim, judgeRunnerClaim, judgeRunnerDeadline, parseRunnerClaim, runnerRef } from "../src/index.ts"
 
 const claim = {
   host: "queue-host",
@@ -16,6 +16,7 @@ const claim = {
   state: "checking" as const,
   holding: "task/a@" + "a".repeat(40),
   since: "2026-09-27T12:00:30.000Z",
+  deadline: "2026-09-27T12:30:30.000Z",
 }
 
 describe("runner claim", () => {
@@ -38,16 +39,32 @@ describe("runner claim", () => {
   })
 
   it("round trips a declared phase deadline and rejects one before its phase start", () => {
-    const bounded = { ...claim, deadline: "2026-09-27T12:30:30.000Z" }
-    const message = formatRunnerClaim(bounded)
+    const message = formatRunnerClaim(claim)
     expect(message).toContain("Since: 2026-09-27T12:00:30.000Z\nDeadline: 2026-09-27T12:30:30.000Z\n")
-    expect(parseRunnerClaim(message)).toEqual(bounded)
-    expect(() => formatRunnerClaim({ ...bounded, deadline: "2026-09-27T12:00:29.999Z" })).toThrow(/Deadline/)
+    expect(parseRunnerClaim(message)).toEqual(claim)
+    expect(() => formatRunnerClaim({ ...claim, deadline: "2026-09-27T12:00:29.999Z" })).toThrow(/Deadline/)
+    expect(() => formatRunnerClaim({ ...claim, deadline: undefined })).toThrow(/Deadline/)
     expect(() =>
       parseRunnerClaim(message.replace("Deadline: 2026-09-27T12:30:30.000Z", "Deadline: yesterday")),
     ).toThrow(/Deadline/)
     // Readers must still parse an older writer so they can label its missing deadline explicitly.
-    expect(parseRunnerClaim(formatRunnerClaim(claim))).toEqual(claim)
+    expect(parseRunnerClaim(message.replace("Deadline: 2026-09-27T12:30:30.000Z\n", ""))).toEqual({
+      ...claim,
+      deadline: undefined,
+    })
+  })
+
+  it("judges a phase only after its declared deadline plus three beats", () => {
+    expect(judgeRunnerDeadline(claim, new Date("2026-09-27T12:33:30.000Z")).status).toBe("within")
+    expect(judgeRunnerDeadline(claim, new Date("2026-09-27T12:33:30.001Z")).status).toBe("overdue")
+    expect(judgeRunnerDeadline({ ...claim, deadline: undefined }, new Date("2026-09-27T12:45:00.000Z"))).toMatchObject({
+      status: "unavailable",
+      reason: "deadline unavailable: writer predates Deadline",
+    })
+    expect(
+      judgeRunnerDeadline({ ...claim, state: "idle", deadline: undefined }, new Date("2026-09-27T12:45:00.000Z"))
+        .status,
+    ).toBe("unbounded")
   })
 
   it("refuses malformed, missing, duplicated, and unknown trailers", () => {
