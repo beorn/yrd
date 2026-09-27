@@ -13,7 +13,6 @@
 
 import { execFileSync } from "node:child_process"
 import {
-  appendFileSync,
   chmodSync,
   mkdirSync,
   mkdtempSync,
@@ -26,17 +25,7 @@ import {
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join, resolve } from "node:path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
-import {
-  createEventQueue,
-  createEventStore,
-  gitIn,
-  readConfig,
-  readJournals,
-  readRunLog,
-  submit,
-  type Git,
-  type LogRecord,
-} from "@yrd/queue-core"
+import { createEventQueue, createEventStore, gitIn, readConfig, readJournals, submit, type Git } from "@yrd/queue-core"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
@@ -181,7 +170,10 @@ async function world(check = "test -f pass.txt"): Promise<World> {
   await git(["push", "--quiet", "origin", "main"])
   const workdir = join(root, "queue")
   mkdirSync(workdir, { recursive: true })
-  return { git, work, workdir }
+  const w = { git, work, workdir }
+  // Since 25041 a queue is its event ref: submit refuses a target without one.
+  await createWorldEventQueue(w)
+  return w
 }
 
 /** A change on its own branch, submitted; `passes` decides what the declared check will say about it. */
@@ -222,16 +214,6 @@ describe("event queue observation refusals", () => {
    */
   it("event list and stats refuse an invalid root observation", async () => {
     const w = await world()
-    const head = (await w.git(["rev-parse", "main"])).trim()
-    const config = await readConfig(w.git, head, { branch: "main", remote: "origin" })
-    if (config === undefined) throw new Error("fixture main lost .yrd.yml")
-    await createEventQueue(
-      createEventStore(w.work, "origin", gitIn(w.work).selection),
-      "main",
-      head,
-      config,
-      new Date(),
-    )
 
     const executable = join(w.workdir, "invalid-observer.sh")
     const selected = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin/git-super")
@@ -419,35 +401,8 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
     const w = await world()
     await change(w, "task/good", true)
     await drain(w)
-    // 24202: a successful real run can receive a bookkeeping warning afterwards.
-    // Existing exit assertions alone missed warnings lost by every human view.
-    const journal = [...readJournals(join(w.workdir, "logs")).runs.values()][0]?.[0]
-    if (journal === undefined) throw new Error("merged test run has no journal")
-    const diagnostic: LogRecord = {
-      kind: "change",
-      run: journal.id,
-      at: new Date(journal.at.getTime() + 1000).toISOString(),
-      branch: journal.branch,
-      head: journal.head,
-      decision: "merged",
-      reason: "change-ref-taken",
-      ref: "refs/changes/task/good",
-      text: "bookkeeping write refused: " + "full evidence\n".repeat(80) + "last evidence line",
-      next: "git show refs/changes/task/good",
-      error: "remote ref moved",
-    }
-    appendFileSync(join(w.workdir, "logs", `${journal.id}.jsonl`), `${JSON.stringify(diagnostic)}\n`)
-    const legacy: LogRecord = {
-      kind: "change",
-      run: journal.id,
-      at: new Date(journal.at.getTime() + 1500).toISOString(),
-      branch: journal.branch,
-      head: journal.head,
-      decision: "sent",
-      reason: "change-ref-taken",
-      remote: "origin",
-    }
-    appendFileSync(join(w.workdir, "logs", `${journal.id}.jsonl`), `${JSON.stringify(legacy)}\n`)
+    // 24202's bookkeeping-warning rows went with the legacy change-ref writes they described (25041; @dev/2
+    // ruling 5a6e80ea (3)): event mode writes no change ref, so no such warning exists to show.
     const run = capture(w.work)
 
     const exit = await coreQueueCommand(
@@ -460,10 +415,6 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
     expect(exit, run.stdout()).toBe(0)
     expect(run.stdout()).toContain("task/good")
     expect(run.stdout()).toContain("merged")
-    expect(run.stdout()).toContain(diagnostic.text)
-    expect(run.stdout()).toContain(diagnostic.next)
-    expect(run.stdout()).toContain("The record has no explanation or inspection command (remote: origin).")
-    expect(run.stdout()).not.toContain("raw diagnostic:")
     for (const request of [
       { command: "list" as const, terms: ["task/good"] },
       { command: "list" as const, latest: true, terms: ["task/good"] },
@@ -472,60 +423,6 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
       const human = capture(w.work)
       expect(await coreQueueCommand(w.work, human.io, request, { workdir: w.workdir })).toBe(0)
       expect(human.stdout()).toContain("merged")
-      expect(human.stdout()).toContain(diagnostic.text)
-      expect(human.stdout()).toContain(diagnostic.next)
-      expect(human.stdout()).toContain("The record has no explanation or inspection command (remote: origin).")
-      expect(human.stdout()).toContain("`yrd list --json`")
-      expect(human.stdout()).not.toContain("raw diagnostic:")
-      const json = capture(w.work)
-      expect(await coreQueueCommand(w.work, json.io, request, { json: true, workdir: w.workdir })).toBe(0)
-      const data = JSON.parse(json.stdout()) as { changes: { diagnostics?: LogRecord[] }[] }
-      expect(data.changes[0]?.diagnostics).toEqual([diagnostic, legacy])
-    }
-    // A printed round is a log, and a log's rounds carry the instant they were
-    // printed: the retired watch's `updated HH:MM:SS`, under the queue's name (item 30).
-    const lines = run.stdout().split("\n")
-    const stamp = lines.findIndex((line) => /^updated \d\d:\d\d:\d\d$/u.test(line))
-    expect(stamp).toBeGreaterThan(0)
-    expect(lines[stamp - 1]).toMatch(/#main$/u)
-    // A later warning-only run does not change Git's merged state or invent its own decision.
-    const only = openLog(join(w.workdir, "logs"), () => new Date(journal.at.getTime() + 2000))
-    const header = readRunLog(join(w.workdir, "logs"), journal.id).find((record) => record.kind === "run")
-    if (header === undefined) throw new Error("merged test run has no header")
-    only.write(header)
-    only.write({
-      ...diagnostic,
-      reason: "change-ref-contended",
-      text: "another write was refused",
-      next: undefined,
-      inspect: "git show the-new-ref",
-    })
-    for (const request of [
-      { command: "list" as const, latest: true, terms: ["task/good"] },
-      { command: "show" as const, branch: "task/good" },
-    ]) {
-      const human = capture(w.work)
-      expect(await coreQueueCommand(w.work, human.io, request, { workdir: w.workdir })).toBe(0)
-      expect(human.stdout()).toContain("merged")
-      expect(human.stdout()).toContain("no run decision recorded")
-    }
-    for (const latest of [false, true]) {
-      const interactive = capture(w.work)
-      expect(
-        await coreQueueCommand(
-          w.work,
-          interactive.io,
-          { command: "list", terms: ["task/good"], watch: true, latest },
-          { interactive: true, workdir: w.workdir },
-        ),
-      ).toBe(0)
-      const snapshot = renderedSnapshot()
-      if (snapshot === undefined) throw new Error("interactive watch did not render")
-      const details = await renderedDetails(snapshot)
-      const detail = details.find((entry) => entry.journal?.id === only.id)
-      expect(detail?.journal?.decision).toBeUndefined()
-      expect(detail?.journal?.diagnostics).toBe(detail?.row.diagnostics)
-      expect(detail?.row.state).toBe("merged")
     }
   })
 
@@ -1043,12 +940,12 @@ describe("the timing a one-row page prints under its row (24196)", () => {
     ).toBe(0)
 
     const lines = page.stdout().split("\n")
-    const row = lines.find((line) => line.includes("task/good") && line.includes("○ submitted")) ?? ""
+    const row = lines.find((line) => line.includes("task/good") && line.includes("○ queued")) ?? ""
     expect(row, page.stdout()).toContain("task/good")
     // AGE is real age; RUN is — with no attempt (item 5, 24196). The one-row timing line
-    // under `next:` is still the cell's duration word, never Age or Wait time.
+    // under the row's notice (`○ queued #1` since 25041's event rows) is the cell's duration word, never Age or Wait time.
     expect(row.trimEnd(), page.stdout()).toMatch(/\d+:\d+ \/ —\s*$/u)
-    const notice = lines.findIndex((line) => line.includes("next: "))
+    const notice = lines.findIndex((line) => /^○ queued #\d/u.test(line))
     expect(lines[notice + 1]?.trim(), page.stdout()).toMatch(/^waiting \d/u)
     expect(page.stdout()).not.toContain("Age")
     expect(page.stdout()).not.toContain("Wait time")
@@ -1210,7 +1107,6 @@ async function createWorldEventQueue(w: World, at = new Date()): Promise<string>
 describe("event-queue runner stages end-to-end into runnerLine and stage strip (25716)", () => {
   it("drives createWorldEventQueue into runnerLine and the stage strip", async () => {
     const w = await world("test -f pass.txt")
-    await createWorldEventQueue(w)
     await change(w, "task/event-step", true)
     await drain(w)
 
@@ -1293,7 +1189,6 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
 
   it("shows no stages from a previous run for a newly queued change re-submitted at the same head (25716 P4)", async () => {
     const w = await world("test -f pass.txt")
-    await createWorldEventQueue(w)
     await change(w, "task/resubmit-step", false)
     await drain(w)
 
@@ -1336,7 +1231,6 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
   // @i/10-yrd/25936: a merge round with every check off writes synthesized result records to run.log
   it("writes synthesized result records to run.log so yrd list --json carries startedAt and log, and journal has phase merge results (25936)", async () => {
     const w = await world('"true"')
-    await createWorldEventQueue(w)
     await change(w, "task/all-checks-off", false)
     await drain(w)
 
@@ -1373,7 +1267,6 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
 describe("bare watch declared queues", () => {
   it("reads independent snapshots and detail callbacks for the same head in two repository queues", async () => {
     const first = await world()
-    await createWorldEventQueue(first)
     await change(first, "task/shared", true)
     const root = dirname(first.work)
     const otherRemote = join(root, "other.git")

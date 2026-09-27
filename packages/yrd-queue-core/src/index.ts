@@ -220,7 +220,7 @@ export type { RuntimeGitlinkDecision, RuntimeGitlinkOff, RuntimeGitlinkPath } fr
 
 export { programRootCheck } from "./program-root.ts"
 
-export { readRemoteCalls, remoteCallsLine, traceRemoteCalls } from "./remote-calls.ts"
+export { readRemoteCalls, remoteCallsLine, traceRemoteCalls, withRemoteSeam } from "./remote-calls.ts"
 export type { RemoteCalls } from "./remote-calls.ts"
 export {
   MIRROR_LOCK_WAIT_MS,

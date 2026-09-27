@@ -151,6 +151,7 @@ import {
   type StopFact,
   remoteCallsLine,
   traceRemoteCalls,
+  withRemoteSeam,
 } from "@yrd/queue-core"
 import { readUnitIntent } from "./unit-intent.ts"
 import { noticeLine } from "./watch-notice.ts"
@@ -441,7 +442,7 @@ function submitCalls(
 ): Readonly<{ env: NodeJS.ProcessEnv | undefined }> & Disposable {
   if (request.command !== "submit" || request.dryRun === true) return { env, [Symbol.dispose]: () => undefined }
   const directory = mkdtempSync(join(tmpdir(), "yrd-submit-trace2-"))
-  const traced = traceRemoteCalls(directory)
+  const traced = traceRemoteCalls(directory, { seams: true })
   return {
     env: env === undefined ? undefined : { ...env, ...traced.env },
     [Symbol.dispose]() {
@@ -531,7 +532,7 @@ export async function coreQueueCommand(
   const git = gitIn(repo, undefined, selection, { env })
   const log = options.log?.child("queue")
   const remote = options.remote ?? "origin"
-  const queue = options.queue ?? (await originHead(git))
+  const queue = options.queue ?? (await withRemoteSeam("originHead", () => originHead(git)))
   const target = { branch: queue, remote }
   const targetLabel = `${remote}/${queue}`
   const localStatus = options.localStatusStore
@@ -605,11 +606,11 @@ export async function coreQueueCommand(
     if (declared === undefined) return undefined
     return { config: declared, oid }
   }
-  const captured = await declaration()
+  const captured = await withRemoteSeam("declaration", declaration)
   if (captured === undefined) return noQueueOnTarget(targetLabel)
   const config = captured.config
   const eventStore = createEventStore(repo, config.target.remote, selection)
-  if ((await queueFormat(eventStore, config.target.branch)) !== "event") {
+  if ((await withRemoteSeam("queueFormat", () => queueFormat(eventStore, config.target.branch))) !== "event") {
     throw new Error(
       `${config.target.remote}#${config.target.branch} uses a legacy Record ref; expected ${queueRef(config.target.branch)}`,
     )
@@ -1229,7 +1230,9 @@ export async function coreQueueCommand(
           issue: canonicalIssue,
           resolveIssue,
         }
-        const inspected = await inspectSubmitAtHead(git, config.target.remote, submission, prepared.head)
+        const inspected = await withRemoteSeam("inspectSubmitAtHead", () =>
+          inspectSubmitAtHead(git, config.target.remote, submission, prepared.head),
+        )
         if (request.dryRun === true) {
           emit(
             io,

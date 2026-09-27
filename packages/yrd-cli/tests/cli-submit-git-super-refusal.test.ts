@@ -14,6 +14,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { freshWorktree, gitIn } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
+import { birthEventQueue } from "./support/event-queue-birth.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -75,6 +76,8 @@ async function world(): Promise<World> {
   await git(["add", "."])
   await git(["commit", "--quiet", "-m", "initial main with .gitmodules"])
   await git(["push", "--quiet", "origin", "main"])
+  // Since 25041 a queue is its event ref: submit refuses a target without one.
+  await birthEventQueue(work, "main", { localStore: false })
 
   // Configure a wrapper for yrd.git that mocks git super worktree add failure
   const wrapper = join(root, "git-wrapper.sh")

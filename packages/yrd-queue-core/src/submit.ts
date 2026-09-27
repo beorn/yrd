@@ -30,6 +30,7 @@ import { type PauseRecord } from "./pause.ts"
 import { remoteUrl } from "./remote.ts"
 import { changeInput, changesRef, decide, initial, project, queueFormat, queueRef, readEventOps } from "./events.ts"
 import { verifyCandidate, type Verification } from "./verifying.ts"
+import { withRemoteSeam } from "./remote-calls.ts"
 
 export type SubmitRequest = Readonly<{
   /** The branch being submitted: the change's own. */
@@ -170,7 +171,11 @@ export async function publishMovedGitlinks(
     } else if (fetchedFromRemote) {
       published.push({ path, sha: row.sha, remote, ref, state: "fetchable" })
     } else {
-      await child(["push", "--quiet", `--force-with-lease=${ref}:${ABSENT}`, "origin", `${row.sha}:${ref}`])
+      try {
+        await child(["push", "--quiet", `--force-with-lease=${ref}:${ABSENT}`, "origin", `${row.sha}:${ref}`])
+      } catch (cause) {
+        throw new Error(`could not publish ${path}@${row.sha} to ${remote} ${ref}`, { cause })
+      }
       published.push({ path, sha: row.sha, remote, ref, state: "published" })
     }
     // A moved submodule may itself have moved a gitlink: the nested pin has to
@@ -202,7 +207,9 @@ export type SubmitInspection = Readonly<{
   stop?: PauseRecord
 }>
 
-function refuseMaintenance(
+type SubmitAdmission = Readonly<Omit<SubmitInspection, "verifying"> & { root: string }>
+
+export function refuseMaintenance(
   stop: PauseRecord | undefined,
   remote: string,
   queue: string,
@@ -259,6 +266,18 @@ export async function inspectSubmitAtHead(
   request: SubmitRequest,
   head: string,
 ): Promise<SubmitInspection> {
+  const admitted = await admitSubmitAtHead(git, remote, request, head)
+  const verifying = await composeSubmit(git, request, admitted)
+  const { root: _root, ...inspection } = admitted
+  return { ...inspection, verifying }
+}
+
+async function admitSubmitAtHead(
+  git: Git,
+  remote: string,
+  request: SubmitRequest,
+  head: string,
+): Promise<SubmitAdmission> {
   refuseTarget(request.branch, request.target.branch)
   const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
@@ -299,6 +318,17 @@ export async function inspectSubmitAtHead(
   }
   const stop = (await readEventOps(store, git, request.target.branch, targetHead)).stop
   refuseMaintenance(stop, remote, request.target.branch)
+  return {
+    head,
+    targetHead,
+    base,
+    root,
+    ...(issue === undefined ? {} : { issue }),
+    ...(stop === undefined ? {} : { stop }),
+  }
+}
+
+async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitAdmission): Promise<Verification> {
   const scratch = mkdtempSync(join(tmpdir(), "yrd-submit-verifying-"))
   const hooksPath = join(scratch, "hooks-disabled")
   mkdirSync(hooksPath)
@@ -306,11 +336,11 @@ export async function inspectSubmitAtHead(
   try {
     const composed = await verifyCandidate({
       git,
-      repo: root,
-      targetHead,
-      head,
+      repo: admitted.root,
+      targetHead: admitted.targetHead,
+      head: admitted.head,
       path: join(scratch, "candidate"),
-      message: `verify ${request.branch} at ${head} against ${targetHead}`,
+      message: `verify ${request.branch} at ${admitted.head} against ${admitted.targetHead}`,
       hooksPath,
       noFetch: true,
     })
@@ -318,27 +348,28 @@ export async function inspectSubmitAtHead(
     if (composed.state === "failed") {
       await composed.failedWorktree.remove()
       throw new Error(
-        `${request.branch} at ${head} cannot be composed with ${targetName(request.target)} at ${targetHead}: ` +
-          `${composed.verifying.detail.code}: ${composed.verifying.detail.message}; ${bound}`,
+        `${request.branch} at ${admitted.head} cannot be composed with ${targetName(request.target)} at ${admitted.targetHead}: ` +
+          `${composed.verifying.detail.code}: ${composed.verifying.detail.message}; ${freshnessLine(admitted.targetHead)}`,
       )
     }
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
-  return {
-    head,
-    targetHead,
-    base,
-    verifying,
-    ...(issue === undefined ? {} : { issue }),
-    ...(stop === undefined ? {} : { stop }),
-  }
+  return verifying
 }
 
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
-  const inspected = await inspectSubmit(git, remote, request)
-  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-  return submitEvent(git, remote, request, root, inspected)
+  refuseTarget(request.branch, request.target.branch)
+  const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
+  const admitted = await withRemoteSeam("inspectSubmit", () => admitSubmitAtHead(git, remote, request, head))
+  const published = await withRemoteSeam("publishMovedGitlinks", () =>
+    publishMovedGitlinks(git, admitted.root, admitted.targetHead, head),
+  )
+  const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted))
+  const { root, ...inspection } = admitted
+  return withRemoteSeam("submitEvent", () =>
+    submitEvent(git, remote, request, root, { ...inspection, verifying }, published),
+  )
 }
 
 async function submitEvent(
@@ -347,9 +378,9 @@ async function submitEvent(
   request: SubmitRequest,
   root: string,
   inspected: SubmitInspection,
+  published: readonly PublishedGitlink[],
 ): Promise<Submitted> {
   const head = inspected.head
-  const published = await publishMovedGitlinks(git, root, inspected.targetHead, head)
   const store = createEventStore(root, remote, selectionFor(git))
   const ref = changesRef(request.target.branch, request.branch)
   const branchRef = `refs/heads/${request.branch}`
