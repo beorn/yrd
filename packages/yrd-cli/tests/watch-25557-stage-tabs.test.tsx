@@ -15,11 +15,30 @@
  * 4. When the runner is idle with no round in flight, the stand-in selection shows no detail pane.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import React from "react"
 import { describe, expect, it } from "vitest"
-import { render } from "silvery/test"
+import { bufferToStyledText, render } from "silvery/test"
+import { createTerminal } from "@termless/core"
+import { createGhosttyBackend, initGhostty } from "@termless/ghostty"
 import { WatchPane, type WatchSnapshot } from "../src/watch-pane.tsx"
 import { WatchDetail, type ChangeDetail } from "../src/watch-detail.tsx"
+
+async function renderAnsiScreenshot(ansi: string, opts: { cols: number; rows: number }): Promise<Uint8Array> {
+  await initGhostty()
+  const backend = createGhosttyBackend()
+  const term = createTerminal({ backend, cols: opts.cols, rows: opts.rows })
+  term.feed(ansi.replace(/\r?\n/g, "\r\n"))
+  return term.screenshot()
+}
+
+function writeCaptureIfConfigured(name: string, content: string | Uint8Array): void {
+  const dir = process.env.YRD_CAPTURE_DIR
+  if (!dir) return
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, name), content)
+}
 
 const NOW = new Date("2026-09-24T12:00:00.000Z")
 
@@ -100,9 +119,22 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
     expect(app.text).toContain("merging")
     expect(app.text).toContain("deprovisioning")
 
-    // In filled variant, tabs have padding and background fill
-    const provCol = app.text.indexOf("provisioning")
-    expect(provCol).toBeGreaterThanOrEqual(0)
+    // In filled variant, tabs have standard inner padding (2 spaces horizontal, 1 line vertical)
+    const lines = app.text.split("\n")
+    const provLineIdx = lines.findIndex((l) => l.includes("provisioning"))
+    expect(provLineIdx).toBeGreaterThan(0)
+    const provLine = lines[provLineIdx] ?? ""
+    const provCol = provLine.indexOf("provisioning")
+    expect(provCol).toBeGreaterThanOrEqual(2)
+
+    // Pin standard inner padding via termless cell inspection:
+    // Top padding line (provLineIdx - 1) has tab background fill
+    expect(app.cell(provCol, provLineIdx - 1).bg).not.toBeNull()
+    // 2 cells horizontal padding to the left of the label have tab background fill
+    expect(app.cell(provCol - 1, provLineIdx).bg).not.toBeNull()
+    expect(app.cell(provCol - 2, provLineIdx).bg).not.toBeNull()
+    // The label cell itself has tab background fill
+    expect(app.cell(provCol, provLineIdx).bg).not.toBeNull()
 
     app.unmount()
   })
@@ -168,6 +200,15 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
 
     // 4. Current running step prepare shows "still writing" or running status
     expect(app.text).toContain("PREPARING")
+
+    if (process.env.YRD_CAPTURE_DIR) {
+      const ansi = bufferToStyledText(app.term.buffer)
+      writeCaptureIfConfigured("260927-yrd-watch-25557-stage-tabs.ansi", ansi)
+      writeCaptureIfConfigured(
+        "260927-yrd-watch-25557-stage-tabs.png",
+        await renderAnsiScreenshot(ansi, { cols: 220, rows: 40 }),
+      )
+    }
 
     app.unmount()
   })
