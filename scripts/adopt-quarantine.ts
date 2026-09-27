@@ -177,13 +177,15 @@ async function inspectTarget(
   Readonly<{ state: State; appendedCount?: number; dropReason?: string; liveEvent?: string; diagnostic?: string }>
 > {
   if (kind === "move") {
-    if (targetOid === null)
+    if (targetOid === null) {
       return { state: "conflict", diagnostic: "live target is absent; reviewed move requires an exact live OID" }
+    }
     if (targetOid === sourceOid) return { state: "adopted", appendedCount: 0 }
     // chainsUnder reconstructs events through the first parent of each commit.
     const liveIndex = sourceEvents.findIndex((event) => event.id === targetOid)
-    if (liveIndex < 0)
+    if (liveIndex < 0) {
       return { state: "conflict", diagnostic: "live target is not on the quarantine first-parent chain" }
+    }
     const live = sourceEvents[liveIndex]
     const appended = sourceEvents.slice(liveIndex + 1)
     const drop = appended[0]
