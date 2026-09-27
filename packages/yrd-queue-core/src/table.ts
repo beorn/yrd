@@ -283,7 +283,7 @@ export function journalOverlay<Status extends string>(row: Row<Status>, journals
 }
 
 /** An event change holds a place while its folded status is open. */
-function stillInLine(state: Row["state"]): boolean {
+function stillInLine(state: string): boolean {
   return isChangeStatus(state) && isOpen(state)
 }
 

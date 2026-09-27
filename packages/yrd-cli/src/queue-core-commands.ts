@@ -165,7 +165,15 @@ import type { DraftWindow, WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot, WatchSource } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
-import { CHECK_GLYPH, STATE_WORDS, clock, diagnosticLines, firstLine, mediaDuration, timingLine } from "./watch-format.ts"
+import {
+  CHECK_GLYPH,
+  STATE_WORDS,
+  clock,
+  diagnosticLines,
+  firstLine,
+  mediaDuration,
+  timingLine,
+} from "./watch-format.ts"
 import { readRunnerFacts, readRunnerService, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
@@ -2753,7 +2761,7 @@ export async function coreQueueCommand(
             : await Promise.all(
                 histories.map(({ events, ...row }) =>
                   row.state === "direct" || row.state === "invalid"
-                    ? undefined
+                    ? Promise.resolve(undefined)
                     : eventShowChecks(git, config, journalOverlay(row, reading.journals), reading.journals, events),
                 ),
               )
@@ -4093,7 +4101,8 @@ export async function readEventListing(
   const windowDated =
     window === "7d"
       ? drafts.dated.filter(
-          (draft) => draft.committedAt !== undefined && listNow.getTime() - draft.committedAt.getTime() <= DRAFT_WINDOW_MS,
+          (draft) =>
+            draft.committedAt !== undefined && listNow.getTime() - draft.committedAt.getTime() <= DRAFT_WINDOW_MS,
         )
       : drafts.dated
   const folded = foldDrafts(windowDated, listNow)
