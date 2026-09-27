@@ -1893,8 +1893,8 @@ it("fails a round with the unreadable remote ref named after publication", async
   )
 })
 
-/** @failure 25708: the service lost its repeated-refusal count across rounds and could not clear the page. */
-it("counts repeated CAS refusals in round journals and resets after publication", async () => {
+/** @failure 26193: the first indexed merge could lose its target lease, consume a number, or miss the eventual merge. */
+it("keeps a final first-round refusal and retries the next round's indexed merge atomically", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
@@ -1915,18 +1915,16 @@ it("counts repeated CAS refusals in round journals and resets after publication"
     })
   })
   const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
-  for (const count of [1, 2, 3]) {
-    const outcome = await queueRun(options)
-    expect(outcome).toMatchObject({ exitCode: 0, merged: [] })
-    expect(logRecords(outcome)).toContainEqual(
-      expect.objectContaining({ kind: "warning", subject: "cas-refused", ref, count }),
-    )
-    expect(outcome.line?.casRefused?.count).toBe(count === 3 ? 3 : undefined)
-    expect((await readStatus(store, "main", branch)).status).toBe("merging")
-  }
+  const first = await queueRun(options)
+  expect(first).toMatchObject({ exitCode: 0, merged: [] })
+  expect(logRecords(first)).toContainEqual(
+    expect.objectContaining({ kind: "warning", subject: "cas-refused", ref, count: 1 }),
+  )
+  expect((await readStatus(store, "main", branch)).status).toBe("merging")
   const before = await readStatus(store, "main", branch)
   if (before.tip === undefined || before.since === undefined) throw new Error("fixture lost its open marker")
   const published = await queueRun(options)
+  expect(refused).toBe(3)
   expect(published.merged).toEqual([branch])
   expect(published.line?.casRefused).toBeUndefined()
   expect(logRecords(published)).toContainEqual(expect.objectContaining({ kind: "merge", ref }))

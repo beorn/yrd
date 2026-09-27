@@ -1,7 +1,7 @@
 /** Submit against a real event queue and remote. */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { createProcess, type Process } from "@yrd/process"
 import * as verifying from "../src/verifying.ts"
@@ -136,6 +136,14 @@ describe("event submit", () => {
       kind: "known",
       record: { id: "opaque-run-1" },
     })
+    const fresh = join(dirname(w.work), "fresh-reader")
+    await gitIn(dirname(w.work))(["clone", "--quiet", w.remote, fresh])
+    expect(
+      await lookupRunIndex(createEventStore(fresh, "origin", selectionFor(gitIn(fresh))), "main", 1),
+    ).toMatchObject({
+      kind: "known",
+      record: { id: "opaque-run-1" },
+    })
     const after = await w.git([
       "ls-remote",
       "--refs",
@@ -144,6 +152,44 @@ describe("event submit", () => {
       runIndexRef("main"),
     ])
     expect(after).not.toBe(before)
+  })
+
+  /** @failure Two writers for one queue could both claim N, or leave an index record without its change event.
+   * @level l3 @consumer competing Yrd runners
+   */
+  it("allocates distinct numbers when two first publications race on one remote queue (26193)", async () => {
+    const w = await world()
+    const branches = ["task/race-one", "task/race-two"] as const
+    const heads: string[] = []
+    for (const branch of branches) {
+      heads.push(await branchWithCommit(w, branch, `${branch.slice(5)}.txt`))
+      await submit(w.git, "origin", { branch, submitter: "author", target: { branch: "main", remote: "origin" } })
+    }
+    const statuses = await Promise.all(branches.map((branch) => readStatus(store(w), "main", branch)))
+    const written = await Promise.all(
+      branches.map((branch, index) => {
+        const tip = statuses[index]?.tip
+        const head = heads[index]
+        if (tip === undefined || head === undefined) throw new Error(`${branch}: fixture lost submission`)
+        return appendNumberedChangeEvent(
+          store(w),
+          "main",
+          branch,
+          tip,
+          { type: "verifying", at: new Date(), commit: head },
+          { id: `race-${index}`, startedAt: "2026-09-27T12:00:00.000Z", host: "hh", actor: "yrd" },
+        )
+      }),
+    )
+    expect(written.map((entry) => entry.number).sort((a, b) => a - b)).toEqual([1, 2])
+    for (const [index, entry] of written.entries()) {
+      expect(await lookupRunIndex(store(w), "main", entry.number)).toMatchObject({
+        kind: "known",
+        record: { id: `race-${index}` },
+      })
+      expect((await readStatus(store(w), "main", branches[index]!)).status).toBe("verifying")
+    }
+    expect(await lookupRunIndex(store(w), "main", 3)).toEqual({ kind: "unknown", number: 3 })
   })
 
   /** @failure Maintenance admits a submit after the queue is stopped. */
