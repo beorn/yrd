@@ -9,8 +9,8 @@
  */
 
 import { describe, expect, it } from "vitest"
-import type { ChangeRecord, Row } from "@yrd/queue-core"
-import { historyEntries, metadataGroups, metadataKeyWidth, timelineOf } from "../src/watch-change.ts"
+import type { Row } from "@yrd/queue-core"
+import { metadataGroups, metadataKeyWidth, timelineOf } from "../src/watch-change.ts"
 import { explanationLine, headlineOf, runOf, runTitle, stepsOf, timingRows } from "../src/watch-run.ts"
 
 const NOW_MS = Date.UTC(2026, 8, 3, 12, 0, 0)
@@ -41,8 +41,7 @@ describe("the status box's own lines", () => {
 
   it("names the reason a failed or stuck change carries, and the position of one in line", () => {
     expect(headlineOf(row({ reason: "test", state: "failed" }))).toBe("failed test")
-    // The state in the one word table's word (24196): the core's queued reads submitted.
-    expect(headlineOf(row({ position: 2, state: "queued" }))).toBe("submitted #2")
+    expect(headlineOf(row({ position: 2, state: "queued" }))).toBe("queued #2")
   })
 
   it("says how a change merged, whether or not a record names the merge", () => {
@@ -98,167 +97,28 @@ describe("the status box's own lines", () => {
 })
 
 describe("HISTORY and METADATA (watch-change)", () => {
-  const record = (
-    kind: ChangeRecord["kind"],
-    offset: number,
-    trailers: readonly (readonly [string, string])[],
-  ): ChangeRecord => ({
-    at: new Date(NOW_MS - 3_600_000 + offset),
-    kind,
-    sha: String(offset).padStart(40, "0"),
-    subject: kind,
-    trailers,
-  })
+  /** Event history already arrives newest first; the timeline keeps only the selected cut. */
+  it("draws the latest event cut with measured gaps and a drafted lead", () => {
+    const start = NOW_MS - 3_600_000
+    const history = [
+      { at: new Date(start + 92_000), text: "merged by yrd" },
+      { at: new Date(start + 62_000), text: "checking by yrd" },
+      { at: new Date(start + 2_000), text: "opened by @chief", opens: true as const },
+      { at: new Date(start), text: "opened by @chief", opens: true as const },
+    ]
+    const timeline = timelineOf(history, new Date(start - 60_000))
 
-  it("reads newest first, calls a second opening a resubmission, and keeps a sent echo only when delivery failed", () => {
-    const entries = historyEntries([
-      record("opened", 0, [["Submitter", "@chief"]]),
-      record("checked", 1_000, [["Base", "3c285a41af46".padEnd(40, "0")]]),
-      record("sent", 1_500, [
-        ["Delivery", "sent"],
-        ["To", "@chief"],
-      ]),
-      record("opened", 2_000, [["Submitter", "@chief"]]),
-      record("failed", 3_000, [["Reason", "test"]]),
-      record("sent", 4_000, [
-        ["Delivery", "failed"],
-        ["To", "@chief"],
-      ]),
-    ])
-    // Each record in the word for the state it put the change in (24196): the record checked reads pending.
-    expect(entries.map((entry) => entry.text)).toEqual([
-      "message to @chief failed",
-      "failed test",
-      "resubmitted by @chief",
-      "pending at 3c285a41af46",
-      "submitted by @chief",
-    ])
-  })
-
-  it("draws the timeline of the cut a detail is about, oldest first, each entry with its time to the next (25441)", () => {
-    const history = historyEntries([
-      record("opened", 0, [["Submitter", "@chief"]]),
-      record("checked", 1_000, [["Base", "3c285a41af46".padEnd(40, "0")]]),
-      record("opened", 2_000, [["Submitter", "@chief"]]),
-      record("checked", 62_000, [["Base", "3c285a41af46".padEnd(40, "0")]]),
-      record("merged", 92_000, [["Merge", "b234234abcde".padEnd(40, "0")]]),
-    ])
-    const drafted = new Date(NOW_MS - 3_600_000 - 60_000)
-    const timeline = timelineOf(history, drafted)
-
-    // Two cuts, a submit and a resubmit: the timeline is the second one's, led by the head's date.
     expect({ cut: timeline.cut, cuts: timeline.cuts }).toEqual({ cut: 2, cuts: 2 })
     expect(timeline.entries.map((entry) => [entry.text, entry.toNextMs])).toEqual([
       ["drafted", 62_000],
-      ["resubmitted by @chief", 60_000],
-      ["pending at 3c285a41af46", 30_000],
-      ["merged as b234234abcde", undefined],
+      ["opened by @chief", 60_000],
+      ["checking by yrd", 30_000],
+      ["merged by yrd", undefined],
     ])
   })
 
-  it("leads with no drafted entry when the head's date is unknown, and counts a change never submitted as one cut", () => {
-    const history = historyEntries([
-      record("opened", 0, [["Submitter", "@chief"]]),
-      record("failed", 5_000, [["Reason", "test"]]),
-    ])
-    expect(timelineOf(history, undefined).entries.map((entry) => entry.text)).toEqual([
-      "submitted by @chief",
-      "failed test",
-    ])
+  it("leaves an empty event timeline unmeasured", () => {
     expect(timelineOf([], undefined)).toEqual({ cut: 1, cuts: 1, entries: [] })
-  })
-
-  it("a notice re-send is never drawn as another run of the change (24196)", () => {
-    const entries = historyEntries([
-      record("opened", 0, [["Submitter", "@chief"]]),
-      record("checked", 1_000, [["Base", "3c285a41af46".padEnd(40, "0")]]),
-      record("sent", 2_000, [
-        ["Delivery", "sent"],
-        ["To", "@chief"],
-      ]),
-      record("sent", 3_000, [
-        ["Delivery", "sent"],
-        ["To", "@chief"],
-      ]),
-    ])
-    // Successful notice re-sends write sent records, but are never drawn as runs in the change history
-    expect(entries.map((entry) => entry.text)).toEqual(["pending at 3c285a41af46", "submitted by @chief"])
-  })
-
-  /**
-   * @failure  `historyEntry` enumerated six of the seven record kinds and let
-   *           `withdrawn` fall through its `default: return undefined`, so the
-   *           one ending a PERSON chose was the one ending the history did not
-   *           show: a withdrawn change read as a chain that simply stopped
-   *           (@i/10-yrd/24492 ripple).
-   */
-  it("renders a withdrawn record, naming who withdrew it and the note they left", () => {
-    const entries = historyEntries([
-      record("opened", 0, [["Submitter", "@dev/9"]]),
-      record("withdrawn", 1_000, [
-        ["By", "@dev/9"],
-        ["Note", "superseded by task/two"],
-      ]),
-    ])
-    // The record withdrawn reads cancelled (24196), still naming who acted.
-    expect(entries[0]?.text).toBe("cancelled by @dev/9")
-    expect(entries[0]?.detail).toBe("superseded by task/two")
-    // The note is optional; the ending and its actor are not.
-    expect(historyEntries([record("withdrawn", 0, [["By", "@chief"]])])[0]).toEqual({
-      at: new Date(NOW_MS - 3_600_000),
-      text: "cancelled by @chief",
-    })
-    // And a record with neither still says the change was cancelled.
-    expect(historyEntries([record("withdrawn", 0, [])])[0]?.text).toBe("cancelled")
-  })
-
-  it("says a direct merge went around the queue, says nothing about the queue's own merges, and carries a failure's detail", () => {
-    const entries = historyEntries([
-      record("merged", 0, [
-        ["Merge", "b234234abcde".padEnd(40, "0")],
-        ["Merged-By", "direct"],
-      ]),
-      record("merged", 500, [
-        ["Merge", "c345345bcdef".padEnd(40, "0")],
-        ["Merged-By", "yrd queue main [q-20260903T113000000Z-0badf00d]"],
-      ]),
-      record("failed", 1_000, [
-        ["Reason", "conflict"],
-        ["Detail", "CONFLICT (content): x.ts"],
-      ]),
-    ])
-    expect(entries).toEqual([
-      expect.objectContaining({ detail: "CONFLICT (content): x.ts", text: "failed conflict" }),
-      { at: expect.any(Date), text: "merged as c345345bcdef" },
-      expect.objectContaining({ detail: "a direct merge, around the queue", text: "merged as b234234abcde" }),
-    ])
-  })
-
-  it("renders deferred history entries with dynamic comparison relation (<, >, =)", () => {
-    const entries = historyEntries([
-      record("deferred", 0, [
-        ["Reason", "projection-exceeded"],
-        ["ProjectedMs", String(58 * 60_000)],
-        ["BoundMs", String(30 * 60_000)],
-      ]),
-      record("deferred", 1_000, [
-        ["Reason", "projection-exceeded"],
-        ["ProjectedMs", String(17 * 60_000)],
-        ["BoundMs", String(30 * 60_000)],
-      ]),
-      record("deferred", 2_000, [
-        ["Reason", "projection-exceeded"],
-        ["ProjectedMs", String(30 * 60_000)],
-        ["BoundMs", String(30 * 60_000)],
-      ]),
-    ])
-    // Newest record first
-    expect(entries[0]?.text).toBe("deferred projection-exceeded (30m = 30m)")
-    expect(entries[0]?.detail).toBe("waits for the long check")
-    expect(entries[1]?.text).toBe("deferred projection-exceeded (17m < 30m)")
-    expect(entries[1]?.detail).toBe("waits for the long check")
-    expect(entries[2]?.text).toBe("deferred projection-exceeded (58m > 30m)")
-    expect(entries[2]?.detail).toBe("waits for the long check")
   })
 
   it("lays the metadata out in three groups with the live facts absent", () => {
@@ -294,9 +154,9 @@ describe("a check running now", () => {
     const live = row({
       live: { check: "affected-tests", phase: "merge", run: "q-x", since: new Date(NOW_MS) },
       position: 1,
-      state: "checked",
+      state: "verifying",
     })
-    expect(headlineOf(live, true)).toBe("pending #1, checking affected-tests")
-    expect(headlineOf(live)).toBe("pending #1, checking affected-tests")
+    expect(headlineOf(live, true)).toBe("verifying #1, checking affected-tests")
+    expect(headlineOf(live)).toBe("verifying #1, checking affected-tests")
   })
 })
