@@ -127,7 +127,7 @@ import {
 import { TimeText } from "./watch-primitives.tsx"
 import type { RunnerFacts, RunnerLine } from "./watch-runner.ts"
 import { decisionsOfRows, lastDayBucket, statsSummary, type RunDecision } from "./watch-stats.ts"
-import { parseQueueAddress, parseRunAddress } from "./address.ts"
+import { formatStoredQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
 
 type ResolvedWatchRun = Readonly<{ canonical: string; id: string; number: number; startedAt?: string }>
 
@@ -189,7 +189,7 @@ export function RunnerDetailPane({ snapshot }: { snapshot: WatchSnapshot }) {
 export type WatchSnapshot = Readonly<{
   /** Current generic observation; no result survives a failed refresh. */
   observation?: GitObservation
-  /** The queue's own name, as a stranger would spell it (`github.com/beorn/hh#main`). */
+  /** The stored queue key (`github.com/beorn/hh#main`, or v2 for a # branch). */
   queue: string
   /** The queues on this screen: pre-M8 exactly one. */
   queues: readonly WatchQueue[]
@@ -643,7 +643,7 @@ function QueuesWatchPane({
               ) : (
                 <TopLine
                   key={source.id}
-                  queue={`${source.snapshot.queue} (${source.snapshot.queues[0]?.path ?? source.label})`}
+                  queue={`${formatStoredQueueAddress(source.snapshot.queue)} (${source.snapshot.queues[0]?.path ?? source.label})`}
                   queueDigit={multiple ? source.digit : undefined}
                   queueFirst
                   status={{
@@ -931,7 +931,7 @@ function SingleWatchPane({
       setCursor(keyed)
     }
   }, [keyed, cursor])
-  const label = shown.queues[0]?.label ?? shown.queue
+  const label = shown.queues[0]?.label ?? formatStoredQueueAddress(shown.queue)
   // A draft has nothing to load: its detail is drawn from its row.
   const draft = selected?.row.state === "draft" ? selected.row : undefined
 
@@ -1082,7 +1082,9 @@ function SingleWatchPane({
       try {
         if (onNavigateRun !== undefined) await onNavigateRun(operand)
         else {
-          if (resolveRunAddress === undefined) throw new Error(`${shown.queue}: run lookup is unavailable`)
+          if (resolveRunAddress === undefined) {
+            throw new Error(`${formatStoredQueueAddress(shown.queue)}: run lookup is unavailable`)
+          }
           const found = await resolveRunAddress(operand.trim())
           const item = shown.unfiltered.find((candidate) => (candidate.run?.id ?? candidate.row.run) === found.id)
           if (item === undefined) {
@@ -1299,7 +1301,7 @@ function SingleWatchPane({
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
         {/* Line 1 (inverted): YRD, status word and the queue address left, timer right (25630, 24196). */}
         <TopLine
-          queue={shown.queue}
+          queue={formatStoredQueueAddress(shown.queue)}
           queues={shown.queues}
           status={
             statusTimer(shown, nowProp ?? shown.at) !== undefined ||
@@ -1609,7 +1611,7 @@ function Table({
   // minute at most; the seconds belong to the cells, not to the table.
   const minute = useMinute()
   const runner = runnerOf(snapshot, minute)
-  const queue = { digit: 1, label: snapshot.queues[0]?.label ?? snapshot.queue }
+  const queue = { digit: 1, label: snapshot.queues[0]?.label ?? formatStoredQueueAddress(snapshot.queue) }
   const isSingleQueue = multipleQueues === undefined ? snapshot.queues.length <= 1 : !multipleQueues
   const baseLayout = listLayout(rows, columns, minute, runner, queue, {
     singleQueue: isSingleQueue,

@@ -236,6 +236,20 @@ describe("the top line (items 30, 32d, 33)", () => {
     expect(first).toContain("example.test/repo#main")
   })
 
+  it("26201: a # queue shows its human address in the title and never its stored v2 key", async () => {
+    const text = await paint(
+      <WatchPane
+        snapshot={snapshot({
+          queue: "v2#example.test%2Frepo#release%232026",
+          queues: [{ branch: "release#2026", label: "release#2026", path: "/repo" }],
+        })}
+        live={false}
+      />,
+    )
+    expect(text.split("\n")[0]).toContain("https://example.test/repo@release%232026")
+    expect(text).not.toContain("v2#")
+  })
+
   it("has no queue All pill; the a key still shows every status", async () => {
     const rows: WatchRow[] = [{ row: row({ branch: "task/queued", state: "queued" }) }, { row: failedRow() }]
     const app = render(<WatchPane snapshot={snapshot({ rows })} live />, { cols: 120, rows: 40 })

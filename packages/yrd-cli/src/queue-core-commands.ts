@@ -162,7 +162,7 @@ import {
   runIndexPath,
   RUN_INDEX_CODES,
 } from "@yrd/queue-core"
-import { formatQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
+import { formatQueueAddress, formatStoredQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
 import { readUnitIntent } from "./unit-intent.ts"
 import { noticeLine } from "./watch-notice.ts"
 import { FILTER_FIELDS, eventNoticeLines, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
@@ -2640,7 +2640,7 @@ export async function coreQueueCommand(
         let seen: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }> = first
         const source: WatchSource = {
           id: first.queue,
-          label: first.queue,
+          label: formatStoredQueueAddress(first.queue),
           resolveRunAddress: async (operand) => {
             const selected = parseQueueAddress(first.queue)
             if (selected.kind !== "remote") {

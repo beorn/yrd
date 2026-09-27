@@ -51,6 +51,7 @@ import {
   type HistoryEntry,
 } from "./watch-change.ts"
 import { useMinute, useNow } from "./watch-clock.ts"
+import { formatStoredQueueAddress } from "./address.ts"
 import {
   CHECK_COLOR,
   CHECK_GLYPH,
@@ -273,7 +274,7 @@ export function runnerDetailFromSnapshot(snapshot: WatchSnapshot, now: Date): Ch
     run: {
       kind: "queue",
       id: latest?.id ?? "run",
-      label: snapshot.queue,
+      label: formatStoredQueueAddress(snapshot.queue),
       row,
       steps: stepsOf(checks, row),
     },
