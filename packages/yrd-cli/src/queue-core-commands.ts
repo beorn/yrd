@@ -158,7 +158,7 @@ import { FILTER_FIELDS, eventNoticeLines, filterRows, rowLine, watchRows, type W
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
 
 import type { DraftWindow, WatchQueue } from "./watch-list.tsx"
-import type { WatchSnapshot } from "./watch-pane.tsx"
+import type { WatchSnapshot, WatchSource } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
 import { STATE_WORDS, clock, diagnosticLines, firstLine, mediaDuration, timingLine } from "./watch-format.ts"
@@ -480,6 +480,8 @@ export async function coreQueueCommand(
     selection?: GitSelection
     /** A terminal with a keyboard on the other end: the watch draws its pane instead of printing rounds. */
     interactive?: boolean
+    /** Hand the existing interactive reader to a pane composing several queues. */
+    watchSource?: (source: WatchSource) => void
     /** One-shot list/show opt-in: an existing queue-owned clone, never a writer's authority. */
     localStatusStore?: Readonly<{ path: string; transport: string }>
     /**
@@ -2299,7 +2301,7 @@ export async function coreQueueCommand(
       // and every one-shot queue command never load React or the reconciler at
       // all — the same separation the retired build script named, restored
       // with it.
-      if (options.interactive === true && options.json !== true) {
+      if ((options.interactive === true || options.watchSource !== undefined) && options.json !== true) {
         const first = await round(captured)
         if (first.observation.contract === "root-v1" && first.observation.outcome === "invalid") {
           io.stderr(`${first.observation.message}\n`)
@@ -2309,10 +2311,6 @@ export async function coreQueueCommand(
           io.stderr(missedSelector(request.terms ?? [], first.queue, first.changes.length))
           return 2
         }
-        const { WatchPane } = await import("./watch-pane.tsx")
-        const { run } = await import("silvery/runtime")
-        const { createElement } = await import("react")
-        const { WATCH_RUN_OPTIONS } = await import("./watch-run-options.ts")
         let ending: YrdCliExitCode | undefined
         // The queue read the LAST round made: a detail opened between rounds
         // reads the same tips the table shows, never a fresher or staler one.
@@ -2320,58 +2318,74 @@ export async function coreQueueCommand(
         let eventInvalid = first.eventInvalid
         let journals = first.journals
         let seen: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }> = first
+        const source: WatchSource = {
+          id: first.queue,
+          label: first.queue,
+          load: async (asked) => {
+            const refreshed = await declaration()
+            if (refreshed === undefined) throw new Error(`${targetLabel} no longer carries a .yrd.yml`)
+            await sightDrafts(seen)
+            const next = await round(refreshed, asked?.draftWindow)
+            seen = next
+            if (next.observation.contract === "root-v1" && next.observation.outcome === "invalid") {
+              ending = 2
+              if (options.watchSource !== undefined) throw new Error(next.observation.message)
+              app.unmount()
+              io.stderr(`${next.observation.message}\n`)
+            }
+            eventChanges = next.eventChanges
+            eventInvalid = next.eventInvalid
+            journals = next.journals
+            return snapshotOf(next)
+          },
+          loadDiff: (item) => readDiff(git, config, item),
+          loadCommandOutput: (command) => Promise.resolve(readCommandOutput(command)),
+          open: (item) => {
+            if (item.row.state === "direct") {
+              return Promise.resolve({
+                row: item.row,
+                run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run),
+                checks: [],
+                ...(journalFor(item, journals) === undefined ? {} : { journal: journalFor(item, journals) }),
+              })
+            }
+            const selected = eventChanges.get(item.row.branch)
+            const defect = eventInvalid.get(item.row.branch)
+            if (defect !== undefined) {
+              return Promise.resolve({
+                row: item.row,
+                run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run),
+                checks: [],
+                note: `Raw events: yrd queue show ${item.row.branch} --json`,
+              })
+            }
+            if (selected === undefined) throw new Error(`event change ${item.row.branch} left the selected listing`)
+            return openEventDetail(
+              git,
+              config,
+              item,
+              config.target.branch,
+              repo,
+              selected,
+              journalFor(item, journals),
+              workdir,
+            )
+          },
+          snapshot: snapshotOf(first),
+        }
+        if (options.watchSource !== undefined) {
+          options.watchSource(source)
+          return 0
+        }
+        const { WatchPane } = await import("./watch-pane.tsx")
+        const { run } = await import("silvery/runtime")
+        const { createElement } = await import("react")
+        const { WATCH_RUN_OPTIONS } = await import("./watch-run-options.ts")
         const app = await run(
           createElement(WatchPane, {
+            ...source,
+            snapshot: snapshotOf(first),
             intervalMs: Math.max(1, request.intervalSeconds ?? 5) * 1000,
-            load: async (asked) => {
-              const refreshed = await declaration()
-              if (refreshed === undefined) throw new Error(`${targetLabel} no longer carries a .yrd.yml`)
-              await sightDrafts(seen)
-              const next = await round(refreshed, asked?.draftWindow)
-              seen = next
-              if (next.observation.contract === "root-v1" && next.observation.outcome === "invalid") {
-                ending = 2
-                app.unmount()
-                io.stderr(`${next.observation.message}\n`)
-              }
-              eventChanges = next.eventChanges
-              eventInvalid = next.eventInvalid
-              journals = next.journals
-              return snapshotOf(next)
-            },
-            loadDiff: (item) => readDiff(git, config, item),
-            loadCommandOutput: (command) => Promise.resolve(readCommandOutput(command)),
-            open: (item) => {
-              if (item.row.state === "direct") {
-                return Promise.resolve({
-                  row: item.row,
-                  run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run),
-                  checks: [],
-                  ...(journalFor(item, journals) === undefined ? {} : { journal: journalFor(item, journals) }),
-                })
-              }
-              const selected = eventChanges.get(item.row.branch)
-              const defect = eventInvalid.get(item.row.branch)
-              if (defect !== undefined) {
-                return Promise.resolve({
-                  row: item.row,
-                  run: runOf(item.row, config.target.branch, [], item.run?.id ?? item.row.run),
-                  checks: [],
-                  note: `Raw events: yrd queue show ${item.row.branch} --json`,
-                })
-              }
-              if (selected === undefined) throw new Error(`event change ${item.row.branch} left the selected listing`)
-              return openEventDetail(
-                git,
-                config,
-                item,
-                config.target.branch,
-                repo,
-                selected,
-                journalFor(item, journals),
-                workdir,
-              )
-            },
             onEnding:
               request.terms === undefined || request.terms.length === 0
                 ? undefined
@@ -2380,7 +2394,6 @@ export async function coreQueueCommand(
                     ending = code
                     app.unmount()
                   },
-            snapshot: snapshotOf(first),
           }),
           WATCH_RUN_OPTIONS,
         )
@@ -3100,7 +3113,7 @@ function describeRun(
  *
  * Read from this round's own log rather than the remote: the `end()` step
  * that pushed a change to `stuck` wrote the complete incident to `outcome.log`
- * in the same call (run.ts), so this is that run's own record of why, never a
+ * in the same call (event-run.ts), so this is that run's own record of why, never a
  * second, possibly-later reading of the change ref.
  */
 function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
@@ -3123,7 +3136,7 @@ function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
       filled(row.next) &&
       filled(row.owner)
     if (!complete) {
-      // Every stuck ending writes a complete incident (run.ts `stuckWrite`);
+      // Every stuck ending writes a complete incident (event-run.ts `writeStuck`);
       // this is the guard against a future ending that stops doing so, not an
       // expected path — it still names the branch rather than saying nothing.
       return `stuck ${branch}: no complete incident in this run's log (${outcome.log}); see \`yrd queue show ${branch}\``

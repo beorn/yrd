@@ -14,6 +14,7 @@ import {
 } from "@yrd/queue-core"
 import { parseQueueAddress, queueDirectory, queueRoot, type QueueAddress } from "./address.ts"
 import { repositoryHere } from "./declaration.ts"
+import type { YrdQueueRunnerDeclaration } from "../../../hab.projects.ts"
 
 export type QueueLocation = Readonly<{
   repo: string
@@ -40,6 +41,47 @@ export type QueueLocation = Readonly<{
   remote?: string
   address?: QueueAddress
 }>
+
+type DeclaredQueue = Pick<YrdQueueRunnerDeclaration, "serviceName" | "repository" | "queue">
+
+export type DeclaredQueueLocation =
+  | Readonly<{ kind: "resolved"; declaration: DeclaredQueue; location: QueueLocation }>
+  | Readonly<{ kind: "unreadable"; declaration: DeclaredQueue; error: Error }>
+
+/** Resolve the same queue set the Yrd runner declaration serves, retaining each failed read by name. */
+export async function resolveDeclaredQueueLocations(
+  cwd: string,
+  declarations: readonly DeclaredQueue[],
+  env: NodeJS.ProcessEnv,
+): Promise<readonly DeclaredQueueLocation[]> {
+  const base = repositoryHere(cwd) ?? resolve(cwd)
+  const locations: DeclaredQueueLocation[] = []
+  for (const declaration of declarations) {
+    try {
+      const path = resolve(base, declaration.repository.path)
+      const repository = repositoryHere(path)
+      if (repository !== path) {
+        throw new Error(
+          repository === undefined
+            ? `declared repository ${path} is not a Git repository`
+            : `declared repository ${path} is inside ${repository}; name its root`,
+        )
+      }
+      locations.push({
+        kind: "resolved",
+        declaration,
+        location: await resolveQueueLocation(path, declaration.queue.base, env, "queue"),
+      })
+    } catch (error: unknown) {
+      locations.push({
+        kind: "unreadable",
+        declaration,
+        error: error instanceof Error ? error : new Error(String(error)),
+      })
+    }
+  }
+  return locations
+}
 
 /**
  * The remote's default branch. A clone records it as refs/remotes/<remote>/HEAD (git clone, or
@@ -195,7 +237,7 @@ export async function resolveQueueLocation(
   }
   const host = await hostWorkdir(cwd, env, git)
   const workdir = queueRoot(host, address)
-  if (context !== "queue" && inside !== undefined) {
+  if (inside !== undefined && (context === "submit" || (context === "reader" && !addressed))) {
     return {
       address,
       selection,

@@ -38,22 +38,25 @@ import {
   type LogRecord,
 } from "@yrd/queue-core"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
+import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { stageInfo, type ChangeDetail } from "../src/watch-detail.tsx"
 import { runIdentifier, runShortName } from "../src/watch-format.ts"
-import type { WatchSnapshot } from "../src/watch-pane.tsx"
+import type { WatchSnapshot, WatchSource } from "../src/watch-pane.tsx"
 import { readRunnerFacts, runnerLine } from "../src/watch-runner.ts"
 import type { WatchRow } from "../src/watch-rows.ts"
 
 type PaneProps = Readonly<{
   snapshot: WatchSnapshot
+  sources?: readonly WatchSource[]
   open?: (row: WatchRow) => Promise<ChangeDetail>
   load?: (request?: Readonly<{ draftWindow: "7d" | "all" }>) => Promise<WatchSnapshot>
   onEnding?: (code: 0 | 1 | 2) => void
 }>
 const rendered: {
   snapshot: WatchSnapshot | undefined
+  sources?: readonly WatchSource[]
   open: PaneProps["open"]
   load: PaneProps["load"]
   onEnding?: PaneProps["onEnding"]
@@ -67,6 +70,7 @@ const rendered: {
 }))
 vi.mock("silvery/runtime", () => ({
   run: async (element: Readonly<{ props: PaneProps }>) => {
+    rendered.sources = element.props.sources
     rendered.snapshot = element.props.snapshot
     rendered.open = element.props.open
     rendered.load = element.props.load
@@ -79,6 +83,17 @@ vi.mock("silvery/runtime", () => ({
     }
   },
 }))
+
+const declaredQueues = vi.hoisted(
+  () =>
+    [] as {
+      serviceName: string
+      repository: { name: string; path: string }
+      queue: { base: string }
+      owner: string
+    }[],
+)
+vi.mock("../../../hab.projects.ts", () => ({ yrdQueueRunnerDeclarations: declaredQueues }))
 
 function renderedSnapshot(): WatchSnapshot | undefined {
   return rendered.snapshot
@@ -1342,4 +1357,101 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
       result: "pass",
     })
   })
+})
+
+/** @failure Two real queues sharing a change identity were read from the caller clone and became indistinguishable.
+ * @level l2 @consumer operator watching the declared queue fleet
+ */
+describe("bare watch declared queues", () => {
+  it("reads independent snapshots and detail callbacks for the same head in two repository queues", async () => {
+    const first = await world()
+    await createWorldEventQueue(first)
+    await change(first, "task/shared", true)
+    const root = dirname(first.work)
+    const otherRemote = join(root, "other.git")
+    const otherWork = join(root, "other")
+    await first.git(["clone", "--quiet", "--mirror", join(root, "remote.git"), otherRemote])
+    await first.git(["clone", "--quiet", otherRemote, otherWork])
+    const otherGit = gitIn(otherWork)
+    const second = { git: otherGit, work: otherWork, workdir: join(root, "other-queue") }
+    const withdrawn = capture(second.work)
+    expect(
+      await coreQueueCommand(
+        second.work,
+        withdrawn.io,
+        {
+          command: "withdraw",
+          branch: "task/shared",
+          by: "@dev/5",
+          reason: "fixture second queue only",
+        },
+        { workdir: second.workdir },
+      ),
+      withdrawn.stderr(),
+    ).toBe(0)
+    declaredQueues.push(
+      {
+        serviceName: "first",
+        repository: { name: "first", path: first.work },
+        queue: { base: "main" },
+        owner: "@chief",
+      },
+      {
+        serviceName: "second",
+        repository: { name: "second", path: second.work },
+        queue: { base: "main" },
+        owner: "@chief",
+      },
+      {
+        serviceName: "missing",
+        repository: { name: "missing", path: join(root, "absent") },
+        queue: { base: "main" },
+        owner: "@chief",
+      },
+    )
+    const inputTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+    const outputTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true })
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+    vi.stubEnv("XDG_STATE_HOME", join(root, "state"))
+    rendered.onWait = undefined
+    try {
+      const watched = capture(first.work)
+      expect(await runYrdProcess([process.execPath, "yrd", "watch"], watched.io), watched.stderr()).toBe(0)
+      const sources = rendered.sources
+      expect(sources?.map((source) => source.id)).toEqual(["first#main", "second#main", "missing#main"])
+      const a = sources?.[0]
+      const b = sources?.[1]
+      expect(sources?.[2]?.error).toContain("absent")
+      const aRow = a?.snapshot?.rows.find((item) => item.row.branch === "task/shared")
+      const bRow = b?.snapshot?.rows.find((item) => item.row.branch === "task/shared")
+      expect(aRow?.row.state).toBe("queued")
+      expect(bRow?.row.state).toBe("cancelled")
+      expect(aRow?.row.head).toBe(bRow?.row.head)
+      expect(a?.snapshot?.queues[0]?.path).not.toBe(first.work)
+      expect(b?.snapshot?.queues[0]?.path).not.toBe(second.work)
+      if (aRow === undefined || bRow === undefined) throw new Error("both queues must expose task/shared")
+      expect((await a?.open?.(aRow))?.row.state).toBe("queued")
+      expect((await b?.open?.(bRow))?.row.state).toBe("cancelled")
+      expect((await a?.load?.())?.rows.find((item) => item.row.branch === "task/shared")?.row.state).toBe("queued")
+      expect((await b?.load?.())?.rows.find((item) => item.row.branch === "task/shared")?.row.state).toBe("cancelled")
+      await expect(sources?.[2]?.load?.()).rejects.toThrow("absent")
+      await first.git(["clone", "--quiet", join(root, "remote.git"), join(root, "absent")])
+      expect((await sources?.[2]?.load?.())?.rows.find((item) => item.row.branch === "task/shared")?.row.state).toBe(
+        "queued",
+      )
+      declaredQueues.length = 0
+      const fallback = capture(first.work)
+      expect(await runYrdProcess([process.execPath, "yrd", "watch"], fallback.io), fallback.stderr()).toBe(0)
+      expect(rendered.sources).toBeUndefined()
+      expect(rendered.snapshot?.rows.find((item) => item.row.branch === "task/shared")?.row.state).toBe("queued")
+    } finally {
+      declaredQueues.length = 0
+      vi.unstubAllEnvs()
+      if (inputTTY === undefined) Reflect.deleteProperty(process.stdin, "isTTY")
+      else Object.defineProperty(process.stdin, "isTTY", inputTTY)
+      if (outputTTY === undefined) Reflect.deleteProperty(process.stdout, "isTTY")
+      else Object.defineProperty(process.stdout, "isTTY", outputTTY)
+    }
+  }, 60_000)
 })

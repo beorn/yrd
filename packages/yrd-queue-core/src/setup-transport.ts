@@ -5,9 +5,9 @@
  * The two need different words because they need different people. A 504 from
  * a code host while setup resolved one pinned dependency is nobody's defect and
  * clears itself; a lockfile that does not match its manifest is a change that
- * must not merge. Both arrive today as `yrd-setup-unusable`, so a reader of the
- * record cannot tell an outage from a break, and the fleet's whole delivery
- * mechanism stops on either. Measured 2026-09-11: one GitHub 504 cost 19m47s.
+ * must not merge. Without separate incident codes, both read as
+ * `yrd-setup-unusable`, hiding an outage from the reader while the fleet's
+ * delivery stops on either. Measured 2026-09-11: one GitHub 504 cost 19m47s.
  *
  * THE DISTINCTION THIS MODULE MUST NOT BLUR, and the reason it is a table of
  * named signatures rather than a regex over "5\\d\\d": a remote that ANSWERED
@@ -27,6 +27,9 @@ export type TransportFault = Readonly<{
   /** The line it matched on, trimmed and bounded — evidence, not a log. */
   line: string
 }>
+
+const SETUP_UNREACHABLE_CODE = "yrd-setup-unreachable"
+const SETUP_UNUSABLE_CODE = "yrd-setup-unusable"
 
 /** Bound on the evidence line a record carries. A record is not a log. */
 const MAX_LINE = 300
@@ -86,4 +89,17 @@ export function transportFaultIn(text: string): TransportFault | undefined {
     }
   }
   return undefined
+}
+
+/** Keep the incident's code and remedy paired with the transport classifier. */
+export function setupStuckCode(fault: TransportFault | undefined): string {
+  return fault === undefined ? SETUP_UNUSABLE_CODE : SETUP_UNREACHABLE_CODE
+}
+
+export function setupStuckNext(fault: TransportFault | undefined): string {
+  if (fault === undefined) return "repair the queue setup, then run yrd queue run"
+  return (
+    `nothing here is the change's fault: setup could not reach a remote (${fault.signature}), ` +
+    "and the round's one retry could not either; once the remote answers, run yrd queue run or resume the queue"
+  )
 }

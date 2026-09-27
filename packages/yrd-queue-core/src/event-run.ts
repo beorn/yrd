@@ -26,13 +26,15 @@ import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
 import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
-import { queueName } from "./config.ts"
+import { InvalidQueueConfig, queueName, readConfig } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
 import { recentCasRefusalStreak, recentCasRefusals, recentPublicationNotLanded, type QueueRunLog } from "./log.ts"
 import {
+  ProgramSubjectSetupFailed,
   programRootCheck,
   recordProgramResult,
   recordProgramStart,
+  recordProgramVerdict,
   recordSynthesizedPassResults,
 } from "./program-root.ts"
 import { queueRefPrefix } from "./refs.ts"
@@ -57,7 +59,8 @@ import {
   overrideNotice,
 } from "./with-notify.ts"
 import { changeName } from "./refs.ts"
-import { transportFaultIn } from "./setup-transport.ts"
+import { setupStuckCode, setupStuckNext, transportFaultIn } from "./setup-transport.ts"
+import { incidentTrailers, type Incident } from "./incident.ts"
 import { readRootChanges } from "./root-changes.ts"
 import { mergedBy } from "./git.ts"
 import { settledBaseCommit } from "./settled-base.ts"
@@ -207,6 +210,30 @@ export async function eventQueueRun(
   }
   const queue = options.target.branch
   const { git, gitOptions, hooksPath, log, selected, url } = prepared
+  const writeStuck = (
+    branch: string,
+    head: string,
+    cause: Readonly<{ code: string; subject: string; via: string; next: string; saw?: string }>,
+  ): void => {
+    const incident: Incident = {
+      code: cause.code,
+      subject: cause.subject.replace(/\s+/gu, " ").trim(),
+      via: `${cause.via} in yrd queue ${queue} [${log.id}]`,
+      evidence: log.path,
+      next: `${cause.next}; ${stuckCures(branch)}`,
+      owner: "the queue operator",
+    }
+    incidentTrailers(incident)
+    log.write({
+      kind: "change",
+      branch,
+      head,
+      decision: "stuck",
+      reason: incident.subject,
+      ...incident,
+      ...(cause.saw === undefined ? {} : { saw: cause.saw }),
+    })
+  }
   const runTransaction = async <T>(
     site: QueueRunEventRetryExhausted["site"],
     marker: string,
@@ -856,7 +883,13 @@ export async function eventQueueRun(
     ...(roundLine.lastJudgedAt === undefined ? {} : { lastJudgedAt: roundLine.lastJudgedAt }),
   })
   read.line = roundLine
-  const writeStuckStop = async (branch: string, head: string, event: string, reason: string): Promise<void> => {
+  const writeStuckStop = async (
+    branch: string,
+    head: string,
+    event: string,
+    reason: string,
+    next?: string,
+  ): Promise<void> => {
     const current = await readEventOps(store, git, queue, target)
     if (
       current.stop?.cause === "stuck" &&
@@ -882,7 +915,7 @@ export async function eventQueueRun(
       cause: "stuck",
       change: { branch, head, event },
       reason,
-      next: stuckCures(branch),
+      next: next === undefined ? stuckCures(branch) : `${next}; ${stuckCures(branch)}`,
     })
   }
   const standing = remaining.find((change) => change.status === "stuck")
@@ -900,12 +933,11 @@ export async function eventQueueRun(
         stuckEvent.id,
         standing.reason ?? "queue could not judge this change",
       )
-      log.write({
-        kind: "change",
-        branch: standing.branch,
-        head: standing.commit,
-        decision: "stuck",
-        reason: standing.reason ?? "queue could not judge this change",
+      writeStuck(standing.branch, standing.commit, {
+        code: "yrd-stuck-held",
+        subject: standing.reason ?? "queue could not judge this change",
+        via: "held change",
+        next: "inspect the standing stuck event and repair its cause before resuming the queue",
       })
       return result(2, observedMerged, [], [standing.branch])
     }
@@ -973,7 +1005,13 @@ export async function eventQueueRun(
       })
       await writeStuckStop(branch, head, ended, oneLine)
       await tell(branch, "stuck", ended)
-      log.write({ kind: "change", branch, head, decision: "stuck", reason: oneLine, saw: child.evidence })
+      writeStuck(branch, head, {
+        code: "yrd-publication-refused",
+        subject: oneLine,
+        via: "component publication",
+        next: "repair the named component remote/ref, then resume the queue",
+        saw: child.evidence,
+      })
       return result(2, observedMerged, failed, [branch])
     }
     let preparedMerge: string | undefined
@@ -1192,7 +1230,12 @@ export async function eventQueueRun(
             })
             await writeStuckStop(branch, head, ended, stuckReason)
             await tell(branch, "stuck", ended)
-            log.write({ kind: "change", branch, head, decision: "stuck", reason: stuckReason })
+            writeStuck(branch, head, {
+              code: "yrd-publication-refused",
+              subject: stuckReason,
+              via: "merge publication",
+              next: "inspect the publication refusal and remote refs, then resume the queue",
+            })
             return result(2, observedMerged, failed, [branch])
           }
         }
@@ -1293,6 +1336,20 @@ export async function eventQueueRun(
         continue
       }
       const candidate = verified.verifying.candidate
+      try {
+        await readConfig(git, candidate, options.target)
+      } catch (error) {
+        if (!(error instanceof InvalidQueueConfig)) throw error
+        const ended = await appendOwnedChange(store, queue, branch, tip, {
+          type: "failed",
+          at: new Date(),
+          reason: error.message,
+        })
+        await tell(branch, "failed", ended)
+        log.write({ kind: "change", branch, head, decision: "failed", reason: error.message })
+        failed.push(branch)
+        continue
+      }
       const raises = (await readRootChanges(git, candidate))?.changes ?? []
       tip = await appendOwnedChange(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })
       tip = await appendOwnedChange(store, queue, branch, tip, { type: "checking", at: new Date() })
@@ -1303,6 +1360,112 @@ export async function eventQueueRun(
       let setupDecision:
         | { kind: "failed" | "stuck"; reason: string; fault?: ReturnType<typeof transportFaultIn> }
         | undefined
+      const attributeCandidateSetup = async (
+        error: SetupFailed,
+        phase: "submit" | "merge",
+        attempt: number,
+        tmpdir: string,
+        programCheck?: string,
+      ): Promise<NonNullable<typeof setupDecision>> => {
+        if (options.setup === undefined) {
+          throw new Error(`event queue ${url}#${queue}: ${branch} setup failed without a setup declaration`, {
+            cause: error,
+          })
+        }
+        let ground: "passed" | "failed" = "failed"
+        let baseFailure: SetupFailed | undefined
+        try {
+          const baseCommit = await settledBaseCommit({
+            git,
+            repo: options.repo,
+            targetSha: target,
+            raises,
+            path: join(
+              options.workdir,
+              "worktrees",
+              log.id,
+              "compose",
+              "base",
+              `${branch.replaceAll("/", "_")}-${String(attempt)}`,
+            ),
+            branch,
+            env: options.env,
+            gitOptions,
+            populateReference: options.populateReference,
+            process: options.process,
+            selection: options.selection,
+          })
+          const baseTree = await prepareWorktree(
+            git,
+            options.repo,
+            baseCommit,
+            join(options.workdir, "worktrees", log.id, `${branch.replaceAll("/", "_")}-base-${String(attempt)}`),
+            {
+              targetSha: target,
+              populateReference: options.populateReference,
+              selection: options.selection,
+              gitOptions,
+              process: options.process,
+              env: options.env,
+              setup: {
+                run: options.setup,
+                logDir: join(
+                  options.workdir,
+                  "checks",
+                  `${branch}@${head}`,
+                  log.id,
+                  `attempt-${String(attempt)}`,
+                  "base",
+                ),
+                tmpdir,
+              },
+            },
+          )
+          await baseTree.remove()
+          ground = "passed"
+        } catch (baseError) {
+          if (!(baseError instanceof SetupFailed)) {
+            throw new AggregateError(
+              [error, baseError],
+              `event queue ${url}#${queue}: ${branch} setup failed and its base could not be judged`,
+            )
+          }
+          baseFailure = baseError
+        }
+        results.push({
+          run: error.ran.result,
+          attempt,
+          phase,
+          ...(options.tier === "long" ? { tier: "long" as const } : {}),
+        })
+        if (programCheck !== undefined) {
+          recordProgramVerdict(
+            { log },
+            { branch, head, name: `${SETUP}-program-subject-${programCheck}`, phase },
+            error.ran.result,
+            ground === "passed" ? "submitter" : "queue",
+          )
+        }
+        let fault: ReturnType<typeof transportFaultIn>
+        let logProblem: string | undefined
+        if (ground === "failed") {
+          try {
+            fault = transportFaultIn(
+              [
+                readFileSync(error.ran.result.log, "utf8"),
+                baseFailure === undefined ? "" : readFileSync(baseFailure.ran.result.log, "utf8"),
+              ].join("\n"),
+            )
+          } catch (readError) {
+            logProblem = `setup log unavailable for transport attribution: ${readError instanceof Error ? readError.message : String(readError)}`
+          }
+        }
+        return {
+          kind: ground === "passed" ? "failed" : "stuck",
+          reason: `setup ${error.ran.result.result} on candidate; settled base setup ${ground}; ${error.message.replace(/\s+/gu, " ")}${logProblem === undefined ? "" : `; ${logProblem}`}`,
+          ...(fault === undefined ? {} : { fault }),
+        }
+      }
       for (let attempt = 1; attempt <= 2; attempt++) {
         const startOfAttempt = results.length
         skippedByOverride = new Set()
@@ -1389,96 +1552,7 @@ export async function eventQueueRun(
             )
           } catch (error) {
             if (!(error instanceof SetupFailed)) throw error
-            if (options.setup === undefined) {
-              throw new Error(`event queue ${url}#${queue}: ${branch} setup failed without a setup declaration`, {
-                cause: error,
-              })
-            }
-            let ground: "passed" | "failed" = "failed"
-            let baseFailure: SetupFailed | undefined
-            try {
-              const baseCommit = await settledBaseCommit({
-                git,
-                repo: options.repo,
-                targetSha: target,
-                raises,
-                path: join(
-                  options.workdir,
-                  "worktrees",
-                  log.id,
-                  "compose",
-                  "base",
-                  `${branch.replaceAll("/", "_")}-${String(attempt)}`,
-                ),
-                branch,
-                env: options.env,
-                gitOptions,
-                populateReference: options.populateReference,
-                process: options.process,
-                selection: options.selection,
-              })
-              const baseTree = await prepareWorktree(
-                git,
-                options.repo,
-                baseCommit,
-                join(options.workdir, "worktrees", log.id, `${branch.replaceAll("/", "_")}-base-${String(attempt)}`),
-                {
-                  targetSha: target,
-                  populateReference: options.populateReference,
-                  selection: options.selection,
-                  gitOptions,
-                  process: options.process,
-                  env: options.env,
-                  setup: {
-                    run: options.setup,
-                    logDir: join(
-                      options.workdir,
-                      "checks",
-                      `${branch}@${head}`,
-                      log.id,
-                      `attempt-${String(attempt)}`,
-                      "base",
-                    ),
-                    tmpdir,
-                  },
-                },
-              )
-              await baseTree.remove()
-              ground = "passed"
-            } catch (baseError) {
-              if (!(baseError instanceof SetupFailed)) {
-                throw new AggregateError(
-                  [error, baseError],
-                  `event queue ${url}#${queue}: ${branch} setup failed and its base could not be judged`,
-                )
-              }
-              baseFailure = baseError
-            }
-            results.push({
-              run: error.ran.result,
-              attempt,
-              phase,
-              ...(options.tier === "long" ? { tier: "long" as const } : {}),
-            })
-            let fault: ReturnType<typeof transportFaultIn>
-            let logProblem: string | undefined
-            if (ground === "failed") {
-              try {
-                fault = transportFaultIn(
-                  [
-                    readFileSync(error.ran.result.log, "utf8"),
-                    baseFailure === undefined ? "" : readFileSync(baseFailure.ran.result.log, "utf8"),
-                  ].join("\n"),
-                )
-              } catch (readError) {
-                logProblem = `setup log unavailable for transport attribution: ${readError instanceof Error ? readError.message : String(readError)}`
-              }
-            }
-            setupDecision = {
-              kind: ground === "passed" ? "failed" : "stuck",
-              reason: `setup ${error.ran.result.result} on candidate; settled base setup ${ground}; ${error.message.replace(/\s+/gu, " ")}${logProblem === undefined ? "" : `; ${logProblem}`}`,
-              ...(fault === undefined ? {} : { fault }),
-            }
+            setupDecision = await attributeCandidateSetup(error, phase, attempt, tmpdir)
             break
           }
           try {
@@ -1507,27 +1581,33 @@ export async function eventQueueRun(
               }
               let checked: CheckResult
               if (check.programRoot === true) {
-                checked = await programRootCheck({
-                  git,
-                  repo: options.repo,
-                  targetSha: target,
-                  tree: worktree.tree,
-                  spec: check,
-                  branch,
-                  head,
-                  phase: evidencePhase,
-                  root: join(options.workdir, "worktrees", log.id, "program", phase, String(attempt), check.name),
-                  logDir,
-                  tmpdir,
-                  log,
-                  setup: options.setup,
-                  env: options.env,
-                  process: options.process,
-                  selection: options.selection,
-                  gitOptions,
-                  populateReference: options.populateReference,
-                  tier: options.tier,
-                })
+                try {
+                  checked = await programRootCheck({
+                    git,
+                    repo: options.repo,
+                    targetSha: target,
+                    tree: worktree.tree,
+                    spec: check,
+                    branch,
+                    head,
+                    phase: evidencePhase,
+                    root: join(options.workdir, "worktrees", log.id, "program", phase, String(attempt), check.name),
+                    logDir,
+                    tmpdir,
+                    log,
+                    setup: options.setup,
+                    env: options.env,
+                    process: options.process,
+                    selection: options.selection,
+                    gitOptions,
+                    populateReference: options.populateReference,
+                    tier: options.tier,
+                  })
+                } catch (error) {
+                  if (!(error instanceof ProgramSubjectSetupFailed)) throw error
+                  setupDecision = await attributeCandidateSetup(error.setup, phase, attempt, tmpdir, check.name)
+                  break
+                }
               } else {
                 await restoreScripts(
                   { git, targetSha: target, process: options.process, selection: options.selection, gitOptions },
@@ -1626,9 +1706,20 @@ export async function eventQueueRun(
           reason: setupDecision.reason,
           ...(attemptedRetry && setupDecision.kind === "stuck" ? { retry: { retried: 1 as const } } : {}),
         })
-        if (setupDecision.kind === "stuck") await writeStuckStop(branch, head, ended, setupDecision.reason)
+        if (setupDecision.kind === "stuck") {
+          await writeStuckStop(branch, head, ended, setupDecision.reason, setupStuckNext(setupDecision.fault))
+        }
         await tell(branch, setupDecision.kind, ended)
-        log.write({ kind: "change", branch, head, decision: setupDecision.kind, reason: setupDecision.reason })
+        if (setupDecision.kind === "stuck") {
+          writeStuck(branch, head, {
+            code: setupStuckCode(setupDecision.fault),
+            subject: `${setupDecision.reason}${setupDecision.fault === undefined ? "" : `; ${setupDecision.fault.signature}: ${setupDecision.fault.line}`}`,
+            via: "setup",
+            next: setupStuckNext(setupDecision.fault),
+          })
+        } else {
+          log.write({ kind: "change", branch, head, decision: setupDecision.kind, reason: setupDecision.reason })
+        }
         if (setupDecision.kind === "stuck") return result(2, observedMerged, failed, [branch])
         failed.push(branch)
         continue
@@ -1668,7 +1759,12 @@ export async function eventQueueRun(
         })
         await writeStuckStop(branch, head, ended, reason)
         await tell(branch, "stuck", ended)
-        log.write({ kind: "change", branch, head, decision: "stuck", reason: stoppedCheck.name })
+        writeStuck(branch, head, {
+          code: "yrd-check-unresolved",
+          subject: reason,
+          via: `check ${stoppedCheck.name}`,
+          next: "inspect the named check log and repair the check or its environment, then resume the queue",
+        })
         return result(2, observedMerged, failed, [branch])
       }
       if (stoppedCheck?.result === "deferred") {
