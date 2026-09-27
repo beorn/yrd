@@ -12,7 +12,7 @@ import type { GitomicBackend } from "gitomic"
 import { gitIn } from "../src/git.ts"
 import { readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
-import { pauseRef } from "../src/refs.ts"
+import { pauseRef, runIndexRef } from "../src/refs.ts"
 import { encodeOps, type OpsState } from "../src/ops-state.ts"
 import { queueResumedAfter } from "../src/index.ts"
 import {
@@ -184,6 +184,7 @@ function landed(inputs: readonly EventInput[], firstId: string): Event[] {
 describe("ADR-0017 ref tree", () => {
   it("has a queue chain and exactly one change chain per branch, with queue encoding", () => {
     expect(queueRef("feature/main")).toBe("refs/yrd/feature%2Fmain/queue")
+    expect(runIndexRef("feature/main")).toBe("refs/yrd/feature%2Fmain/runs")
     expect(changesRef("feature/main", "task/42-one")).toBe("refs/yrd/feature%2Fmain/changes/task/42-one")
     expect(() => changesRef("main", "../escape")).toThrow(/branch/)
   })

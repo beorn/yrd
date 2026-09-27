@@ -48,6 +48,11 @@ export function queueRefPrefix(queue: string): string {
   return `${YRD_REFS}/${encodeQueueComponent(queue)}`
 }
 
+/** The queue's one durable run-number index ref. */
+export function runIndexRef(queue: string): string {
+  return `${queueRefPrefix(queue)}/runs`
+}
+
 /** The operational pause ref one queue owns. */
 export function pauseRef(queue: string): string {
   return `${queueRefPrefix(queue)}/pause`

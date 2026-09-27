@@ -28,6 +28,7 @@ export {
   overrideRef,
   pauseRef,
   queueRefPrefix,
+  runIndexRef,
   refOfChange,
 } from "./refs.ts"
 export type { Change } from "./refs.ts"
