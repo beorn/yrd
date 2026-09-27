@@ -39,12 +39,12 @@
     "fix": "oxlint --fix . && oxfmt --write ."
   },
   "dependencies": {
-    "@silvery/ansi": "^0.24.0",
-    "@silvery/commander": "^0.24.0",
-    "@silvery/scope": "^0.24.0",
+    "@silvery/ansi": "^0.25.0",
+    "@silvery/commander": "^0.25.0",
+    "@silvery/scope": "^0.25.0",
     "loggily": "github:beorn/loggily#1d92a8d782daf8e9d2a5131d7dec988f2f1d0a0b",
     "react": "^19.2.0",
-    "silvery": "^0.24.2",
+    "silvery": "^0.25.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
