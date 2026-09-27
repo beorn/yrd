@@ -19,6 +19,7 @@ describe("runner claim", () => {
     expect(message).toContain("Runner: queue-host/4242\n")
     expect(message).toContain("Beat: 60000ms\n")
     expect(parseRunnerClaim(message)).toEqual(claim)
+    expect(parseRunnerClaim(`${message}\n\n`)).toEqual(claim) // `git show -s --format=%B` terminal blank lines
   })
 
   it("judges the three-beat boundary and future clock skew", () => {
@@ -39,6 +40,7 @@ describe("runner claim", () => {
     expect(() => parseRunnerClaim(message.replace("Holding: " + claim.holding + "\n", ""))).not.toThrow()
     expect(() => parseRunnerClaim(message.replace(claim.holding, "not-a-change"))).toThrow(/Holding/)
     expect(() => parseRunnerClaim(message.replace("Since: 2026-09-27T12:00:30.000Z\n", ""))).toThrow(/Since/)
+    expect(() => parseRunnerClaim(message.replace("Beat: 60000ms\n", "Beat: 60000ms\n\n"))).toThrow(/malformed trailer/)
     expect(() => parseRunnerClaim(message + "At: 2026-09-27T12:01:00.000Z\n")).toThrow(/duplicate At/)
     expect(() => parseRunnerClaim(message + "Step: check\n")).toThrow(/unknown.*Step/)
   })

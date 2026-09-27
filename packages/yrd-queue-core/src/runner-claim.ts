@@ -96,7 +96,9 @@ export function formatRunnerClaim(input: RunnerClaim): string {
 
 /** Refuse incomplete or ambiguous commit messages instead of inventing health. */
 export function parseRunnerClaim(body: string): RunnerClaim {
-  const lines = body.replace(/\n$/u, "").split("\n")
+  // `git show --format=%B` appends its own newline after the commit message.
+  // Ignore only terminal blank lines; a blank inside the trailers is malformed.
+  const lines = body.replace(/\n+$/u, "").split("\n")
   if (lines[0] === SUBJECT && lines[1] === "") lines.splice(0, 2)
   const values = new Map<string, string>()
   let last = -1
