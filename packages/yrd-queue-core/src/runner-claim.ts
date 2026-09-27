@@ -29,6 +29,8 @@ export type RunnerClaim = Readonly<{
   since: string
   /** Current phase bound; absent on unbounded states and in legacy claims. */
   deadline?: string
+  /** Verbatim append-only trailers written by a newer runner. */
+  unknownTrailers?: readonly string[]
 }>
 
 export type RunnerClaimJudgment = Readonly<{
@@ -90,6 +92,16 @@ function checked(claim: RunnerClaim): RunnerClaim {
       throw new TypeError(`runner claim Deadline is invalid for ${claim.state} State`)
     }
   }
+  const unknownKeys = new Set<string>()
+  for (const line of claim.unknownTrailers ?? []) {
+    const match = /^([A-Za-z]+): (.*)$/u.exec(line)
+    const key = match?.[1]
+    if (key === undefined || (ORDER as readonly string[]).includes(key)) {
+      throw new TypeError(`runner claim invalid future trailer: ${JSON.stringify(line)}`)
+    }
+    if (unknownKeys.has(key)) throw new TypeError(`runner claim duplicate ${key} trailer`)
+    unknownKeys.add(key)
+  }
   if (claim.holding !== undefined) {
     const change = parseChangeName(claim.holding)
     if (change === undefined) {
@@ -122,7 +134,8 @@ export function formatRunnerClaim(input: RunnerClaim): string {
     `State: ${claim.state}\n` +
     (claim.holding === undefined ? "" : `Holding: ${claim.holding}\n`) +
     `Since: ${claim.since}\n` +
-    (claim.deadline === undefined ? "" : `Deadline: ${claim.deadline}\n`)
+    (claim.deadline === undefined ? "" : `Deadline: ${claim.deadline}\n`) +
+    (claim.unknownTrailers?.map((line) => `${line}\n`).join("") ?? "")
   )
 }
 
@@ -133,7 +146,9 @@ export function parseRunnerClaim(body: string): RunnerClaim {
   const lines = body.replace(/\n+$/u, "").split("\n")
   if (lines[0] === SUBJECT && lines[1] === "") lines.splice(0, 2)
   const values = new Map<string, string>()
+  const unknownTrailers: string[] = []
   let last = -1
+  let unknownTail = false
   for (const line of lines) {
     const match = /^([A-Za-z]+): (.*)$/u.exec(line)
     if (match === null) throw new TypeError(`runner claim malformed trailer: ${JSON.stringify(line)}`)
@@ -143,7 +158,19 @@ export function parseRunnerClaim(body: string): RunnerClaim {
       throw new TypeError(`runner claim malformed trailer: ${JSON.stringify(line)}`)
     }
     const order = (ORDER as readonly string[]).indexOf(key)
-    if (order < 0) throw new TypeError(`runner claim unknown trailer ${key}`)
+    if (order < 0) {
+      if (!REQUIRED.every((requiredKey) => values.has(requiredKey))) {
+        throw new TypeError(`runner claim unknown trailer ${key} before all required trailers`)
+      }
+      if (values.has(key)) throw new TypeError(`runner claim duplicate ${key} trailer`)
+      // A newer writer may append trailers after this reader's known tail.
+      // Known trailers appearing later would make their order ambiguous.
+      unknownTail = true
+      values.set(key, value)
+      unknownTrailers.push(line)
+      continue
+    }
+    if (unknownTail) throw new TypeError(`runner claim known ${key} trailer after unknown tail`)
     if (values.has(key)) throw new TypeError(`runner claim duplicate ${key} trailer`)
     if (order <= last) throw new TypeError(`runner claim ${key} trailer is out of order`)
     values.set(key, value)
@@ -171,6 +198,7 @@ export function parseRunnerClaim(body: string): RunnerClaim {
     ...(values.has("Holding") ? { holding: required(values, "Holding") } : {}),
     since: required(values, "Since"),
     ...(values.has("Deadline") ? { deadline: required(values, "Deadline") } : {}),
+    ...(unknownTrailers.length === 0 ? {} : { unknownTrailers }),
   })
 }
 

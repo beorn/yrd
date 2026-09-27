@@ -147,6 +147,7 @@ export type RunnerService =
  */
 export type RunnerFlow = Readonly<{
   waiting?: number
+  oldestWaiting?: Readonly<{ branch: string; openedAt: string }>
   unjudgedForMs?: number
   slow?: boolean
   stallAfterMs: number
@@ -173,7 +174,7 @@ export type RunnerFacts = Readonly<{
 function runnerFlow(document: QueueHealthDocument): RunnerFlow | undefined {
   const flow = document.facts?.flow
   if (typeof flow !== "object" || flow === null) return undefined
-  const { waiting, unjudgedForMs, slow, stallAfterMs, stalledForMs, casRefused } = flow as Readonly<
+  const { waiting, oldestWaiting, unjudgedForMs, slow, stallAfterMs, stalledForMs, casRefused } = flow as Readonly<
     Record<string, unknown>
   >
   if (waiting !== undefined && typeof waiting !== "number") return undefined
@@ -183,6 +184,22 @@ function runnerFlow(document: QueueHealthDocument): RunnerFlow | undefined {
     return undefined
   }
   if (typeof stallAfterMs !== "number") return undefined
+  let oldest: RunnerFlow["oldestWaiting"]
+  if (oldestWaiting !== undefined) {
+    const value = oldestWaiting as Readonly<Record<string, unknown>>
+    if (
+      typeof oldestWaiting !== "object" ||
+      oldestWaiting === null ||
+      typeof value.branch !== "string" ||
+      value.branch.length === 0 ||
+      typeof value.openedAt !== "string" ||
+      !Number.isFinite(Date.parse(value.openedAt)) ||
+      new Date(Date.parse(value.openedAt)).toISOString() !== value.openedAt
+    ) {
+      throw new TypeError("health document facts.flow.oldestWaiting must name a branch and canonical openedAt")
+    }
+    oldest = { branch: value.branch, openedAt: value.openedAt }
+  }
   const refusal = casRefused as Readonly<Record<string, unknown>> | undefined
   if (waiting === undefined && (typeof refusal?.ref !== "string" || typeof refusal.count !== "number")) return undefined
   return {
@@ -190,6 +207,7 @@ function runnerFlow(document: QueueHealthDocument): RunnerFlow | undefined {
     ...(typeof slow === "boolean" ? { slow } : {}),
     ...(typeof unjudgedForMs === "number" ? { unjudgedForMs } : {}),
     ...(typeof waiting === "number" ? { waiting } : {}),
+    ...(oldest === undefined ? {} : { oldestWaiting: oldest }),
     ...(typeof stalledForMs === "number" ? { stalledForMs } : {}),
     ...(refusal !== undefined && typeof refusal.ref === "string" && typeof refusal.count === "number"
       ? {
@@ -260,8 +278,10 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
   // runner process", read from the loop's own declared liveness rather than
   // from anybody's silence.
   if (pid !== undefined && !running(pid)) {
+    const claim = document.facts?.runnerClaim as Readonly<Record<string, unknown>> | undefined
+    const host = claim?.pid === pid && typeof claim.host === "string" ? claim.host : undefined
     return {
-      cause: `the health document names process ${String(pid)} as its writer, and that process does not answer`,
+      cause: `the health document names process ${String(pid)}${host === undefined ? "" : ` on ${host}`} as its writer, and that process does not answer; hh-hab ps ${SERVICE} --json has the supervisor's exit cause`,
       graceful: false,
       kind: "stopped",
       why: outsideGracefulStop(document),
@@ -279,7 +299,15 @@ export async function readRunnerService(workdir: string, now: Date = new Date())
   const runner = document.facts?.runner as Readonly<Record<string, unknown>> | undefined
   const startedAt = typeof runner?.startedAt === "string" ? new Date(Date.parse(runner.startedAt)) : undefined
   const since = startedAt !== undefined && !Number.isNaN(startedAt.getTime()) ? startedAt : undefined
-  const flow = runnerFlow(document)
+  let flow: RunnerFlow | undefined
+  try {
+    flow = runnerFlow(document)
+  } catch (error) {
+    return {
+      kind: "unreadable",
+      why: `health document flow in ${workdir} cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
   const failureFact = document.facts?.roundReadFailure
   let readFailure: Readonly<{ ref: string; error: string; count: number }> | undefined
   if (failureFact !== undefined) {
@@ -332,7 +360,7 @@ function serviceStoppedFact(document: QueueHealthDocument): ServiceIntentFact | 
 function outsideGracefulStop(document: QueueHealthDocument): string {
   const writtenAt = document.facts?.writtenAt
   const since = typeof writtenAt === "string" ? writtenAt : "an unrecorded instant"
-  return `stopped outside a graceful stop since ${since}; hab ps ${SERVICE} has the supervisor's record`
+  return `stopped outside a graceful stop since ${since}; hh-hab ps ${SERVICE} --json has the supervisor's exit cause`
 }
 
 /** Read what the runner's row shows. Nothing here writes; one readdir, one stat, two file reads, two pid probes. */
@@ -708,13 +736,15 @@ export function runnerWord(
   stopped?: StopFact | null,
 ): RunnerState {
   if (stopped !== undefined && stopped !== null) return stopped.change === null ? "paused" : "stuck"
+  // A dead writer is a measured local stop. Its last runner ref may remain
+  // fresh for three beats after the exit, but cannot turn that stop back into work.
+  if (facts?.service.kind === "stopped") return "stopped"
   if (facts?.published?.signal === "silent") return "silent"
   if (facts?.published?.signal === "fresh") {
     const state = facts.published.claim?.State
     if (state !== undefined) return state
   }
   switch (facts?.service.kind) {
-    case "stopped":
     case "unknown":
       return "stopped"
     case "beating": {
@@ -805,7 +835,16 @@ export function runnerLine(
 ): RunnerLine {
   const line = runnerLineOf(facts, now, options)
   const note = flowNote(facts?.service)
-  return note === undefined ? line : { ...line, holds: `${line.holds} · ${note}` }
+  const oldest = facts?.service.kind === "beating" ? facts.service.flow?.oldestWaiting : undefined
+  const age = oldest === undefined ? undefined : now.getTime() - Date.parse(oldest.openedAt)
+  const oldestNote =
+    oldest === undefined || age === undefined
+      ? undefined
+      : age < 0
+        ? `oldest waiting ${oldest.branch} opened ${oldest.openedAt} (reader clock earlier)`
+        : `oldest waiting ${oldest.branch} for ${mediaDuration(age)}`
+  const notes = [oldestNote, note].filter((item): item is string => item !== undefined)
+  return notes.length === 0 ? line : { ...line, holds: `${line.holds} · ${notes.join(" · ")}` }
 }
 
 /**
@@ -878,9 +917,11 @@ function runnerLineOf(
   // A health document that is there and is not a document decides no word, so
   // it would go unsaid entirely if it were not said here.
   const localDetail = service?.kind === "unreadable" ? `${service.why} · ${found}` : found
+  const unjudged =
+    published?.unjudgedTrailers === undefined ? "" : ` · unjudged trailers: ${published.unjudgedTrailers.join(", ")}`
   const publishedDetail =
     published?.signal === "fresh" || published?.signal === "silent"
-      ? `published status from runner ref: ${published.signal}, ${publishedClaim?.State ?? "unreadable state"} since ${publishedClaim?.Since ?? "unknown"}, beat at ${publishedClaim?.At ?? "unknown"}${published.phase?.status === "overdue" ? ` · phase overdue: ${published.phase.reason}` : published.phase?.status === "unavailable" ? ` · ${published.phase.reason}` : ""}`
+      ? `published status from runner ref: ${published.signal}, ${publishedClaim?.State ?? "unreadable state"} since ${publishedClaim?.Since ?? "unknown"}, beat at ${publishedClaim?.At ?? "unknown"}${published.phase?.status === "overdue" ? ` · phase overdue: ${published.phase.reason}` : published.phase?.status === "unavailable" ? ` · ${published.phase.reason}` : ""}${unjudged}`
       : published?.why
   const detail = publishedDetail === undefined ? localDetail : `${publishedDetail} · ${localDetail}`
   switch (state) {
