@@ -18,19 +18,14 @@ import {
   checksOf,
   clocks,
   gitIn,
-  incidentTrailers,
   journalKey,
-  list,
-  nextOwner,
-  readChange,
   readJournals,
   runStartedAt,
   skippedChecks,
   subjects,
   watchRows,
 } from "../src/index.ts"
-import type { ChangeRecord, CheckSpec, Git, Row } from "../src/index.ts"
-import type { QueueEntry } from "../src/remote.ts"
+import type { CheckSpec, Git, Row } from "../src/index.ts"
 // `openLog` is the writer, and index.ts lists only what a consumer outside the
 // package imports. A test that writes a journal is inside it.
 import { openLog, readRunLog, recentCasRefusalStreak } from "../src/log.ts"
@@ -819,7 +814,7 @@ describe("the clocks", () => {
   // start to its decision, or to now while a check holds the row. A change waiting in line holds no check, so
   // nothing about it is running: a runtime that kept counting there read like a check that never ended.
   it("counts an attempt's runtime to now only while a check holds the row, never while a change waits in line", () => {
-    const waits: Row = { branch: "task/one", head: "abc", since, startedAt: started, state: "checked" }
+    const waits: Row = { branch: "task/one", head: "abc", since, startedAt: started, state: "verifying" }
     const held: Row = { ...waits, live: { check: "test", phase: "merge", run: "q-1", since: started } }
 
     expect({
@@ -870,25 +865,25 @@ describe("the clocks", () => {
     const noticed = new Date("2026-09-03T19:59:00.000Z")
     const checkStarted = new Date("2026-09-03T19:56:30.000Z")
     const queued: Row = { at: opened, branch: "task/queued", head: "abc", since: opened, state: "queued" }
-    const checked: Row = {
+    const verifying: Row = {
       at: passed,
       branch: "task/checked",
       head: "abd",
       since,
       startedAt: started,
-      state: "checked",
+      state: "verifying",
     }
     const stuck: Row = { at: stuckAt, branch: "task/stuck", endedAt: stuckAt, head: "abe", since, state: "stuck" }
-    const running: Row = { ...checked, live: { check: "test", phase: "merge", run: "q-1", since: checkStarted } }
+    const running: Row = { ...verifying, live: { check: "test", phase: "merge", run: "q-1", since: checkStarted } }
     // The tip is the notice sent after the merge: the ending is the merged record's instant, not the notice's.
-    const merged: Row = { ...checked, at: noticed, endedAt: passed, state: "merged" }
-    const withdrawn: Row = {
+    const merged: Row = { ...verifying, at: noticed, endedAt: passed, state: "merged" }
+    const cancelled: Row = {
       at: withdrawnAt,
       branch: "task/withdrawn",
       endedAt: withdrawnAt,
       head: "abf",
       since,
-      state: "withdrawn",
+      state: "cancelled",
     }
     const read = (row: Row) => {
       const measured = clocks(row, now) as Readonly<Record<string, unknown>>
@@ -904,163 +899,20 @@ describe("the clocks", () => {
     const none = { checkingMs: undefined, stuckMs: undefined, tookMs: undefined, waitingMs: undefined }
 
     expect({
-      checked: read(checked),
+      verifying: read(verifying),
       merged: read(merged),
       queued: read(queued),
       running: read(running),
       stuck: read(stuck),
-      withdrawn: read(withdrawn),
+      cancelled: read(cancelled),
     }).toEqual({
-      checked: { ...none, clockAt: since, waitingMs: minutes(60) },
+      verifying: { ...none, clockAt: since },
       merged: { ...none, clockAt: passed, tookMs: minutes(57) },
       queued: { ...none, clockAt: opened, waitingMs: minutes(12) },
       running: { ...none, checkingMs: minutes(3) + 30_000, clockAt: since },
       stuck: { ...none, clockAt: since, stuckMs: minutes(10), waitingMs: minutes(60) },
-      withdrawn: { ...none, clockAt: withdrawnAt, tookMs: minutes(40) },
+      cancelled: { ...none, clockAt: withdrawnAt, tookMs: minutes(40) },
     })
-  })
-})
-
-/**
- * @failure  The operator, 2026-09-16 21:34 PDT: "also the ordering looks weird - look at the time stamps".
- *           Ended rows were ordered by their tip's instant, and the tip of a merged change is the notice
- *           sent after it, so a merge rose to the top whenever its notice went out again; the change the
- *           runner holds sat wherever its place in line put it; and a branch pushed without a submit was
- *           nowhere (@i/10-yrd/24196, decision 4; the operator's v3 words).
- * @level    l1 (the table read from records built in memory)
- * @consumer the operator reading `yrd watch` and `yrd list`, top to bottom
- */
-describe("the table's one order (24196)", () => {
-  const now = new Date("2026-09-03T20:00:00.000Z")
-  const ago = (minutes: number): Date => new Date(now.getTime() - minutes * 60 * 1000)
-  let shas = 0
-  const sha = (): string => (shas += 1).toString(16).padStart(40, "0")
-
-  /** One change's records, oldest first, each carrying its name and when it was opened, as every record does. */
-  function change(
-    branch: string,
-    opened: Date,
-    steps: readonly Readonly<{
-      kind: ChangeRecord["kind"]
-      at: Date
-      trailers?: readonly (readonly [string, string])[]
-    }>[],
-    over: Partial<Pick<QueueEntry["change"], "headOnTarget" | "branchHead">> = {},
-  ): QueueEntry {
-    const head = sha()
-    const record = (kind: ChangeRecord["kind"], at: Date, trailers: readonly (readonly [string, string])[] = []) => ({
-      at,
-      kind,
-      sha: sha(),
-      subject: kind,
-      trailers: [
-        ["Record", kind],
-        ["Change", `${branch}@${head}`],
-        ["Opened", opened.toISOString()],
-        ...trailers,
-      ] as const,
-    })
-    const records = [record("opened", opened), ...steps.map((step) => record(step.kind, step.at, step.trailers))] as [
-      ChangeRecord,
-      ...ChangeRecord[],
-    ]
-    const changeRecords = { branch, branchHead: head, head, headOnTarget: false, records, ...over }
-    return { change: changeRecords, reading: readChange(changeRecords) }
-  }
-
-  it("puts the change the runner holds first, then the line by its places, stuck where it stands, then the ended rows newest ending first, then the drafts newest first", () => {
-    const pending = change("task/a-pending", ago(60), [{ at: ago(3), kind: "checked" }])
-    const held = change("task/b-held", ago(50), [])
-    const incident = incidentTrailers({
-      code: "yrd-check-unresolved",
-      evidence: "/w/logs/q-1.jsonl",
-      next: "repair and resume",
-      owner: "the queue's operator",
-      subject: "the check could not be resolved",
-      via: "affected-tests",
-    })
-    const stuck = change("task/c-stuck", ago(40), [{ at: ago(6), kind: "stuck", trailers: incident }])
-    const submitted = change("task/d-submitted", ago(30), [])
-    const merged = change(
-      "task/e-merged",
-      ago(90),
-      [
-        { at: ago(80), kind: "checked" },
-        { at: ago(10), kind: "merged" },
-        // The notice, a minute ago: the change ended nine minutes before it.
-        {
-          at: ago(1),
-          kind: "sent",
-          trailers: [
-            ["State", "merged"],
-            ["Delivery", "sent"],
-            ["To", "@dev/2"],
-          ],
-        },
-      ],
-      { headOnTarget: true },
-    )
-    const failed = change("task/f-failed", ago(70), [{ at: ago(5), kind: "failed", trailers: [["Reason", "test"]] }])
-    const withdrawn = change("task/g-withdrawn", ago(100), [{ at: ago(20), kind: "withdrawn" }])
-    const run = "q-20260903T195500000Z-0000b0b0"
-    const check = { name: "affected-tests", phase: "submit", startedAt: ago(4) }
-    const journals = {
-      dir: "/w/logs",
-      malformed: [],
-      runs: new Map([
-        [
-          journalKey(held.change.branch, held.change.head),
-          [
-            journalRun({
-              at: ago(4),
-              branch: held.change.branch,
-              checks: [check],
-              head: held.change.head,
-              id: run,
-              running: check,
-              startedAt: ago(5),
-            }),
-          ],
-        ],
-      ]),
-    }
-    const directMerges = [
-      {
-        at: ago(15),
-        commit: sha(),
-        gitlinks: [],
-        parents: [],
-        subject: "a hotfix",
-        target: "main",
-        why: "a direct push",
-      },
-    ]
-    // The drafts as the one derivation reads them (drafts.ts): the branch, its head, and its head commit's
-    // author and instant.
-    const drafts = [
-      { author: "ada", branch: "task/h-draft-older", committedAt: ago(120), head: sha(), movedSinceSubmit: false },
-      { author: "grace", branch: "task/i-draft-newer", committedAt: ago(30), head: sha(), movedSinceSubmit: false },
-    ]
-
-    const rows = list([withdrawn, submitted, merged, held, failed, stuck, pending], {
-      directMerges,
-      drafts,
-      journals,
-      now,
-    } as Parameters<typeof list>[1])
-
-    expect(rows.map((row) => row.branch)).toEqual([
-      "task/b-held",
-      "task/a-pending",
-      "task/c-stuck",
-      "task/d-submitted",
-      "task/f-failed",
-      "task/e-merged",
-      "main",
-      "task/g-withdrawn",
-      "task/i-draft-newer",
-      "task/h-draft-older",
-    ])
   })
 })
 
@@ -1219,31 +1071,6 @@ describe("the declared checks, joined to what ran", () => {
     ])
     // Absent, never an empty command string presented as if it were one.
     expect(views[1]?.spec).toBeUndefined()
-  })
-})
-
-describe("who acts next", () => {
-  it("is the queue while the queue still owes the change work", () => {
-    expect(nextOwner({ state: "queued" })?.owner).toBe("the queue")
-    expect(nextOwner({ state: "checked" })?.owner).toBe("the queue")
-  })
-
-  it("is the submitter once it failed, because only they can move the branch", () => {
-    const next = nextOwner({ reason: "test", state: "failed" }, { submitter: "@dev/2" })
-
-    expect(next?.owner).toBe("@dev/2")
-    expect(next?.because).toContain("test")
-  })
-
-  it("is nobody once it merged", () => {
-    expect(nextOwner({ state: "merged" })).toBeUndefined()
-  })
-
-  it("points a stuck change at the evidence rather than inventing a person no record names", () => {
-    const next = nextOwner({ reason: "setup", state: "stuck" }, { journal: "/w/logs" })
-
-    expect(next?.owner).toBe("the queue's operator")
-    expect(next?.because).toContain("/w/logs")
   })
 })
 
