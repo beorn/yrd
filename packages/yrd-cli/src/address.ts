@@ -1,5 +1,5 @@
 import { isAbsolute, join, normalize, sep } from "node:path"
-import { encodeQueueComponent } from "@yrd/queue-core"
+import { encodeQueueComponent, formatQueueKey, parseQueueKey } from "@yrd/queue-core"
 
 export type RemoteQueueAddress = Readonly<{
   kind: "remote"
@@ -61,15 +61,27 @@ export function hasHumanQueueBranch(value: string): boolean {
 export function parseQueueAddress(operand: string): QueueAddress {
   const humanSeparator = humanQueueBranchSeparator(operand)
   const firstHash = operand.indexOf("#")
-  const legacy = firstHash >= 0 && (humanSeparator < 0 || firstHash < humanSeparator)
+  const versioned = /^v\d+#/u.test(operand)
+  const legacy = versioned || (firstHash >= 0 && (humanSeparator < 0 || firstHash < humanSeparator))
   const first = legacy ? firstHash : humanSeparator
-  if (first <= 0 || (legacy && first !== operand.lastIndexOf("#"))) {
+  if (first <= 0) {
     throw refusal(operand, "the repository and queue must be separated by exactly one # or one @")
   }
-  const repository = legacy ? operand.slice(0, first) : decodeHumanPart(operand.slice(0, first), operand, "repository")
+  let repository: string
   let queue = operand.slice(first + 1)
+  if (legacy) {
+    try {
+      const stored = parseQueueKey(operand)
+      repository = stored.left
+      queue = stored.branch
+    } catch (error) {
+      throw refusal(operand, error instanceof Error ? error.message : String(error))
+    }
+  } else {
+    repository = decodeHumanPart(operand.slice(0, first), operand, "repository")
+  }
   if (queue === "") throw refusal(operand, `the queue branch after ${legacy ? "#" : "@"} is empty`)
-  if (legacy && /^\d+$/u.test(queue)) {
+  if (legacy && !versioned && /^\d+$/u.test(queue)) {
     throw refusal(operand, `ambiguous #${queue}: a numeric queue branch or a run without an explicit @branch`)
   }
   if (!legacy && (queue.includes("@") || queue.includes("#"))) {
@@ -77,14 +89,13 @@ export function parseQueueAddress(operand: string): QueueAddress {
   }
   if (!legacy) {
     queue = decodeHumanPart(queue, operand, "branch")
-    if (queue.includes("#")) {
-      throw refusal(operand, "a # in the branch needs versioned stored queue-key encoding (#26201)")
-    }
   }
 
   if (isAbsolute(repository)) {
     const path = normalize(repository)
-    return Object.freeze({ canonical: `${path}#${queue}`, kind: "local", queue, repository: path, transport: path })
+    const canonical = formatQueueKey(path, queue)
+    if (versioned && operand !== canonical) throw refusal(operand, `noncanonical v2 queue key; use ${canonical}`)
+    return Object.freeze({ canonical, kind: "local", queue, repository: path, transport: path })
   }
 
   let host: string
@@ -112,7 +123,7 @@ export function parseQueueAddress(operand: string): QueueAddress {
     path = url.pathname
   } else {
     const parts = repository.split("/")
-    if (parts.length === 2) {
+    if (parts.length === 2 && !versioned) {
       host = "github.com"
       path = repository
     } else {
@@ -132,7 +143,8 @@ export function parseQueueAddress(operand: string): QueueAddress {
   if (components.some((component) => component === "" || component === "." || component === "..")) {
     throw refusal(operand, "the repository path contains an empty, . or .. component")
   }
-  const canonical = `${host}/${path}#${queue}`
+  const canonical = formatQueueKey(`${host}/${path}`, queue)
+  if (versioned && operand !== canonical) throw refusal(operand, `noncanonical v2 queue key; use ${canonical}`)
   return Object.freeze({ canonical, host, kind: "remote", path, queue, transport: `https://${host}/${path}.git` })
 }
 
@@ -141,7 +153,19 @@ export function formatQueueAddress(address: QueueAddress): string {
   if (address.kind !== "remote") {
     throw new Error(`local queue ${address.canonical} has no portable remote address`)
   }
-  return `${address.host}/${encodeHumanPart(address.path)}@${encodeHumanPart(address.queue)}`
+  const repository = address.path.includes("/")
+    ? `${address.host}/${encodeHumanPart(address.path)}`
+    : `https://${address.host}/${encodeHumanPart(address.path)}`
+  return `${repository}@${encodeHumanPart(address.queue)}`
+}
+
+/** Show a stored key as a human address without exposing its v2 wire spelling. */
+export function formatStoredQueueAddress(key: string): string {
+  if (!/^v\d+#/u.test(key)) return key
+  const address = parseQueueAddress(key)
+  return address.kind === "remote"
+    ? formatQueueAddress(address)
+    : `${encodeHumanPart(address.repository)}@${encodeHumanPart(address.queue)}`
 }
 
 /** A published queue run is identified by its full remote queue and a positive per-queue number. */

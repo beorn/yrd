@@ -37,15 +37,41 @@ describe("a queue's canonical address", () => {
     expect(queue.canonical).toBe(parseQueueAddress("beorn/hh#release%40").canonical)
   })
 
-  it.each(["beorn/hh@release@2026", "beorn/hh@release%402026%23", "beorn/hh@release%4a"])(
+  it.each(["beorn/hh@release@2026", "beorn/hh@release#2026", "beorn/hh@release%4a"])(
     "refuses an unescaped or unsupported branch delimiter %s (26193)",
     (operand) => {
       expect(() => parseQueueAddress(operand)).toThrow(`queue address '${operand}'`)
     },
   )
 
-  it("refuses a # bearing branch even when escaped in the human form (26193)", () => {
-    expect(() => parseQueueAddress("beorn/hh@release%232026")).toThrow(/#.*branch/u)
+  it("uses one v2 stored key for a # branch while keeping the human run address and physical path (26201)", () => {
+    const address = parseQueueAddress("beorn/hh@release%232026")
+    expect(address.canonical).toBe("v2#github.com%2Fbeorn%2Fhh#release%232026")
+    expect(parseQueueAddress(address.canonical)).toEqual(address)
+    expect(formatQueueAddress(address)).toBe("github.com/beorn/hh@release%232026")
+    expect(parseRunAddress("beorn/hh@release%232026#3")).toMatchObject({
+      canonical: "github.com/beorn/hh@release%232026#3",
+      queue: { canonical: address.canonical },
+    })
+    expect(queueRoot("/state/yrd", address)).toBe("/state/yrd/github.com/beorn/hh%23release%232026")
+  })
+
+  it("keeps a versioned short-path remote distinct from a GitHub owner/repo shorthand (26201)", () => {
+    const stored = parseQueueAddress("v2#example.test%2Frepo#release%232026")
+    expect(stored.canonical).toBe("v2#example.test%2Frepo#release%232026")
+    const human = formatQueueAddress(stored)
+    expect(human).toBe("https://example.test/repo@release%232026")
+    expect(parseQueueAddress(human).canonical).toBe(stored.canonical)
+  })
+
+  it.each([
+    ["v2#github.com%2Fbeorn%2Fhh#main", /v2.*requires.*#/u],
+    ["v2#github.com%2fbeorn%2fhh#release%232026", /canonical/u],
+    ["v2#github.com%2Fbeorn%2Fhh#release%FF2026", /UTF-8/u],
+    ["v2#github.com%2Fbeorn%2Fhh#", /empty/u],
+    ["v3#github.com%2Fbeorn%2Fhh#release%232026", /unknown.*version/u],
+  ])("refuses invalid stored key %s by name (26201)", (key, problem) => {
+    expect(() => parseQueueAddress(key)).toThrow(problem)
   })
 
   it("prints the one remote queue form and parses a numbered run under it (26193)", () => {
