@@ -85,6 +85,7 @@ import {
   DEFAULT_CHECK_BOUND_MS,
   STEP_BOUNDS_MS,
   STEP_STATES,
+  roundBoundMs,
   inspectSubmit,
   inspectSubmitAtHead,
   preparePinCarrier,
@@ -1712,6 +1713,7 @@ export async function coreQueueCommand(
       let runnerSince = writer.startedAt
       let runnerDeadline: string | undefined
       let runnerPhase: string | undefined
+      let roundPlan: Readonly<{ due: string; round: string; candidates: number }> | undefined
       const runnerClaim = (at: Date = new Date()): RunnerClaim => ({
         host: hostname(),
         pid: writer.pid,
@@ -1722,7 +1724,17 @@ export async function coreQueueCommand(
         ...(holding === undefined ? {} : { holding }),
         since: runnerSince,
         ...(runnerDeadline === undefined ? {} : { deadline: runnerDeadline }),
+        ...(roundPlan === undefined ? {} : roundPlan),
       })
+      const stoppedRunnerClaim = (): RunnerClaim => {
+        runnerState = "stopped"
+        holding = undefined
+        runnerSince = new Date().toISOString()
+        runnerDeadline = undefined
+        runnerPhase = undefined
+        roundPlan = undefined
+        return runnerClaim()
+      }
       const publisher = new RunnerPublisher(
         git,
         config.target.remote,
@@ -1757,6 +1769,7 @@ export async function coreQueueCommand(
           throw new Error(`unbounded runner ${state} cannot carry a phase deadline`)
         }
         if (runnerState === state && holding === selected && runnerPhase === phase && runnerSince === since) return
+        if (!bounded) roundPlan = undefined
         runnerSince = since
         runnerState = state
         holding = selected
@@ -1771,6 +1784,25 @@ export async function coreQueueCommand(
         if (bounded && stated !== undefined) writeHealth(lineDocument(lastStop, 0))
       }
       const recordRunnerState = (record: LogRecord): void => {
+        if (record.kind === "observation" && record.subject === "line") {
+          if (openedAt === undefined) throw new Error("line observation has no open round for its Due plan")
+          if (roundPlan !== undefined) throw new Error("round Due plan was already published")
+          if (typeof record.waiting !== "number" || !Number.isSafeInteger(record.waiting) || record.waiting < 0) {
+            throw new Error(`line observation has invalid Candidates: ${String(record.waiting)}`)
+          }
+          if (record.waiting > 0) {
+            roundPlan = {
+              round: openedAt,
+              due: new Date(
+                Date.parse(openedAt) + roundBoundMs(activeChecks, activeSetup, record.waiting),
+              ).toISOString(),
+              candidates: record.waiting,
+            }
+            void publisher.publish(runnerClaim())
+            if (stated !== undefined) writeHealth(lineDocument(lastStop, 0))
+          }
+          return
+        }
         const selected =
           typeof record.branch === "string" && typeof record.head === "string"
             ? `${record.branch}@${record.head}`
@@ -1780,8 +1812,21 @@ export async function coreQueueCommand(
             throw new Error("check start lacks a name or start instant for its runner deadline")
           }
           const boundMs = (() => {
-            if (record.name === "setup") {
+            const programSetup =
+              record.purpose === "program-root-setup"
+                ? /^(?:setup-program-target-|setup-program-subject-)(.+)$/u.exec(record.name)?.[1]
+                : undefined
+            if (record.name === "setup" || record.purpose === "program-root-setup") {
               if (activeSetup === undefined) throw new Error("runner setup has no declaration for its bound")
+              if (record.purpose === "program-root-setup" && programSetup === undefined) {
+                throw new Error(`runner program-root setup ${record.name} has no declared check name`)
+              }
+              if (
+                programSetup !== undefined &&
+                !activeChecks.some((check) => check.name === programSetup && check.programRoot === true)
+              ) {
+                throw new Error(`runner program-root setup ${record.name} has no declared check`)
+              }
               return DEFAULT_CHECK_BOUND_MS
             }
             const spec = activeChecks.find((check) => check.name === record.name)
@@ -1789,7 +1834,7 @@ export async function coreQueueCommand(
             return spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
           })()
           setRunnerState(
-            record.name === "setup" ? "provisioning" : "checking",
+            record.name === "setup" || record.purpose === "program-root-setup" ? "provisioning" : "checking",
             selected,
             record.name,
             record.start,
@@ -2068,10 +2113,7 @@ export async function coreQueueCommand(
           { exitCode: 0, from: gitlink.sha, gitlink: gitlink.path, reason: "gitlink-moved", to: now },
           moved,
         )
-        runnerState = "stopped"
-        holding = undefined
-        runnerSince = new Date().toISOString()
-        await publisher.publish(runnerClaim())
+        await publisher.publish(stoppedRunnerClaim())
         return 0
       }
       // THE LINE AS IT STANDS AT START, read from the queue event chain and written before round 1 opens
@@ -2140,10 +2182,7 @@ export async function coreQueueCommand(
         )
         stated = graceful
         persistHealth(graceful)
-        runnerState = "stopped"
-        holding = undefined
-        runnerSince = new Date().toISOString()
-        void publisher.publish(runnerClaim()).finally(() => {
+        void publisher.publish(stoppedRunnerClaim()).finally(() => {
           offTerminate()
           terminate.reraise()
         })
@@ -2258,6 +2297,8 @@ export async function coreQueueCommand(
               activeChecks = declared.config.checks
               activeSetup = declared.config.setup
               openedAt = new Date().toISOString()
+              roundPlan = undefined
+              setRunnerState("provisioning", undefined, "line-read", openedAt, STEP_BOUNDS_MS["line-read"])
               if (flow !== undefined) flow = { ...flow, roundOpen: { startedAt: openedAt } }
               if (lockWaitStated) {
                 lockWaitStated = false
@@ -2276,6 +2317,7 @@ export async function coreQueueCommand(
           if ("kind" in ran) {
             if (ran.kind === "legacy-override-present") {
               readFailure = undefined
+              setRunnerState("idle")
               openedAt = undefined
               const { ref, oid } = ran.error
               const why = `${ref} at ${oid} remains on ${config.target.remote}; no queue round will run while it exists`
@@ -2316,6 +2358,7 @@ export async function coreQueueCommand(
             legacyOverrideHeld = undefined
             if (ran.kind === "retry-exhausted") {
               readFailure = undefined
+              setRunnerState("idle")
               openedAt = undefined
               flow = flowAfterRetryExhaustion(flow, ran.error, new Date())
               const document = writeHealth(lineDocument(lastStop, interval))
@@ -2334,6 +2377,7 @@ export async function coreQueueCommand(
               error: message,
               count: readFailure?.ref === ran.ref ? readFailure.count + 1 : 1,
             }
+            setRunnerState("idle")
             openedAt = undefined
             const document = writeHealth(lineDocument(lastStop, interval))
             await request.afterHealth?.(document)
@@ -2386,10 +2430,7 @@ export async function coreQueueCommand(
         clearInterval(beat)
         offTerminate()
         if (stopped() && publisher.conflict === undefined) {
-          runnerState = "stopped"
-          holding = undefined
-          runnerSince = new Date().toISOString()
-          await publisher.publish(runnerClaim())
+          await publisher.publish(stoppedRunnerClaim())
         }
       }
     }

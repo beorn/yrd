@@ -52,6 +52,7 @@ import {
   pauseRef,
   queueRef,
   runnerRef,
+  roundBoundMs,
   QUEUE_HEALTH_DOCUMENT,
   readConfig,
   readEventQueue,
@@ -382,6 +383,92 @@ describe("yrd queue up, the service", () => {
     expect(existsSync(logDir) ? readdirSync(logDir) : []).toEqual([])
   })
 
+  /** @failure Program-root setup starts were rejected as undeclared checks, killing the resident service. @level l2 */
+  it("accepts the declared setup of a program-root check in a live round", async () => {
+    const w = await world()
+    await redeclare(
+      w,
+      'setup: "true"\nchecks:\n  - verify:\n      programRoot: true\n      run: test -d "$YRD_PROGRAM_ROOT"\n  - setup-program-target-foo:\n      run: test -d "$YRD_REPO"\n',
+    )
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    await w.git(["checkout", "--quiet", "-b", "task/program-setup", "main"])
+    writeFileSync(join(w.work, "program-setup.txt"), "change\n")
+    await w.git(["add", "program-setup.txt"])
+    await w.git(["commit", "--quiet", "-m", "a program-root candidate"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/program-setup",
+      submitter: "@dev/5",
+      target: { branch: "main", remote: "origin" },
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterRound: () => stop.abort(),
+        },
+        { json: true, workdir: w.workdir },
+      ),
+      run.stderr(),
+    ).toBe(0)
+  })
+
+  /** @failure Stopping inside a planned round left Deadline and Due on a stopped claim, so publication refused it. @level l2 */
+  it("relinquishes an active round with a valid stopped claim", async () => {
+    const w = await world()
+    await redeclare(w, "checks:\n  - hold:\n      on: [submit]\n      run: sleep 3\n")
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    await w.git(["checkout", "--quiet", "-b", "task/stop-planned", "main"])
+    writeFileSync(join(w.work, "stop-planned.txt"), "change\n")
+    await w.git(["add", "stop-planned.txt"])
+    await w.git(["commit", "--quiet", "-m", "candidate in a stopped round"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/stop-planned",
+      submitter: "@dev/5",
+      target: { branch: "main", remote: "origin" },
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "up", intervalSeconds: 0, stop: stop.signal },
+      { json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(
+        async () => {
+          expect((await readRunnerFacts(w.workdir)).latest?.activeStep?.kind).toBe("check")
+        },
+        { timeout: 15_000, interval: 100 },
+      )
+      stop.abort()
+      expect(await service, run.stderr()).toBe(0)
+      const tip = await readRemoteCommit(w.git, "origin", runnerRef("main"))
+      if (tip === undefined) throw new Error("stopped runner claim is absent")
+      const claim = parseRunnerClaim(await w.git(["show", "-s", "--format=%B", tip]))
+      expect(claim.state).toBe("stopped")
+      expect([claim.deadline, claim.due, claim.round, claim.candidates]).toEqual([
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      ])
+    } finally {
+      stop.abort()
+      await service
+    }
+  }, 20_000)
+
   /**
    * @failure A long check kept its journal quiet, and the remote runner ref could age into silence while the service was healthy.
    * @level l2 (real queued check, remote ref and service loop)
@@ -433,12 +520,27 @@ describe("yrd queue up, the service", () => {
           const tip = await readRemoteCommit(w.git, "origin", runnerRef("main"))
           if (tip === undefined) throw new Error("runner ref absent while check runs")
           const claim = parseRunnerClaim(await w.git(["show", "-s", "--format=%B", tip]))
-          expect(claim).toMatchObject({ state: "checking", deadline: expect.any(String) })
+          expect(claim).toMatchObject({
+            state: "checking",
+            deadline: expect.any(String),
+            round: expect.any(String),
+            due: expect.any(String),
+            candidates: 1,
+          })
           if (claim.deadline === undefined) throw new Error("checking claim has no declared Deadline")
+          if (claim.round === undefined || claim.due === undefined) {
+            throw new Error("checking claim has no round Due plan")
+          }
           expect(Date.parse(claim.deadline) - Date.parse(claim.since)).toBe(30 * 60_000)
+          expect(Date.parse(claim.due) - Date.parse(claim.round)).toBe(
+            roundBoundMs([{ name: "hold", run: "sleep 35", on: ["submit"] }], undefined, 1),
+          )
           expect((await readQueueHealth(w.workdir, SERVICE)).facts?.runnerClaim).toMatchObject({
             state: "checking",
             deadline: claim.deadline,
+            round: claim.round,
+            due: claim.due,
+            candidates: 1,
           })
         },
         { timeout: 10_000, interval: 100 },

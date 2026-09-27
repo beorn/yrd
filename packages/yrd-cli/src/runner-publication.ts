@@ -3,12 +3,14 @@ import {
   formatRunnerClaim,
   judgeRunnerClaim,
   judgeRunnerDeadline,
+  judgeRunnerDue,
   parseRunnerClaim,
   readRemoteCommit,
   runnerRef,
   type Git,
   type RunnerClaim,
   type RunnerDeadlineJudgment,
+  type RunnerDueJudgment,
 } from "@yrd/queue-core"
 
 type Trailers = Readonly<
@@ -21,6 +23,9 @@ type Trailers = Readonly<
     Holding?: string
     Since: string
     Deadline?: string
+    Due?: string
+    Round?: string
+    Candidates?: string
   } & Record<string, string | undefined>
 >
 
@@ -28,6 +33,7 @@ export type PublishedRunner = Readonly<{
   signal: "fresh" | "silent" | "absent" | "unreadable"
   claim?: Trailers
   phase?: RunnerDeadlineJudgment
+  round?: RunnerDueJudgment
   /** Newer append-only trailer names this reader preserved but cannot judge. */
   unjudgedTrailers?: readonly string[]
   /** Absence and unreadability must say where the reader looked and why it could not answer. */
@@ -50,6 +56,7 @@ function trailers(claim: RunnerClaim): Trailers {
     ...(claim.holding === undefined ? {} : { Holding: claim.holding }),
     Since: claim.since,
     ...(claim.deadline === undefined ? {} : { Deadline: claim.deadline }),
+    ...(claim.due === undefined ? {} : { Due: claim.due, Round: claim.round, Candidates: String(claim.candidates) }),
     ...unknown,
   }
 }
@@ -76,6 +83,7 @@ export async function readPublishedRunner(
     const claim = await claimAt(git, tip, ref)
     const verdict = judgeRunnerClaim(claim, now)
     const phase = judgeRunnerDeadline(claim, now)
+    const round = judgeRunnerDue(claim, now)
     const unjudgedTrailers = claim.unknownTrailers?.map((line) => line.slice(0, line.indexOf(": ")))
     const unjudged = unjudgedTrailers === undefined ? {} : { unjudgedTrailers }
     return verdict.status === "unreadable"
@@ -83,10 +91,11 @@ export async function readPublishedRunner(
           signal: "unreadable",
           claim: trailers(claim),
           phase,
+          round,
           ...unjudged,
           why: `${remote} ${ref} at ${tip}: ${verdict.reason}`,
         }
-      : { signal: verdict.status, claim: trailers(claim), phase, ...unjudged }
+      : { signal: verdict.status, claim: trailers(claim), phase, round, ...unjudged }
   } catch (error) {
     return {
       signal: "unreadable",

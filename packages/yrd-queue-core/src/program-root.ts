@@ -273,6 +273,7 @@ async function prepareProgramRoot(
     head: run.head,
     name: `${SETUP}-program-${stage}-${run.spec.name}`,
     phase: run.phase,
+    purpose: "program-root-setup" as const,
   }
   return prepareWorktree(run.git, run.repo, commit, join(run.root, stage === "target" ? "P" : "C"), {
     env: run.env,
@@ -397,6 +398,7 @@ export function recordProgramStart(
     /** Which base run this is, on a base-phase row: the whole check, or the scope it asked for. */
     scope?: "narrowed" | "full"
     scripts?: readonly string[]
+    purpose?: "program-root-setup"
   }>,
 ): void {
   run.log.write({ ...about, kind: "check" })
