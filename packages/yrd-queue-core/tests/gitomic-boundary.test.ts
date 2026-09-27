@@ -13,7 +13,7 @@ function refCommands(text: string): string[] {
   return [...text.matchAll(REF_COMMAND)].map((match) => match[1] ?? "")
 }
 
-describe("the legacy Gitomic boundary", () => {
+describe("the Yrd Gitomic boundary", () => {
   it("retains only the M2 tip check as a production Record reader (25041)", () => {
     // @source-grep: a future legacy fallback can compile and pass event journeys;
     // the accepted retirement contract permits exactly one M2 tip check.
@@ -42,7 +42,7 @@ describe("the legacy Gitomic boundary", () => {
     expect(sites.filter((name) => name !== "event-read.ts")).toEqual([])
   })
 
-  it("owns every legacy queue ref read and write", () => {
+  it("owns every queue ref read and write", () => {
     // Source-text checks are invisible to import-based test selection. Enumerate
     // every ref-command site so a new site requires an explicit boundary review.
     const sites = Object.fromEntries(
@@ -69,7 +69,7 @@ describe("the legacy Gitomic boundary", () => {
       "submit.ts": ["fetch", "push"],
     })
 
-    for (const name of ["git.ts", "legacy-records.ts", "pause.ts", "remote.ts", "withdraw.ts"]) {
+    for (const name of ["git.ts", "pause.ts", "remote.ts", "withdraw.ts"]) {
       expect(refCommands(source(name)), name).toEqual([])
     }
 
@@ -77,7 +77,7 @@ describe("the legacy Gitomic boundary", () => {
     const [gitlinkPublication, queueSubmission] = submit.split("export type SubmitInspection")
     // The retention ref is read by name through readRemoteCommit (25570), never an ls-remote.
     expect(refCommands(gitlinkPublication ?? ""), "gitlink retention publication").toEqual(["fetch", "push"])
-    expect(refCommands(queueSubmission ?? ""), "legacy queue submission").toEqual([])
+    expect(refCommands(queueSubmission ?? ""), "queue submission").toEqual([])
 
     // The run's one fetch (the composing checkout's commit) lives in settled-base.ts.
     const run = source("run.ts")
@@ -114,14 +114,13 @@ describe("the legacy Gitomic boundary", () => {
     expect(source("git.ts")).toContain("backend: GitomicBackend = createLegacyBackend(selection.executable)")
   })
 
-  it("selects Yrd's scrubbed environment and five-minute bound for both production paths", () => {
+  it("selects Yrd's scrubbed environment and five-minute bound for production reads", () => {
     const git = source("git.ts")
     expect(git).toContain("const GIT_ROOT_INVOCATION_MS = 5 * 60_000")
     // Bound once, so the publickey retry (25282) resolves its SSH command from attempt 1's environment.
     expect(git).toContain("const baseEnv = gitEnvironment(globalThis.process.env)")
     expect(git).toContain("remoteTimeoutMs: GIT_ROOT_INVOCATION_MS")
     expect(git).toContain("gitExecutable,")
-    expect(source("legacy-records.ts")).toContain("createLegacyBackend(executableFor(git))")
-    expect(source("events.ts")).toContain("backend: GitomicBackend")
+    expect(source("events.ts")).toContain("backend: GitomicBackend = createLegacyBackend(selection.executable)")
   })
 })
