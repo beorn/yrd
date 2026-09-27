@@ -563,7 +563,7 @@ describe("the table (items 3, 28, 38)", () => {
       .find((candidate) => candidate.includes("fix the parser") || candidate.includes("task/one"))
     expect(line).toContain("× failed")
     expect(line).toContain("fix the parser")
-    expect(line).toContain("(err=test)")
+    expect(line).not.toContain("(err=")
     expect(line).toContain("@chief")
     expect(line).not.toContain("0badf00d")
   })

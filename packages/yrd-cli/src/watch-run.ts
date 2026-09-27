@@ -104,7 +104,8 @@ export function headlineOf(row: Row, joinedRun = false): string {
   if (
     (row.state === "failed" || row.state === "stuck" || row.state === "cancelled") &&
     row.reason !== undefined &&
-    !notice.word.includes(row.reason)
+    !notice.word.includes(row.reason) &&
+    !row.reason.toLowerCase().includes(notice.word.toLowerCase())
   ) {
     return `${notice.word} ${row.reason}`
   }

@@ -36,6 +36,7 @@
  * reading before this rendered, and the diff arrives through `onToggleDiff`.
  */
 
+import type { ReactNode } from "react"
 import { hyperlink } from "@silvery/ansi"
 import { Box, ScrollArea, Tab, TabList, TabPanel, Tabs, Text, useInput, useScrollController } from "silvery"
 import type { CheckView, JournalCommand, JournalRun, JournalStep, Row } from "@yrd/queue-core"
@@ -290,6 +291,26 @@ export function runnerDetailFromSnapshot(snapshot: WatchSnapshot, now: Date): Ch
   }
 }
 
+function DetailScroll({
+  controller,
+  children,
+}: {
+  controller: ReturnType<typeof useScrollController>
+  children: ReactNode
+}) {
+  const omitted = Math.max(0, controller.maxScroll - controller.scrollOffset)
+  return (
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+      <ScrollArea controller={controller}>{children}</ScrollArea>
+      {omitted > 0 ? (
+        <Text color="$fg-muted" flexShrink={0}>
+          {`${omitted} more lines`}
+        </Text>
+      ) : null}
+    </Box>
+  )
+}
+
 export function WatchDetail({
   detail,
   change,
@@ -334,7 +355,7 @@ export function WatchDetail({
     const selectedSubIndex = resolved.selectedSubIndex
 
     return (
-      <ScrollArea controller={scroll}>
+      <DetailScroll controller={scroll}>
         <Box flexDirection="column" minWidth={0} paddingX={1} gap={1}>
           <Box flexDirection="column" minWidth={0}>
             <Box flexDirection="row" gap={1}>
@@ -383,7 +404,7 @@ export function WatchDetail({
             ))}
           </Tabs>
         </Box>
-      </ScrollArea>
+      </DetailScroll>
     )
   }
 
@@ -408,7 +429,7 @@ export function WatchDetail({
   const selectedSubIndex = resolved.selectedSubIndex
   const migratedWithoutChecks = isMigratedWithoutCheckDetail(detail)
   return (
-    <ScrollArea controller={scroll}>
+    <DetailScroll controller={scroll}>
       <Box flexDirection="column" minWidth={0} paddingX={1}>
         {/* The status box at the VERY top, no identity row above it (items 1, 23). */}
         <RunStatusBox run={detail.run} joinedRun={joinedRun} />
@@ -466,7 +487,7 @@ export function WatchDetail({
           ))}
         </Tabs>
       </Box>
-    </ScrollArea>
+    </DetailScroll>
   )
 }
 
@@ -855,20 +876,22 @@ function CheckingStageBody({ detail, selectedSubIndex }: { detail: ChangeDetail;
             ))}
             <Box height={1} flexShrink={0} />
           </Box>
-        ) : null}
-        <Box flexDirection="row" minWidth={0} gap={1}>
-          <Text color={CHECK_COLOR[selectedCheck.state]} bold>
-            {CHECK_GLYPH[selectedCheck.state]}
-          </Text>
-          <Text bold>
-            {selectedCheck.phase !== undefined && detail.checks.filter((o) => o.name === selectedCheck.name).length > 1
-              ? `${selectedCheck.name} (${String(selectedCheck.phase)})`
-              : selectedCheck.name}
-          </Text>
-          {selectedCheck.result?.ms !== undefined ? (
-            <Text color="$fg-muted"> · {mediaDuration(selectedCheck.result.ms)}</Text>
-          ) : null}
-        </Box>
+        ) : (
+          <Box flexDirection="row" minWidth={0} gap={1}>
+            <Text color={CHECK_COLOR[selectedCheck.state]} bold>
+              {CHECK_GLYPH[selectedCheck.state]}
+            </Text>
+            <Text bold>
+              {selectedCheck.phase !== undefined &&
+              detail.checks.filter((o) => o.name === selectedCheck.name).length > 1
+                ? `${selectedCheck.name} (${String(selectedCheck.phase)})`
+                : selectedCheck.name}
+            </Text>
+            {selectedCheck.result?.ms !== undefined ? (
+              <Text color="$fg-muted"> · {mediaDuration(selectedCheck.result.ms)}</Text>
+            ) : null}
+          </Box>
+        )}
         <CheckBody check={selectedCheck} />
       </Box>
     )
@@ -1506,11 +1529,13 @@ function CheckBody({ check }: { check: CheckPanel }) {
           longer names has no command to show and says so, rather than
           rendering an empty prompt that reads as a command that did nothing. */}
       {check.spec === undefined ? (
-        <Text color="$fg-muted" wrap="wrap">
-          {check.name === "setup"
-            ? "the target's setup command, run once in the fresh worktree before any check"
-            : "the declaration this change was judged by does not name this check"}
-        </Text>
+        <MarkerRow>
+          <Text color="$fg-muted" wrap="wrap">
+            {check.name === "setup"
+              ? "the target's setup command, run once in the fresh worktree before any check"
+              : "the declaration this change was judged by does not name this check"}
+          </Text>
+        </MarkerRow>
       ) : (
         <MarkerRow marker={<Text color="$fg-info">$</Text>}>
           <Text wrap="wrap" minWidth={0}>
@@ -1526,7 +1551,6 @@ function CheckBody({ check }: { check: CheckPanel }) {
               ? "unmeasured — no result recorded"
               : check.state}
           {exit}
-          {check.result?.ms === undefined ? "" : ` ${mediaDuration(check.result.ms)}`}
         </Text>
       </MarkerRow>
       {/* The REAL path, as a link that opens it (S2.21). A path we do not have

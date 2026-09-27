@@ -105,7 +105,7 @@ export type ListLayout = Readonly<{
 /** The CHANGES cell's parenthesized suffix: the running check, else a failure's code — status, never identity. */
 export function changesSuffix(row: Row): Readonly<{ text: string; color: string }> | undefined {
   if (row.live !== undefined) return { color: "$fg-info", text: row.live.check }
-  if (row.state === "failed" && row.reason !== undefined) return { color: "$fg-error", text: `err=${row.reason}` }
+  if (row.state === "failed") return undefined
   if (row.state === "queued" && row.reason?.startsWith("deferred ")) {
     return { color: "$fg-accent", text: row.reason }
   }
@@ -810,9 +810,13 @@ export function RunnerRow({
     <Box flexDirection="column" minWidth={0} width="100%" backgroundColor={cursor ? "$bg-selected" : undefined}>
       <Cells layout={layout}>
         {{
-          time: <TimeText text={timeText} color={forced ?? color} />,
+          time: line.at === undefined ? null : <TimeText text={timeText} color={forced ?? color} />,
           q: null,
-          run: null,
+          run: (
+            <Text color={forced ?? color} wrap="truncate">
+              {line.at === undefined ? "—" : " "}
+            </Text>
+          ),
           queueRun: null,
           task: (
             <Box flexDirection="row" minWidth={0} overflow="hidden">

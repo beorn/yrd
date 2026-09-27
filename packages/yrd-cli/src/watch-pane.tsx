@@ -1269,11 +1269,18 @@ function SingleWatchPane({
       ) : (
         list
       )
+    ) : tier === "below" ? (
+      <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+        <Box flexShrink={0} minWidth={0}>
+          {list}
+        </Box>
+        {detailPane}
+      </Box>
     ) : (
       <SplitPane
-        direction={tier === "right" ? "row" : "column"}
-        ratio={clampSplitPaneRatio(tier === "right" ? DEFAULT_SPLIT_RATIO : 0.6, {
-          containerSize: tier === "right" ? columns : terminalRows,
+        direction="row"
+        ratio={clampSplitPaneRatio(DEFAULT_SPLIT_RATIO, {
+          containerSize: columns,
           dividerSize: DIVIDER_SIZE,
         })}
         dividerSize={DIVIDER_SIZE}
