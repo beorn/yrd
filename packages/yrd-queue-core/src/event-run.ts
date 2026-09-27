@@ -26,13 +26,15 @@ import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
 import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
-import { queueName } from "./config.ts"
+import { InvalidQueueConfig, queueName, readConfig } from "./config.ts"
 import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
 import { recentCasRefusalStreak, recentCasRefusals, recentPublicationNotLanded, type QueueRunLog } from "./log.ts"
 import {
+  ProgramSubjectSetupFailed,
   programRootCheck,
   recordProgramResult,
   recordProgramStart,
+  recordProgramVerdict,
   recordSynthesizedPassResults,
 } from "./program-root.ts"
 import { queueRefPrefix } from "./refs.ts"
@@ -1334,6 +1336,20 @@ export async function eventQueueRun(
         continue
       }
       const candidate = verified.verifying.candidate
+      try {
+        await readConfig(git, candidate, options.target)
+      } catch (error) {
+        if (!(error instanceof InvalidQueueConfig)) throw error
+        const ended = await appendOwnedChange(store, queue, branch, tip, {
+          type: "failed",
+          at: new Date(),
+          reason: error.message,
+        })
+        await tell(branch, "failed", ended)
+        log.write({ kind: "change", branch, head, decision: "failed", reason: error.message })
+        failed.push(branch)
+        continue
+      }
       const raises = (await readRootChanges(git, candidate))?.changes ?? []
       tip = await appendOwnedChange(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })
       tip = await appendOwnedChange(store, queue, branch, tip, { type: "checking", at: new Date() })
@@ -1344,6 +1360,112 @@ export async function eventQueueRun(
       let setupDecision:
         | { kind: "failed" | "stuck"; reason: string; fault?: ReturnType<typeof transportFaultIn> }
         | undefined
+      const attributeCandidateSetup = async (
+        error: SetupFailed,
+        phase: "submit" | "merge",
+        attempt: number,
+        tmpdir: string,
+        programCheck?: string,
+      ): Promise<NonNullable<typeof setupDecision>> => {
+        if (options.setup === undefined) {
+          throw new Error(`event queue ${url}#${queue}: ${branch} setup failed without a setup declaration`, {
+            cause: error,
+          })
+        }
+        let ground: "passed" | "failed" = "failed"
+        let baseFailure: SetupFailed | undefined
+        try {
+          const baseCommit = await settledBaseCommit({
+            git,
+            repo: options.repo,
+            targetSha: target,
+            raises,
+            path: join(
+              options.workdir,
+              "worktrees",
+              log.id,
+              "compose",
+              "base",
+              `${branch.replaceAll("/", "_")}-${String(attempt)}`,
+            ),
+            branch,
+            env: options.env,
+            gitOptions,
+            populateReference: options.populateReference,
+            process: options.process,
+            selection: options.selection,
+          })
+          const baseTree = await prepareWorktree(
+            git,
+            options.repo,
+            baseCommit,
+            join(options.workdir, "worktrees", log.id, `${branch.replaceAll("/", "_")}-base-${String(attempt)}`),
+            {
+              targetSha: target,
+              populateReference: options.populateReference,
+              selection: options.selection,
+              gitOptions,
+              process: options.process,
+              env: options.env,
+              setup: {
+                run: options.setup,
+                logDir: join(
+                  options.workdir,
+                  "checks",
+                  `${branch}@${head}`,
+                  log.id,
+                  `attempt-${String(attempt)}`,
+                  "base",
+                ),
+                tmpdir,
+              },
+            },
+          )
+          await baseTree.remove()
+          ground = "passed"
+        } catch (baseError) {
+          if (!(baseError instanceof SetupFailed)) {
+            throw new AggregateError(
+              [error, baseError],
+              `event queue ${url}#${queue}: ${branch} setup failed and its base could not be judged`,
+            )
+          }
+          baseFailure = baseError
+        }
+        results.push({
+          run: error.ran.result,
+          attempt,
+          phase,
+          ...(options.tier === "long" ? { tier: "long" as const } : {}),
+        })
+        if (programCheck !== undefined) {
+          recordProgramVerdict(
+            { log },
+            { branch, head, name: `${SETUP}-program-subject-${programCheck}`, phase },
+            error.ran.result,
+            ground === "passed" ? "submitter" : "queue",
+          )
+        }
+        let fault: ReturnType<typeof transportFaultIn>
+        let logProblem: string | undefined
+        if (ground === "failed") {
+          try {
+            fault = transportFaultIn(
+              [
+                readFileSync(error.ran.result.log, "utf8"),
+                baseFailure === undefined ? "" : readFileSync(baseFailure.ran.result.log, "utf8"),
+              ].join("\n"),
+            )
+          } catch (readError) {
+            logProblem = `setup log unavailable for transport attribution: ${readError instanceof Error ? readError.message : String(readError)}`
+          }
+        }
+        return {
+          kind: ground === "passed" ? "failed" : "stuck",
+          reason: `setup ${error.ran.result.result} on candidate; settled base setup ${ground}; ${error.message.replace(/\s+/gu, " ")}${logProblem === undefined ? "" : `; ${logProblem}`}`,
+          ...(fault === undefined ? {} : { fault }),
+        }
+      }
       for (let attempt = 1; attempt <= 2; attempt++) {
         const startOfAttempt = results.length
         skippedByOverride = new Set()
@@ -1430,96 +1552,7 @@ export async function eventQueueRun(
             )
           } catch (error) {
             if (!(error instanceof SetupFailed)) throw error
-            if (options.setup === undefined) {
-              throw new Error(`event queue ${url}#${queue}: ${branch} setup failed without a setup declaration`, {
-                cause: error,
-              })
-            }
-            let ground: "passed" | "failed" = "failed"
-            let baseFailure: SetupFailed | undefined
-            try {
-              const baseCommit = await settledBaseCommit({
-                git,
-                repo: options.repo,
-                targetSha: target,
-                raises,
-                path: join(
-                  options.workdir,
-                  "worktrees",
-                  log.id,
-                  "compose",
-                  "base",
-                  `${branch.replaceAll("/", "_")}-${String(attempt)}`,
-                ),
-                branch,
-                env: options.env,
-                gitOptions,
-                populateReference: options.populateReference,
-                process: options.process,
-                selection: options.selection,
-              })
-              const baseTree = await prepareWorktree(
-                git,
-                options.repo,
-                baseCommit,
-                join(options.workdir, "worktrees", log.id, `${branch.replaceAll("/", "_")}-base-${String(attempt)}`),
-                {
-                  targetSha: target,
-                  populateReference: options.populateReference,
-                  selection: options.selection,
-                  gitOptions,
-                  process: options.process,
-                  env: options.env,
-                  setup: {
-                    run: options.setup,
-                    logDir: join(
-                      options.workdir,
-                      "checks",
-                      `${branch}@${head}`,
-                      log.id,
-                      `attempt-${String(attempt)}`,
-                      "base",
-                    ),
-                    tmpdir,
-                  },
-                },
-              )
-              await baseTree.remove()
-              ground = "passed"
-            } catch (baseError) {
-              if (!(baseError instanceof SetupFailed)) {
-                throw new AggregateError(
-                  [error, baseError],
-                  `event queue ${url}#${queue}: ${branch} setup failed and its base could not be judged`,
-                )
-              }
-              baseFailure = baseError
-            }
-            results.push({
-              run: error.ran.result,
-              attempt,
-              phase,
-              ...(options.tier === "long" ? { tier: "long" as const } : {}),
-            })
-            let fault: ReturnType<typeof transportFaultIn>
-            let logProblem: string | undefined
-            if (ground === "failed") {
-              try {
-                fault = transportFaultIn(
-                  [
-                    readFileSync(error.ran.result.log, "utf8"),
-                    baseFailure === undefined ? "" : readFileSync(baseFailure.ran.result.log, "utf8"),
-                  ].join("\n"),
-                )
-              } catch (readError) {
-                logProblem = `setup log unavailable for transport attribution: ${readError instanceof Error ? readError.message : String(readError)}`
-              }
-            }
-            setupDecision = {
-              kind: ground === "passed" ? "failed" : "stuck",
-              reason: `setup ${error.ran.result.result} on candidate; settled base setup ${ground}; ${error.message.replace(/\s+/gu, " ")}${logProblem === undefined ? "" : `; ${logProblem}`}`,
-              ...(fault === undefined ? {} : { fault }),
-            }
+            setupDecision = await attributeCandidateSetup(error, phase, attempt, tmpdir)
             break
           }
           try {
@@ -1548,27 +1581,33 @@ export async function eventQueueRun(
               }
               let checked: CheckResult
               if (check.programRoot === true) {
-                checked = await programRootCheck({
-                  git,
-                  repo: options.repo,
-                  targetSha: target,
-                  tree: worktree.tree,
-                  spec: check,
-                  branch,
-                  head,
-                  phase: evidencePhase,
-                  root: join(options.workdir, "worktrees", log.id, "program", phase, String(attempt), check.name),
-                  logDir,
-                  tmpdir,
-                  log,
-                  setup: options.setup,
-                  env: options.env,
-                  process: options.process,
-                  selection: options.selection,
-                  gitOptions,
-                  populateReference: options.populateReference,
-                  tier: options.tier,
-                })
+                try {
+                  checked = await programRootCheck({
+                    git,
+                    repo: options.repo,
+                    targetSha: target,
+                    tree: worktree.tree,
+                    spec: check,
+                    branch,
+                    head,
+                    phase: evidencePhase,
+                    root: join(options.workdir, "worktrees", log.id, "program", phase, String(attempt), check.name),
+                    logDir,
+                    tmpdir,
+                    log,
+                    setup: options.setup,
+                    env: options.env,
+                    process: options.process,
+                    selection: options.selection,
+                    gitOptions,
+                    populateReference: options.populateReference,
+                    tier: options.tier,
+                  })
+                } catch (error) {
+                  if (!(error instanceof ProgramSubjectSetupFailed)) throw error
+                  setupDecision = await attributeCandidateSetup(error.setup, phase, attempt, tmpdir, check.name)
+                  break
+                }
               } else {
                 await restoreScripts(
                   { git, targetSha: target, process: options.process, selection: options.selection, gitOptions },

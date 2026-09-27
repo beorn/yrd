@@ -158,11 +158,19 @@ export type QueueConfig = Readonly<{
  * `.yrd.yml` (an honest absence, read as git's exit 1). Any other failure
  * throws with the path that is wrong.
  */
+export class InvalidQueueConfig extends Error {
+  override readonly name = "InvalidQueueConfig"
+}
+
 export async function readConfig(git: Git, commit: string, target: Target): Promise<QueueConfig | undefined> {
   const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
   if (blob === undefined) return undefined
   const text = await git(["show", `${commit}:.yrd.yml`])
-  return parseConfig(text, { at: commit, blob, target })
+  try {
+    return parseConfig(text, { at: commit, blob, target })
+  } catch (error) {
+    throw new InvalidQueueConfig(error instanceof Error ? error.message : String(error), { cause: error })
+  }
 }
 
 /** Parse the declaration's text with its captured source and caller-owned queue identity. */
