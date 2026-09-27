@@ -838,7 +838,7 @@ export async function createEventQueue(
   if (Number.isNaN(at.getTime())) throw new TypeError("Time: needs a valid instant")
   if (config === undefined) {
     throw new Error(
-      `cannot create event queue ${queue} at ${commit}: the pinned commit has no declared QueueConfig; #25040 does not invent a default`,
+      `cannot create event queue ${queue} at ${commit}: the pinned commit has no declared QueueConfig; declare checks in .yrd.yml at that commit before creating an event queue`,
     )
   }
   if (config.target.remote !== store.remote || config.target.branch !== queue) {
@@ -849,7 +849,7 @@ export async function createEventQueue(
   const blob = await refAt(gitIn(store.repo, undefined, store.selection), `${commit}:.yrd.yml`, "blob")
   if (blob === undefined) {
     throw new Error(
-      `cannot create event queue ${queue} at ${commit}: the pinned commit has no .yrd.yml; #25040 does not invent a default`,
+      `cannot create event queue ${queue} at ${commit}: the pinned commit has no .yrd.yml; declare checks in .yrd.yml at that commit before creating an event queue`,
     )
   }
   if (blob !== config.blob) {

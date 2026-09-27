@@ -2,8 +2,6 @@
 import type { CheckSpec } from "./check.ts"
 import type { Notifier, QueueConfig } from "./config.ts"
 
-const FOLLOW_ON = "@i/10-yrd/25065-event-queues-run-every-check-kind-beyond-plain-merge-checks"
-
 type EventQueueRunConfig = Readonly<{
   checks: readonly CheckSpec[]
   setup?: string
@@ -37,8 +35,10 @@ const CHECK_KEYS = new Set([
 ])
 
 function unsupported(action: EventQueueConfigAction, feature: string, detail = ""): never {
+  const cleanFeature = feature.replace(/:$/, "")
+  const subject = detail.length > 0 ? `${feature}${detail}:` : feature
   throw new Error(
-    `cannot ${action} an event queue with ${feature}${detail}: this declaration feature has no event runner executor; ${FOLLOW_ON} keeps it refused before #25041`,
+    `cannot ${action} an event queue with ${subject} this declaration feature has no event runner executor; remove ${cleanFeature} from .yrd.yml to run on an event queue`,
   )
 }
 
