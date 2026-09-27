@@ -9,9 +9,21 @@
  */
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs"
 import { join } from "node:path"
+import { AsyncLocalStorage } from "node:async_hooks"
 
 /** A git process's own verb when it talks to a remote. */
 const REMOTE_VERBS = new Set(["clone", "fetch", "ls-remote", "pull", "push"])
+const seamScope = new AsyncLocalStorage<string>()
+
+/** Label the Git processes started by one submit read without changing process-wide state. */
+export function withRemoteSeam<T>(name: string, action: () => T): T {
+  if (!/^[a-zA-Z][a-zA-Z0-9.-]*$/u.test(name)) throw new TypeError(`invalid remote seam ${JSON.stringify(name)}`)
+  return seamScope.run(name, action)
+}
+
+export function remoteSeam(): string | undefined {
+  return seamScope.getStore()
+}
 
 export type RemoteCalls = Readonly<{
   /** git processes that wrote an event file. */
@@ -27,6 +39,8 @@ export type RemoteCalls = Readonly<{
   remoteMs: number
   /** Event lines that did not parse: a process killed mid-write. Counted, never skipped silently. */
   unreadable: number
+  /** Per-function remote verbs and transport children; `unattributed` is an explicit measurement gap. */
+  seams: Readonly<Record<string, Readonly<Record<string, number>>>>
 }>
 
 /** Count the remote calls recorded under one trace2 directory. A directory that is not there is refused. */
@@ -46,12 +60,24 @@ export function readRemoteCalls(directory: string): RemoteCalls {
   let sshChildren = 0
   let remoteSeconds = 0
   let unreadable = 0
+  const seams: Record<string, Record<string, number>> = {}
   for (const name of names) {
     let started = false
     let remote = false
+    let seam: string | undefined
+    const fileVerbs: Record<string, number> = {}
+    let fileSshChildren = 0
+    let fileRemoteMs = 0
     for (const line of readFileSync(join(directory, name), "utf8").split("\n")) {
       if (line === "") continue
-      let event: { event?: unknown; name?: unknown; child_class?: unknown; t_abs?: unknown }
+      let event: {
+        event?: unknown
+        name?: unknown
+        child_class?: unknown
+        t_abs?: unknown
+        param?: unknown
+        value?: unknown
+      }
       try {
         event = JSON.parse(line) as typeof event
       } catch {
@@ -60,16 +86,32 @@ export function readRemoteCalls(directory: string): RemoteCalls {
         continue
       }
       if (event.event === "start") started = true
+      if (event.event === "def_param" && event.param === "YRD_SEAM" && typeof event.value === "string") {
+        seam = event.value
+      }
       if (event.event === "cmd_name" && typeof event.name === "string" && REMOTE_VERBS.has(event.name)) {
         verbs[event.name] = (verbs[event.name] ?? 0) + 1
         remote = true
+        fileVerbs[event.name] = (fileVerbs[event.name] ?? 0) + 1
       }
-      if (event.event === "child_start" && event.child_class === "transport/ssh") sshChildren++
-      if (event.event === "exit" && remote && typeof event.t_abs === "number") remoteSeconds += event.t_abs
+      if (event.event === "child_start" && event.child_class === "transport/ssh") {
+        sshChildren++
+        fileSshChildren++
+      }
+      if (event.event === "exit" && remote && typeof event.t_abs === "number") {
+        remoteSeconds += event.t_abs
+        fileRemoteMs += Math.round(event.t_abs * 1000)
+      }
+    }
+    if (remote) {
+      const row = (seams[seam ?? "unattributed"] ??= {})
+      for (const [name, count] of Object.entries(fileVerbs)) row[name] = (row[name] ?? 0) + count
+      row.ssh_children = (row.ssh_children ?? 0) + fileSshChildren
+      row.remote_ms = (row.remote_ms ?? 0) + fileRemoteMs
     }
     if (started) processes++
   }
-  return { processes, verbs, sshChildren, remoteMs: Math.round(remoteSeconds * 1000), unreadable }
+  return { processes, verbs, sshChildren, remoteMs: Math.round(remoteSeconds * 1000), unreadable, seams }
 }
 
 /**
@@ -80,15 +122,27 @@ export function readRemoteCalls(directory: string): RemoteCalls {
  */
 export function traceRemoteCalls(
   directory: string,
-): Readonly<{ env: Readonly<{ GIT_TRACE2_EVENT: string }>; end(): RemoteCalls }> {
+  options: Readonly<{ seams?: boolean }> = {},
+): Readonly<{ env: Readonly<NodeJS.ProcessEnv>; end(): RemoteCalls }> {
   mkdirSync(directory, { recursive: true })
   const previous = process.env.GIT_TRACE2_EVENT
+  const previousVars = process.env.GIT_TRACE2_ENV_VARS
   process.env.GIT_TRACE2_EVENT = directory
+  if (options.seams) {
+    process.env.GIT_TRACE2_ENV_VARS = [...new Set([...(previousVars?.split(",") ?? []), "YRD_SEAM"])].join(",")
+  }
   return {
-    env: { GIT_TRACE2_EVENT: directory },
+    env: {
+      GIT_TRACE2_EVENT: directory,
+      ...(options.seams ? { GIT_TRACE2_ENV_VARS: process.env.GIT_TRACE2_ENV_VARS } : {}),
+    },
     end() {
       if (previous === undefined) delete process.env.GIT_TRACE2_EVENT
       else process.env.GIT_TRACE2_EVENT = previous
+      if (options.seams) {
+        if (previousVars === undefined) delete process.env.GIT_TRACE2_ENV_VARS
+        else process.env.GIT_TRACE2_ENV_VARS = previousVars
+      }
       try {
         return readRemoteCalls(directory)
       } finally {
@@ -113,5 +167,10 @@ export function remoteCallsRow(calls: RemoteCalls): Readonly<Record<string, numb
     remote_ms: calls.remoteMs,
     unreadable: calls.unreadable,
     ...Object.fromEntries(Object.entries(calls.verbs).map(([verb, count]) => [verb, count])),
+    ...Object.fromEntries(
+      Object.entries(calls.seams).flatMap(([seam, row]) =>
+        Object.entries(row).map(([name, count]) => [`seam.${seam}.${name}`, count]),
+      ),
+    ),
   }
 }

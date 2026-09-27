@@ -30,6 +30,7 @@ import { type PauseRecord } from "./pause.ts"
 import { remoteUrl } from "./remote.ts"
 import { changeInput, changesRef, decide, initial, project, queueFormat, queueRef, readEventOps } from "./events.ts"
 import { verifyCandidate, type Verification } from "./verifying.ts"
+import { withRemoteSeam } from "./remote-calls.ts"
 
 export type SubmitRequest = Readonly<{
   /** The branch being submitted: the change's own. */
@@ -360,11 +361,15 @@ async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitA
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   refuseTarget(request.branch, request.target.branch)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
-  const admitted = await admitSubmitAtHead(git, remote, request, head)
-  const published = await publishMovedGitlinks(git, admitted.root, admitted.targetHead, head)
-  const verifying = await composeSubmit(git, request, admitted)
+  const admitted = await withRemoteSeam("inspectSubmit", () => admitSubmitAtHead(git, remote, request, head))
+  const published = await withRemoteSeam("publishMovedGitlinks", () =>
+    publishMovedGitlinks(git, admitted.root, admitted.targetHead, head),
+  )
+  const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted))
   const { root, ...inspection } = admitted
-  return submitEvent(git, remote, request, root, { ...inspection, verifying }, published)
+  return withRemoteSeam("submitEvent", () =>
+    submitEvent(git, remote, request, root, { ...inspection, verifying }, published),
+  )
 }
 
 async function submitEvent(
