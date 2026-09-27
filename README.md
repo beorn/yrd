@@ -98,6 +98,12 @@ Submission scans branch history back to its merge-base with the captured target,
 
 Later commits and branch renames retain the binding. Conflicts name both issues and commits; `--issue` must match an existing binding.
 
+The target's `.yrd.yml` may declare `issueResolver: [issue-lookup, --json]`. Yrd appends each raw binding or `--issue` value as one argument and expects JSON with a nonempty `id` string on stdout.
+
+Yrd compares those IDs and writes the canonical ID in new environment and pin-only binding commits. The candidate's declaration cannot change this rule for its own submission.
+
+A missing issue, failed command, timeout or invalid result refuses and names the raw reference and target command.
+
 Only unbound legacy branches may fall back to their leading numeric issue segment. Live and dry-run submission report that fallback. Git publication starts after binding validation.
 
 Close reads teardown from the environment's current commit and refuses dirty, locked, unregistered or out-of-root paths. Failed teardown preserves the environment.
