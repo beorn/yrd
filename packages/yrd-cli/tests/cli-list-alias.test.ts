@@ -13,6 +13,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, submit } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
+import { birthEventQueue } from "./support/event-queue-birth.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -63,6 +64,7 @@ async function queueWithOneChange(): Promise<string> {
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
+  await birthEventQueue(work)
   await git(["checkout", "--quiet", "-b", "task/one", "main"])
   writeFileSync(join(work, "pass.txt"), "pass\n")
   await git(["add", "."])
@@ -116,6 +118,7 @@ describe("`yrd list` is `yrd queue list`", () => {
     expect(flagsOf(aliasHelp.stdout)).toEqual([
       "--all",
       "--drafts",
+      "--fresh",
       "--interval",
       "--json",
       "--latest",

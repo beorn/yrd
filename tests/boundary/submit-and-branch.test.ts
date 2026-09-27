@@ -26,10 +26,10 @@ import {
 afterEach(removeTemporaryRoots)
 
 describe("the submit path", { timeout: 120_000 }, () => {
-  // 25626: this boundary fixture still creates a legacy Record queue; dev/11 is migrating it to events.
+  // 26183: public submit cases run against the event queue after the 25041 strict-reader cutover.
   // The core stale-compose test does not prove that both public submit aliases
   // accept a moved target while leaving the author's branch and FETCH_HEAD alone.
-  it.fails.each([
+  it.each([
     { label: "submit", argv: ["submit"] },
     { label: "queue submit", argv: ["queue", "submit"] },
   ])("$label previews and submits a stale but composable branch without rewriting it", async ({ argv }) => {
@@ -89,7 +89,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(await refs(origin)).toEqual(beforeRemote)
   })
 
-  it.fails("one push puts the branch and its opened event at the queue remote", async () => {
+  it("one push puts the branch and its opened event at the queue remote", async () => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
     await addYrdRemote(repo, origin)
     const branch = "24099-widget"
@@ -109,7 +109,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
    * and the dry run opened a real change. An option a command does not implement must refuse; an
    * option it does implement must reach the code that acts on it.
    */
-  it.fails("a dry run of the target refuses like the submit, and puts nothing at the remote", async () => {
+  it("a dry run of the target refuses like the submit, and puts nothing at the remote", async () => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
     await addYrdRemote(repo, origin)
     const before = await refs(origin)
@@ -121,7 +121,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(await refs(origin), dry.report).toEqual(before)
   })
 
-  it.fails("a dry run says what it would open and puts nothing at the remote", async () => {
+  it("a dry run says what it would open and puts nothing at the remote", async () => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
     await addYrdRemote(repo, origin)
     const branch = "24099-dry"
@@ -145,7 +145,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(await refExists(repo, changesRef("main", branch)), dry.report).toBe(false)
   })
 
-  it.fails("uses origin as the repository and does not add a declaration-selected remote", async () => {
+  it("uses origin as the repository and does not add a declaration-selected remote", async () => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
     expect(await remoteNames(repo)).not.toContain("yrd")
     const branch = "24099-remote"

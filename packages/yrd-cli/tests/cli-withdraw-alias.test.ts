@@ -14,6 +14,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, submit } from "@yrd/queue-core"
+import { birthEventQueue } from "./support/event-queue-birth.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 
@@ -65,6 +66,7 @@ async function queueWithChanges(...branches: readonly string[]): Promise<string>
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
+  await birthEventQueue(work, "main", { localStore: false })
   for (const branch of branches) {
     await git(["checkout", "--quiet", "-b", branch, "main"])
     writeFileSync(join(work, "pass.txt"), `${branch}\n`)
@@ -84,7 +86,7 @@ function shapeOf(text: string, branch: string): string {
 
 /** The state `yrd list --json` reads for one branch. */
 async function stateOf(work: string, branch: string): Promise<string | undefined> {
-  const listed = await yrd(work, "list", "--json")
+  const listed = await yrd(work, "list", "--json", "--fresh")
   expect(listed.exitCode, listed.report).toBe(0)
   const rows = (JSON.parse(listed.stdout) as { changes: readonly { branch: string; state: string }[] }).changes
   return rows.find((row) => row.branch === branch)?.state
@@ -101,8 +103,8 @@ describe("`yrd withdraw` is `yrd queue withdraw`", () => {
     expect(alias.exitCode, alias.report).toBe(canonical.exitCode)
     expect(shapeOf(alias.stdout, "task/two")).toBe(shapeOf(canonical.stdout, "task/one"))
     // The ending is real on both, and it is the branch each command named.
-    expect(await stateOf(work, "task/one")).toBe("withdrawn")
-    expect(await stateOf(work, "task/two")).toBe("withdrawn")
+    expect(await stateOf(work, "task/one")).toBe("cancelled")
+    expect(await stateOf(work, "task/two")).toBe("cancelled")
   })
 
   it("prints the same line without --json, and refuses the same way when nothing is in line", async () => {
