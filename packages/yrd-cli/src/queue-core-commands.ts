@@ -49,7 +49,6 @@ import {
   listRefs,
   queueFormat,
   queueRef,
-  queueResumedAfter,
   queueRefPrefix,
   changesRef,
   readChangeEvents,
@@ -57,7 +56,6 @@ import {
   readEventOps,
   readEventQueueWithChanges,
   setBranchIgnored,
-  stuckReleaseReason,
   writeQueueEvent,
   writeQueueOverride,
   prepareWorktree,
@@ -66,7 +64,6 @@ import {
   openLog,
   gitIn,
   incidentLine,
-  incidentLines,
   journalKey,
   queueName,
   resolveGitSelection,
@@ -158,15 +155,7 @@ import type { DraftWindow, WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
-import {
-  CHECK_GLYPH,
-  STATE_WORDS,
-  clock,
-  diagnosticLines,
-  firstLine,
-  mediaDuration,
-  timingLine,
-} from "./watch-format.ts"
+import { STATE_WORDS, clock, diagnosticLines, firstLine, mediaDuration, timingLine } from "./watch-format.ts"
 import { readRunnerFacts, readRunnerService, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
@@ -935,13 +924,13 @@ export async function coreQueueCommand(
         if (request.command === "resume" && standing === undefined) throw new QueueNotPaused()
         const at = new Date()
         const reason = request.command === "pause" ? request.reason : (request.reason ?? "pause lifted")
-        const id = await writeQueueEvent(eventStore, config.target.branch, {
-          type: request.command === "pause" ? "paused" : "resumed",
-          reason,
-          by: request.by,
-          at,
-          ...(request.command === "pause" ? { cause: request.cause ?? "operator" } : {}),
-        })
+        const id = await writeQueueEvent(
+          eventStore,
+          config.target.branch,
+          request.command === "pause"
+            ? { type: "paused", reason, by: request.by, at, cause: request.cause ?? "operator" }
+            : { type: "resumed", reason, by: request.by, at },
+        )
         const written: PauseRecord = {
           kind: request.command === "pause" ? "paused" : "resumed",
           sha: id,
@@ -1295,9 +1284,7 @@ export async function coreQueueCommand(
           ? undefined
           : gitIn(request.author.repo, undefined, request.author.selection, { env: options.env })
       const local = author === undefined ? undefined : await refAt(author, `refs/heads/${branch}`)
-      let standing:
-        | { change: Change; reading: { state: Row["state"] }; landing?: string }
-        | undefined
+      let standing: { change: Change; reading: { state: Row["state"] }; landing?: string } | undefined
       const reading = await readEventListing(git, config, repo, workdir, captured.oid, eventStore, { all: true })
       const selected = reading.changes.get(branch)
       const row = reading.all.find((candidate) => candidate.branch === branch)
@@ -1925,7 +1912,12 @@ export async function coreQueueCommand(
           // after an act lifts it. The hook sees the document as written, with
           // nothing awaited between the write and the call.
           const sleepMs = sleepAfter(outcome, interval)
-          lastStop = outcome.stopped?.ring === "pause" ? (outcome.stopped.what as PauseRecord) : undefined
+          lastStop =
+            outcome.stuck.length > 0
+              ? (await readEventOps(eventStore, git, config.target.branch, outcome.target)).stop
+              : outcome.stopped?.ring === "pause"
+                ? (outcome.stopped.what as PauseRecord)
+                : undefined
           const latestQueue = await readEventQueue(eventStore, config.target.branch)
           if (lastRelease !== undefined) lastRelease = latestQueue.release?.id
           setChainPressure(latestQueue.writePressure)
@@ -3447,13 +3439,7 @@ function readOutput(check: CheckView): CheckPanel {
 
 /** Whether an event change in this state holds a place in line. */
 function inLineState(state: Row["state"]): boolean {
-  return (
-    state === "queued" ||
-    state === "stuck" ||
-    state === "verifying" ||
-    state === "checking" ||
-    state === "merging"
-  )
+  return state === "queued" || state === "stuck" || state === "verifying" || state === "checking" || state === "merging"
 }
 
 /** How often a waiter tries the round lock again: well inside the service's shortest sleep, so a waiter wins the gap between two rounds. */
@@ -3545,13 +3531,7 @@ function lockWaitFact(wait: RoundLockWait): Readonly<Record<string, unknown>> {
  */
 export function endingCode(states: readonly Row["state"][]): YrdCliExitCode | undefined {
   if (
-    states.some(
-      (state) =>
-        state === "queued" ||
-        state === "verifying" ||
-        state === "checking" ||
-        state === "merging",
-    )
+    states.some((state) => state === "queued" || state === "verifying" || state === "checking" || state === "merging")
   ) {
     return undefined
   }
@@ -3644,44 +3624,7 @@ async function declarationFor(
 
 /** How the change ended, in the word `checksOf` needs to judge its last check. */
 function endingOf(row: Row): "merged" | "failed" | "stuck" | "open" {
-  return row.state === "merged" || row.state === "failed" || row.state === "stuck"
-    ? row.state
-    : "open"
-}
-
-/**
- * The glyphs the retired watch used for exactly these five conditions, kept
- * because the operator already reads them: passed, failed, stuck, running, and
- * a check the change never reached.
- */
-
-/** One check, and under it the command that produced it and the log it wrote. */
-function checkLines(check: CheckView): readonly string[] {
-  const exit = check.result?.exit === undefined ? "" : ` exit=${check.result.exit}`
-  const ms = check.result?.ms === undefined ? "" : ` ${mediaDuration(check.result.ms)}`
-  // A running journal names the eventual artifact before runCheck writes it.
-  // Reuse the watch's availability reading so show does not advertise it early.
-  const log =
-    (check.state === "running" ? readOutput(check).why : undefined) ??
-    (check.log === undefined ? undefined : `log ${check.log}`)
-  const state =
-    check.state === "not-run"
-      ? " NOT RUN"
-      : check.state === "off"
-        ? " off"
-        : check.state === "running"
-          ? " running"
-          : check.state === "unmeasured"
-            ? " unmeasured — no result recorded"
-            : ""
-  return [
-    `  ${CHECK_GLYPH[check.state]} ${check.name}${state}${exit}${ms}`,
-    // The command above its output, which here is the path the output went to
-    // (S2.21). A check the declaration no longer names has no command to show,
-    // and says that rather than showing an empty one.
-    check.spec === undefined ? "      (the declaration does not name this check)" : `      $ ${check.spec.run}`,
-    ...(log === undefined ? [] : [`      ${log}`]),
-  ]
+  return row.state === "merged" || row.state === "failed" || row.state === "stuck" ? row.state : "open"
 }
 
 function areRefMapsEqual(
@@ -3864,14 +3807,16 @@ export async function readEventListing(
   }))
   const directRows: Row[] = directMerges
     .filter((commit) => options.all === true || listNow.getTime() - commit.at.getTime() <= 7 * 24 * 60 * 60 * 1000)
-    .map((commit): Row => ({
-      at: commit.at,
-      head: commit.commit,
-      branch: commit.target,
-      reason: directMergeLine(commit),
-      state: "direct",
-      subject: commit.subject,
-    }))
+    .map(
+      (commit): Row => ({
+        at: commit.at,
+        head: commit.commit,
+        branch: commit.target,
+        reason: directMergeLine(commit),
+        state: "direct",
+        subject: commit.subject,
+      }),
+    )
     .sort((left, right) => (right.at?.getTime() ?? 0) - (left.at?.getTime() ?? 0))
   const projected = [...selected.table, ...selected.document, ...directRows]
   const titles = await subjects(

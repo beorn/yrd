@@ -17,7 +17,6 @@
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { changeRef, overrideRef, pauseRef } from "../../packages/yrd-queue-core/src/index.ts"
 import { runYrdProcess } from "../../packages/yrd-cli/src/cli.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../../packages/yrd-cli/src/types.ts"
 import { installDeclaredYrdEntry } from "../../packages/yrd-cli/tests/support/declared-yrd-entry.ts"
@@ -289,158 +288,6 @@ export async function checkAttempts(checkLog: string): Promise<number> {
   return (await checkLines(checkLog)).length
 }
 
-/* ---------------------------------------------------------------------------
- * The change and its records.
- *
- * Still black box: git is the store the plan names, so reading a change's ref
- * out of the shared repository with `git for-each-ref` and `git log` is
- * reading the published surface, not an internal. Nothing below opens a
- * journal, a database or a module.
- * ------------------------------------------------------------------------- */
-
-/** Every change ref a repository carries, as `<sha> <name>` lines. */
-export async function changeRefs(repo: string): Promise<readonly string[]> {
-  const listed = await git(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/yrd/main/**")
-  // The queue's own control refs share the prefix, and submit now publishes the pause fence (d7fda91051); neither is
-  // a change.
-  const control = new Set([pauseRef("main"), overrideRef("main")])
-  return listed === "" ? [] : listed.split("\n").filter((line) => !control.has(line.slice(line.indexOf(" ") + 1)))
-}
-
-/** Every ref of yrd's own the repository carries — the breadcrumb a missing
- * change ref needs, because it says what the queue wrote instead. */
-async function yrdRefs(repo: string): Promise<readonly string[]> {
-  const listed = await git(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/yrd/**")
-  return listed === "" ? [] : listed.split("\n")
-}
-
-/** One commit on a change's ref. */
-type ChangeRecord = Readonly<{
-  sha: string
-  parents: readonly string[]
-  /** Line one, prose, never parsed by a reader. */
-  subject: string
-  /** Every trailer, in order, as `Key: value` lines. */
-  trailerLines: readonly string[]
-  /** Values by trailer key, repeats kept. */
-  trailers: ReadonlyMap<string, readonly string[]>
-  /** The `Record:` value, or "" when the commit carries none. */
-  kind: string
-}>
-
-/** A change's ref as a reader sees it. */
-export type ChangeReading = Readonly<{
-  /** `refs/yrd/main/<branch>@<head>`. */
-  ref: string
-  exists: boolean
-  /** The ref's tip sha, or "" when there is no such ref. */
-  tip: string
-  /** The records, oldest first, along the ref's first-parent line, with the
-   * parentless genesis commit at the end of that line left out. */
-  records: readonly ChangeRecord[]
-  /** The `Record:` value of each, oldest first. */
-  kinds: readonly string[]
-  /** The parentless commit the first-parent line ends at, when there is one. */
-  genesis?: ChangeRecord
-  /** Every commit on the first-parent line, newest first — including whatever
-   * is NOT a record, which is the point of the "reads exactly the records" case. */
-  firstParentLine: readonly string[]
-  /** Everything a failing assertion should print. */
-  report: string
-}>
-
-function parseTrailers(lines: readonly string[]): Map<string, readonly string[]> {
-  const trailers = new Map<string, string[]>()
-  for (const line of lines) {
-    const colon = line.indexOf(":")
-    if (colon <= 0) continue
-    const key = line.slice(0, colon).trim()
-    const value = line.slice(colon + 1).trim()
-    const existing = trailers.get(key)
-    if (existing === undefined) trailers.set(key, [value])
-    else existing.push(value)
-  }
-  return trailers
-}
-
-const FIELD = "\u001f"
-const RECORD = "\u001e"
-
-/** The commits on a ref's first-parent line, newest first. */
-async function firstParentCommits(repo: string, ref: string): Promise<readonly ChangeRecord[]> {
-  const raw = await git(
-    repo,
-    "log",
-    "--first-parent",
-    `--format=%H${FIELD}%P${FIELD}%s${FIELD}%(trailers:only,unfold)${RECORD}`,
-    ref,
-  )
-  return raw
-    .split(RECORD)
-    .map((record) => record.replace(/^\n+/, ""))
-    .filter((record) => record.trim() !== "")
-    .map((record) => {
-      const [sha = "", parents = "", subject = "", trailerBlock = ""] = record.split(FIELD)
-      const trailerLines = trailerBlock.split("\n").filter((line) => line.trim() !== "")
-      const trailers = parseTrailers(trailerLines)
-      return {
-        sha,
-        parents: parents === "" ? [] : parents.split(" "),
-        subject,
-        trailerLines,
-        trailers,
-        kind: trailers.get("Record")?.[0] ?? "",
-      }
-    })
-}
-
-/**
- * Read one change's ref out of `repo`. Never throws when the ref is absent —
- * the reading says so, and its report lists every ref the repository does
- * carry, so a red case names what is missing instead of stack-tracing.
- */
-export async function readChange(
-  repo: string,
-  change: Readonly<{ branch: string; headSha: string }>,
-): Promise<ChangeReading> {
-  const ref = changeRef("main", { branch: change.branch, head: change.headSha })
-  const present = await changeRefs(repo)
-  const tipLine = present.find((line) => line.endsWith(` ${ref}`))
-  if (tipLine === undefined) {
-    const yrd = await yrdRefs(repo)
-    const carried = yrd.length === 0 ? "  (none)" : yrd.map((line) => `  ${line}`).join("\n")
-    return {
-      ref,
-      exists: false,
-      tip: "",
-      records: [],
-      kinds: [],
-      firstParentLine: [],
-      report: `no change ref ${ref} in ${repo}\nrefs/yrd/** there:\n${carried}`,
-    }
-  }
-  const tip = tipLine.split(" ")[0] ?? ""
-  const line = await firstParentCommits(repo, ref)
-  const genesis = line.find((commit) => commit.parents.length === 0)
-  const records = [...line].reverse().filter((commit) => commit.kind !== "")
-  const shown = line
-    .map(
-      (commit) =>
-        `  ${commit.sha.slice(0, 8)} [${commit.parents.length}p] ${commit.kind || "(no Record:)"} — ${commit.subject}`,
-    )
-    .join("\n")
-  return {
-    ref,
-    exists: true,
-    tip,
-    records,
-    kinds: records.map((record) => record.kind),
-    genesis,
-    firstParentLine: line.map((commit) => commit.sha),
-    report: `${ref} at ${tip}\nfirst-parent line, newest first:\n${shown}`,
-  }
-}
-
 export type YrdJsonResult = Readonly<{
   exitCode: number
   /** The parsed `--json` answer, or `undefined` when the CLI printed something else. */
@@ -565,10 +412,6 @@ function expectZero(
 // helper above keeps the signature it had.
 // ---------------------------------------------------------------------------
 
-/** The ref a change is, as the queue that writes it names it. Re-exported so no
- * case — and nothing in this fixture — spells the prefix a second time. */
-export { changeRef }
-
 /** Whether a repository carries a ref at exactly this name. */
 export async function refExists(dir: string, ref: string): Promise<boolean> {
   return (await gitTry(dir, "show-ref", "--verify", "--quiet", ref)).exitCode === 0
@@ -669,19 +512,6 @@ export async function runYrdIn(repo: string, cwd: string, ...args: string[]): Pr
 /** The plan's one path in: `yrd queue submit <branch>`. */
 export function queueSubmit(repo: string, branch: string): Promise<QueueRunResult> {
   return runYrd(repo, "queue", "submit", branch, ...notifyArgs(repo))
-}
-
-/**
- * A change's records, newest first, as their commit messages on the change ref.
- * A record carries `Record:`; the genesis commit that ends the first-parent walk
- * carries none and is not one.
- */
-export async function recordMessages(dir: string, ref: string): Promise<readonly string[]> {
-  const log = await git(dir, "log", "--first-parent", "--format=%B%x00", ref)
-  return log
-    .split("\0")
-    .map((message) => message.trim())
-    .filter((message) => /^Record: /mu.test(message))
 }
 
 /** Every record a hook was handed, as one blob; empty when none ran. */

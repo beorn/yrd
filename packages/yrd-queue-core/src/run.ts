@@ -91,9 +91,6 @@ export type QueueRunOptions = Readonly<{
   foreground?: boolean
 }>
 
-/** A completed queue round with a failed change; reported by the long runner. */
-export const QUEUE_RUN_FAILED_EXIT = 1
-
 /** What a round read of its line, for the service's stall judgement (25669). */
 export type RoundLine = Readonly<{
   waiting: number
@@ -180,10 +177,6 @@ function gitInvocationOptions(options: QueueRunOptions, log: QueueRunLog): GitIn
 
 function nowMs(options: QueueRunOptions): number {
   return options.now !== undefined ? options.now() : Date.now()
-}
-
-function isStopWindowClosed(options: QueueRunOptions): options is QueueRunOptions & { stopAtMs: number } {
-  return options.stopAtMs !== undefined && nowMs(options) >= options.stopAtMs
 }
 
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {

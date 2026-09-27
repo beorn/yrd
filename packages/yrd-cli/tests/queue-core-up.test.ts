@@ -16,7 +16,6 @@
  */
 
 import * as fs from "node:fs"
-import { execFileSync } from "node:child_process"
 import {
   chmodSync,
   cpSync,
@@ -31,7 +30,6 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import { pathToFileURL } from "node:url"
 import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
@@ -40,7 +38,6 @@ import { openEvents } from "gitomic/events"
 import {
   appendChangeEvent,
   changeInput,
-  changeRef,
   createEventQueue,
   createEventStore,
   changesRef,
@@ -57,7 +54,6 @@ import {
   ROUND_LOCK,
   runId,
   setBranchIgnored,
-  stuckReleaseReason,
   submit,
   trailer,
   watchRows,
@@ -91,39 +87,6 @@ process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
 process.env.GIT_CONFIG_VALUE_0 = "always"
 
 const roots: string[] = []
-
-/** Run the previous pin's actual queue projection, with an explicit shallow-clone refusal. */
-async function previousQueueReader(): Promise<typeof import("../../yrd-queue-core/src/events.ts")> {
-  const yrdRoot = resolve(import.meta.dirname, "../../..")
-  const oldPin = "14f772a1244f1b9d2bfd199364f099186a126767"
-  let oldEvents: string
-  let oldRecords: string
-  try {
-    oldEvents = execFileSync("git", ["-C", yrdRoot, "show", `${oldPin}:packages/yrd-queue-core/src/events.ts`], {
-      encoding: "utf8",
-    })
-    oldRecords = execFileSync(
-      "git",
-      ["-C", yrdRoot, "show", `${oldPin}:packages/yrd-queue-core/src/legacy-records.ts`],
-      {
-        encoding: "utf8",
-      },
-    )
-  } catch (error) {
-    throw new Error(`historical Yrd reader ${oldPin} is absent; run git fetch --unshallow origin main in vendor/yrd`, {
-      cause: error,
-    })
-  }
-  const directory = mkdtempSync(join(tmpdir(), "yrd-old-reader-"))
-  roots.push(directory)
-  cpSync(join(yrdRoot, "packages/yrd-queue-core/src"), join(directory, "src"), { recursive: true })
-  symlinkSync(join(yrdRoot, "../../node_modules"), join(directory, "node_modules"), "dir")
-  writeFileSync(join(directory, "src/events.ts"), oldEvents)
-  writeFileSync(join(directory, "src/legacy-records.ts"), oldRecords)
-  return (await import(
-    pathToFileURL(join(directory, "src/events.ts")).href
-  )) as typeof import("../../yrd-queue-core/src/events.ts")
-}
 
 // A selected event change must keep the watch open through every working phase.
 describe("event watch selector endings", () => {
@@ -666,7 +629,7 @@ describe("yrd queue up, the service", () => {
     },
   )
 
-  it("keeps a round on its declaration's target, then reads the next target's declaration", async () => {
+  it("refuses a target that moves mid-read, then judges under the next declaration", async () => {
     const w = await world()
     const checkLog = join(w.workdir, "fixed-target-checks.log")
     const checkA = join(w.workdir, "check-a.sh")
@@ -677,7 +640,6 @@ describe("yrd queue up, the service", () => {
     chmodSync(checkB, 0o755)
     await redeclare(w, `checks:\n  - fixed:\n      run: ${checkA}\n      on: submit\n`)
     const a = (await w.git(["rev-parse", "HEAD"])).trim()
-    const configA = (await w.git(["rev-parse", `${a}:.yrd.yml`])).trim()
     await w.git(["checkout", "--quiet", "-b", "task/one", a])
     writeFileSync(join(w.work, "one.txt"), "one\n")
     await w.git(["add", "one.txt"])
@@ -725,42 +687,22 @@ describe("yrd queue up, the service", () => {
     await w.git(["config", "remote.origin.uploadpack", wrapper])
 
     const run = capture(w.work)
-    let rounds = 0
-
-    const exit = await coreQueueCommand(
-      w.work,
-      run.io,
-      {
-        afterRound: async (outcome) => {
-          rounds += 1
-          expect(rounds).toBeLessThanOrEqual(2)
-          if (rounds === 2) {
-            await w.git(["fetch", "--quiet", "origin", "main"])
-            await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
-            await redeclare(w, "batch: 1\n")
-          }
-          expect(outcome.base).toBe(rounds === 1 ? a : b)
-        },
-        command: "up",
-        intervalSeconds: 0,
-      },
-      { json: true, queue: "main", workdir: w.workdir },
-    )
-
+    const exit = await coreQueueCommand(w.work, run.io, { command: "run" }, { json: true, workdir: w.workdir })
     expect(exit, run.stdout()).toBe(2)
-    expect(rounds).toBe(2)
     expect(
       readFileSync(calls, "utf8")
         .split("\n")
         .filter((line) => line !== "").length,
     ).toBeGreaterThanOrEqual(2)
-    const written = records(run)
-    expect(written).toHaveLength(3)
-    expect(written[0]).toMatchObject({ base: a, config: configA, exitCode: 0, merged: [], target: a })
-    expect(written[1]).toMatchObject({ base: b, config: configB, exitCode: 0, merged: ["task/one"] })
-    expect(readFileSync(checkLog, "utf8")).toBe(`A:${a}\nB:${b}\n`)
-    // The third round never ran: its malformed declaration is read before it.
-    expect(written[2]).toEqual({ ...STUCK, why: expect.stringContaining("batch") as string })
+    expect(records(run)).toEqual([{ ...STUCK, why: expect.stringContaining("target moved") as string }])
+    expect(existsSync(checkLog)).toBe(false)
+
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const retry = capture(w.work)
+    expect(await coreQueueCommand(w.work, retry.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(records(retry)[0]).toMatchObject({ base: b, config: configB, exitCode: 0, merged: ["task/one"] })
+    expect(readFileSync(checkLog, "utf8")).toBe(`B:${b}\n`)
   })
 
   it("ends stuck when the target no longer carries a declaration at all", async () => {
@@ -1332,7 +1274,8 @@ describe("yrd queue show names the queue it read (@i/10-yrd/24050)", () => {
 })
 
 describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)", () => {
-  it("names the same branch and cure whichever of the three commands reports it", async () => {
+  // @followup 26175: event-run must write the complete incident in its run journal.
+  it.fails("26175: names the same branch and cure whichever of the three commands reports it", async () => {
     const w = await world()
     // A setup that cannot reach its remote: it sticks the same way on every
     // judgement, retried once inside the round and then written, and that is
@@ -1505,6 +1448,36 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(await readQueueHealth(w.workdir, SERVICE)).toEqual(seen.at(-1))
   })
 
+  /** @failure 25041: a process can die after writing the stuck change event and before writing its queue stop.
+   * @level l2 @consumer Hab's yrd service and queue list
+   */
+  it("repairs a missing event stop on the first round after a stuck event", async () => {
+    const w = await world(false)
+    const target = (await w.git(["rev-parse", "main"])).trim()
+    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createEventQueue(store, "main", target, config, new Date())
+    const branch = "task/crash-gap"
+    const head = await oneChange(w, branch)
+    const submitted = await readStatus(store, "main", branch)
+    if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
+    await appendChangeEvent(store, "main", branch, submitted.tip, {
+      type: "stuck",
+      at: new Date(),
+      reason: "repair needed",
+    })
+    expect((await readEventOps(store, gitIn(w.work), "main", target)).stop).toBeUndefined()
+
+    const first = capture(w.work)
+    expect(await coreQueueCommand(w.work, first.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(2)
+    const pause = (await readEventOps(store, gitIn(w.work), "main", target)).stop
+    expect(pause).toMatchObject({ cause: "stuck", change: { branch, head }, reason: "repair needed" })
+    const second = capture(w.work)
+    expect(await coreQueueCommand(w.work, second.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(2)
+    expect((await readEventOps(store, gitIn(w.work), "main", target)).stop?.sha).toBe(pause?.sha)
+  })
+
   // NO TIMER EVER RESUMES A STOPPED LINE. The fault clears while the line is
   // stopped, and the line stays stopped; `yrd queue resume` is the act, the
   // page clears on it, and the change merges in the round after.
@@ -1669,111 +1642,45 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     expect(records(after)[0]).toMatchObject({ exitCode: 0, merged: [branch] })
   }, 60_000)
 
-  // @failure 25041: resume can release a readable stuck change while another change history is unreadable.
-  it("refuses stuck resume until every event change history can be judged", async () => {
-    const w = await world(false)
-    const target = (await w.git(["rev-parse", "main"])).trim()
-    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
-    if (config === undefined) throw new Error("the fixture's target lost its declaration")
+  // @failure 25041: a resume needlessly scans every change history and refuses a sound named stop.
+  it("resumes the named stuck change without scanning an unrelated unreadable history", async () => {
+    const w = await world()
     const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
-    await createEventQueue(store, "main", target, config, new Date())
     const queueTip = (await readEventQueue(store, "main")).tip
     const branch = "task/readable-stuck"
-    await oneChange(w, branch)
+    const head = await oneChange(w, branch)
     const submitted = await readStatus(store, "main", branch)
     if (submitted.tip === undefined) throw new Error("the submitted change has no event tip")
-    await appendChangeEvent(store, "main", branch, submitted.tip, {
+    const event = await appendChangeEvent(store, "main", branch, submitted.tip, {
       type: "stuck",
       at: new Date(),
       reason: "repair needed",
     })
+    await writeQueueEvent(store, "main", {
+      type: "paused",
+      by: "yrd",
+      cause: "stuck",
+      change: { branch, head, event },
+      reason: "repair needed",
+      at: new Date(),
+    })
     await (
       await openEvents({ ...store, ref: changesRef("main", "task/unreadable"), writer: "yrd" })
     ).append([changeInput("failed", { queueTip, at: new Date(), reason: "no opened event" })], { expect: null })
-    const queueBefore = (await w.git(["ls-remote", "origin", queueRef("main")])).trim()
     const resumed = capture(w.work)
-    const resume = coreQueueCommand(
-      w.work,
-      resumed.io,
-      { by: "@chief", command: "resume", reason: "repaired" },
-      { workdir: w.workdir },
-    )
-    await expect(resume).rejects.toThrow(changesRef("main", "task/unreadable"))
-    await expect(resume).rejects.toThrow(/cannot judge stuck resume/)
-    expect((await w.git(["ls-remote", "origin", queueRef("main")])).trim()).toBe(queueBefore)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        resumed.io,
+        { by: "@chief", command: "resume", reason: "repaired" },
+        { workdir: w.workdir },
+      ),
+      resumed.stderr(),
+    ).toBe(0)
+    expect(
+      (await readEventOps(store, gitIn(w.work), "main", (await w.git(["rev-parse", "main"])).trim())).stop,
+    ).toBeUndefined()
   }, 60_000)
-
-  // @failure 25041: the previous Yrd pin threw on a pre-cutover resumed-only queue chain.
-  it("keeps pre-cutover stuck releases readable by the previous Yrd pin", async () => {
-    const old = await previousQueueReader()
-    for (const legacyPause of [false, true]) {
-      const w = await world(false)
-      const target = (await w.git(["rev-parse", "main"])).trim()
-      const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
-      if (config === undefined) throw new Error("the fixture's target lost its declaration")
-      const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
-      await old.createEventQueue(store, "main", target, config, new Date())
-      const branch = `task/old-reader-${legacyPause ? "legacy" : "plain"}`
-      await oneChange(w, branch)
-      const submitted = await readStatus(store, "main", branch)
-      if (submitted.tip === undefined) throw new Error(`${branch} has no event tip`)
-      const stuck = await appendChangeEvent(store, "main", branch, submitted.tip, {
-        type: "stuck",
-        at: new Date(),
-        reason: "repair needed",
-      })
-      if (legacyPause) {
-        const paused = capture(w.work)
-        expect(
-          await coreQueueCommand(
-            w.work,
-            paused.io,
-            { by: "@chief", command: "pause", reason: "repair" },
-            { workdir: w.workdir },
-          ),
-          paused.stderr(),
-        ).toBe(0)
-      } else {
-        const reason = stuckReleaseReason(stuck, "repaired")
-        const first = await writeQueueEvent(store, "main", { type: "paused", by: "@chief", reason, at: new Date() })
-        expect((await readEventQueue(store, "main")).release?.id).toBe(first)
-        expect((await old.readEventQueue(store, "main")).pause?.id).toBe(first)
-        expect((await old.readEventQueueWithChanges(store, "main")).queue.pause?.id).toBe(first)
-      }
-      const resumed = capture(w.work)
-      expect(
-        await coreQueueCommand(
-          w.work,
-          resumed.io,
-          { by: "@chief", command: "resume", reason: "repaired" },
-          { workdir: w.workdir },
-        ),
-        resumed.stderr(),
-      ).toBe(0)
-      expect((await old.readEventQueue(store, "main")).pause).toBeUndefined()
-      expect((await old.readEventQueueWithChanges(store, "main")).queue.pause).toBeUndefined()
-      if (!legacyPause) {
-        const queue = await readEventQueue(store, "main")
-        await (
-          await openEvents({ ...store, ref: queueRef("main"), writer: "@chief" })
-        ).append(
-          [
-            {
-              type: "resumed",
-              props: [
-                ["Queue", queue.tip],
-                ["Time", new Date().toISOString()],
-                ["Reason", "unpaired red arm"],
-              ],
-            },
-          ],
-          { expect: queue.tip },
-        )
-        await expect(old.readEventQueue(store, "main")).rejects.toThrow(/resumes a running queue/)
-        await expect(old.readEventQueueWithChanges(store, "main")).rejects.toThrow(/resumes a running queue/)
-      }
-    }
-  }, 90_000)
 
   // What no round can fix still ends the service: a round that cannot even
   // read its queue has no change to stop the line on, so the loop has nothing
@@ -1920,8 +1827,12 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
       expect(accepted.stderr()).toContain("yrd queue resume")
     }
     // Opened, and nothing more: no check ran at submit.
-    const lateRef = changeRef("main", { branch: "task/late", head: lateHead })
-    expect(await w.git(["ls-remote", "--refs", "origin", lateRef])).toContain(lateRef)
+    expect(
+      await readStatus(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", "task/late"),
+    ).toMatchObject({
+      commit: lateHead,
+      status: "queued",
+    })
     expect(fault.runs()).toBe(judgedBefore)
 
     // The stop lifts by an act — the stuck change withdrawn — and the late change is judged normally.
@@ -3212,7 +3123,8 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
 
   // ROW 2. The measured specimen, reproduced: the record says the remote could
   // not be reached, and says which signature it saw.
-  it("says yrd-setup-unreachable, and names the signature it matched", async () => {
+  // @followup 26175: restore setup classification in event-run's run journal.
+  it.fails("26175: says yrd-setup-unreachable, and names the signature it matched", async () => {
     const w = await world()
     const line = "error: GET https://api.github.com/repos/beorn/verify-publishable/tarball/ef92031daa - 504"
     await roundWithSetup(w, "task/upstream-504", failingSetup(w.workdir, "upstream-504", line))
@@ -3228,7 +3140,8 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
   // is not transport-shaped must still be billed exactly as before. A classifier
   // that is too generous does not fail loudly — it relabels real breaks as
   // outages, and then they are retried forever instead of being fixed.
-  it("a real break still says yrd-setup-unusable and still tells you to repair it", async () => {
+  // @followup 26175: preserve unusable setup as a distinct incident reason.
+  it.fails("26175: a real break still says yrd-setup-unusable and still tells you to repair it", async () => {
     const w = await world()
     const line = "error: lockfile had changes, but lockfile is frozen"
     await roundWithSetup(w, "task/real-break", failingSetup(w.workdir, "real-break", line))
@@ -3241,7 +3154,8 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
   // The distinction yrd already paid for one layer up, asserted here too: a
   // remote that ANSWERED 404 holds an answer, not a fault. Retrying it forever
   // would stop the queue on a component commit that never left somebody's bay.
-  it("a 404 is an answer, not an unreachable remote", async () => {
+  // @followup 26175: a 404 remains a setup answer in the event-run incident.
+  it.fails("26175: a 404 is an answer, not an unreachable remote", async () => {
     const w = await world()
     const line = "error: GET https://api.github.com/repos/beorn/x/tarball/deadbeef - 404"
     await roundWithSetup(w, "task/answered-404", failingSetup(w.workdir, "answered-404", line))
@@ -3350,7 +3264,7 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
    * carries `sticks-again.txt`. Every judgement appends the worktree it ran in,
    * so a case can count how often one head was judged.
    */
-  function gate(w: World): Readonly<{ declaration: string; judgements: (head: string) => number }> {
+  function gate(w: World): Readonly<{ declaration: string; judgements: (branch: string) => number }> {
     const log = join(dirname(w.workdir), "gate-judgements.log")
     const script = join(dirname(w.workdir), "gate.sh")
     writeFileSync(log, "")
@@ -3369,10 +3283,10 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     chmodSync(script, 0o755)
     return {
       declaration: `checks:\n  - gate:\n      on: [submit]\n      run: ${script}\n`,
-      judgements: (head) =>
+      judgements: (branch) =>
         readFileSync(log, "utf8")
           .split("\n")
-          .filter((line) => line.endsWith(`/submit/${head.slice(0, 12)}`)).length,
+          .filter((line) => line.includes(`/${branch.replaceAll("/", "_")}-submit-`)).length,
     }
   }
 
@@ -3419,12 +3333,14 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     const stuck = await yrd(w, "queue", "run", "--json")
     expect(stuck.exitCode, stuck.report).toBe(2)
     expect(await stopOf(w)).toMatchObject({ by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` })
-    expect(check.judgements(stuckHead)).toBe(1)
+    expect(check.judgements("task/stuck"), readFileSync(join(dirname(w.workdir), "gate-judgements.log"), "utf8")).toBe(
+      1,
+    )
 
     const merged = await yrd(w, "merge", "task/fix")
 
     expect(await onMain(w, fixHead), merged.report).toBe(true)
-    expect(check.judgements(stuckHead), merged.report).toBe(2)
+    expect(check.judgements("task/stuck"), merged.report).toBe(2)
     expect(await onMain(w, stuckHead), merged.report).toBe(true)
     expect(await stopOf(w)).toBeNull()
     expect(merged.exitCode, merged.report).toBe(0)

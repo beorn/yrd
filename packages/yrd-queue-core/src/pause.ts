@@ -16,7 +16,7 @@ export type PauseRecord = Readonly<{
   /** `operator` for every record that names no cause. */
   cause: PauseCause
   /** The change a stuck stop waits on; present exactly when `cause` is `stuck`. */
-  change?: Change
+  change?: Change & Readonly<{ event?: string }>
   /** A stuck stop's cures: its stuck record's own `Next`, carried so the page needs no second read. */
   next?: string
 }>

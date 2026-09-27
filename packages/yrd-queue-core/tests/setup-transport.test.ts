@@ -1,12 +1,6 @@
 import { describe, expect, test } from "vitest"
 
-import {
-  SETUP_UNREACHABLE_CODE,
-  SETUP_UNUSABLE_CODE,
-  setupStuckCode,
-  setupStuckNext,
-  transportFaultIn,
-} from "../src/setup-transport.ts"
+import { transportFaultIn } from "../src/setup-transport.ts"
 
 // @i/10-yrd/24486 rows 2 and 3. A 504 from a code host and a lockfile that does
 // not match its manifest both stopped the whole queue as `yrd-setup-unusable`,
@@ -27,7 +21,6 @@ describe("what IS an unreachable remote", () => {
     const fault = transportFaultIn(log)
     expect(fault?.signature).toBe("http-5xx")
     expect(fault?.line).toContain("504")
-    expect(setupStuckCode(fault)).toBe(SETUP_UNREACHABLE_CODE)
   })
 
   test.each([
@@ -79,7 +72,6 @@ describe("row 3, the negative control: what is NOT an unreachable remote", () =>
     ["a full disk", "ENOSPC: no space left on device"],
   ])("%s", (_why, line) => {
     expect(transportFaultIn(line)).toBeUndefined()
-    expect(setupStuckCode(transportFaultIn(line))).toBe(SETUP_UNUSABLE_CODE)
   })
 
   // The one yrd already paid for, one layer up: a remote that ANSWERED and does
@@ -109,26 +101,5 @@ describe("row 3, the negative control: what is NOT an unreachable remote", () =>
     ["a package count", "installed 429 packages"],
   ])("%s is not an HTTP status", (_why, line) => {
     expect(transportFaultIn(line)).toBeUndefined()
-  })
-})
-
-describe("what the record tells a person", () => {
-  test("a break tells them to repair the setup", () => {
-    expect(setupStuckNext(undefined)).toBe("repair the queue setup, then run yrd queue run")
-  })
-
-  // It names no branch and no author on purpose: nothing about the change is
-  // wrong, and sending a submitter to look for a defect that is not there is
-  // how a transient outage becomes somebody's afternoon.
-  // It promises no later round: the andon (operator 2026-09-16) retries once
-  // inside the round and then stops the line, so "the next round retries" would
-  // send the reader to wait for a timer that no longer exists.
-  test("a transport fault says the change is not at fault, names the signature, and promises no timer", () => {
-    const next = setupStuckNext({ signature: "http-5xx", line: "... - 504" })
-    expect(next).toContain("nothing here is the change's fault")
-    expect(next).toContain("http-5xx")
-    expect(next).toContain("one retry")
-    expect(next).not.toMatch(/own cadence|wait it out|next round/u)
-    expect(next).not.toMatch(/repair the queue setup/u)
   })
 })

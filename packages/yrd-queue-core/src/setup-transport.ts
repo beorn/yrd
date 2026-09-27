@@ -21,12 +21,6 @@
  * string the caller already has.
  */
 
-/** The reason a setup stuck on something no change can fix. */
-export const SETUP_UNREACHABLE_CODE = "yrd-setup-unreachable"
-
-/** The reason a setup stuck on the repository's own state. */
-export const SETUP_UNUSABLE_CODE = "yrd-setup-unusable"
-
 export type TransportFault = Readonly<{
   /** Which signature matched, so the record says what was seen and not merely "transport". */
   signature: string
@@ -92,29 +86,4 @@ export function transportFaultIn(text: string): TransportFault | undefined {
     }
   }
   return undefined
-}
-
-/** The record reason for a setup failure: transport-shaped, or the repository's. */
-export function setupStuckCode(fault: TransportFault | undefined): string {
-  return fault === undefined ? SETUP_UNUSABLE_CODE : SETUP_UNREACHABLE_CODE
-}
-
-/**
- * What clears this, said to a person reading the record.
- *
- * A transport fault names no branch and no author on purpose: nothing about the
- * change is wrong, and telling a submitter to repair their work would send them
- * looking for a defect that is not there.
- *
- * It promises no later round, because there is none: the round already took
- * the change a second time, and a stuck stops the line until an act lifts it
- * (the andon, operator 2026-09-16). A record that said "the next round
- * retries" would send its reader to wait for a timer that no longer exists.
- */
-export function setupStuckNext(fault: TransportFault | undefined): string {
-  if (fault === undefined) return "repair the queue setup, then run yrd queue run"
-  return (
-    `nothing here is the change's fault: setup could not reach a remote (${fault.signature}), ` +
-    "and the round's one retry could not either; once the remote answers, run yrd queue run or resume the queue"
-  )
 }

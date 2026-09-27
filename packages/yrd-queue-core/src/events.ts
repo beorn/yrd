@@ -5,7 +5,7 @@ import { readEventChain, readEventChains } from "./event-read.ts"
 import { EVENT_READ_LIMIT } from "./event-read.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
-import { overrideRef, pauseRef, queueRefPrefix } from "./refs.ts"
+import { overrideRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
 import { readM2Pause, type PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
 import { gitIn, refAt } from "./git.ts"
@@ -253,7 +253,7 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
 /** Construct Yrd's required causal trailers; a recorded commit is always kept. */
 export function changeInput(type: ChangeEventType, details: ChangeInputDetails): EventInput {
   assertChangeEventType(type)
-  if (type === "adopted") throw new TypeError("adopted needs adoptedInput with source provenance")
+  if (type === "adopted") throw new TypeError("adopted is historical; the migration writer is retired")
   if (!COMMIT_OID.test(details.queueTip)) throw new TypeError(`Queue: must name a commit oid, got ${details.queueTip}`)
   if (Number.isNaN(details.at.getTime())) throw new TypeError("Time: needs a valid instant")
   if ((type === "opened" || type === "verifying" || type === "merging") && details.commit === undefined) {
@@ -292,122 +292,6 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
     ...(details.commit === undefined ? {} : { keeps: [details.commit] }),
     ...(details.title === undefined ? {} : { title: details.title }),
     ...(details.content === undefined ? {} : { content: details.content }),
-  }
-}
-
-export type AdoptedInputDetails = Readonly<{
-  queueTip: string
-  /** Publication time. Historical times are separate Adopted-* trailers. */
-  at: Date
-  head: string
-  opened: Date
-  status: ChangeEnding
-  ended: Date
-  reason?: CancellationReason | string
-  submitter: string
-  issue?: string
-  merge?: string
-  base?: string
-  config?: string
-  /** Exact Check: values copied from old records, never synthesized. */
-  checks?: readonly string[]
-  sources: readonly Readonly<{ ref: string; oid: string }>[]
-  verifying?: Date
-  checking?: Date
-  merging?: Date
-  /** Exact branch observation made by the one-shot adopter before publication. */
-  branchFact?: string
-}>
-
-/** Keep an old ending as a historical row while only advancing its branch chain tip. */
-export function adoptedInput(details: AdoptedInputDetails): EventInput {
-  const oid = (name: string, value: string | undefined, required = false): void => {
-    if (required && value === undefined) throw new TypeError(`adopted needs ${name}:`)
-    if (value !== undefined && !COMMIT_OID.test(value)) throw new TypeError(`invalid ${name}: ${value}`)
-  }
-  const instant = (name: string, value: Date): string => {
-    if (!(value instanceof Date) || Number.isNaN(value.getTime())) throw new TypeError(`invalid ${name}:`)
-    return value.toISOString()
-  }
-  oid("Queue", details.queueTip, true)
-  oid("Adopted-Head", details.head, true)
-  oid("Adopted-Merge", details.merge)
-  oid("Adopted-Base", details.base)
-  oid("Adopted-Config", details.config)
-  if (details.status !== "merged" && details.status !== "failed" && details.status !== "cancelled") {
-    throw new TypeError(`invalid Adopted-Status: ${String(details.status)}`)
-  }
-  if (details.status === "merged" && details.merge === undefined) {
-    throw new TypeError("merged adoption needs Adopted-Merge:")
-  }
-  if (details.status !== "merged" && details.merge !== undefined) {
-    throw new TypeError("only merged adoption carries Adopted-Merge:")
-  }
-  if (
-    details.status === "cancelled" &&
-    !["resubmitted", "dropped", "deleted", "unrecorded", "withdrawn"].includes(details.reason ?? "")
-  ) {
-    throw new TypeError("cancelled adoption needs a CancellationReason")
-  }
-  if (details.submitter.trim() === "") throw new TypeError("adopted needs Adopted-Submitter:")
-  if (details.issue !== undefined && details.issue.trim() === "") throw new TypeError("Adopted-Issue: cannot be empty")
-  if (details.reason !== undefined && details.reason.trim() === "") {
-    throw new TypeError("Adopted-Reason: cannot be empty")
-  }
-  if (
-    details.branchFact !== undefined &&
-    !/^refs\/heads\/.+ (?:absent at .+, not leasable|at [0-9a-f]{40}, leased)$/.test(details.branchFact)
-  ) {
-    throw new TypeError(`invalid Branch: ${details.branchFact}`)
-  }
-  if (details.sources.length === 0) throw new TypeError("adopted needs Migrated-From:")
-  for (const check of details.checks ?? []) {
-    const read = readCheckTrailer(check)
-    if (read.name === "" || read.exit === undefined || read.ms === undefined || read.log === undefined) {
-      throw new TypeError(`adopted has malformed Check: ${check}`)
-    }
-  }
-  const sources = details.sources.map(({ ref, oid: source }) => {
-    if (!ref.startsWith("refs/yrd/") || !ref.endsWith(`@${details.head}`) || !COMMIT_OID.test(source)) {
-      throw new TypeError(`invalid Migrated-From: ${ref}@${source}`)
-    }
-    return `${ref}@${source}`
-  })
-  const props: [string, string][] = [
-    ["Queue", details.queueTip],
-    ["Time", instant("Time", details.at)],
-    ["By", YRD_ADOPTER_WRITER],
-    ["Adopted-Head", details.head],
-    ["Adopted-Opened", instant("Adopted-Opened", details.opened)],
-    ["Adopted-Status", details.status],
-    ["Adopted-Ended", instant("Adopted-Ended", details.ended)],
-    ["Adopted-Submitter", details.submitter],
-  ]
-  if (details.reason !== undefined) props.push(["Adopted-Reason", details.reason])
-  if (details.issue !== undefined) props.push(["Adopted-Issue", details.issue])
-  if (details.merge !== undefined) props.push(["Adopted-Merge", details.merge])
-  if (details.base !== undefined) props.push(["Adopted-Base", details.base])
-  if (details.config !== undefined) props.push(["Adopted-Config", details.config])
-  if (details.branchFact !== undefined) props.push(["Branch", details.branchFact])
-  for (const [key, value] of [
-    ["Adopted-Verifying", details.verifying],
-    ["Adopted-Checking", details.checking],
-    ["Adopted-Merging", details.merging],
-  ] as const) {
-    if (value !== undefined) props.push([key, instant(key, value)])
-  }
-  for (const check of details.checks ?? []) props.push(["Check", check])
-  for (const source of sources) props.push(["Migrated-From", source])
-  return {
-    type: "adopted",
-    props,
-    keeps: [
-      ...new Set([
-        details.head,
-        ...sources.map((source) => source.slice(source.lastIndexOf("@") + 1)),
-        ...(details.merge === undefined ? [] : [details.merge]),
-      ]),
-    ],
   }
 }
 
@@ -925,20 +809,6 @@ const queueLocations = new WeakMap<
   Readonly<{ repo: string; remote: string; queue: string; backend?: GitomicBackend }>
 >()
 
-/** The queue stop in the existing command response shape. */
-export function eventPause(queue: EventQueueProjection): PauseRecord | undefined {
-  if (queue.opsCutover !== undefined) return queue.ops?.pause
-  if (queue.pause === undefined) return undefined
-  return {
-    kind: "paused",
-    sha: queue.pause.id,
-    at: queue.pause.at,
-    reason: queue.pause.reason,
-    by: queue.pause.by,
-    cause: queue.pause.cause,
-  }
-}
-
 /** The first event declares a queue and keeps the commit carrying .yrd.yml. */
 export async function createEventQueue(
   store: QueueLocation,
@@ -1090,11 +960,17 @@ async function eventLineStop(
   if (pause.cause === "operator" || pause.cause === "maintenance" || pause.change === undefined) return pause
   const ref = changesRef(queue, pause.change.branch)
   const events = await readEventChain(await openEvents({ ...store, ref }))
-  if (events.length === 0) return pause
+  if (events.length === 0) throw new Error(`${ref}: stuck queue pause ${pause.sha} has no change events`)
   const state = project(events, ref, store.repo)
   if (state.commit !== pause.change.head || !isOpen(state.status)) return undefined
-  const stuckAt = events.findLastIndex((event) => event.type === "stuck")
+  const stuckAt =
+    pause.change.event === undefined
+      ? events.findLastIndex((event) => event.type === "stuck")
+      : events.findIndex((event) => event.id === pause.change?.event)
   if (stuckAt < 0) throw new Error(`${ref}: stuck queue pause ${pause.sha} has no stuck change event`)
+  if (events[stuckAt]?.type !== "stuck") {
+    throw new Error(`${ref}: stuck queue pause ${pause.sha} names a non-stuck event ${pause.change.event}`)
+  }
   return events.slice(stuckAt + 1).some((event) => CHANGE_ENDINGS.some((ending) => ending === event.type))
     ? undefined
     : pause
@@ -1121,17 +997,29 @@ export async function queueResumedAfter(
 }
 
 export type WriteQueueEvent =
-  | Readonly<{ type: "paused" | "resumed"; reason: string; by: string; at: Date; cause?: "operator" | "maintenance" }>
+  | Readonly<{
+      type: "paused"
+      reason: string
+      by: string
+      at: Date
+      cause?: "operator" | "maintenance"
+      change?: never
+      next?: never
+    }>
+  | Readonly<{
+      type: "paused"
+      reason: string
+      by: string
+      at: Date
+      cause: "stuck"
+      change: Change & Readonly<{ event: string }>
+      next?: string
+    }>
+  | Readonly<{ type: "resumed"; reason: string; by: string; at: Date }>
   | Readonly<{ type: "observed"; commit: string; branch?: string; by: string; at: Date }>
   | Readonly<{ type: "notified"; notice: NoticeWrite; by: string; at: Date }>
 
 const STUCK_RELEASE_PREFIX = "yrd-stuck-release:"
-
-export function stuckReleaseReason(stuckEvent: string, reason: string): string {
-  if (!COMMIT_OID.test(stuckEvent)) throw new TypeError(`stuck release needs an event id, got ${stuckEvent}`)
-  if (reason.trim() === "") throw new TypeError("stuck release needs Reason:")
-  return `${STUCK_RELEASE_PREFIX}${stuckEvent} ${reason}`
-}
 
 function isStuckReleaseReason(reason: string): boolean {
   return (
@@ -1152,7 +1040,7 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   const result = await chain.transact(async (events) => {
     const current = projectEventQueue(events, ref, store.repo)
     const releaseWrite = (write.type === "paused" || write.type === "resumed") && isStuckReleaseReason(write.reason)
-    if (write.type === "paused" && current.opsCutover === undefined && !releaseWrite) {
+    if (write.type === "paused" && current.opsCutover === undefined && (write.cause === "stuck" || !releaseWrite)) {
       throw new Error(`${ref}: paused needs ops-cutover; legacy pause Record is still authoritative`)
     }
     if (write.type === "resumed" && current.opsCutover === undefined && !releaseWrite && current.pause === undefined) {
@@ -1200,6 +1088,17 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
         if (current.ops === undefined) throw new Error(`${ref}: ops-cutover has no effective state`)
         const standing = await eventLineStop(store, queue, current.ops.pause)
         if (write.type === "paused" && standing !== undefined) {
+          if (
+            write.cause === "stuck" &&
+            standing.cause === "stuck" &&
+            standing.change?.branch === write.change.branch &&
+            standing.change.head === write.change.head &&
+            standing.change.event === write.change.event &&
+            standing.reason === write.reason
+          ) {
+            existing = standing.sha
+            return []
+          }
           throw new Error(`${ref}: queue is already paused at ${standing.sha}`)
         }
         if (write.type === "resumed" && standing === undefined) {
@@ -1218,6 +1117,9 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
                   reason: write.reason,
                   by: write.by,
                   cause: write.cause ?? "operator",
+                  ...(write.cause !== "stuck"
+                    ? {}
+                    : { change: write.change, ...(write.next === undefined ? {} : { next: write.next }) }),
                 },
                 overrides: current.ops.overrides,
               }
@@ -1455,7 +1357,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
           if (
             next.pause?.kind !== "paused" ||
             next.pause.sha !== event.id ||
-            (next.pause.cause !== "operator" && next.pause.cause !== "maintenance") ||
+            (next.pause.cause !== "operator" && next.pause.cause !== "maintenance" && next.pause.cause !== "stuck") ||
             next.pause.reason !== reason ||
             next.pause.by !== event.writer ||
             next.pause.at.toISOString() !== time

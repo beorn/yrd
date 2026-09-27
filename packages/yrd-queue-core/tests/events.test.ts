@@ -14,12 +14,11 @@ import { readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
 import { pauseRef } from "../src/refs.ts"
 import { encodeOps, type OpsState } from "../src/ops-state.ts"
-import { queueResumedAfter, stuckReleaseReason } from "../src/index.ts"
+import { queueResumedAfter } from "../src/index.ts"
 import {
   CHANGE_EVENT_TYPES,
   QUEUE_RUN_WRITER,
   adoptedChange,
-  adoptedInput,
   appendChangeEvent,
   changeInput,
   changesRef,
@@ -27,7 +26,6 @@ import {
   enumerateChangeSegments,
   expireQueueOverrides,
   drop,
-  eventPause,
   evolve,
   initial,
   listChangeHistories,
@@ -36,6 +34,7 @@ import {
   queueFormat,
   queueRef,
   readChangeEvents,
+  readEventOps,
   readEventQueue,
   readEventQueueWithChanges,
   readStatus,
@@ -1048,7 +1047,7 @@ describe("the queue-format boundary", () => {
     )
     if (opened.head === null) throw new Error("fixture opened event has no tip")
     beforeNextPublish(async () => {
-      const reason = stuckReleaseReason(A, "raced repair")
+      const reason = `yrd-stuck-release:${A} raced repair`
       await writeQueueEvent(location, "lab", { type: "paused", by: "operator", reason, at: new Date() })
       await writeQueueEvent(location, "lab", { type: "resumed", by: "operator", reason, at: new Date() })
     })
@@ -1085,7 +1084,7 @@ describe("the queue-format boundary", () => {
         at: new Date("2026-09-22T14:00:15.000Z"),
       }),
     ).rejects.toThrow(/needs a preceding pause/)
-    const releaseReason = stuckReleaseReason(A, "repaired")
+    const releaseReason = `yrd-stuck-release:${A} repaired`
     const releasePause = await writeQueueEvent(location, "lab", {
       type: "paused",
       reason: releaseReason,
@@ -1094,7 +1093,7 @@ describe("the queue-format boundary", () => {
     })
     const halfRelease = await readEventQueue(location, "lab")
     expect(halfRelease.release).toMatchObject({ id: releasePause, reason: releaseReason })
-    expect(eventPause(halfRelease)).toBeUndefined()
+    expect(halfRelease.pause).toBeUndefined()
     const stuckResume = await writeQueueEvent(location, "lab", {
       type: "resumed",
       reason: releaseReason,
@@ -1104,7 +1103,7 @@ describe("the queue-format boundary", () => {
     const beforeCutover = await readEventQueue(location, "lab")
     expect(beforeCutover.tip).toBe(stuckResume)
     expect(beforeCutover.release).toBeUndefined()
-    expect(eventPause(beforeCutover)).toBeUndefined()
+    expect(beforeCutover.pause).toBeUndefined()
     await seedOpsCutover(location, "lab")
     await writeQueueEvent(location, "lab", {
       type: "paused",
@@ -1112,15 +1111,15 @@ describe("the queue-format boundary", () => {
       by: "operator",
       at: new Date("2026-09-22T14:01:00.000Z"),
     })
-    expect(eventPause(await readEventQueue(location, "lab"))?.reason).toBe("repair")
-    expect(eventPause(await readEventQueue(location, "lab"))?.by).toBe("operator")
+    expect((await readEventQueue(location, "lab")).ops?.pause?.reason).toBe("repair")
+    expect((await readEventQueue(location, "lab")).ops?.pause?.by).toBe("operator")
     await writeQueueEvent(location, "lab", {
       type: "resumed",
       reason: "repaired",
       by: "operator",
       at: new Date("2026-09-22T14:02:00.000Z"),
     })
-    expect(eventPause(await readEventQueue(location, "lab"))).toBeUndefined()
+    expect((await readEventQueue(location, "lab")).ops?.pause).toBeUndefined()
     await expect(
       writeQueueEvent(location, "lab", {
         type: "resumed",
@@ -1129,6 +1128,108 @@ describe("the queue-format boundary", () => {
         at: new Date("2026-09-22T14:03:00.000Z"),
       }),
     ).rejects.toThrow(/queue is not paused/)
+  })
+
+  /** @failure A stuck pause loses its named change in the Ops snapshot, so every reader sees a running line.
+   * @level l1 @consumer queue list, submit, health, and resume
+   */
+  it("round-trips a stuck pause with its change through the event Ops snapshot", async () => {
+    const { store, location } = remoteMemStore("yrd-event-stuck-ops")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const queueTip = await seedEventQueue(location, "lab", head, new Date("2026-09-22T14:00:00.000Z"))
+    await seedOpsCutover(location, "lab")
+    const branch = "task/stuck"
+    const opened = await (
+      await openEvents({ ...store, ref: changesRef("lab", branch) })
+    ).append([changeInput("opened", { queueTip, at: new Date(), commit: head, by: "@dev/2" })], { expect: null })
+    if (opened.head === null) throw new Error("fixture opened event has no tip")
+    const event = await appendChangeEvent(location, "lab", branch, opened.head, {
+      type: "stuck",
+      at: new Date(),
+      reason: "setup could not reach its remote",
+    })
+    const change = { branch, head, event }
+    const paused = await writeQueueEvent(location, "lab", {
+      type: "paused",
+      by: "yrd",
+      cause: "stuck",
+      change,
+      reason: "setup could not reach its remote",
+      at: new Date("2026-09-22T14:01:00.000Z"),
+    })
+    expect((await readEventQueue(location, "lab")).ops?.pause).toMatchObject({
+      sha: paused,
+      by: "yrd",
+      cause: "stuck",
+      change,
+    })
+    await writeQueueEvent(location, "lab", {
+      type: "resumed",
+      by: "@chief",
+      reason: "remote repaired",
+      at: new Date("2026-09-22T14:02:00.000Z"),
+    })
+    expect((await readEventQueue(location, "lab")).ops?.pause).toBeUndefined()
+  })
+
+  /** @failure A pre-anchor Ops snapshot stored change as a string; retiring that reader strands a paused queue.
+   * @level l1 @consumer queue resume during the strict-reader rollout
+   */
+  it("reads a legacy stuck pause without an event anchor and resumes it", async () => {
+    const { store, location } = remoteMemStore("yrd-legacy-stuck-ops")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const queueTip = await seedEventQueue(location, "lab", head, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = "task/legacy-stuck"
+    const opened = await (
+      await openEvents({ ...store, ref: changesRef("lab", branch) })
+    ).append([changeInput("opened", { queueTip, at: new Date(), commit: head, by: "@dev/2" })], { expect: null })
+    if (opened.head === null) throw new Error("fixture opened event has no tip")
+    await appendChangeEvent(location, "lab", branch, opened.head, {
+      type: "stuck",
+      at: new Date(),
+      reason: "repair needed",
+    })
+    const cutover = await (
+      await openEvents({ ...store, ref: queueRef("lab"), writer: "@chief" })
+    ).append(
+      [
+        {
+          type: "ops-cutover",
+          props: [
+            ["Queue", queueTip],
+            ["Time", "2026-09-22T14:00:30.000Z"],
+            [
+              "Ops",
+              JSON.stringify({
+                version: 1,
+                pause: {
+                  kind: "paused",
+                  sha: "self",
+                  at: "2026-09-22T14:00:20.000Z",
+                  reason: "repair needed",
+                  by: "yrd",
+                  cause: "stuck",
+                  change: `${branch}@${head}`,
+                },
+                overrides: [],
+              }),
+            ],
+          ],
+        },
+      ],
+      { expect: queueTip },
+    )
+    const stop = (await readEventOps(location, gitIn(store.repo), "lab", head)).stop
+    expect(stop).toMatchObject({ sha: cutover.events[0]?.id, change: { branch, head } })
+    await writeQueueEvent(location, "lab", {
+      type: "resumed",
+      by: "@chief",
+      reason: "repaired",
+      at: new Date("2026-09-22T14:01:00.000Z"),
+    })
+    expect((await readEventOps(location, gitIn(store.repo), "lab", head)).stop).toBeUndefined()
   })
 
   // @failure 25041: a caller could mistake any earlier resume for a release of the latest stuck change.
@@ -1142,7 +1243,7 @@ describe("the queue-format boundary", () => {
       await openEvents({ ...store, ref: changesRef("lab", branch) })
     ).append([changeInput("opened", { queueTip, at: new Date(), commit, by: "@dev/2" })], { expect: null })
     if (opened.head === null) throw new Error("fixture opened event has no tip")
-    const earlier = stuckReleaseReason(A, "earlier repair")
+    const earlier = `yrd-stuck-release:${A} earlier repair`
     await writeQueueEvent(location, "lab", { type: "paused", by: "@chief", reason: earlier, at: new Date() })
     await writeQueueEvent(location, "lab", { type: "resumed", by: "@chief", reason: earlier, at: new Date() })
     const stuck = await appendChangeEvent(location, "lab", branch, opened.head, {
@@ -1152,7 +1253,7 @@ describe("the queue-format boundary", () => {
     })
     const history = (await readEventQueueWithChanges(location, "lab")).histories.get(branch)
     expect(await queueResumedAfter(location, "lab", branch, history)).toBe(false)
-    const reason = stuckReleaseReason(stuck, "repaired")
+    const reason = `yrd-stuck-release:${stuck} repaired`
     await writeQueueEvent(location, "lab", { type: "paused", by: "@chief", reason, at: new Date() })
     expect(await queueResumedAfter(location, "lab", branch, history)).toBe(false)
     await writeQueueEvent(location, "lab", { type: "resumed", by: "@chief", reason, at: new Date() })
@@ -1167,7 +1268,7 @@ describe("the queue-format boundary", () => {
     await writeQueueEvent(location, "lab", {
       type: "paused",
       by: "@chief",
-      reason: stuckReleaseReason(A, "repair"),
+      reason: `yrd-stuck-release:${A} repair`,
       at: new Date(),
     })
     await seedOpsCutover(location, "lab")
@@ -1210,7 +1311,7 @@ describe("the queue-format boundary", () => {
       by: "operator",
       at: new Date("2026-09-22T14:01:00.000Z"),
     })
-    expect(eventPause(await readEventQueue(location, "lab"))).toBeUndefined()
+    expect((await readEventQueue(location, "lab")).ops?.pause).toBeUndefined()
   })
 
   /** @failure The created event loses the maintenance cause when legacy pause authority is deleted.
@@ -1242,7 +1343,7 @@ describe("the queue-format boundary", () => {
       )
       if (accepted) {
         await (await staging).publish()
-        expect(eventPause(await readEventQueue(location, "lab"))).toMatchObject({
+        expect((await readEventQueue(location, "lab")).pause).toMatchObject({
           cause: "maintenance",
           by: "@chief",
           reason: "25041 lab",
@@ -1291,7 +1392,7 @@ describe("the queue-format boundary", () => {
     ).rejects.toBeInstanceOf(Conflict)
     expect(await (await openEvents({ ...store, ref: changeRef })).head()).toBeNull()
     expect((await listRefs("refs/heads/task/fenced", store)).size).toBe(0)
-    expect(eventPause(await readEventQueue(location, "lab"))).toMatchObject({ cause: "maintenance", by: "@chief" })
+    expect((await readEventQueue(location, "lab")).ops?.pause).toMatchObject({ cause: "maintenance", by: "@chief" })
   })
 
   it("keeps the complete override table on each ops event and refuses a missing snapshot", async () => {
@@ -1807,62 +1908,8 @@ describe("the queue-format boundary", () => {
       expect.arrayContaining([expect.objectContaining({ head: oldHead, state: "cancelled" })]),
     )
     expect(() => changeInput("adopted", { queueTip: A, at: new Date("2026-09-25T02:00:00.000Z") })).toThrow(
-      /adoptedInput/,
+      /migration writer is retired/,
     )
-  })
-
-  // @failure 25647: an adoption could lose source commits or invent decision evidence when written.
-  it("constructs a kept adopted ending with one readable evidence grammar", () => {
-    const source = { ref: `refs/yrd/main/task/24526@${B}`, oid: "d".repeat(40) }
-    const details = {
-      queueTip: A,
-      at: new Date("2026-09-25T02:00:00.000Z"),
-      head: B,
-      opened: new Date("2026-09-24T12:00:00.000Z"),
-      status: "merged" as const,
-      ended: new Date("2026-09-24T12:30:00.000Z"),
-      submitter: "@dev/12",
-      issue: "24526",
-      merge: "e".repeat(40),
-      base: "f".repeat(40),
-      config: "1".repeat(40),
-      checks: ["test exit=0 ms=42 log=/tmp/real-old-log"],
-      sources: [source],
-      verifying: new Date("2026-09-24T12:10:00.000Z"),
-    }
-    const input = adoptedInput(details)
-    expect(input.keeps).toEqual([B, source.oid, details.merge])
-    expect(input.props).toEqual(
-      expect.arrayContaining([
-        ["By", "yrd-adopter"],
-        ["Time", details.at.toISOString()],
-        ["Adopted-Opened", details.opened.toISOString()],
-        ["Adopted-Ended", details.ended.toISOString()],
-        ["Adopted-Base", details.base],
-        ["Adopted-Config", details.config],
-        ["Check", details.checks[0]],
-        ["Migrated-From", `${source.ref}@${source.oid}`],
-      ]),
-    )
-    const reading = adoptedChange(event("adopted", "2".repeat(40), input.props, [...(input.keeps ?? [])]))
-    expect(reading).toMatchObject({
-      head: B,
-      sources: [source],
-      state: {
-        status: "merged",
-        adoptedMerge: details.merge,
-        adoptedBase: details.base,
-        adoptedConfig: details.config,
-        adoptedChecks: details.checks,
-        adoptedPhases: { verifying: details.verifying },
-      },
-    })
-    expect(() => adoptedInput({ ...details, status: "queued" as never })).toThrow(/Adopted-Status/)
-    expect(() => adoptedInput({ ...details, ended: undefined as never })).toThrow(/Adopted-Ended/)
-    expect(() => adoptedInput({ ...details, sources: [] })).toThrow(/Migrated-From/)
-    expect(() =>
-      adoptedInput({ ...details, sources: [{ ref: `refs/yrd/main/task/24526@${A}`, oid: source.oid }] }),
-    ).toThrow(/Migrated-From/)
   })
 
   // @failure 25647: old Opened: values could reorder event-chain history during adoption.

@@ -71,7 +71,7 @@ function endingTime(event: Event, context: string): string {
 }
 import { repairMissingBranchHeads } from "./remote.ts"
 import { isActive } from "./override.ts"
-import { QueuePaused } from "./pause.ts"
+import { QueuePaused, stuckCures } from "./pause.ts"
 
 const DEFAULT_QUEUE_RUN_RETRY_BUDGET_MS = 5_000
 // If all journals are live service rounds at its 120s interval, 128 cover
@@ -856,9 +856,50 @@ export async function eventQueueRun(
     ...(roundLine.lastJudgedAt === undefined ? {} : { lastJudgedAt: roundLine.lastJudgedAt }),
   })
   read.line = roundLine
+  const writeStuckStop = async (branch: string, head: string, event: string, reason: string): Promise<void> => {
+    const current = await readEventOps(store, git, queue, target)
+    if (
+      current.stop?.cause === "stuck" &&
+      current.stop.change?.branch === branch &&
+      current.stop.change.head === head
+    ) {
+      if (current.stop.change.event === undefined || current.stop.change.event === event) return
+    }
+    if (current.stop !== undefined) {
+      log.write({
+        kind: "observation",
+        subject: "stuck-stop-held-by-another-pause",
+        branch,
+        head,
+        standing: current.stop.sha,
+      })
+      return
+    }
+    await writeQueueEvent(store, queue, {
+      type: "paused",
+      at: new Date(),
+      by: "yrd",
+      cause: "stuck",
+      change: { branch, head, event },
+      reason,
+      next: stuckCures(branch),
+    })
+  }
   const standing = remaining.find((change) => change.status === "stuck")
   if (standing !== undefined) {
-    if (!(await queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)))) {
+    const retryNamedStuck =
+      options.foreground === true && options.only?.branch === standing.branch && options.only.head === standing.commit
+    if (!retryNamedStuck && !(await queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)))) {
+      const stuckEvent = histories.get(standing.branch)?.events.findLast((event) => event.type === "stuck")
+      if (stuckEvent === undefined) {
+        throw new Error(`${changesRef(queue, standing.branch)}: standing stuck has no event`)
+      }
+      await writeStuckStop(
+        standing.branch,
+        standing.commit,
+        stuckEvent.id,
+        standing.reason ?? "queue could not judge this change",
+      )
       log.write({
         kind: "change",
         branch: standing.branch,
@@ -930,6 +971,7 @@ export async function eventQueueRun(
         at: new Date(),
         reason: oneLine,
       })
+      await writeStuckStop(branch, head, ended, oneLine)
       await tell(branch, "stuck", ended)
       log.write({ kind: "change", branch, head, decision: "stuck", reason: oneLine, saw: child.evidence })
       return result(2, observedMerged, failed, [branch])
@@ -1148,6 +1190,7 @@ export async function eventQueueRun(
               at: new Date(),
               reason: stuckReason,
             })
+            await writeStuckStop(branch, head, ended, stuckReason)
             await tell(branch, "stuck", ended)
             log.write({ kind: "change", branch, head, decision: "stuck", reason: stuckReason })
             return result(2, observedMerged, failed, [branch])
@@ -1583,6 +1626,7 @@ export async function eventQueueRun(
           reason: setupDecision.reason,
           ...(attemptedRetry && setupDecision.kind === "stuck" ? { retry: { retried: 1 as const } } : {}),
         })
+        if (setupDecision.kind === "stuck") await writeStuckStop(branch, head, ended, setupDecision.reason)
         await tell(branch, setupDecision.kind, ended)
         log.write({ kind: "change", branch, head, decision: setupDecision.kind, reason: setupDecision.reason })
         if (setupDecision.kind === "stuck") return result(2, observedMerged, failed, [branch])
@@ -1614,13 +1658,15 @@ export async function eventQueueRun(
         continue
       }
       if (stoppedCheck?.result === "stuck") {
+        const reason = `${stoppedCheck.name} could not judge (${stoppedCheck.why ?? `exit ${String(stoppedCheck.exit)}`}; log ${stoppedCheck.log})`
         const ended = await appendOwnedChange(store, queue, branch, tip, {
           type: "stuck",
           at: new Date(),
           ...evidence,
           ...(attemptedRetry ? { retry: { retried: 1 as const } } : {}),
-          reason: `${stoppedCheck.name} could not judge (${stoppedCheck.why ?? `exit ${String(stoppedCheck.exit)}`}; log ${stoppedCheck.log})`,
+          reason,
         })
+        await writeStuckStop(branch, head, ended, reason)
         await tell(branch, "stuck", ended)
         log.write({ kind: "change", branch, head, decision: "stuck", reason: stoppedCheck.name })
         return result(2, observedMerged, failed, [branch])

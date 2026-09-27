@@ -13,7 +13,6 @@ import {
   CHANGE_STATUSES,
   assertPlainEventQueueConfig,
   changeInput,
-  changeRef,
   changesRef,
   createEventQueue,
   createEventStore,
@@ -595,7 +594,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const config = await readConfig(git, head, { branch: "main", remote: "origin" })
     if (config === undefined) throw new Error("fixture target lost its declaration")
     const branch = "task/migrated-without-checks"
-    const source = `${changeRef("main", { branch, head })}@${head}`
+    const source = `refs/yrd/main/${branch}@${head}@${head}`
     const opened = changeInput("opened", {
       queueTip,
       at: new Date("2026-09-22T14:01:00.000Z"),

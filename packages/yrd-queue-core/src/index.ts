@@ -22,7 +22,6 @@
 
 export {
   changeName,
-  changeRef,
   encodeQueueComponent,
   parseChangeName,
   parseChangeRef,
@@ -37,7 +36,6 @@ export {
   CHANGE_STATUSES,
   EVENT_TRAILERS,
   adoptedChange,
-  adoptedInput,
   appendChangeEvent,
   changeInput,
   changesRef,
@@ -45,7 +43,6 @@ export {
   decide,
   expireQueueOverrides,
   drop,
-  eventPause,
   evolve,
   enumerateChangeSegments,
   initial,
@@ -61,13 +58,11 @@ export {
   readStatus,
   resetQueueFormatCache,
   setBranchIgnored,
-  stuckReleaseReason,
   writeQueueEvent,
   writeQueueOverride,
 } from "./events.ts"
 export type { Event } from "./git.ts"
 export type {
-  AdoptedInputDetails,
   CancellationReason,
   ChangeEventType,
   ChangeStatus,
@@ -128,7 +123,7 @@ export {
   ReferenceUnpopulated,
 } from "./reference.ts"
 export type { PopulateReference, ReferenceStore } from "./reference.ts"
-export { queueRun, QueueAuthorityUnreadable, QUEUE_RUN_FAILED_EXIT } from "./run.ts"
+export { queueRun, QueueAuthorityUnreadable } from "./run.ts"
 export { QueueRunEventRetryExhausted } from "./event-run.ts"
 export type { QueueRunOptions, QueueRunOutcome, RoundLine } from "./run.ts"
 export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from "./config.ts"
@@ -137,7 +132,7 @@ export type { Ending, Notifier, QueueConfig, QueueHealthConfig, Target } from ".
 export { clocks, endingInstants, subjects, watchRows, watchRowKey } from "./table.ts"
 export type { Clocks, NextOwner, Row, WatchRow, WatchRowOptions } from "./table.ts"
 export { resolveRemote } from "./remote.ts"
-export { DRAFT_EXCLUDED_PREFIXES, DRAFT_ROW_MS, DRAFT_WINDOW_MS, foldDrafts, readDrafts } from "./drafts.ts"
+export { DRAFT_EXCLUDED_PREFIXES, DRAFT_WINDOW_MS, readDrafts } from "./drafts.ts"
 export type { Draft, DraftReading } from "./drafts.ts"
 export { directMergeLine, eventDirectMergeCommits } from "./direct.ts"
 export { refuseTarget, inspectSubmit, inspectSubmitAtHead, freshnessLine, submit, issueOf } from "./submit.ts"
@@ -209,13 +204,7 @@ export type {
   StallThreshold,
 } from "./service-health.ts"
 
-export {
-  SETUP_UNREACHABLE_CODE,
-  SETUP_UNUSABLE_CODE,
-  setupStuckCode,
-  setupStuckNext,
-  transportFaultIn,
-} from "./setup-transport.ts"
+export { transportFaultIn } from "./setup-transport.ts"
 export type { TransportFault } from "./setup-transport.ts"
 
 export { runtimeGitlinkPath } from "./runtime-gitlink.ts"

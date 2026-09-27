@@ -137,7 +137,7 @@ export const LOG_KINDS = [
   "reference",
   "warning",
   // A scope a failing check offered its own settled-base run that the queue
-  // could not honour (narrowing.ts). Only the refusal is a row of its own: an
+  // could not honour (26180). Only the refusal is a row of its own: an
   // honoured offer and an absent one are both readable on the base check's own
   // `scope` field, and a refusal that left no trace would be indistinguishable
   // from a check that never offered anything.
@@ -392,7 +392,7 @@ export type JournalCheck = Readonly<{
   /**
    * On a `base` phase row, which of the two base runs this was: `full` is the
    * whole check re-run at the settled base, `narrowed` is the scope the check
-   * itself asked for (narrowing.ts). Absent on every other phase, and on a
+   * itself asked for (26180). Absent on every other phase, and on a
    * base row written before this field existed.
    */
   scope?: "narrowed" | "full"

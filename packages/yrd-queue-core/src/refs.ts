@@ -71,11 +71,6 @@ export function changeName(change: Change): string {
   return `${trimmed}@${change.head}`
 }
 
-/** The ref a change is: its name under its queue's namespace. */
-export function changeRef(queue: string, change: Change): string {
-  return refOfChange(queue, changeName(change))
-}
-
 /** The ref a change's NAME is, for a reader holding the name and not the pair. */
 export function refOfChange(queue: string, name: string): string {
   return `${queueRefPrefix(queue)}/${name}`

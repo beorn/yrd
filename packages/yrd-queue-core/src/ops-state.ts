@@ -1,7 +1,7 @@
 /** The complete operational state carried by every queue ops event. */
 import type { OverrideEntry } from "./override.ts"
 import type { PauseRecord } from "./pause.ts"
-import { changeName, parseChangeName } from "./refs.ts"
+import { parseChangeName } from "./refs.ts"
 
 export type OpsState = Readonly<{
   pause?: PauseRecord
@@ -24,7 +24,15 @@ export function encodeOps(state: OpsState): string {
             reason: state.pause.reason,
             by: state.pause.by,
             cause: state.pause.cause,
-            ...(state.pause.change === undefined ? {} : { change: changeName(state.pause.change) }),
+            ...(state.pause.change === undefined
+              ? {}
+              : {
+                  change: {
+                    branch: state.pause.change.branch,
+                    head: state.pause.change.head,
+                    ...(state.pause.change.event === undefined ? {} : { event: state.pause.change.event }),
+                  },
+                }),
             ...(state.pause.next === undefined ? {} : { next: state.pause.next }),
           },
     overrides: state.overrides.map((entry) => ({
@@ -81,7 +89,23 @@ export function decodeOps(value: string, self: string, where: string): OpsState 
     if (raw.cause !== "operator" && raw.cause !== "stuck" && raw.cause !== "maintenance") {
       throw new Error(`${where}: Ops: invalid pause cause`)
     }
-    const change = raw.change === undefined ? undefined : parseChangeName(text(raw, "change"))
+    const change =
+      raw.change === undefined
+        ? undefined
+        : typeof raw.change === "string"
+          ? parseChangeName(text(raw, "change"))
+          : (() => {
+              const named = object(raw.change, "Ops: pause change")
+              const branch = text(named, "branch")
+              const head = text(named, "head")
+              const parsedName = parseChangeName(`${branch}@${head}`)
+              if (parsedName === undefined) throw new Error(`${where}: Ops: invalid pause change`)
+              const event = named.event === undefined ? undefined : text(named, "event")
+              if (event !== undefined && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(event)) {
+                throw new Error(`${where}: Ops: pause change event needs an oid`)
+              }
+              return { ...parsedName, ...(event === undefined ? {} : { event }) }
+            })()
     if ((raw.cause === "stuck" && change === undefined) || (raw.cause !== "stuck" && raw.change !== undefined)) {
       throw new Error(`${where}: Ops: pause cause and change disagree`)
     }

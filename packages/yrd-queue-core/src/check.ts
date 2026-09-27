@@ -130,8 +130,7 @@ export type RunCheck = Readonly<{
   /** Which check tier is running: normal (default) or long. */
   tier?: "normal" | "long"
   /**
-   * What the check itself asked for in this run, read off its own earlier log
-   * (narrowing.ts). It joins the environment after the declaration's
+   * An optional check-supplied scope for a base run (26180). It joins the environment after the declaration's
    * passthrough and before the queue's own `YRD_*` statements, which stay
    * authoritative.
    */
