@@ -5,9 +5,9 @@
  * The two need different words because they need different people. A 504 from
  * a code host while setup resolved one pinned dependency is nobody's defect and
  * clears itself; a lockfile that does not match its manifest is a change that
- * must not merge. Both arrive today as `yrd-setup-unusable`, so a reader of the
- * record cannot tell an outage from a break, and the fleet's whole delivery
- * mechanism stops on either. Measured 2026-09-11: one GitHub 504 cost 19m47s.
+ * must not merge. Without separate incident codes, both read as
+ * `yrd-setup-unusable`, hiding an outage from the reader while the fleet's
+ * delivery stops on either. Measured 2026-09-11: one GitHub 504 cost 19m47s.
  *
  * THE DISTINCTION THIS MODULE MUST NOT BLUR, and the reason it is a table of
  * named signatures rather than a regex over "5\\d\\d": a remote that ANSWERED
