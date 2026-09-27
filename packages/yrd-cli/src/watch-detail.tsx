@@ -832,6 +832,12 @@ function CheckingStageBody({ detail, selectedSubIndex }: { detail: ChangeDetail;
     const remedy = detail.run.steps?.[selectedSubIndex]?.remedy
     return (
       <Box flexDirection="column" minWidth={0}>
+        {/* The remedy leads the tab (39): the filled tabs cost rows, and whose move it is must not fall below the fold. */}
+        {remedy !== undefined ? (
+          <Text color={CHECK_COLOR[selectedCheck.state]} wrap="wrap">
+            {remedy}
+          </Text>
+        ) : null}
         {detail.checks.length > 1 ? (
           <Box flexDirection="column" minWidth={0}>
             {detail.checks.map((c, idx) => (
@@ -863,11 +869,6 @@ function CheckingStageBody({ detail, selectedSubIndex }: { detail: ChangeDetail;
             <Text color="$fg-muted"> · {mediaDuration(selectedCheck.result.ms)}</Text>
           ) : null}
         </Box>
-        {remedy !== undefined ? (
-          <Text color={CHECK_COLOR[selectedCheck.state]} wrap="wrap">
-            {remedy}
-          </Text>
-        ) : null}
         <CheckBody check={selectedCheck} />
       </Box>
     )
