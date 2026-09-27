@@ -58,6 +58,8 @@ export type DraftReading = Readonly<{
   dated: readonly Draft[]
   /** The drafts whose head this repository has not read: undated, whatever the window. */
   undated: readonly Draft[]
+  /** How many drafts this repository has read that are older than the window. */
+  older?: number
 }>
 
 /**
@@ -78,7 +80,7 @@ export async function readDrafts(
         !submittedHeads.has(`${branch}@${head}`),
     )
     .map(([branch, head]): Draft => ({ branch, head, movedSinceSubmit: submittedBranches.has(branch) }))
-  if (candidates.length === 0) return { dated: [], undated: [] }
+  if (candidates.length === 0) return { dated: [], undated: [], older: 0 }
 
   const present = await presentCommits(git, [...new Set(candidates.map((draft) => draft.head))])
   const facts = await commitFacts(git, [...present])
@@ -90,11 +92,19 @@ export async function readDrafts(
       : [{ ...draft, ...fact }]
   })
   const offTarget = await offTheTarget(git, [...new Set(inWindow.map((draft) => draft.head))], options.targetSha)
+  const older =
+    since === undefined
+      ? 0
+      : candidates.filter((draft) => {
+          const fact = facts.get(draft.head)
+          return fact !== undefined && fact.committedAt.getTime() < since
+        }).length
   return {
     dated: inWindow
       .filter((draft) => offTarget.has(draft.head))
       .sort((left, right) => right.committedAt.getTime() - left.committedAt.getTime()),
     undated: candidates.filter((draft) => !present.has(draft.head)),
+    older,
   }
 }
 
