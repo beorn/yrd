@@ -738,7 +738,7 @@ function buildProgram(
       (filters === undefined || filters.length === 0) &&
       status === undefined
     ) {
-      const { yrdQueueRunnerDeclarations } = await import("git-yrd/hab-projects")
+      const { yrdQueueRunnerDeclarations } = await import("../../../hab.projects.ts")
       const declared = await resolveDeclaredQueueLocations(cwd(), yrdQueueRunnerDeclarations, env)
       if (declared.length > 0) {
         const sources: import("./watch-pane.tsx").WatchSource[] = []
