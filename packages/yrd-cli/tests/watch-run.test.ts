@@ -68,8 +68,10 @@ describe("the status box's own lines", () => {
     expect(timingRows(row({ since: undefined }), new Date(NOW_MS))).toEqual([])
   })
 
-  it("names the run on the border by its start instant and gives a pre-run row no title", () => {
-    expect(runTitle({ id: "q-20260903T113000000Z-0badf00d", label: "main" })).toMatch(/^RUN main#\d{6}$/u)
+  it("names a published run by number, an unnumbered one by opaque id, and a pre-run row by no title", () => {
+    const id = "q-20260903T113000000Z-0badf00d"
+    expect(runTitle({ id, label: "main", number: 7 })).toBe("RUN main#7")
+    expect(runTitle({ id, label: "main" })).toBe(`RUN main [${id}]`)
     expect(runTitle({ label: "main" })).toBeUndefined()
   })
 

@@ -38,6 +38,7 @@ import {
   drop,
   gitIn,
   mergedByRun,
+  lookupRunIndex,
   pauseRef,
   queueRef,
   queueRefPrefix,
@@ -344,6 +345,13 @@ it("runs a check-free event change through one atomic merge", async () => {
   const outcome = await queueRun(options)
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-run"] })
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([expect.objectContaining({ kind: "run-number", number: 1, run: outcome.run })]),
+  )
+  expect(await lookupRunIndex(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", 1)).toMatchObject({
+    kind: "known",
+    record: { id: outcome.run },
+  })
   // The line as the round read it, before its merge (25669): what the service
   // judges a stall from. Nothing was judged before this round.
   expect(outcome.line).toEqual({
@@ -363,6 +371,18 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(message).toContain("Issue: @i/10-yrd/1")
   expect(message).toContain("Submitter: @dev/2")
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
+})
+
+it("leaves an idle event round unnumbered and the next index value at one (26193)", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [], failed: [], stuck: [] })
+  expect(logRecords(outcome).some((record) => record.kind === "run-number")).toBe(false)
+  expect(await lookupRunIndex(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", 1)).toEqual({
+    kind: "unknown",
+    number: 1,
+  })
 })
 
 /** @failure One malformed change chain ended the service round before healthy changes could merge (25658).
@@ -1876,8 +1896,8 @@ it("fails a round with the unreadable remote ref named after publication", async
   )
 })
 
-/** @failure 25708: the service lost its repeated-refusal count across rounds and could not clear the page. */
-it("counts repeated CAS refusals in round journals and resets after publication", async () => {
+/** @failure 26193: the first indexed merge could lose its target lease, consume a number, or miss the eventual merge. */
+it("keeps a final first-round refusal and retries the next round's indexed merge atomically", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
@@ -1898,18 +1918,16 @@ it("counts repeated CAS refusals in round journals and resets after publication"
     })
   })
   const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
-  for (const count of [1, 2, 3]) {
-    const outcome = await queueRun(options)
-    expect(outcome).toMatchObject({ exitCode: 0, merged: [] })
-    expect(logRecords(outcome)).toContainEqual(
-      expect.objectContaining({ kind: "warning", subject: "cas-refused", ref, count }),
-    )
-    expect(outcome.line?.casRefused?.count).toBe(count === 3 ? 3 : undefined)
-    expect((await readStatus(store, "main", branch)).status).toBe("merging")
-  }
+  const first = await queueRun(options)
+  expect(first).toMatchObject({ exitCode: 0, merged: [] })
+  expect(logRecords(first)).toContainEqual(
+    expect.objectContaining({ kind: "warning", subject: "cas-refused", ref, count: 1 }),
+  )
+  expect((await readStatus(store, "main", branch)).status).toBe("merging")
   const before = await readStatus(store, "main", branch)
   if (before.tip === undefined || before.since === undefined) throw new Error("fixture lost its open marker")
   const published = await queueRun(options)
+  expect(refused).toBe(3)
   expect(published.merged).toEqual([branch])
   expect(published.line?.casRefused).toBeUndefined()
   expect(logRecords(published)).toContainEqual(expect.objectContaining({ kind: "merge", ref }))
