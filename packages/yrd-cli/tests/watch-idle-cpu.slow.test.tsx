@@ -40,7 +40,7 @@ function snapshot(): WatchSnapshot {
     branch,
     head: branch.padEnd(40, String(index)),
     since: new Date(at.getTime() - 3_600_000),
-    state: index === 0 ? "queued" : index === 1 ? "checked" : index === 2 ? "merged" : "failed",
+    state: index === 0 ? "queued" : index === 1 ? "verifying" : index === 2 ? "merged" : "failed",
     subject: `${branch} does its work`,
   }))
   return {

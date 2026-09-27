@@ -36,7 +36,7 @@ const RUNNING_ROW: Row = {
   branch: "task/checking-something",
   head: "deadbeef".padEnd(40, "0"),
   live: { check: "typecheck", phase: "typecheck", run: "q-1", since: NOW },
-  state: "checked",
+  state: "verifying",
 }
 
 function item(): WatchRow {
@@ -143,53 +143,6 @@ describe("AGE / RUN (item 5, 24196): every row has AGE, runner and after have RU
     expect(second).toContain("45:01 / —")
     expect(first).not.toContain("waiting")
   }, 10_000)
-})
-
-describe("changesSuffix for deferred row", () => {
-  it("shows the projected duration and bound with > when projected exceeds bound", () => {
-    const row: Row = {
-      branch: "task/wide",
-      head: "a".repeat(40),
-      state: "deferred" as any,
-      projectedMs: 58 * 60 * 1000,
-      boundMs: 30 * 60 * 1000,
-    }
-    const suffix = changesSuffix(row)
-    expect(suffix).toEqual({
-      color: "$fg-accent",
-      text: "projected 58m > 30m, waits for the long check",
-    })
-  })
-
-  it("shows the projected duration and bound with < when projected is less than bound", () => {
-    const row: Row = {
-      branch: "task/under",
-      head: "b".repeat(40),
-      state: "deferred" as any,
-      projectedMs: 17 * 60 * 1000,
-      boundMs: 30 * 60 * 1000,
-    }
-    const suffix = changesSuffix(row)
-    expect(suffix).toEqual({
-      color: "$fg-accent",
-      text: "projected 17m < 30m, waits for the long check",
-    })
-  })
-
-  it("shows the projected duration and bound with = when projected equals bound", () => {
-    const row: Row = {
-      branch: "task/equal",
-      head: "c".repeat(40),
-      state: "deferred" as any,
-      projectedMs: 30 * 60 * 1000,
-      boundMs: 30 * 60 * 1000,
-    }
-    const suffix = changesSuffix(row)
-    expect(suffix).toEqual({
-      color: "$fg-accent",
-      text: "projected 30m = 30m, waits for the long check",
-    })
-  })
 })
 
 describe("the drafts the home list folds into a count (25424)", () => {

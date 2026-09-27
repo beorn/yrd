@@ -205,7 +205,7 @@ describe("a one-shot render when a row's check is running right now", () => {
   // watch-list.tsx's `ListRow`.
   it("does not throw, and prints the row's state in its static (non-pulsing) color", async () => {
     const liveRow = row({
-      state: "checked",
+      state: "verifying",
       live: { check: "typecheck", phase: "run", run: RUN_ID, since: NOW },
     })
 
@@ -218,7 +218,7 @@ describe("a one-shot render when a row's check is running right now", () => {
 
   it("still leaves the runner's own marker crash-free while a run is active, and names the row it holds", async () => {
     const liveRow = row({
-      state: "checked",
+      state: "verifying",
       live: { check: "typecheck", phase: "run", run: RUN_ID, since: NOW },
     })
     const runner = {
@@ -263,7 +263,7 @@ function flowRows(): readonly Row[] {
   const ago = (minutes: number): Date => new Date(READ_AT.getTime() - minutes * 60_000)
   return [
     change({ branch: "task/next", head: "1".repeat(40), position: 1, since: ago(50) }),
-    change({ branch: "task/twice", head: "2".repeat(40), position: 2, since: ago(40), state: "checked" }),
+    change({ branch: "task/twice", head: "2".repeat(40), position: 2, since: ago(40), state: "verifying" }),
     change({ branch: "task/late", head: "3".repeat(40), position: 3, since: ago(10) }),
     change({ at: ago(5), branch: "task/merged", endedAt: ago(5), head: "4".repeat(40), state: "merged" }),
     change({

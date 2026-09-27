@@ -48,7 +48,7 @@ function row(branch: string, state: Row["state"]): Row {
 }
 
 function snapshot(): WatchSnapshot {
-  const rows = [row("task/one", "queued"), row("task/two", "checked"), row("task/three", "merged")].map((each) => ({
+  const rows = [row("task/one", "queued"), row("task/two", "verifying"), row("task/three", "merged")].map((each) => ({
     row: each,
   }))
   return {

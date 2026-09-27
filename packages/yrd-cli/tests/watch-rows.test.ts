@@ -260,14 +260,14 @@ describe("the one row renderer", () => {
   it("draws the plain list's line unchanged when there is no subject, run or live check to add", () => {
     const current = row({ head: "abcdef0123456789", issue: "@i/1", position: 1, result: "pass" })
     // The state in the one word table's word (24196), in a column as wide as the longest.
-    expect(rowLine({ row: current })).toBe(" 1 submitted task/one abcdef012345 pass @i/1")
+    expect(rowLine({ row: current })).toBe(" 1 queued    task/one abcdef012345 pass @i/1")
     // Joined and record-only rows share fixed columns; only the run suffix differs.
     expect(
       rowLine({
         row: current,
         run: journalRun({ id: "q-1", branch: current.branch, head: current.head, startedAt: now, at: now, checks: [] }),
       }),
-    ).toBe(" 1 submitted task/one abcdef012345 pass @i/1 [q-1]")
+    ).toBe(" 1 queued    task/one abcdef012345 pass @i/1 [q-1]")
   })
 
   it("adds the subject, the run and the check running now when there is something to put there", () => {
@@ -308,11 +308,11 @@ describe("the notice", () => {
       row({ live: { check: "typecheck", phase: "merge", run: "q-1", since: now }, position: 1 }),
     )
 
-    expect(notice.word).toBe("submitted #1, checking typecheck")
+    expect(notice.word).toBe("queued #1, checking typecheck")
   })
 
   it("carries the queue position in the notice, where a live fact belongs", () => {
-    expect(watchNotice(row({ position: 3 })).word).toBe("submitted #3")
+    expect(watchNotice(row({ position: 3 })).word).toBe("queued #3")
     const historical = row({ state: "failed", position: 1, result: "stuck verify", run: "q-1" })
     expect(watchNotice(historical, true)).toMatchObject({ word: "change failed #1", cause: "run result: stuck verify" })
     // The join is a caller's fact, not inferred from a result or run identifier.
@@ -328,9 +328,7 @@ describe("the notice", () => {
     // Every state a row can have, each its own value: a state the core adds fails to compile here until listed.
     const states = Object.values({
       cancelled: "cancelled",
-      checked: "checked",
       checking: "checking",
-      deferred: "deferred",
       direct: "direct",
       draft: "draft",
       failed: "failed",
@@ -340,7 +338,6 @@ describe("the notice", () => {
       queued: "queued",
       stuck: "stuck",
       verifying: "verifying",
-      withdrawn: "withdrawn",
     } as const satisfies { readonly [S in Row["state"]]: S })
     // The table answers with a word no second map could hold, so a notice reading a map of its own cannot match.
     const table = vi.spyOn(format, "stateWord").mockImplementation(({ state }) => `the table's word for ${state}`)
