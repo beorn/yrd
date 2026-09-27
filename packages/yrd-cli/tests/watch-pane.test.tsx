@@ -776,7 +776,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
     // No identity title row above the box: the first thing in the detail is the border with the run on it.
     expect(text).toContain("RUN main [")
     // One line: the marker, the bold status and its explanation, and no step line under it (25441).
-    const status = lines.findIndex((line) => line.includes("× Failed test"))
+    const status = lines.findIndex((line) => /× It failed \(test\)/u.test(line) || line.includes("× Failed test"))
     expect(status).toBeGreaterThan(-1)
     expect(lines[status + 1]).toMatch(/╰/u)
     // One tab per stage (25716 row 3)
