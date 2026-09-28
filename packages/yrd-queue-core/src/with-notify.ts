@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
-import { prepareWorktree } from "./worktree.ts"
+import { prepareWorktree, removeEmptyWorktreeRunDirectory } from "./worktree.ts"
 import type { ObservationNotice, Git } from "./git.ts"
 import type { Ending, Notifier } from "./config.ts"
 import type { OverrideEntry } from "./override.ts"
@@ -218,32 +218,28 @@ export async function dispatchNotifications(
   await using resources = new AsyncDisposableStack()
   const runner = context.process ?? resources.use(createProcess({ cwd: context.repo }))
   const stamp = `notify-${String(Date.now())}-${String(process.pid)}-${randomUUID().slice(0, 8)}`
+  const directory = join(context.workdir, "worktrees", stamp)
+  resources.defer(() => removeEmptyWorktreeRunDirectory(directory))
   let prepared: Promise<Readonly<{ cwd: string; runner: Process }>> | undefined
   const environment = (): Promise<Readonly<{ cwd: string; runner: Process }>> => {
     prepared ??= (async () => {
-      mkdirSync(join(context.workdir, "worktrees", stamp), { recursive: true })
-      const tree = await prepareWorktree(
-        context.git,
-        context.repo,
-        context.targetSha,
-        join(context.workdir, "worktrees", stamp, "notify"),
-        {
-          targetSha: context.targetSha,
-          process: runner,
-          queueRun: true,
-          ...(context.env === undefined ? {} : { env: context.env }),
-          ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
-          ...(context.setup === undefined
-            ? {}
-            : {
-                setup: {
-                  run: context.setup,
-                  logDir: join(context.workdir, "checks", "notify", stamp),
-                  tmpdir: join(context.workdir, "tmp", "notify", stamp),
-                },
-              }),
-        },
-      )
+      mkdirSync(directory, { recursive: true })
+      const tree = await prepareWorktree(context.git, context.repo, context.targetSha, join(directory, "notify"), {
+        targetSha: context.targetSha,
+        process: runner,
+        queueRun: true,
+        ...(context.env === undefined ? {} : { env: context.env }),
+        ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
+        ...(context.setup === undefined
+          ? {}
+          : {
+              setup: {
+                run: context.setup,
+                logDir: join(context.workdir, "checks", "notify", stamp),
+                tmpdir: join(context.workdir, "tmp", "notify", stamp),
+              },
+            }),
+      })
       resources.defer(() => tree.remove())
       return { cwd: tree.path, runner }
     })()
