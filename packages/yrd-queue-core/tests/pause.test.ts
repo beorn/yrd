@@ -1,22 +1,22 @@
 /**
- * @failure  A legacy pause tip is mistaken for the approved M2 maintenance fence.
+ * @failure  A retired legacy pause tip is still accepted by the event queue.
  * @level    l1 (real bare remote and Gitomic ref fetch)
  * @consumer post-cutover event queue authority read (#25041)
  */
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, type Git } from "../src/git.ts"
-import { readM2Pause } from "../src/pause.ts"
 import { pauseRef } from "../src/refs.ts"
+import { createEventQueue, createEventStore, readConfig, readEventOps, selectionFor } from "../src/index.ts"
 
 const roots: string[] = []
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
 
-async function world(): Promise<{ writer: Git; reader: Git; created: string }> {
+async function world(): Promise<{ writer: Git; reader: Git; created: string; target: string; other: string }> {
   const root = mkdtempSync(join(tmpdir(), "yrd-m2-pause-"))
   roots.push(root)
   const remote = join(root, "remote.git")
@@ -32,8 +32,21 @@ async function world(): Promise<{ writer: Git; reader: Git; created: string }> {
     await git(["config", "user.email", "queue@yrd.test"])
     await git(["config", "user.name", "yrd"])
   }
-  await writer(["commit", "--allow-empty", "-m", "event created"])
-  return { writer, reader, created: (await writer(["rev-parse", "HEAD"])).trim() }
+  writeFileSync(join(work, ".yrd.yml"), "{}\n")
+  await writer(["add", ".yrd.yml"])
+  await writer(["commit", "-m", "declared queue"])
+  await writer(["push", "--quiet", "origin", "main"])
+  const target = (await writer(["rev-parse", "HEAD"])).trim()
+  const config = await readConfig(writer, target, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error("fixture queue has no config")
+  const created = await createEventQueue(
+    createEventStore(work, "origin", selectionFor(writer)),
+    "main",
+    target,
+    config,
+    new Date(),
+  )
+  return { writer, reader, created, target, other }
 }
 
 function m2(created: string, actor = "yrd-ops-cutover", extra = ""): string {
@@ -47,47 +60,20 @@ async function publish(writer: Git, message: string): Promise<string> {
   return sha
 }
 
-describe("the only retained legacy pause reader", () => {
-  it("accepts the exact M2 tip for this event queue and leaves application refs untouched", async () => {
+describe("retired legacy pause refs", () => {
+  /** @failure A retired M2 ref is still accepted as event authority after retirement.
+   * @level l1 @consumer post-cutover queue ops and submit
+   * Existing parser tests accept M2, so they cannot catch retirement failure; no new production seam.
+   */
+  it("reads event ops without M2 and refuses the former exact fence with its leased remedy", async () => {
     const w = await world()
-    expect(await readM2Pause(w.reader, "origin", "main", w.created)).toBeUndefined()
-    const sha = await publish(w.writer, m2(w.created))
-    const pause = await readM2Pause(w.reader, "origin", "main", w.created)
-    expect(pause).toMatchObject({
-      kind: "paused",
-      sha,
-      by: "yrd-ops-cutover",
-      cause: "maintenance",
-      reason: `moved to event format at ${w.created}`,
-      at: new Date("2026-09-27T00:40:59.853Z"),
-    })
-    expect(await w.reader(["for-each-ref", pauseRef("main")])).toBe("")
-  })
-
-  it("refuses a fence naming another event-created commit", async () => {
-    const w = await world()
-    await publish(w.writer, m2("a".repeat(40)))
-    await expect(readM2Pause(w.reader, "origin", "main", w.created)).rejects.toThrow(
-      /M2 names event-created .*; expected /,
-    )
-  })
-
-  it("refuses a different actor or extra field rather than treating it as M2", async () => {
-    const w = await world()
-    await publish(w.writer, m2(w.created, "operator"))
-    await expect(readM2Pause(w.reader, "origin", "main", w.created)).rejects.toThrow(
-      /exact M2 maintenance fence fields/,
-    )
-    await publish(w.writer, m2(w.created, "yrd-ops-cutover", "\nNext: legacy"))
-    await expect(readM2Pause(w.reader, "origin", "main", w.created)).rejects.toThrow(
-      /exact M2 maintenance fence fields/,
-    )
-  })
-
-  it("refuses a second otherwise identical fence commit on the tip", async () => {
-    const w = await world()
-    await publish(w.writer, m2(w.created))
-    await publish(w.writer, m2(w.created))
-    await expect(readM2Pause(w.reader, "origin", "main", w.created)).rejects.toThrow(/second commit atop an M2 fence/)
+    const store = createEventStore(w.other, "origin", selectionFor(w.reader))
+    const ops = await readEventOps(store, w.reader, "main", w.target)
+    expect(ops.source).toBe("event")
+    expect(ops.stop).toBeUndefined()
+    const oid = await publish(w.writer, m2(w.created))
+    await expect(readEventOps(store, w.reader, "main", w.target)).rejects.toThrow(pauseRef("main"))
+    await expect(readEventOps(store, w.reader, "main", w.target)).rejects.toThrow(oid)
+    await expect(readEventOps(store, w.reader, "main", w.target)).rejects.toThrow("--force-with-lease=")
   })
 })

@@ -752,19 +752,6 @@ describe("yrd queue up, the service", () => {
   it("holds a legacy override ref with unhealthy health, then resumes after removal (26235)", async () => {
     const w = await world()
     const target = (await w.git(["rev-parse", "HEAD"])).trim()
-    const created = (await readEventQueue(createEventStore(w.work, "origin", gitIn(w.work).selection), "main")).created
-    const tree = (await w.git(["rev-parse", `${target}^{tree}`])).trim()
-    const m2 = (
-      await w.git([
-        "commit-tree",
-        tree,
-        "-p",
-        target,
-        "-m",
-        `moved to event format at ${created}\n\nRecord: paused\nPaused-By: yrd-ops-cutover\nPaused-At: 2026-09-27T00:40:59.853Z\nCause: maintenance\n`,
-      ])
-    ).trim()
-    await w.git(["push", "--quiet", "origin", `${m2}:${pauseRef("main")}`])
     const legacyRef = "refs/yrd/main/override"
     await w.git(["push", "--quiet", "origin", `${target}:${legacyRef}`])
 

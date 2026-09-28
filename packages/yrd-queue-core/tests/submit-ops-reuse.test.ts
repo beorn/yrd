@@ -1,5 +1,5 @@
 /**
- * @failure Submit rereads the unchanged queue chain and M2 fence before publication, spending remote calls without
+ * @failure Submit rereads the unchanged queue chain before publication, spending remote calls without
  *          improving the atomic leases (25626).
  * @level   l1 (real bare remote and Git trace2 processes)
  * @consumer yrd submit's admission and publication path
@@ -80,7 +80,6 @@ async function world(): Promise<World> {
       `moved to event format at ${created}\n\nRecord: paused\nPaused-By: yrd-ops-cutover\nPaused-At: 2026-09-27T00:40:59.853Z\nCause: maintenance\n`,
     ])
   ).trim()
-  await git(["push", "--quiet", "origin", `${fence}:${pauseRef("main")}`])
   await git(["checkout", "--quiet", "-b", "task/probe", "main"])
   await git(["commit", "--quiet", "--allow-empty", "-m", "work"])
   await git(["checkout", "--quiet", "main"])
@@ -128,7 +127,7 @@ async function noPublication(w: World): Promise<void> {
 }
 
 describe("submit reuses a fenced admission observation", () => {
-  it("keeps the live M2 fence and saves the repeated chain read on an unchanged queue", async () => {
+  it("saves the repeated chain read on an unchanged event queue", async () => {
     const w = await world()
     const trace = traceRemoteCalls(join(w.root, "trace"), { seams: true })
     let calls: ReturnType<typeof trace.end>
@@ -222,7 +221,7 @@ describe("submit reuses a fenced admission observation", () => {
     expect(calls.unreadable).toBe(0)
   })
 
-  it("rereads and refuses an M2 tip changed before publication", async () => {
+  it("rereads and refuses a retired pause ref appearing before publication", async () => {
     const w = await world()
     await expect(
       submit(
@@ -232,7 +231,7 @@ describe("submit reuses a fenced admission observation", () => {
         "origin",
         request,
       ),
-    ).rejects.toThrow(/second commit atop an M2 fence/u)
+    ).rejects.toThrow(/retired legacy pause ref/u)
     await noPublication(w)
   })
 
@@ -311,44 +310,6 @@ describe("submit reuses a fenced admission observation", () => {
       calls = trace.end()
     }
     expect(calls.seams.submitEvent?.fetch ?? 0).toBeGreaterThan(0)
-  })
-
-  it("rejects a pause ref change after the listing through the atomic pause lease", async () => {
-    const w = await world()
-    const next = await moveM2(w)
-    await w.git([
-      "push",
-      "--quiet",
-      "--force-with-lease=" + pauseRef("main") + ":" + next,
-      "origin",
-      `${w.fence}:${pauseRef("main")}`,
-    ])
-    const script = join(w.root, "git-race.sh")
-    const marker = join(w.root, "race-pending")
-    writeFileSync(marker, "pending\n")
-    writeFileSync(
-      script,
-      `#!/bin/sh\ncase " $* " in\n  *ls-remote*refs/yrd/main/*)
-    if [ "\${YRD_SEAM-}" = submitEvent ] && [ -f '${marker}' ]; then
-      git "$@" > '${w.root}/listed' || exit $?
-      git -C '${w.remote}' update-ref '${pauseRef("main")}' '${next}' '${w.fence}' || exit $?
-      rm '${marker}'
-      cat '${w.root}/listed'
-      exit 0
-    fi;;
-esac
-exec git "$@"
-`,
-    )
-    chmodSync(script, 0o755)
-    const runner = gitIn(w.work, undefined, { ...selectionFor(w.git), executable: script })
-    const trace = traceRemoteCalls(join(w.root, "trace-race"), { seams: true })
-    try {
-      await expect(submit(runner, "origin", request)).rejects.toThrow(/second commit atop an M2 fence/u)
-    } finally {
-      trace.end()
-    }
-    await noPublication(w)
   })
 
   it("refreshes and refuses maintenance that lands after the listing", async () => {
