@@ -8,7 +8,7 @@
  * mechanism counts all three, and the count is git's, not a wrapper's opinion of what it ran.
  */
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 import { AsyncLocalStorage } from "node:async_hooks"
 
 /** A git process's own verb when it talks to a remote. */
@@ -59,7 +59,15 @@ function describeSshCall(
     command === "clone" && argv !== undefined
       ? argv.filter((arg) => arg.startsWith("ssh://") || /^[^@\s]+@[^:\s]+:/u.test(arg))
       : []
-  const namedRepository = repository ?? (cloneSources.length === 1 ? cloneSources[0] : undefined)
+  // Bare Git has no worktree for def_repo. Gitomic explicitly names its absolute
+  // git directory in start argv; implicit bare discovery is recorded below.
+  const gitDirIndex = argv?.findIndex((arg) => arg === "--git-dir" || arg.startsWith("--git-dir=")) ?? -1
+  const gitDirOption = gitDirIndex > 0 ? argv?.[gitDirIndex] : undefined
+  const gitDirectory = gitDirOption === "--git-dir" ? argv?.[gitDirIndex + 1] : gitDirOption?.slice("--git-dir=".length)
+  const namedRepository =
+    repository ??
+    (gitDirectory !== undefined && isAbsolute(gitDirectory) ? gitDirectory : undefined) ??
+    (cloneSources.length === 1 ? cloneSources[0] : undefined)
   if (command === undefined || argv === undefined || namedRepository === undefined) {
     return { command: "unknown", repository: namedRepository ?? "unknown", refresh, sshChildren }
   }
@@ -122,6 +130,8 @@ export function readRemoteCalls(
         value?: unknown
         argv?: unknown
         worktree?: unknown
+        category?: unknown
+        key?: unknown
       }
       try {
         event = JSON.parse(line) as typeof event
@@ -135,6 +145,15 @@ export function readRemoteCalls(
         argv = event.argv as string[]
       }
       if (event.event === "def_repo" && typeof event.worktree === "string") repository = event.worktree
+      if (
+        event.event === "data" &&
+        event.category === "setup" &&
+        event.key === "implicit-bare-repository" &&
+        typeof event.value === "string" &&
+        isAbsolute(event.value)
+      ) {
+        repository = event.value
+      }
       if (event.event === "def_param" && event.param === "GIT_SUPER_PHASE" && event.value === "refresh") refresh = true
       if (event.event === "def_param" && event.param === "YRD_SEAM" && typeof event.value === "string") {
         seam = event.value
