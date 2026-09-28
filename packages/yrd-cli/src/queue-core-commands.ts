@@ -1364,10 +1364,10 @@ export async function coreQueueCommand(
           resolveIssue,
           admit,
         }
-        const inspected = await withRemoteSeam("inspectSubmitAtHead", () =>
-          inspectSubmitAtHead(git, config.target.remote, submission, prepared.head),
-        )
         if (request.dryRun === true) {
+          const inspected = await withRemoteSeam("inspectSubmitAtHead", () =>
+            inspectSubmitAtHead(git, config.target.remote, submission, prepared.head),
+          )
           emit(
             io,
             options.json,
