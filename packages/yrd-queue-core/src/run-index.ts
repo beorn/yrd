@@ -214,6 +214,13 @@ function parseRecord(ref: string, path: string, raw: string): RunIndexRecord {
   }
 }
 
+/** Validate one already-fetched exact run-index tip with the same `next` reader as lookups. */
+export async function readRunIndexTip(store: QueueLocation, queue: string, tip: Oid): Promise<number> {
+  const ref = runIndexRef(queue)
+  await store.backend.readCommit(store.repo, tip)
+  return nextRunNumber(await readBlob(store.backend, store.repo, tip, ref, "next"), ref)
+}
+
 /** Read only `next` and the requested numbered entry; no history or whole-tree scan. */
 export async function lookupRunIndex(store: QueueLocation, queue: string, number: number): Promise<RunIndexLookup> {
   runIndexPath(number)
