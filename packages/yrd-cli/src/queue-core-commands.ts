@@ -32,6 +32,7 @@ import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import { issueResolver } from "./issue-resolver.ts"
+import { runAdmission } from "./admission.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
   assertPlainEventQueueConfig,
@@ -111,6 +112,7 @@ import {
   type OverrideTable,
   type PinCarrierPin,
   notifyOutsideRound,
+  dispatchNotifications,
   overrideNotice,
   HEARTBEAT_GRACE_MS,
   HEARTBEAT_INTERVAL_MS,
@@ -136,6 +138,8 @@ import {
   type JournalRun,
   type Git,
   type IssueResolution,
+  type AdmissionOutcome,
+  type Submitted,
   type GitRunner,
   type GitObservation,
   type GitSelection,
@@ -653,6 +657,21 @@ export async function coreQueueCommand(
   const resolveIssue = issueResolver(config, repo, env)
   const workdir = options.workdir ?? (await workdirOf(git))
   mkdirSync(workdir, { recursive: true })
+  const admission = config.admission
+  const admit =
+    admission === undefined
+      ? undefined
+      : (issue: string, branch: string, head: string, targetHead: string) =>
+          runAdmission(
+            git,
+            repo,
+            workdir,
+            targetHead,
+            admission,
+            { issue, branch, head },
+            env ?? process.env,
+            options.populateReference,
+          )
   const invalidateStatusSnapshot = async (): Promise<void> => {
     // The queue-owned clone is the list/show reader. A remote write can leave
     // its refs and 60-second stamp behind, so its next read must fetch once.
@@ -769,6 +788,51 @@ export async function coreQueueCommand(
       `yrd: accepted while the line is stopped — ${pauseLine(stop)}; ` +
         `the change waits in line and is judged once the stop lifts; ${liftLine(stop, config.target.remote, config.target.branch)}\n`,
     )
+  }
+  const echoAdmission = (outcome: AdmissionOutcome, dryRun = false): void => {
+    if (outcome.kind === "skipped") io.stderr(`yrd: admission skipped: ${outcome.reason}\n`)
+    if (outcome.kind === "cannot-judge") {
+      io.stderr(
+        `yrd: ADMISSION CANNOT JUDGE: ${outcome.reason}; ${dryRun ? "dry run would proceed without publishing" : "submit proceeds with a recorded change warning"}\n`,
+      )
+    }
+  }
+  const notifyAdmissionWarning = async (submitted: Submitted, submitter: string): Promise<void> => {
+    const warning = submitted.admissionWarning
+    if (warning === undefined) return
+    try {
+      const deliveries = await dispatchNotifications(
+        {
+          git,
+          repo,
+          targetSha: captured.oid,
+          workdir,
+          notify: config.notify,
+          setup: config.setup,
+          env: env ?? process.env,
+          populateReference: options.populateReference,
+        },
+        "admission-warning",
+        {
+          record: "admission-warning",
+          change: `${submitted.branch}@${submitted.head}`,
+          endingId: warning.event,
+          endedAt: warning.at,
+          submitter,
+          ...(submitted.issue === undefined ? {} : { issue: submitted.issue.issue }),
+          reason: warning.reason,
+        },
+      )
+      for (const delivery of deliveries) {
+        if (delivery.delivery !== "sent") {
+          io.stderr(
+            `yrd: admission-warning ${warning.event} notification ${delivery.name} ${delivery.delivery}: ${delivery.failure ?? "no target notify entry declared"}\n`,
+          )
+        }
+      }
+    } catch (cause) {
+      io.stderr(`yrd: admission-warning ${warning.event} notification could not run: ${String(cause)}\n`)
+    }
   }
 
   /**
@@ -1291,8 +1355,10 @@ export async function coreQueueCommand(
           branch: prepared.branch,
           submitter: request.submitter,
           target: config.target,
+          expectedTargetHead: captured.oid,
           issue: canonicalIssue,
           resolveIssue,
+          admit,
         }
         const inspected = await withRemoteSeam("inspectSubmitAtHead", () =>
           inspectSubmitAtHead(git, config.target.remote, submission, prepared.head),
@@ -1307,12 +1373,14 @@ export async function coreQueueCommand(
               targetHead: prepared.targetHead,
               dryRun: true,
               verifying: inspected.verifying,
+              admission: inspected.admission,
               freshness: freshnessLine(inspected.targetHead),
               stopped: stopFact(inspected.stop),
             },
             `would open ${changeName({ branch: prepared.branch, head: prepared.head })} on ${targetName(config.target)}; nothing was pushed; ${freshnessLine(inspected.targetHead)}`,
           )
           echoStop(inspected.stop)
+          echoAdmission(inspected.admission, true)
           return 0
         }
         await git(["update-ref", `refs/heads/${prepared.branch}`, prepared.head, "0".repeat(prepared.head.length)])
@@ -1342,6 +1410,7 @@ export async function coreQueueCommand(
             { cause: cleanup },
           )
         }
+        await notifyAdmissionWarning(submitted, request.submitter)
         const { stop: acceptedUnder, ...accepted } = submitted
         emit(
           io,
@@ -1353,6 +1422,7 @@ export async function coreQueueCommand(
               .join(""),
         )
         echoStop(acceptedUnder)
+        echoAdmission(submitted.admission)
         return 0
       }
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
@@ -1360,8 +1430,10 @@ export async function coreQueueCommand(
         branch,
         submitter: request.submitter,
         target: config.target,
+        expectedTargetHead: captured.oid,
         ...(request.issue === undefined ? {} : { issue: request.issue }),
         resolveIssue,
+        admit,
       }
       // Operator and stuck stops accept submits (the andon, operator 2026-09-16).
       // A maintenance stop refuses in the shared inspection before this echo.
@@ -1376,6 +1448,7 @@ export async function coreQueueCommand(
             change: changeName({ branch, head }),
             dryRun: true,
             verifying,
+            admission: inspected.admission,
             submitter: request.submitter,
             target: targetName(config.target),
             targetHead,
@@ -1387,9 +1460,11 @@ export async function coreQueueCommand(
             `${issue === undefined ? "" : ` (issue ${issue.issue})`}; nothing was pushed; ${freshnessLine(targetHead)}`,
         )
         echoStop(inspected.stop)
+        echoAdmission(inspected.admission, true)
         return 0
       }
       const submitted = await submit(git, config.target.remote, submission)
+      await notifyAdmissionWarning(submitted, request.submitter)
       const { stop: acceptedUnder, ...accepted } = submitted
       emit(
         io,
@@ -1402,6 +1477,7 @@ export async function coreQueueCommand(
             .join(""),
       )
       echoStop(acceptedUnder)
+      echoAdmission(submitted.admission)
       return 0
     }
     case "run": {

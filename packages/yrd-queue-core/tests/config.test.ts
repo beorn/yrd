@@ -13,6 +13,23 @@ const TARGET = { branch: "release/1.x", remote: "yrd" } as const
 const SOURCE = { at: "captured-target-A", blob: "b".repeat(40), target: TARGET } as const
 
 describe("the queue declaration grammar", () => {
+  it("reads a bounded pre-submit admission command", () => {
+    expect(
+      parseConfig("admission:\n  run: bun tools/yrd-admission.ts\n  timeoutMs: 15000\n", SOURCE).admission,
+    ).toEqual({
+      run: "bun tools/yrd-admission.ts",
+      timeoutMs: 15000,
+    })
+  })
+  it.each([
+    ["missing run", "admission:\n  timeoutMs: 15000\n"],
+    ["empty run", "admission:\n  run: ''\n  timeoutMs: 15000\n"],
+    ["missing timeout", "admission:\n  run: true\n"],
+    ["unbounded timeout", "admission:\n  run: true\n  timeoutMs: 0\n"],
+    ["unknown key", "admission:\n  run: true\n  timeoutMs: 15000\n  extra: ignored\n"],
+  ])("refuses %s in admission", (_name, declaration) => {
+    expect(() => parseConfig(declaration, SOURCE)).toThrow(/admission/u)
+  })
   it("reads a host issue resolver as an argument vector", () => {
     expect(parseConfig("issueResolver: [hh-km, bd, show, --json]\n", SOURCE).issueResolver).toEqual([
       "hh-km",
@@ -213,7 +230,7 @@ describe("the queue declaration grammar", () => {
     [
       "unknown ending",
       "notify:\n  - everyone:\n      on: landed\n      run: bun x\n",
-      /on: must be merged or failed or stuck or merged-direct/u,
+      /on: must be admission-warning or merged or failed or stuck or merged-direct/u,
     ],
     [
       "check-only notify key",
