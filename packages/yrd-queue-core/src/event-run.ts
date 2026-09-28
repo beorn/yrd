@@ -228,6 +228,13 @@ export async function eventQueueRun(
   }
   const queue = options.target.branch
   const { git, gitOptions, hooksPath, log, selected, url } = prepared
+  const plumbing = {
+    ...options.plumbing,
+    journal: (record: Parameters<QueueRunLog["write"]>[0]) => {
+      log.write(record)
+      options.plumbing?.journal?.(record)
+    },
+  }
   const runIdentity = { id: log.id, startedAt: new Date().toISOString(), host: hostname(), actor: "yrd" }
   const writeStuck = (
     branch: string,
@@ -1373,6 +1380,7 @@ export async function eventQueueRun(
         hooksPath,
         timed: (name, work) => timedStep(log, { branch, head, phase: "submit", name }, work),
         worktree: {
+          plumbing,
           env: options.env,
           gitOptions,
           populateReference: options.populateReference,
@@ -1454,6 +1462,7 @@ export async function eventQueueRun(
               `${branch.replaceAll("/", "_")}-${String(attempt)}`,
             ),
             branch,
+            plumbing,
             env: options.env,
             gitOptions,
             populateReference: options.populateReference,
@@ -1468,6 +1477,7 @@ export async function eventQueueRun(
             {
               targetSha: target,
               queueRun: true,
+              plumbing,
               populateReference: options.populateReference,
               selection: options.selection,
               gitOptions,
@@ -1605,6 +1615,7 @@ export async function eventQueueRun(
                 {
                   targetSha: target,
                   queueRun: true,
+                  plumbing,
                   populateReference: options.populateReference,
                   selection: options.selection,
                   gitOptions,
@@ -1647,6 +1658,7 @@ export async function eventQueueRun(
               if (check.programRoot === true) {
                 try {
                   checked = await programRootCheck({
+                    plumbing,
                     queueRun: true,
                     git,
                     repo: options.repo,
@@ -1845,6 +1857,7 @@ export async function eventQueueRun(
                 `${branch.replaceAll("/", "_")}-${String(stopped.attempt)}`,
               ),
               branch,
+              plumbing,
               env: options.env,
               gitOptions,
               populateReference: options.populateReference,
@@ -1864,6 +1877,7 @@ export async function eventQueueRun(
               {
                 targetSha: target,
                 queueRun: true,
+                plumbing,
                 populateReference: options.populateReference,
                 selection: options.selection,
                 gitOptions,
@@ -1890,6 +1904,7 @@ export async function eventQueueRun(
               let checked: CheckResult
               if (check.programRoot === true) {
                 checked = await programRootCheck({
+                  plumbing,
                   queueRun: true,
                   git,
                   repo: options.repo,
