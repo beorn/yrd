@@ -20,6 +20,7 @@ import { isFlockHeld, tryAcquireFlock } from "@bearly/flock"
 import { ROUND_LOCK } from "@yrd/queue-core"
 
 const HOLDER = join(import.meta.dirname, "support", "round-lock-holder.ts")
+const LOCK_RELEASE_TIMEOUT_MS = 500
 
 const roots: string[] = []
 const children: number[] = []
@@ -135,8 +136,19 @@ describe("the round lock across processes", () => {
     // The instrument before the conclusion: the child it started still runs.
     expect(running(child), `child ${String(child)}`).toBe(true)
 
-    const held = isFlockHeld(path)
-    expect(held, held ? `held after the holder died; openers: ${openers(path)}` : "").toBe(false)
+    // Wait on kernel ownership rather than assuming the process exit event
+    // establishes release. The one-shot observation flaked in CI (#26339).
+    const releaseDeadline = performance.now() + LOCK_RELEASE_TIMEOUT_MS
+    let held = isFlockHeld(path)
+    while (held && performance.now() < releaseDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      held = isFlockHeld(path)
+    }
+    expect(
+      held,
+      held ? `${path} held ${String(LOCK_RELEASE_TIMEOUT_MS)} ms after the holder died; openers: ${openers(path)}` : "",
+    ).toBe(false)
+    expect(running(child), `child ${String(child)} stopped while waiting for lock release`).toBe(true)
     const next = tryAcquireFlock(path)
     expect(next, `the lock is still held while child ${String(child)} runs`).not.toBeNull()
     next?.release()
