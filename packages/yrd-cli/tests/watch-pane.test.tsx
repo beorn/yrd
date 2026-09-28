@@ -718,7 +718,7 @@ describe("the table (items 3, 28, 38)", () => {
     const ageRunOf = (painted: readonly string[], branch: string): string | undefined =>
       /\S+ \/ \S+/u.exec(painted.find((line) => line.includes(branch))?.trimEnd() ?? "")?.[0]
     const lines = app.text.split("\n")
-    expect(ageRunOf(lines, "task/merged")).toBe("1h00m / 01:30")
+    expect(ageRunOf(lines, "task/merged")).toBe("1h00m / 1:30")
     expect(ageRunOf(lines, "task/queued")).toBe("1h00m / —")
 
     // f flips failed toggle off
@@ -739,7 +739,7 @@ describe("the table (items 3, 28, 38)", () => {
     await app.waitForLayoutStable()
     const restored = app.text.split("\n")
     expect(ageRunOf(restored, "task/queued")).toBe("1h00m / —")
-    expect(ageRunOf(restored, "task/merged")).toBe("1h00m / 01:30")
+    expect(ageRunOf(restored, "task/merged")).toBe("1h00m / 1:30")
     app.unmount()
   })
 
@@ -782,7 +782,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
     // One tab per stage (25716 row 3)
     const names = lines.findIndex((line) => /Timeline.*provisioning.*checking.*merging.*deprovisioning/u.test(line))
     expect(names).toBeGreaterThan(-1)
-    expect(lines[names + 1]).toMatch(/cut 1\/1.*− not journaled.*× failed.*− not run.*− not journaled/u)
+    expect(lines[names + 1]).toMatch(/attempt 1\/1.*− not recorded.*× failed.*− not run.*− not recorded/u)
     // The failure sentence lives in the status box once; the checking tab does
     // not repeat the remedy (26242).
     expect(text).toMatch(/it failed \(test\)/iu)
@@ -808,7 +808,7 @@ describe("the status box (items 1, 23, 29a, 39; one line since 25441)", () => {
     )
     const text = await paint(at(<RunStatusBox run={run} />))
 
-    expect(text).toMatch(/✓ Merged as b234234abcde at \d\d:\d\d:\d\d/u)
+    expect(text).toMatch(/✓ Merged as b234234abcde at \d\d:\d\d/u)
     expect(text).not.toContain("passed, merged")
     // The clocks left the box for the timeline tab.
     expect(text).not.toContain("runtime")
@@ -885,8 +885,8 @@ describe("the change list and the Timeline tab (items 2, 4, 6, 24, 25, 31; 25441
 
     // The timeline first, oldest first (25441): drafted at the head's date, then this cut's history,
     // each with its time to the next; the ending has none.
-    const draftedAt = text.search(/\d\d:\d\d:\d\d {2}Drafted · 1:40/u)
-    const openedAt = text.search(/\d\d:\d\d:\d\d {2}Opened by @chief · 1h00m/u)
+    const draftedAt = text.search(/\d\d:\d\d {2}Drafted · 1:40/u)
+    const openedAt = text.search(/\d\d:\d\d {2}Opened by @chief · 1h00m/u)
     const failedAt = text.indexOf("Failed by yrd — test")
     expect(draftedAt).toBeGreaterThan(-1)
     expect(openedAt).toBeGreaterThan(draftedAt)
@@ -897,7 +897,7 @@ describe("the change list and the Timeline tab (items 2, 4, 6, 24, 25, 31; 25441
     expect(text).toContain("The parser dropped the last token.")
     // METADATA: keys uppercase in one column, the three groups.
     expect(text).toMatch(/BY\s+@chief/u)
-    expect(text).toMatch(/CREATED\s+\d\d:\d\d:\d\d · 1h00m ago/u)
+    expect(text).toMatch(/CREATED\s+\d\d:\d\d · 1h00m ago/u)
     expect(text).toMatch(/COMMITS\s+first \d\d:\d\d · last \d\d:\d\d · 3 commits/u)
     expect(text).toMatch(/HEAD\s+abcdef012345/u)
     expect(text).toMatch(new RegExp(`RUN\\s+${RUN_ID}`, "u"))
@@ -1339,9 +1339,7 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
       expect(current(app)).toContain("⚠︎ the queue read failed at ")
     })
     const text = current(app)
-    expect(text).toContain(
-      `retrying; the table is the ${clock(NOW, { seconds: true })} reading — error: cannot lock ref`,
-    )
+    expect(text).toContain(`retrying; the table is the ${clock(NOW)} reading — error: cannot lock ref`)
     // Never the command line that ran: the why is git's own sentence.
     expect(text).not.toContain("git fetch --quiet")
     // The table still shows the last reading.
@@ -1620,7 +1618,7 @@ describe("the RUNNER marker is wired to the ROWS, not to the process (items 1, 5
 
     // `processing` retired in S1: the runner's row shares the STATUS column with
     // every change's, so it says the same word a checking change says.
-    expect(app.text).toContain("1h00m / 02:31")
+    expect(app.text).toContain("1h00m / 2:31")
     expect(app.text, "the queue is not idle while it is checking something").not.toMatch(/\bidle \d/u)
     app.unmount()
   })
@@ -2312,9 +2310,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         time: /\bTIME\b/u.test(header),
         runtime: /\bRUNTIME\b/u.test(header),
       },
-      held: held.includes("40:00 / 03:21"),
+      held: held.includes("40:00 / 3:21"),
       waiting: waiting.includes("12:03 / —"),
-      merged: merged.includes("7:10 / 04:10"),
+      merged: merged.includes("7:10 / 4:10"),
     }).toEqual({
       header: { age: true, time: true, runtime: false },
       held: true,
@@ -2340,8 +2338,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const detail = await paint(at(<WatchDetail detail={detailOf({ row: held }, [])} selected={CHANGES_TAB} />), [], 100)
 
     expect(header).toContain("AGE / RUN")
-    expect(change).toContain("5h37m / 04:00")
-    expect(detail).toMatch(/CREATED\s+\d\d:\d\d:\d\d · 5h37m ago/u)
+    expect(change).toContain("5h37m / 4:00")
+    expect(detail).toMatch(/CREATED\s+\d\d:\d\d · 5h37m ago/u)
   })
 
   it("a stuck row whose own stuck record the reading cannot date shows no duration, never the wait it keeps in line (A2-set-v4)", async () => {
@@ -2405,8 +2403,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     }).toEqual({
       detail: "50:00",
       oldClocks: false,
-      runtime: "03:00",
-      table: expect.stringContaining("50:00 / 03:00"),
+      runtime: "3:00",
+      table: expect.stringContaining("50:00 / 3:00"),
     })
   })
 
@@ -4099,7 +4097,7 @@ describe("the top line (25416)", () => {
       )
       await settle(appAtT2)
       const lineAtT2 = appAtT2.lines.find((l) => l.includes("task/freeze")) ?? ""
-      expect(lineAtT2).toContain("3:00 / 02:00")
+      expect(lineAtT2).toContain("3:00 / 2:00")
       appAtT2.unmount()
 
       const appAtT3 = render(
@@ -4114,7 +4112,7 @@ describe("the top line (25416)", () => {
       )
       await settle(appAtT3)
       const lineAtT3 = appAtT3.lines.find((l) => l.includes("task/freeze")) ?? ""
-      expect(lineAtT3).toContain("3:00 / 02:00")
+      expect(lineAtT3).toContain("3:00 / 2:00")
       appAtT3.unmount()
     })
 
@@ -4339,7 +4337,7 @@ describe("one tab per stage of the round, from its journal (25441 slice 2)", () 
     const text = current(app)
     expect(text).not.toContain("Queue: example.test/repo#main")
     // Its stage tabs
-    expect(text).toMatch(/Timeline\s+provisioning\s+checking\s+merging\s+deprovisioning/u)
+    expect(text).toMatch(/Timeline[\s\S]*provisioning[\s\S]*checking[\s\S]*merging[\s\S]*deprovisioning/u)
     app.unmount()
     // The open step's own tab says the round is still writing it.
     const detail = await open({ row: live })

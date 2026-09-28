@@ -758,7 +758,7 @@ describe("the runner's row", () => {
     expect(line.duration).toBe("checking 2:00")
     expect(line.at).toEqual(new Date(NOW.getTime() - 120_000))
     expect(line.detail).toContain("alive: beat 0:02 ago")
-    expect(line.detail).toMatch(/this round since \d\d:\d\d:\d\d/u)
+    expect(line.detail).toMatch(/this round since \d\d:\d\d/u)
     expect(line.detail).toContain("typecheck, test, output 0:02 ago (this machine only)")
   })
 

@@ -48,7 +48,7 @@ describe("the status box's own lines", () => {
     const at = new Date(NOW_MS + 2 * 3_600_000 + 15 * 60_000 + 31_000)
     expect(
       explanationLine(row({ endedAt: at, merge: "b234234abcde0123456789abcdef0123456789ab", state: "merged" })),
-    ).toMatch(/^Merged as b234234abcde at \d\d:\d\d:\d\d\.$/u)
+    ).toMatch(/^Merged as b234234abcde at \d\d:\d\d\.$/u)
     expect(explanationLine(row({ state: "merged" }))).toContain("no merged record names the merge commit")
   })
 
@@ -63,8 +63,8 @@ describe("the status box's own lines", () => {
     const held = row({ live: { check: "test", phase: "merge", run: "q-1", since: started }, startedAt: started })
     const rows = timingRows(held, new Date(NOW_MS))
     expect(rows).toHaveLength(2)
-    expect(rows[0]).toMatch(/^Submitted \d\d:\d\d:\d\d, Started \d\d:\d\d:\d\d$/u)
-    expect(rows[1]).toBe("checking 1:00 · runtime 01:00")
+    expect(rows[0]).toMatch(/^Submitted \d\d:\d\d, Started \d\d:\d\d$/u)
+    expect(rows[1]).toBe("checking 1:00 · runtime 1:00")
     expect(timingRows(row({ since: undefined }), new Date(NOW_MS))).toEqual([])
   })
 
@@ -141,7 +141,7 @@ describe("HISTORY and METADATA (watch-change)", () => {
       ["HEAD", "BASE", "RUN"],
     ])
     expect(groups.flat().find((fact) => fact.key === "COMMITS")?.value).toBe("2 commits")
-    expect(groups.flat().find((fact) => fact.key === "CREATED")?.value).toMatch(/^\d\d:\d\d:\d\d · 1h00m ago$/u)
+    expect(groups.flat().find((fact) => fact.key === "CREATED")?.value).toMatch(/^\d\d:\d\d · 1h00m ago$/u)
     expect(metadataKeyWidth(groups)).toBe("COMMITS".length + 2)
   })
 

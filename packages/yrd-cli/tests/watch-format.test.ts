@@ -226,9 +226,9 @@ describe("the RUN time in the AGE / RUN cell (25421)", () => {
     state: "merged",
   })
 
-  it("zero-pads every number of the run time, so it reads 03:02", () => {
-    expect(ageRunText(ended(182_000), now)).toBe("1h00m / 03:02")
-    expect(ageRunText(ended(3_723_000), now)).toBe("1h00m / 01h02m")
+  it("uses the unified duration form for the run time (26243)", () => {
+    expect(ageRunText(ended(182_000), now)).toBe("1h00m / 3:02")
+    expect(ageRunText(ended(3_723_000), now)).toBe("1h00m / 1h02m")
   })
 
   it("keeps the column wide enough for mm:ss before any run time is on screen", () => {
@@ -254,9 +254,9 @@ describe("done changes freeze their clocks (25630)", () => {
       endedAt: T2,
     }
     // At T2 (ended instant): age is T2 - T0 = 3m, run is T2 - T1 = 2m
-    expect(ageRunText(merged, T2)).toBe("3:00 / 02:00")
+    expect(ageRunText(merged, T2)).toBe("3:00 / 2:00")
     // At T3 (1 hour later): age and run are frozen at T2!
-    expect(ageRunText(merged, T3)).toBe("3:00 / 02:00")
+    expect(ageRunText(merged, T3)).toBe("3:00 / 2:00")
   })
 
   it("queued and running tick while done stays frozen", () => {
@@ -285,12 +285,12 @@ describe("done changes freeze their clocks (25630)", () => {
 
     // At T2:
     expect(ageRunText(queued, T2)).toBe("3:00 / —")
-    expect(ageRunText(running, T2)).toBe("3:00 / 02:00")
-    expect(ageRunText(merged, T2)).toBe("3:00 / 02:00")
+    expect(ageRunText(running, T2)).toBe("3:00 / 2:00")
+    expect(ageRunText(merged, T2)).toBe("3:00 / 2:00")
 
     // At T3 (1 hour later):
     expect(ageRunText(queued, T3)).toBe("1h03m / —")
-    expect(ageRunText(running, T3)).toBe("1h03m / 01h02m")
-    expect(ageRunText(merged, T3)).toBe("3:00 / 02:00")
+    expect(ageRunText(running, T3)).toBe("1h03m / 1h02m")
+    expect(ageRunText(merged, T3)).toBe("3:00 / 2:00")
   })
 })

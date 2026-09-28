@@ -124,7 +124,7 @@ export function explanationLine(row: Row): string | undefined {
       // no merged record names the merge commit, a merge the queue did not make.
       return "Merged: the head is on the queue branch, and no merged record names the merge commit."
     }
-    const at = row.endedAt === undefined ? "" : ` at ${clock(row.endedAt, { seconds: true })}`
+    const at = row.endedAt === undefined ? "" : ` at ${clock(row.endedAt)}`
     return `Merged as ${row.merge.slice(0, 12)}${at}.`
   }
   if (row.state === "direct") return row.reason
@@ -144,7 +144,7 @@ export function statusLineOf(row: Row, joinedRun = false): Readonly<{ status: st
     if (row.merge === undefined) {
       return { status, explanation: "the head is on the queue branch, and no merged record names the merge commit" }
     }
-    const at = row.endedAt === undefined ? "" : ` at ${clock(row.endedAt, { seconds: true })}`
+    const at = row.endedAt === undefined ? "" : ` at ${clock(row.endedAt)}`
     return { status, explanation: `as ${row.merge.slice(0, 12)}${at}` }
   }
   const explanation = explanationLine(row)
@@ -169,9 +169,9 @@ export function statusLineOf(row: Row, joinedRun = false): Readonly<{ status: st
  */
 export function timingRows(row: Row, now: Date): readonly string[] {
   const clocks = [
-    row.since === undefined ? undefined : `Submitted ${clock(row.since, { seconds: true })}`,
-    row.startedAt === undefined ? undefined : `Started ${clock(row.startedAt, { seconds: true })}`,
-    row.endedAt === undefined ? undefined : `Completed ${clock(row.endedAt, { seconds: true })}`,
+    row.since === undefined ? undefined : `Submitted ${clock(row.since)}`,
+    row.startedAt === undefined ? undefined : `Started ${clock(row.startedAt)}`,
+    row.endedAt === undefined ? undefined : `Completed ${clock(row.endedAt)}`,
   ].filter((part): part is string => part !== undefined)
   const timing = timingLine(row, now)
   return [clocks.length === 0 ? undefined : clocks.join(", "), timing === "" ? undefined : timing].filter(

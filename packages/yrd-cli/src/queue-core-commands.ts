@@ -2123,8 +2123,9 @@ export async function coreQueueCommand(
             throw error
           }
           const latest = await declaration()
-          if (latest === undefined)
+          if (latest === undefined) {
             return terminalExit("declaration-unreadable", `${targetLabel} no longer carries a .yrd.yml`)
+          }
           targetOid = latest.oid
           now = await gitlinkAt(git, targetOid, gitlink.path)
         }
@@ -3792,7 +3793,7 @@ export function sleepAfter(outcome: QueueRunOutcome, intervalMs: number): number
 
 /** One printed round of the text watch, with `updated HH:MM:SS` under the queue's name (item 30). */
 function stampRound(text: string, queue: string, at: Date): string {
-  const stamp = `updated ${clock(at, { seconds: true })}`
+  const stamp = `updated ${clock(at)}`
   const lines = text.split("\n")
   const name = lines.indexOf(queue)
   if (name === -1) return `${stamp}\n${text}`
