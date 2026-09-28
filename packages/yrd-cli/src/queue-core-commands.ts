@@ -1694,6 +1694,8 @@ export async function coreQueueCommand(
         chainPressure = pressure
       }
       let threshold = { declared: config.health.declared, ms: config.health.stallAfterMs }
+      // The service runs normal-tier rounds. Keep the runner's published bounds on that same tier.
+      const upRoundTier = "normal" as const
       let activeChecks = config.checks
       let activeSetup = config.setup
       const flowReading = (): FlowReading | undefined =>
@@ -1890,7 +1892,7 @@ export async function coreQueueCommand(
             roundPlan = {
               round: openedAt,
               due: new Date(
-                Date.parse(openedAt) + roundBoundMs(activeChecks, activeSetup, record.waiting, "normal"),
+                Date.parse(openedAt) + roundBoundMs(activeChecks, activeSetup, record.waiting, upRoundTier),
               ).toISOString(),
               candidates: record.waiting,
             }
@@ -1927,7 +1929,7 @@ export async function coreQueueCommand(
             }
             const spec = activeChecks.find((check) => check.name === record.name)
             if (spec === undefined) throw new Error(`runner check ${record.name} has no declaration for its bound`)
-            return effectiveCheckTimeoutMs(spec, "normal")
+            return effectiveCheckTimeoutMs(spec, upRoundTier)
           })()
           setRunnerState(
             record.name === "setup" || record.purpose === "program-root-setup" ? "provisioning" : "checking",
@@ -2397,6 +2399,7 @@ export async function coreQueueCommand(
             setRunnerState("provisioning", undefined, "prepare", new Date().toISOString(), STEP_BOUNDS_MS.prepare)
           }
           const ran = await lockedRound({
+            tier: upRoundTier,
             before: async (declared) => {
               // The round opens now, judged against the threshold THIS round's
               // declaration carries, so an edit to health.stallAfter is the next

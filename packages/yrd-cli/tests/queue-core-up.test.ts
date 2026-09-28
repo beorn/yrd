@@ -476,7 +476,10 @@ describe("yrd queue up, the service", () => {
    */
   it("beats the remote claim during a long check without blocking the event loop for one Beat", async () => {
     const w = await world()
-    await redeclare(w, "checks:\n  - hold:\n      on: [submit]\n      run: sleep 35\n")
+    await redeclare(
+      w,
+      "checks:\n  - hold:\n      on: [submit]\n      run: sleep 35\n      timeoutMs: 1800000\n      long:\n        timeoutMs: 5400000\n",
+    )
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
     await w.git(["checkout", "--quiet", "-b", "task/beat", "main"])
@@ -532,9 +535,36 @@ describe("yrd queue up, the service", () => {
             throw new Error("checking claim has no round Due plan")
           }
           expect(Date.parse(claim.deadline) - Date.parse(claim.since)).toBe(30 * 60_000)
-          expect(Date.parse(claim.due) - Date.parse(claim.round)).toBe(
-            roundBoundMs([{ name: "hold", run: "sleep 35", on: ["submit"] }], undefined, 1),
+          const normalDue = roundBoundMs(
+            [
+              {
+                name: "hold",
+                run: "sleep 35",
+                on: ["submit"],
+                timeoutMs: 30 * 60_000,
+                long: { timeoutMs: 90 * 60_000 },
+              },
+            ],
+            undefined,
+            1,
+            "normal",
           )
+          const longDue = roundBoundMs(
+            [
+              {
+                name: "hold",
+                run: "sleep 35",
+                on: ["submit"],
+                timeoutMs: 30 * 60_000,
+                long: { timeoutMs: 90 * 60_000 },
+              },
+            ],
+            undefined,
+            1,
+            "long",
+          )
+          expect(normalDue).toBeLessThan(longDue)
+          expect(Date.parse(claim.due) - Date.parse(claim.round)).toBe(normalDue)
           expect((await readQueueHealth(w.workdir, SERVICE)).facts?.runnerClaim).toMatchObject({
             state: "checking",
             deadline: claim.deadline,
@@ -1838,6 +1868,49 @@ describe("a stuck change stops the line; the service stays up and pages (the and
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
   }
+
+  /** @failure 24570: a timed-out check could be reported as a clock stall instead of the queue's stop page.
+   * @level l2 @consumer the supervisor reading the service health document
+   */
+  it("a timed-out check stops the line and pages through the existing stop", async () => {
+    const w = await world()
+    await redeclare(w, "checks:\n  - hang:\n      on: [submit]\n      run: sleep 20\n      timeoutMs: 1000\n")
+    const head = await oneChange(w, "task/hung-check")
+    const stop = new AbortController()
+    const documents: QueueHealthDocument[] = []
+    const timeout = setTimeout(() => stop.abort(), 25_000)
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterHealth: (document) => {
+              documents.push(document)
+              if (document.error?.code === "queue-round-stuck") stop.abort()
+            },
+          },
+          { json: true, workdir: w.workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+    } finally {
+      clearTimeout(timeout)
+      stop.abort()
+    }
+    expect(records(run)[0]).toMatchObject({ exitCode: 2, stuck: ["task/hung-check"] })
+    expect(documents.some((document) => document.error?.code === "queue-round-stuck")).toBe(true)
+    const page = await readQueueHealth(w.workdir, SERVICE)
+    expect(page).toMatchObject({
+      state: "unhealthy",
+      verdict: { kind: "running" },
+      error: { code: "queue-round-stuck", cause: expect.stringContaining(`task/hung-check@${head}`) },
+    })
+  }, 40_000)
 
   // ACCEPTANCE: one round judges the stuck change and stops the line; every
   // later round holds it — no setup runs again, nothing is judged or merged —
