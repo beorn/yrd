@@ -13,6 +13,7 @@
     "@yrd/bay": "workspace:*",
     "@yrd/process": "workspace:*",
     "@yrd/queue-core": "workspace:*",
+    "git-super": "^0.1.0",
     "gitomic": "^0.4.0",
     "loggily": "^0.11.0",
     "react": "^19.2.0",
@@ -22,7 +23,6 @@
     "@termless/core": "^0.9.1",
     "@termless/ghostty": "^0.9.1",
     "@termless/ghostty-native": "^0.9.1",
-    "@termless/xtermjs": "^0.9.1",
-    "git-super": "^0.1.0"
+    "@termless/xtermjs": "^0.9.1"
   }
 }
