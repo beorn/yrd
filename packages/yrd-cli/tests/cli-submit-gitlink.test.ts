@@ -8,7 +8,7 @@
  * @testonly none
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -273,18 +273,55 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     const w = await world()
     const one = w.components[0]!
     const branch = `pin/vendor-one/${one.held.slice(0, 12)}`
-    const ran = await yrd(
-      w.work,
-      "submit",
-      "--gitlink",
-      `${one.path}=${one.held}`,
-      "--issue",
-      "25804",
-      "--submitter",
-      "@dev/2",
+    // @failure A real pin submit also runs its unused preview, composing the
+    // same carrier twice and repeating its acquisitions (26331).
+    // @level l2 @consumer yrd submit --gitlink
+    // Observe the real process boundary; every invocation still runs Git Super.
+    const bin = join(w.root, "observe-bin")
+    mkdirSync(bin)
+    const compositions = join(w.root, "compositions.jsonl")
+    const wrapper = join(bin, "git-super")
+    writeFileSync(
+      wrapper,
+      [
+        "#!/usr/bin/env bun",
+        'import { appendFileSync } from "node:fs"',
+        'import { spawnSync } from "node:child_process"',
+        "const args = process.argv.slice(2)",
+        'if (args[0] === "--json" && args[1] === "merge")',
+        `  appendFileSync(${JSON.stringify(compositions)}, JSON.stringify({ head: args[2] }) + "\\n")`,
+        `const ran = spawnSync(${JSON.stringify(join(import.meta.dirname, "../../../node_modules/.bin/git-super"))}, args, { stdio: "inherit" })`,
+        "if (ran.error) throw ran.error",
+        "process.exit(ran.status ?? 1)",
+        "",
+      ].join("\n"),
     )
+    chmodSync(wrapper, 0o755)
+    const previousPath = process.env.PATH
+    process.env.PATH = `${bin}:${previousPath ?? ""}`
+    let ran: Awaited<ReturnType<typeof yrd>>
+    try {
+      ran = await yrd(
+        w.work,
+        "submit",
+        "--gitlink",
+        `${one.path}=${one.held}`,
+        "--issue",
+        "25804",
+        "--submitter",
+        "@dev/2",
+      )
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
     expect(ran.exitCode, ran.report).toBe(0)
     await assertCarrier(w, branch, [{ path: one.path, sha: one.held }])
+    const composed = readFileSync(compositions, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(composed).toEqual([{ head: await remoteHead(w.remote, branch) }])
     const location = await resolveQueueLocation(w.work, undefined, process.env, "queue")
     expect(await gitIn(location.repo)(["for-each-ref", "--format=%(refname)", "refs/heads/pin/"])).toBe("")
   }, 60_000)
