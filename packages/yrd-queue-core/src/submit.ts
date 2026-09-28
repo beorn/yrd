@@ -323,7 +323,11 @@ async function admitSubmitAtHead(
   refuseTarget(request.branch, request.target.branch)
   const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
-  if (request.expectedTargetHead !== undefined && request.expectedTargetHead !== targetHead) {
+  if (
+    request.admit !== undefined &&
+    request.expectedTargetHead !== undefined &&
+    request.expectedTargetHead !== targetHead
+  ) {
     throw new Error(
       `${targetName(request.target)} moved from declared ${request.expectedTargetHead} to ${targetHead} before admission; rerun submit to read its current .yrd.yml`,
     )
@@ -354,22 +358,22 @@ async function admitSubmitAtHead(
   }
   const issue = await issueOf(git, request.branch, head, targetHead, request.issue, request.resolveIssue)
   let admission: AdmissionOutcome
-  if (issue === undefined) {
-    admission = { kind: "skipped", reason: "no issue on this change" }
-  } else if (request.admit === undefined) {
+  if (request.admit === undefined) {
     admission = { kind: "skipped", reason: "target declares no admission command" }
   } else {
+    const issueValue = issue?.issue ?? ""
+    const issueLabel = issue?.issue ?? "unbound issue"
     let verdict: AdmissionVerdict
     try {
-      verdict = await request.admit(issue.issue, request.branch, head, targetHead)
+      verdict = await request.admit(issueValue, request.branch, head, targetHead)
     } catch (cause) {
       verdict = {
         kind: "cannot-judge",
-        reason: `admission for ${issue.issue} threw before a verdict: ${String(cause)}`,
+        reason: `admission for ${issueLabel} threw before a verdict: ${String(cause)}`,
       }
     }
     if (verdict.kind === "refuse") {
-      throw new Error(`admission refused ${request.branch}@${head} for ${issue.issue}: ${verdict.reason}`)
+      throw new Error(`admission refused ${request.branch}@${head} for ${issueLabel}: ${verdict.reason}`)
     }
     admission = verdict.kind === "cannot-judge" ? verdict : { kind: "admitted" }
   }

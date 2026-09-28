@@ -5,15 +5,14 @@
  * @testonly none
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
-import { homedir } from "node:os"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn } from "@yrd/queue-core"
 import { admissionVerdict, runAdmission } from "../src/admission.ts"
 import type { ProcessResult } from "@yrd/process"
 
-const base = join(homedir(), ".cache", "yrd-admission-tests")
-mkdirSync(base, { recursive: true })
+const base = tmpdir()
 const roots: string[] = []
 afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true })

@@ -636,6 +636,18 @@ describe("event submit", () => {
     expect(await remoteRefs(w)).toEqual(["refs/heads/main", queueRef("main"), runIndexRef("main")])
   })
 
+  it("does not apply the admission target guard when no admission command is declared", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/no-admission-target-moved", "one.txt")
+    const submitted = await submit(w.git, "origin", {
+      branch: "task/no-admission-target-moved",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      expectedTargetHead: "a".repeat(40),
+    })
+    expect(submitted.admission).toEqual({ kind: "skipped", reason: "target declares no admission command" })
+  })
+
   it("records one cannot-judge warning and deduplicates an unchanged-head retry", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/admission-warning", "one.txt")
@@ -702,18 +714,19 @@ describe("event submit", () => {
     expect(submitted.admissionWarning?.event).toBeDefined()
   })
 
-  it("skips issue-free admission explicitly", async () => {
+  it("runs target admission with an empty issue binding and records cannot-judge", async () => {
     const w = await world()
     await branchWithCommit(w, "feature/without-issue", "one.txt")
-    const admit = vi.fn(async () => ({ kind: "refuse" as const, reason: "must never run" }))
+    const admit = vi.fn(async () => ({ kind: "cannot-judge" as const, reason: "missing issue binding" }))
     const submitted = await submit(w.git, "origin", {
       branch: "feature/without-issue",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
       admit,
     })
-    expect(submitted.admission).toEqual({ kind: "skipped", reason: "no issue on this change" })
-    expect(admit).not.toHaveBeenCalled()
+    expect(admit).toHaveBeenCalledWith("", "feature/without-issue", submitted.head, submitted.targetHead)
+    expect(submitted.admission).toEqual({ kind: "cannot-judge", reason: "missing issue binding" })
+    expect(submitted.admissionWarning?.event).toBeDefined()
   })
 
   it("refuses to submit the target without publishing a change", async () => {
