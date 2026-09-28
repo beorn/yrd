@@ -4,6 +4,8 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { Conflict } from "gitomic"
+import { openEvents } from "gitomic/events"
+import * as events from "../src/events.ts"
 import { createProcess, type Process } from "@yrd/process"
 import * as verifying from "../src/verifying.ts"
 import {
@@ -139,6 +141,109 @@ describe("event submit", () => {
       }),
     ).rejects.toThrow(/unexpected refs/)
     expect(head).toHaveLength(40)
+  })
+
+  it("lets two concurrent first submits create one event queue and both proceed (26398)", async () => {
+    resetQueueFormatCache()
+    const w = await world(false)
+    const work2 = join(dirname(w.work), "work2")
+    await gitIn(dirname(w.work))(["clone", "--quiet", w.remote, work2])
+    const git2 = gitIn(work2)
+    await git2(["config", "user.email", "queue@yrd.test"])
+    await git2(["config", "user.name", "yrd"])
+    await branchWithCommit(w, "task/first-a", "a.txt")
+    await git2(["checkout", "--quiet", "-b", "task/first-b", "main"])
+    writeFileSync(join(work2, "b.txt"), "b\n")
+    await git2(["add", "b.txt"])
+    await git2(["commit", "--quiet", "-m", "b"])
+    const results = await Promise.allSettled([
+      submit(w.git, "origin", {
+        branch: "task/first-a",
+        submitter: "a",
+        target: { branch: "main", remote: "origin" },
+      }),
+      submit(git2, "origin", {
+        branch: "task/first-b",
+        submitter: "b",
+        target: { branch: "main", remote: "origin" },
+      }),
+    ])
+    expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"])
+    resetQueueFormatCache()
+    expect(await queueFormat(store(w), "main")).toBe("event")
+    expect((await readStatus(store(w), "main", "task/first-a")).status).toBe("queued")
+    expect(
+      (await readStatus(createEventStore(work2, "origin", selectionFor(git2)), "main", "task/first-b")).status,
+    ).toBe("queued")
+    const created = (await (await openEvents({ ...store(w), ref: queueRef("main") })).events()).filter(
+      (event) => event.type === "created",
+    )
+    expect(created).toHaveLength(1)
+  })
+
+  it("refuses first submit without .yrd.yml at targetHead and writes no queue ref (26398)", async () => {
+    resetQueueFormatCache()
+    const w = await world(false)
+    await w.git(["rm", "--quiet", ".yrd.yml"])
+    await w.git(["commit", "--quiet", "-m", "drop declaration"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const head = await branchWithCommit(w, "task/no-yml", "no-yml.txt")
+    await expect(
+      submit(w.git, "origin", {
+        branch: "task/no-yml",
+        submitter: "author",
+        target: { branch: "main", remote: "origin" },
+      }),
+    ).rejects.toThrow(/has no \.yrd\.yml/)
+    expect(head).toHaveLength(40)
+    resetQueueFormatCache()
+    expect(await queueFormat(store(w), "main")).toBe("empty")
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
+  })
+
+  it("refuses createEventQueue when QueueConfig targets another remote and writes no ref (26398)", async () => {
+    resetQueueFormatCache()
+    const w = await world(false)
+    const config = await readConfig(w.git, w.target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture lost queue config")
+    await expect(
+      createEventQueue(
+        store(w),
+        "main",
+        w.target,
+        { ...config, target: { remote: "other", branch: "main" } },
+        new Date(),
+      ),
+    ).rejects.toThrow(/QueueConfig targets other#main/)
+    resetQueueFormatCache()
+    expect(await queueFormat(store(w), "main")).toBe("empty")
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
+  })
+
+  it("names the swallowed create error when the re-read is not an event queue (26398)", async () => {
+    resetQueueFormatCache()
+    const w = await world(false)
+    const head = await branchWithCommit(w, "task/lost-create", "lost.txt")
+    const spy = vi.spyOn(events, "createEventQueue").mockRejectedValueOnce(new Conflict("lost create CAS"))
+    try {
+      const error = await submit(w.git, "origin", {
+        branch: "task/lost-create",
+        submitter: "author",
+        target: { branch: "main", remote: "origin" },
+      }).then(
+        () => undefined,
+        (caught: unknown) => caught,
+      )
+      expect(error).toBeInstanceOf(Error)
+      expect(String(error)).toMatch(/did not become an event queue after create: classified empty/)
+      expect(String(error)).toMatch(/lost create CAS/)
+      expect(error).toMatchObject({ cause: expect.any(Conflict) })
+      expect(head).toHaveLength(40)
+      resetQueueFormatCache()
+      expect(await queueFormat(store(w), "main")).toBe("empty")
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it("births the queue and empty run index together; an occupied index lease leaves no queue (26193)", async () => {

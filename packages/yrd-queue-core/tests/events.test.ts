@@ -1949,6 +1949,20 @@ describe("the queue-format boundary", () => {
     expect(events[1]?.links).toEqual([commit])
   })
 
+  it("refuses to classify empty when listing the queue prefix fails (26398)", async () => {
+    const { location } = remoteMemStore("yrd-listing-failure")
+    const broken = {
+      ...location,
+      backend: {
+        ...location.backend,
+        listRefs: async () => {
+          throw new Error("ls-remote failed: origin unreadable")
+        },
+      },
+    }
+    await expect(queueFormat(broken, "lab")).rejects.toThrow(/ls-remote failed: origin unreadable/)
+  })
+
   it("selects one event queue by its queue ref and reads an empty change set without legacy fallback", async () => {
     const { store, location } = remoteMemStore("yrd-event-selector")
     expect(await queueFormat(location, "lab")).toBe("empty")
