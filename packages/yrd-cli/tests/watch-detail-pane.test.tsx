@@ -106,11 +106,19 @@ async function paint(
   size = { cols: 140, rows: 50 },
   rowCount = 1,
   checks: readonly CheckPanel[] = [UNDECLARED_FAILED],
+  withWarning = false,
 ): Promise<{ text: string; lines: string[]; ansi: string }> {
+  let rejectQueueRead: ((error: Error) => void) | undefined
+  const load = withWarning
+    ? () =>
+        new Promise<WatchSnapshot>((_resolve, reject) => {
+          rejectQueueRead = reject
+        })
+    : undefined
   const app = render(
     <NowContext.Provider value={NOW}>
       <MinuteContext.Provider value={NOW}>
-        <WatchPane snapshot={snapshot(rowCount)} live={false} open={opener(checks)} />
+        <WatchPane snapshot={snapshot(rowCount)} live={withWarning} load={load} intervalMs={10} open={opener(checks)} />
       </MinuteContext.Provider>
     </NowContext.Provider>,
     size,
@@ -122,6 +130,14 @@ async function paint(
   await app.waitForLayoutStable()
   await new Promise((resolve) => setTimeout(resolve, 30))
   await app.waitForLayoutStable()
+  if (withWarning) {
+    await vi.waitFor(() => expect(rejectQueueRead).toBeDefined())
+    rejectQueueRead!(new Error("fixture queue read failed at /fixture/queue"))
+    await vi.waitFor(async () => {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("fixture queue read failed at /fixture/queue")
+    })
+  }
   const text = app.text
   const ansi = bufferToStyledText(app.term.buffer)
   writeCaptureIfConfigured(`yrd-watch-26242-${size.cols}x${size.rows}.layout.txt`, debugTree(app.getContainer()))
@@ -190,19 +206,21 @@ describe("26242: watch detail pane at 140x50", () => {
         spec: { name: "lockfile-agreement", run: "bun tools/check-lockfile-agreement.ts" },
         log: "/w/checks/lockfile-agreement.log",
         result: { exit: "1", log: "/w/checks/lockfile-agreement.log", ms: 1000, result: "fail" },
-        output: LONG_LOG,
+        // AC2 includes a genuinely wrapped log line, with no pre-wrapping.
+        output: `${"WRAPPED CHECK LOG BEGIN ".padEnd(420, "wrapped detail output ")}\n${LONG_LOG}`,
       },
       { name: "affected-tests", state: "not-run" },
     ]
-    const { text, lines } = await paint({ cols: 200, rows: 40 }, 40, checks)
+    const { text, lines } = await paint({ cols: 200, rows: 40 }, 40, checks, true)
     const header = lines.findIndex((line) => /TIME.*RUN.*CHANGES/u.test(line))
     const detail = lines.findIndex((line) => line.includes("It failed"))
     expect(header).toBeGreaterThanOrEqual(0)
     expect(detail).toBeGreaterThan(header)
     // The selected identity repeats in the detail: inspect only the list region.
     expect(lines.slice(header + 1, detail).join("\n")).toContain("task/24197-240col-gate")
-    expect(text).toContain("LONG CHECK LOG 01")
+    expect(text).toContain("WRAPPED CHECK LOG BEGIN")
     expect(text).toMatch(/\d+ more lines/u)
+    expect(lines[39]).toContain("fixture queue read failed at /fixture/queue")
   })
 
   it("row 4: RUNNER keeps its rounded box; inner dash sits under RUN", async () => {

@@ -870,7 +870,7 @@ function CheckingStageBody({ detail, selectedSubIndex }: { detail: ChangeDetail;
     return (
       <Box flexDirection="column" minWidth={0}>
         {detail.checks.length > 1 ? (
-          <Box flexDirection="column" minWidth={0}>
+          <Box flexDirection="row" flexWrap="wrap" minWidth={0} gap={2}>
             {detail.checks.map((c, idx) => (
               <Box key={`summary-${c.name}-${c.phase ?? idx}`} flexDirection="row" minWidth={0} gap={1}>
                 <Text color={CHECK_COLOR[c.state]} bold>
@@ -884,7 +884,6 @@ function CheckingStageBody({ detail, selectedSubIndex }: { detail: ChangeDetail;
                 {c.result?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(c.result.ms)}</Text> : null}
               </Box>
             ))}
-            <Box height={1} flexShrink={0} />
           </Box>
         ) : (
           <Box flexDirection="row" minWidth={0} gap={1}>
