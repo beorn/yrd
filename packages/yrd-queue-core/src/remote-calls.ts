@@ -65,7 +65,7 @@ function describeSshCall(
   }
   const dryRun = argv.includes("--dry-run") ? " --dry-run" : ""
   const mainRef = argv.some((arg) => /^\+refs\/heads\/[^:]+:refs\/remotes\/origin\/[^:]+$/u.test(arg))
-  const mainFetch = command === "fetch" && argv.includes("--no-tags") && argv.includes("origin") && mainRef
+  const mainFetch = command === "fetch" && argv.includes("--no-tags") && mainRef
   if (refresh) {
     if (!mainFetch) {
       throw new Error(`Trace2 tagged a non-component-main SSH call as refresh: ${command} in ${namedRepository}`)

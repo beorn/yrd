@@ -21,7 +21,7 @@
  * git transcript. The caller hands in a logger only when trace is on.
  */
 
-import { lstatSync, readlinkSync, rmSync, writeFileSync } from "node:fs"
+import { lstatSync, readlinkSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import type { Process } from "@yrd/process"
 import type { GitProcess } from "git-super/process"
@@ -538,6 +538,17 @@ async function removeWorktree(git: Git, path: string): Promise<void> {
   // git is told to forget the entry afterwards.
   rmSync(path, { force: true, recursive: true })
   await pruneWorktrees(git)
+}
+
+/** An ended run drops its parent only after every child worktree is gone. */
+export function removeEmptyWorktreeRunDirectory(directory: string): void {
+  try {
+    rmdirSync(directory)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST") return
+    throw error
+  }
 }
 
 /** Forget stale registrations under git-super's repository worktree mutation lock (26240). */

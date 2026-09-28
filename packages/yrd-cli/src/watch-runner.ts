@@ -374,8 +374,9 @@ function serviceExitedFact(document: QueueHealthDocument): ServiceExitFact | "un
     document.verdict?.kind !== "stopped" ||
     document.error !== undefined ||
     document.facts?.staleAfter !== undefined
-  )
+  ) {
     return "unreadable"
+  }
   if (typeof raw !== "object" || raw === null) return "unreadable"
   const fact = raw as Readonly<Record<string, unknown>>
   if (
@@ -386,11 +387,10 @@ function serviceExitedFact(document: QueueHealthDocument): ServiceExitFact | "un
     !Number.isFinite(Date.parse(fact.at)) ||
     new Date(Date.parse(fact.at)).toISOString() !== fact.at ||
     (fact.exitCode !== undefined && (!Number.isSafeInteger(fact.exitCode) || Number(fact.exitCode) < 0)) ||
-    (fact.kind === "signal"
-      ? typeof fact.signal !== "string" || fact.signal.length === 0
-      : fact.signal !== undefined)
-  )
+    (fact.kind === "signal" ? typeof fact.signal !== "string" || fact.signal.length === 0 : fact.signal !== undefined)
+  ) {
     return "unreadable"
+  }
   return fact as ServiceExitFact
 }
 
@@ -954,7 +954,7 @@ function runnerLineOf(
       : (died ??
         [
           `${latest.alive ? "alive" : "no process"}: beat ${String(beat)} ago`,
-          `this round since ${clock(latest.startedAt, { seconds: true })}`,
+          `this round since ${clock(latest.startedAt)}`,
           `${checksText}, output ${String(beat)} ago (this machine only)`,
         ].join(" · "))
   // A health document that is there and is not a document decides no word, so

@@ -565,7 +565,7 @@ function provisioningStageInfo(detail: ChangeDetail): StageInfoResult {
   const compose = steps.find((s) => s.name === "compose")
   const prepare = steps.find((s) => s.name === "prepare")
   if (compose === undefined && prepare === undefined) {
-    return { said: " not journaled", state: "not-run" }
+    return { said: " not recorded", state: "not-run" }
   }
   const threw = compose?.threw === true || prepare?.threw === true
   const running =
@@ -626,7 +626,7 @@ function mergingStageInfo(detail: ChangeDetail): StageInfoResult {
   }
   if (detail.row.state === "merged") {
     if (publish === undefined && merge === undefined && notify === undefined) {
-      return { said: " not journaled", state: "not-run" }
+      return { said: " not recorded", state: "not-run" }
     }
     return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
   }
@@ -647,7 +647,7 @@ function deprovisioningStageInfo(detail: ChangeDetail): StageInfoResult {
   }
   if (detail.row.state === "merged" || detail.row.state === "failed") {
     if (remove === undefined && retire === undefined) {
-      return { said: " not journaled", state: "not-run" }
+      return { said: " not recorded", state: "not-run" }
     }
     return { ms: ms > 0 ? ms : undefined, said: ms > 0 ? ` ${mediaDuration(ms)}` : " passed", state: "passed" }
   }
@@ -1271,8 +1271,8 @@ function RunningSteps({ detail }: { detail: ChangeDetail }) {
         STEPS
       </Text>
       {steps.map((step, idx) => {
-        const start = clock(step.startedAt, { seconds: true })
-        const end = step.endedAt !== undefined ? clock(step.endedAt, { seconds: true }) : "running"
+        const start = clock(step.startedAt)
+        const end = step.endedAt !== undefined ? clock(step.endedAt) : "running"
         const elapsed =
           step.ms !== undefined
             ? mediaDuration(step.ms)
@@ -1316,10 +1316,10 @@ function historyOf(detail: ChangeDetail): readonly HistoryEntry[] | undefined {
   return detail.events === undefined ? undefined : eventHistoryEntries(detail.events)
 }
 
-/** The first tab's second line: which of the branch's cuts this is, e.g. `cut 2/3`. */
+/** The first tab's second line: which of the branch's attempts this is, e.g. `attempt 2/3`. */
 function cutCounter(detail: ChangeDetail): string {
   const { cut, cuts } = timelineOf(historyOf(detail) ?? [], undefined)
-  return `cut ${String(cut)}/${String(cuts)}`
+  return `attempt ${String(cut)}/${String(cuts)}`
 }
 
 /** The change list under the status box (item 2): `· <branch>@<sha12> <bold subject>`, ellipsis-truncated. */
@@ -1396,7 +1396,7 @@ function ChangeBox({
         timeline.entries.map((entry) => (
           <Box key={`${entry.at.toISOString()} ${entry.text}`} flexDirection="row" minWidth={0}>
             <Text color="$fg-muted" flexShrink={0}>
-              {clock(entry.at, { seconds: true })}
+              {clock(entry.at)}
               {"  "}
             </Text>
             <Text wrap="wrap" minWidth={0}>

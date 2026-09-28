@@ -102,8 +102,7 @@ export function metadataGroups(
   now: Date,
   about: Readonly<{ commits?: ChangeCommits; runId?: string }> = {},
 ): readonly (readonly MetadataFact[])[] {
-  const when = (at: Date): string =>
-    `${clock(at, { seconds: true })} · ${mediaDuration(now.getTime() - at.getTime())} ago`
+  const when = (at: Date): string => `${clock(at)} · ${mediaDuration(now.getTime() - at.getTime())} ago`
   const identity: MetadataFact[] = [
     ...(row.issue === undefined ? [] : [{ key: "ISSUE", value: row.issue }]),
     ...(row.submitter === undefined ? [] : [{ key: "BY", value: row.submitter }]),
