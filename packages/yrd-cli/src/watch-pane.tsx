@@ -59,6 +59,7 @@ import {
   ModalDialog,
   DISCLOSURE_MARKERS,
   ModalOverlay,
+  Screen,
   SplitPane,
   Text,
   TextInput,
@@ -320,21 +321,31 @@ export function WatchPane(props: WatchPaneProps) {
   const source = props.sources?.length === 1 ? props.sources[0] : undefined
   if (source?.snapshot !== undefined && source.error === undefined) {
     return (
-      <SingleWatchPane
-        {...props}
-        snapshot={source.snapshot}
-        load={source.load}
-        open={source.open}
-        loadDiff={source.loadDiff}
-        loadCommandOutput={source.loadCommandOutput}
-        resolveRunAddress={source.resolveRunAddress}
-      />
+      <Screen>
+        <SingleWatchPane
+          {...props}
+          snapshot={source.snapshot}
+          load={source.load}
+          open={source.open}
+          loadDiff={source.loadDiff}
+          loadCommandOutput={source.loadCommandOutput}
+          resolveRunAddress={source.resolveRunAddress}
+        />
+      </Screen>
     )
   }
   if (props.sources !== undefined && props.sources.length > 0) {
-    return <QueuesWatchPane {...props} sources={props.sources} />
+    return (
+      <Screen>
+        <QueuesWatchPane {...props} sources={props.sources} />
+      </Screen>
+    )
   }
-  return <SingleWatchPane {...props} />
+  return (
+    <Screen>
+      <SingleWatchPane {...props} />
+    </Screen>
+  )
 }
 
 /** Each declared queue owns one in-flight refresh and its own retry clock. A slow queue never delays another. */
