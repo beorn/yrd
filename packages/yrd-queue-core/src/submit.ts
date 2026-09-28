@@ -48,11 +48,22 @@ export type SubmitRequest = Readonly<{
   branch: string
   /** The queue's target: the branch it merges on, at the remote holding it. */
   target: Target
+  /** Target declaration commit captured by the CLI; admission must not run newer code with older policy. */
+  expectedTargetHead?: string
   submitter: string
   issue?: string
   /** Host-owned issue identity. A configured resolver must either return one canonical issue or throw. */
   resolveIssue?: IssueResolver
+  /** Target-owned process policy. The host runs it; core only interprets its verdict. */
+  admit?: (issue: string, branch: string, head: string, targetHead: string) => Promise<AdmissionVerdict>
 }>
+
+export type AdmissionVerdict = Readonly<
+  { kind: "admit" } | { kind: "refuse"; reason: string } | { kind: "cannot-judge"; reason: string }
+>
+export type AdmissionOutcome = Readonly<
+  { kind: "skipped"; reason: string } | { kind: "admitted" } | { kind: "cannot-judge"; reason: string }
+>
 
 export type IssueResolver = (raw: string) => Promise<string>
 
@@ -76,6 +87,9 @@ export type Submitted = Readonly<{
   published: readonly PublishedGitlink[]
   verifying: Verification
   issue?: IssueResolution
+  admission: AdmissionOutcome
+  /** Present only when this submit appended a new warning event; its caller sends one notification. */
+  admissionWarning?: Readonly<{ event: string; reason: string; at: string }>
   /** The stop the line stood under when this was accepted: the change waits behind it. */
   stop?: PauseRecord
 }>
@@ -227,6 +241,7 @@ export type SubmitInspection = Readonly<{
   base: string
   verifying: Verification
   issue?: IssueResolution
+  admission: AdmissionOutcome
   /** An operator or stuck stop is echoed; maintenance refuses intake. */
   stop?: PauseRecord
 }>
@@ -308,6 +323,11 @@ async function admitSubmitAtHead(
   refuseTarget(request.branch, request.target.branch)
   const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
+  if (request.expectedTargetHead !== undefined && request.expectedTargetHead !== targetHead) {
+    throw new Error(
+      `${targetName(request.target)} moved from declared ${request.expectedTargetHead} to ${targetHead} before admission; rerun submit to read its current .yrd.yml`,
+    )
+  }
   const bound = freshnessLine(targetHead)
   if (await isAncestor(git, head, targetHead)) {
     // The target may have advanced past this branch's exact landing. Consult
@@ -333,6 +353,26 @@ async function admitSubmitAtHead(
     )
   }
   const issue = await issueOf(git, request.branch, head, targetHead, request.issue, request.resolveIssue)
+  let admission: AdmissionOutcome
+  if (issue === undefined) {
+    admission = { kind: "skipped", reason: "no issue on this change" }
+  } else if (request.admit === undefined) {
+    admission = { kind: "skipped", reason: "target declares no admission command" }
+  } else {
+    let verdict: AdmissionVerdict
+    try {
+      verdict = await request.admit(issue.issue, request.branch, head, targetHead)
+    } catch (cause) {
+      verdict = {
+        kind: "cannot-judge",
+        reason: `admission for ${issue.issue} threw before a verdict: ${String(cause)}`,
+      }
+    }
+    if (verdict.kind === "refuse") {
+      throw new Error(`admission refused ${request.branch}@${head} for ${issue.issue}: ${verdict.reason}`)
+    }
+    admission = verdict.kind === "cannot-judge" ? verdict : { kind: "admitted" }
+  }
   // Operator and stuck stops are echoed; a maintenance stop refuses intake.
   // Issue conflicts are settled before
   // repository composition starts; every other refusal below still carries
@@ -355,6 +395,7 @@ async function admitSubmitAtHead(
     root,
     operational,
     ...(issue === undefined ? {} : { issue }),
+    admission,
     ...(stop === undefined ? {} : { stop }),
   }
 }
@@ -455,14 +496,28 @@ async function submitEvent(
       ...(inspected.issue === undefined ? {} : { issue: inspected.issue.issue }),
       title: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
     })
+    const warningReason = inspected.admission.kind === "cannot-judge" ? inspected.admission.reason : undefined
+    const warningAt = new Date()
+    const warning =
+      warningReason !== undefined
+        ? changeInput("admission-warning", {
+            queueTip: ops.queue.tip,
+            at: warningAt,
+            commit: head,
+            reason: warningReason,
+            title: `admission could not judge ${request.branch}@${head.slice(0, 12)}`,
+          })
+        : undefined
     let retry = false
     let retryOpened: string | undefined
+    let warningWritten = false
     // Lease the authoritative queue tip beside this change. A new maintenance
     // event between the read and publish makes the whole atomic push fail.
     let result
     try {
       result = await chain.transact(
         (events) => {
+          warningWritten = false
           let current
           try {
             current = events.length === 0 ? initial : project(events, ref, root)
@@ -481,9 +536,20 @@ async function submitEvent(
               current.status === "stuck")
           if (retry) {
             retryOpened = events.findLast((event) => event.type === "opened")?.id
-            return []
+            if (warning === undefined) return []
+            const currentSegment = events.slice(events.findLastIndex((event) => event.type === "opened"))
+            const repeated = currentSegment.some(
+              (event) =>
+                event.type === "admission-warning" &&
+                event.props.some(([key, value]) => key === "Commit" && value === head) &&
+                event.props.some(([key, value]) => key === "Reason" && value === warningReason),
+            )
+            if (repeated) return []
+            warningWritten = true
+            return [warning]
           }
-          return decide(events, input)
+          warningWritten = warning !== undefined
+          return [...decide(events, input), ...(warning === undefined ? [] : [warning])]
         },
         `submit ${request.branch}`,
         {
@@ -512,6 +578,12 @@ async function submitEvent(
     }
     const opened = retryOpened ?? result.events.findLast((event) => event.type === "opened")?.id
     if (opened === undefined) throw new Error(`${ref} in ${root}: submit published no opened event`)
+    const warningEvent = warningWritten
+      ? result.events.findLast((event) => event.type === "admission-warning")?.id
+      : undefined
+    if (warningWritten && warningEvent === undefined) {
+      throw new Error(`${ref} in ${root}: submit published no admission-warning event`)
+    }
     if (retry) {
       const latest = await readEventOps(store, git, request.target.branch, inspected.targetHead)
       refuseMaintenance(latest.stop, remote, request.target.branch, published)
@@ -524,6 +596,16 @@ async function submitEvent(
       retry,
       published,
       verifying: inspected.verifying,
+      admission: inspected.admission,
+      ...(warningEvent !== undefined && warningReason !== undefined
+        ? {
+            admissionWarning: {
+              event: warningEvent,
+              reason: warningReason,
+              at: warningAt.toISOString(),
+            },
+          }
+        : {}),
       ...(inspected.issue === undefined ? {} : { issue: inspected.issue }),
       ...(ops.stop === undefined ? {} : { stop: ops.stop }),
     }

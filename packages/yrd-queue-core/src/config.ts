@@ -78,6 +78,7 @@ const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]
 // verb's set, clear and replace, and a round's expiry and half-window reminder.
 // Not a default: only an entry that names it hears it.
 export const ENDINGS = [
+  "admission-warning",
   "merged",
   "failed",
   "stuck",
@@ -121,6 +122,8 @@ export type QueueConfig = Readonly<{
   ignore: readonly string[]
   /** Target-owned command that resolves a raw issue reference to its canonical identity. */
   issueResolver?: readonly string[]
+  /** Target-owned pre-submit policy command. Exit 1 refuses; failures to judge warn. */
+  admission?: Readonly<{ run: string; timeoutMs: number }>
   checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
   setup?: string
@@ -181,6 +184,7 @@ export function parseConfig(
   const setup = optionalString(raw, "setup")
   const teardown = optionalString(raw, "teardown")
   const issueResolver = readIssueResolver(raw.issueResolver)
+  const admission = readAdmission(raw.admission)
   return {
     archiveAfter: readArchiveAfter(raw["archive-after"]),
     blob,
@@ -188,6 +192,7 @@ export function parseConfig(
     health: readHealth(raw.health),
     ignore: readIgnore(raw.ignore),
     ...(issueResolver === undefined ? {} : { issueResolver }),
+    ...(admission === undefined ? {} : { admission }),
     notify,
     setup,
     teardown,
@@ -376,6 +381,7 @@ function readChecks(value: unknown): readonly CheckSpec[] {
 // submodules and nothing else, so the target says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
 const TOP_KEYS = [
+  "admission",
   "archive-after",
   "checks",
   "health",
@@ -385,6 +391,19 @@ const TOP_KEYS = [
   "teardown",
   "notify",
 ] as const
+
+function readAdmission(value: unknown): QueueConfig["admission"] {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) throw new Error(".yrd.yml admission: must be a mapping with run and timeoutMs")
+  onlyKeys(value, ["run", "timeoutMs"], ".yrd.yml admission")
+  if (typeof value.run !== "string" || value.run.trim() === "" || value.run !== value.run.trim()) {
+    throw new Error(".yrd.yml admission.run: must be a non-empty command without surrounding whitespace")
+  }
+  if (!Number.isSafeInteger(value.timeoutMs) || (value.timeoutMs as number) < 1) {
+    throw new Error(".yrd.yml admission.timeoutMs: must be a positive integer")
+  }
+  return { run: value.run, timeoutMs: value.timeoutMs as number }
+}
 
 function readIssueResolver(value: unknown): readonly string[] | undefined {
   if (value === undefined) return undefined

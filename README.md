@@ -122,9 +122,9 @@ In a superproject, `git super status`, `git super diff` and `git super push` wor
 
 **What submit does, in order:**
 
-1. Refuses the queue branch, reads the local branch head, then reads and fetches the configured target's advertised commit. Fetch obtains the commit objects without pulling or integrating them into your branch. Operator and stuck stops accept the submit; a maintenance stop refuses it before publication. No check runs at submit.
+1. Refuses the queue branch, reads the local branch head, then reads and fetches the configured target's advertised commit. Fetch obtains the commit objects without pulling or integrating them into your branch. Operator and stuck stops accept the submit; a maintenance stop refuses it before publication. No queue check runs at submit.
 2. Checks shared history and refuses a head already contained by the target.
-3. Composes the submitted commit onto the observed target and settles gitlinks with git-super. A conflict refuses submission before a change opens, naming the conflict. The submitted commit remains unchanged.
+3. Resolves the issue and runs the target's optional `admission` command before any push. A policy exit 1 refuses with its stdout cure. A timeout, signal or other failure cannot judge: submit proceeds with a visible warning event and target-declared notification. Issue-free changes skip admission and say so. It then composes the submitted commit onto the observed target and settles gitlinks with git-super. A conflict refuses submission before a change opens, naming the conflict. The submitted commit remains unchanged.
 4. Creates the opened record for that submitted commit, then publishes it as the branch head together with the record in one atomic push. The branch, change and stop authority use leases against the remote values just observed; a concurrent maintenance stop refuses the whole push.
 5. Returns the submitted change. The queue runs checks and merges later, revalidating against the target at merge time. Successful submission means queued, not merged.
 
@@ -144,6 +144,9 @@ Everything the file can say:
 
 ```yml
 setup: bun install --frozen-lockfile # runs once in every fresh checkout the queue makes, before any check
+admission: # optional target-owned pre-submit command, run in a detached checkout of the captured target
+  run: bun tools/admission.ts
+  timeoutMs: 15000 # required positive integer; includes the policy process, not target checkout preparation
 checks:
   - typecheck: # each check is one mapping of its name to its settings
       run: bun "$YRD_PROGRAM_ROOT/tools/typecheck.ts"
@@ -159,9 +162,15 @@ notify: # the same shape as checks: a name, when it runs, what runs
   - supervisor:
       on: [stuck, merged-direct]
       run: bun tools/yrd-notify.ts --to @cto
+  - admission-supervisor:
+      on: admission-warning
+      run: bun tools/yrd-notify.ts --to @cto
 health:
   stallAfter: 45m # changes waiting with none judged for this long is a stalled line; default 45m, at least 10m
 ```
+
+`admission` receives `YRD_ADMISSION_ISSUE` (the canonical issue path), `YRD_ADMISSION_BRANCH`, and `YRD_ADMISSION_HEAD`. Its target checkout uses the target's code even if the submitted branch edits the policy script. Exit 0 admits; exit 1 refuses and prints a cure on stdout; any other exit, signal, timeout, incomplete output or execution failure is *cannot judge*. A cannot-judge submission stays in the queue and records an `admission-warning` event with the head, reason and time. The same head and reason are recorded once per change, including retries; a new warning event dispatches the target's `notify: on: admission-warning` entry once. A missing notification entry or failed delivery is reported on stderr. `--dry-run` runs admission and reports its verdict without publishing. The target policy command must run without `setup:`; it executes in a clean target checkout before checks install dependencies.
+If the target advances between reading `.yrd.yml` and admission, submit refuses with a retry instruction so a newer policy is never run with an older declaration.
 
 A queue-authored cancellation after a confirmed missing remote branch sends `cancelled` through this ring. An explicit `yrd drop` or `yrd queue withdraw` sends no cancellation notice.
 
