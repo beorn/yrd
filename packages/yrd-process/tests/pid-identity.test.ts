@@ -4,9 +4,10 @@
  * @consumer Yrd's runner publisher and watch reader
  * @testonly none
  */
-import { mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { safeRemoveSync } from "removely"
 import { describe, expect, it, vi } from "vitest"
 import { pidPresence, processStartIdentity } from "../src/pid-identity.ts"
 
@@ -24,7 +25,7 @@ describe("process identity", () => {
         unreadable: [{ field: "startTick", path: join(root, "42/stat"), code: "ENOENT" }],
       })
     } finally {
-      rmSync(root, { recursive: true, force: true })
+      safeRemoveSync(root, { within: realpathSync(tmpdir()) })
     }
   })
 
