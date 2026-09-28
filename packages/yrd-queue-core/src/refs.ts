@@ -129,3 +129,20 @@ export function parseChangeRef(queue: string, ref: string): Change | undefined {
   if (name === "pause" || name === "override") return undefined
   return parseChangeName(name)
 }
+
+/** The one vocabulary for every ref this queue owns; readers dispatch on this kind, never a second name list. */
+export type QueueRefKind = "change" | "changes" | "queue" | "pause" | "override" | "runner" | "runs"
+
+export function classifyQueueRef(queue: string, ref: string): QueueRefKind | undefined {
+  const prefix = `${queueRefPrefix(queue)}/`
+  if (!ref.startsWith(prefix)) return undefined
+  if (ref === queueRef(queue)) return "queue"
+  if (ref === pauseRef(queue)) return "pause"
+  if (ref === runnerRef(queue)) return "runner"
+  if (ref === runIndexRef(queue)) return "runs"
+  // `override` is an old, named operational ref with no current reader; the census must page it.
+  if (ref === `${prefix}override`) return "override"
+  if (ref === `${prefix}changes` || ref.startsWith(`${prefix}changes/`)) return "changes"
+  if (parseChangeRef(queue, ref) !== undefined) return "change"
+  return undefined
+}

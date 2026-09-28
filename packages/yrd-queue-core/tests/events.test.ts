@@ -12,7 +12,7 @@ import type { GitomicBackend } from "gitomic"
 import { gitIn } from "../src/git.ts"
 import { readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
-import { pauseRef, runIndexRef } from "../src/refs.ts"
+import { classifyQueueRef, pauseRef, runIndexRef } from "../src/refs.ts"
 import { activateRunIndex, lookupRunIndex } from "../src/run-index.ts"
 import { encodeOps, type OpsState } from "../src/ops-state.ts"
 import { queueResumedAfter } from "../src/index.ts"
@@ -191,6 +191,19 @@ describe("ADR-0017 ref tree", () => {
     expect(runIndexRef("feature/main")).toBe("refs/yrd/feature%2Fmain/runs")
     expect(changesRef("feature/main", "task/42-one")).toBe("refs/yrd/feature%2Fmain/changes/task/42-one")
     expect(() => changesRef("main", "../escape")).toThrow(/branch/)
+  })
+
+  it("classifies each owned ref kind without treating an unknown or nested old name as a current reader", () => {
+    const sha = "a".repeat(40)
+    expect(classifyQueueRef("main", "refs/yrd/main/queue")).toBe("queue")
+    expect(classifyQueueRef("main", "refs/yrd/main/runs")).toBe("runs")
+    expect(classifyQueueRef("main", "refs/yrd/main/runner")).toBe("runner")
+    expect(classifyQueueRef("main", "refs/yrd/main/pause")).toBe("pause")
+    expect(classifyQueueRef("main", "refs/yrd/main/override")).toBe("override")
+    expect(classifyQueueRef("main", "refs/yrd/main/changes/task/one")).toBe("changes")
+    expect(classifyQueueRef("main", `refs/yrd/main/task/one@${sha}`)).toBe("change")
+    expect(classifyQueueRef("main", "refs/yrd/main/unnamed")).toBeUndefined()
+    expect(classifyQueueRef("main", "refs/yrd/other/queue")).toBeUndefined()
   })
 })
 
