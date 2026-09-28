@@ -42,12 +42,12 @@ import { issueResolver } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 
-export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string }>
+export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string; hold?: string }>
 export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string }>
 export type EnvListOptions = Readonly<{ json?: boolean }>
 
 /** One environment as git holds it: a worktree under the bays root. */
-export type EnvRow = Readonly<{ name: string; path: string; branch?: string; head?: string }>
+export type EnvRow = Readonly<{ name: string; path: string; branch?: string; head?: string; hold: string | null }>
 
 /**
  * The repository a command stands in, and the target its declaration names.
@@ -90,6 +90,9 @@ async function resolveBaseSha(git: Git, target: string): Promise<string> {
  */
 export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
+  if (options.hold !== undefined && options.hold.trim() === "") {
+    throw new Error("yrd env open --hold needs a non-empty reason")
+  }
   const commit = options.commit
   if (commit !== undefined && options.issue !== undefined) {
     throw new Error(
@@ -152,6 +155,16 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     provisioned = result.output
   }
   const { path, baseSha } = provisioned
+  if (options.hold !== undefined) {
+    try {
+      await git(["worktree", "lock", "--reason", options.hold, path])
+    } catch (error) {
+      throw new Error(
+        `yrd env open created ${path} but could not hold it: ${error instanceof Error ? error.message : String(error)}; the environment remains open, so inspect git worktree list before retrying`,
+        { cause: error },
+      )
+    }
+  }
   let headSha = provisioned.headSha
   if (options.issue !== undefined && branch !== undefined) {
     try {
@@ -233,9 +246,10 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
   const prefixes = roots.map((path) => `${existsSync(path) ? realpathSync(path) : resolve(path)}/`)
   const rows: EnvRow[] = (await registeredWorktrees(gitIn(root, process)))
     .filter(({ path }) => prefixes.some((prefix) => path.startsWith(prefix)))
-    .map(({ path, head, branch }) => ({
+    .map(({ path, head, branch, locked }) => ({
       name: basename(path),
       path,
+      hold: locked ?? null,
       ...(head === undefined ? {} : { head }),
       ...(branch === undefined ? {} : { branch }),
     }))
@@ -247,7 +261,9 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
     io.stdout(`no registered environments under ${roots.join(" or ")}; worktrees elsewhere excluded\n`)
     return 0
   }
-  io.stdout(`${rows.map((row) => `${row.name}  ${row.branch ?? "(detached)"}  ${row.path}`).join("\n")}\n`)
+  io.stdout(
+    `${rows.map((row) => `${row.name}  ${row.branch ?? "(detached)"}  ${row.path}${row.hold === null ? "" : row.hold === "" ? "  held" : `  hold: ${row.hold}`}`).join("\n")}\n`,
+  )
   return 0
 }
 
