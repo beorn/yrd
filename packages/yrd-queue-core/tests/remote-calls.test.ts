@@ -64,67 +64,72 @@ describe("remote calls are counted from git's trace2 event log", () => {
   }, 60_000)
 
   /** @failure A round's total hid the 15 component-main refreshes, so its beyond-refresh SSH cost was unknowable. */
-  it("keeps a proven refresh split and names the SSH commands after Trace2 is removed (26232)", async () => {
-    const root = mkdtempSync(join(tmpdir(), "yrd-round-refresh-"))
-    roots.push(root)
-    const seed = join(root, "seed")
-    mkdirSync(seed)
-    const git = gitIn(seed)
-    await git(["init", "--quiet", "--initial-branch=main"])
-    await git([
-      "-c",
-      "user.email=calls@yrd.test",
-      "-c",
-      "user.name=yrd",
-      "commit",
-      "--quiet",
-      "--allow-empty",
-      "-m",
-      "one",
-    ])
-    const remote = join(root, "remote.git")
-    await gitIn(root)(["clone", "--quiet", "--bare", seed, remote])
-    const ssh = join(root, "fake-ssh")
-    writeFileSync(ssh, '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n')
-    chmodSync(ssh, 0o755)
-    const trace = traceRemoteCalls(join(root, "trace2"), { refresh: true })
-    const base = { ...process.env, ...trace.env, GIT_SSH_COMMAND: ssh }
-    const url = `ssh://calls.invalid${remote}`
-    await git(["remote", "add", "origin", url])
-    await gitIn(seed, undefined, undefined, { env: { ...base, GIT_SUPER_PHASE: "refresh" } })([
-      "fetch",
-      "--no-tags",
-      "origin",
-      "+refs/heads/main:refs/remotes/origin/main",
-    ])
-    await gitIn(seed, undefined, undefined, { env: base })(["ls-remote", url, "refs/heads/main"])
-    const row = roundRemoteCallsRow(trace.end())
-    expect(row).toMatchObject({
-      ssh_children: 2,
-      refresh_ssh_children: 1,
-      beyond_refresh_ssh_children: 1,
-      unreadable: 0,
-    })
-    expect(row.refresh_calls).toEqual([`1 fetch @ ${seed}`])
-    expect(row.beyond_refresh_calls).toEqual([`1 ls-remote @ ${seed}`])
-    expect(existsSync(join(root, "trace2"))).toBe(false)
+  it.each(["configured origin", "captured URL"])(
+    "keeps a proven refresh split for %s after Trace2 is removed (26232)",
+    async (source) => {
+      const root = mkdtempSync(join(tmpdir(), "yrd-round-refresh-"))
+      roots.push(root)
+      const seed = join(root, "seed")
+      mkdirSync(seed)
+      const git = gitIn(seed)
+      await git(["init", "--quiet", "--initial-branch=main"])
+      await git([
+        "-c",
+        "user.email=calls@yrd.test",
+        "-c",
+        "user.name=yrd",
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "one",
+      ])
+      const remote = join(root, "remote.git")
+      await gitIn(root)(["clone", "--quiet", "--bare", seed, remote])
+      const ssh = join(root, "fake-ssh")
+      writeFileSync(ssh, '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n')
+      chmodSync(ssh, 0o755)
+      const trace = traceRemoteCalls(join(root, "trace2"), { refresh: true })
+      const base = { ...process.env, ...trace.env, GIT_SSH_COMMAND: ssh }
+      const url = `ssh://calls.invalid${remote}`
+      const selected = source === "captured URL" ? url : "origin"
+      await git(["remote", "add", "origin", url])
+      await gitIn(seed, undefined, undefined, { env: { ...base, GIT_SUPER_PHASE: "refresh" } })([
+        "fetch",
+        "--no-tags",
+        selected,
+        "+refs/heads/main:refs/remotes/origin/main",
+      ])
+      await gitIn(seed, undefined, undefined, { env: base })(["ls-remote", url, "refs/heads/main"])
+      const row = roundRemoteCallsRow(trace.end())
+      expect(row).toMatchObject({
+        ssh_children: 2,
+        refresh_ssh_children: 1,
+        beyond_refresh_ssh_children: 1,
+        unreadable: 0,
+      })
+      expect(row.refresh_calls).toEqual([`1 fetch @ ${seed}`])
+      expect(row.beyond_refresh_calls).toEqual([`1 ls-remote @ ${seed}`])
+      expect(existsSync(join(root, "trace2"))).toBe(false)
 
-    // An older git-super still makes the same refresh fetch but cannot mark it;
-    // the round must warn instead of publishing a plausible zero refresh count.
-    const oldTrace = traceRemoteCalls(join(root, "old-trace2"), { refresh: true })
-    await gitIn(seed, undefined, undefined, {
-      env: { ...process.env, ...oldTrace.env, GIT_SSH_COMMAND: ssh },
-    })(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
-    expect(() => roundRemoteCallsRow(oldTrace.end())).toThrow(/untagged component-main refresh/u)
-    expect(existsSync(join(root, "old-trace2"))).toBe(false)
+      // An older git-super still makes the same refresh fetch but cannot mark it;
+      // the round must warn instead of publishing a plausible zero refresh count.
+      const oldTrace = traceRemoteCalls(join(root, "old-trace2"), { refresh: true })
+      await gitIn(seed, undefined, undefined, {
+        env: { ...process.env, ...oldTrace.env, GIT_SSH_COMMAND: ssh },
+      })(["fetch", "--no-tags", selected, "+refs/heads/main:refs/remotes/origin/main"])
+      expect(() => roundRemoteCallsRow(oldTrace.end())).toThrow(/untagged component-main refresh/u)
+      expect(existsSync(join(root, "old-trace2"))).toBe(false)
 
-    // Submit observes the same Git call but has no round refresh boundary.
-    const submitTrace = traceRemoteCalls(join(root, "submit-trace2"), { seams: true })
-    await gitIn(seed, undefined, undefined, {
-      env: { ...process.env, ...submitTrace.env, GIT_SSH_COMMAND: ssh },
-    })(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
-    expect(submitTrace.end().sshChildren).toBe(1)
-  }, 60_000)
+      // Submit observes the same Git call but has no round refresh boundary.
+      const submitTrace = traceRemoteCalls(join(root, "submit-trace2"), { seams: true })
+      await gitIn(seed, undefined, undefined, {
+        env: { ...process.env, ...submitTrace.env, GIT_SSH_COMMAND: ssh },
+      })(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+      expect(submitTrace.end().sshChildren).toBe(1)
+    },
+    60_000,
+  )
 
   it("names an SSH clone even when Git has not defined its destination repository", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-round-clone-"))

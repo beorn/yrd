@@ -1,7 +1,7 @@
 /**
  * @reach fs-walk <fixture-only: gitlink cases use temporary repos and a named git-super binary>
- * Settling at submit and merge: git-super raises every held-back gitlink to its
- * submodule's newest main. An authored gitlink main does not carry waits without
+ * Settling at submit and merge: git-super refreshes moved and non-Equal pins,
+ * reusing untouched Equal observations for at most ten minutes. An authored gitlink main does not carry waits without
  * ending the change or blocking the next entry; an object no remote can supply
  * is the submitter's failed change, never a queue-owned stuck.
  *
@@ -240,6 +240,57 @@ it("runs a gitlink-bearing event change through the checked candidate", async ()
   expect(state.candidate).toBe(await remoteTip(w.git, "refs/heads/main"))
 })
 
+/** @failure A queue round omits bounded reuse and refreshes every component despite a warm Equal observation (26263).
+ * @level l3 @consumer queue operator's component refresh budget
+ * @testonly none
+ * Core tests cannot catch the round caller omitting the existing option.
+ */
+it("refreshes only the moved component in a round with an untouched warm Equal component", async () => {
+  const w = await world()
+  await addSecondChild(w)
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "one-moved-component")
+  await submitGitlink(w, "task/one-moved-component", ahead)
+  const trace = join(dirname(w.work), "round-compose-trace.jsonl")
+  await using real = createProcess({ cwd: w.work })
+  let compositions = 0
+  const recording: Process = {
+    ...real,
+    async run(request) {
+      if (request.argv.includes("super") && request.argv.includes("merge")) {
+        compositions++
+        return real.run({
+          ...request,
+          env: { ...request.env, GIT_TRACE2_EVENT: trace, GIT_TRACE2_ENV_VARS: "GIT_SUPER_PHASE" },
+        })
+      }
+      return real.run(request)
+    },
+  }
+  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [], process: recording })
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/one-moved-component"] })
+  expect(compositions).toBe(1)
+  const rows = readFileSync(trace, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { event: string; sid: string; param?: string; value?: string; argv?: string[] })
+  const refreshProcesses = new Set(
+    rows
+      .filter((row) => row.event === "def_param" && row.param === "GIT_SUPER_PHASE" && row.value === "refresh")
+      .map((row) => row.sid),
+  )
+  // Transport descendants inherit the tag; count the fetch itself once.
+  const refreshes = rows.filter(
+    (row) =>
+      row.event === "start" &&
+      refreshProcesses.has(row.sid) &&
+      row.argv?.includes("fetch") &&
+      row.argv.includes("--no-tags"),
+  )
+  expect(refreshes).toHaveLength(1)
+  expect(await submoduleMain(w)).toBe(ahead)
+})
+
 /** @failure A stale file-only branch spent remote calls retaining old component pins it never changed (26231).
  * @level l1 @consumer Yrd submit's per-operation SSH budget
  */
@@ -259,6 +310,9 @@ it("does not publish a stale target's component pins for a file-only branch", as
   await w.git(["add", "submodule"])
   await w.git(["commit", "--quiet", "-m", "advance component on main"])
   await w.git(["push", "--quiet", "origin", "main"])
+  // The persistent store looks Ahead of its stale tracking ref. Submit must
+  // observe the already published main before deciding, despite noFetch.
+  await sub(["update-ref", "refs/remotes/origin/main", w.main])
 
   const result = await submit(w.git, "origin", {
     branch: "task/stale-file",
@@ -267,6 +321,7 @@ it("does not publish a stale target's component pins for a file-only branch", as
   })
   expect(result.verifying.state).toBe("verified")
   expect(result.published).toEqual([])
+  expect((await sub(["rev-parse", "refs/remotes/origin/main"])).trim()).toBe(newer)
 })
 
 it("publishes exactly the component pin a branch authored", async () => {
@@ -414,6 +469,7 @@ it.each([
   await submitFile(w, "task/raised-check")
   const rootBefore = await remoteTip(w.git, "refs/heads/main")
   const childBefore = await advanceSubmodule(w, "four")
+  await expireComponentObservation(w)
 
   const outcome = await queueRun({ ...(await w.options({ run: command, on: ["merge"] })), notify: [] })
 
@@ -433,6 +489,7 @@ it("runs the declared base phase in order through the failed check", async () =>
   await createWorldEventQueue(w)
   await submitFile(w, "task/prefix-check")
   await advanceSubmodule(w, "four")
+  await expireComponentObservation(w)
   const rows: Array<{ kind: string; phase?: string; name?: string; result?: string; whose?: string }> = []
   const outcome = await queueRun({
     ...(await w.options()),
@@ -461,6 +518,7 @@ it.each([
   await createWorldEventQueue(w)
   await submitFile(w, "task/cleanup-check")
   await advanceSubmodule(w, "four")
+  await expireComponentObservation(w)
   await using real = createProcess({ cwd: w.work })
   let baseCheckRan = false
   let cleanupRejected = false
@@ -517,6 +575,7 @@ it.each([
   await createWorldEventQueue(w)
   await submitFile(w, "task/marker-check")
   await advanceSubmodule(w, "four")
+  await expireComponentObservation(w)
   const rows: Array<{ kind: string; phase?: string; scope?: string }> = []
   const run = `if [ "$YRD_CHECK_SCOPE" = settled-base-attribution ]; then ${base}; else ${candidate}; fi`
 
@@ -1075,6 +1134,17 @@ it("publishes a nested pin that the branch authored", async () => {
 async function gitlinkAt(w: World, commit: string): Promise<string> {
   const row = (await w.git(["ls-tree", commit, "--", "submodule"])).trim().split(/\s+/u)
   return row[2] ?? ""
+}
+
+/** Attribution fixtures require the queue to discover a newer child main. */
+async function expireComponentObservation(w: World): Promise<void> {
+  const sub = gitIn(join(w.work, "submodule"))
+  const oid = (await sub(["rev-parse", "refs/remotes/origin/main"])).trim()
+  const origin = (await sub(["config", "--get", "remote.origin.url"])).trim()
+  const dated = gitIn(join(w.work, "submodule"), undefined, undefined, {
+    env: { ...process.env, GIT_COMMITTER_DATE: new Date(Date.now() - 601_000).toISOString() },
+  })
+  await dated(["reflog", "write", "refs/remotes/origin/main", oid, oid, `git-super component-main refresh ${origin}`])
 }
 
 async function advanceSubmodule(w: World, contents: string): Promise<string> {
