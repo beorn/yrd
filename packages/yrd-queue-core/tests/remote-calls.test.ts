@@ -10,7 +10,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { createLegacyBackend, gitIn, readRemoteCommit } from "../src/git.ts"
+import { createProcess } from "@yrd/process"
+import { createLegacyBackend, gitIn, invokeGit, readRemoteCommit } from "../src/git.ts"
 import { readRemoteCalls, roundRemoteCallsRow, traceRemoteCalls, withRemoteSeam } from "../src/remote-calls.ts"
 
 const roots: string[] = []
@@ -215,7 +216,12 @@ describe("remote calls are counted from git's trace2 event log", () => {
     expect(existsSync(join(root, "unread", "trace2"))).toBe(false)
   })
 
-  it("attributes real Git and Gitomic remote reads to their calling seams (25626)", async () => {
+  /** @failure Candidate composition bypassed gitIn's label overlay and left 16 SSH children unlabelled (26292).
+   * @level l2: direct supervised Git invocation and SSH child events, using a local upload-pack transport.
+   * @consumer submit's operation groups; no test-only production seam.
+   * @testonly none
+   */
+  it("attributes Git, Gitomic and direct supervised reads to their calling seams (25626, 26292)", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-remote-seams-"))
     roots.push(root)
     const seed = join(root, "seed")
@@ -241,11 +247,33 @@ describe("remote calls are counted from git's trace2 event log", () => {
       /^[0-9a-f]{40}$/u,
     )
     await withRemoteSeam("listBranch", () => caller(["ls-remote", remote, "refs/heads/main"]))
+    const ssh = join(root, "fake-ssh")
+    writeFileSync(ssh, '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n')
+    chmodSync(ssh, 0o755)
+    const composeEnv = {
+      ...process.env,
+      ...traced.env,
+      GIT_SSH_COMMAND: ssh,
+    }
+    await using runner = createProcess({ cwd: seed, env: composeEnv })
+    const composed = await withRemoteSeam("composeSubmit", () =>
+      invokeGit(
+        runner,
+        { cwd: seed, args: ["ls-remote", `ssh://seams.invalid${remote}`, "refs/heads/main"] },
+        {},
+        composeEnv,
+        undefined,
+      ),
+    )
+    expect(composed.failure).toBeUndefined()
+    expect(composed.result?.exitCode, composed.result?.stderr).toBe(0)
+    expect(composeEnv).not.toHaveProperty("YRD_SEAM")
     await caller(["ls-remote", remote, "refs/heads/main"])
     const calls = traced.end()
     expect(calls.seams).toMatchObject({
       readRemoteCommit: { fetch: 1 },
       listBranch: { "ls-remote": 1 },
+      composeSubmit: { "ls-remote": 1, ssh_children: 1 },
     })
     expect(calls.seams.unattributed).toMatchObject({ "ls-remote": 1 })
     expect(calls.unreadable).toBe(0)

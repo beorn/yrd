@@ -279,13 +279,11 @@ export function gitIn(
   const invoke = async (originalArgs: readonly string[], input?: string, observation = false) => {
     const args = Object.freeze([...originalArgs])
     const attempt = async (attemptEnv: NodeJS.ProcessEnv | undefined) => {
-      const runEnv =
-        remoteSeam() === undefined ? attemptEnv : seamEnvironment(attemptEnv ?? gitEnvironment(globalThis.process.env))
       let evidence = await invokeGit(
         runner,
         { args, cwd, ...(selection === undefined ? {} : { selection }) },
         options,
-        runEnv,
+        attemptEnv,
         input,
         observation,
       )
@@ -474,11 +472,12 @@ export async function invokeGit(
   let failure: string | undefined
   try {
     output = options.openOutput?.(invocation)
+    const runEnv = remoteSeam() === undefined ? env : seamEnvironment(env ?? gitEnvironment(globalThis.process.env))
     result = await runner.run({
       argv: [selection?.executable ?? "git", ...(protocol === undefined ? [] : ["--protocol-fd=3"]), ...args],
       cwd,
       captureRawOutput: true,
-      ...(env === undefined ? {} : { env }),
+      ...(runEnv === undefined ? {} : { env: runEnv }),
       ...(input === undefined ? {} : { stdin: input }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
       signal: options.signal === undefined ? abort.signal : AbortSignal.any([abort.signal, options.signal]),
