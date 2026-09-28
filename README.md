@@ -65,7 +65,7 @@ yrd queue stats [--since 3h|<time>|<sha>] [--by submitter|branch] merged, failed
 yrd queue show <branch>                                           that branch's change segments, newest first, each with its events and ending
 yrd queue show --all --json                                       every branch's change segments in one document, grouped by branch name
 yrd check <name...>                                               run the named checks here, now, in a fresh checkout of HEAD
-yrd env open [commit] | --bay <name> | --issue <ref>              with [commit], retain that exact commit detached; with --bay/--issue instead, open or adopt its task/<name> branch; print the path
+yrd env open ([commit] | --bay <name> | --issue <ref>) [--hold <reason>]  retain a commit detached, or open/adopt task/<name>; print path
 yrd env list                                                      list this repository's retained environments
 yrd env close <path> [--retain <directory>]                       run teardown and remove a clean, unlocked environment; retain submodule stores
 ```
@@ -93,6 +93,12 @@ For a Record-to-Event migration, set the maintenance stop before planning and le
 With a commit operand, `yrd env open` requires a full commit object ID already present locally and refuses `--issue`.
 
 Without a commit, `--bay <name>` or `--issue <ref>` opens or adopts `task/<name>` through Git worktree registration. An occupied branch refuses and names its holder.
+
+**Holding a Yrd worktree.** Add `--hold <reason>` to either `env open` form. Yrd locks the Git worktree before issue binding or setup, so a later failure leaves it locked.
+
+`env list --json` reports the reason as `hold`, or `null` when unlocked; the human list shows a nonempty reason. The reason is free text, not proof of ownership or expiry. `null` means only unlocked.
+
+`env close` refuses a held worktree and names the reason. `git worktree unlock <path>` clears the hold. Close still requires a clean worktree and preserves submodule stores.
 
 With `--issue`, an initial `Refs:` commit records the binding before setup and preserves the current tree and history. A matching binding adds no commit.
 
@@ -169,7 +175,7 @@ health:
   stallAfter: 45m # changes waiting with none judged for this long is a stalled line; default 45m, at least 10m
 ```
 
-`admission` receives `YRD_ADMISSION_ISSUE` (the canonical issue path), `YRD_ADMISSION_BRANCH`, and `YRD_ADMISSION_HEAD`. Its target checkout uses the target's code even if the submitted branch edits the policy script. Exit 0 admits; exit 1 refuses and prints a cure on stdout; any other exit, signal, timeout, incomplete output or execution failure is *cannot judge*. A cannot-judge submission stays in the queue and records an `admission-warning` event with the head, reason and time. The same head and reason are recorded once per change, including retries; a new warning event dispatches the target's `notify: on: admission-warning` entry once. A missing notification entry or failed delivery is reported on stderr. `--dry-run` runs admission and reports its verdict without publishing. The target policy command must run without `setup:`; it executes in a clean target checkout before checks install dependencies.
+`admission` receives `YRD_ADMISSION_ISSUE` (the canonical issue path), `YRD_ADMISSION_BRANCH`, and `YRD_ADMISSION_HEAD`. Its target checkout uses the target's code even if the submitted branch edits the policy script. Exit 0 admits; exit 1 refuses and prints a cure on stdout; any other exit, signal, timeout, incomplete output or execution failure is _cannot judge_. A cannot-judge submission stays in the queue and records an `admission-warning` event with the head, reason and time. The same head and reason are recorded once per change, including retries; a new warning event dispatches the target's `notify: on: admission-warning` entry once. A missing notification entry or failed delivery is reported on stderr. `--dry-run` runs admission and reports its verdict without publishing. The target policy command must run without `setup:`; it executes in a clean target checkout before checks install dependencies.
 If the target advances between reading `.yrd.yml` and admission, submit refuses with a retry instruction so a newer policy is never run with an older declaration.
 
 A queue-authored cancellation after a confirmed missing remote branch sends `cancelled` through this ring. An explicit `yrd drop` or `yrd queue withdraw` sends no cancellation notice.
