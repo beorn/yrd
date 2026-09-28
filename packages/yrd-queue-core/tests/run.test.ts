@@ -3107,4 +3107,77 @@ describe("event queue setup and journal", () => {
       }
     }
   })
+
+  /**
+   * @failure Every merged change left its task branch on origin, so origin's ref
+   * advertisement grew by one branch per merge and every fetch paid for it.
+   * @level l3 @consumer every fetch of the queue's remote (@i/10-yrd/25568, @i/10-yrd/26420)
+   */
+  describe("a merged change's task branch leaves origin", () => {
+    async function branchOnOrigin(w: World, branch: string): Promise<string> {
+      return (await w.git(["ls-remote", "--refs", "origin", `refs/heads/${branch}`])).trim().split(/\s+/u)[0] ?? ""
+    }
+
+    it("is deleted once its merged record lands, and the change still reads merged", async () => {
+      const w = await world()
+      await createWorldEventQueue(w)
+      const head = await submitCommit(w, "task/one", "one.txt")
+
+      const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [] })
+
+      expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/one"] })
+      expect(await branchOnOrigin(w, "task/one")).toBe("")
+      expect(outcome.branches).toEqual([`deleted task/one at ${head.slice(0, 12)}, merged`])
+      expect(logRecords(outcome).filter((row) => row.kind === "branch-deleted")).toEqual([
+        expect.objectContaining({ branch: "task/one", head }),
+      ])
+      const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+      expect((await readStatus(store, "main", "task/one")).status).toBe("merged")
+    })
+
+    it("is kept when its submitter moved it past the merged head, and the row names where it went", async () => {
+      const w = await world()
+      await createWorldEventQueue(w)
+      const head = await submitCommit(w, "task/moved", "moved.txt")
+      await w.git(["merge", "--ff-only", "task/moved"])
+      await w.git(["push", "--quiet", "origin", "main"])
+      await w.git(["checkout", "--quiet", "task/moved"])
+      writeFileSync(join(w.work, "later.txt"), "later\n")
+      await w.git(["add", "later.txt"])
+      await w.git(["commit", "--quiet", "-m", "later work on the same branch"])
+      const later = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["push", "--quiet", "origin", "task/moved"])
+      await w.git(["checkout", "--quiet", "main"])
+
+      const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+      expect(await branchOnOrigin(w, "task/moved")).toBe(later)
+      expect(outcome.branches).toEqual([
+        `kept task/moved (merged at ${head.slice(0, 12)}): moved to ${later.slice(0, 12)}`,
+      ])
+      expect(logRecords(outcome).filter((row) => row.kind === "branch-kept")).toEqual([
+        expect.objectContaining({ branch: "task/moved", head, saw: later }),
+      ])
+      const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+      expect((await readStatus(store, "main", "task/moved")).status).toBe("merged")
+    })
+
+    it("is kept as already gone when its submitter deleted it, and the change still reads merged", async () => {
+      const w = await world()
+      await createWorldEventQueue(w)
+      const head = await submitCommit(w, "task/gone", "gone.txt")
+      await w.git(["merge", "--ff-only", "task/gone"])
+      await w.git(["push", "--quiet", "origin", "main"])
+      await w.git(["push", "--quiet", "origin", ":refs/heads/task/gone"])
+
+      const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+
+      expect(outcome.branches).toEqual([`kept task/gone (merged at ${head.slice(0, 12)}): already gone`])
+      expect(logRecords(outcome).filter((row) => row.kind === "branch-kept")).toEqual([
+        expect.objectContaining({ branch: "task/gone", head, saw: "absent" }),
+      ])
+      const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+      expect((await readStatus(store, "main", "task/gone")).status).toBe("merged")
+    })
+  })
 })

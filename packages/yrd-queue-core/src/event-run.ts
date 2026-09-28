@@ -30,7 +30,7 @@ import { eventDirectMergeCommits } from "./direct.ts"
 import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
 import { checkLogPath, effectiveCheckTimeoutMs, runCheck, TRANSPORT_RETRY_LIMIT, type CheckResult } from "./check.ts"
 import { InvalidQueueConfig, UnknownConfigKey, queueName, readConfig } from "./config.ts"
-import { offTheTarget, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
+import { offTheTarget, readRemoteCommit, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
 import { recentCasRefusalStreak, recentCasRefusals, recentPublicationNotLanded, type QueueRunLog } from "./log.ts"
 import {
   ProgramSubjectSetupFailed,
@@ -434,6 +434,37 @@ export async function eventQueueRun(
   const deferredChanges: string[] = []
   /** The line as this round read it (25669), stated on every outcome once the line is read. */
   const read: { line?: RoundLine } = {}
+  const branches: string[] = []
+  const deleteMergedBranch = async (branch: string, head: string): Promise<void> => {
+    const ref = `refs/heads/${branch}`
+    try {
+      if (store.backend.publish === undefined) {
+        throw new Error("Gitomic backend lacks publish for merged branch deletion")
+      }
+      await store.backend.publish(store.repo, [{ ref, expect: head, oid: null }], options.target.remote)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      let saw: string
+      try {
+        saw = (await readRemoteCommit(git, options.target.remote, ref)) ?? "absent"
+      } catch (readError) {
+        saw = `unread (${readError instanceof Error ? readError.message : String(readError)})`
+      }
+      const why =
+        saw === "absent"
+          ? "already gone"
+          : saw === head
+            ? `the delete failed: ${message}`
+            : saw.startsWith("unread")
+              ? `the delete failed and its branch is ${saw}: ${message}`
+              : `moved to ${saw.slice(0, 12)}`
+      log.write({ branch, head, kind: "branch-kept", saw, ...(saw === "absent" ? {} : { error: message }) })
+      branches.push(`kept ${branch} (merged at ${head.slice(0, 12)}): ${why}`)
+      return
+    }
+    log.write({ branch, head, kind: "branch-deleted" })
+    branches.push(`deleted ${branch} at ${head.slice(0, 12)}, merged`)
+  }
   const result = (
     exitCode: 0 | 1 | 2,
     merged: string[] = [],
@@ -457,6 +488,7 @@ export async function eventQueueRun(
     directMerges,
     checkedWaiting: 0,
     ...(read.line === undefined ? {} : { line: read.line }),
+    ...(branches.length === 0 ? {} : { branches: [...branches] }),
     ...(stopped === undefined ? {} : { stopped }),
   })
   const tell = async (
@@ -803,6 +835,7 @@ export async function eventQueueRun(
         decision: "merged",
         reason: `already on target at ${merge}`,
       })
+      if (change.commit !== undefined) await deleteMergedBranch(branch, change.commit)
     } catch (error) {
       let current
       try {
@@ -1227,6 +1260,7 @@ export async function eventQueueRun(
             decision: "merged",
             reason: "landed after unknown publication response",
           })
+          await deleteMergedBranch(branch, head)
           return result(failed.length > 0 ? 1 : 0, [...observedMerged, branch], failed, [], [], undefined, candidate)
         }
         if (successor === undefined) {
@@ -1326,6 +1360,7 @@ export async function eventQueueRun(
     await timedStep(log, { branch, head, name: "notify", phase: "merge" }, () => tell(branch, "merged", ended))
     log.write({ kind: "merge", branch, head, commit: candidate, ref: changesRef(queue, branch), marker })
     log.write({ kind: "change", branch, head, decision: "merged" })
+    await deleteMergedBranch(branch, head)
     return result(failed.length > 0 ? 1 : 0, [...observedMerged, branch], failed, [], [], undefined, candidate)
   }
   for (const selectedChange of line) {
