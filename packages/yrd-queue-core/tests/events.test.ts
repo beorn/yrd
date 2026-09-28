@@ -1951,7 +1951,7 @@ describe("the queue-format boundary", () => {
 
   it("selects one event queue by its queue ref and reads an empty change set without legacy fallback", async () => {
     const { store, location } = remoteMemStore("yrd-event-selector")
-    expect(await queueFormat(location, "lab")).toBe("legacy")
+    expect(await queueFormat(location, "lab")).toBe("empty")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
     await seedEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
