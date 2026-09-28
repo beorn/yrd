@@ -3215,10 +3215,14 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       run.io,
       {
         command: "up",
-        // A second between holding rounds: idle time only a heartbeat covers.
-        intervalSeconds: 1,
+        // Three seconds between holding rounds: idle time only a heartbeat
+        // covers, since it outlasts the 1.6s window below. The grace is wider
+        // than HEARTBEAT's so a loaded CI runner holding this in-process loop
+        // for ~0.5s reads as a slow writer, not an overdue one (26352).
+        intervalSeconds: 3,
         stop: stop.signal,
-        ...HEARTBEAT,
+        heartbeatIntervalMs: HEARTBEAT.heartbeatIntervalMs,
+        heartbeatGraceMs: 1_500,
         afterHealth: (document) => {
           seen.push(document)
           roundEnds.push(published.writes.length - 1)
