@@ -108,6 +108,21 @@ it("refuses future event queue and check keys by name", () => {
   ).toThrow(/check key futureCheckFeature:/u)
 })
 
+it("accepts a declared admission command for event queue submission", () => {
+  const config: QueueConfig = {
+    target: { remote: "origin", branch: "main" },
+    archiveAfter: "never",
+    checks: [],
+    health: { declared: false, stallAfterMs: 45 * 60_000 },
+    ignore: [],
+    notify: [],
+    admission: { run: "bun tools/yrd-admission.ts", timeoutMs: 15_000 },
+    blob: "a".repeat(40),
+  }
+  expect(() => assertPlainEventQueueConfig(config, "submit")).not.toThrow()
+  expect(() => assertPlainEventQueueConfig(config, "run")).not.toThrow()
+})
+
 function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout(): string }> {
   let stderr = ""
   let stdout = ""
