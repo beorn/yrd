@@ -8,7 +8,7 @@ import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 import { assertBranch, changesRef, pauseRef, queueRef, queueRefPrefix, runIndexRef, type Change } from "./refs.ts"
 export { queueRef } from "./refs.ts"
 export { changesRef } from "./refs.ts"
-import { readM2Pause, type PauseRecord } from "./pause.ts"
+import type { PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
 import { createLegacyBackend, gitIn, refAt } from "./git.ts"
 import type { Git, GitSelection } from "./git.ts"
@@ -819,8 +819,6 @@ type EventQueueProjection = Readonly<{
   /** Complete operational state from the latest ops event, once cut over. */
   ops?: OpsState
   pause?: Readonly<{ id: string; at: Date; reason: string; by: string; cause: "operator" | "maintenance" }>
-  /** A synthetic pre-cutover pause awaiting its matching stuck-release resume. It is not an operator stop. */
-  release?: Readonly<{ id: string; at: Date; reason: string; by: string }>
   observed: Readonly<Record<string, Readonly<{ id: string; branch?: string }>>>
   notices: Readonly<
     Record<string, Readonly<{ id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }>>
@@ -957,14 +955,14 @@ type EventOps = Readonly<{
   overrides: OverrideTable
 }>
 
-/** Read event ops together with the queue and M2 pause refs used for admission. */
+/** Read event authority and refuse every retired legacy pause ref. */
 export async function readEventOpsWithRefs(
   store: QueueReadStore,
-  git: Git,
+  _git: Git,
   queue: string,
   _targetSha: string,
-  listed?: Readonly<{ refs: ReadonlyMap<string, Oid>; validatedPauseTip: string | null }>,
-): Promise<Readonly<{ ops: EventOps; listedQueueTip: string | null; pauseTip: string | null }>> {
+  listed?: Readonly<{ refs: ReadonlyMap<string, Oid> }>,
+): Promise<Readonly<{ ops: EventOps; listedQueueTip: string | null }>> {
   let acquiredRefs: ReadonlyMap<string, Oid> | undefined
   let projected: EventQueue
   if (store.remote !== undefined && listed === undefined) {
@@ -973,14 +971,14 @@ export async function readEventOpsWithRefs(
     const where = `${store.remote}#${queue} in ${store.repo}`
     if (store.backend.fetchRefs === undefined) {
       throw new TypeError(
-        `${where}: backend cannot fetch queue ${ref} and M2 ${fenceRef}; admission refused. Use a Gitomic backend with fetchRefs`,
+        `${where}: backend cannot fetch queue ${ref} and retired legacy ref ${fenceRef}; admission refused. Use a Gitomic backend with fetchRefs`,
       )
     }
     try {
       acquiredRefs = await store.backend.fetchRefs(store.repo, [ref, fenceRef], store.remote, { absent: "omit" })
     } catch (cause) {
       throw new Error(
-        `${where}: could not fetch queue ${ref} and M2 ${fenceRef}: ${String(cause)}; admission refused. Check the fetch failure and retry`,
+        `${where}: could not fetch queue ${ref} and retired legacy ref ${fenceRef}: ${String(cause)}; admission refused. Check the fetch failure and retry`,
         { cause },
       )
     }
@@ -1001,20 +999,16 @@ export async function readEventOpsWithRefs(
     )
   }
   const refs = acquiredRefs ?? listed?.refs ?? (await listRefs(queueRefPrefix(queue), store))
-  const pauseTip = refs.get(pauseRef(queue)) ?? null
-  // An identical OID carries the exact M2 body admission already validated.
-  // A changed tip needs the full content check before the caller leases it.
-  if (pauseTip !== null && listed?.validatedPauseTip !== pauseTip) {
-    const fence = await readM2Pause(
-      store.remote === undefined ? gitIn(store.repo, undefined, store.selection) : git,
-      store.remote,
-      queue,
-      projected.created,
-      store.remote === undefined || acquiredRefs !== undefined ? pauseTip : undefined,
+  const legacyRef = pauseRef(queue)
+  const legacyOid = refs.get(legacyRef)
+  if (legacyOid !== undefined) {
+    const remedy =
+      store.remote === undefined
+        ? "read fresh upstream authority for the exact leased retirement command"
+        : `after the reviewed retirement preflight, delete this exact tip with git -C '${store.repo.replaceAll("'", "'\\''")}' push --atomic --force-with-lease='${legacyRef}:${legacyOid}' '${store.remote.replaceAll("'", "'\\''")}' ':${legacyRef}'`
+    throw new Error(
+      `${store.remote ?? store.repo}#${queue}: retired legacy pause ref ${legacyRef} at ${legacyOid}; ${remedy}`,
     )
-    if (fence?.sha !== pauseTip) {
-      throw new Error(`${store.remote}#${queue}: ${pauseRef(queue)} changed during the M2 tip read`)
-    }
   }
   const stop = await eventLineStop(store, queue, projected.ops.pause)
   return {
@@ -1026,11 +1020,10 @@ export async function readEventOpsWithRefs(
       overrides: { sha: projected.tip, entries: projected.ops.overrides },
     },
     listedQueueTip: refs.get(queueRef(queue)) ?? null,
-    pauseTip,
   }
 }
 
-/** Read event ops under the queue and M2 pause authorities. */
+/** Read event ops under the queue event authority. */
 export async function readEventOps(
   store: QueueReadStore,
   git: Git,
@@ -1129,31 +1122,8 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   let existing: string | undefined
   const result = await chain.transact(async (events) => {
     const current = projectEventQueue(events, ref, store.repo)
-    const releaseWrite = (write.type === "paused" || write.type === "resumed") && isStuckReleaseReason(write.reason)
-    if (write.type === "paused" && current.opsCutover === undefined && (write.cause === "stuck" || !releaseWrite)) {
-      throw new Error(`${ref}: paused needs ops-cutover; legacy pause Record is still authoritative`)
-    }
-    if (write.type === "resumed" && current.opsCutover === undefined && !releaseWrite && current.pause === undefined) {
-      throw new Error(`${ref}: pre-cutover resume needs a preceding pause`)
-    }
-    if (current.opsCutover === undefined && releaseWrite) {
-      if (current.release !== undefined && current.release.reason !== write.reason) {
-        throw new Error(`${ref}: unfinished stuck release at ${current.release.id} must complete first`)
-      }
-      const completed = events.findLast(
-        (event) => event.type === "resumed" && prop(event, EVENT_TRAILERS.reason) === write.reason,
-      )
-      if (completed !== undefined) {
-        existing = completed.id
-        return []
-      }
-      if (write.type === "paused" && current.release !== undefined) {
-        existing = current.release.id
-        return []
-      }
-      if (write.type === "resumed" && current.release === undefined && current.pause === undefined) {
-        throw new Error(`${ref}: stuck release resume needs a preceding pause`)
-      }
+    if ((write.type === "paused" || write.type === "resumed") && current.opsCutover === undefined) {
+      throw new Error(`${ref}: ${write.type} needs ops-cutover; pre-cutover pause and release authoring is retired`)
     }
     if (write.type === "observed") existing = current.observed[write.commit]?.id
     if (write.type === "notified") existing = current.notices[write.notice.key]?.id
@@ -1377,7 +1347,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   let previous: string | undefined
   let declaration: string | undefined
   let pause: EventQueueProjection["pause"]
-  let release: EventQueueProjection["release"]
+  let release: { id: string; reason: string } | undefined
   let opsCutover: string | undefined
   let ops: OpsState | undefined
   const observed: Record<string, { id: string; branch?: string }> = {}
@@ -1430,7 +1400,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
             throw new Error(`${ref}: event ${event.id} pauses during unfinished stuck release ${release.id}`)
           }
           if (isStuckReleaseReason(reason)) {
-            release = { id: event.id, at: new Date(time), reason, by: event.writer }
+            release = { id: event.id, reason }
           } else {
             pause = { id: event.id, at: new Date(time), reason, by: event.writer, cause: "operator" }
           }
@@ -1463,9 +1433,8 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
           throw new Error(`${ref}: resumed event ${event.id} needs Reason:`)
         }
         if (opsCutover === undefined) {
-          // Before cutover, legacy owns pause. Earlier writers could emit a
-          // lone resume, so the reader still accepts it; this writer requires
-          // an older-reader-compatible preceding pause.
+          // Historical writers could emit a lone resume. Keep decoding old
+          // history, including validation of any preceding release pair.
           if (release !== undefined && prop(event, EVENT_TRAILERS.reason) !== release.reason) {
             throw new Error(`${ref}: resumed event ${event.id} does not complete stuck release ${release.id}`)
           }
@@ -1590,7 +1559,6 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
     observed,
     notices,
     ...(pause === undefined ? {} : { pause }),
-    ...(release === undefined ? {} : { release }),
     ...(opsCutover === undefined ? {} : { opsCutover }),
     ...(ops === undefined ? {} : { ops }),
   }

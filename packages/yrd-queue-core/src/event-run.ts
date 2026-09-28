@@ -603,10 +603,6 @@ export async function eventQueueRun(
   }
 
   let operational = await readEventOps(store, git, queue, target)
-  if (operational.queue.release !== undefined) {
-    const release = operational.queue.release
-    throw new Error(`event queue ${url}#${queue}: unfinished pre-cutover release ${release.id} after ops cutover`)
-  }
   // No override can expire or need a reminder when the table is empty. Keep
   // the round's injected clock for its stop window until a clock act is due.
   const clock =
