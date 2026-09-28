@@ -1356,6 +1356,7 @@ export async function eventQueueRun(
       verifyCandidate({
         git,
         repo: options.repo,
+        noFetch: true,
         targetHead: target,
         head,
         path,
