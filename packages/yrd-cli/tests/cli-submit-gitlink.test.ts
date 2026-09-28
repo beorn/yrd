@@ -488,9 +488,9 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     const round = await yrd(w.work, "queue", "run", "--json")
     expect(round.exitCode, round.report).toBe(0)
     expect((await gitIn(w.remote)(["rev-list", "--parents", "-n", "1", carrier])).trim()).toBe(`${carrier} ${w.base}`)
-    // The event queue keeps the submitted branch at its original carrier;
-    // main receives the composed tree without rewriting that branch.
-    expect(await remoteHead(w.remote, branch)).toBe(carrier)
+    // The event queue deletes the merged carrier branch (26420);
+    // main receives the composed tree without rewriting the carrier commit.
+    await expect(remoteHead(w.remote, branch)).rejects.toThrow(/refs\/heads\/pin\//u)
     const merged = await remoteHead(w.remote, "main")
     expect(merged).not.toBe(advanced)
     expect((await gitIn(w.remote)(["ls-tree", merged, one.path])).trim()).toBe(
