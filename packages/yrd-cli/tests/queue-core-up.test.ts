@@ -31,7 +31,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs"
-import { tmpdir } from "node:os"
+import { hostname, tmpdir } from "node:os"
 import { monitorEventLoopDelay } from "node:perf_hooks"
 import { dirname, join, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
@@ -343,6 +343,55 @@ async function submitGitlink(w: GitlinkWorld, branch: string, sha: string): Prom
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
+  /** @failure A candidate could run a round before acquiring its claim, or ignore shutdown while waiting. @level l2 */
+  it("waits for an unproven local claim without a round and aborts without replacing it", async () => {
+    const w = await world()
+    const now = new Date().toISOString()
+    const tree = (await w.git(["mktree"], "")).trim()
+    const prior = (
+      await w.git([
+        "commit-tree",
+        tree,
+        "-m",
+        formatRunnerClaim({
+          host: hostname(),
+          pid: process.pid,
+          started: now,
+          at: now,
+          beatMs: 60_000,
+          state: "idle",
+          since: now,
+        }),
+      ])
+    ).trim()
+    await w.git(["push", "--quiet", "origin", `${prior}:${runnerRef("main")}`])
+    const stop = new AbortController()
+    const run = capture(w.work)
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "up", intervalSeconds: 0, stop: stop.signal },
+      { workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(
+        async () => {
+          expect((await readQueueHealth(w.workdir, SERVICE)).facts?.publication).toContain("waiting for")
+        },
+        { timeout: 5_000, interval: 50 },
+      )
+      expect(await readRemoteCommit(w.git, "origin", runnerRef("main"))).toBe(prior)
+      const logDir = join(w.workdir, "logs")
+      expect(existsSync(logDir) ? readdirSync(logDir) : []).toEqual([])
+      stop.abort()
+      expect(await service).toBe(0)
+      expect(await readRemoteCommit(w.git, "origin", runnerRef("main"))).toBe(prior)
+    } finally {
+      stop.abort()
+      await service
+    }
+  })
+
   /**
    * @failure A second live runner could start rounds despite a fresh claim from another identity.
    * @level l2 (real queue service, leased remote claim and health document)

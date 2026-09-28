@@ -33,6 +33,10 @@ export type RunnerClaim = Readonly<{
   due?: string
   round?: string
   candidates?: number
+  /** Linux process identity, published together when all three values are readable. */
+  boot?: string
+  pidNamespace?: string
+  startTick?: number
   /** Verbatim append-only trailers written by a newer runner. */
   unknownTrailers?: readonly string[]
 }>
@@ -65,6 +69,9 @@ const ORDER = [
   "Due",
   "Round",
   "Candidates",
+  "Boot",
+  "PidNamespace",
+  "StartTick",
 ] as const
 const REQUIRED = ["Runner", "Started", "At", "Beat", "State", "Since"] as const
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u
@@ -86,6 +93,13 @@ function required(values: ReadonlyMap<string, string>, key: string): string {
 function candidatesOf(value: string): number {
   if (!/^[1-9]\d*$/u.test(value) || !Number.isSafeInteger(Number(value))) {
     throw new TypeError(`runner claim Candidates must be a positive safe integer: ${JSON.stringify(value)}`)
+  }
+  return Number(value)
+}
+
+function startTickOf(value: string): number {
+  if (!/^(?:0|[1-9]\d*)$/u.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new TypeError(`runner claim StartTick must be a nonnegative safe integer: ${JSON.stringify(value)}`)
   }
   return Number(value)
 }
@@ -136,6 +150,15 @@ function checked(claim: RunnerClaim): RunnerClaim {
       throw new TypeError(`runner claim Due is invalid for ${claim.state} State`)
     }
   }
+  if (claim.boot !== undefined && (claim.boot.length === 0 || /[\r\n]/u.test(claim.boot))) {
+    throw new TypeError("runner claim Boot must be one nonempty line")
+  }
+  if (claim.pidNamespace !== undefined && (claim.pidNamespace.length === 0 || /[\r\n]/u.test(claim.pidNamespace))) {
+    throw new TypeError("runner claim PidNamespace must be one nonempty line")
+  }
+  if (claim.startTick !== undefined && (!Number.isSafeInteger(claim.startTick) || claim.startTick < 0)) {
+    throw new TypeError("runner claim StartTick must be a nonnegative safe integer")
+  }
   const unknownKeys = new Set<string>()
   for (const line of claim.unknownTrailers ?? []) {
     const match = /^([A-Za-z]+): (.*)$/u.exec(line)
@@ -163,6 +186,10 @@ function checked(claim: RunnerClaim): RunnerClaim {
 /** Full root-commit message; Beat's unit is integer milliseconds. */
 export function formatRunnerClaim(input: RunnerClaim): string {
   const claim = checked(input)
+  const identityCount = [claim.boot, claim.pidNamespace, claim.startTick].filter((value) => value !== undefined).length
+  if (identityCount !== 0 && identityCount !== 3) {
+    throw new TypeError("runner claim Boot, PidNamespace and StartTick must be written together")
+  }
   if (
     claim.deadline === undefined &&
     (claim.state === "provisioning" ||
@@ -182,6 +209,9 @@ export function formatRunnerClaim(input: RunnerClaim): string {
     (claim.due === undefined
       ? ""
       : `Due: ${claim.due}\nRound: ${claim.round}\nCandidates: ${String(claim.candidates)}\n`) +
+    (claim.boot === undefined
+      ? ""
+      : `Boot: ${claim.boot}\nPidNamespace: ${claim.pidNamespace}\nStartTick: ${String(claim.startTick)}\n`) +
     (claim.unknownTrailers?.map((line) => `${line}\n`).join("") ?? "")
   )
 }
@@ -248,6 +278,9 @@ export function parseRunnerClaim(body: string): RunnerClaim {
     ...(values.has("Due") ? { due: required(values, "Due") } : {}),
     ...(values.has("Round") ? { round: required(values, "Round") } : {}),
     ...(values.has("Candidates") ? { candidates: candidatesOf(required(values, "Candidates")) } : {}),
+    ...(values.has("Boot") ? { boot: required(values, "Boot") } : {}),
+    ...(values.has("PidNamespace") ? { pidNamespace: required(values, "PidNamespace") } : {}),
+    ...(values.has("StartTick") ? { startTick: startTickOf(required(values, "StartTick")) } : {}),
     ...(unknownTrailers.length === 0 ? {} : { unknownTrailers }),
   })
 }
