@@ -64,8 +64,8 @@ function decodeField(encoded: string, key: string): string {
   let decoded: string
   try {
     decoded = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes))
-  } catch {
-    throw new Error(`v2 queue key ${JSON.stringify(key)} has invalid UTF-8`)
+  } catch (cause) {
+    throw new Error(`v2 queue key ${JSON.stringify(key)} has invalid UTF-8`, { cause })
   }
   if (decoded === "" || encodeQueueComponent(decoded) !== encoded) {
     throw new Error(`v2 queue key ${JSON.stringify(key)} has a noncanonical encoded field`)
