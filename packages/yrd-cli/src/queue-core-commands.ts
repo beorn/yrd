@@ -2021,18 +2021,8 @@ export async function coreQueueCommand(
        * read once, at the moment nobody is watching; a fact in the health
        * document is read every time anyone asks how this service is.
        */
-      let lastRelease: string | undefined
       const lineDocument = (stop: PauseRecord | undefined, sleepMs: number): QueueHealthDocument => {
-        const base = roundHealthDocument(
-          SERVICE,
-          stop,
-          sleepMs,
-          new Date(),
-          flowReading(),
-          readFailure,
-          lastStuck,
-          lastRelease,
-        )
+        const base = roundHealthDocument(SERVICE, stop, sleepMs, new Date(), flowReading(), readFailure, lastStuck)
         return {
           ...base,
           facts: {
@@ -2246,7 +2236,6 @@ export async function coreQueueCommand(
       try {
         const operational = await readEventOps(eventStore, git, config.target.branch, captured.oid)
         lastStop = operational.stop
-        lastRelease = operational.queue.release?.id
         setChainPressure(operational.queue.writePressure)
       } catch (error) {
         return stuck(
@@ -2557,7 +2546,6 @@ export async function coreQueueCommand(
                 ? (outcome.stopped.what as PauseRecord)
                 : undefined
           const latestQueue = await readEventQueue(eventStore, config.target.branch)
-          if (lastRelease !== undefined) lastRelease = latestQueue.release?.id
           setChainPressure(latestQueue.writePressure)
           lastStuck = outcome.pendingStuck ?? outcome.stuck
           setRunnerState(lastStuck.length > 0 ? "stuck" : lastStop === undefined ? "idle" : "paused")

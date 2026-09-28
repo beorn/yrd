@@ -514,15 +514,14 @@ async function submitEvent(
   let afterConflict: SubmitOps | undefined
   for (let attempt = 0; attempt < 2; attempt++) {
     const refs = attempt === 0 ? await listRefs(queueRefPrefix(request.target.branch), store) : undefined
-    // The unchanged tip names the same append-only queue history. A matching M2
-    // ref is the same validated fence; a stop needs its change chain reread.
+    // The unchanged tip names the same append-only queue history. A retired
+    // pause ref must still refuse; a stop needs its change chain reread.
     const reuse =
       refs !== undefined &&
       admittedOps.ops.stop === undefined &&
       admittedOps.listedQueueTip === admittedOps.ops.queue.tip &&
       refs.get(queueRef(request.target.branch)) === admittedOps.ops.queue.tip &&
-      (refs.get(pauseRef(request.target.branch)) ?? null) === admittedOps.pauseTip
-    // The pause body is reused only when its OID matches admission's validated M2.
+      !refs.has(pauseRef(request.target.branch))
     // ADR-0022: the read after a rejected CAS is the next attempt's base.
     // A stuck pause depends on a separate change ref, so it must be rederived
     // on the second attempt.
@@ -536,9 +535,9 @@ async function submitEvent(
               git,
               request.target.branch,
               inspected.targetHead,
-              refs === undefined ? undefined : { refs, validatedPauseTip: admittedOps.pauseTip },
+              refs === undefined ? undefined : { refs },
             )
-    const { ops, pauseTip } = operational
+    const { ops } = operational
     refuseMaintenance(ops.stop, remote, request.target.branch, published)
     const branchAt = (await listRefs(branchRef, store)).get(branchRef) ?? null
     const input = changeInput("opened", {
@@ -615,15 +614,11 @@ async function submitEvent(
           also: [
             { ref: branchRef, expect: branchAt, oid: head },
             { ref: queueRef(request.target.branch), expect: ops.queue.tip, oid: ops.queue.tip },
-            ...(pauseTip === null ? [] : [{ ref: pauseRef(request.target.branch), expect: pauseTip, oid: pauseTip }]),
           ],
         },
       )
     } catch (error) {
-      if (
-        !(error instanceof Conflict) ||
-        !error.refs.some((ref) => ref === queueRef(request.target.branch) || ref === pauseRef(request.target.branch))
-      ) {
+      if (!(error instanceof Conflict) || !error.refs.some((ref) => ref === queueRef(request.target.branch))) {
         throw error
       }
       if (attempt === 0) {

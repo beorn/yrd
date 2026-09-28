@@ -166,6 +166,34 @@ async function seedOpsCutover(
   return id
 }
 
+/** Serialize historical pairs directly: the retired writer must never author them again. */
+async function seedHistoricalRelease(
+  location: Parameters<typeof readEventQueue>[0],
+  queue: string,
+  type: "paused" | "resumed",
+  reason: string,
+): Promise<string> {
+  const previous = await readEventQueue(location, queue)
+  const result = await (
+    await openEvents({ ...location, ref: queueRef(queue), writer: "@chief" })
+  ).append(
+    [
+      {
+        type,
+        props: [
+          ["Queue", previous.tip],
+          ["Time", new Date().toISOString()],
+          ["Reason", reason],
+        ],
+      },
+    ],
+    { expect: previous.tip },
+  )
+  const id = result.events[0]?.id
+  if (id === undefined) throw new Error("fixture historical release event was not written")
+  return id
+}
+
 function input(type: string, props: readonly (readonly [string, string])[] = [], keeps: string[] = []): EventInput {
   return {
     type,
@@ -1266,8 +1294,9 @@ describe("the queue-format boundary", () => {
       { expect: null },
     )
     if (opened.head === null) throw new Error("fixture opened event has no tip")
+    await seedOpsCutover(location, "lab")
     beforeNextPublish(async () => {
-      const reason = `yrd-stuck-release:${A} raced repair`
+      const reason = "raced repair"
       await writeQueueEvent(location, "lab", { type: "paused", by: "operator", reason, at: new Date() })
       await writeQueueEvent(location, "lab", { type: "resumed", by: "operator", reason, at: new Date() })
     })
@@ -1303,26 +1332,52 @@ describe("the queue-format boundary", () => {
         by: "operator",
         at: new Date("2026-09-22T14:00:15.000Z"),
       }),
-    ).rejects.toThrow(/needs a preceding pause/)
+    ).rejects.toThrow(/needs ops-cutover/)
     const releaseReason = `yrd-stuck-release:${A} repaired`
-    const releasePause = await writeQueueEvent(location, "lab", {
-      type: "paused",
-      reason: releaseReason,
-      by: "operator",
-      at: new Date("2026-09-22T14:00:20.000Z"),
-    })
+    // Retirement removes new authoring, while historical event envelopes remain readable.
+    await expect(
+      writeQueueEvent(location, "lab", {
+        type: "paused",
+        reason: releaseReason,
+        by: "operator",
+        at: new Date("2026-09-22T14:00:20.000Z"),
+      }),
+    ).rejects.toThrow(/needs ops-cutover/)
+    const historical = await openEvents({ ...location, ref: queueRef("lab"), writer: "operator" })
+    const paused = await historical.append(
+      [
+        {
+          type: "paused",
+          props: [
+            ["Queue", created],
+            ["Time", "2026-09-22T14:00:20.000Z"],
+            ["Reason", releaseReason],
+          ],
+        },
+      ],
+      { expect: created },
+    )
+    if (paused.head === null) throw new Error("fixture historical pause has no tip")
     const halfRelease = await readEventQueue(location, "lab")
-    expect(halfRelease.release).toMatchObject({ id: releasePause, reason: releaseReason })
+    expect(halfRelease.tip).toBe(paused.head)
+    expect("release" in halfRelease).toBe(false)
     expect(halfRelease.pause).toBeUndefined()
-    const stuckResume = await writeQueueEvent(location, "lab", {
-      type: "resumed",
-      reason: releaseReason,
-      by: "operator",
-      at: new Date("2026-09-22T14:00:21.000Z"),
-    })
+    const resumed = await historical.append(
+      [
+        {
+          type: "resumed",
+          props: [
+            ["Queue", paused.head],
+            ["Time", "2026-09-22T14:00:21.000Z"],
+            ["Reason", releaseReason],
+          ],
+        },
+      ],
+      { expect: paused.head },
+    )
     const beforeCutover = await readEventQueue(location, "lab")
-    expect(beforeCutover.tip).toBe(stuckResume)
-    expect(beforeCutover.release).toBeUndefined()
+    expect(beforeCutover.tip).toBe(resumed.head)
+    expect("release" in beforeCutover).toBe(false)
     expect(beforeCutover.pause).toBeUndefined()
     await seedOpsCutover(location, "lab")
     await writeQueueEvent(location, "lab", {
@@ -1464,8 +1519,8 @@ describe("the queue-format boundary", () => {
     ).append([changeInput("opened", { queueTip, at: new Date(), commit, by: "@dev/2" })], { expect: null })
     if (opened.head === null) throw new Error("fixture opened event has no tip")
     const earlier = `yrd-stuck-release:${A} earlier repair`
-    await writeQueueEvent(location, "lab", { type: "paused", by: "@chief", reason: earlier, at: new Date() })
-    await writeQueueEvent(location, "lab", { type: "resumed", by: "@chief", reason: earlier, at: new Date() })
+    await seedHistoricalRelease(location, "lab", "paused", earlier)
+    await seedHistoricalRelease(location, "lab", "resumed", earlier)
     const stuck = await appendChangeEvent(location, "lab", branch, opened.head, {
       type: "stuck",
       at: new Date(),
@@ -1474,9 +1529,9 @@ describe("the queue-format boundary", () => {
     const history = (await readEventQueueWithChanges(location, "lab")).histories.get(branch)
     expect(await queueResumedAfter(location, "lab", branch, history)).toBe(false)
     const reason = `yrd-stuck-release:${stuck} repaired`
-    await writeQueueEvent(location, "lab", { type: "paused", by: "@chief", reason, at: new Date() })
+    await seedHistoricalRelease(location, "lab", "paused", reason)
     expect(await queueResumedAfter(location, "lab", branch, history)).toBe(false)
-    await writeQueueEvent(location, "lab", { type: "resumed", by: "@chief", reason, at: new Date() })
+    await seedHistoricalRelease(location, "lab", "resumed", reason)
     expect(await queueResumedAfter(location, "lab", branch, history)).toBe(true)
   })
 
@@ -1485,12 +1540,7 @@ describe("the queue-format boundary", () => {
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
     await seedEventQueue(location, "lab", commit, new Date())
-    await writeQueueEvent(location, "lab", {
-      type: "paused",
-      by: "@chief",
-      reason: `yrd-stuck-release:${A} repair`,
-      at: new Date(),
-    })
+    await seedHistoricalRelease(location, "lab", "paused", `yrd-stuck-release:${A} repair`)
     await seedOpsCutover(location, "lab")
     await expect(readEventQueue(location, "lab")).rejects.toThrow(/cuts over during unfinished stuck release/)
   })
@@ -2281,7 +2331,7 @@ describe("the queue-format boundary", () => {
         "lab",
         A,
       ),
-    ).rejects.toThrow(/backend cannot fetch queue refs\/yrd\/lab\/queue and M2 refs\/yrd\/lab\/pause/u)
+    ).rejects.toThrow(/backend cannot fetch queue refs\/yrd\/lab\/queue and retired legacy ref refs\/yrd\/lab\/pause/u)
   })
 
   it("pages a listed change chain beyond 1024 events without dropping its opening", async () => {

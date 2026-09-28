@@ -213,7 +213,6 @@ export function roundHealthDocument(
   flow?: FlowReading,
   readFailure?: RoundReadFailure,
   stuck: readonly string[] = [],
-  unfinishedRelease?: string,
 ): QueueHealthDocument {
   const base = { schema: QUEUE_HEALTH_SCHEMA, service, verdict: { kind: "running" } as const }
   const facts = {
@@ -221,23 +220,6 @@ export function roundHealthDocument(
     nextRoundInMs: sleepMs,
     stopped: stopFact(stop),
     ...(stuck.length === 0 ? {} : { stuckChanges: stuck }),
-    ...(unfinishedRelease === undefined ? {} : { unfinishedStuckRelease: unfinishedRelease }),
-  }
-  if (unfinishedRelease !== undefined) {
-    const completing: QueueHealthDocument = {
-      ...base,
-      state: "unhealthy",
-      error: {
-        code: "queue-stuck-release-incomplete",
-        cause: `unfinished stuck release at ${unfinishedRelease}, completing`,
-        resolution: ["The service completes this release on its next round; no operator resume is needed."],
-      },
-      facts,
-    }
-    return withRoundReadFailure(
-      flow === undefined ? completing : withLineFlow(completing, stop, flow, now),
-      readFailure,
-    )
   }
   if (stuck.length > 0 && stop?.cause !== "stuck") {
     const branch = stuck[0]

@@ -17,9 +17,9 @@ function refCommands(text: string): string[] {
 }
 
 describe("the Yrd Gitomic boundary", () => {
-  it("retains only the M2 tip check as a production Record reader (25041)", () => {
+  it("retires every production Record reader (25041)", () => {
     // @source-grep: a future legacy fallback can compile and pass event journeys;
-    // the accepted retirement contract permits exactly one M2 tip check.
+    // the accepted retirement contract permits no ongoing Record reader.
     const repo = new URL("../../../", import.meta.url)
     const tracked = execFileSync("git", ["ls-files", "-z", "--", "packages"], {
       cwd: fileURLToPath(repo),
@@ -31,9 +31,12 @@ describe("the Yrd Gitomic boundary", () => {
           /^packages\/[^/]+\/(?:src|scripts)\/.*\.[cm]?[jt]sx?$/u.test(path) && !/\.test\.[cm]?[jt]sx?$/u.test(path),
       )
       // The trailer key, not an identifier ending in it (`onRecord:`); `\n` is the key inside a regex literal.
-      .map((path) => ({ path, count: readFileSync(new URL(path, repo), "utf8").match(/(?:^|[^\w$]|\\n)Record:/gmu)?.length ?? 0 }))
+      .map((path) => ({
+        path,
+        count: readFileSync(new URL(path, repo), "utf8").match(/(?:^|[^\w$]|\\n)Record:/gmu)?.length ?? 0,
+      }))
       .filter(({ count }) => count > 0)
-    expect(hits).toEqual([{ path: "packages/yrd-queue-core/src/pause.ts", count: 1 }])
+    expect(hits).toEqual([])
   })
 
   it("routes every production event-chain read through the named Yrd read policy", () => {

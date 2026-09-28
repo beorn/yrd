@@ -1,5 +1,5 @@
 /**
- * @failure Submit rereads the unchanged queue chain and M2 fence before publication, spending remote calls without
+ * @failure Submit rereads the unchanged queue chain before publication, spending remote calls without
  *          improving the atomic leases (25626).
  * @level   l1 (real bare remote and Git trace2 processes)
  * @consumer yrd submit's admission and publication path
@@ -81,7 +81,6 @@ async function world(): Promise<World> {
       `moved to event format at ${created}\n\nRecord: paused\nPaused-By: yrd-ops-cutover\nPaused-At: 2026-09-27T00:40:59.853Z\nCause: maintenance\n`,
     ])
   ).trim()
-  await git(["push", "--quiet", "origin", `${fence}:${pauseRef("main")}`])
   await git(["checkout", "--quiet", "-b", "task/probe", "main"])
   await git(["commit", "--quiet", "--allow-empty", "-m", "work"])
   await git(["checkout", "--quiet", "main"])
@@ -129,7 +128,7 @@ async function noPublication(w: World): Promise<void> {
 }
 
 describe("submit reuses a fenced admission observation", () => {
-  it("keeps the live M2 fence and saves the repeated chain read on an unchanged queue", async () => {
+  it("saves the repeated chain read on an unchanged event queue", async () => {
     const w = await world()
     // The CLI selects event format before its admission phase. Keep that
     // boundary here, then count real SSH transport children inside admission.
@@ -241,31 +240,34 @@ describe("submit reuses a fenced admission observation", () => {
     expect(calls.unreadable).toBe(0)
   })
 
-  it.each(["admission", "publication"])("rereads and refuses an M2 tip changed before %s", async (boundary) => {
-    const w = await world()
-    let mutated = false
-    const mutate = async () => {
-      await moveM2(w)
-      mutated = true
-    }
-    await expect(
-      submit(
-        boundary === "publication" ? beforePublication(w, mutate) : w.git,
-        "origin",
-        boundary === "admission"
-          ? {
-              ...request,
-              admit: async () => {
-                await mutate()
-                return { kind: "admit" as const }
-              },
-            }
-          : request,
-      ),
-    ).rejects.toThrow(/second commit atop an M2 fence/u)
-    expect(mutated).toBe(true)
-    await noPublication(w)
-  })
+  it.each(["admission", "publication"])(
+    "rereads and refuses a retired pause ref appearing before %s",
+    async (boundary) => {
+      const w = await world()
+      let mutated = false
+      const mutate = async () => {
+        await moveM2(w)
+        mutated = true
+      }
+      await expect(
+        submit(
+          boundary === "publication" ? beforePublication(w, mutate) : w.git,
+          "origin",
+          boundary === "admission"
+            ? {
+                ...request,
+                admit: async () => {
+                  await mutate()
+                  return { kind: "admit" as const }
+                },
+              }
+            : request,
+        ),
+      ).rejects.toThrow(/retired legacy pause ref/u)
+      expect(mutated).toBe(true)
+      await noPublication(w)
+    },
+  )
 
   /** @failure A stale legacy ref blocks submit after M6 although only the runner judges it. */
   it("admits submit without an override-ref read when a stale ref appears before publication (26235)", async () => {
@@ -357,47 +359,8 @@ describe("submit reuses a fenced admission observation", () => {
     expect(calls.seams.submitEvent?.fetch ?? 0).toBeGreaterThan(0)
   })
 
-  it("rejects a pause ref change after the listing through the atomic pause lease", async () => {
-    const w = await world()
-    const next = await moveM2(w)
-    await w.git([
-      "push",
-      "--quiet",
-      "--force-with-lease=" + pauseRef("main") + ":" + next,
-      "origin",
-      `${w.fence}:${pauseRef("main")}`,
-    ])
-    const script = join(w.root, "git-race.sh")
-    const marker = join(w.root, "race-pending")
-    writeFileSync(marker, "pending\n")
-    writeFileSync(
-      script,
-      `#!/bin/sh\ncase " $* " in\n  *ls-remote*refs/yrd/main/*)
-    if [ "\${YRD_SEAM-}" = submitEvent ] && [ -f '${marker}' ]; then
-      git "$@" > '${w.root}/listed' || exit $?
-      git -C '${w.remote}' update-ref '${pauseRef("main")}' '${next}' '${w.fence}' || exit $?
-      rm '${marker}'
-      cat '${w.root}/listed'
-      exit 0
-    fi;;
-esac
-exec git "$@"
-`,
-    )
-    chmodSync(script, 0o755)
-    const runner = gitIn(w.work, undefined, { ...selectionFor(w.git), executable: script })
-    const trace = traceRemoteCalls(join(w.root, "trace-race"), { seams: true })
-    try {
-      await expect(submit(runner, "origin", request)).rejects.toThrow(/second commit atop an M2 fence/u)
-    } finally {
-      trace.end()
-    }
-    expect(existsSync(marker)).toBe(false)
-    await noPublication(w)
-  })
-
   /** @failure A failed combined acquisition must refuse admission with its Git reason, never use cached refs. */
-  it("fails loudly when the admission queue and M2 fetch fails", async () => {
+  it("fails loudly when the admission queue and retired ref fetch fails", async () => {
     const w = await world()
     const script = join(w.root, "git-batch-fail.sh")
     const marker = join(w.root, "batch-pending")
@@ -407,7 +370,7 @@ exec git "$@"
       `#!/bin/sh\ncase " $* " in\n  *fetch*refs/yrd/main/queue*)
     if [ "\${YRD_SEAM-}" = inspectSubmit ] && [ -f '${marker}' ]; then
       rm '${marker}'
-      echo 'fixture queue/M2 fetch failed' >&2
+      echo 'fixture queue/retired-ref fetch failed' >&2
       exit 73
     fi;;
 esac
@@ -428,7 +391,7 @@ exec git "$@"
     expect(existsSync(marker)).toBe(false)
     expect(failure).toBeInstanceOf(Error)
     expect(String(failure)).toContain("refs/yrd/main/queue")
-    expect(String(failure)).toContain("fixture queue/M2 fetch failed")
+    expect(String(failure)).toContain("fixture queue/retired-ref fetch failed")
     await noPublication(w)
   })
 

@@ -1,6 +1,5 @@
-/** The retained M2 intake fence and operator-facing pause facts. */
-import { readRemoteCommit, type Git } from "./git.ts"
-import { changeName, pauseRef, type Change } from "./refs.ts"
+/** Operator-facing facts from the event queue pause. */
+import { changeName, type Change } from "./refs.ts"
 
 export type PauseKind = "paused" | "resumed"
 
@@ -56,56 +55,6 @@ export function stopFact(stop: PauseRecord | undefined): StopFact | null {
     change: stop.change === undefined ? null : changeName(stop.change),
     since: stop.at.toISOString(),
   }
-}
-
-/** Read only the permanent M2 tip. Other legacy pause records are refused. */
-export async function readM2Pause(
-  git: Git,
-  remote: string | undefined,
-  queue: string,
-  created: string,
-  knownSha?: string,
-): Promise<PauseRecord | undefined> {
-  const ref = pauseRef(queue)
-  if (remote === undefined && knownSha === undefined) throw new Error(`local ${ref}: M2 tip was not supplied`)
-  const sha = knownSha ?? (remote === undefined ? undefined : await readRemoteCommit(git, remote, ref))
-  if (sha === undefined) return undefined
-  const where = `${remote ?? "local"}#${queue} ${ref} at ${sha}`
-  const body = await git(["show", "-s", "--format=%B", sha])
-  const fields =
-    /^moved to event format at ([0-9a-f]{40}(?:[0-9a-f]{24})?)\n\nRecord: paused\nPaused-By: yrd-ops-cutover\nPaused-At: ([^\n]+)\nCause: maintenance\n{1,2}$/u.exec(
-      body,
-    )
-  if (fields === null) {
-    throw new Error(
-      `${where}: expected the exact M2 maintenance fence fields; read ${JSON.stringify(body.slice(0, 400))}`,
-    )
-  }
-  const cutover = fields[1]
-  if (cutover !== created) {
-    throw new Error(`${where}: M2 names event-created ${cutover}; expected ${created}`)
-  }
-  const atText = fields[2] ?? ""
-  const at = new Date(atText)
-  if (Number.isNaN(at.getTime()) || at.toISOString() !== atText) {
-    throw new Error(`${where}: M2 has invalid Paused-At ${JSON.stringify(atText)}`)
-  }
-  const parents = (await git(["show", "-s", "--format=%P", sha])).trim().split(/\s+/u)
-  if (parents.length !== 1 || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(parents[0] ?? "")) {
-    throw new Error(`${where}: M2 must have exactly one predecessor; read ${parents.join(", ")}`)
-  }
-  const predecessor = await git(["show", "-s", "--format=%B", parents[0] ?? ""])
-  if (/^moved to event format at [0-9a-f]{40}(?:[0-9a-f]{24})?\n\n/u.test(predecessor)) {
-    throw new Error(`${where}: second commit atop an M2 fence ${parents[0]} is not an approved tip`)
-  }
-  return Object.freeze({
-    kind: "paused",
-    sha,
-    at,
-    reason: `moved to event format at ${created}`,
-    by: "yrd-ops-cutover",
-    cause: "maintenance",
-  })
 }
 
 /** The operator-facing line shared by list, the submit echo, refusals and the pause commands. */
