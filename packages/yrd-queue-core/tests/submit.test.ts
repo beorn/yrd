@@ -356,16 +356,20 @@ describe("event submit", () => {
     await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind\n\nRefs: 26050"])
     await w.git(["commit", "--quiet", "--allow-empty", "-m", "work\n\nRefs: @km/storage/26050-full"])
     const canonical = "@km/storage/26050-full"
+    const admit = vi.fn(async () => ({ kind: "admit" as const }))
     const submitted = await submit(w.git, "origin", {
       branch: "task/26050",
       submitter: "author",
       target: { remote: "origin", branch: "main" },
+      admit,
       resolveIssue: async (raw) => {
         if (raw === "26050" || raw === canonical) return canonical
         throw new Error(`unknown issue ${raw}`)
       },
     })
     expect(submitted.issue?.issue).toBe(canonical)
+    expect(admit).toHaveBeenCalledWith(canonical, "task/26050", submitted.head, submitted.targetHead)
+    expect(submitted.admission).toEqual({ kind: "admitted" })
     expect((await readStatus(store(w), "main", "task/26050")).issue).toBe(canonical)
   })
 
