@@ -4,11 +4,12 @@
  * @consumer the resident queue runner and off-machine status readers
  * @testonly none
  */
-import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { mkdtempSync, readlinkSync, rmSync } from "node:fs"
+import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, readRemoteCommit, roundHealthDocument, runnerRef, type RunnerClaim } from "@yrd/queue-core"
+import { processStartIdentity } from "@yrd/process"
 import { readPublishedRunner, RunnerPublisher } from "../src/runner-publication.ts"
 import { runnerLine } from "../src/watch-runner.ts"
 
@@ -61,6 +62,117 @@ async function fixture() {
 }
 
 describe("runner ref publication", () => {
+  /** @failure A killed same-host runner kept its fresh claim and made every replacement exit before the three-beat silence bound. @level l2 */
+  it.skipIf(process.platform !== "linux")("takes over a killed same-host runner within five seconds", async () => {
+    const f = await fixture()
+    const child = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    try {
+      const identity = processStartIdentity(child.pid)
+      expect(identity.boot).toBeDefined()
+      expect(identity.tick).toBeDefined()
+      const prior = { ...f.own, host: hostname(), pid: child.pid }
+      const namespace = readlinkSync(`/proc/${String(child.pid)}/ns/pid`)
+      const oldTip = await f.replace(
+        prior,
+        `Boot: ${identity.boot}\nPidNamespace: ${namespace}\nStartTick: ${String(identity.tick)}\n`,
+      )
+      child.kill("SIGKILL")
+      await child.exited
+      expect(() => process.kill(child.pid, 0)).toThrow()
+
+      const began = performance.now()
+      const ownIdentity = processStartIdentity(process.pid)
+      await f.publisher.publish({
+        ...f.own,
+        host: hostname(),
+        pid: process.pid,
+        boot: ownIdentity.boot,
+        pidNamespace: readlinkSync("/proc/self/ns/pid"),
+        startTick: ownIdentity.tick,
+      } as RunnerClaim)
+      expect(performance.now() - began).toBeLessThan(5_000)
+      expect(f.publisher.conflict).toBeUndefined()
+      expect(await f.remoteTip()).not.toBe(oldTip)
+    } finally {
+      if (child.exitCode === null) {
+        child.kill("SIGKILL")
+        await child.exited
+      }
+    }
+  })
+
+  /** @failure A recycled PID could block recovery, or a live PID could be stolen. @level l2 */
+  it.skipIf(process.platform !== "linux")("distinguishes a live runner from a reused PID", async () => {
+    const identity = processStartIdentity(process.pid)
+    expect(identity.boot).toBeDefined()
+    expect(identity.tick).toBeDefined()
+    const namespace = readlinkSync("/proc/self/ns/pid")
+    for (const reused of [false, true]) {
+      const f = await fixture()
+      const started = new Date(Date.parse(f.own.started) - 1000).toISOString()
+      const prior = { ...f.own, host: hostname(), pid: process.pid, started }
+      const oldTip = await f.replace(
+        prior,
+        `Boot: ${identity.boot}\nPidNamespace: ${namespace}\nStartTick: ${String(identity.tick! + (reused ? 1 : 0))}\n`,
+      )
+      await f.publisher.publish({
+        ...f.own,
+        host: hostname(),
+        pid: process.pid,
+        boot: identity.boot,
+        pidNamespace: namespace,
+        startTick: identity.tick,
+      } as RunnerClaim)
+      if (reused) {
+        expect(f.publisher.conflict).toBeUndefined()
+        expect(await f.remoteTip()).not.toBe(oldTip)
+      } else {
+        expect(f.publisher.conflict?.name).toBe("RunnerConflict")
+        expect(await f.remoteTip()).toBe(oldTip)
+      }
+    }
+  })
+
+  /** @failure A legacy or foreign PID domain could be misread as dead, or a candidate could start a round early. @level l2 */
+  it("waits without publishing for unproven same-host claims and re-reads after a beat", async () => {
+    for (const kind of ["legacy", "boot", "namespace", "partial"] as const) {
+      const f = await fixture()
+      const prior = { ...f.own, host: hostname(), pid: process.pid + 100_000 }
+      const group =
+        kind === "legacy" ? "" :
+        kind === "partial" ? "Boot: other-boot\n" :
+        `Boot: ${kind === "boot" ? "other-boot" : "same-boot"}\nPidNamespace: ${kind === "namespace" ? "pid:[other]" : "pid:[same]"}\nStartTick: 1\n`
+      const oldTip = await f.replace(prior, group)
+      await f.publisher.publish({
+        ...f.own,
+        host: hostname(),
+        pid: process.pid,
+        boot: "same-boot",
+        pidNamespace: "pid:[same]",
+        startTick: 2,
+      })
+      expect(f.publisher.waiting, kind).toContain("waiting for")
+      expect(f.publisher.owns, kind).toBe(false)
+      expect(f.publisher.conflict, kind).toBeUndefined()
+      expect(await f.remoteTip(), kind).toBe(oldTip)
+      const stale = new Date(Date.now() - 4 * 60_000).toISOString()
+      await f.replace({ ...prior, started: stale, at: stale, since: stale })
+      await f.publisher.publish({
+        ...f.own,
+        host: hostname(),
+        pid: process.pid,
+        boot: "same-boot",
+        pidNamespace: "pid:[same]",
+        startTick: 2,
+      })
+      expect(f.publisher.owns, kind).toBe(true)
+      expect(f.publisher.waiting, kind).toBeUndefined()
+    }
+  })
+
   /** @failure A newer claim looked fresh by beat but hid trailers this reader could not judge. @level l2 */
   it("keeps a future trailer in the published claim and names it on the human row", async () => {
     const f = await fixture()

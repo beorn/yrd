@@ -28,6 +28,22 @@ const claim = {
 }
 
 describe("runner claim", () => {
+  /** @failure A partial identity could prove death, or new identity trailers could break an old reader. @level l1 */
+  it("appends a complete PID identity group and reads a partial group as unproven", () => {
+    const withIdentity = { ...claim, boot: "boot-a", pidNamespace: "pid:[42]", startTick: 1234 }
+    const message = formatRunnerClaim(withIdentity)
+    expect(message).toContain("Boot: boot-a\nPidNamespace: pid:[42]\nStartTick: 1234\n")
+    expect(parseRunnerClaim(message)).toEqual(withIdentity)
+    const oldKnown = new Set([
+      "Runner", "Started", "At", "Beat", "State", "Holding", "Since", "Deadline", "Due", "Round", "Candidates",
+    ])
+    const oldReaderTail = message.trimEnd().split("\n").slice(2).filter((line) => !oldKnown.has(line.split(": ")[0] ?? ""))
+    expect(oldReaderTail.map((line) => line.split(": ")[0])).toEqual(["Boot", "PidNamespace", "StartTick"])
+    const partial = message.replace("StartTick: 1234\n", "")
+    expect(parseRunnerClaim(partial)).toEqual({ ...claim, boot: "boot-a", pidNamespace: "pid:[42]" })
+    expect(() => formatRunnerClaim({ ...claim, boot: "boot-a" })).toThrow(/written together/)
+  })
+
   it("names the queue-owned runner ref and round trips all claim trailers", () => {
     expect(runnerRef("a/b")).toBe("refs/yrd/a%2Fb/runner")
     const message = formatRunnerClaim(claim)

@@ -8,7 +8,7 @@
  * bytes. The lock itself is a kernel flock, so yrd compares neither.
  */
 
-import { readFileSync } from "node:fs"
+import { readFileSync, readlinkSync } from "node:fs"
 
 /**
  * Linux fixes USER_HZ at 100 for `/proc/[pid]/stat` regardless of CONFIG_HZ; it
@@ -72,9 +72,25 @@ function procStatStartTicks(stat: string): number | undefined {
 export type ProcessStartIdentity = Readonly<{
   /** `/proc/sys/kernel/random/boot_id`; undefined when it cannot be read. */
   boot?: string
+  /** `/proc/[pid]/ns/pid` link target; undefined when it cannot be read. */
+  pidNamespace?: string
   /** Field 22 of `/proc/[pid]/stat`; undefined when it cannot be read. */
   tick?: number
 }>
+
+/** Kernel PID existence, with permission denial counted as existence. */
+export function pidPresence(pid: number): "present" | "absent" {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new TypeError(`pid must be a positive safe integer: ${String(pid)}`)
+  try {
+    process.kill(pid, 0)
+    return "present"
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ESRCH") return "absent"
+    if (code === "EPERM") return "present"
+    throw error
+  }
+}
 
 /**
  * WHICH PROCESS `pid` is, in two halves that two readings of one process always
@@ -96,11 +112,22 @@ export type ProcessStartIdentity = Readonly<{
  */
 export function processStartIdentity(pid: number, procRoot = "/proc"): ProcessStartIdentity {
   const boot = readProcFile(`${procRoot}/sys/kernel/random/boot_id`)?.trim()
+  const pidNamespace = readProcLink(`${procRoot}/${String(pid)}/ns/pid`)
   const stat = readProcFile(`${procRoot}/${String(pid)}/stat`)
   const tick = stat === undefined ? undefined : procStatStartTicks(stat)
   return {
     ...(boot === undefined || boot === "" ? {} : { boot }),
+    ...(pidNamespace === undefined ? {} : { pidNamespace }),
     ...(tick === undefined ? {} : { tick }),
+  }
+}
+
+function readProcLink(path: string): string | undefined {
+  try {
+    return readlinkSync(path)
+  } catch {
+    // An unreadable namespace is unproven identity, never evidence of death.
+    return undefined
   }
 }
 

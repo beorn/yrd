@@ -1817,6 +1817,11 @@ export async function coreQueueCommand(
       let runnerDeadline: string | undefined
       let runnerPhase: string | undefined
       let roundPlan: Readonly<{ due: string; round: string; candidates: number }> | undefined
+      const writerIdentity = processStartIdentity(writer.pid)
+      const claimIdentity =
+        writerIdentity.boot !== undefined && writerIdentity.pidNamespace !== undefined && writerIdentity.tick !== undefined
+          ? { boot: writerIdentity.boot, pidNamespace: writerIdentity.pidNamespace, startTick: writerIdentity.tick }
+          : {}
       const runnerClaim = (at: Date = new Date()): RunnerClaim => ({
         host: hostname(),
         pid: writer.pid,
@@ -1828,6 +1833,7 @@ export async function coreQueueCommand(
         since: runnerSince,
         ...(runnerDeadline === undefined ? {} : { deadline: runnerDeadline }),
         ...(roundPlan === undefined ? {} : roundPlan),
+        ...claimIdentity,
       })
       const stoppedRunnerClaim = (): RunnerClaim => {
         runnerState = "stopped"
@@ -1843,10 +1849,10 @@ export async function coreQueueCommand(
         config.target.remote,
         config.target.branch,
         (status) => {
-          const recovering = publicationStatus.startsWith("failed ")
+          const recovering = publicationStatus.startsWith("failed ") || publicationStatus.startsWith("waiting ")
           publicationStatus =
-            status.kind === "failed" ? `failed ${status.cause} at ${status.at}` : `fresh at ${status.at}`
-          if (stated !== undefined && (status.kind === "failed" || recovering)) writeHealth(stated)
+            status.kind === "ok" ? `fresh at ${status.at}` : `${status.kind} ${status.cause} at ${status.at}`
+          if (stated !== undefined && (status.kind !== "ok" || recovering)) writeHealth(stated)
         },
         (line) => {
           log?.warn?.(line)
@@ -2243,30 +2249,8 @@ export async function coreQueueCommand(
         runnerState = "paused"
         runnerSince = new Date().toISOString()
       }
-      writeHealth(lineDocument(lastStop, 0))
-      await publisher.publish(runnerClaim())
-      const startupConflict = runnerConflictExit()
-      if (startupConflict !== undefined) return startupConflict
-      // THE HEARTBEAT (24523 D6): one timer for the whole loop, restating the last
-      // document on a fixed interval through open rounds, idle sleeps, a stopped
-      // line and the relaunch wait alike. Rounds are awaited child processes, so
-      // the event loop is free to write, and the document is fresh exactly while
-      // its writer lives. The `finally` clears it on every way out of the loop.
-      let nextRunnerBeat = Date.now() + runnerBeatMs
-      const beat = setInterval(() => {
-        // Re-judged, not merely restated (25669): a stall that develops inside one
-        // long round — the 09-24 specimen was a single 50-minute round — pages on
-        // the heartbeat's clock instead of waiting for the round to end.
-        const reading = flowReading()
-        if (stated !== undefined) {
-          writeHealth(reading === undefined ? stated : withLineFlow(stated, lastStop, reading, new Date(), readFailure))
-        }
-        if (Date.now() >= nextRunnerBeat) {
-          nextRunnerBeat = Date.now() + runnerBeatMs
-          void publisher.publish(runnerClaim(), true)
-        }
-        void notePhase()
-      }, heartbeat.intervalMs)
+      let beat: ReturnType<typeof setInterval> | undefined
+      const startupAbort = new AbortController()
       // THE SIGNAL EXIT (25430, 24570). A signal carries no reason. When the
       // supervisor wrote a current stop intent first, the last document says
       // who stopped the service. Without one, it names the terminal signal and
@@ -2282,7 +2266,8 @@ export async function coreQueueCommand(
         // a second signal uses the process default instead of re-entering this
         // handler while the first publish is pending.
         offTerminate()
-        clearInterval(beat)
+        startupAbort.abort()
+        if (beat !== undefined) clearInterval(beat)
         const intent = readUnitIntent("stop", options.env ?? process.env, writer.startedAt)
         const signal = received ?? "SIGTERM"
         if (intent.kind === "none") {
@@ -2300,8 +2285,40 @@ export async function coreQueueCommand(
           stated = graceful
           persistHealth(graceful)
         }
-        void publisher.publish(stoppedRunnerClaim()).finally(() => terminate.reraise(signal))
+        if (publisher.owns) void publisher.publish(stoppedRunnerClaim()).finally(() => terminate.reraise(signal))
+        else terminate.reraise(signal)
       })
+      try {
+        writeHealth(lineDocument(lastStop, 0))
+        await publisher.publish(runnerClaim())
+        const startupSignal =
+          request.stop === undefined ? startupAbort.signal : AbortSignal.any([startupAbort.signal, request.stop])
+        // A candidate owns no claim and may run no round. Re-read the remote
+        // ref through Publisher until this writer has won the exact-tip CAS.
+        while (!publisher.owns) {
+          const startupConflict = runnerConflictExit()
+          if (startupConflict !== undefined) return startupConflict
+          if (stopped() || startupAbort.signal.aborted) return 0
+          await delay(Math.min(15_000, runnerBeatMs), undefined, { signal: startupSignal }).catch((error) => {
+            if (!startupSignal.aborted) throw error
+          })
+          if (stopped() || startupAbort.signal.aborted) return 0
+          await publisher.publish(runnerClaim())
+        }
+        // THE HEARTBEAT (24523 D6): one timer for the whole loop, restating
+        // the last document through rounds, idle sleeps and a stopped line.
+        let nextRunnerBeat = Date.now() + runnerBeatMs
+        beat = setInterval(() => {
+          const reading = flowReading()
+          if (stated !== undefined) {
+            writeHealth(reading === undefined ? stated : withLineFlow(stated, lastStop, reading, new Date(), readFailure))
+          }
+          if (Date.now() >= nextRunnerBeat) {
+            nextRunnerBeat = Date.now() + runnerBeatMs
+            void publisher.publish(runnerClaim(), true)
+          }
+          void notePhase()
+        }, heartbeat.intervalMs)
       /**
        * A round the service waits for — a `yrd merge` or `yrd queue run` in the
        * same workdir — is stated where the service is read: the holder as a
@@ -2329,7 +2346,6 @@ export async function coreQueueCommand(
           )
         },
       }
-      try {
         for (;;) {
           const conflict = runnerConflictExit()
           if (conflict !== undefined) return conflict
@@ -2553,9 +2569,9 @@ export async function coreQueueCommand(
           if (stopped()) return 0
         }
       } finally {
-        clearInterval(beat)
+        if (beat !== undefined) clearInterval(beat)
         offTerminate()
-        if (stopped() && publisher.conflict === undefined) {
+        if (stopped() && publisher.owns && publisher.conflict === undefined) {
           await publisher.publish(stoppedRunnerClaim())
         }
       }
