@@ -36,6 +36,7 @@ import {
   type Git,
 } from "@yrd/queue-core"
 import { createProcess } from "@yrd/process"
+import { createLocalGitWorktreeStore } from "git-super/worktree"
 import { repositoryHere as findRepository } from "./declaration.ts"
 import { originHead } from "./queue-location.ts"
 import { issueResolver } from "./issue-resolver.ts"
@@ -157,7 +158,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   const { path, baseSha } = provisioned
   if (options.hold !== undefined) {
     try {
-      await git(["worktree", "lock", "--reason", options.hold, path])
+      await createLocalGitWorktreeStore({ repo: root }).lock(path, options.hold)
     } catch (error) {
       throw new Error(
         `yrd env open created ${path} but could not hold it: ${error instanceof Error ? error.message : String(error)}; the environment remains open, so inspect git worktree list before retrying`,
