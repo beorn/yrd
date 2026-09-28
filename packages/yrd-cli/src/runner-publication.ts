@@ -172,7 +172,13 @@ export class RunnerPublisher {
         try {
           const wrote = await this.write(next.claim)
           if (wrote) this.onStatus({ kind: "ok", at: new Date().toISOString() })
-          else this.onStatus({ kind: "waiting", cause: this.waiting ?? "runner claim not yet acquired", at: new Date().toISOString() })
+          else {
+            this.onStatus({
+              kind: "waiting",
+              cause: this.waiting ?? "runner claim not yet acquired",
+              at: new Date().toISOString(),
+            })
+          }
         } catch (error) {
           const cause = error instanceof Error ? error.message : String(error)
           if (error instanceof RunnerConflict) this.conflict = error
@@ -227,19 +233,32 @@ export class RunnerPublisher {
     if (verdict.status === "fresh") {
       if (prior.host !== claim.host) throw new RunnerConflict(prior, this.ref)
       const samePidDomain =
-        prior.boot !== undefined && prior.pidNamespace !== undefined && prior.startTick !== undefined &&
-        claim.boot !== undefined && claim.pidNamespace !== undefined && claim.startTick !== undefined &&
-        prior.boot === claim.boot && prior.pidNamespace === claim.pidNamespace
+        prior.boot !== undefined &&
+        prior.pidNamespace !== undefined &&
+        prior.startTick !== undefined &&
+        claim.boot !== undefined &&
+        claim.pidNamespace !== undefined &&
+        claim.startTick !== undefined &&
+        prior.boot === claim.boot &&
+        prior.pidNamespace === claim.pidNamespace
       if (samePidDomain) {
         if (pidPresence(prior.pid) === "absent") {
           this.onNotice(`taking over dead runner ${prior.host}/${String(prior.pid)} at ${this.ref}: PID absent`)
         } else {
           const identity = processStartIdentity(prior.pid)
-          if (identity.boot === prior.boot && identity.pidNamespace === prior.pidNamespace && identity.tick !== undefined) {
+          if (
+            identity.boot === prior.boot &&
+            identity.pidNamespace === prior.pidNamespace &&
+            identity.tick !== undefined
+          ) {
             if (identity.tick === prior.startTick) throw new RunnerConflict(prior, this.ref)
             this.onNotice(`taking over dead runner ${prior.host}/${String(prior.pid)} at ${this.ref}: PID reused`)
           } else {
-            return this.awaitSilence(current, prior, "present PID has unreadable or changed process identity")
+            const reason =
+              identity.unreadable
+                ?.map(({ field, path, code }) => `death unproven: ${field} unreadable at ${path} (${code})`)
+                .join("; ") ?? "death unproven: start identity incomplete or changed"
+            return this.awaitSilence(current, prior, reason)
           }
         }
       } else {
@@ -250,7 +269,9 @@ export class RunnerPublisher {
       throw unreadable(verdict.reason)
     }
     if (verdict.status === "silent") {
-      this.onNotice(`taking over stale runner ${prior.host}/${String(prior.pid)} started ${prior.started} at ${this.ref}`)
+      this.onNotice(
+        `taking over stale runner ${prior.host}/${String(prior.pid)} started ${prior.started} at ${this.ref}`,
+      )
     }
     this.tip = current
     this.known = true
@@ -267,7 +288,9 @@ export class RunnerPublisher {
   }
 
   private async write(claim: RunnerClaim): Promise<boolean> {
-    if (!this.known && !(await this.inspect(claim, await readRemoteCommit(this.git, this.remote, this.ref)))) return false
+    if (!this.known && !(await this.inspect(claim, await readRemoteCommit(this.git, this.remote, this.ref)))) {
+      return false
+    }
     const tree = (await this.git(["mktree"], "")).trim()
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(tree)) throw new Error(`git mktree returned ${JSON.stringify(tree)}`)
     const commit = (await this.git(["commit-tree", tree, "-m", formatRunnerClaim(claim)])).trim()

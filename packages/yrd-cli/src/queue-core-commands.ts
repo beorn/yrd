@@ -1819,7 +1819,9 @@ export async function coreQueueCommand(
       let roundPlan: Readonly<{ due: string; round: string; candidates: number }> | undefined
       const writerIdentity = processStartIdentity(writer.pid)
       const claimIdentity =
-        writerIdentity.boot !== undefined && writerIdentity.pidNamespace !== undefined && writerIdentity.tick !== undefined
+        writerIdentity.boot !== undefined &&
+        writerIdentity.pidNamespace !== undefined &&
+        writerIdentity.tick !== undefined
           ? { boot: writerIdentity.boot, pidNamespace: writerIdentity.pidNamespace, startTick: writerIdentity.tick }
           : {}
       const runnerClaim = (at: Date = new Date()): RunnerClaim => ({
@@ -2311,7 +2313,9 @@ export async function coreQueueCommand(
         beat = setInterval(() => {
           const reading = flowReading()
           if (stated !== undefined) {
-            writeHealth(reading === undefined ? stated : withLineFlow(stated, lastStop, reading, new Date(), readFailure))
+            writeHealth(
+              reading === undefined ? stated : withLineFlow(stated, lastStop, reading, new Date(), readFailure),
+            )
           }
           if (Date.now() >= nextRunnerBeat) {
             nextRunnerBeat = Date.now() + runnerBeatMs
@@ -2319,33 +2323,33 @@ export async function coreQueueCommand(
           }
           void notePhase()
         }, heartbeat.intervalMs)
-      /**
-       * A round the service waits for — a `yrd merge` or `yrd queue run` in the
-       * same workdir — is stated where the service is read: the holder as a
-       * fact on the document when the wait begins, cleared by the round this
-       * service then runs. The document stays HEALTHY however long the wait
-       * lasts. A long round is not a fault, whoever runs it (24523 F4: round
-       * length is not a deadline), so past the budget the wait is logged and
-       * pages nobody.
-       */
-      let lockWaitStated = false
-      const requiredRunIndex = runIndexRef(config.target.branch)
-      let runIndexReady = false
-      let runIndexWaitAnnounced = false
-      let legacyOverrideHeld: string | undefined
-      const waiting = {
-        onWait: (wait: RoundLockWait): void => {
-          lockWaitStated = true
-          log?.info?.(`waiting for the round lock in ${workdir}: ${lockHolderLine(wait)}`)
-          const alive = lineDocument(lastStop, 0)
-          writeHealth({ ...alive, facts: { ...alive.facts, waitingForRoundLock: lockWaitFact(wait) } })
-        },
-        onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>): void => {
-          log?.warn?.(
-            `waited ${mediaDuration(wait.waitedMs)} for the round lock in ${workdir}: ${lockHolderLine(wait)}`,
-          )
-        },
-      }
+        /**
+         * A round the service waits for — a `yrd merge` or `yrd queue run` in the
+         * same workdir — is stated where the service is read: the holder as a
+         * fact on the document when the wait begins, cleared by the round this
+         * service then runs. The document stays HEALTHY however long the wait
+         * lasts. A long round is not a fault, whoever runs it (24523 F4: round
+         * length is not a deadline), so past the budget the wait is logged and
+         * pages nobody.
+         */
+        let lockWaitStated = false
+        const requiredRunIndex = runIndexRef(config.target.branch)
+        let runIndexReady = false
+        let runIndexWaitAnnounced = false
+        let legacyOverrideHeld: string | undefined
+        const waiting = {
+          onWait: (wait: RoundLockWait): void => {
+            lockWaitStated = true
+            log?.info?.(`waiting for the round lock in ${workdir}: ${lockHolderLine(wait)}`)
+            const alive = lineDocument(lastStop, 0)
+            writeHealth({ ...alive, facts: { ...alive.facts, waitingForRoundLock: lockWaitFact(wait) } })
+          },
+          onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>): void => {
+            log?.warn?.(
+              `waited ${mediaDuration(wait.waitedMs)} for the round lock in ${workdir}: ${lockHolderLine(wait)}`,
+            )
+          },
+        }
         for (;;) {
           const conflict = runnerConflictExit()
           if (conflict !== undefined) return conflict

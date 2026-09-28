@@ -4,6 +4,10 @@
  * @consumer Yrd's resident publisher and off-machine readers
  * @testonly none
  */
+import { execFileSync } from "node:child_process"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   formatRunnerClaim,
@@ -29,16 +33,33 @@ const claim = {
 
 describe("runner claim", () => {
   /** @failure A partial identity could prove death, or new identity trailers could break an old reader. @level l1 */
-  it("appends a complete PID identity group and reads a partial group as unproven", () => {
+  it("appends a complete PID identity group and reads a partial group as unproven", async () => {
     const withIdentity = { ...claim, boot: "boot-a", pidNamespace: "pid:[42]", startTick: 1234 }
     const message = formatRunnerClaim(withIdentity)
     expect(message).toContain("Boot: boot-a\nPidNamespace: pid:[42]\nStartTick: 1234\n")
     expect(parseRunnerClaim(message)).toEqual(withIdentity)
-    const oldKnown = new Set([
-      "Runner", "Started", "At", "Beat", "State", "Holding", "Since", "Deadline", "Due", "Round", "Candidates",
-    ])
-    const oldReaderTail = message.trimEnd().split("\n").slice(2).filter((line) => !oldKnown.has(line.split(": ")[0] ?? ""))
-    expect(oldReaderTail.map((line) => line.split(": ")[0])).toEqual(["Boot", "PidNamespace", "StartTick"])
+    // Exercise the shipped pre-identity parser, rather than simulating its schema.
+    const oldSource = execFileSync("git", ["show", "9521187d10:packages/yrd-queue-core/src/runner-claim.ts"], {
+      cwd: resolve(import.meta.dirname, "../../.."),
+      encoding: "utf8",
+    }).replace('"./refs.ts"', JSON.stringify(resolve(import.meta.dirname, "../src/refs.ts")))
+    const root = mkdtempSync(join(tmpdir(), "yrd-old-runner-reader-"))
+    try {
+      const path = join(root, "runner-claim.ts")
+      writeFileSync(path, oldSource)
+      const oldReader = (await import(path)) as {
+        parseRunnerClaim(body: string): typeof claim & { unknownTrailers: readonly string[] }
+        formatRunnerClaim(input: typeof claim & { unknownTrailers: readonly string[] }): string
+      }
+      const parsed = oldReader.parseRunnerClaim(message)
+      expect(parsed).toEqual({
+        ...claim,
+        unknownTrailers: ["Boot: boot-a", "PidNamespace: pid:[42]", "StartTick: 1234"],
+      })
+      expect(oldReader.formatRunnerClaim(parsed)).toBe(message)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
     const partial = message.replace("StartTick: 1234\n", "")
     expect(parseRunnerClaim(partial)).toEqual({ ...claim, boot: "boot-a", pidNamespace: "pid:[42]" })
     expect(() => formatRunnerClaim({ ...claim, boot: "boot-a" })).toThrow(/written together/)
