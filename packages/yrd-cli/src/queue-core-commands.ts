@@ -650,15 +650,18 @@ export async function coreQueueCommand(
   const config = captured.config
   const eventStore = createEventStore(repo, config.target.remote, selection)
   const advertisedFormat = await withRemoteSeam("queueFormat", () => queueFormat(eventStore, config.target.branch))
-  if (advertisedFormat === "legacy") {
-    throw new Error(
-      `${config.target.remote}#${config.target.branch} uses a legacy Record ref; expected ${queueRef(config.target.branch)}`,
-    )
-  }
-  if (advertisedFormat !== "event" && advertisedFormat !== "empty") {
-    throw new Error(
-      `${config.target.remote}#${config.target.branch} uses a legacy Record ref; expected ${queueRef(config.target.branch)}`,
-    )
+  switch (advertisedFormat) {
+    case "legacy":
+      throw new Error(
+        `${config.target.remote}#${config.target.branch} uses a legacy Record ref; expected ${queueRef(config.target.branch)}`,
+      )
+    case "event":
+    case "empty":
+      break
+    default: {
+      const unreachable: never = advertisedFormat
+      throw new Error(`${config.target.remote}#${config.target.branch} classified ${String(unreachable)}`)
+    }
   }
   const resolveIssue = issueResolver(config, repo, env)
   const workdir = options.workdir ?? (await workdirOf(git))

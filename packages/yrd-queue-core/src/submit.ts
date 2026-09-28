@@ -412,30 +412,44 @@ async function admitSubmitAtHead(
   const store = createEventStore(root, remote, selectionFor(git))
   const queue = request.target.branch
   const format = await queueFormat(store, queue)
-  if (format === "empty") {
-    const config = await readConfig(git, targetHead, request.target)
-    if (config === undefined) {
+  switch (format) {
+    case "empty": {
+      const config = await readConfig(git, targetHead, request.target)
+      if (config === undefined) {
+        throw new Error(
+          `cannot create event queue ${remote}#${queue}: the pinned commit ${targetHead} has no .yrd.yml; declare checks in .yrd.yml at that commit before creating an event queue`,
+        )
+      }
+      let createError: unknown
+      try {
+        await createEventQueue(store, queue, targetHead, config, new Date())
+      } catch (error) {
+        if (!(error instanceof Conflict) && !(error instanceof RetriesExhausted)) throw error
+        createError = error
+      }
+      const again = await queueFormat(store, queue)
+      if (again !== "event") {
+        const named = createError instanceof Error ? createError.message : String(createError ?? "no create error")
+        throw new Error(
+          `${remote}#${queue} did not become an event queue after create: classified ${again}; create: ${named}`,
+          createError instanceof Error ? { cause: createError } : undefined,
+        )
+      }
+      break
+    }
+    case "legacy": {
+      const refs = await listRefs(queueRefPrefix(queue), store)
+      const named = [...refs.keys()].filter((ref) => classifyQueueRef(queue, ref) === "change")
       throw new Error(
-        `cannot create event queue ${remote}#${queue}: the pinned commit ${targetHead} has no .yrd.yml; declare checks in .yrd.yml at that commit before creating an event queue`,
+        `${remote}#${queue} uses a legacy Record ref ${named[0] ?? "(none listed)"}; expected ${queueRef(queue)}`,
       )
     }
-    try {
-      await createEventQueue(store, queue, targetHead, config, new Date())
-    } catch (error) {
-      if (!(error instanceof Conflict) && !(error instanceof RetriesExhausted)) throw error
+    case "event":
+      break
+    default: {
+      const unreachable: never = format
+      throw new Error(`${remote}#${queue} classified ${String(unreachable)}`)
     }
-    const again = await queueFormat(store, queue)
-    if (again !== "event") {
-      throw new Error(`${remote}#${queue} did not become an event queue after create: classified ${again}`)
-    }
-  } else if (format === "legacy") {
-    const refs = await listRefs(queueRefPrefix(queue), store)
-    const named = [...refs.keys()].filter((ref) => classifyQueueRef(queue, ref) === "change")
-    throw new Error(
-      `${remote}#${queue} uses a legacy Record ref ${named[0] ?? "(none listed)"}; expected ${queueRef(queue)}`,
-    )
-  } else if (format !== "event") {
-    throw new Error(`${remote}#${queue} uses a legacy Record ref; expected ${queueRef(queue)}`)
   }
   const operational = await readEventOpsWithRefs(store, git, request.target.branch, targetHead)
   const stop = operational.ops.stop
