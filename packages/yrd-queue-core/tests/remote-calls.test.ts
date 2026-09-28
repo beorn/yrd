@@ -63,10 +63,19 @@ describe("remote calls are counted from git's trace2 event log", () => {
     expect(calls.processes).toBeGreaterThanOrEqual(4)
   }, 60_000)
 
-  /** @failure A round's total hid the 15 component-main refreshes, so its beyond-refresh SSH cost was unknowable. */
-  it.each(["configured origin", "captured URL"])(
-    "keeps a proven refresh split for %s after Trace2 is removed (26232)",
-    async (source) => {
+  /** @failure Bare Git reads omitted repository identity, so the round could not prove its SSH split (26282).
+   * @level l2: real Git's bare discovery and Gitomic's explicit git-directory invocation.
+   * @consumer the round's durable refresh/beyond-refresh counts; no test-only production seam.
+   */
+  it.each([
+    ["configured origin", "working"],
+    ["captured URL", "working"],
+    ["configured origin", "bare"],
+    ["captured URL", "git-dir"],
+    ["configured origin", "git-dir-equals"],
+  ])(
+    "keeps a proven refresh split for %s in %s after Trace2 is removed (26232, 26282)",
+    async (source, mode) => {
       const root = mkdtempSync(join(tmpdir(), "yrd-round-refresh-"))
       roots.push(root)
       const seed = join(root, "seed")
@@ -86,6 +95,14 @@ describe("remote calls are counted from git's trace2 event log", () => {
       ])
       const remote = join(root, "remote.git")
       await gitIn(root)(["clone", "--quiet", "--bare", seed, remote])
+      const repository = mode === "working" ? seed : join(root, "mirror.git")
+      if (mode !== "working") await gitIn(root)(["clone", "--quiet", "--bare", seed, repository])
+      const prefix =
+        mode === "git-dir" ? ["--git-dir", repository] : mode === "git-dir-equals" ? [`--git-dir=${repository}`] : []
+      const caller = (env: NodeJS.ProcessEnv) => {
+        const invoke = gitIn(repository, undefined, undefined, { env })
+        return (args: string[]) => invoke([...prefix, ...args])
+      }
       const ssh = join(root, "fake-ssh")
       writeFileSync(ssh, '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n')
       chmodSync(ssh, 0o755)
@@ -93,14 +110,14 @@ describe("remote calls are counted from git's trace2 event log", () => {
       const base = { ...process.env, ...trace.env, GIT_SSH_COMMAND: ssh }
       const url = `ssh://calls.invalid${remote}`
       const selected = source === "captured URL" ? url : "origin"
-      await git(["remote", "add", "origin", url])
-      await gitIn(seed, undefined, undefined, { env: { ...base, GIT_SUPER_PHASE: "refresh" } })([
+      await gitIn(repository)(["remote", mode === "working" ? "add" : "set-url", "origin", url])
+      await caller({ ...base, GIT_SUPER_PHASE: "refresh" })([
         "fetch",
         "--no-tags",
         selected,
         "+refs/heads/main:refs/remotes/origin/main",
       ])
-      await gitIn(seed, undefined, undefined, { env: base })(["ls-remote", url, "refs/heads/main"])
+      await caller(base)(["ls-remote", url, "refs/heads/main"])
       const row = roundRemoteCallsRow(trace.end())
       expect(row).toMatchObject({
         ssh_children: 2,
@@ -108,24 +125,30 @@ describe("remote calls are counted from git's trace2 event log", () => {
         beyond_refresh_ssh_children: 1,
         unreadable: 0,
       })
-      expect(row.refresh_calls).toEqual([`1 fetch @ ${seed}`])
-      expect(row.beyond_refresh_calls).toEqual([`1 ls-remote @ ${seed}`])
+      expect(row.refresh_calls).toEqual([`1 fetch @ ${repository}`])
+      expect(row.beyond_refresh_calls).toEqual([`1 ls-remote @ ${repository}`])
       expect(existsSync(join(root, "trace2"))).toBe(false)
 
       // An older git-super still makes the same refresh fetch but cannot mark it;
       // the round must warn instead of publishing a plausible zero refresh count.
       const oldTrace = traceRemoteCalls(join(root, "old-trace2"), { refresh: true })
-      await gitIn(seed, undefined, undefined, {
-        env: { ...process.env, ...oldTrace.env, GIT_SSH_COMMAND: ssh },
-      })(["fetch", "--no-tags", selected, "+refs/heads/main:refs/remotes/origin/main"])
+      await caller({ ...process.env, ...oldTrace.env, GIT_SSH_COMMAND: ssh })([
+        "fetch",
+        "--no-tags",
+        selected,
+        "+refs/heads/main:refs/remotes/origin/main",
+      ])
       expect(() => roundRemoteCallsRow(oldTrace.end())).toThrow(/untagged component-main refresh/u)
       expect(existsSync(join(root, "old-trace2"))).toBe(false)
 
       // Submit observes the same Git call but has no round refresh boundary.
       const submitTrace = traceRemoteCalls(join(root, "submit-trace2"), { seams: true })
-      await gitIn(seed, undefined, undefined, {
-        env: { ...process.env, ...submitTrace.env, GIT_SSH_COMMAND: ssh },
-      })(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+      await caller({ ...process.env, ...submitTrace.env, GIT_SSH_COMMAND: ssh })([
+        "fetch",
+        "--no-tags",
+        "origin",
+        "+refs/heads/main:refs/remotes/origin/main",
+      ])
       expect(submitTrace.end().sshChildren).toBe(1)
     },
     60_000,
@@ -260,7 +283,37 @@ describe("remote calls are counted from git's trace2 event log", () => {
     expect(calls.seams.unattributed).toBeUndefined()
   })
 
-  it("refuses a trace directory that does not exist, rather than reporting zero calls", () => {
+  /** @failure Missing trace or process identity must not satisfy a round SSH-count check (26282).
+   * @level l0: incomplete native event shapes at the count consumer.
+   * @consumer roundRemoteCallsRow's named unknown-data warning; no test-only production seam.
+   */
+  it("refuses missing trace or process identity, rather than reporting zero calls", () => {
     expect(() => readRemoteCalls(join(tmpdir(), "yrd-remote-calls-absent-25570"))).toThrow(/trace2 directory/u)
+    const directory = mkdtempSync(join(tmpdir(), "yrd-remote-calls-incomplete-"))
+    roots.push(directory)
+    for (const identity of [
+      [
+        { event: "start", argv: ["git", "ls-remote", "origin"] },
+        { event: "def_repo", worktree: "/repo" },
+      ],
+      [
+        { event: "start", argv: ["git", "ls-remote", "origin"] },
+        { event: "cmd_name", name: "ls-remote" },
+      ],
+      [
+        { event: "start", argv: ["git", "--git-dir=relative.git", "ls-remote", "origin"] },
+        { event: "cmd_name", name: "ls-remote" },
+      ],
+    ]) {
+      writeFileSync(
+        join(directory, "process"),
+        [...identity, { event: "child_start", child_class: "transport/ssh" }]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+      )
+      const calls = readRemoteCalls(directory)
+      expect(calls.sshChildren).toBe(1)
+      expect(() => roundRemoteCallsRow(calls)).toThrow(/transport child lacks its Git command or repository/u)
+    }
   })
 })
