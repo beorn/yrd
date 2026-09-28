@@ -221,7 +221,7 @@ describe("the STATS line's summary (25416)", () => {
       { ...decision(25, "merged"), queuedMs: minutes(100), runMs: minutes(100) },
     ]
     expect(statsSummary({ drafts: "8 drafts (1d), 98 older", waiting: 7 }, lastDayBucket(decisions, NOW))).toBe(
-      "current: 8 drafts (1d), 98 older, 7 waiting · 24h: 04:00 wait, 07:00 run, 1 merge, 1 failed, 1 stuck",
+      "current: 8 drafts (1d), 98 older, 7 waiting · 24h: 4:00 wait, 7:00 run, 1 merge, 1 failed, 1 stuck",
     )
   })
 
