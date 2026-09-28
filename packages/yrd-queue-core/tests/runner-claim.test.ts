@@ -5,9 +5,10 @@
  * @testonly none
  */
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { safeRemoveSync } from "removely"
 import { describe, expect, it } from "vitest"
 import {
   formatRunnerClaim,
@@ -58,7 +59,7 @@ describe("runner claim", () => {
       })
       expect(oldReader.formatRunnerClaim(parsed)).toBe(message)
     } finally {
-      rmSync(root, { recursive: true, force: true })
+      safeRemoveSync(root, { within: realpathSync(tmpdir()) })
     }
     const partial = message.replace("StartTick: 1234\n", "")
     expect(parseRunnerClaim(partial)).toEqual({ ...claim, boot: "boot-a", pidNamespace: "pid:[42]" })

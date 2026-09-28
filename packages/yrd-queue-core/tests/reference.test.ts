@@ -10,6 +10,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, wr
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { acquireExclusive } from "git-super/exclusive"
+import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, type Git } from "../src/git.ts"
 import type { LogWrite } from "../src/log.ts"
@@ -364,7 +365,7 @@ describe("populateReferenceStores", () => {
     // The remote the declaration names is gone, so no store can be made for it.
     // Reporting an empty result here would hand a caller a reference it has
     // been told is self-contained and is not.
-    rmSync(vendor, { force: true, recursive: true })
+    safeRemoveSync(vendor, { within: realpathSync(tmpdir()) })
 
     await expect(populateReferenceStores({ gitIn: (cwd) => gitIn(cwd), repo })).rejects.toThrow(/vendor\/dep/u)
   }, 60_000)
@@ -570,7 +571,7 @@ describe("freshWorktree", () => {
 
     // verifyCandidate removed its composed worktree. Disable the component
     // origin, then prove the owner can compose the verified root from custody.
-    rmSync(vendor, { force: true, recursive: true })
+    safeRemoveSync(vendor, { within: realpathSync(tmpdir()) })
 
     // Remove the fixture's exact origin rewrites so Git Super's exact local
     // borrow rewrites take precedence. Equal-length insteadOf entries would
