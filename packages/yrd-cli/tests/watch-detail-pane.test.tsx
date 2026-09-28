@@ -12,7 +12,7 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
-import { bufferToStyledText, render } from "silvery/test"
+import { bufferToStyledText, debugTree, render } from "silvery/test"
 import { createTerminal } from "@termless/core"
 import { createGhosttyBackend, initGhostty } from "@termless/ghostty"
 import { NowContext, MinuteContext } from "../src/watch-clock.ts"
@@ -92,9 +92,8 @@ function snapshot(rowCount = 1): WatchSnapshot {
   }
 }
 
-function opener() {
+function opener(checks: readonly CheckPanel[] = [UNDECLARED_FAILED]) {
   return vi.fn(async (item: WatchRow): Promise<ChangeDetail> => {
-    const checks = [UNDECLARED_FAILED]
     return {
       checks,
       row: item.row,
@@ -106,11 +105,12 @@ function opener() {
 async function paint(
   size = { cols: 140, rows: 50 },
   rowCount = 1,
+  checks: readonly CheckPanel[] = [UNDECLARED_FAILED],
 ): Promise<{ text: string; lines: string[]; ansi: string }> {
   const app = render(
     <NowContext.Provider value={NOW}>
       <MinuteContext.Provider value={NOW}>
-        <WatchPane snapshot={snapshot(rowCount)} live={false} open={opener()} />
+        <WatchPane snapshot={snapshot(rowCount)} live={false} open={opener(checks)} />
       </MinuteContext.Provider>
     </NowContext.Provider>,
     size,
@@ -124,6 +124,7 @@ async function paint(
   await app.waitForLayoutStable()
   const text = app.text
   const ansi = bufferToStyledText(app.term.buffer)
+  writeCaptureIfConfigured(`yrd-watch-26242-${size.cols}x${size.rows}.layout.txt`, debugTree(app.getContainer()))
   writeCaptureIfConfigured(`yrd-watch-26242-${size.cols}x${size.rows}.ansi`, ansi)
   writeCaptureIfConfigured(`yrd-watch-26242-${size.cols}x${size.rows}.png`, await renderAnsiPng(ansi, size))
   app.unmount()
@@ -178,10 +179,28 @@ describe("26242: watch detail pane at 140x50", () => {
     expect(lines.slice(more + 1).some((line) => /╰/u.test(line))).toBe(true)
   })
 
-  // 24197 AC2: the real200×40 below-tier list can consume the log viewport.
-  // The one-row140×50 case above cannot detect that allocation failure.
-  it("24197: a dense below-tier list leaves the selected check log visible at 200x40", async () => {
-    const { text } = await paint({ cols: 200, rows: 40 }, 40)
+  // 24197 AC2: both the list and the long log must remain useful at 200×40.
+  // The one-check fixture misses the actual summary, command and path chrome.
+  it("24197: a dense below-tier list and selected check log remain visible at 200x40", async () => {
+    const checks: readonly CheckPanel[] = [
+      { name: "typecheck", state: "not-run" },
+      {
+        name: "lockfile-agreement",
+        state: "failed",
+        spec: { name: "lockfile-agreement", run: "bun tools/check-lockfile-agreement.ts" },
+        log: "/w/checks/lockfile-agreement.log",
+        result: { exit: "1", log: "/w/checks/lockfile-agreement.log", ms: 1000, result: "fail" },
+        output: LONG_LOG,
+      },
+      { name: "affected-tests", state: "not-run" },
+    ]
+    const { text, lines } = await paint({ cols: 200, rows: 40 }, 40, checks)
+    const header = lines.findIndex((line) => /TIME.*RUN.*CHANGES/u.test(line))
+    const detail = lines.findIndex((line) => line.includes("It failed"))
+    expect(header).toBeGreaterThanOrEqual(0)
+    expect(detail).toBeGreaterThan(header)
+    // The selected identity repeats in the detail: inspect only the list region.
+    expect(lines.slice(header + 1, detail).join("\n")).toContain("task/24197-240col-gate")
     expect(text).toContain("LONG CHECK LOG 01")
     expect(text).toMatch(/\d+ more lines/u)
   })

@@ -1288,7 +1288,7 @@ function SingleWatchPane({
         <Box flexGrow={0} flexShrink={1} minHeight={0} maxHeight="50%" minWidth={0}>
           {list}
         </Box>
-        <Box flexGrow={1} minHeight={DETAIL_NATURAL_HEIGHT} minWidth={0}>
+        <Box flexGrow={1} flexBasis={0} minHeight={DETAIL_NATURAL_HEIGHT} minWidth={0}>
           {detailPane}
         </Box>
       </Box>
