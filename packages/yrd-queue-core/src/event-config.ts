@@ -11,19 +11,20 @@ type EventQueueRunConfig = Readonly<{
 
 type EventQueueConfigAction = "create" | "run" | "submit"
 
-const QUEUE_KEYS = new Set([
-  "target",
-  "archiveAfter",
-  "checks",
-  "health",
-  "ignore",
-  "issueResolver",
-  "admission",
-  "blob",
-  "notify",
-  "setup",
-  "teardown",
-])
+/** Every parsed queue field needs an explicit event-runner decision. */
+const QUEUE_KEYS = {
+  target: "supported",
+  archiveAfter: "supported",
+  checks: "supported",
+  health: "supported",
+  ignore: "supported",
+  issueResolver: "supported",
+  admission: "supported",
+  blob: "supported",
+  notify: "supported",
+  setup: "supported",
+  teardown: "refused",
+} as const satisfies Record<keyof QueueConfig, "supported" | "refused">
 const CHECK_KEYS = new Set([
   "name",
   "run",
@@ -56,7 +57,9 @@ function assertPlainFeatures(config: EventQueueRunConfig, action: EventQueueConf
 export function assertPlainEventQueueConfig(config: QueueConfig, action: EventQueueConfigAction): void {
   assertPlainFeatures(config, action)
   for (const [key, value] of Object.entries(config)) {
-    if (value !== undefined && !QUEUE_KEYS.has(key)) unsupported(action, `queue key ${key}:`)
+    if (value !== undefined && QUEUE_KEYS[key as keyof QueueConfig] !== "supported") {
+      unsupported(action, `queue key ${key}:`)
+    }
   }
 }
 
