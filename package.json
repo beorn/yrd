@@ -42,7 +42,7 @@
     "@silvery/ansi": "^0.25.0",
     "@silvery/commander": "^0.25.0",
     "@silvery/scope": "^0.25.0",
-    "loggily": "github:beorn/loggily#b3e70c9c3da41b625000a01923b2fdb15bb1bf6b",
+    "loggily": "github:beorn/loggily#9aacb11b722a4c5aa7c2dec76cbd7ebf589dbf2a",
     "react": "^19.2.0",
     "silvery": "^0.25.0",
     "zod": "4.6.5"
@@ -57,7 +57,7 @@
   },
   "overrides": {
     "git-super": "github:beorn/git-super#5c66396f174ddcbe0d164de510ca08fee48a3a69",
-    "gitomic": "github:beorn/gitomic#eda69424bef4de26cf8006d5d9cc3e7c244ac393",
-    "loggily": "github:beorn/loggily#b3e70c9c3da41b625000a01923b2fdb15bb1bf6b"
+    "gitomic": "github:beorn/gitomic#566f132da7287b01ff9211378d8a760954786239",
+    "loggily": "github:beorn/loggily#9aacb11b722a4c5aa7c2dec76cbd7ebf589dbf2a"
   }
 }

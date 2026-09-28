@@ -894,11 +894,14 @@ it("refuses cancellation after the marker before child publication", async () =>
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-rival"], stuck: [] })
   expect(await remoteTip(w.git, "refs/heads/main")).not.toBe(rootBefore)
   expect(await submoduleMain(w)).toBe(ahead)
-  expect((await readStatus(eventStore(w), "main", "task/event-rival")).status).toBe("merged")
-  // Since 35b3d713fa a drop of an ended change keeps its ending and deletes only the branch name (25658 P3).
-  await drop(eventStore(w), { queue: "main", branch: "task/event-rival", by: "@dev/2" })
-  expect((await readStatus(eventStore(w), "main", "task/event-rival")).status).toBe("merged")
+  // Since 26420 the runner deletes the merged origin branch on landing.
+  expect(outcome.branches).toEqual(expect.arrayContaining([expect.stringMatching(/^deleted task\/event-rival at /u)]))
   await expect(remoteTip(w.git, "refs/heads/task/event-rival")).rejects.toThrow(/is absent/u)
+  // Calling drop on an already-merged change whose branch was already deleted throws (no branch to drop).
+  await expect(drop(eventStore(w), { queue: "main", branch: "task/event-rival", by: "@dev/2" })).rejects.toThrow(
+    /is absent; its change already ended merged at .*; there is no branch to drop/u,
+  )
+  expect((await readStatus(eventStore(w), "main", "task/event-rival")).status).toBe("merged")
 })
 
 /** @failure Marker read-back can become stale before Git-super starts its child write.

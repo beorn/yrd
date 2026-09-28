@@ -435,7 +435,12 @@ export async function eventQueueRun(
   /** The line as this round read it (25669), stated on every outcome once the line is read. */
   const read: { line?: RoundLine } = {}
   const branches: string[] = []
-  const deleteMergedBranch = async (branch: string, head: string): Promise<void> => {
+  const deleteMergedBranch = async (branch: string, head?: string): Promise<void> => {
+    if (head === undefined) {
+      log.write({ branch, kind: "branch-kept", saw: "unread", reason: "no submitted commit recorded" })
+      branches.push(`kept ${branch}: no submitted commit recorded`)
+      return
+    }
     const ref = `refs/heads/${branch}`
     try {
       if (store.backend.publish === undefined) {
@@ -835,7 +840,7 @@ export async function eventQueueRun(
         decision: "merged",
         reason: `already on target at ${merge}`,
       })
-      if (change.commit !== undefined) await deleteMergedBranch(branch, change.commit)
+      await deleteMergedBranch(branch, change.commit)
     } catch (error) {
       let current
       try {
