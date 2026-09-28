@@ -678,6 +678,34 @@ describe("event submit", () => {
     ).toEqual(["opened", "admission-warning", "cancelled", "opened", "admission-warning"])
   })
 
+  it("admits a judged policy warning and stores its label on the warning event", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/policy-warning", "one.txt")
+    const submitted = await submit(w.git, "origin", {
+      branch: "task/policy-warning",
+      submitter: "@dev/2",
+      issue: "@i/26273",
+      target: { branch: "main", remote: "origin" },
+      admit: async () => ({ kind: "warn", reason: "Start 3 is not ticked; complete and tick it" }),
+    })
+    expect(submitted.admission).toEqual({ kind: "warn", reason: "Start 3 is not ticked; complete and tick it" })
+    expect(submitted.admissionWarning?.event).toBeDefined()
+    const history = (await listChangeHistories(store(w), "main")).histories.get("task/policy-warning")
+    expect(history?.events.map((event) => event.type)).toEqual(["opened", "admission-warning"])
+    expect(history?.events.at(-1)?.props).toContainEqual(["Warning-Kind", "policy-warning"])
+    expect(history?.state.diagnostic).toContain("policy warning")
+    expect(history?.state.diagnostic).toContain("Start 3")
+    const repeated = await submit(w.git, "origin", {
+      branch: "task/policy-warning",
+      submitter: "@dev/2",
+      issue: "@i/26273",
+      target: { branch: "main", remote: "origin" },
+      admit: async () => ({ kind: "warn", reason: "Start 3 is not ticked; complete and tick it" }),
+    })
+    expect(repeated.retry).toBe(true)
+    expect(repeated.admissionWarning).toBeUndefined()
+  })
+
   it("admits an evidenced issue without writing a warning", async () => {
     const w = await world()
     await branchWithCommit(w, "task/admitted", "one.txt")

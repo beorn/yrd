@@ -50,6 +50,7 @@ export const EVENT_TRAILERS = {
   issue: "Issue",
   queue: "Queue",
   reason: "Reason",
+  warningKind: "Warning-Kind",
   time: "Time",
   check: "Check",
   base: "Base",
@@ -167,6 +168,7 @@ type ChangeInputDetails = Readonly<{
   issue?: string
   by?: string
   reason?: string
+  warningKind?: "policy-warning"
   title?: string
   content?: string
   checks?: readonly EventCheck[]
@@ -283,6 +285,9 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   if (type === "admission-warning" && (details.commit === undefined || details.reason === undefined)) {
     throw new TypeError("admission-warning needs Commit: and Reason:")
   }
+  if (details.warningKind !== undefined && type !== "admission-warning") {
+    throw new TypeError("Warning-Kind: belongs on admission-warning")
+  }
   const props: [string, string][] = [
     [EVENT_TRAILERS.queue, details.queueTip],
     [EVENT_TRAILERS.time, details.at.toISOString()],
@@ -291,6 +296,7 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   if (details.issue !== undefined) props.push([EVENT_TRAILERS.issue, details.issue])
   if (details.by !== undefined) props.push([EVENT_TRAILERS.by, details.by])
   if (details.reason !== undefined) props.push([EVENT_TRAILERS.reason, details.reason])
+  if (details.warningKind !== undefined) props.push([EVENT_TRAILERS.warningKind, details.warningKind])
   if (details.run !== undefined) props.push([EVENT_TRAILERS.run, details.run])
   props.push(...evidenceProps(type, details))
   return {
@@ -589,7 +595,14 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       }
       const reason = requiredProp(event, EVENT_TRAILERS.reason)
       if (reason.trim() === "") throw new Error(`event ${event.id} admission-warning has empty Reason:`)
-      return diagnose(next, `admission could not judge ${head.slice(0, 12)}: ${reason}`)
+      const warningKind = prop(event, EVENT_TRAILERS.warningKind)
+      if (warningKind !== undefined && warningKind !== "policy-warning") {
+        throw new Error(`event ${event.id} admission-warning has unknown Warning-Kind: ${warningKind}`)
+      }
+      return diagnose(
+        next,
+        `admission ${warningKind === "policy-warning" ? "policy warning" : "could not judge"} ${head.slice(0, 12)}: ${reason}`,
+      )
     }
     case "verifying":
     case "checking":

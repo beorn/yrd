@@ -59,10 +59,16 @@ export type SubmitRequest = Readonly<{
 }>
 
 export type AdmissionVerdict = Readonly<
-  { kind: "admit" } | { kind: "refuse"; reason: string } | { kind: "cannot-judge"; reason: string }
+  | { kind: "admit" }
+  | { kind: "refuse"; reason: string }
+  | { kind: "warn"; reason: string }
+  | { kind: "cannot-judge"; reason: string }
 >
 export type AdmissionOutcome = Readonly<
-  { kind: "skipped"; reason: string } | { kind: "admitted" } | { kind: "cannot-judge"; reason: string }
+  | { kind: "skipped"; reason: string }
+  | { kind: "admitted" }
+  | { kind: "warn"; reason: string }
+  | { kind: "cannot-judge"; reason: string }
 >
 
 export type IssueResolver = (raw: string) => Promise<string>
@@ -372,10 +378,21 @@ async function admitSubmitAtHead(
         reason: `admission for ${issueLabel} threw before a verdict: ${String(cause)}`,
       }
     }
-    if (verdict.kind === "refuse") {
-      throw new Error(`admission refused ${request.branch}@${head} for ${issueLabel}: ${verdict.reason}`)
+    switch (verdict.kind) {
+      case "admit":
+        admission = { kind: "admitted" }
+        break
+      case "refuse":
+        throw new Error(`admission refused ${request.branch}@${head} for ${issueLabel}: ${verdict.reason}`)
+      case "warn":
+      case "cannot-judge":
+        admission = verdict
+        break
+      default: {
+        const unreachable: never = verdict
+        throw new Error(`unknown admission verdict: ${String(unreachable)}`)
+      }
     }
-    admission = verdict.kind === "cannot-judge" ? verdict : { kind: "admitted" }
   }
   // Operator and stuck stops are echoed; a maintenance stop refuses intake.
   // Issue conflicts are settled before
@@ -500,7 +517,11 @@ async function submitEvent(
       ...(inspected.issue === undefined ? {} : { issue: inspected.issue.issue }),
       title: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
     })
-    const warningReason = inspected.admission.kind === "cannot-judge" ? inspected.admission.reason : undefined
+    const warningReason =
+      inspected.admission.kind === "cannot-judge" || inspected.admission.kind === "warn"
+        ? inspected.admission.reason
+        : undefined
+    const warningKind = inspected.admission.kind === "warn" ? "policy-warning" : undefined
     const warningAt = new Date()
     const warning =
       warningReason !== undefined
@@ -509,7 +530,8 @@ async function submitEvent(
             at: warningAt,
             commit: head,
             reason: warningReason,
-            title: `admission could not judge ${request.branch}@${head.slice(0, 12)}`,
+            ...(warningKind === undefined ? {} : { warningKind }),
+            title: `admission ${warningKind === undefined ? "could not judge" : "policy warning"} ${request.branch}@${head.slice(0, 12)}`,
           })
         : undefined
     let retry = false
@@ -546,7 +568,8 @@ async function submitEvent(
               (event) =>
                 event.type === "admission-warning" &&
                 event.props.some(([key, value]) => key === "Commit" && value === head) &&
-                event.props.some(([key, value]) => key === "Reason" && value === warningReason),
+                event.props.some(([key, value]) => key === "Reason" && value === warningReason) &&
+                event.props.find(([key]) => key === "Warning-Kind")?.[1] === warningKind,
             )
             if (repeated) return []
             warningWritten = true

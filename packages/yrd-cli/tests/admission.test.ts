@@ -33,6 +33,13 @@ describe("target-owned admission command", () => {
       kind: "refuse",
       reason: "Start 3: tick with evidence",
     })
+    expect(admissionVerdict({ ...result, exitCode: 3 } as ProcessResult, "bun policy.ts", 100)).toEqual({
+      kind: "warn",
+      reason: "Start 3: tick with evidence",
+    })
+    expect(
+      admissionVerdict({ ...result, exitCode: 3, signal: "SIGTERM" } as ProcessResult, "bun policy.ts", 100),
+    ).toMatchObject({ kind: "cannot-judge", reason: expect.stringContaining("signal SIGTERM") })
     expect(
       admissionVerdict(
         { ...result, exitCode: 143, timedOut: true, stderr: "socket stalled" } as ProcessResult,

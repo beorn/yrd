@@ -790,6 +790,11 @@ export async function coreQueueCommand(
     )
   }
   const echoAdmission = (outcome: AdmissionOutcome, dryRun = false): void => {
+    if (outcome.kind === "warn") {
+      io.stderr(
+        `yrd: ADMISSION POLICY WARNING: ${outcome.reason}; ${dryRun ? "dry run would proceed without publishing" : "submit proceeds with a recorded change warning"}\n`,
+      )
+    }
     if (outcome.kind === "cannot-judge") {
       io.stderr(
         `yrd: ADMISSION CANNOT JUDGE: ${outcome.reason}; ${dryRun ? "dry run would proceed without publishing" : "submit proceeds with a recorded change warning"}\n`,

@@ -1195,6 +1195,33 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(repeated.stdout()).toContain(head.slice(0, 12))
   })
 
+  it("prints the policy cure and submits through the event queue on admission exit 3", async () => {
+    const repo = await world('admission:\n  run: "sh tools/policy.sh"\n  timeoutMs: 5000\n')
+    const git = gitIn(repo)
+    mkdirSync(join(repo, "tools"))
+    writeFileSync(
+      join(repo, "tools", "policy.sh"),
+      "#!/bin/sh\necho 'Start 3 is not ticked; complete and tick it'\nexit 3\n",
+    )
+    await git(["add", "tools/policy.sh"])
+    await git(["commit", "--quiet", "-m", "policy"])
+    await git(["push", "--quiet", "origin", "main"])
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    await git(["checkout", "--quiet", "-b", "task/warn-only"])
+    writeFileSync(join(repo, "work.txt"), "warning submit\n")
+    await git(["add", "work.txt"])
+    await git(["commit", "--quiet", "-m", "warning submit"])
+    const submitted = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], submitted.io)).toBe(0)
+    expect(submitted.stderr()).toContain("POLICY WARNING")
+    expect(submitted.stderr()).toContain("Start 3 is not ticked; complete and tick it")
+    const receipt = JSON.parse(submitted.stdout()) as { admission: { kind: string } }
+    expect(receipt.admission.kind).toBe("warn")
+    const store = createEventStore(repo, "origin", git.selection)
+    const change = (await listChanges(store, "main")).get("task/warn-only")
+    expect(change).toMatchObject({ status: "queued", diagnostic: expect.stringContaining("policy warning") })
+  })
+
   /** @failure 25708: a same-head submit reopened a merged chain while the service published against its old tip. */
   it.each(["merging", "merged"] as const)("refuses a same-head submit when its change is %s", async (status) => {
     const repo = await world("{}\n")

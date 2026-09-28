@@ -23,6 +23,9 @@ export function admissionVerdict(result: ProcessResult, run: string, timeoutMs: 
   ) {
     return cannotJudge(run, `process did not settle cleanly (exit ${result.exitCode})`, result.stderr)
   }
+  if (result.signal !== null) {
+    return cannotJudge(run, `exit ${result.exitCode}, signal ${String(result.signal)}`, result.stderr)
+  }
   if (result.exitCode === 0) return { kind: "admit" }
   if (result.exitCode === 1) {
     const reason = result.stdout.trim()
@@ -31,11 +34,17 @@ export function admissionVerdict(result: ProcessResult, run: string, timeoutMs: 
       reason: reason === "" ? `target .yrd.yml admission ${JSON.stringify(run)} refused without a stdout cure` : reason,
     }
   }
-  return cannotJudge(
-    run,
-    `exit ${result.exitCode}${result.signal === null ? "" : `, signal ${result.signal}`}`,
-    result.stderr,
-  )
+  if (result.exitCode === 3) {
+    const reason = result.stdout.trim()
+    return {
+      kind: "warn",
+      reason:
+        reason === ""
+          ? `target .yrd.yml admission ${JSON.stringify(run)} warned without a stdout cure; print the failing policy row and its cure`
+          : reason,
+    }
+  }
+  return cannotJudge(run, `exit ${result.exitCode}`, result.stderr)
 }
 
 /** Run only target-declared policy in a detached worktree of the captured target. */
