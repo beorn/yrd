@@ -64,7 +64,7 @@ describe("remote calls are counted from git's trace2 event log", () => {
   }, 60_000)
 
   /** @failure A round's total hid the 15 component-main refreshes, so its beyond-refresh SSH cost was unknowable. */
-  it("keeps a proven refresh split and names the SSH commands after Trace2 is removed (26232)", async () => {
+  it.each(["configured origin", "captured URL"])("keeps a proven refresh split for %s after Trace2 is removed (26232)", async (source) => {
     const root = mkdtempSync(join(tmpdir(), "yrd-round-refresh-"))
     roots.push(root)
     const seed = join(root, "seed")
@@ -90,11 +90,12 @@ describe("remote calls are counted from git's trace2 event log", () => {
     const trace = traceRemoteCalls(join(root, "trace2"), { refresh: true })
     const base = { ...process.env, ...trace.env, GIT_SSH_COMMAND: ssh }
     const url = `ssh://calls.invalid${remote}`
+    const selected = source === "captured URL" ? url : "origin"
     await git(["remote", "add", "origin", url])
     await gitIn(seed, undefined, undefined, { env: { ...base, GIT_SUPER_PHASE: "refresh" } })([
       "fetch",
       "--no-tags",
-      "origin",
+      selected,
       "+refs/heads/main:refs/remotes/origin/main",
     ])
     await gitIn(seed, undefined, undefined, { env: base })(["ls-remote", url, "refs/heads/main"])
@@ -114,7 +115,7 @@ describe("remote calls are counted from git's trace2 event log", () => {
     const oldTrace = traceRemoteCalls(join(root, "old-trace2"), { refresh: true })
     await gitIn(seed, undefined, undefined, {
       env: { ...process.env, ...oldTrace.env, GIT_SSH_COMMAND: ssh },
-    })(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+    })(["fetch", "--no-tags", selected, "+refs/heads/main:refs/remotes/origin/main"])
     expect(() => roundRemoteCallsRow(oldTrace.end())).toThrow(/untagged component-main refresh/u)
     expect(existsSync(join(root, "old-trace2"))).toBe(false)
 
