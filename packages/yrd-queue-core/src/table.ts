@@ -36,8 +36,10 @@ export type Row<Status extends string = ChangeStatus | "direct" | "invalid"> = R
    * Row.next} says the same thing in the one line a reader acts on.
    */
   malformed?: readonly string[]
-  /** A selected event chain whose history cannot fold, or a readable chain with no opened event. */
+  /** A selected chain that cannot fold, or retained merged endings whose equality cannot be proved. */
   diagnostic?: string
+  /** Immutable ending identity distinguishing retained ambiguous merged rows. */
+  ending?: string
   /** Exact selected event chain and fold error when state is invalid. */
   ref?: string
   tip?: string
@@ -57,11 +59,11 @@ export type Row<Status extends string = ChangeStatus | "direct" | "invalid"> = R
   /** The merge commit on the target, full sha, from the merged record's `Merge:` (carried by the sent record too); absent until merged. */
   merge?: string
   /**
-   * Later merged endings of this same head, folded into this row (25718): a
-   * re-submit after a merge can merge the head again, and one change is one
-   * row. Each names its ending event and when it ended.
+   * Later endings of this same head and proven merge root, folded into this row
+   * (25718). `ending` remains the later event; originalEnding and merge carry
+   * the equality proof independently of a journal run's own merge field.
    */
-  duplicates?: readonly Readonly<{ ending: string; endedAt?: Date }>[]
+  duplicates?: readonly Readonly<{ ending: string; originalEnding?: string; merge?: string; endedAt?: Date }>[]
   /** The target commit the change was merged or judged at, full sha, from the record's `Base:`. */
   base?: string
   /**
@@ -137,10 +139,11 @@ export type WatchRowOptions = Readonly<{
   journals?: Journals
 }>
 
-/** The same identity for selection and detail: branch, head, and journal run. */
+/** The same identity for selection and detail: branch, head, retained ending and journal run. */
 export function watchRowKey(row: WatchRow): string {
   const change = journalKey(row.row.branch, row.row.head)
-  return row.run === undefined ? change : `${change}@${row.run.id}`
+  const ending = row.row.ending === undefined ? change : `${change}:ending:${row.row.ending}`
+  return row.run === undefined ? ending : `${ending}@${row.run.id}`
 }
 
 /**
