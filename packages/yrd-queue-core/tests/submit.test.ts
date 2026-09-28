@@ -17,7 +17,9 @@ import {
   normalizeIssueReference,
   listChangeHistories,
   lookupRunIndex,
+  queueFormat,
   queueRef,
+  resetQueueFormatCache,
   runIndexRef,
   readConfig,
   readStatus,
@@ -83,6 +85,62 @@ function store(w: World) {
   return createEventStore(w.work, "origin", selectionFor(w.git))
 }
 describe("event submit", () => {
+  it("creates the event queue on first submit to an empty remote (26398)", async () => {
+    resetQueueFormatCache()
+    const w = await world(false)
+    expect(await queueFormat(store(w), "main")).toBe("empty")
+    const head = await branchWithCommit(w, "task/lifecycle", "lifecycle.txt")
+    await submit(w.git, "origin", {
+      branch: "task/lifecycle",
+      submitter: "author",
+      target: { branch: "main", remote: "origin" },
+    })
+    resetQueueFormatCache()
+    expect(await queueFormat(store(w), "main")).toBe("event")
+    const status = await readStatus(store(w), "main", "task/lifecycle")
+    expect(status.status).toBe("queued")
+    expect(head).toHaveLength(40)
+  })
+
+  it("refuses first submit when a legacy Record ref is present and names it (26398)", async () => {
+    resetQueueFormatCache()
+    const w = await world(false)
+    const legacy = `refs/yrd/main/task/old@${w.target}`
+    await w.git(["update-ref", legacy, w.target])
+    await w.git(["push", "--quiet", "origin", legacy])
+    resetQueueFormatCache()
+    expect(await queueFormat(store(w), "main")).toBe("legacy")
+    const head = await branchWithCommit(w, "task/legacy-remote", "legacy.txt")
+    await expect(
+      submit(w.git, "origin", {
+        branch: "task/legacy-remote",
+        submitter: "author",
+        target: { branch: "main", remote: "origin" },
+      }),
+    ).rejects.toThrow(/legacy Record ref refs\/yrd\/main\/task\/old@/)
+    expect(head).toHaveLength(40)
+    resetQueueFormatCache()
+    expect(await queueFormat(store(w), "main")).toBe("legacy")
+  })
+
+  it("refuses first submit over stray queue refs (26398)", async () => {
+    resetQueueFormatCache()
+    const w = await world(false)
+    await w.git(["update-ref", "refs/yrd/main/runs", w.target])
+    await w.git(["push", "--quiet", "origin", "refs/yrd/main/runs"])
+    resetQueueFormatCache()
+    await expect(queueFormat(store(w), "main")).rejects.toThrow(/unexpected refs.*refs\/yrd\/main\/runs/)
+    const head = await branchWithCommit(w, "task/stray", "stray.txt")
+    await expect(
+      submit(w.git, "origin", {
+        branch: "task/stray",
+        submitter: "author",
+        target: { branch: "main", remote: "origin" },
+      }),
+    ).rejects.toThrow(/unexpected refs/)
+    expect(head).toHaveLength(40)
+  })
+
   it("births the queue and empty run index together; an occupied index lease leaves no queue (26193)", async () => {
     const born = await world()
     expect(await remoteRefs(born)).toEqual(["refs/heads/main", queueRef("main"), runIndexRef("main")])

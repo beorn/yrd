@@ -5,7 +5,16 @@ import { readEventChain, readEventChains } from "./event-read.ts"
 import { EVENT_READ_LIMIT } from "./event-read.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
-import { assertBranch, changesRef, pauseRef, queueRef, queueRefPrefix, runIndexRef, type Change } from "./refs.ts"
+import {
+  assertBranch,
+  changesRef,
+  classifyQueueRef,
+  pauseRef,
+  queueRef,
+  queueRefPrefix,
+  runIndexRef,
+  type Change,
+} from "./refs.ts"
 export { queueRef } from "./refs.ts"
 export { changesRef } from "./refs.ts"
 import { readM2Pause, type PauseRecord } from "./pause.ts"
@@ -1643,24 +1652,32 @@ function validateOverrideEvent(event: QueueEventShape, before: OpsState, after: 
   }
 }
 
-const formatCache = new Map<string, "event" | "legacy">()
+const formatCache = new Map<string, "event">()
 
 /** Reset the process-wide queue format cache (for tests). */
 export function resetQueueFormatCache(): void {
   formatCache.clear()
 }
 
-/** One advertisement selects the format. An event queue with no changes is empty. Cached once per process. */
-export async function queueFormat(store: QueueReadStore, queue: string): Promise<"event" | "legacy"> {
+export type QueueFormat = "event" | "legacy" | "empty"
+
+/** One advertisement selects the format. An event queue with no changes is empty. Cached once per process. Empty is never cached. */
+export async function queueFormat(store: QueueReadStore, queue: string): Promise<QueueFormat> {
   const key = `${store.repo}#${store.remote ?? ""}#${queue}`
   const cached = formatCache.get(key)
   if (cached !== undefined) return cached
   const refs = await listRefs(queueRefPrefix(queue), store)
-  const format = refs.has(queueRef(queue)) ? "event" : "legacy"
-  if (format === "event") {
-    formatCache.set(key, format)
+  if (refs.size === 0) return "empty"
+  if (refs.has(queueRef(queue))) {
+    formatCache.set(key, "event")
+    return "event"
   }
-  return format
+  const names = [...refs.keys()]
+  const where = `${store.remote ?? store.repo}#${queue}`
+  if (names.every((ref) => classifyQueueRef(queue, ref) === "change")) return "legacy"
+  throw new Error(
+    `${where} has unexpected refs under ${queueRefPrefix(queue)}: ${names.join(", ")}; expected ${queueRef(queue)} or an empty listing`,
+  )
 }
 
 /** Read one existing branch chain; a missing selected chain is a data error. */
@@ -2005,8 +2022,14 @@ async function appendDecision(
 /** End a branch and delete its name in the same leased publish. */
 export async function drop(store: QueueLocation, request: DropRequest): Promise<Dropped> {
   const { queue, branch } = request
-  if ((await queueFormat(store, queue)) !== "event") {
-    throw new Error(`drop needs an event queue at ${store.remote}#${queue}; use yrd withdraw for legacy changes`)
+  const format = await queueFormat(store, queue)
+  if (format === "legacy") {
+    throw new Error(
+      `${store.remote}#${queue} uses a legacy Record ref; expected ${queueRef(queue)}; use yrd withdraw for legacy changes`,
+    )
+  }
+  if (format !== "event") {
+    throw new Error(`drop needs an event queue at ${store.remote}#${queue}; expected ${queueRef(queue)}`)
   }
   const queueTip = (await readEventQueue(store, queue)).tip
   const ref = changesRef(queue, branch)
