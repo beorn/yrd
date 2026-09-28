@@ -1,4 +1,6 @@
 /**
+ * @reach fs-walk <fixture-only: scans Linux /proc for lock holders, not the CODE checkout>
+ *
  * The round lock across processes (andon phase 2, `@cto` 079b8578).
  *
  * The lock is a kernel flock on the workdir's `round.lock`, taken by the one
