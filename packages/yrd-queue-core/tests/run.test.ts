@@ -1239,6 +1239,8 @@ it("runs an event program-root check through the shared protected executor", asy
     "Check",
     expect.stringMatching(/^verify exit=0 .*result=pass attempt=1 phase=merge /u),
   ])
+  // @failure 26272: protected P/C roots left an empty scaffold under the ended run.
+  expect(readdirSync(join(w.workdir, "worktrees"), { recursive: true })).toEqual([])
 })
 
 /** @failure A change could replace a target-owned check script before its own event check ran.

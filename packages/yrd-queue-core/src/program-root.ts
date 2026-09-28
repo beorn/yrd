@@ -1,6 +1,6 @@
 /** One protected P/C lifecycle for queue phases and the non-publishing check command. */
-import { lstatSync, mkdirSync, readlinkSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, lstatSync, mkdirSync, readlinkSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import { gitIn, refAt, type Git } from "./git.ts"
 import type { QueueRunLog } from "./log.ts"
@@ -8,6 +8,7 @@ import {
   checkedTree,
   judgedTreeDigest,
   prepareWorktree,
+  removeEmptyWorktreeRunDirectory,
   SETUP,
   SetupFailed,
   type PrepareWorktree,
@@ -367,9 +368,24 @@ export async function programRootCheck(run: ProgramRootCheck): Promise<CheckResu
     return result
   } finally {
     try {
-      if (subject !== undefined) await subject.remove()
+      try {
+        if (subject !== undefined) await subject.remove()
+      } finally {
+        if (program !== undefined) await program.remove()
+      }
     } finally {
-      if (program !== undefined) await program.remove()
+      if (run.queueRun === true) {
+        // P/C are gone; prune only the empty check/attempt/phase/program scaffold.
+        for (const directory of [
+          run.root,
+          dirname(run.root),
+          dirname(dirname(run.root)),
+          dirname(dirname(dirname(run.root))),
+        ]) {
+          removeEmptyWorktreeRunDirectory(directory)
+          if (existsSync(directory)) break
+        }
+      }
     }
   }
 }
