@@ -59,6 +59,7 @@ import {
   ModalDialog,
   DISCLOSURE_MARKERS,
   ModalOverlay,
+  Screen,
   SplitPane,
   Text,
   TextInput,
@@ -320,21 +321,31 @@ export function WatchPane(props: WatchPaneProps) {
   const source = props.sources?.length === 1 ? props.sources[0] : undefined
   if (source?.snapshot !== undefined && source.error === undefined) {
     return (
-      <SingleWatchPane
-        {...props}
-        snapshot={source.snapshot}
-        load={source.load}
-        open={source.open}
-        loadDiff={source.loadDiff}
-        loadCommandOutput={source.loadCommandOutput}
-        resolveRunAddress={source.resolveRunAddress}
-      />
+      <Screen>
+        <SingleWatchPane
+          {...props}
+          snapshot={source.snapshot}
+          load={source.load}
+          open={source.open}
+          loadDiff={source.loadDiff}
+          loadCommandOutput={source.loadCommandOutput}
+          resolveRunAddress={source.resolveRunAddress}
+        />
+      </Screen>
     )
   }
   if (props.sources !== undefined && props.sources.length > 0) {
-    return <QueuesWatchPane {...props} sources={props.sources} />
+    return (
+      <Screen>
+        <QueuesWatchPane {...props} sources={props.sources} />
+      </Screen>
+    )
   }
-  return <SingleWatchPane {...props} />
+  return (
+    <Screen>
+      <SingleWatchPane {...props} />
+    </Screen>
+  )
 }
 
 /** Each declared queue owns one in-flight refresh and its own retry clock. A slow queue never delays another. */
@@ -1271,13 +1282,13 @@ function SingleWatchPane({
       )
     ) : tier === "below" ? (
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {/* Content-sized while the list is short so the detail grows into free
-            rows (26242). flexShrink lets a long list scroll so overflow
-            indicators and the address dialog stay on screen (25418). */}
-        <Box flexGrow={0} flexShrink={1} minHeight={0} minWidth={0}>
+        {/* Short lists give their free rows to detail (26242). A long list
+            yields at half the height so fixed detail chrome cannot
+            consume the entire check-log viewport (24197). */}
+        <Box flexGrow={0} flexShrink={1} minHeight={0} maxHeight="50%" minWidth={0}>
           {list}
         </Box>
-        <Box flexGrow={1} minHeight={DETAIL_NATURAL_HEIGHT} minWidth={0}>
+        <Box flexGrow={1} flexBasis={0} minHeight={DETAIL_NATURAL_HEIGHT} minWidth={0}>
           {detailPane}
         </Box>
       </Box>
