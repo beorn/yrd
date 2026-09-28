@@ -134,30 +134,64 @@ export function eventRows(
   return [...changeRows, ...draftRows]
 }
 
-/** The current table and the opened-segment document share the legacy seven-day ending window. */
 /**
- * One change is one row (25718): a segment that merged a head an earlier
- * segment already merged is the same ending recorded twice (a re-submit after
- * the merge, 25708), so it folds into that earlier row as a duplicate note
- * instead of standing as a second merged row with its own `since`.
+ * Only matching heads with proven equal merge roots share a row (25718).
+ * Keep contradictory or incomplete evidence on both retained endings.
  */
-function foldEqualEndings(
-  segments: readonly EventChange[],
-): readonly Readonly<{ segment: EventChange; duplicates?: Row<ChangeStatus>["duplicates"] }>[] {
-  const kept: { segment: EventChange; duplicates?: { ending: string; endedAt?: Date }[] }[] = []
+function foldEqualEndings(branch: string, segments: readonly EventChange[]) {
+  const kept: {
+    segment: EventChange
+    duplicates?: NonNullable<Row<ChangeStatus>["duplicates"]>[number][]
+    diagnostic?: string
+  }[] = []
   for (const segment of segments) {
-    const original =
+    const matches =
       segment.status === "merged" && segment.commit !== undefined
-        ? kept.find((entry) => entry.segment.status === "merged" && entry.segment.commit === segment.commit)
-        : undefined
-    if (original === undefined || segment.ending === undefined) {
-      kept.push({ segment })
+        ? kept.filter((entry) => entry.segment.status === "merged" && entry.segment.commit === segment.commit)
+        : []
+    const root = segment.merge ?? segment.adoptedMerge
+    const diagnostics: string[] = []
+    for (const entry of matches) {
+      const prior = entry.segment
+      const priorRoot = prior.merge ?? prior.adoptedMerge
+      if (root !== undefined && priorRoot === root && prior.ending !== undefined && segment.ending !== undefined) {
+        continue
+      }
+      const problem =
+        root === undefined || priorRoot === undefined || prior.ending === undefined || segment.ending === undefined
+          ? "equality unproven"
+          : "contradictory endings"
+      const diagnostic = `${branch}: ${problem}: ending ${prior.ending?.id ?? "missing"} merge ${priorRoot ?? "missing"}; ending ${segment.ending?.id ?? "missing"} merge ${root ?? "missing"}; both rows retained; inspect yrd queue show ${branch} --json`
+      entry.diagnostic = [entry.diagnostic, diagnostic].filter((line) => line !== undefined).join("; ")
+      diagnostics.push(diagnostic)
+    }
+    const original =
+      root === undefined || segment.ending === undefined
+        ? undefined
+        : matches.find(
+            (entry) =>
+              entry.segment.ending !== undefined && (entry.segment.merge ?? entry.segment.adoptedMerge) === root,
+          )
+    if (original === undefined || original.segment.ending === undefined || segment.ending === undefined) {
+      kept.push({ segment, ...(diagnostics.length === 0 ? {} : { diagnostic: diagnostics.join("; ") }) })
       continue
     }
     original.duplicates = [
       ...(original.duplicates ?? []),
-      { ending: segment.ending.id, ...(segment.endedAt === undefined ? {} : { endedAt: segment.endedAt }) },
+      {
+        ending: segment.ending.id,
+        originalEnding: original.segment.ending.id,
+        merge: root,
+        ...(segment.endedAt === undefined ? {} : { endedAt: segment.endedAt }),
+      },
     ]
+    if (diagnostics.length > 0) {
+      original.diagnostic = [original.diagnostic, ...diagnostics].filter((line) => line !== undefined).join("; ")
+    }
+    // The last submitted segment owns current selection even when its equal
+    // ending folds back into a representative before another submitted head.
+    kept.splice(kept.indexOf(original), 1)
+    kept.push(original)
   }
   return kept
 }
@@ -168,7 +202,9 @@ export function eventListRows(
   options: Readonly<{ now?: Date; all?: boolean; drafts?: boolean }> = {},
 ): Readonly<{ table: readonly Row<ChangeStatus>[]; document: readonly Row<ChangeStatus>[] }> {
   const now = options.now ?? new Date()
-  const folded = new Map([...histories].map(([branch, segments]) => [branch, foldEqualEndings(segments)] as const))
+  const folded = new Map(
+    [...histories].map(([branch, segments]) => [branch, foldEqualEndings(branch, segments)] as const),
+  )
   const current = new Map(
     [...folded].map(([branch, segments]) => {
       const last = segments.at(-1)
@@ -176,26 +212,50 @@ export function eventListRows(
       return [branch, last.segment] as const
     }),
   )
-  const duplicatesOf = (branch: string, index: number): Row<ChangeStatus>["duplicates"] =>
-    folded.get(branch)?.[index]?.duplicates
+  const retained = new Set<Row>()
+  const withEndingFacts = (
+    row: Row<ChangeStatus>,
+    entry: ReturnType<typeof foldEqualEndings>[number],
+  ): Row<ChangeStatus> => {
+    const projected = {
+      ...row,
+      ...(entry.duplicates === undefined ? {} : { duplicates: entry.duplicates }),
+      ...(entry.diagnostic === undefined
+        ? {}
+        : {
+            diagnostic: [row.diagnostic, entry.diagnostic].filter((line) => line !== undefined).join("; "),
+            ...(entry.segment.ending === undefined ? {} : { ending: entry.segment.ending.id }),
+          }),
+    }
+    if (entry.diagnostic !== undefined) retained.add(projected)
+    return projected
+  }
   const active = eventRows(current).map((row) => {
-    const duplicates =
-      row.format === "event" ? duplicatesOf(row.branch, (folded.get(row.branch)?.length ?? 0) - 1) : undefined
-    return duplicates === undefined ? row : { ...row, duplicates }
+    const entry = folded.get(row.branch)?.at(-1)
+    if (entry === undefined) throw new Error(`event change ${row.branch} lost its current segment`)
+    return withEndingFacts(row, entry)
   })
   const previous = [...folded].flatMap(([branch, segments]) =>
-    segments.slice(0, -1).map(({ segment, duplicates }) => {
+    segments.slice(0, -1).map((entry) => {
+      const { segment } = entry
       const single = eventRows(new Map([[branch, segment]]))[0]
       if (single === undefined) throw new Error(`event change ${branch} lost an opened segment`)
       const { position: _position, ...row } = single
-      return duplicates === undefined ? row : { ...row, duplicates }
+      return withEndingFacts(row, entry)
     }),
   )
   const visible = (row: Row): boolean => {
-    if (options.all) return true
+    if (options.all || retained.has(row)) return true
     if (row.position !== undefined) return true
     const at = clocks(row, now).clockAt
-    return at === undefined || now.getTime() - at.getTime() <= 7 * 24 * 60 * 60 * 1000
+    const recent = (ending: Date) => now.getTime() - ending.getTime() <= 7 * 24 * 60 * 60 * 1000
+    // Folded proof can be fresh while its original ending is outside the
+    // window. Preserve original and run clocks; inspect every known ending.
+    return (
+      at === undefined ||
+      recent(at) ||
+      row.duplicates?.some((note) => note.endedAt !== undefined && recent(note.endedAt)) === true
+    )
   }
   const selected = [...active, ...previous].filter(visible)
   const ordered = (rows: readonly Row<ChangeStatus>[]): Row<ChangeStatus>[] => [
@@ -208,7 +268,7 @@ export function eventListRows(
   ]
   const draftRows = eventRows(new Map(), drafts)
   return {
-    table: [...ordered(active.filter(visible)), ...draftRows],
+    table: [...ordered([...active, ...previous.filter((row) => retained.has(row))].filter(visible)), ...draftRows],
     document: [...ordered(selected), ...(options.drafts ? draftRows : [])],
   }
 }

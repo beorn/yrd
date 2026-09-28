@@ -29,6 +29,7 @@ import {
   createEventStore,
   drop,
   eventRows,
+  openLog,
   gitIn,
   gracefulStopHealthDocument,
   listChanges,
@@ -667,6 +668,14 @@ describe("a queue is the selected origin branch carrying config", () => {
     await git(["merge", "--quiet", "--no-ff", "-m", "landed twice", branch])
     const merge = (await git(["rev-parse", "HEAD"])).trim()
     await git(["push", "--quiet", "origin", "main"])
+    const logs = join(await workdirOf(git, { cwd: repo }), "logs")
+    for (const minutesAgo of [29, 19]) {
+      const journal = openLog(logs, () => time(minutesAgo))
+      journal.write({ kind: "run", base: target })
+      journal.write({ kind: "change", branch, head, decision: "merged" })
+      // Only one run recorded its merge; the other must keep merge absent.
+      if (minutesAgo === 29) journal.write({ kind: "merge", branch, head, commit: merge })
+    }
     await (
       await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
     ).append(
@@ -694,12 +703,30 @@ describe("a queue is the selected origin branch carrying config", () => {
     const shown = capture(repo)
     expect(await coreQueueCommand(repo, shown.io, { command: "show", branch }, { json: true, queue: "main" })).toBe(0)
     const segments = (
-      JSON.parse(shown.stdout()) as { changes: readonly { head: string; events: readonly { type: string }[] }[] }
+      JSON.parse(shown.stdout()) as {
+        changes: readonly { head: string; events: readonly { type: string; id: string }[] }[]
+      }
     ).changes
     expect(segments.map(({ head: shownHead, events }) => [shownHead, events.map((event) => event.type)])).toEqual([
       [head, ["opened", "merged"]],
       [head, ["opened", "merged"]],
     ])
+    const endings = segments.map(({ events }) => {
+      const ending = events.find((event) => event.type === "merged")
+      if (ending === undefined) throw new Error("queue show lost a fixture's merged ending")
+      return ending.id
+    })
+    const proof = [{ ending: endings[0], originalEnding: endings[1], merge, endedAt: expect.any(String) }]
+    expect(current).toEqual([expect.objectContaining({ head, merge, duplicates: proof })])
+    const historical = capture(repo)
+    expect(
+      await coreQueueCommand(repo, historical.io, { command: "list", terms: [branch] }, { json: true, queue: "main" }),
+    ).toBe(0)
+    const runs = (JSON.parse(historical.stdout()) as { changes: readonly { merge?: string; duplicates: unknown }[] })
+      .changes
+    expect(runs).toHaveLength(2)
+    expect(runs.map((row) => row.merge)).toEqual([undefined, merge])
+    for (const row of runs) expect(row.duplicates).toEqual(proof)
     const bulk = capture(repo)
     expect(await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: "main" })).toBe(0)
     expect(

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest"
 import type { Event } from "gitomic/events"
 import { evolve, initial, type EventChange } from "../src/events.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
-import { clocks } from "../src/table.ts"
+import { clocks, watchRows, watchRowKey } from "../src/table.ts"
 
 const QUEUE = "a".repeat(40)
 const HEAD = "b".repeat(40)
@@ -88,7 +88,7 @@ describe("event changes use the shared table row", () => {
     expect(expanded.table.map((row) => row.head)).toEqual([HEAD, drafts[0]!.head])
     expect(expanded.document.map((row) => row.head)).toEqual([HEAD, prior.commit, ancient.commit, drafts[0]!.head])
   })
-  it("folds a head merged twice into one row that names the later ending (25718)", () => {
+  it("folds proven equal merge roots and names both endings and their root (25718)", () => {
     // A re-submit after the merge (25708) opened a second segment on the same
     // head, and the queue merged it again: one change, two equal endings. As
     // two rows with two `since` values, every strict reader refused the list.
@@ -99,6 +99,7 @@ describe("event changes use the shared table row", () => {
     const merged = {
       status: "merged" as const,
       commit: HEAD,
+      merge: "c".repeat(40),
       since: first,
       at: first,
       endedAt: first,
@@ -107,6 +108,7 @@ describe("event changes use the shared table row", () => {
     const again = {
       status: "merged" as const,
       commit: HEAD,
+      adoptedMerge: "c".repeat(40),
       since: second,
       at: ended,
       endedAt: ended,
@@ -114,12 +116,99 @@ describe("event changes use the shared table row", () => {
     }
     const listed = eventListRows(new Map([["task/twice", [merged, again]]]), [], { now })
     expect(listed.document.map((row) => [row.head, row.since])).toEqual([[HEAD, first]])
-    expect(listed.document[0]?.duplicates).toEqual([{ ending: "f".repeat(40), endedAt: ended }])
+    expect(listed.document[0]?.duplicates).toEqual([
+      { ending: "f".repeat(40), originalEnding: "e".repeat(40), merge: "c".repeat(40), endedAt: ended },
+    ])
     expect(listed.table.map((row) => row.since)).toEqual([first])
+
+    const reopenedHead = eventListRows(
+      new Map([
+        [
+          "task/twice",
+          [
+            merged,
+            {
+              ...again,
+              commit: "d".repeat(40),
+              adoptedMerge: "d".repeat(40),
+              ending: { kind: "merged" as const, id: "a".repeat(40) },
+            },
+            again,
+          ],
+        ],
+      ]),
+      [],
+      { now },
+    )
+    expect(reopenedHead.table.map((row) => row.head)).toEqual([HEAD])
+    expect(reopenedHead.table[0]?.duplicates).toEqual(listed.table[0]?.duplicates)
+
+    const ancient = new Date("2026-09-01T14:00:00.000Z")
+    const freshDuplicate = eventListRows(
+      new Map([["task/twice", [{ ...merged, since: ancient, at: ancient, endedAt: ancient }, again]]]),
+      [],
+      { now },
+    )
+    expect(freshDuplicate.table).toHaveLength(1)
+    expect(freshDuplicate.document).toHaveLength(1)
+    expect(freshDuplicate.table[0]).toMatchObject({
+      since: ancient,
+      endedAt: ancient,
+      duplicates: [{ ending: "f".repeat(40), originalEnding: "e".repeat(40), merge: "c".repeat(40), endedAt: ended }],
+    })
 
     // A head that failed and then merged is two endings, not one: both rows stay.
     const failed = { ...merged, status: "failed" as const, ending: { kind: "failed" as const, id: "e".repeat(40) } }
     expect(eventListRows(new Map([["task/retry", [failed, again]]]), [], { now }).document).toHaveLength(2)
+  })
+  // A matching head is insufficient proof; the old fixture had no merge roots
+  // and therefore certified the false equality that hid contradictory endings.
+  it.each([
+    ["different roots", "c".repeat(40), "d".repeat(40), "contradictory endings"],
+    ["missing original root", undefined, "d".repeat(40), "equality unproven"],
+    ["missing later root", "c".repeat(40), undefined, "equality unproven"],
+  ])("retains both merged endings with %s in the list", (_case, firstRoot, laterRoot, diagnostic) => {
+    const first = new Date("2026-09-01T14:00:00.000Z")
+    const later = new Date("2026-09-24T14:00:00.000Z")
+    const segments: EventChange[] = [
+      {
+        status: "merged",
+        commit: HEAD,
+        merge: firstRoot,
+        since: first,
+        at: first,
+        endedAt: first,
+        ending: { kind: "merged", id: "e".repeat(40) },
+      },
+      {
+        status: "merged",
+        commit: HEAD,
+        merge: laterRoot,
+        since: later,
+        at: later,
+        endedAt: later,
+        ending: { kind: "merged", id: "f".repeat(40) },
+      },
+    ]
+    const listed = eventListRows(new Map([["task/unproven", segments]]), [], { now: later })
+    for (const rows of [listed.table, listed.document]) {
+      expect(rows.map((row) => row.since)).toEqual([later, first])
+      // Both retained endings must be independently selectable by the watch.
+      expect(new Set(watchRows(rows).map(watchRowKey)).size).toBe(rows.length)
+      for (const row of rows) {
+        expect(row.duplicates).toBeUndefined()
+        for (const evidence of [
+          "task/unproven",
+          diagnostic,
+          "e".repeat(40),
+          "f".repeat(40),
+          firstRoot ?? "missing",
+          laterRoot ?? "missing",
+        ]) {
+          expect(row.diagnostic).toContain(evidence)
+        }
+      }
+    }
   })
   it("projects one row per branch with the fold's current status, submitted head and ending reason", () => {
     const opened = evolve(
