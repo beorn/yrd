@@ -471,9 +471,11 @@ it.each([
   const childBefore = await advanceSubmodule(w, "four")
   await expireComponentObservation(w)
 
-  const outcome = await queueRun({ ...(await w.options({ run: command, on: ["merge"] })), notify: [] })
+  const options = { ...(await w.options({ run: command, on: ["merge"] })), notify: [] }
+  const outcome = await queueRun(options)
 
   expect(outcome.exitCode).toBe(exitCode)
+  expect(existsSync(join(options.workdir, "worktrees", outcome.run))).toBe(false)
   expect(await remoteTip(w.git, "refs/heads/main")).toBe(rootBefore)
   expect(await submoduleMain(w)).toBe(childBefore)
   const state = await readStatus(eventStore(w), "main", "task/raised-check")
