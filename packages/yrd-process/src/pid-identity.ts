@@ -1,14 +1,15 @@
 /**
  * Linux `/proc/[pid]/stat` boot-time and process-start-time parsing.
  *
- * The one parser of `/proc/[pid]/stat` field 22. Two callers read it:
+ * The one parser of `/proc/[pid]/stat` field 22. Callers read it:
  * `path-reaper.ts`'s path-holder census, to attribute a held path to the
  * process that has held it since before the census began, and the queue's
  * round lock, whose body names its holder's boot and start tick as diagnostic
- * bytes. The lock itself is a kernel flock, so yrd compares neither.
+ * bytes. The lock itself is a kernel flock, so yrd compares neither. Runner
+ * recovery compares the recorded identity before replacing a fresh claim.
  */
 
-import { readFileSync } from "node:fs"
+import { readFileSync, readlinkSync } from "node:fs"
 
 /**
  * Linux fixes USER_HZ at 100 for `/proc/[pid]/stat` regardless of CONFIG_HZ; it
@@ -68,17 +69,34 @@ function procStatStartTicks(stat: string): number | undefined {
   return Number.isFinite(ticks) && ticks >= 0 ? ticks : undefined
 }
 
-/** Which process a pid names: the boot it runs in and the clock tick it started at. */
+/** Which process a pid names: its boot, PID namespace, and start tick. */
 export type ProcessStartIdentity = Readonly<{
   /** `/proc/sys/kernel/random/boot_id`; undefined when it cannot be read. */
   boot?: string
+  /** `/proc/[pid]/ns/pid` link target; undefined when it cannot be read. */
+  pidNamespace?: string
   /** Field 22 of `/proc/[pid]/stat`; undefined when it cannot be read. */
   tick?: number
+  /** Local read diagnostics; these never form part of a published claim. */
+  unreadable?: ReadonlyArray<{ field: "boot" | "pidNamespace" | "startTick"; path: string; code: string }>
 }>
 
+/** Kernel PID existence, with permission denial counted as existence. */
+export function pidPresence(pid: number): "present" | "absent" {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new TypeError(`pid must be a positive safe integer: ${String(pid)}`)
+  try {
+    process.kill(pid, 0)
+    return "present"
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ESRCH") return "absent"
+    if (code === "EPERM") return "present"
+    throw error
+  }
+}
+
 /**
- * WHICH PROCESS `pid` is, in two halves that two readings of one process always
- * agree on: the boot it runs in and the clock tick it started at. Each half is
+ * WHICH PROCESS `pid` is: its boot, PID namespace, and start tick. Each field is
  * read on its own and is undefined when it cannot be read (no proc filesystem,
  * a process that has exited, or a line that does not parse), so a boot that
  * differs is known even where the process's own line is not.
@@ -91,23 +109,43 @@ export type ProcessStartIdentity = Readonly<{
  * recorded its identity before a reboot is compared after it.
  *
  * Undefined is UNPROVEN, never absent: a caller asking whether the process at
- * `pid` is still the one it recorded must not read an unreadable half as a
+ * `pid` is still the one it recorded must not read an unreadable field as a
  * different process.
  */
 export function processStartIdentity(pid: number, procRoot = "/proc"): ProcessStartIdentity {
-  const boot = readProcFile(`${procRoot}/sys/kernel/random/boot_id`)?.trim()
-  const stat = readProcFile(`${procRoot}/${String(pid)}/stat`)
+  const unreadable: NonNullable<ProcessStartIdentity["unreadable"]>[number][] = []
+  const bootPath = `${procRoot}/sys/kernel/random/boot_id`
+  const namespacePath = `${procRoot}/${String(pid)}/ns/pid`
+  const statPath = `${procRoot}/${String(pid)}/stat`
+  const boot = readProcFile(bootPath, (code) => unreadable.push({ field: "boot", path: bootPath, code }))?.trim()
+  const pidNamespace = readProcLink(namespacePath, (code) =>
+    unreadable.push({ field: "pidNamespace", path: namespacePath, code }),
+  )
+  const stat = readProcFile(statPath, (code) => unreadable.push({ field: "startTick", path: statPath, code }))
   const tick = stat === undefined ? undefined : procStatStartTicks(stat)
   return {
     ...(boot === undefined || boot === "" ? {} : { boot }),
+    ...(pidNamespace === undefined ? {} : { pidNamespace }),
     ...(tick === undefined ? {} : { tick }),
+    ...(unreadable.length === 0 ? {} : { unreadable }),
   }
 }
 
-function readProcFile(path: string): string | undefined {
+function readProcLink(path: string, onUnreadable: (code: string) => void): string | undefined {
+  try {
+    return readlinkSync(path)
+  } catch (error) {
+    onUnreadable((error as NodeJS.ErrnoException).code ?? "UNKNOWN")
+    // silent-fallback-allow: caller retains the path and errno and reports unproven identity in the candidate wait notice.
+    return undefined
+  }
+}
+
+function readProcFile(path: string, onUnreadable?: (code: string) => void): string | undefined {
   try {
     return readFileSync(path, "utf8")
-  } catch {
+  } catch (error) {
+    onUnreadable?.((error as NodeJS.ErrnoException).code ?? "UNKNOWN")
     // silent-fallback-allow: undefined is an unproven half of an identity, which the caller must treat as unproven.
     return undefined
   }

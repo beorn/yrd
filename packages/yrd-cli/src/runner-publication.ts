@@ -12,6 +12,7 @@ import {
   type RunnerDeadlineJudgment,
   type RunnerDueJudgment,
 } from "@yrd/queue-core"
+import { pidPresence, processStartIdentity } from "@yrd/process"
 
 type Trailers = Readonly<
   {
@@ -26,6 +27,9 @@ type Trailers = Readonly<
     Due?: string
     Round?: string
     Candidates?: string
+    Boot?: string
+    PidNamespace?: string
+    StartTick?: string
   } & Record<string, string | undefined>
 >
 
@@ -57,6 +61,9 @@ function trailers(claim: RunnerClaim): Trailers {
     Since: claim.since,
     ...(claim.deadline === undefined ? {} : { Deadline: claim.deadline }),
     ...(claim.due === undefined ? {} : { Due: claim.due, Round: claim.round, Candidates: String(claim.candidates) }),
+    ...(claim.boot === undefined ? {} : { Boot: claim.boot }),
+    ...(claim.pidNamespace === undefined ? {} : { PidNamespace: claim.pidNamespace }),
+    ...(claim.startTick === undefined ? {} : { StartTick: String(claim.startTick) }),
     ...unknown,
   }
 }
@@ -124,13 +131,15 @@ export class RunnerPublisher {
   private pending: Queued[] = []
   private running = false
   conflict: RunnerConflict | undefined
+  waiting: string | undefined
+  owns = false
 
   constructor(
     private readonly git: Git,
     readonly remote: string,
     readonly queue: string,
     private readonly onStatus: (
-      status: { kind: "ok"; at: string } | { kind: "failed"; cause: string; at: string },
+      status: { kind: "ok"; at: string } | { kind: "failed" | "waiting"; cause: string; at: string },
     ) => void,
     private readonly onNotice: (line: string) => void,
   ) {
@@ -161,8 +170,15 @@ export class RunnerPublisher {
         const next = this.pending.shift()
         if (next === undefined) break
         try {
-          await this.write(next.claim)
-          this.onStatus({ kind: "ok", at: new Date().toISOString() })
+          const wrote = await this.write(next.claim)
+          if (wrote) this.onStatus({ kind: "ok", at: new Date().toISOString() })
+          else {
+            this.onStatus({
+              kind: "waiting",
+              cause: this.waiting ?? "runner claim not yet acquired",
+              at: new Date().toISOString(),
+            })
+          }
         } catch (error) {
           const cause = error instanceof Error ? error.message : String(error)
           if (error instanceof RunnerConflict) this.conflict = error
@@ -180,11 +196,12 @@ export class RunnerPublisher {
     }
   }
 
-  private async inspect(claim: RunnerClaim, current: string | undefined): Promise<void> {
+  private async inspect(claim: RunnerClaim, current: string | undefined): Promise<boolean> {
     if (current === undefined) {
       this.tip = undefined
       this.known = true
-      return
+      this.waiting = undefined
+      return true
     }
     const unreadable = (cause: string): Error =>
       new Error(
@@ -200,7 +217,8 @@ export class RunnerPublisher {
     if (prior.host === claim.host && prior.pid === claim.pid && prior.started === claim.started) {
       this.tip = current
       this.known = true
-      return
+      this.waiting = undefined
+      return true
     }
     if (prior.state === "stopped") {
       this.onNotice(
@@ -208,20 +226,71 @@ export class RunnerPublisher {
       )
       this.tip = current
       this.known = true
-      return
+      this.waiting = undefined
+      return true
     }
     const verdict = judgeRunnerClaim(prior, new Date())
-    if (verdict.status === "fresh") throw new RunnerConflict(prior, this.ref)
+    if (verdict.status === "fresh") {
+      if (prior.host !== claim.host) throw new RunnerConflict(prior, this.ref)
+      const samePidDomain =
+        prior.boot !== undefined &&
+        prior.pidNamespace !== undefined &&
+        prior.startTick !== undefined &&
+        claim.boot !== undefined &&
+        claim.pidNamespace !== undefined &&
+        claim.startTick !== undefined &&
+        prior.boot === claim.boot &&
+        prior.pidNamespace === claim.pidNamespace
+      if (samePidDomain) {
+        if (pidPresence(prior.pid) === "absent") {
+          this.onNotice(`taking over dead runner ${prior.host}/${String(prior.pid)} at ${this.ref}: PID absent`)
+        } else {
+          const identity = processStartIdentity(prior.pid)
+          if (
+            identity.boot === prior.boot &&
+            identity.pidNamespace === prior.pidNamespace &&
+            identity.tick !== undefined
+          ) {
+            if (identity.tick === prior.startTick) throw new RunnerConflict(prior, this.ref)
+            this.onNotice(`taking over dead runner ${prior.host}/${String(prior.pid)} at ${this.ref}: PID reused`)
+          } else {
+            const reason =
+              identity.unreadable
+                ?.map(({ field, path, code }) => `death unproven: ${field} unreadable at ${path} (${code})`)
+                .join("; ") ?? "death unproven: start identity incomplete or changed"
+            return this.awaitSilence(current, prior, reason)
+          }
+        }
+      } else {
+        return this.awaitSilence(current, prior, "local PID domain or complete identity is unproven")
+      }
+    }
     if (verdict.status === "unreadable") {
       throw unreadable(verdict.reason)
     }
-    this.onNotice(`taking over stale runner ${prior.host}/${String(prior.pid)} started ${prior.started} at ${this.ref}`)
+    if (verdict.status === "silent") {
+      this.onNotice(
+        `taking over stale runner ${prior.host}/${String(prior.pid)} started ${prior.started} at ${this.ref}`,
+      )
+    }
     this.tip = current
     this.known = true
+    this.waiting = undefined
+    return true
   }
 
-  private async write(claim: RunnerClaim): Promise<void> {
-    if (!this.known) await this.inspect(claim, await readRemoteCommit(this.git, this.remote, this.ref))
+  private awaitSilence(current: string, prior: RunnerClaim, reason: string): false {
+    const waiting = `${this.ref} at ${current}: waiting for ${prior.host}/${String(prior.pid)} to become silent; ${reason}`
+    if (waiting !== this.waiting) this.onNotice(waiting)
+    this.waiting = waiting
+    this.known = false
+    return false
+  }
+
+  private async write(claim: RunnerClaim): Promise<boolean> {
+    if (!this.known && !(await this.inspect(claim, await readRemoteCommit(this.git, this.remote, this.ref)))) {
+      return false
+    }
     const tree = (await this.git(["mktree"], "")).trim()
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(tree)) throw new Error(`git mktree returned ${JSON.stringify(tree)}`)
     const commit = (await this.git(["commit-tree", tree, "-m", formatRunnerClaim(claim)])).trim()
@@ -239,17 +308,19 @@ export class RunnerPublisher {
           `${commit}:${this.ref}`,
         ])
         this.tip = commit
-        return
+        this.owns = true
+        return true
       } catch (error) {
         // The push may have landed despite a lost response. A failed lease may
         // also mean a second writer; re-read before deciding either way.
         const current = await readRemoteCommit(this.git, this.remote, this.ref)
         if (current === commit) {
           this.tip = commit
-          return
+          this.owns = true
+          return true
         }
         if (current === this.tip) throw error
-        await this.inspect(claim, current)
+        if (!(await this.inspect(claim, current))) return false
       }
     }
     throw new Error(`${this.ref}: leased publication changed four times; retry at the next beat`)

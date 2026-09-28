@@ -44,6 +44,7 @@ import {
   type StopFact,
 } from "@yrd/queue-core"
 import { readQueueHealth, SERVICE } from "./queue-health.ts"
+import { pidPresence } from "@yrd/process"
 import { clock, mediaDuration } from "./watch-format.ts"
 import { STATE_WORDS, type RunnerState } from "./watch-words.ts"
 import type { PublishedRunner } from "./runner-publication.ts"
@@ -742,15 +743,7 @@ function errorDetail(error: unknown): string {
 }
 
 function running(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    if (code === "ESRCH") return false
-    if (code === "EPERM") return true
-    throw error
-  }
+  return pidPresence(pid) === "present"
 }
 
 /**
