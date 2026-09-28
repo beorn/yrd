@@ -2231,7 +2231,7 @@ describe("the queue-format boundary", () => {
     const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
     const queueTip = await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
     const branch = await openEvents({ ...store, ref: queueRef("lab") })
-    let tip = queueTip
+    let tip = await seedOpsCutover(location, "lab")
     for (let i = 0; i < 1024; i++) {
       const written = await branch.append(
         [
@@ -2256,7 +2256,32 @@ describe("the queue-format boundary", () => {
       at: new Date("2026-09-22T14:01:00.000Z"),
     })
     expect((await readEventQueue(location, "lab")).observed[commit]?.id).toBe(observed)
+    const admitted = await readEventOps(location, gitIn(store.repo), "lab", commit)
+    expect(admitted.queue.created).toBe(queueTip)
+    expect(admitted.queue.observed[commit]?.id).toBe(observed)
+    expect(admitted.queue.tip).toBe(observed)
     expect(await branch.head()).toBe(observed)
+  })
+
+  /** @failure Missing remote queue authority must be named, never read as a running empty queue. */
+  it("refuses an absent queue when reading remote ops", async () => {
+    const { store, location } = remoteMemStore("yrd-absent-ops-queue")
+    await expect(readEventOps(location, gitIn(store.repo), "lab", A)).rejects.toThrow(
+      /yrd-absent-ops-queue: required queue ref refs\/yrd\/lab\/queue is missing/u,
+    )
+  })
+
+  /** @failure A backend without acquisition support must not fall back to an independently listed authority. */
+  it("refuses a remote ops backend that cannot fetch refs", async () => {
+    const { store, location } = remoteMemStore("yrd-unsupported-ops-backend")
+    await expect(
+      readEventOps(
+        { ...location, backend: { ...location.backend, fetchRefs: undefined } },
+        gitIn(store.repo),
+        "lab",
+        A,
+      ),
+    ).rejects.toThrow(/backend cannot fetch queue refs\/yrd\/lab\/queue and M2 refs\/yrd\/lab\/pause/u)
   })
 
   it("pages a listed change chain beyond 1024 events without dropping its opening", async () => {

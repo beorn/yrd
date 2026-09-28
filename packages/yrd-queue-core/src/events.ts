@@ -903,6 +903,12 @@ export async function createEventQueue(
 export async function readEventQueue(store: QueueReadStore, queue: string): Promise<EventQueue> {
   const ref = queueRef(queue)
   const events = await readEventChain(await openEvents({ ...store, ref }))
+  return eventQueueFromHistory(store, queue, events)
+}
+
+/** One projection and validation policy, independent of how its exact tip was acquired. */
+function eventQueueFromHistory(store: QueueReadStore, queue: string, events: readonly Event[]): EventQueue {
+  const ref = queueRef(queue)
   const projected = projectEventQueue(events, ref, store.repo)
   const warningAt = Math.ceil(EVENT_READ_LIMIT * 0.75)
   let writePressure: EventQueueProjection["writePressure"]
@@ -959,7 +965,33 @@ export async function readEventOpsWithRefs(
   _targetSha: string,
   listed?: Readonly<{ refs: ReadonlyMap<string, Oid>; validatedPauseTip: string | null }>,
 ): Promise<Readonly<{ ops: EventOps; listedQueueTip: string | null; pauseTip: string | null }>> {
-  const projected = await readEventQueue(store, queue)
+  let acquiredRefs: ReadonlyMap<string, Oid> | undefined
+  let projected: EventQueue
+  if (store.remote !== undefined && listed === undefined) {
+    const ref = queueRef(queue)
+    const fenceRef = pauseRef(queue)
+    const where = `${store.remote}#${queue} in ${store.repo}`
+    if (store.backend.fetchRefs === undefined) {
+      throw new TypeError(
+        `${where}: backend cannot fetch queue ${ref} and M2 ${fenceRef}; admission refused. Use a Gitomic backend with fetchRefs`,
+      )
+    }
+    try {
+      acquiredRefs = await store.backend.fetchRefs(store.repo, [ref, fenceRef], store.remote, { absent: "omit" })
+    } catch (cause) {
+      throw new Error(
+        `${where}: could not fetch queue ${ref} and M2 ${fenceRef}: ${String(cause)}; admission refused. Check the fetch failure and retry`,
+        { cause },
+      )
+    }
+    const tip = acquiredRefs.get(ref)
+    if (tip === undefined) {
+      throw new Error(`${where}: required queue ref ${ref} is missing; admission refused. Check the queue declaration`)
+    }
+    projected = eventQueueFromHistory(store, queue, await readEventChain(await openEvents({ ...store, ref }), tip))
+  } else {
+    projected = await readEventQueue(store, queue)
+  }
   if (projected.opsCutover === undefined || projected.ops === undefined) {
     if (store.remote === undefined) {
       throw new Error(`${store.repo}: local status cannot read pre-cutover ops; use --fresh`)
@@ -968,7 +1000,7 @@ export async function readEventOpsWithRefs(
       `${store.remote}#${queue}: ${queueRef(queue)} has no event ops authority; expected an ops-cutover event`,
     )
   }
-  const refs = listed?.refs ?? (await listRefs(queueRefPrefix(queue), store))
+  const refs = acquiredRefs ?? listed?.refs ?? (await listRefs(queueRefPrefix(queue), store))
   const pauseTip = refs.get(pauseRef(queue)) ?? null
   // An identical OID carries the exact M2 body admission already validated.
   // A changed tip needs the full content check before the caller leases it.
@@ -978,7 +1010,7 @@ export async function readEventOpsWithRefs(
       store.remote,
       queue,
       projected.created,
-      store.remote === undefined ? refs.get(pauseRef(queue)) : undefined,
+      store.remote === undefined || acquiredRefs !== undefined ? pauseTip : undefined,
     )
     if (fence?.sha !== pauseTip) {
       throw new Error(`${store.remote}#${queue}: ${pauseRef(queue)} changed during the M2 tip read`)

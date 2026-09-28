@@ -1,5 +1,5 @@
 /** Yrd's one policy for reading Gitomic event chains. */
-import { chainsUnder, type Event, openEvents } from "./git.ts"
+import { chainsUnder, type Event, type Oid, openEvents } from "./git.ts"
 
 export const EVENT_READ_LIMIT = 1024
 
@@ -24,8 +24,8 @@ async function completeChain(chain: Chain, recent: readonly Event[], label: stri
 }
 
 /** Read a complete chain from one fixed tip, including events older than one page. */
-export async function readEventChain(chain: Chain): Promise<Event[]> {
-  const tip = await chain.head()
+export async function readEventChain(chain: Chain, acquiredTip?: Oid): Promise<Event[]> {
+  const tip = acquiredTip ?? (await chain.head())
   if (tip === null) return []
   const recent = await chain.events({ at: tip, limit: EVENT_READ_LIMIT })
   if (recent.length === 0 || recent.at(-1)?.id !== tip) {

@@ -8,7 +8,7 @@
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import {
   appendChangeEvent,
   changeInput,
@@ -16,6 +16,7 @@ import {
   createEventQueue,
   createEventStore,
   gitIn,
+  queueFormat,
   queueRef,
   readConfig,
   readEventQueue,
@@ -130,23 +131,36 @@ async function noPublication(w: World): Promise<void> {
 describe("submit reuses a fenced admission observation", () => {
   it("keeps the live M2 fence and saves the repeated chain read on an unchanged queue", async () => {
     const w = await world()
+    // The CLI selects event format before its admission phase. Keep that
+    // boundary here, then count real SSH transport children inside admission.
+    expect(await queueFormat(createEventStore(w.work, "origin", selectionFor(w.git)), "main")).toBe("event")
+    const ssh = join(w.root, "fake-ssh")
+    writeFileSync(ssh, '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n')
+    chmodSync(ssh, 0o755)
+    await w.git(["remote", "set-url", "origin", `ssh://calls.invalid${w.remote}`])
+    vi.stubEnv("GIT_SSH_COMMAND", ssh)
     const trace = traceRemoteCalls(join(w.root, "trace"), { seams: true })
+    const runner = gitIn(w.work)
     let calls: ReturnType<typeof trace.end>
     try {
-      const result = await submit(w.git, "origin", request)
+      const result = await submit(runner, "origin", request)
       expect(result.retry).toBe(false)
     } finally {
       calls = trace.end()
+      vi.unstubAllEnvs()
     }
+    expect(calls.seams.inspectSubmit?.ssh_children, JSON.stringify(calls.seams)).toBe(2)
     expect(calls.seams.submitEvent).toMatchObject({ "ls-remote": 3, push: 1 })
     expect(calls.seams.submitEvent?.fetch ?? 0).toBe(0)
     expect(calls.seams.unattributed).toBeUndefined()
+    expect(calls.unreadable).toBe(0)
   })
 
   it("bounds one-push reads when only the queue tip advances after admission", async () => {
     const w = await world()
     const store = createEventStore(w.work, "origin", selectionFor(w.git))
     const trace = traceRemoteCalls(join(w.root, "trace-moved-queue"), { seams: true })
+    let mutated = false
     let calls: ReturnType<typeof trace.end>
     try {
       const result = await submit(
@@ -157,6 +171,7 @@ describe("submit reuses a fenced admission observation", () => {
             by: "yrd-run",
             at: new Date(),
           })
+          mutated = true
         }),
         "origin",
         request,
@@ -166,6 +181,7 @@ describe("submit reuses a fenced admission observation", () => {
     } finally {
       calls = trace.end()
     }
+    expect(mutated).toBe(true)
     const publication = calls.seams.submitEvent
     const remoteCalls = (publication?.["ls-remote"] ?? 0) + (publication?.fetch ?? 0) + (publication?.push ?? 0)
     expect(publication?.push).toBe(1)
@@ -194,6 +210,7 @@ describe("submit reuses a fenced admission observation", () => {
       reason: "withdrawn",
     })
     const trace = traceRemoteCalls(join(w.root, "trace-stale-stuck"), { seams: true })
+    let mutated = false
     let calls: ReturnType<typeof trace.end>
     try {
       const result = await submit(
@@ -206,6 +223,7 @@ describe("submit reuses a fenced admission observation", () => {
             at: new Date(),
             change: { branch: "task/stuck", head: w.target, event: stuck },
           })
+          mutated = true
         }),
         "origin",
         request,
@@ -215,6 +233,7 @@ describe("submit reuses a fenced admission observation", () => {
     } finally {
       calls = trace.end()
     }
+    expect(mutated).toBe(true)
     const publication = calls.seams.submitEvent
     const remoteCalls = (publication?.["ls-remote"] ?? 0) + (publication?.fetch ?? 0) + (publication?.push ?? 0)
     expect(publication?.push).toBe(1)
@@ -222,17 +241,29 @@ describe("submit reuses a fenced admission observation", () => {
     expect(calls.unreadable).toBe(0)
   })
 
-  it("rereads and refuses an M2 tip changed before publication", async () => {
+  it.each(["admission", "publication"])("rereads and refuses an M2 tip changed before %s", async (boundary) => {
     const w = await world()
+    let mutated = false
+    const mutate = async () => {
+      await moveM2(w)
+      mutated = true
+    }
     await expect(
       submit(
-        beforePublication(w, async () => {
-          await moveM2(w)
-        }),
+        boundary === "publication" ? beforePublication(w, mutate) : w.git,
         "origin",
-        request,
+        boundary === "admission"
+          ? {
+              ...request,
+              admit: async () => {
+                await mutate()
+                return { kind: "admit" as const }
+              },
+            }
+          : request,
       ),
     ).rejects.toThrow(/second commit atop an M2 fence/u)
+    expect(mutated).toBe(true)
     await noPublication(w)
   })
 
@@ -256,26 +287,39 @@ describe("submit reuses a fenced admission observation", () => {
     }
     expect(calls.seams.submitEvent).toMatchObject({ "ls-remote": 3, push: 1 })
     expect(calls.unreadable).toBe(0)
+    expect((await w.git(["ls-remote", "origin", legacyRef])).trim()).toBe(`${w.target}\t${legacyRef}`)
     expect((await w.git(["ls-remote", "origin", changesRef("main", "task/probe")])).trim()).not.toBe("")
   })
 
-  it("rereads and refuses maintenance appearing before publication", async () => {
+  it.each(["admission", "publication"])("rereads and refuses maintenance appearing before %s", async (boundary) => {
     const w = await world()
+    let mutated = false
+    const mutate = async () => {
+      await writeQueueEvent(createEventStore(w.work, "origin", selectionFor(w.git)), "main", {
+        type: "paused",
+        by: "@chief",
+        cause: "maintenance",
+        reason: "intake migration",
+        at: new Date(),
+      })
+      mutated = true
+    }
     await expect(
       submit(
-        beforePublication(w, async () => {
-          await writeQueueEvent(createEventStore(w.work, "origin", selectionFor(w.git)), "main", {
-            type: "paused",
-            by: "@chief",
-            cause: "maintenance",
-            reason: "intake migration",
-            at: new Date(),
-          })
-        }),
+        boundary === "publication" ? beforePublication(w, mutate) : w.git,
         "origin",
-        request,
+        boundary === "admission"
+          ? {
+              ...request,
+              admit: async () => {
+                await mutate()
+                return { kind: "admit" as const }
+              },
+            }
+          : request,
       ),
     ).rejects.toThrow(/submission stopped for maintenance/u)
+    expect(mutated).toBe(true)
     await noPublication(w)
   })
 
@@ -348,6 +392,43 @@ exec git "$@"
     } finally {
       trace.end()
     }
+    expect(existsSync(marker)).toBe(false)
+    await noPublication(w)
+  })
+
+  /** @failure A failed combined acquisition must refuse admission with its Git reason, never use cached refs. */
+  it("fails loudly when the admission queue and M2 fetch fails", async () => {
+    const w = await world()
+    const script = join(w.root, "git-batch-fail.sh")
+    const marker = join(w.root, "batch-pending")
+    writeFileSync(marker, "pending\n")
+    writeFileSync(
+      script,
+      `#!/bin/sh\ncase " $* " in\n  *fetch*refs/yrd/main/queue*)
+    if [ "\${YRD_SEAM-}" = inspectSubmit ] && [ -f '${marker}' ]; then
+      rm '${marker}'
+      echo 'fixture queue/M2 fetch failed' >&2
+      exit 73
+    fi;;
+esac
+exec git "$@"
+`,
+    )
+    chmodSync(script, 0o755)
+    const runner = gitIn(w.work, undefined, { ...selectionFor(w.git), executable: script })
+    const trace = traceRemoteCalls(join(w.root, "trace-batch-fail"), { seams: true })
+    let failure: unknown
+    try {
+      await submit(runner, "origin", request)
+    } catch (error) {
+      failure = error
+    } finally {
+      trace.end()
+    }
+    expect(existsSync(marker)).toBe(false)
+    expect(failure).toBeInstanceOf(Error)
+    expect(String(failure)).toContain("refs/yrd/main/queue")
+    expect(String(failure)).toContain("fixture queue/M2 fetch failed")
     await noPublication(w)
   })
 
