@@ -371,6 +371,32 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(message).toContain("Issue: @i/10-yrd/1")
   expect(message).toContain("Submitter: @dev/2")
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
+  // @failure 26272: a completed round leaves its empty worktree parent behind.
+  expect(readdirSync(join(w.workdir, "worktrees"))).toEqual([])
+})
+
+/** @failure 26272: cleanup erases a run parent that still holds a file beside its worktree.
+ * @level l3 @consumer queue operator and notifier
+ */
+it("keeps nonempty queue and notify parents after their worktrees close", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/parent-content", "one.txt")
+  const options = {
+    ...(await w.options({ exit: 0, setup: "touch ../keep" })),
+    checks: [],
+    notify: [{ name: "marker", on: ["merged" as const], run: "touch ../keep" }],
+  }
+
+  const outcome = await queueRun(options)
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/parent-content"] })
+  const parent = join(w.workdir, "worktrees")
+  const names = readdirSync(parent)
+  expect(names).toHaveLength(2)
+  expect(names).toContain(outcome.run)
+  expect(names.some((name) => name.startsWith("notify-"))).toBe(true)
+  for (const name of names) expect(readdirSync(join(parent, name))).toEqual(["keep"])
 })
 
 it("leaves an idle event round unnumbered and the next index value at one (26193)", async () => {
@@ -1315,6 +1341,8 @@ it("delivers an event ending and settles its recipient on the branch chain", asy
       [`${merged?.id}:recorder`]: { for: merged?.id, to: "recorder", result: "delivered" },
     },
   })
+  // @failure 26272: notification teardown leaves its empty worktree parent behind.
+  expect(readdirSync(join(w.workdir, "worktrees"))).toEqual([])
 })
 
 /** @failure Migration replayed a pre-switch merge as a fresh notification every round.
