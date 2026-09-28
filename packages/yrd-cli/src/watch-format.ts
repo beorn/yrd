@@ -310,9 +310,9 @@ export function ageRunText(row: Row, now: Date): string {
   return `${age} / ${run}`
 }
 
-/** A run time as the table and the detail both say it: every number zero-padded, so it reads 03:02 (25421). */
+/** A run time as the table and the detail both say it: uses the unified duration form (26243). */
 export function runTime(milliseconds: number): string {
-  return mediaDuration(milliseconds).replace(/^\d(?=\D)/u, (digit) => `0${digit}`)
+  return mediaDuration(milliseconds)
 }
 
 /** The AGE / RUN cell's least width: an mm:ss age and an mm:ss run time, so a run time appearing never widens the column (25421). */

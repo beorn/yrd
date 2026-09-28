@@ -1233,7 +1233,7 @@ describe("event-queue runner stages end-to-end into runnerLine and stage strip (
     expect(queuedDetail.journal).toBeUndefined()
     const prov = stageInfo(queuedDetail, "provisioning")
     expect(prov.state).toBe("not-run")
-    expect(prov.said).toBe(" not journaled")
+    expect(prov.said).toBe(" not recorded")
   })
 
   // @i/10-yrd/25936: a merge round with every check off writes synthesized result records to run.log

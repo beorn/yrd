@@ -196,3 +196,23 @@ describe("26242: watch detail pane at 140x50", () => {
     expect(text).not.toMatch(/█/u)
   })
 })
+
+describe("26243: watch uses one clock format, one duration format and plain words at 140x50", () => {
+  it("pins unified clock times, unified durations and plain phrases", async () => {
+    const { text, lines } = await paint140x50()
+
+    // Clock times use one form: HH:MM, no seconds across the whole watch screen
+    expect(text).not.toMatch(/\b\d\d:\d\d:\d\d\b/u)
+
+    // Durations use one form: AGE / RUN values use the same duration form (no rogue 01:30)
+    expect(text).toContain("2h00m / 1:30")
+    expect(text).not.toContain("2h00m / 01:30")
+
+    // Plain phrases replace internal terms
+    expect(text).not.toContain("not journaled")
+    expect(text).toContain("− not recorded")
+    expect(text).not.toContain("cut 1/1")
+    expect(text).toContain("attempt 1/1")
+    expect(text).not.toContain("err=")
+  })
+})

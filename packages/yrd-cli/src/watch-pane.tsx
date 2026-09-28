@@ -612,7 +612,7 @@ function QueuesWatchPane({
       {selectedSource !== undefined && readings.get(selectedSource.id)?.error !== undefined ? (
         <Text color="$fg-warning">
           {selectedSource.label}: read failed — {readings.get(selectedSource.id)?.error}; showing last good reading{" "}
-          {focusedSnapshot === undefined ? "unmeasured" : clock(focusedSnapshot.at, { seconds: true })}
+          {focusedSnapshot === undefined ? "unmeasured" : clock(focusedSnapshot.at)}
         </Text>
       ) : null}
       {selectedSource !== undefined && focusedSnapshot !== undefined ? (
@@ -710,9 +710,7 @@ function QueuesWatchPane({
               .map((source) => (
                 <Text key={source.id} color="$fg-warning">
                   {source.label}: read failed — {source.error}
-                  {source.snapshot !== undefined
-                    ? `; last good reading ${clock(source.snapshot.at, { seconds: true })}`
-                    : "; unmeasured"}
+                  {source.snapshot !== undefined ? `; last good reading ${clock(source.snapshot.at)}` : "; unmeasured"}
                 </Text>
               ))}
           </Box>
@@ -1365,11 +1363,7 @@ function SingleWatchPane({
         {readFailure === undefined ? null : (
           <Box height={1} flexShrink={0}>
             <Text bold color="$fg-warning" wrap="truncate">
-              {readFailureLine(
-                "the queue read",
-                readFailure,
-                `; the table is the ${clock(shown.at, { seconds: true })} reading`,
-              )}
+              {readFailureLine("the queue read", readFailure, `; the table is the ${clock(shown.at)} reading`)}
             </Text>
           </Box>
         )}
@@ -1538,7 +1532,7 @@ type ReadFailure = Readonly<{ at: Date; message: string }>
  */
 function readFailureLine(what: string, failure: ReadFailure, still = ""): string {
   const why = failure.message.replace(/^.* exited \d+: /u, "")
-  return `⚠︎ ${what} failed at ${clock(failure.at, { seconds: true })}, retrying${still} — ${why}`
+  return `⚠︎ ${what} failed at ${clock(failure.at)}, retrying${still} — ${why}`
 }
 
 /**
@@ -1561,7 +1555,7 @@ function DraftDetail({ row }: { row: Row }) {
         </Text>
       ) : (
         <Text wrap="wrap">
-          committed {clock(row.at, { seconds: true })}
+          committed {clock(row.at)}
           {row.author === undefined ? "" : ` by ${row.author}`}
         </Text>
       )}
