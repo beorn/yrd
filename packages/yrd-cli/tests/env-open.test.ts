@@ -427,6 +427,50 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).toContain("setup exploded")
     expect(run.stderr()).toContain(bay)
   })
+
+  /** @failure 25957: a retained environment could not state that it must outlive idleness.
+   * @level l2 @consumer seats holding an environment across sessions
+   */
+  it("keeps a requested hold when setup fails and shows why close refuses", async () => {
+    const w = await world("exit 23")
+    const reason = "@dev/5 25957 until review"
+    const opened = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "held", "--hold", reason], opened.io)).toBe(2)
+
+    const path = join(w.work, ".bays", "held")
+    expect(existsSync(path)).toBe(true)
+    expect(await w.git(["worktree", "list", "--porcelain"])).toContain(`locked ${reason}`)
+
+    const listed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io)).toBe(0)
+    const heldRows = JSON.parse(listed.stdout()) as { environments: { path: string; hold: string | null }[] }
+    expect(heldRows.environments).toContainEqual(expect.objectContaining({ path, hold: reason }))
+
+    const human = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "list"], human.io)).toBe(0)
+    expect(human.stdout()).toContain(reason)
+
+    const closed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path], closed.io)).toBe(2)
+    expect(closed.stderr()).toContain(reason)
+    expect(existsSync(path)).toBe(true)
+  })
+
+  /** @failure 25957: treating every open as a hold would make scratch environments uncollectable.
+   * @level l2 @consumer users of plain yrd env open
+   */
+  it("leaves a plain open unlocked and lists its hold as null", async () => {
+    const w = await world(":")
+    const opened = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "scratch"], opened.io)).toBe(0)
+
+    const path = join(w.work, ".bays", "scratch")
+    const listed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io)).toBe(0)
+    const scratchRows = JSON.parse(listed.stdout()) as { environments: { path: string; hold: string | null }[] }
+    expect(scratchRows.environments).toContainEqual(expect.objectContaining({ path, hold: null }))
+  })
 })
 
 /**
