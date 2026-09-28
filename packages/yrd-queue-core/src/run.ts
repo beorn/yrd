@@ -183,7 +183,14 @@ function nowMs(options: QueueRunOptions): number {
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   await using resources = new AsyncDisposableStack()
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
-  resources.defer(() => removeEmptyWorktreeRunDirectory(join(options.workdir, "worktrees", log.id)))
+  const runWorktrees = join(options.workdir, "worktrees", log.id)
+  resources.defer(() => {
+    // The queue owns this scaffold; settledBaseCommit also serves callers
+    // whose worktree path has unrelated parent directories.
+    removeEmptyWorktreeRunDirectory(join(runWorktrees, "compose", "base"))
+    removeEmptyWorktreeRunDirectory(join(runWorktrees, "compose"))
+    removeEmptyWorktreeRunDirectory(runWorktrees)
+  })
   // THE JOURNAL OPENS WITH ITS HEADER, before the first journaled Git call and
   // before anything here can throw. Every field below is known from the run's
   // options, so there is nothing to wait for: the run row carries the gitlink

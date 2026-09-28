@@ -1,9 +1,8 @@
 /** Compose the candidate's raised root gitlinks onto the target without its authored content. */
 import type { Process } from "@yrd/process"
-import { dirname } from "node:path"
 import { gitIn, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
 import type { RootChanges } from "./root-changes.ts"
-import { freshWorktree, removeEmptyWorktreeRunDirectory, type PlumbingLog } from "./worktree.ts"
+import { freshWorktree, type PlumbingLog } from "./worktree.ts"
 
 export async function settledBaseCommit(
   options: Readonly<{
@@ -57,14 +56,7 @@ export async function settledBaseCommit(
       await options.git(["fetch", "--quiet", composing.path, commit])
     }
   } finally {
-    try {
-      await composing.remove()
-    } finally {
-      // The compose tree is nested two levels below the run. Its worktree
-      // removal does not remove those empty scaffold directories.
-      removeEmptyWorktreeRunDirectory(dirname(options.path))
-      removeEmptyWorktreeRunDirectory(dirname(dirname(options.path)))
-    }
+    await composing.remove()
   }
   return commit
 }
