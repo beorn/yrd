@@ -20,6 +20,7 @@ import {
 import type { PauseRecord } from "../src/pause.ts"
 import type { RunnerClaim } from "../src/runner-claim.ts"
 import { judgeRunnerDue } from "../src/runner-claim.ts"
+import { roundBoundMs } from "../src/check.ts"
 
 // A stuck change STOPS THE LINE (the andon, operator 2026-09-16): the queue
 // pauses itself naming the change, the service stays up holding the stop, and
@@ -455,6 +456,87 @@ describe("a waiting line that judges nothing reads stalled (25669)", () => {
       believableHealthDocument({ ...stored, facts: { ...stored.facts, runnerClaim: claim, runnerPhase: "hold" } }, now)
         .error?.cause,
     ).toBe(reason)
+  })
+
+  /** @failure 24570: the old 45-minute clock paged a healthy round during its third declared check.
+   * @level l2 @consumer the local health reader and remote claim reader
+   */
+  test("three 25-minute checks stay unpaged while each phase and the whole round remain in bound", () => {
+    const round = "2026-09-24T19:00:00.000Z"
+    const checks = ["first", "second", "third"].map((name) => ({
+      name,
+      on: ["submit" as const],
+      run: "test",
+      timeoutMs: minutes(25),
+    }))
+    const totalBound = roundBoundMs(checks, undefined, 1)
+    expect(totalBound).toBeGreaterThan(minutes(75))
+    const due = new Date(Date.parse(round) + totalBound).toISOString()
+    const flow = {
+      waiting: 1,
+      oldestWaiting: { branch: "task/long", openedAt: round },
+      roundOpen: { startedAt: round },
+    }
+    for (const [phase, since, at] of [
+      ["first", "2026-09-24T19:00:00.000Z", "2026-09-24T19:20:00.000Z"],
+      ["second", "2026-09-24T19:25:00.000Z", "2026-09-24T19:47:00.000Z"],
+      ["third", "2026-09-24T19:50:00.000Z", "2026-09-24T20:12:00.000Z"],
+    ] as const) {
+      const now = new Date(at)
+      const claim: RunnerClaim = {
+        host: "queue-host",
+        pid: 42,
+        started: round,
+        round,
+        due,
+        candidates: 1,
+        at,
+        beatMs: 60_000,
+        state: "checking",
+        since,
+        deadline: new Date(Date.parse(since) + minutes(25)).toISOString(),
+      }
+      const document = roundHealthDocument("yrd", undefined, INTERVAL, now, {
+        flow: { ...flow, roundOpen: { ...flow.roundOpen, phase } },
+        threshold,
+        claim,
+      })
+      expect(document.state, phase).toBe("healthy")
+      expect(document.error, phase).toBeUndefined()
+      expect(believableHealthDocument(document, now).error, phase).toBeUndefined()
+    }
+  })
+
+  /** @failure 24570: a pre-plan hang could fall through the legacy 45-minute clock instead of its line-read bound.
+   * @level l2 @consumer a queue health reader before the first line observation
+   */
+  test("a pre-plan line read pages at its phase deadline plus three beats", () => {
+    const round = "2026-09-24T19:00:00.000Z"
+    const claim: RunnerClaim = {
+      host: "queue-host",
+      pid: 42,
+      started: round,
+      at: "2026-09-24T19:33:00.000Z",
+      beatMs: 60_000,
+      state: "provisioning",
+      since: round,
+      deadline: "2026-09-24T19:30:00.000Z",
+    }
+    const flow = {
+      waiting: 1,
+      oldestWaiting: { branch: "task/long", openedAt: round },
+      roundOpen: { startedAt: round, phase: "line-read" },
+    }
+    expect(lineStall(flow, threshold, at("19:33:00"), claim)).toBeUndefined()
+    const page = roundHealthDocument("yrd", undefined, INTERVAL, new Date("2026-09-24T19:33:00.001Z"), {
+      flow,
+      threshold,
+      claim,
+    })
+    expect(page).toMatchObject({
+      state: "unhealthy",
+      error: { code: STALLED_LINE_CODE, cause: expect.stringContaining("line-read") },
+    })
   })
 
   test("the clock starts at the later of the last judgement and the oldest change's opening, so a submit after idle hours does not page at once", () => {
