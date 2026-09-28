@@ -388,7 +388,11 @@ it("keeps nonempty queue and notify parents after their worktrees close", async 
     notify: [{ name: "marker", on: ["merged" as const], run: "touch ../keep" }],
   }
 
-  const outcome = await queueRun(options)
+  const warnings: string[] = []
+  const warning = vi.spyOn(console, "warn").mockImplementation((...message: unknown[]) => {
+    warnings.push(message.map(String).join(" "))
+  })
+  const outcome = await queueRun(options).finally(() => warning.mockRestore())
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/parent-content"] })
   const parent = join(w.workdir, "worktrees")
@@ -396,7 +400,13 @@ it("keeps nonempty queue and notify parents after their worktrees close", async 
   expect(names).toHaveLength(2)
   expect(names).toContain(outcome.run)
   expect(names.some((name) => name.startsWith("notify-"))).toBe(true)
-  for (const name of names) expect(readdirSync(join(parent, name))).toEqual(["keep"])
+  const retained = warnings.filter((line) => line.startsWith("yrd: kept non-empty worktree run directory "))
+  expect(retained).toHaveLength(2)
+  for (const name of names) {
+    const path = join(parent, name)
+    expect(readdirSync(path)).toEqual(["keep"])
+    expect(retained.some((line) => line.includes(path) && /\b(?:ENOTEMPTY|EEXIST)\b/u.test(line))).toBe(true)
+  }
 })
 
 it("leaves an idle event round unnumbered and the next index value at one (26193)", async () => {

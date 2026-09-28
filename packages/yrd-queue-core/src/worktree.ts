@@ -546,7 +546,13 @@ export function removeEmptyWorktreeRunDirectory(directory: string): void {
     rmdirSync(directory)
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST") return
+    if (code === "ENOENT") return
+    if (code === "ENOTEMPTY" || code === "EEXIST") {
+      console.warn(
+        `yrd: kept non-empty worktree run directory ${directory} (${code}); inspect its contents before cleanup`,
+      )
+      return
+    }
     throw error
   }
 }
