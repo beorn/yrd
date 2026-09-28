@@ -27,9 +27,10 @@
  */
 
 import { transportFaultIn } from "./setup-transport.ts"
-import { existsSync } from "node:fs"
+import { accessSync, constants, existsSync } from "node:fs"
 import { join, resolve } from "node:path"
-import type { Git } from "./git.ts"
+import { ensureCommitObject } from "git-super/objects"
+import { GitExit, seamProcess, type Git } from "./git.ts"
 
 /** One store this run created, as the caller records it. */
 export type ReferenceStore = Readonly<{
@@ -60,9 +61,20 @@ export type PopulateReference = Readonly<{
    * else, so anchoring on HEAD would leave exactly that change unborrowable.
    */
   commit?: string
+  /** Local root whose matching gitlink stores can serve exact pins before origin is asked. */
+  source?: string
+  /** One acquisition fact per pin. Observer failures propagate. */
+  acquired?: (pin: ReferenceAcquisition) => void
   /** Told about each store as it is created. A store already there says nothing. */
   populated?: (store: ReferenceStore) => void
 }>
+
+export type ReferenceAcquisition = Readonly<{ path: string; sha: string }> &
+  (
+    | Readonly<{ source: "present" }>
+    | Readonly<{ source: "local"; localSource: string }>
+    | Readonly<{ source: "remote"; localMiss?: Readonly<{ localSource: string; reason: string }> }>
+  )
 
 /**
  * A gitlink the reference cannot be given a store for.
@@ -190,8 +202,15 @@ export async function populateReferenceStores(options: PopulateReference): Promi
         throw new ReferenceUnpopulated(root, named, `${level.commit}:.gitmodules declares no url for it`)
       }
       const store = join(level.dir, path)
-      if (!(await isRepositoryAt(options.gitIn, store))) {
+      const existing = await isRepositoryAt(options.gitIn, store)
+      const present = existing && (await holdsCommit(options.gitIn(store), sha))
+      const localSource = options.source === undefined ? undefined : resolve(options.source, named)
+      const miss =
+        present || localSource === undefined ? undefined : await localSourceMiss(options.gitIn, localSource, sha)
+      const local = !present && localSource !== undefined && miss === undefined
+      if (!existing) {
         const started = Date.now()
+        const cloneFrom = local ? localSource : url
         try {
           await git([
             // Local paths are how every test fixture and every file-transport
@@ -202,20 +221,22 @@ export async function populateReferenceStores(options: PopulateReference): Promi
             "protocol.file.allow=always",
             "clone",
             "--quiet",
+            ...(local ? ["--no-local"] : []),
             "--no-checkout",
             "--origin",
             "origin",
-            url,
+            cloneFrom,
             store,
           ])
+          if (local) await options.gitIn(store)(["remote", "set-url", "origin", url])
         } catch (error) {
           const why = error instanceof Error ? error.message : String(error)
           const fault = transportFaultIn(why)
           throw new ReferenceUnpopulated(
             root,
             named,
-            `cloning ${url} into ${store} failed: ${why}`,
-            fault === undefined ? undefined : `cloning ${url} could not reach it (${fault.signature})`,
+            `cloning ${cloneFrom} into ${store} failed: ${why}`,
+            fault === undefined ? undefined : `cloning ${cloneFrom} could not reach it (${fault.signature})`,
           )
         }
         const populated: ReferenceStore = { ms: Date.now() - started, path: named, sha, url }
@@ -223,7 +244,17 @@ export async function populateReferenceStores(options: PopulateReference): Promi
         options.populated?.(populated)
       }
       const storeGit = options.gitIn(store)
-      if (await holdsCommit(storeGit, sha)) {
+      if (local) {
+        // Copy through the existing exact-object primitive, never alternates:
+        // the owner must retain the closure after this source is removed.
+        await ensureCommitObject({
+          commit: sha,
+          git: seamProcess(storeGit, resolve(store)),
+          remote: localSource,
+          repository: store,
+        })
+      }
+      if (present || local || (await holdsCommit(storeGit, sha))) {
         // Present is not the same as REACHABLE, and only reachable survives.
         // A pin that arrived on a branch stops being reachable the moment that
         // branch moves, and the next gc in this store takes it — so the ref is
@@ -263,10 +294,58 @@ export async function populateReferenceStores(options: PopulateReference): Promi
           await unresolved(`${store} still lacks ${sha} after one fetch from origin`)
         }
       }
+      options.acquired?.(
+        present
+          ? { path: named, sha, source: "present" }
+          : local
+            ? { localSource, path: named, sha, source: "local" }
+            : {
+                path: named,
+                sha,
+                source: "remote",
+                ...(localSource === undefined || miss === undefined
+                  ? {}
+                  : { localMiss: { localSource, reason: miss } }),
+              },
+      )
       levels.push({ commit: sha, dir: store, prefix: named })
     }
   }
   return created
+}
+
+/** Missing/unreadable cache entries are misses; a broken repository or object is an error. */
+async function localSourceMiss(gitIn: (cwd: string) => Git, source: string, sha: string): Promise<string | undefined> {
+  try {
+    accessSync(source, constants.R_OK | constants.X_OK)
+    accessSync(join(source, ".git"), constants.R_OK)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "EACCES" || code === "EPERM")
+      return `local store ${source} is missing or unreadable (${code})`
+    throw error
+  }
+  const git = gitIn(source)
+  try {
+    const toplevel = (await git(["rev-parse", "--path-format=absolute", "--show-toplevel"])).trim()
+    if (resolve(toplevel) !== source)
+      throw new Error(`local source ${source} resolved to another repository: ${toplevel}`)
+    // Batch-check reports "missing" with exit zero for corrupt loose objects,
+    // too. Only the strict command's exact absence answer is a cache miss.
+    await git(["cat-file", "-e", `${sha}^{commit}`])
+    return undefined
+  } catch (error) {
+    if (error instanceof GitExit && error.detail.trim() === `fatal: Not a valid object name ${sha}^{commit}`) {
+      return `local store ${source} does not hold ${sha}`
+    }
+    if (error instanceof GitExit && /permission denied|operation not permitted/iu.test(error.detail)) {
+      return `local store ${source} is unreadable: ${error.detail}`
+    }
+    throw new Error(
+      `cannot acquire ${sha} from local source ${source}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
+  }
 }
 
 /**

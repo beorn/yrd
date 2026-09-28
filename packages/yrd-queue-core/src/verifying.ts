@@ -1,6 +1,7 @@
 import { createProcess, type Process } from "@yrd/process"
-import { gitEnvironment, invokeGit, publishGitInvocation, type Git, type GitInvocationOptions } from "./git.ts"
+import { gitEnvironment, gitIn, invokeGit, publishGitInvocation, type Git, type GitInvocationOptions } from "./git.ts"
 import { freshWorktree, type FreshWorktree, type Worktree } from "./worktree.ts"
+import { populateReferenceStores } from "./reference.ts"
 
 /** `descents` records git-super's two-direction ancestry checks of nested pins (24320). */
 export type Verification =
@@ -80,6 +81,45 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
   if (result.commit === undefined) {
     await worktree.remove()
     throw new Error(`git-super merge of ${options.head} reported updated without a commit`)
+  }
+  if (options.worktree?.populateReference === true) {
+    const population = options.worktree
+    // The successful composition owns new child objects. Adopt their exact
+    // closure into the queue's stores before releasing that temporary owner.
+    // A failed adoption leaves the source intact and propagates the failure.
+    await populateReferenceStores({
+      acquired: (pin) => {
+        population.plumbing?.journal?.({
+          action: "acquired",
+          head: result.commit,
+          kind: "reference",
+          path: pin.path,
+          sha: pin.sha,
+          source: pin.source,
+          ...(pin.source === "local" ? { localSource: pin.localSource } : {}),
+          ...(pin.source === "remote" && pin.localMiss !== undefined
+            ? { localSource: pin.localMiss.localSource, localMissReason: pin.localMiss.reason }
+            : {}),
+        })
+      },
+      commit: result.commit,
+      gitIn: (cwd) =>
+        gitIn(cwd, population.process, population.selection, {
+          ...(population.env === undefined ? {} : { env: population.env }),
+          ...population.gitOptions,
+        }),
+      populated: (store) => {
+        population.plumbing?.journal?.({
+          head: result.commit,
+          kind: "reference",
+          ms: store.ms,
+          path: store.path,
+          sha: store.sha,
+        })
+      },
+      repo: options.repo,
+      source: worktree.path,
+    })
   }
   await worktree.remove()
   return { state: "verified", verifying: { ...evidence, state: "verified", candidate: result.commit } }

@@ -6,14 +6,20 @@
  * @consumer every queue run, `yrd check` and `yrd env` compose — all borrow from one reference
  */
 
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { acquireExclusive } from "git-super/exclusive"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, type Git } from "../src/git.ts"
 import type { LogWrite } from "../src/log.ts"
-import { GitlinkNotOnRemote, populateReferenceStores, ReferenceUnpopulated } from "../src/reference.ts"
+import {
+  GitlinkNotOnRemote,
+  populateReferenceStores,
+  type ReferenceAcquisition,
+  ReferenceUnpopulated,
+} from "../src/reference.ts"
+import { verifyCandidate } from "../src/verifying.ts"
 import { freshWorktree, registeredWorktrees } from "../src/worktree.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
@@ -181,6 +187,124 @@ describe("populateReferenceStores", () => {
     expect(await storeGit(["cat-file", "-t", raised])).toContain("commit")
   }, 60_000)
 
+  it("promotes a locally held candidate pin into the owner reference without contacting its origin", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-reference-local-pin-"))
+    roots.push(root)
+    const { nested, product, vendor } = await superproject(root)
+    const repo = await queueClone(root, product)
+    await populateReferenceStores({ gitIn: (cwd) => gitIn(cwd), repo })
+
+    const source = join(root, "composition-source")
+    const bay = join(source, "vendor/dep")
+    const nestedSource = join(bay, "apps/nested")
+    await gitIn(root)(["clone", "--quiet", vendor, bay])
+    await gitIn(root)(["clone", "--quiet", nested, nestedSource])
+    const bayGit = gitIn(bay)
+    writeFileSync(join(bay, "vendor.txt"), "held locally\n")
+    await bayGit(["add", "--all"])
+    await bayGit([...author, "commit", "--quiet", "--message", "local candidate pin"])
+    const candidate = (await bayGit(["rev-parse", "HEAD"])).trim()
+    const productGit = gitIn(product)
+    await productGit(["update-index", "--add", "--cacheinfo", `160000,${candidate},vendor/dep`])
+    await productGit([...author, "commit", "--quiet", "--message", "raise vendor/dep to local pin"])
+    await gitIn(repo)(["fetch", "--quiet", "origin", "main"])
+    const head = (await gitIn(repo)(["rev-parse", "FETCH_HEAD"])).trim()
+    // The candidate exists in the caller's temporary composition store, while
+    // the persistent store's declared origin is deliberately unavailable.
+    rmSync(vendor, { force: true, recursive: true })
+
+    await populateReferenceStores({
+      commit: head,
+      gitIn: (cwd) => gitIn(cwd),
+      repo,
+      source,
+    })
+
+    const storeGit = gitIn(join(repo, "vendor/dep"))
+    expect(await storeGit(["cat-file", "-t", candidate])).toContain("commit")
+    expect(await storeGit(["for-each-ref", "--format=%(refname)", "refs/yrd/pins"])).toContain(candidate)
+  }, 60_000)
+
+  it("falls back to the component origin when the optional local source is absent", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-reference-missing-source-"))
+    roots.push(root)
+    const { product, vendor } = await superproject(root)
+    const repo = await queueClone(root, product)
+    await populateReferenceStores({ gitIn: (cwd) => gitIn(cwd), repo })
+
+    const vendorGit = gitIn(vendor)
+    writeFileSync(join(vendor, "vendor.txt"), "available from origin\n")
+    await vendorGit(["add", "--all"])
+    await vendorGit([...author, "commit", "--quiet", "--message", "origin pin"])
+    const candidate = (await vendorGit(["rev-parse", "HEAD"])).trim()
+    const productGit = gitIn(product)
+    await productGit(["update-index", "--add", "--cacheinfo", `160000,${candidate},vendor/dep`])
+    await productGit([...author, "commit", "--quiet", "--message", "raise vendor/dep to origin pin"])
+    await gitIn(repo)(["fetch", "--quiet", "origin", "main"])
+    const head = (await gitIn(repo)(["rev-parse", "FETCH_HEAD"])).trim()
+    const source = join(root, "composition-source")
+    mkdirSync(source)
+    const acquired: ReferenceAcquisition[] = []
+
+    await populateReferenceStores({
+      commit: head,
+      gitIn: (cwd) => gitIn(cwd),
+      repo,
+      source,
+      acquired: (record) => void acquired.push(record),
+    })
+
+    const storeGit = gitIn(join(repo, "vendor/dep"))
+    expect(await storeGit(["cat-file", "-t", candidate])).toContain("commit")
+    expect(await storeGit(["for-each-ref", "--format=%(refname)", "refs/yrd/pins"])).toContain(candidate)
+    expect(acquired).toContainEqual({
+      localMiss: expect.objectContaining({
+        localSource: join(source, "vendor/dep"),
+        reason: expect.any(String),
+      }),
+      path: "vendor/dep",
+      sha: candidate,
+      source: "remote",
+    })
+  }, 60_000)
+
+  it("fails loudly when the local source contains a corrupt object for the requested pin", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-reference-corrupt-source-"))
+    roots.push(root)
+    const { nested, product, vendor } = await superproject(root)
+    const repo = await queueClone(root, product)
+    await populateReferenceStores({ gitIn: (cwd) => gitIn(cwd), repo })
+
+    const vendorGit = gitIn(vendor)
+    writeFileSync(join(vendor, "vendor.txt"), "valid origin copy\n")
+    await vendorGit(["add", "--all"])
+    await vendorGit([...author, "commit", "--quiet", "--message", "pin with a corrupt local copy"])
+    const candidate = (await vendorGit(["rev-parse", "HEAD"])).trim()
+    const productGit = gitIn(product)
+    await productGit(["update-index", "--add", "--cacheinfo", `160000,${candidate},vendor/dep`])
+    await productGit([...author, "commit", "--quiet", "--message", "raise vendor/dep to valid origin pin"])
+    await gitIn(repo)(["fetch", "--quiet", "origin", "main"])
+    const head = (await gitIn(repo)(["rev-parse", "FETCH_HEAD"])).trim()
+    const source = join(root, "corrupt-source")
+    const sourceStore = join(source, "vendor/dep")
+    const nestedSource = join(sourceStore, "apps/nested")
+    await gitIn(root)(["clone", "--quiet", "--no-hardlinks", vendor, sourceStore])
+    await gitIn(root)(["clone", "--quiet", nested, nestedSource])
+    const object = join(sourceStore, ".git", "objects", candidate.slice(0, 2), candidate.slice(2))
+    expect(existsSync(object)).toBe(true)
+    chmodSync(object, 0o644)
+    writeFileSync(object, "corrupt object bytes\n")
+
+    await expect(
+      populateReferenceStores({
+        commit: head,
+        gitIn: (cwd) => gitIn(cwd),
+        repo,
+        source,
+      }),
+    ).rejects.toThrow()
+  }, 60_000)
+
   /**
    * The two causes of an unfetchable pin, told apart by one probe. Both
    * fixtures raise the SAME gitlink to the SAME unpushed commit; the only
@@ -320,10 +444,11 @@ describe("freshWorktree", () => {
 
     // Populated on the way in, and reported as records rather than as a trace
     // line nobody turned on.
-    expect(journal.filter(({ kind }) => kind === "reference").map((record) => record["path"])).toEqual([
-      "vendor/dep",
-      "vendor/dep/apps/nested",
-    ])
+    expect(
+      journal
+        .filter((record) => record["kind"] === "reference" && record["action"] !== "acquired")
+        .map((record) => record["path"]),
+    ).toEqual(["vendor/dep", "vendor/dep/apps/nested"])
     // THE WHOLE CLAIM. Every gitlink came off local disk, so no `warning` row
     // was written: a compose that fetched or found no reference is the degraded
     // one, and it is exactly what read as ordinary for four hours.
@@ -339,9 +464,134 @@ describe("freshWorktree", () => {
       plumbing: { journal: (record: LogWrite) => void again.push(record) },
       populateReference: true,
     })
-    expect(again.filter(({ kind }) => kind === "reference")).toEqual([])
+    expect(again.filter((record) => record["kind"] === "reference" && record["action"] !== "acquired")).toEqual([])
     expect(again.filter(({ kind }) => kind === "warning")).toEqual([])
     expect(existsSync(join(second.path, "vendor/dep/apps/nested/nested.txt"))).toBe(true)
+  }, 120_000)
+
+  it("keeps a verifyCandidate-local moved pin borrowable after its composition source is removed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-reference-verify-custody-"))
+    roots.push(root)
+    const { nested, product, vendor } = await superproject(root)
+    const nestedRemote = "https://github.com/beorn/yrd-reference-nested-fixture.git"
+    const componentRemote = "https://github.com/beorn/yrd-reference-component-fixture.git"
+    const vendorGit = gitIn(vendor)
+    await vendorGit(["config", "-f", ".gitmodules", "submodule.apps/nested.url", nestedRemote])
+    await vendorGit(["add", ".gitmodules"])
+    await vendorGit([...author, "commit", "--quiet", "--message", "name hosted nested remote"])
+    const productGit = gitIn(product)
+    await productGit(["config", "-f", ".gitmodules", "submodule.vendor/dep.url", componentRemote])
+    const componentBase = (await vendorGit(["rev-parse", "HEAD"])).trim()
+    await productGit(["update-index", "--add", "--cacheinfo", `160000,${componentBase},vendor/dep`])
+    await productGit(["add", ".gitmodules"])
+    await productGit([...author, "commit", "--quiet", "--message", "name hosted component remote"])
+    const repo = await queueClone(root, product)
+    const logicalOrigin = "https://github.com/beorn/yrd-reference-fixture.git"
+    const fixtureEnv = {
+      ...superEnv,
+      GIT_CONFIG_COUNT: "4",
+      GIT_CONFIG_KEY_0: "protocol.file.allow",
+      GIT_CONFIG_VALUE_0: "always",
+      GIT_CONFIG_KEY_1: `url.${vendor}.insteadOf`,
+      GIT_CONFIG_VALUE_1: componentRemote,
+      GIT_CONFIG_KEY_2: `url.${product}.insteadOf`,
+      GIT_CONFIG_VALUE_2: logicalOrigin,
+      GIT_CONFIG_KEY_3: `url.${nested}.insteadOf`,
+      GIT_CONFIG_VALUE_3: nestedRemote,
+    }
+    const git = gitIn(repo, undefined, undefined, { env: fixtureEnv })
+    await git(["remote", "set-url", "origin", logicalOrigin])
+    await populateReferenceStores({ gitIn: (cwd) => gitIn(cwd, undefined, undefined, { env: fixtureEnv }), repo })
+
+    // The submitted child pin and component main diverge from their shared
+    // base. Git Super must compose the two independent file changes into a new
+    // child commit while verifying the root candidate.
+    const component = join(root, "candidate-component")
+    await gitIn(root)(["clone", "--quiet", vendor, component])
+    const componentGit = gitIn(component)
+    writeFileSync(join(component, "candidate-only.txt"), "submitted side\n")
+    await componentGit(["add", "--all"])
+    await componentGit([...author, "commit", "--quiet", "--message", "candidate component side"])
+    const candidatePin = (await componentGit(["rev-parse", "HEAD"])).trim()
+    await componentGit(["push", "--quiet", "origin", `${candidatePin}:refs/heads/candidate-side`])
+
+    const baseRoot = (await productGit(["rev-parse", "HEAD"])).trim()
+    await productGit(["checkout", "--quiet", "-b", "candidate"])
+    await productGit(["update-index", "--add", "--cacheinfo", `160000,${candidatePin},vendor/dep`])
+    await productGit([...author, "commit", "--quiet", "--message", "candidate root pin"])
+    const candidateRoot = (await productGit(["rev-parse", "HEAD"])).trim()
+    await productGit(["checkout", "--quiet", "main"])
+    expect((await productGit(["rev-parse", "HEAD"])).trim()).toBe(baseRoot)
+
+    writeFileSync(join(vendor, "main-only.txt"), "main side\n")
+    await vendorGit(["add", "--all"])
+    await vendorGit([...author, "commit", "--quiet", "--message", "advance component main independently"])
+    const mainPin = (await vendorGit(["rev-parse", "HEAD"])).trim()
+    await gitIn(join(repo, "vendor/dep"), undefined, undefined, { env: fixtureEnv })([
+      "fetch",
+      "--quiet",
+      "origin",
+      "main",
+    ])
+    await productGit(["update-index", "--add", "--cacheinfo", `160000,${mainPin},vendor/dep`])
+    await productGit([...author, "commit", "--quiet", "--message", "advance root target to component main"])
+    await git(["fetch", "--quiet", "origin", "main"])
+    const targetHead = (await git(["rev-parse", "FETCH_HEAD"])).trim()
+    await git(["fetch", "--quiet", "origin", "candidate"])
+    const head = (await git(["rev-parse", "FETCH_HEAD"])).trim()
+
+    const verified = await verifyCandidate({
+      git,
+      env: fixtureEnv,
+      head,
+      message: "verify a root candidate carrying a local component pin",
+      path: join(root, "verification-worktree"),
+      repo,
+      targetHead,
+      worktree: {
+        env: fixtureEnv,
+        populateReference: true,
+      },
+    })
+    if (verified.state !== "verified") {
+      throw new Error(`candidate verification failed: ${JSON.stringify(verified.verifying.detail)}`)
+    }
+
+    const verifiedRoot = verified.verifying.candidate
+    const mergedGitlink = verified.verifying.gitlinks.find(({ path }) => path === "vendor/dep")
+    expect(mergedGitlink).toMatchObject({ path: "vendor/dep", state: "merged" })
+    const composedPin = (await git(["rev-parse", `${verifiedRoot}:vendor/dep`])).trim()
+    expect(composedPin).not.toBe(candidatePin)
+    const store = join(repo, "vendor/dep")
+    const storeGit = gitIn(store)
+    await expect(storeGit(["cat-file", "-e", `${composedPin}^{commit}`])).resolves.toBe("")
+    expect(await storeGit(["show", `${composedPin}:candidate-only.txt`])).toContain("submitted side")
+    expect(await storeGit(["show", `${composedPin}:main-only.txt`])).toContain("main side")
+
+    // verifyCandidate removed its composed worktree. Disable the component
+    // origin, then prove the owner can compose the verified root from custody.
+    rmSync(vendor, { force: true, recursive: true })
+
+    // Remove the fixture's exact origin rewrites so Git Super's exact local
+    // borrow rewrites take precedence. Equal-length insteadOf entries would
+    // otherwise point at the removed fixture origin instead of owner custody.
+    const borrowEnv = {
+      ...superEnv,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "protocol.file.allow",
+      GIT_CONFIG_VALUE_0: "always",
+    }
+    const borrowGit = gitIn(repo, undefined, undefined, { env: borrowEnv })
+    const worktree = await freshWorktree(borrowGit, repo, verifiedRoot, join(root, "after-verification"), {
+      env: borrowEnv,
+      populateReference: true,
+    })
+    expect((await gitIn(worktree.path)(["-C", "vendor/dep", "rev-parse", "HEAD"])).trim()).toBe(composedPin)
+    await worktree.remove()
+
+    expect(await storeGit(["for-each-ref", "--format=%(refname)", "refs/yrd/pins"])).toContain(composedPin)
+    await storeGit(["gc", "--prune=now", "--quiet"])
+    expect(await storeGit(["cat-file", "-t", composedPin])).toContain("commit")
   }, 120_000)
 
   /**

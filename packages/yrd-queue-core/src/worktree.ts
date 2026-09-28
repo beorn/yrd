@@ -24,13 +24,21 @@
 import { lstatSync, readlinkSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import type { Process } from "@yrd/process"
-import type { GitProcess } from "git-super/process"
 import { createGitWorktreeStore } from "git-super/worktree"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
 import { GIT_SUPER_ABSENT_STORE, populateReferenceStores, ReferenceUnpopulated } from "./reference.ts"
-import { GitExit, gitIn, mergeBase, refAt, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
+import {
+  GitExit,
+  gitIn,
+  mergeBase,
+  refAt,
+  seamProcess,
+  type Git,
+  type GitInvocationOptions,
+  type GitSelection,
+} from "./git.ts"
 
 /**
  * What the worktree plumbing narrates to.
@@ -116,6 +124,20 @@ export async function freshWorktree(
           ...options.gitOptions,
         })
       await populateReferenceStores({
+        acquired: (pin) => {
+          plumbing?.journal?.({
+            action: "acquired",
+            head: commit,
+            kind: "reference",
+            path: pin.path,
+            sha: pin.sha,
+            source: pin.source,
+            ...(pin.source === "local" ? { localSource: pin.localSource } : {}),
+            ...(pin.source === "remote" && pin.localMiss !== undefined
+              ? { localSource: pin.localMiss.localSource, localMissReason: pin.localMiss.reason }
+              : {}),
+          })
+        },
         commit,
         gitIn: gitAt,
         populated: (store) => {
@@ -563,27 +585,6 @@ async function pruneWorktrees(git: Git): Promise<void> {
   if (common === "") throw new Error("cannot prune worktrees: git returned an empty common directory")
   const repo = resolve(common)
   await createGitWorktreeStore({ gitProcess: seamProcess(git, repo), repo }).prune()
-}
-
-/** Keep git-super's store on Yrd's selected Git process and its failure evidence. */
-function seamProcess(git: Git, repo: string): GitProcess {
-  return {
-    async run(request) {
-      if (resolve(request.repo) !== repo) {
-        throw new Error(`git-super's worktree store asked Git about ${request.repo}; its seam answers for ${repo} only`)
-      }
-      try {
-        return { code: 0, stderr: "", stdout: await git(request.args, request.stdin) }
-      } catch (error) {
-        const evidence = error instanceof GitExit ? error.evidence : undefined
-        const answered = evidence?.result
-        if (answered === undefined || evidence?.failure !== undefined || evidence?.protocol?.refusal !== undefined) {
-          throw error
-        }
-        return { code: answered.exitCode, stderr: answered.stderr, stdout: answered.stdout }
-      }
-    },
-  }
 }
 
 /**

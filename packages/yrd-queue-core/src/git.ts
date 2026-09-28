@@ -17,7 +17,7 @@
 import { hostname } from "node:os"
 import { randomUUID } from "node:crypto"
 import { accessSync, constants, statSync } from "node:fs"
-import { isAbsolute } from "node:path"
+import { isAbsolute, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createShellBackend, type GitomicBackend } from "gitomic"
@@ -33,6 +33,7 @@ import {
   isRetryableRead,
   isSshSessionDrop,
   verboseSshRetryEnvironment,
+  type GitProcess,
 } from "git-super/process"
 import type { QueueObservation } from "./remote.ts"
 import { remoteSeam } from "./remote-calls.ts"
@@ -923,6 +924,27 @@ export class GitExit extends Error {
   ) {
     super(`git ${args.join(" ")} in ${cwd} exited ${exitCode}: ${detail}`)
     this.name = "GitExit"
+  }
+}
+
+/** Keep git-super's store on Yrd's selected Git process and its failure evidence. */
+export function seamProcess(git: Git, repo: string): GitProcess {
+  return {
+    async run(request) {
+      if (resolve(request.repo) !== repo) {
+        throw new Error(`git-super's worktree store asked Git about ${request.repo}; its seam answers for ${repo} only`)
+      }
+      try {
+        return { code: 0, stderr: "", stdout: await git(request.args, request.stdin) }
+      } catch (error) {
+        const evidence = error instanceof GitExit ? error.evidence : undefined
+        const answered = evidence?.result
+        if (answered === undefined || evidence?.failure !== undefined || evidence?.protocol?.refusal !== undefined) {
+          throw error
+        }
+        return { code: answered.exitCode, stderr: answered.stderr, stdout: answered.stdout }
+      }
+    },
   }
 }
 
