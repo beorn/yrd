@@ -75,6 +75,7 @@ export const YRD_ADOPTER_WRITER = "yrd-adopter"
 
 export const CHANGE_EVENT_TYPES = [
   "opened",
+  "admission-warning",
   "verifying",
   "checking",
   "merging",
@@ -279,6 +280,9 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   }
   if (details.issue !== undefined && details.issue.trim() === "") throw new TypeError("Issue: cannot be empty")
   if (details.reason !== undefined && details.reason.trim() === "") throw new TypeError("Reason: cannot be empty")
+  if (type === "admission-warning" && (details.commit === undefined || details.reason === undefined)) {
+    throw new TypeError("admission-warning needs Commit: and Reason:")
+  }
   const props: [string, string][] = [
     [EVENT_TRAILERS.queue, details.queueTip],
     [EVENT_TRAILERS.time, details.at.toISOString()],
@@ -574,6 +578,18 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         reason: undefined,
         run: undefined,
       }
+    }
+    case "admission-warning": {
+      if (!isOpen(state.status)) return endingRefusal(state, event)
+      const head = keptCommit(event)
+      if (head !== state.commit) {
+        throw new Error(
+          `event ${event.id} admission-warning keeps ${head}, expected submitted head ${state.commit ?? "absent"}`,
+        )
+      }
+      const reason = requiredProp(event, EVENT_TRAILERS.reason)
+      if (reason.trim() === "") throw new Error(`event ${event.id} admission-warning has empty Reason:`)
+      return diagnose(next, `admission could not judge ${head.slice(0, 12)}: ${reason}`)
     }
     case "verifying":
     case "checking":

@@ -336,6 +336,7 @@ describe("ADR-0016 event fold", () => {
   it("keeps the approved change-event vocabulary exact", () => {
     expect(CHANGE_EVENT_TYPES).toEqual([
       "opened",
+      "admission-warning",
       "verifying",
       "checking",
       "merging",

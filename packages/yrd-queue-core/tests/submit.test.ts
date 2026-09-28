@@ -600,6 +600,122 @@ describe("event submit", () => {
     ).toEqual(["opened"])
   })
 
+  /** @failure An unticked Start row opens a change, or an unreadable policy silently admits without a recorded warning.
+   * @level l2 @consumer Yrd submit and dry-run admission
+   */
+  it("refuses a policy exit 1 before any branch or event push", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/refused-admission", "one.txt")
+    const request = {
+      branch: "task/refused-admission",
+      submitter: "@dev/2",
+      issue: "@i/26273",
+      target: { branch: "main", remote: "origin" },
+      admit: async () => ({ kind: "refuse" as const, reason: "Start 3 is unticked; tick it with evidence" }),
+    }
+    await expect(inspectSubmit(w.git, "origin", request)).rejects.toThrow(/Start 3 is unticked/u)
+    await expect(submit(w.git, "origin", request)).rejects.toThrow(/Start 3 is unticked/u)
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main", queueRef("main"), runIndexRef("main")])
+  })
+
+  it("refuses a target move before judging with a policy from the stale declaration", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/target-moved", "one.txt")
+    const admit = vi.fn(async () => ({ kind: "admit" as const }))
+    await expect(
+      submit(w.git, "origin", {
+        branch: "task/target-moved",
+        submitter: "@dev/2",
+        issue: "@i/26273",
+        target: { branch: "main", remote: "origin" },
+        expectedTargetHead: "a".repeat(40),
+        admit,
+      }),
+    ).rejects.toThrow(/moved from declared .*rerun submit/u)
+    expect(admit).not.toHaveBeenCalled()
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main", queueRef("main"), runIndexRef("main")])
+  })
+
+  it("records one cannot-judge warning and deduplicates an unchanged-head retry", async () => {
+    const w = await world()
+    const head = await branchWithCommit(w, "task/admission-warning", "one.txt")
+    const request = {
+      branch: "task/admission-warning",
+      submitter: "@dev/2",
+      issue: "@i/26273",
+      target: { branch: "main", remote: "origin" },
+      admit: async () => ({ kind: "cannot-judge" as const, reason: "policy timed out after 10ms" }),
+    }
+    const first = await submit(w.git, "origin", request)
+    expect(first.admission).toMatchObject({ kind: "cannot-judge", reason: "policy timed out after 10ms" })
+    expect(first.admissionWarning).toMatchObject({ reason: "policy timed out after 10ms" })
+    const firstHistory = (await listChangeHistories(store(w), "main")).histories.get(request.branch)
+    expect(firstHistory?.events.map((event) => event.type)).toEqual(["opened", "admission-warning"])
+    expect(firstHistory?.state).toMatchObject({ status: "queued", commit: head })
+    const retry = await submit(w.git, "origin", request)
+    expect(retry.retry).toBe(true)
+    expect(retry.admissionWarning).toBeUndefined()
+    expect((await listChangeHistories(store(w), "main")).histories.get(request.branch)?.events).toHaveLength(2)
+    await w.git(["checkout", "--quiet", request.branch])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "next attempt"])
+    const next = await submit(w.git, "origin", request)
+    expect(next.admissionWarning?.event).toBeDefined()
+    expect(next.admissionWarning?.event).not.toBe(first.admissionWarning?.event)
+    expect(
+      (await listChangeHistories(store(w), "main")).histories.get(request.branch)?.events.map((event) => event.type),
+    ).toEqual(["opened", "admission-warning", "cancelled", "opened", "admission-warning"])
+  })
+
+  it("admits an evidenced issue without writing a warning", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/admitted", "one.txt")
+    const submitted = await submit(w.git, "origin", {
+      branch: "task/admitted",
+      submitter: "@dev/2",
+      issue: "@i/26273",
+      target: { branch: "main", remote: "origin" },
+      admit: async () => ({ kind: "admit" }),
+    })
+    expect(submitted.admission).toEqual({ kind: "admitted" })
+    expect(submitted.admissionWarning).toBeUndefined()
+    expect(
+      (await listChangeHistories(store(w), "main")).histories.get("task/admitted")?.events.map((event) => event.type),
+    ).toEqual(["opened"])
+  })
+
+  it("records a thrown policy adapter as cannot-judge instead of losing the change", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/admission-unavailable", "one.txt")
+    const submitted = await submit(w.git, "origin", {
+      branch: "task/admission-unavailable",
+      submitter: "@dev/2",
+      issue: "@i/26273",
+      target: { branch: "main", remote: "origin" },
+      admit: async () => {
+        throw new Error("target checkout unavailable")
+      },
+    })
+    expect(submitted.admission).toMatchObject({
+      kind: "cannot-judge",
+      reason: expect.stringContaining("target checkout unavailable"),
+    })
+    expect(submitted.admissionWarning?.event).toBeDefined()
+  })
+
+  it("skips issue-free admission explicitly", async () => {
+    const w = await world()
+    await branchWithCommit(w, "feature/without-issue", "one.txt")
+    const admit = vi.fn(async () => ({ kind: "refuse" as const, reason: "must never run" }))
+    const submitted = await submit(w.git, "origin", {
+      branch: "feature/without-issue",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      admit,
+    })
+    expect(submitted.admission).toEqual({ kind: "skipped", reason: "no issue on this change" })
+    expect(admit).not.toHaveBeenCalled()
+  })
+
   it("refuses to submit the target without publishing a change", async () => {
     const w = await world()
     await expect(

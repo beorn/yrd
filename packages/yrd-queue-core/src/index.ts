@@ -185,7 +185,7 @@ export {
 } from "./submit.ts"
 export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
 export type { PinCarrierPin, PreparedPinCarrier } from "./pin-carrier.ts"
-export type { IssueResolution, IssueResolver } from "./submit.ts"
+export type { AdmissionOutcome, AdmissionVerdict, IssueResolution, IssueResolver, Submitted } from "./submit.ts"
 export { withdraw, NothingToWithdraw } from "./withdraw.ts"
 export type { WithdrawRequest, Withdrawn, WithdrawnChange } from "./withdraw.ts"
 export { QueuePaused, QueueNotPaused, liftLine, pauseLine, stopFact, stuckCures } from "./pause.ts"
@@ -208,7 +208,7 @@ export type {
   OverrideTable,
   OverrideWrite,
 } from "./override.ts"
-export { notifyOutsideRound, overrideNotice } from "./with-notify.ts"
+export { dispatchNotifications, notifyOutsideRound, overrideNotice } from "./with-notify.ts"
 export type { OutsideRound, OverrideNotice } from "./with-notify.ts"
 
 export { remoteUrl } from "./remote.ts"
