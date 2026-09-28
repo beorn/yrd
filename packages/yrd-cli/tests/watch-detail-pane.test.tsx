@@ -74,8 +74,10 @@ const UNDECLARED_FAILED: CheckPanel = {
   result: { exit: "1", log: "/w/checks/affected-tests.log", ms: 1000, result: "fail" },
 }
 
-function snapshot(): WatchSnapshot {
-  const rows: WatchRow[] = [{ row: failedRow() }]
+function snapshot(rowCount = 1): WatchSnapshot {
+  const rows: WatchRow[] = Array.from({ length: rowCount }, (_, index) => ({
+    row: { ...failedRow(), branch: index === 0 ? failedRow().branch : `task/other-failed-${index}` },
+  }))
   return {
     at: NOW,
     queue: "github.com/beorn/hh-dev#main",
@@ -101,14 +103,17 @@ function opener() {
   })
 }
 
-async function paint140x50(): Promise<{ text: string; lines: string[]; ansi: string }> {
+async function paint(
+  size = { cols: 140, rows: 50 },
+  rowCount = 1,
+): Promise<{ text: string; lines: string[]; ansi: string }> {
   const app = render(
     <NowContext.Provider value={NOW}>
       <MinuteContext.Provider value={NOW}>
-        <WatchPane snapshot={snapshot()} live={false} open={opener()} />
+        <WatchPane snapshot={snapshot(rowCount)} live={false} open={opener()} />
       </MinuteContext.Provider>
     </NowContext.Provider>,
-    { cols: 140, rows: 50 },
+    size,
   )
   await app.waitForLayoutStable()
   app.press("ArrowDown")
@@ -119,8 +124,8 @@ async function paint140x50(): Promise<{ text: string; lines: string[]; ansi: str
   await app.waitForLayoutStable()
   const text = app.text
   const ansi = bufferToStyledText(app.term.buffer)
-  writeCaptureIfConfigured("yrd-watch-26242-140x50.ansi", ansi)
-  writeCaptureIfConfigured("yrd-watch-26242-140x50.png", await renderAnsiPng(ansi, { cols: 140, rows: 50 }))
+  writeCaptureIfConfigured(`yrd-watch-26242-${size.cols}x${size.rows}.ansi`, ansi)
+  writeCaptureIfConfigured(`yrd-watch-26242-${size.cols}x${size.rows}.png`, await renderAnsiPng(ansi, size))
   app.unmount()
   return { text, lines: text.split("\n"), ansi }
 }
@@ -132,7 +137,7 @@ function leadingSpaces(line: string): number {
 
 describe("26242: watch detail pane at 140x50", () => {
   it("row 1: undeclared-check note and status share one left edge", async () => {
-    const { lines } = await paint140x50()
+    const { lines } = await paint()
     const note = lines.find((line) => line.includes("does not name this check"))
     const status = lines.find((line) => /failed exit=/u.test(line))
     const log = lines.find((line) => line.includes("LONG CHECK LOG 01"))
@@ -145,7 +150,7 @@ describe("26242: watch detail pane at 140x50", () => {
   })
 
   it("row 2: each fact appears once", async () => {
-    const { text, lines } = await paint140x50()
+    const { text, lines } = await paint()
     expect(text).not.toMatch(/Failed affected-tests failed/u)
     expect(text).not.toMatch(/\(err=/u)
     expect(text.match(/× affected-tests/g)?.length ?? 0).toBe(1)
@@ -159,7 +164,7 @@ describe("26242: watch detail pane at 140x50", () => {
   })
 
   it("row 3: detail grows into free rows and a cut log says how many lines follow", async () => {
-    const { lines, text } = await paint140x50()
+    const { lines, text } = await paint()
     const tableRow = lines.findIndex((line) => line.includes("task/24197-240col-gate"))
     const statusBox = lines.findIndex((line) => line.includes("RUN main") || line.includes("Failed"))
     expect(tableRow).toBeGreaterThanOrEqual(0)
@@ -173,8 +178,16 @@ describe("26242: watch detail pane at 140x50", () => {
     expect(lines.slice(more + 1).some((line) => /╰/u.test(line))).toBe(true)
   })
 
+  // 24197 AC2: the real200×40 below-tier list can consume the log viewport.
+  // The one-row140×50 case above cannot detect that allocation failure.
+  it("24197: a dense below-tier list leaves the selected check log visible at 200x40", async () => {
+    const { text } = await paint({ cols: 200, rows: 40 }, 40)
+    expect(text).toContain("LONG CHECK LOG 01")
+    expect(text).toMatch(/\d+ more lines/u)
+  })
+
   it("row 4: RUNNER keeps its rounded box; inner dash sits under RUN", async () => {
-    const { lines, text } = await paint140x50()
+    const { lines, text } = await paint()
     expect(text).toMatch(/RUNNER/u)
     expect(text).toMatch(/no runner status published/u)
     const runnerTitle = lines.find((line) => line.includes("RUNNER") && line.includes("github.com"))
@@ -199,7 +212,7 @@ describe("26242: watch detail pane at 140x50", () => {
 
 describe("26243: watch uses one clock format, one duration format and plain words at 140x50", () => {
   it("pins unified clock times, unified durations and plain phrases", async () => {
-    const { text, lines } = await paint140x50()
+    const { text, lines } = await paint()
 
     // Clock times use one form: HH:MM, no seconds across the whole watch screen
     expect(text).not.toMatch(/\b\d\d:\d\d:\d\d\b/u)

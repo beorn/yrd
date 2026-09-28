@@ -1271,10 +1271,10 @@ function SingleWatchPane({
       )
     ) : tier === "below" ? (
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {/* Content-sized while the list is short so the detail grows into free
-            rows (26242). flexShrink lets a long list scroll so overflow
-            indicators and the address dialog stay on screen (25418). */}
-        <Box flexGrow={0} flexShrink={1} minHeight={0} minWidth={0}>
+        {/* Short lists give their free rows to detail (26242). A long list
+            yields at half the height so fixed detail chrome cannot
+            consume the entire check-log viewport (24197). */}
+        <Box flexGrow={0} flexShrink={1} minHeight={0} maxHeight="50%" minWidth={0}>
           {list}
         </Box>
         <Box flexGrow={1} minHeight={DETAIL_NATURAL_HEIGHT} minWidth={0}>
