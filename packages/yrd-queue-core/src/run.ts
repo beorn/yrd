@@ -16,6 +16,7 @@ import {
 } from "./git.ts"
 import { queueFormat, queueRef } from "./events.ts"
 import { eventQueueRun } from "./event-run.ts"
+import { removeEmptyWorktreeRunDirectory } from "./worktree.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { overrideLine, type OverrideEntry, type OverrideTable } from "./override.ts"
 import { roundRemoteCallsRow, traceRemoteCalls } from "./remote-calls.ts"
@@ -182,6 +183,7 @@ function nowMs(options: QueueRunOptions): number {
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   await using resources = new AsyncDisposableStack()
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
+  resources.defer(() => removeEmptyWorktreeRunDirectory(join(options.workdir, "worktrees", log.id)))
   // THE JOURNAL OPENS WITH ITS HEADER, before the first journaled Git call and
   // before anything here can throw. Every field below is known from the run's
   // options, so there is nothing to wait for: the run row carries the gitlink
