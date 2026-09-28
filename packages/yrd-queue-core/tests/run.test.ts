@@ -92,7 +92,12 @@ const RIVAL_STUCK_TRAILERS = [
 /** Intercept the real Gitomic publication seam while retaining its shell backend. */
 function beforeGitomicPublish(
   before: (repo: string, updates: readonly RefUpdate[], remote?: string) => Promise<void>,
-  beforeFetchRefs?: (repo: string, refs: string | readonly string[], remote: string) => Promise<void>,
+  beforeFetchRefs?: (
+    repo: string,
+    refs: string | readonly string[],
+    remote: string,
+    options?: gitomic.FetchRefsOptions,
+  ) => Promise<void>,
   after?: (repo: string, updates: readonly RefUpdate[], remote?: string) => Promise<void>,
   beforeListRefs?: (repo: string, prefix: string, remote?: string) => Promise<ReadonlyMap<string, string> | undefined>,
 ): ReturnType<typeof vi.spyOn> {
@@ -109,9 +114,9 @@ function beforeGitomicPublish(
       ...backend,
       listRefs: async (repo, prefix, remote) =>
         (await beforeListRefs?.(repo, prefix, remote)) ?? listRefs(repo, prefix, remote),
-      fetchRefs: async (repo, refs, remote) => {
-        await beforeFetchRefs?.(repo, refs, remote)
-        return fetchRefs(repo, refs, remote)
+      fetchRefs: async (repo, refs, remote, fetchOptions) => {
+        await beforeFetchRefs?.(repo, refs, remote, fetchOptions)
+        return fetchRefs(repo, refs, remote, fetchOptions)
       },
       publish: async (repo, updates, remote) => {
         await before(repo, updates, remote)
