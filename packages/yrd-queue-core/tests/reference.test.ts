@@ -563,6 +563,11 @@ describe("freshWorktree", () => {
     expect(mergedGitlink).toMatchObject({ path: "vendor/dep", state: "merged" })
     const composedPin = (await git(["rev-parse", `${verifiedRoot}:vendor/dep`])).trim()
     expect(composedPin).not.toBe(candidatePin)
+    // 26404: the tree records `from` (the two-parent composition). `composition.pin`
+    // is the author's second parent; `to` / `composition.parent` is component main.
+    expect(mergedGitlink?.from).toBe(composedPin)
+    expect(mergedGitlink?.to).toBe(mainPin)
+    expect(mergedGitlink?.composition).toMatchObject({ parent: mainPin, pin: candidatePin })
     const store = join(repo, "vendor/dep")
     const storeGit = gitIn(store)
     await expect(storeGit(["cat-file", "-e", `${composedPin}^{commit}`])).resolves.toBe("")
