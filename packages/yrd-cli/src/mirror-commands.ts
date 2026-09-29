@@ -10,7 +10,7 @@
  * repository's git dir would be a second store nobody else reads.
  */
 
-import { configValue, gitIn, refreshDeclaredMirrors } from "@yrd/queue-core"
+import { configValue, gitIn, refreshDeclaredMirrors, resolveGitSelection } from "@yrd/queue-core"
 import { relative } from "node:path"
 import { repositoryHere } from "./declaration.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
@@ -29,7 +29,8 @@ export async function refreshMirrors(options: MirrorRefreshOptions, io: YrdCliIO
     )
     return 1
   }
-  const store = await configValue(gitIn(repo), MIRROR_STORE_SETTING)
+  const selection = await resolveGitSelection(repo)
+  const store = await configValue(gitIn(repo, undefined, selection), MIRROR_STORE_SETTING)
   if (store === undefined) {
     io.stderr(
       `yrd mirror refresh: this host declares no mirror store (${MIRROR_STORE_SETTING} is unset in ${repo}); ` +
@@ -43,7 +44,7 @@ export async function refreshMirrors(options: MirrorRefreshOptions, io: YrdCliIO
       root: store,
       repo,
       commit: options.commit ?? "HEAD",
-      gitIn: (directory) => gitIn(directory),
+      gitIn: (directory) => gitIn(directory, undefined, selection),
     })
   } catch (error) {
     io.stderr(`yrd mirror refresh: ${error instanceof Error ? error.message : String(error)}\n`)

@@ -95,6 +95,58 @@ describe("a queue started by address on a host with no checkout", () => {
     await git(root, "config", "--file", selectionConfig, "user.name", "URI Queue Test")
     await git(root, "config", "--file", selectionConfig, "user.email", "uri-queue@example.invalid")
 
+    // 25196: env list is an owning-repository read. A native Git fallback
+    // returns plausible rows, so only the selected executable's call log
+    // distinguishes the correct path from the unselected one.
+    const beforeEnvList = selected.readCalls().length
+    const envList = Bun.spawn(["bun", join(REPO_ROOT, "bin/yrd.ts"), "env", "list", "--json"], {
+      cwd: author,
+      env: {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: selectionConfig,
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "yrd.workdir",
+        GIT_CONFIG_VALUE_0: workdir,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [envListOut, envListErr, envListExit] = await Promise.all([
+      new Response(envList.stdout).text(),
+      new Response(envList.stderr).text(),
+      envList.exited,
+    ])
+    expect(envListExit, `${envListErr}\n${envListOut}`).toBe(0)
+    expect(
+      selected
+        .readCalls()
+        .slice(beforeEnvList)
+        .some(({ cwd, args }) => cwd === author && args[0] === "worktree"),
+    ).toBe(true)
+
+    // Mirror refresh has a separate CLI entry and injects runners for each
+    // repository it visits. Its owning-repo reads use the chosen executable.
+    await git(author, "config", "yrd.mirror", join(root, "mirrors"))
+    const beforeMirror = selected.readCalls().length
+    const mirror = Bun.spawn(["bun", join(REPO_ROOT, "bin/yrd.ts"), "mirror", "refresh", "--json"], {
+      cwd: author,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: selectionConfig },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [mirrorOut, mirrorErr, mirrorExit] = await Promise.all([
+      new Response(mirror.stdout).text(),
+      new Response(mirror.stderr).text(),
+      mirror.exited,
+    ])
+    expect(mirrorExit, `${mirrorErr}\n${mirrorOut}`).toBe(0)
+    expect(
+      selected
+        .readCalls()
+        .slice(beforeMirror)
+        .some(({ cwd, args }) => cwd === author && args[0] === "config"),
+    ).toBe(true)
+
     const submit = Bun.spawn(
       ["bun", join(REPO_ROOT, "bin/yrd.ts"), "submit", "task/uri", "--queue", "main", "--notify", "@dev/3", "--json"],
       {

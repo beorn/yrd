@@ -171,7 +171,7 @@ export async function publishMovedGitlinks(
     if (row.newMode !== "160000" || ZERO_SHA.test(row.sha)) continue
     const path = prefix === "" ? row.path : `${prefix}/${row.path}`
     const checkout = join(root, row.path)
-    const child = gitIn(checkout)
+    const child = gitIn(checkout, undefined, selectionFor(git))
     // The DECLARED submodule url is what the record names; the transport rewrite is the host's.
     const remote = await remoteUrl(child, "origin")
     // Where the pin is: this checkout, else the remote under some ref (a branch

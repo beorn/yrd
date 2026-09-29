@@ -63,6 +63,6 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
   })
   const record = result.events.findLast((event) => event.type === "cancelled")?.id
   if (record === undefined) throw new Error(`${ref} in ${root}: withdrawal published no cancelled event`)
-  await deleteCandidateRefsForShas(gitIn(root), root, remote, [head])
+  await deleteCandidateRefsForShas(gitIn(root, undefined, selectionFor(git)), root, remote, [head])
   return { branch: request.branch, queue, withdrawn: [{ branch: request.branch, head, record }] }
 }

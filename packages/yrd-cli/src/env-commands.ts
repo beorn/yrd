@@ -29,6 +29,7 @@ import {
   issueOf,
   readConfig,
   refAt,
+  resolveGitSelection,
   runId,
   runSetup,
   SetupFailed,
@@ -91,6 +92,7 @@ async function resolveBaseSha(git: Git, target: string): Promise<string> {
  */
 export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
+  const selection = await resolveGitSelection(root)
   if (options.hold !== undefined && options.hold.trim() === "") {
     throw new Error("yrd env open --hold needs a non-empty reason")
   }
@@ -105,7 +107,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     // with --bay/--issue and no argument. Offering only `rev-parse HEAD`
     // answered a question the caller had not asked: it resolves to a commit
     // and detaches, discarding the branch identity they named.
-    const resolved = await refAt(gitIn(root), commit)
+    const resolved = await refAt(gitIn(root, undefined, selection), commit)
     throw new Error(
       `yrd env open takes an exact commit object ID as its argument, not '${commit}'.` +
         (resolved === undefined ? "" : ` '${commit}' is a ref here, and this argument never accepts one.`) +
@@ -114,7 +116,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
         ` To retain an exact commit detached, resolve one first with git rev-parse ${resolved === undefined ? "HEAD" : commit}.`,
     )
   }
-  const target = commit === undefined ? await originHead(gitIn(root)) : "HEAD"
+  const target = commit === undefined ? await originHead(gitIn(root, undefined, selection)) : "HEAD"
   const name = (
     options.bay ??
     options.issue ??
@@ -123,7 +125,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   if (name === "") throw new Error("yrd: --bay needs a name")
   const branch = commit === undefined ? `task/${name}` : undefined
   await using process = createProcess({ cwd: root })
-  const git = gitIn(root, process)
+  const git = gitIn(root, process, selection)
   const base = commit ?? (await resolveBaseSha(git, target))
   if (commit !== undefined && (await refAt(git, commit)) !== commit) {
     throw new Error(
@@ -169,7 +171,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   let headSha = provisioned.headSha
   if (options.issue !== undefined && branch !== undefined) {
     try {
-      const environmentGit = gitIn(path, process)
+      const environmentGit = gitIn(path, process, selection)
       headSha = (await environmentGit(["rev-parse", "HEAD"])).trim()
       const binding = await issueOf(environmentGit, branch, headSha, base, options.issue, resolveIssue)
       if (binding === undefined) throw new Error(`no issue resolved for requested binding ${options.issue}`)
@@ -237,15 +239,13 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
 /** `yrd env list` — the environments this repository holds, as git holds them. */
 export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
+  const selection = await resolveGitSelection(root)
   const baysRoot = baysRootOf()
   await using process = createProcess({ cwd: root })
-  const roots = [
-    baysRoot,
-    legacyBaysRoot(root),
-    join(resolve(root, await workdirOf(gitIn(root, process))), "environments"),
-  ]
+  const git = gitIn(root, process, selection)
+  const roots = [baysRoot, legacyBaysRoot(root), join(resolve(root, await workdirOf(git)), "environments")]
   const prefixes = roots.map((path) => `${existsSync(path) ? realpathSync(path) : resolve(path)}/`)
-  const rows: EnvRow[] = (await registeredWorktrees(gitIn(root, process)))
+  const rows: EnvRow[] = (await registeredWorktrees(git))
     .filter(({ path }) => prefixes.some((prefix) => path.startsWith(prefix)))
     .map(({ path, head, branch, locked }) => ({
       name: basename(path),
@@ -281,8 +281,9 @@ export async function closeEnvironment(
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
+  const selection = await resolveGitSelection(root)
   await using process = createProcess({ cwd: root })
-  const git = gitIn(root, process)
+  const git = gitIn(root, process, selection)
   const workdir = resolve(root, await workdirOf(git))
   const roots = [baysRootOf(), legacyBaysRoot(root), join(workdir, "environments")]
   const requested = resolve(io.cwd ?? globalThis.process.cwd(), operand)
@@ -317,7 +318,7 @@ export async function closeEnvironment(
       `environment ${path} is locked${registered.locked === "" ? "" : `: ${registered.locked}`}; resolve its owner before closing it`,
     )
   }
-  const treeGit = gitIn(path, process)
+  const treeGit = gitIn(path, process, selection)
   await requireClean(treeGit, path)
   const commit = (await treeGit(["rev-parse", "HEAD"])).trim()
   const config = await readConfig(treeGit, commit, { branch: "HEAD", remote: "origin" })
