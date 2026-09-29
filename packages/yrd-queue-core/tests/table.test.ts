@@ -85,18 +85,26 @@ describe("a packed Check: trailer", () => {
 })
 
 describe("event row overlays", () => {
-  it("keeps an observed merge's event SHA across run rows without a merge record", () => {
+  it("keeps an observed merge's event SHA without lending it to an older run", () => {
     const branch = "task/observed"
     const head = "a".repeat(40)
     const merge = "b".repeat(40)
     const at = new Date("2026-09-28T05:04:24Z")
     const runs = [
-      journalRun({ at, startedAt: at, branch, head, id: "q-2", decision: "merged", reason: "already on target" }),
+      journalRun({
+        at,
+        startedAt: at,
+        branch,
+        head,
+        id: "q-2",
+        decision: "merged",
+        reason: `already on target at ${merge}`,
+      }),
       journalRun({ at, startedAt: at, branch, head, id: "q-1", decision: "checked" }),
     ]
     const journals = { dir: "/journal-fixture", malformed: [], runs: new Map([[journalKey(branch, head), runs]]) }
     const merged: Row = { branch, head, state: "merged", merge }
-    expect(watchRows([merged], { journals, perRun: true }).map(({ row }) => row.merge)).toEqual([merge, merge])
+    expect(watchRows([merged], { journals, perRun: true }).map(({ row }) => row.merge)).toEqual([merge, undefined])
 
     const withoutEventSha: Row = { branch, head, state: "merged" }
     expect(watchRows([withoutEventSha], { journals, perRun: true }).map(({ row }) => row.merge)).toEqual([
