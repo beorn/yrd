@@ -251,6 +251,20 @@ it("refreshes only the moved component in a round with an untouched warm Equal c
   await createWorldEventQueue(w)
   const ahead = await aheadOfSubmodule(w, "one-moved-component")
   await submitGitlink(w, "task/one-moved-component", ahead)
+  // Submit's unbounded local Equal read writes no refresh stamp. Give the
+  // unchanged child a real remote observation so this remains a warm-round test.
+  const other = gitIn(join(w.work, "other"))
+  await other(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+  const otherMain = (await other(["rev-parse", "refs/remotes/origin/main"])).trim()
+  const otherOrigin = (await other(["config", "--get", "remote.origin.url"])).trim()
+  await other([
+    "reflog",
+    "write",
+    "refs/remotes/origin/main",
+    otherMain,
+    otherMain,
+    `git-super component-main refresh ${otherOrigin}`,
+  ])
   const trace = join(dirname(w.work), "round-compose-trace.jsonl")
   await using real = createProcess({ cwd: w.work })
   let compositions = 0
