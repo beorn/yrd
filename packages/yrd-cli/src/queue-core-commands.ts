@@ -1397,17 +1397,23 @@ export async function coreQueueCommand(
           return 0
         }
         await git(["update-ref", `refs/heads/${prepared.branch}`, prepared.head, "0".repeat(prepared.head.length)])
+        const removeCarrierRef = async (): Promise<void> => {
+          try {
+            // Delete only the exact head we created; another cleanup may have removed it already.
+            await git(["update-ref", "-d", `refs/heads/${prepared.branch}`, prepared.head])
+          } catch (cleanup) {
+            if ((await refAt(git, `refs/heads/${prepared.branch}`)) !== undefined) throw cleanup
+          }
+        }
         let submitted
         try {
           submitted = await submit(git, config.target.remote, submission)
         } catch (cause) {
           try {
-            // The create-only update above proves this carrier branch was ours.
-            // Delete only while it still names the exact head we created.
-            await git(["update-ref", "-d", `refs/heads/${prepared.branch}`, prepared.head])
+            await removeCarrierRef()
           } catch (cleanup) {
             throw new Error(
-              `submit refused and generated carrier ${prepared.branch} could not be removed: ${String(cleanup)}`,
+              `${prepared.branch}: submit refused: ${String(cause)}; generated carrier could not be removed: ${String(cleanup)}`,
               { cause },
             )
           }
@@ -1416,11 +1422,10 @@ export async function coreQueueCommand(
         try {
           // The carrier was pushed to the remote; remove the temporary local ref from
           // the queue clone so subsequent submissions or re-cuts do not collide on it.
-          await git(["update-ref", "-d", `refs/heads/${prepared.branch}`, prepared.head])
+          await removeCarrierRef()
         } catch (cleanup) {
-          throw new Error(
-            `submitted ${prepared.branch} successfully, but local carrier ref could not be removed: ${String(cleanup)}`,
-            { cause: cleanup },
+          io.stderr(
+            `${prepared.branch}: submitted successfully; local carrier ref cleanup failed (remaining ref preserved): ${String(cleanup)}\n`,
           )
         }
         await notifyAdmissionWarning(submitted, request.submitter)

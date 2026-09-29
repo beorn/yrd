@@ -187,7 +187,86 @@ async function assertCarrier(
   ).toBe(true)
 }
 
+async function raceCarrierCleanup(w: World, branch: string, outcome: "absent" | "moved"): Promise<void> {
+  const wrapper = join(w.root, "git-race-cleanup.ts")
+  writeFileSync(
+    wrapper,
+    [
+      "#!/usr/bin/env bun",
+      'import { spawnSync } from "node:child_process"',
+      "const args = process.argv.slice(2)",
+      'const index = args.indexOf("update-ref")',
+      `if (index >= 0 && args[index + 1] === "-d" && args[index + 2] === ${JSON.stringify(`refs/heads/${branch}`)}) {`,
+      outcome === "absent"
+        ? "  const racing = args"
+        : `  const racing = [...args.slice(0, index), "update-ref", args[index + 2], ${JSON.stringify(w.base)}, args[index + 3]]`,
+      '  const raced = spawnSync("git", racing, { stdio: "inherit" })',
+      "  if (raced.error) throw raced.error",
+      '  if (raced.status !== 0) throw new Error("fixture could not race carrier cleanup")',
+      "}",
+      'const ran = spawnSync("git", args, { stdio: "inherit" })',
+      "if (ran.error) throw ran.error",
+      "process.exit(ran.status ?? 2)",
+      "",
+    ].join("\n"),
+  )
+  chmodSync(wrapper, 0o755)
+  await gitIn(w.work)(["config", "--local", "yrd.git", JSON.stringify({ executable: wrapper, contract: "native" })])
+}
+
 describe("yrd submit --gitlink builds a queue-owned carrier", () => {
+  /** @failure Local cleanup failure hides a committed submit receipt or deletes a moved ref (26653 AC1, AC2).
+   * @level l2 @consumer carrier authors receiving the public CLI receipt
+   */
+  it.each(["absent", "moved"] as const)(
+    "keeps the committed receipt when cleanup finds the ref %s",
+    async (outcome) => {
+      const w = await world()
+      const one = w.components[0]!
+      const branch = `pin/vendor-one/${one.held.slice(0, 12)}`
+      await raceCarrierCleanup(w, branch, outcome)
+      const ran = await yrd(w.work, "submit", "--gitlink", `${one.path}=${one.held}`, "--issue", "25804", "--json")
+      expect(ran.exitCode, ran.report).toBe(0)
+      const receipt = JSON.parse(ran.stdout) as { branch: string; head: string; opened: string }
+      expect(receipt.branch).toBe(branch)
+      expect(receipt.head).toBe(await remoteHead(w.remote, branch))
+      expect(receipt.opened).toBe((await gitIn(w.remote)(["rev-parse", `refs/yrd/main/changes/${branch}`])).trim())
+      await assertCarrier(w, branch, [{ path: one.path, sha: one.held }])
+      const location = await resolveQueueLocation(w.work, undefined, process.env, "queue")
+      const local = await gitIn(location.repo)(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])
+      expect(local.trim()).toBe(outcome === "absent" ? "" : w.base)
+      if (outcome === "moved") {
+        expect(ran.stderr).toContain("local carrier ref")
+        expect(ran.stderr).toContain("preserved")
+        expect(ran.stderr).toContain(w.base)
+        expect(ran.stderr).toContain(receipt.head)
+      }
+    },
+    90_000,
+  )
+
+  /** @failure Cleanup conflict overwrites the actual submit refusal (26653 AC3).
+   * @level l2 @consumer carrier authors distinguishing rejected publication from cleanup
+   */
+  it("keeps the submit rejection and cleanup conflict together", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const branch = `pin/vendor-one/${one.held.slice(0, 12)}`
+    await raceCarrierCleanup(w, branch, "moved")
+    const hook = join(w.remote, "hooks", "pre-receive")
+    writeFileSync(hook, '#!/usr/bin/env bun\nprocess.stderr.write("26653 submit rejected\\n")\nprocess.exit(1)\n')
+    chmodSync(hook, 0o755)
+    const ran = await yrd(w.work, "submit", "--gitlink", `${one.path}=${one.held}`, "--issue", "25804", "--json")
+    expect(ran.exitCode, ran.report).toBe(2)
+    expect(ran.stderr).toContain("26653 submit rejected")
+    expect(ran.stderr).toContain("could not be removed")
+    expect(ran.stderr).toContain(w.base)
+    expect(ran.stdout).toBe("")
+    expect(await refs(w.remote)).not.toContain(branch)
+    const location = await resolveQueueLocation(w.work, undefined, process.env, "queue")
+    expect((await gitIn(location.repo)(["rev-parse", `refs/heads/${branch}`])).trim()).toBe(w.base)
+  }, 90_000)
+
   /** @failure A maintenance stop arriving after carrier creation leaves an unpublished local branch behind.
    * @level l2 @consumer pin-only submit against a fenced migration
    */
@@ -323,7 +402,8 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       .map((line) => JSON.parse(line))
     expect(composed).toEqual([{ head: await remoteHead(w.remote, branch) }])
     const location = await resolveQueueLocation(w.work, undefined, process.env, "queue")
-    expect(await gitIn(location.repo)(["for-each-ref", "--format=%(refname)", "refs/heads/pin/"])).toBe("")
+    // Cleanup owns this carrier only; another submit's moved ref must remain intact.
+    expect(await gitIn(location.repo)(["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`])).toBe("")
   }, 60_000)
 
   it("uses one order-independent multi-pin name, refuses its open identity, then re-cuts an ended identity as -r2", async () => {
