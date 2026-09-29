@@ -222,9 +222,11 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
     // Assign absent run-only values too: no later run's facts may survive this join.
     at: run.at,
     base: run.base,
-    // A merged event owns the change's merge SHA even when this machine's run
-    // journal has no merge record (including older per-run rows).
-    merge: run.merge ?? current.merge,
+    // An observed-on-target run writes its merge in the event but not the
+    // journal. Other runs must not borrow a later event's merge SHA.
+    merge:
+      run.merge ??
+      (run.decision === "merged" && run.reason?.startsWith("already on target at ") ? current.merge : undefined),
     reason: run.incident?.code ?? run.reason,
     incident: run.incident,
     diagnostics: run.diagnostics,
