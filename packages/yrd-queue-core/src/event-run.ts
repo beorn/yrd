@@ -2,7 +2,7 @@
 import { mkdirSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname, join } from "node:path"
-import { Conflict, RetriesExhausted, openEvents } from "./git.ts"
+import { Conflict, PublicationRejected, RetriesExhausted, openEvents } from "./git.ts"
 import { readEventAt } from "./event-read.ts"
 
 import {
@@ -31,7 +31,13 @@ import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
 import { checkLogPath, effectiveCheckTimeoutMs, runCheck, TRANSPORT_RETRY_LIMIT, type CheckResult } from "./check.ts"
 import { InvalidQueueConfig, UnknownConfigKey, queueName, readConfig } from "./config.ts"
 import { offTheTarget, readRemoteCommit, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
-import { recentCasRefusalStreak, recentCasRefusals, recentPublicationNotLanded, type QueueRunLog } from "./log.ts"
+import {
+  recentCasRefusalStreak,
+  recentCasRefusals,
+  recentPublicationNotLanded,
+  recentPublicationRejected,
+  type QueueRunLog,
+} from "./log.ts"
 import {
   ProgramSubjectSetupFailed,
   programRootCheck,
@@ -364,6 +370,7 @@ export async function eventQueueRun(
     current: EventChange,
     error: unknown,
   ): Promise<EventChange> => {
+    if (error instanceof PublicationRejected) throw error
     if (current.tip === selectedTip) throw error
     if (current.tip === undefined) {
       throw new Error(`event queue ${url}#${queue}: publication-unknown for ${branch}: current chain has no tip`, {
@@ -1072,6 +1079,75 @@ export async function eventQueueRun(
     }
     const parent = (await git(["show", "-s", "--format=%P", candidate])).trim().split(/\s+/u)[0]
     if (parent === undefined || parent === "") throw new Error(`candidate ${candidate} has no target parent`)
+    const ref = changesRef(queue, branch)
+    const stopRejectedMerge = async (
+      rejection: Readonly<{ reason: string; remoteReasons: readonly string[] }>,
+    ): Promise<QueueRunOutcome> => {
+      const description =
+        `${branch}: remote rejected merge publication for ${ref} at ${marker}, target parent ${parent}: ` +
+        `${rejection.reason}; reasons: ${rejection.remoteReasons.join("; ")}`
+      const oneLine = description.replace(/\s+/gu, " ").trim()
+      let ended: string
+      try {
+        ended = await appendOwnedChange(store, queue, branch, marker, {
+          type: "stuck",
+          at: new Date(),
+          reason: oneLine,
+        })
+      } catch (stuckError) {
+        if (stuckError instanceof Conflict) {
+          log.write({
+            kind: "discarded",
+            branch,
+            head,
+            ref,
+            marker,
+            reason: `remote rejected the merge, then a rival moved ${ref} before its stuck event: ${stuckError.message}`,
+          })
+          return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
+        }
+        if (!(stuckError instanceof PublicationRejected)) throw stuckError
+        log.write({
+          kind: "warning",
+          subject: "publication-rejected-stuck-refused",
+          branch,
+          head,
+          ref,
+          marker,
+          targetParent: parent,
+          reason: `merge refusal: ${rejection.reason}; stuck event refusal: ${stuckError.message}`,
+        })
+        return result(2, observedMerged, failed, [branch])
+      }
+      try {
+        await writeStuckStop(branch, head, ended, oneLine)
+      } catch (stuckError) {
+        if (!(stuckError instanceof PublicationRejected)) throw stuckError
+        log.write({
+          kind: "warning",
+          subject: "publication-rejected-stuck-refused",
+          branch,
+          head,
+          ref,
+          marker,
+          targetParent: parent,
+          reason: `merge refusal: ${rejection.reason}; pause event refusal: ${stuckError.message}`,
+        })
+        return result(2, observedMerged, failed, [branch])
+      }
+      await tell(branch, "stuck", ended)
+      writeStuck(branch, head, {
+        code: "yrd-publication-rejected",
+        subject: oneLine,
+        via: "merge publication",
+        next: "repair the remote rejection, then resume the queue",
+        saw: rejection.remoteReasons.join("; "),
+      })
+      return result(2, observedMerged, failed, [branch])
+    }
+    if (current.since === undefined) throw new Error(`${ref} at ${marker} has no opened time for rejection history`)
+    const priorRejection = recentPublicationRejected(dirname(log.path), ref, marker, parent, current.since)
+    if (priorRejection !== undefined) return stopRejectedMerge(priorRejection)
     let child
     try {
       child = await timedStep(log, { branch, head, name: "publish", phase: "merge" }, () =>
@@ -1147,7 +1223,20 @@ export async function eventQueueRun(
           what: error.pause,
         })
       }
-      const ref = changesRef(queue, branch)
+      if (error instanceof PublicationRejected) {
+        log.write({
+          kind: "warning",
+          subject: "publication-rejected",
+          branch,
+          head,
+          ref,
+          marker,
+          targetParent: parent,
+          reason: error.message,
+          remoteReasons: error.reasons,
+        })
+        return stopRejectedMerge({ reason: error.message, remoteReasons: error.reasons })
+      }
       // Stage/write failures have no candidate event to reconcile and must
       // keep their original error. Only a publication attempt can be unknown.
       if (preparedMerge === undefined && !(error instanceof Conflict)) throw error

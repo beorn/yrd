@@ -611,9 +611,15 @@ function recentPublicationWarnings(
   ref: string,
   marker: string,
   openedAt: Date,
-  subject: "cas-refused" | "publication-not-landed",
+  subject: "cas-refused" | "publication-not-landed" | "publication-rejected",
   budget?: JournalBudget,
-): Readonly<{ count: number; firstAt?: string; windowExhausted?: ExhaustedJournalWindow }> {
+  targetParent?: string,
+): Readonly<{
+  count: number
+  firstAt?: string
+  windowExhausted?: ExhaustedJournalWindow
+  rejection?: Readonly<{ reason: string; remoteReasons: readonly string[] }>
+}> {
   if (
     budget !== undefined &&
     (budget.name.trim() === "" || !Number.isSafeInteger(budget.journals) || budget.journals < 1)
@@ -655,6 +661,19 @@ function recentPublicationWarnings(
     for (const record of [...readRunLog(dir, id)].reverse()) {
       if (record.ref !== ref || record.marker !== marker) continue
       if (record.kind === "merge") return { count, firstAt }
+      if (subject === "publication-rejected") {
+        if (record.kind !== "warning" || record.subject !== subject || record.targetParent !== targetParent) {
+          continue
+        }
+        if (
+          typeof record.reason !== "string" ||
+          !Array.isArray(record.remoteReasons) ||
+          !record.remoteReasons.every((reason) => typeof reason === "string")
+        ) {
+          throw new Error(`${id}: unreadable publication rejection for ${ref} at ${marker}`)
+        }
+        return { count: 1, rejection: { reason: record.reason, remoteReasons: record.remoteReasons } }
+      }
       if (
         record.kind === "warning" &&
         (record.subject === "cas-refused" || record.subject === "publication-not-landed") &&
@@ -709,6 +728,18 @@ export function recentCasRefusalStreak(
 /** Count a marker's consecutive transport outcomes that definitely did not land. */
 export function recentPublicationNotLanded(dir: string, ref: string, marker: string, openedAt: Date): number {
   return recentPublicationWarnings(dir, ref, marker, openedAt, "publication-not-landed").count
+}
+
+/** A known rejected merge for the same chain marker and target parent, retained across service rounds. */
+export function recentPublicationRejected(
+  dir: string,
+  ref: string,
+  marker: string,
+  targetParent: string,
+  openedAt: Date,
+): Readonly<{ reason: string; remoteReasons: readonly string[] }> | undefined {
+  return recentPublicationWarnings(dir, ref, marker, openedAt, "publication-rejected", undefined, targetParent)
+    .rejection
 }
 
 export type ReadJournalsOptions = Readonly<{

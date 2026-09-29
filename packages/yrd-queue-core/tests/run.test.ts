@@ -1819,6 +1819,121 @@ it("keeps an unlanded merge publication retryable and judges the next change", a
   )
 })
 
+/** @failure A definitive remote rejection was treated as an ambiguous merge and retried on the next round.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("stops a rejected merge once when the remote accepts the stuck event", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const branch = "task/target-rejected"
+  await submitCommit(w, branch, "one.txt")
+  writeFileSync(
+    join(w.remote, "hooks", "pre-receive"),
+    '#!/bin/sh\nwhile read old new ref; do\n  if [ "$ref" = refs/heads/main ]; then\n    echo target branch refused >&2\n    exit 1\n  fi\ndone\nexit 0\n',
+    { mode: 0o755 },
+  )
+  let mergePublishes = 0
+  using _publish = beforeGitomicPublish(async (_repo, updates) => {
+    if (updates.some((update) => update.ref === "refs/heads/main")) mergePublishes++
+  })
+
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  const first = await queueRun(options)
+  expect(first).toMatchObject({ exitCode: 2, stuck: [branch], merged: [] })
+  expect((await readStatus(store, "main", branch)).status).toBe("stuck")
+  expect(await remoteTarget(w)).toBe(w.target)
+  expect(mergePublishes).toBe(1)
+
+  const second = await queueRun(options)
+  expect(second.merged).toEqual([])
+  expect((await readStatus(store, "main", branch)).status).toBe("stuck")
+  expect(mergePublishes).toBe(1)
+})
+
+/** @failure A remote that also refuses the stuck event caused a later round to republish the rejected merge.
+ * @level l3 @consumer queue operator and submitter
+ */
+it("remembers a rejected merge when the remote also refuses its stuck event", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const branch = "task/every-ref-rejected"
+  await submitCommit(w, branch, "one.txt")
+  const ref = changesRef("main", branch)
+  let mergePublishes = 0
+  let stuckPublishes = 0
+  using _publish = beforeGitomicPublish(async (_repo, updates) => {
+    if (updates.some((update) => update.ref === "refs/heads/main")) {
+      mergePublishes++
+      if (mergePublishes === 1) {
+        writeFileSync(join(w.remote, "hooks", "pre-receive"), "#!/bin/sh\necho every ref refused >&2\nexit 1\n", {
+          mode: 0o755,
+        })
+      }
+    } else if (mergePublishes > 0 && updates.some((update) => update.ref === ref)) {
+      stuckPublishes++
+      // An up-to-date queue ref in a native push makes its report mixed and therefore
+      // ambiguous to Gitomic. Inject the real typed all-ref refusal at this seam.
+      throw new gitomic.PublicationRejected(
+        updates,
+        updates.map(() => "every update refused"),
+        "stuck event refused",
+      )
+    }
+  })
+
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  const first = await queueRun(options)
+  expect(first).toMatchObject({ exitCode: 2, stuck: [branch], merged: [] })
+  expect((await readStatus(store, "main", branch)).status).toBe("merging")
+  expect(logRecords(first)).toContainEqual(
+    expect.objectContaining({ kind: "warning", subject: "publication-rejected-stuck-refused", branch, ref }),
+  )
+  expect(mergePublishes).toBe(1)
+  expect(stuckPublishes).toBe(1)
+
+  const second = await queueRun(options)
+  expect(second).toMatchObject({ exitCode: 2, stuck: [branch], merged: [] })
+  expect(mergePublishes).toBe(1)
+  expect(stuckPublishes).toBe(2)
+})
+
+/** @failure A rival chain move wrapped a known remote refusal as publication-unknown.
+ * @level l3 @consumer queue operator
+ */
+it("keeps the real rejection type when a rival moves the event chain", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const branch = "task/rejected-with-rival"
+  await submitCommit(w, branch, "one.txt")
+  const ref = changesRef("main", branch)
+  let injected = false
+  using _publish = beforeGitomicPublish(async (_repo, updates) => {
+    if (injected) return
+    const selected = updates.find((update) => update.ref === ref)
+    if (selected?.expect === undefined) return
+    injected = true
+    await appendChangeEvent(store, "main", branch, selected.expect, {
+      type: "failed",
+      at: new Date(),
+      reason: "rival finished this change",
+    })
+    throw new gitomic.PublicationRejected(
+      updates,
+      updates.map(() => "remote refused this attempt"),
+      "rival moved",
+    )
+  })
+
+  await expect(queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })).rejects.toBeInstanceOf(
+    gitomic.PublicationRejected,
+  )
+  expect(injected).toBe(true)
+  expect((await readStatus(store, "main", branch)).status).toBe("failed")
+})
+
 /** @failure 25789: an empty-ref Conflict after merge publication skipped readback and stopped the whole round.
  * @level l3 @consumer queue operator and next submitter
  */

@@ -26,7 +26,7 @@ import { GIT_REPOSITORY_LOCAL_ENV_VARS } from "removely"
 export { chainsUnder, listRefs, openEvents } from "gitomic/events"
 export type { AlsoRef, Event, EventInput } from "gitomic/events"
 export type { CommitMeta, GitomicBackend, Oid } from "gitomic"
-export { Conflict, RetriesExhausted } from "gitomic"
+export { Conflict, PublicationRejected, RetriesExhausted } from "gitomic"
 import {
   coreSshCommandFromConfig,
   isExactPublickeyRefusal,
