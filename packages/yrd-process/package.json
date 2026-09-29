@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./testing/scripted-process": "./src/testing/scripted-process.ts"
   },
   "dependencies": {
     "@silvery/scope": "^0.25.0",
