@@ -849,7 +849,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     }
     const listed = capture(repo)
     expect(
-      await coreQueueCommand(repo, listed.io, { command: "list" }, { json: true, queue: "main" }),
+      await coreQueueCommand(repo, listed.io, { command: "list", all: true }, { json: true, queue: "main" }),
       listed.stderr(),
     ).toBe(0)
     const rows = (
@@ -992,14 +992,21 @@ describe("a queue is the selected origin branch carrying config", () => {
 
     const json = capture(repo)
     expect(
-      await coreQueueCommand(repo, json.io, { command: "list", drafts: true }, { json: true, queue: "main" }),
+      await coreQueueCommand(
+        repo,
+        json.io,
+        { command: "list", all: true, drafts: true },
+        { json: true, queue: "main" },
+      ),
     ).toBe(0)
     expect(
       (JSON.parse(json.stdout()) as { changes: readonly { state: string }[] }).changes.map((row) => row.state).sort(),
     ).toEqual([...CHANGE_STATUSES].sort())
 
     const table = capture(repo)
-    expect(await coreQueueCommand(repo, table.io, { command: "list", drafts: true }, { queue: "main" })).toBe(0)
+    expect(
+      await coreQueueCommand(repo, table.io, { command: "list", all: true, drafts: true }, { queue: "main" }),
+    ).toBe(0)
     for (const [index, status] of CHANGE_STATUSES.entries()) {
       const branch = status === "draft" ? "task/draft" : `task/status-${String(index - 1)}`
       const rowLabel = status === "draft" ? `draft ${branch}` : `queue ${branch}`
@@ -1014,7 +1021,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         await coreQueueCommand(
           repo,
           filteredJson.io,
-          { command: "list", terms: [status], drafts: status === "draft" },
+          { command: "list", terms: [status], all: true, drafts: status === "draft" },
           { json: true, queue: "main" },
         ),
       ).toBe(0)
@@ -1026,7 +1033,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         await coreQueueCommand(
           repo,
           filteredTable.io,
-          { command: "list", terms: [status], drafts: status === "draft" },
+          { command: "list", terms: [status], all: true, drafts: status === "draft" },
           { queue: "main" },
         ),
       ).toBe(0)

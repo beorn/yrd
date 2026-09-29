@@ -2063,7 +2063,7 @@ describe("the queue-format boundary", () => {
     const segments = enumerateChangeSegments(oldDrop?.events ?? [], changesRef("lab", "task/old-drop"), store.repo)
     expect(segments).toHaveLength(1)
     expect(
-      eventListRows(new Map([["task/old-drop", segments.map((segment) => segment.state)]]), []).table,
+      eventListRows(new Map([["task/old-drop", segments.map((segment) => segment.state)]]), [], { all: true }).table,
     ).toMatchObject([{ branch: "task/old-drop", state: "cancelled", head }])
   })
 
