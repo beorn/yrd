@@ -3,7 +3,8 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symli
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it, vi } from "vitest"
-import { createProcess, type Process } from "@yrd/process"
+import { createProcess } from "@yrd/process"
+import { createScriptedProcess, exitedResult } from "@yrd/process/testing/scripted-process"
 import { gitIn } from "../src/git.ts"
 import * as gitRunner from "../src/git.ts"
 import { openLog, readRunLog } from "../src/log.ts"
@@ -1180,27 +1181,13 @@ describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
     const root = temporaryRoot("git-super-evidence")
     const log = openLog(join(root, "logs"))
     const heartbeat = "git-super push: select-root 0/1 +0ms\ngit-super push: plan 0/1 +10000ms\n"
-    const fakeProcess: Process = {
-      async close() {},
-      async [Symbol.asyncDispose]() {
-        await this.close()
-      },
-      async run(request) {
-        request.onOutput?.({ stream: "stdout", chunk: new TextEncoder().encode('{"state":"updated"}\n') })
-        request.onOutput?.({ stream: "stderr", chunk: new TextEncoder().encode(heartbeat) })
-        return {
-          durationMs: 0,
-          exitCode: 0,
-          signal: null,
-          timedOut: false,
-          stdout: '{"state":"updated"}',
-          stderr: heartbeat,
-        }
-      },
-    }
+    const heartbeatProcess = createScriptedProcess({
+      output: ['{"state":"updated"}\n', { stream: "stderr", chunk: new TextEncoder().encode(heartbeat) }],
+      result: exitedResult({ stdout: '{"state":"updated"}', stderr: heartbeat }),
+    })
     const result = await gitSuperExecution(
       {
-        process: fakeProcess,
+        process: heartbeatProcess,
         gitOptions: {
           openOutput: log.openGitOutput,
           onInvocation: log.writeGitInvocation,
@@ -1227,26 +1214,15 @@ describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
   it("gitSuperExecution logs publication failure loudly rather than throwing after a successful push (25517)", async () => {
     const root = temporaryRoot("gse-pub-failure")
     const log = openLog(join(root, "logs"))
-    const fakeProcess: Process = {
-      async close() {},
-      async [Symbol.asyncDispose]() {},
-      async run(request) {
-        request.onOutput?.({ stream: "stdout", chunk: new TextEncoder().encode('{"state":"updated"}\n') })
-        return {
-          durationMs: 0,
-          exitCode: 0,
-          signal: null,
-          timedOut: false,
-          stdout: '{"state":"updated"}',
-          stderr: "",
-        }
-      },
-    }
+    const pushedProcess = createScriptedProcess({
+      output: ['{"state":"updated"}\n'],
+      result: exitedResult({ stdout: '{"state":"updated"}' }),
+    })
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
     try {
       const result = await gitSuperExecution(
         {
-          process: fakeProcess,
+          process: pushedProcess,
           gitOptions: {
             openOutput: log.openGitOutput,
             onInvocation: () => {
@@ -1272,25 +1248,22 @@ describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
   it("gitSuperExecution records a timed-out push as incomplete and throws (25517)", async () => {
     const root = temporaryRoot("gse-timeout")
     const log = openLog(join(root, "logs"))
-    const fakeProcess: Process = {
-      async close() {},
-      async [Symbol.asyncDispose]() {},
-      async run() {
-        return {
-          durationMs: 5000,
-          exitCode: null as never,
-          signal: "SIGKILL" as never,
-          timedOut: true,
-          stdout: "",
-          stderr: "timed out waiting for lock\n",
-        }
+    // A killed child still reports a numeric exit code (the Process type allows no null); 137 is SIGKILL's.
+    const timedOutProcess = createScriptedProcess({
+      result: {
+        durationMs: 5000,
+        exitCode: 137,
+        signal: "SIGKILL",
+        timedOut: true,
+        stdout: "",
+        stderr: "timed out waiting for lock\n",
       },
-    }
+    })
     let handedInvocation: gitRunner.GitInvocation | undefined
     await expect(
       gitSuperExecution(
         {
-          process: fakeProcess,
+          process: timedOutProcess,
           gitOptions: {
             openOutput: log.openGitOutput,
             onInvocation: (inv) => {
@@ -1312,24 +1285,13 @@ describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
   it("gitSuperExecution drops fallback file write and relies on streaming output (25517)", async () => {
     const root = temporaryRoot("gse-no-fallback-write")
     const log = openLog(join(root, "logs"))
-    const fakeProcess: Process = {
-      async close() {},
-      async [Symbol.asyncDispose]() {},
-      async run() {
-        return {
-          durationMs: 0,
-          exitCode: 0,
-          signal: null,
-          timedOut: false,
-          stdout: '{"state":"updated"}',
-          stderr: "buffered output not streamed to onOutput",
-        }
-      },
-    }
+    const bufferedProcess = createScriptedProcess({
+      result: exitedResult({ stdout: '{"state":"updated"}', stderr: "buffered output not streamed to onOutput" }),
+    })
     let handedInvocation: gitRunner.GitInvocation | undefined
     const result = await gitSuperExecution(
       {
-        process: fakeProcess,
+        process: bufferedProcess,
         gitOptions: {
           openOutput: log.openGitOutput,
           onInvocation: (inv) => {

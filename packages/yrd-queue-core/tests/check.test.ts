@@ -17,6 +17,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import type { Process, ProcessRequest, ProcessResult } from "@yrd/process"
+import { createScriptedProcess, exitedResult, type ScriptedOutput } from "@yrd/process/testing/scripted-process"
 import { checkLogPath, runCheck } from "../src/index.ts"
 import type { CheckedTree } from "../src/index.ts"
 import { readCheckResult, readCheckVerdict } from "../src/check.ts"
@@ -141,7 +142,7 @@ describe("a check log is written once", () => {
   it("records a missing completed log as unmeasured", async () => {
     const where = place("lost")
     const path = checkLogPath(where.logDir, "lost")
-    const driver = stubDriver(["completed\n"])
+    const driver = scriptedRun(["completed\n"])
     const process: Process = {
       ...driver,
       run: async (request) => {
@@ -164,33 +165,23 @@ describe("a check log is written once", () => {
  * needs, so the two things the file cannot show on its own — a capture budget
  * overrun, and where the log's bytes came from — can be asserted exactly.
  */
-function stubDriver(
-  streamed: readonly (string | { stream: "stdout" | "stderr"; chunk: Uint8Array })[],
+function scriptedRun(
+  streamed: readonly ScriptedOutput[],
   dropped?: ProcessResult["outputTruncation"],
   result?: ProcessResult,
 ): Process {
-  const encoder = new TextEncoder()
-  return {
-    run: (request: ProcessRequest): Promise<ProcessResult> => {
-      for (const text of streamed) {
-        request.onOutput?.(typeof text === "string" ? { stream: "stdout", chunk: encoder.encode(text) } : text)
-      }
-      return Promise.resolve({
-        exitCode: 0,
-        signal: null,
-        // Deliberately NOT what was streamed: a log built from this text instead
-        // of from the stream is the whole-file write this change removed.
-        stdout: "the captured text, which the log must not be written from",
-        stderr: "",
-        durationMs: 1,
-        timedOut: false,
-        ...result,
-        ...(dropped === undefined ? {} : { outputTruncation: dropped }),
-      })
-    },
-    close: () => Promise.resolve(),
-    [Symbol.asyncDispose]: () => Promise.resolve(),
-  }
+  const settled =
+    result ??
+    exitedResult({
+      // Deliberately NOT what was streamed: a log built from this text instead
+      // of from the stream is the whole-file write this change removed.
+      stdout: "the captured text, which the log must not be written from",
+      durationMs: 1,
+    })
+  return createScriptedProcess({
+    output: streamed,
+    result: dropped === undefined ? settled : { ...settled, outputTruncation: dropped },
+  })
 }
 
 /**
@@ -379,7 +370,7 @@ describe("a check log and the text the queue read", () => {
     const result = await runCheck({
       ...where,
       spec: { name: "counts", run: "unused" },
-      process: stubDriver(
+      process: scriptedRun(
         ["every byte of it\n"],
         [{ stream: "stdout", totalBytes: reported, keptBytes: 8, droppedBytes: reported - 8, limitBytes: 8 }],
         {
@@ -411,7 +402,7 @@ describe("a check log and the text the queue read", () => {
     const result = await runCheck({
       ...place("stderr-counts"),
       spec: { name: "stderr-counts", run: "unused" },
-      process: stubDriver(
+      process: scriptedRun(
         ["12345678", { stream: "stderr", chunk: new TextEncoder().encode("é") }],
         [{ stream: "stdout", totalBytes: 8, keptBytes: 4, droppedBytes: 4, limitBytes: 4 }],
         {
@@ -436,7 +427,7 @@ describe("a check log and the text the queue read", () => {
     const result = await runCheck({
       ...place("receipt"),
       spec: { name: "receipt", run: "unused" },
-      process: stubDriver(
+      process: scriptedRun(
         ["12345678"],
         [{ stream: "stdout", totalBytes: 8, keptBytes: 4, droppedBytes: 3, limitBytes: 4 }],
         {
@@ -467,7 +458,7 @@ describe("a check log and the text the queue read", () => {
     const result = await runCheck({
       ...place("short"),
       spec: { name: "short", run: "unused" },
-      process: stubDriver([text]),
+      process: scriptedRun([text]),
     })
     expect(result).toMatchObject({ result: "pass", exit: 0 })
     expect(readFileSync(result.log)).toEqual(Buffer.from(text))
@@ -485,7 +476,7 @@ describe("a check log and the text the queue read", () => {
     const result = await runCheck({
       ...place("write-fails"),
       spec: { name: "write", run: "unused" },
-      process: stubDriver(["abcdef"]),
+      process: scriptedRun(["abcdef"]),
     })
     expect(result).toMatchObject({ result: "stuck", exit: "unsettled" })
     expect(result.why).toContain("stdout after 2 bytes")
@@ -504,7 +495,7 @@ describe("a check log and the text the queue read", () => {
     const result = await runCheck({
       ...place("size"),
       spec: { name: "size", run: "unused" },
-      process: stubDriver(["abcdef"]),
+      process: scriptedRun(["abcdef"]),
     })
     expect(result).toMatchObject({ result: "stuck", exit: "unsettled" })
     expect(result.why).toContain(fault === "wrong size" ? "size 5, expected 6" : "injected stat failure")
@@ -519,7 +510,7 @@ describe("a check log and the text the queue read", () => {
     const result = await runCheck({
       ...place("close"),
       spec: { name: "close", run: "unused" },
-      process: stubDriver(["abcdef"]),
+      process: scriptedRun(["abcdef"]),
     })
     expect(result).toMatchObject({ result: "stuck", exit: "unsettled" })
     expect(result.why).toContain("could not be closed: injected close failure")
@@ -536,7 +527,7 @@ describe("a check log and the text the queue read", () => {
     const result = await runCheck({
       ...place("settlement"),
       spec: { name: "settlement", run: "unused" },
-      process: stubDriver(
+      process: scriptedRun(
         ["12345678"],
         [{ stream: "stdout", totalBytes: 8, keptBytes: 4, droppedBytes: 4, limitBytes: 4 }],
         {
@@ -561,7 +552,7 @@ describe("a check log and the text the queue read", () => {
 
   it("propagates a reader exception and closes its partial log", async () => {
     const close = vi.spyOn(fs, "closeSync")
-    const driver = stubDriver([])
+    const driver = scriptedRun([])
     await expect(
       runCheck({
         ...place("reader"),
@@ -585,7 +576,7 @@ describe("a check log and the text the queue read", () => {
     const result = await runCheck({
       ...where,
       spec: { name: "streamed", run: "unused" },
-      process: stubDriver(["what the check actually wrote\n"]),
+      process: scriptedRun(["what the check actually wrote\n"]),
     })
 
     expect(result.result).toBe("pass")
@@ -599,7 +590,7 @@ describe("a check log and the text the queue read", () => {
     const result = await runCheck({
       ...where,
       spec: { name: "loud", run: "unused" },
-      process: stubDriver(
+      process: scriptedRun(
         ["every byte of it\n"],
         [{ stream: "stdout", totalBytes: 4096, keptBytes: 1024, droppedBytes: 3072, limitBytes: 1024 }],
       ),
