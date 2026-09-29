@@ -13,6 +13,7 @@ export type Verification =
       gitlinks: readonly SettledGitlink[]
       descents?: readonly SuperMergeDescent[]
       steps?: readonly SuperMergeStep[]
+      unboundedLocalMains?: readonly SuperMergeUnboundedLocalMain[]
     }>
   | Readonly<{
       state: "failed"
@@ -22,6 +23,7 @@ export type Verification =
       gitlinks: readonly SettledGitlink[]
       descents?: readonly SuperMergeDescent[]
       steps?: readonly SuperMergeStep[]
+      unboundedLocalMains?: readonly SuperMergeUnboundedLocalMain[]
     }>
 
 export type VerifiedCandidate =
@@ -40,6 +42,7 @@ export type VerificationOptions = Readonly<{
   env?: NodeJS.ProcessEnv
   hooksPath?: string
   noFetch?: boolean
+  unboundedLocalMain?: boolean
   /**
    * Times a named part of the verification into the caller's journal. Only the
    * queue round passes it; without it nothing is timed.
@@ -66,6 +69,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
     gitlinks: result.gitlinks,
     ...(result.descents === undefined ? {} : { descents: result.descents }),
     ...(result.steps === undefined ? {} : { steps: result.steps }),
+    ...(result.unboundedLocalMains === undefined ? {} : { unboundedLocalMains: result.unboundedLocalMains }),
   }
   if (result.state !== "updated" || result.partial) {
     if (result.detail === undefined) {
@@ -126,7 +130,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
 }
 
 async function superMerge(
-  options: Pick<VerificationOptions, "process" | "env" | "hooksPath" | "noFetch">,
+  options: Pick<VerificationOptions, "process" | "env" | "hooksPath" | "noFetch" | "unboundedLocalMain">,
   cwd: string,
   commit: string,
   message: string,
@@ -137,6 +141,7 @@ async function superMerge(
     "-m",
     message,
     ...(options.noFetch ? ["--no-fetch"] : []),
+    ...(options.unboundedLocalMain ? ["--unbounded-local-main"] : []),
   ])
   let parsed: unknown
   try {
@@ -280,7 +285,11 @@ export type SuperMergeResult = Readonly<{
   descents?: readonly SuperMergeDescent[]
   /** How long each phase of the merge took, in order. Optional so an older git-super still parses. */
   steps?: readonly SuperMergeStep[]
+  /** Local Equal pin reads made without remote refresh during submit composition. */
+  unboundedLocalMains?: readonly SuperMergeUnboundedLocalMain[]
 }>
+
+export type SuperMergeUnboundedLocalMain = Readonly<{ path: string; pin: string; store: string }>
 
 /**
  * One phase of git-super's merge and its duration. `name` is whatever git-super
@@ -336,6 +345,8 @@ export function readSuperMergeResult(value: unknown): SuperMergeResult {
   // The same contract as descents: absent is an older git-super, malformed is a
   // producer defect that would leave the compose silent inside.
   const steps = found.steps === undefined ? undefined : readSuperMergeSteps(found.steps)
+  const unboundedLocalMains =
+    found.unboundedLocalMains === undefined ? undefined : readSuperMergeUnboundedLocalMains(found.unboundedLocalMains)
   return {
     state: found.state as SuperMergeResult["state"],
     partial: found.partial,
@@ -344,7 +355,27 @@ export function readSuperMergeResult(value: unknown): SuperMergeResult {
     gitlinks,
     ...(descents === undefined ? {} : { descents }),
     ...(steps === undefined ? {} : { steps }),
+    ...(unboundedLocalMains === undefined ? {} : { unboundedLocalMains }),
   }
+}
+
+function readSuperMergeUnboundedLocalMains(value: unknown): readonly SuperMergeUnboundedLocalMain[] {
+  if (!Array.isArray(value)) throw new Error("git-super merge unboundedLocalMains is not an array")
+  return value.map((row, index): SuperMergeUnboundedLocalMain => {
+    const entry = typeof row === "object" && row !== null ? (row as Record<string, unknown>) : undefined
+    if (
+      entry === undefined ||
+      typeof entry.path !== "string" ||
+      entry.path === "" ||
+      typeof entry.pin !== "string" ||
+      entry.pin === "" ||
+      typeof entry.store !== "string" ||
+      entry.store === ""
+    ) {
+      throw new Error(`git-super merge unboundedLocalMain ${String(index)} is incomplete`)
+    }
+    return { path: entry.path, pin: entry.pin, store: entry.store }
+  })
 }
 
 function readSuperMergeSteps(value: unknown): readonly SuperMergeStep[] {

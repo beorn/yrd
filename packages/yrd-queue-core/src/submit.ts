@@ -482,6 +482,7 @@ async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitA
       message: `verify ${request.branch} at ${admitted.head} against ${admitted.targetHead}`,
       hooksPath,
       noFetch: true,
+      unboundedLocalMain: true,
     })
     verifying = composed.verifying
     if (composed.state === "failed") {

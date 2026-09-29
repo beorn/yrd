@@ -328,6 +328,7 @@ it("submit and the queue compose through the same git-only verifier, once per he
   // Submit and merge each enter the shared verifier once for this head.
   expect(calls).toHaveBeenCalledTimes(2)
   expect(calls.mock.calls.slice(1).map(([options]) => options.head)).toEqual([head])
+  expect(calls.mock.calls[1]?.[0]?.unboundedLocalMain).toBeUndefined()
 })
 
 async function remoteTarget(w: Pick<World, "git">): Promise<string> {

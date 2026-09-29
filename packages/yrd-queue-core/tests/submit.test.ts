@@ -961,7 +961,10 @@ describe("event submit", () => {
     expect((await readStatus(store(w), "main", "task/advance")).commit).toBe(second)
     expect(first).not.toBe(second)
   })
-  it("inspects the candidate with noFetch enabled (25626)", async () => {
+  /** @failure Submit fails to request local Equal reads while the queue round must keep its old argv.
+   * @level l2 @consumer Yrd submit admission
+   */
+  it("requests local Equal reads only at submit composition (25626)", async () => {
     const w = await world()
     await branchWithCommit(w, "task/one", "one.txt")
     using verifySpy = vi.spyOn(verifying, "verifyCandidate")
@@ -972,9 +975,10 @@ describe("event submit", () => {
     })
     expect(verifySpy).toHaveBeenCalled()
     expect(verifySpy.mock.calls[0]?.[0]?.noFetch).toBe(true)
+    expect(verifySpy.mock.calls[0]?.[0]?.unboundedLocalMain).toBe(true)
   })
 
-  it("verifyCandidate passes --no-fetch in argv to git-super (25626 Arm Y2)", async () => {
+  it("verifyCandidate preserves the round's exact git-super argv and adds the submit flag only on request (25626)", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/arm-y2", "y2.txt")
     const targetHead = (await w.git(["rev-parse", "refs/heads/main"])).trim()
@@ -992,7 +996,7 @@ describe("event submit", () => {
     const scratch = mkdtempSync(join(tmpdir(), "arm-y2-"))
     roots.push(scratch)
     try {
-      await verifying.verifyCandidate({
+      const options = {
         git: w.git,
         repo: w.work,
         targetHead,
@@ -1001,13 +1005,25 @@ describe("event submit", () => {
         message: "verify candidate with noFetch",
         noFetch: true,
         process: recording,
-      })
+      } as const
+      await verifying.verifyCandidate(options)
+      await verifying.verifyCandidate({ ...options, path: join(scratch, "submit-candidate"), unboundedLocalMain: true })
     } finally {
       rmSync(scratch, { recursive: true, force: true })
     }
-    expect(recordedArgvs.length).toBeGreaterThan(0)
-    for (const argv of recordedArgvs) {
-      expect(argv).toContain("--no-fetch")
-    }
+    expect(recordedArgvs).toEqual([
+      ["git", "super", "--json", "merge", head, "-m", "verify candidate with noFetch", "--no-fetch"],
+      [
+        "git",
+        "super",
+        "--json",
+        "merge",
+        head,
+        "-m",
+        "verify candidate with noFetch",
+        "--no-fetch",
+        "--unbounded-local-main",
+      ],
+    ])
   })
 })
