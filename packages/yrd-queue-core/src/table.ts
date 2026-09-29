@@ -219,10 +219,12 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   const defect = malformedNext(run)
   return {
     ...current,
-    // Assign absent values too: no later run's facts may survive this join.
+    // Assign absent run-only values too: no later run's facts may survive this join.
     at: run.at,
     base: run.base,
-    merge: run.merge,
+    // A merged event owns the change's merge SHA even when this machine's run
+    // journal has no merge record (including older per-run rows).
+    merge: run.merge ?? current.merge,
     reason: run.incident?.code ?? run.reason,
     incident: run.incident,
     diagnostics: run.diagnostics,
