@@ -463,7 +463,18 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     await command(lender, ["git", "add", "vendor/dependency"])
     await command(lender, ["git", "commit", "-m", "update dependency pin"])
 
-    await command(borrowerSub, ["git", "update-ref", "refs/heads/main", uniqueSha])
+    const lenderGitDir = (
+      await command(lenderSub, ["git", "rev-parse", "--path-format=absolute", "--git-dir"])
+    ).stdout.trim()
+    const borrowerGitDir = (
+      await command(borrowerSub, ["git", "rev-parse", "--path-format=absolute", "--git-dir"])
+    ).stdout.trim()
+    const altFile = join(borrowerGitDir, "objects", "info", "alternates")
+    const existingAlt = existsSync(altFile) ? readFileSync(altFile, "utf8") : ""
+    writeFileSync(altFile, `${join(lenderGitDir, "objects")}\n${existingAlt}`)
+
+    const updateRefRes = await command(borrowerSub, ["git", "update-ref", "refs/heads/main", uniqueSha])
+    expect(updateRefRes.exit).toBe(0)
     await command(borrowerSub, ["git", "symbolic-ref", "HEAD", "refs/heads/main"])
 
     const closed = capture(w.work)
