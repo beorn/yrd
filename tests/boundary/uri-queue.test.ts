@@ -3,6 +3,7 @@
  * creates a clone at a non-canonical path, or cannot merge from its owned clone.
  * @level l3 (real CLI process, bare remote, submit, clone and merge)
  * @consumer Hab starting a queue service on a machine with no checkout.
+ * @reach fs-walk <fixture-only: real Git commands traverse temporary repositories and workdir>
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -13,6 +14,8 @@ import { parseQueueAddress, queueDirectory } from "../../packages/yrd-cli/src/ad
 import { git } from "./fixture.ts"
 import { installSelectedGit } from "../../packages/yrd-cli/tests/support/selected-git.ts"
 import { birthEventQueue } from "../../packages/yrd-cli/tests/support/event-queue-birth.ts"
+import { gitIn, resolveGitSelection } from "../../packages/yrd-queue-core/src/git.ts"
+import { publishMovedGitlinks } from "../../packages/yrd-queue-core/src/submit.ts"
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..")
 const roots: string[] = []
@@ -145,6 +148,12 @@ describe("a queue started by address on a host with no checkout", () => {
         .readCalls()
         .slice(beforeMirror)
         .some(({ cwd, args }) => cwd === author && args[0] === "config"),
+    ).toBe(true)
+    expect(
+      selected
+        .readCalls()
+        .slice(beforeMirror)
+        .some(({ cwd, args }) => cwd === author && args[0] === "ls-tree"),
     ).toBe(true)
 
     const submit = Bun.spawn(
@@ -301,5 +310,98 @@ describe("a queue started by address on a host with no checkout", () => {
       ),
       JSON.stringify(eventReads.filter(({ args }) => gitSubcommand(args)?.name === "fetch").map(({ args }) => args)),
     ).toBe(true)
+
+    // Both terminal verbs inspect candidate refs after writing their event.
+    // Those reads create a second runner from the event store's repository.
+    for (const terminal of ["withdraw", "drop"] as const) {
+      const branch = `task/${terminal}`
+      await git(author, "checkout", "--quiet", "main")
+      await git(author, "checkout", "--quiet", "-b", branch)
+      writeFileSync(join(author, `${terminal}.txt`), `${terminal}\n`)
+      await git(author, "add", `${terminal}.txt`)
+      await git(author, "commit", "--quiet", "-m", `${terminal} candidate`)
+      for (const command of [
+        ["submit", branch, "--queue", "main", "--notify", "@dev/3", "--json"],
+        [terminal, branch, "--queue", "main", "--notify", "@dev/3", "--json"],
+      ]) {
+        const before = selected.readCalls().length
+        const invoked = Bun.spawn(["bun", join(REPO_ROOT, "bin/yrd.ts"), ...command], {
+          cwd: author,
+          env: {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: selectionConfig,
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "yrd.workdir",
+            GIT_CONFIG_VALUE_0: workdir,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        const [out, err, code] = await Promise.all([
+          new Response(invoked.stdout).text(),
+          new Response(invoked.stderr).text(),
+          invoked.exited,
+        ])
+        expect(code, `${command.join(" ")}: ${err}\n${out}`).toBe(0)
+        if (command[0] === terminal) {
+          expect(
+            selected
+              .readCalls()
+              .slice(before)
+              .some(
+                ({ cwd, args }) =>
+                  cwd === owned &&
+                  gitSubcommand(args)?.name === "ls-remote" &&
+                  args.some((arg) => arg.startsWith("refs/yrd/candidates/")),
+              ),
+            `${terminal} did not inspect candidate refs with selected Git`,
+          ).toBe(true)
+        }
+      }
+    }
   }, 120_000)
+})
+
+describe("a changed gitlink published by the submitter", () => {
+  it("uses the root's selected Git executable in the child checkout", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-selected-gitlink-"))
+    roots.push(root)
+    const childRemote = join(root, "child.git")
+    const childSeed = join(root, "child-seed")
+    const superproject = join(root, "super")
+    await git(root, "init", "--quiet", "--bare", "--initial-branch=main", childRemote)
+    await git(root, "clone", "--quiet", childRemote, childSeed)
+    await git(childSeed, "config", "user.name", "Selected Git Test")
+    await git(childSeed, "config", "user.email", "selected-git@example.invalid")
+    await git(childSeed, "checkout", "--quiet", "-b", "main")
+    writeFileSync(join(childSeed, "child.txt"), "base\n")
+    await git(childSeed, "add", "child.txt")
+    await git(childSeed, "commit", "--quiet", "-m", "child base")
+    await git(childSeed, "push", "--quiet", "origin", "main")
+
+    await git(root, "init", "--quiet", "--initial-branch=main", superproject)
+    await git(superproject, "config", "user.name", "Selected Git Test")
+    await git(superproject, "config", "user.email", "selected-git@example.invalid")
+    await git(superproject, "-c", "protocol.file.allow=always", "submodule", "add", "--quiet", childRemote, "child")
+    await git(superproject, "commit", "--quiet", "-am", "root base")
+    const base = (await git(superproject, "rev-parse", "HEAD")).trim()
+    const child = join(superproject, "child")
+    await git(child, "config", "user.name", "Selected Git Test")
+    await git(child, "config", "user.email", "selected-git@example.invalid")
+    writeFileSync(join(child, "child.txt"), "changed\n")
+    await git(child, "commit", "--quiet", "-am", "child change")
+    const pin = (await git(child, "rev-parse", "HEAD")).trim()
+    await git(superproject, "add", "child")
+    await git(superproject, "commit", "--quiet", "-m", "move child pin")
+    const head = (await git(superproject, "rev-parse", "HEAD")).trim()
+
+    const selected = await installSelectedGit(superproject)
+    const rootGit = gitIn(superproject, undefined, await resolveGitSelection(superproject))
+    const published = await publishMovedGitlinks(rootGit, superproject, base, head)
+    expect(published).toMatchObject([{ path: "child", sha: pin, state: "published" }])
+    expect(selected.readCalls().some(({ cwd, args }) => cwd === child && args[0] === "remote")).toBe(true)
+    expect(
+      selected.readCalls().some(({ cwd, args }) => cwd === child && args[0] === "push" && args.includes("origin")),
+    ).toBe(true)
+  }, 30_000)
 })
