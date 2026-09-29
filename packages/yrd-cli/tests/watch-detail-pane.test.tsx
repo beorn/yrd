@@ -180,7 +180,7 @@ describe("26242: watch detail pane at 140x50", () => {
     expect((heading!.match(/failed/giu) ?? []).length).toBe(1)
   })
 
-  it("row 3: detail grows into free rows and a cut log says how many lines follow", async () => {
+  it("row 3: unframed detail grows into free rows and a cut log says how many lines follow", async () => {
     const { lines, text } = await paint()
     const tableRow = lines.findIndex((line) => line.includes("task/24197-240col-gate"))
     const statusBox = lines.findIndex((line) => line.includes("RUN main") || line.includes("Failed"))
@@ -191,8 +191,11 @@ describe("26242: watch detail pane at 140x50", () => {
     expect(text).toMatch(/\d+ more lines/u)
     const more = lines.findIndex((line) => /\d+ more lines/u.test(line))
     expect(more).toBeGreaterThan(-1)
-    expect(lines[more]).toMatch(/│/u)
-    expect(lines.slice(more + 1).some((line) => /╰/u.test(line))).toBe(true)
+    // Operator's 24197 review: the selected details under the tabs have no
+    // surrounding frame. The status box above the tabs remains its own box.
+    const tabs = lines.findIndex((line) => line.includes("Timeline") && line.includes("checking"))
+    expect(tabs).toBeGreaterThan(-1)
+    expect(lines.slice(tabs + 1).join("\n")).not.toMatch(/[╭╮╰╯]/u)
   })
 
   // 24197 AC2: both the list and the long log must remain useful at 200×40.
