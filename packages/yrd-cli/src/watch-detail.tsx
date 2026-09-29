@@ -11,15 +11,13 @@
  *   │ − lint       not run                              │   remedy on the failed one (39)
  *   ╰───────────────────────────────────────────────────╯
  *   · task/foo@abcdef012345  fix the parser                the change list (2, 24)
- *   [Changes] [✓ typecheck] [× test] [− lint]               Changes first (3); one tab per check
- *   ╭───────────────────────────────────────────────────╮   the Changes tab: one box per
- *   │ task/foo@abcdef012345                             │   change, its own header on
- *   │ fix the parser                                    │   every box (25), title, body,
- *   │ …                                                 │   HISTORY newest first, three
- *   │ 14:15 · 21m ago  merged as b234234abcde           │   METADATA groups, and the
- *   │ ISSUE  @i/10-yrd/24096                            │   `▶ Diff +A −B` fold last (31)
- *   │ ► Diff +214 −38                                    │
- *   ╰───────────────────────────────────────────────────╯
+ *   [Timeline] [✓ typecheck] [× test] [− lint]              Timeline first; one tab per check
+ *     task/foo@abcdef012345                                unframed details below the tabs:
+ *     fix the parser                                      each change keeps its header,
+ *     …                                                   title, body, HISTORY newest
+ *     14:15 · 21m ago  merged as b234234abcde              first, three METADATA groups,
+ *     ISSUE  @i/10-yrd/24096                              and the `▶ Diff +A −B` fold last
+ *     ► Diff +214 −38
  *
  * Three rules from the operator's own spec are structural, not incidental:
  *
@@ -752,7 +750,7 @@ function StageTabPanel({
   const skipped = isStageSkipped(detail, stage)
   if (skipped) {
     return (
-      <TitledBox borderColor="$border-muted">
+      <Box flexDirection="column" minWidth={0} minHeight={0} paddingX={1}>
         <Text color="$fg-muted" bold>
           {stage.toUpperCase()} — NOT RUN
         </Text>
@@ -764,12 +762,9 @@ function StageTabPanel({
         ) : (
           <Text color="$fg-muted">{stageSkipReason(detail, stage)}</Text>
         )}
-      </TitledBox>
+      </Box>
     )
   }
-
-  const info = stageInfo(detail, stage)
-  const borderColor = CHECK_COLOR[info.state]
 
   const body = (
     <>
@@ -780,9 +775,19 @@ function StageTabPanel({
     </>
   )
   return (
-    <TitledBox fill={fill} borderColor={borderColor} titleRight={stage}>
+    <Box
+      width="100%"
+      height={fill ? "100%" : undefined}
+      flexDirection="column"
+      minWidth={0}
+      minHeight={0}
+      flexGrow={fill ? 1 : undefined}
+      flexShrink={fill ? 1 : 0}
+      paddingX={1}
+      userSelect="contain"
+    >
       {fill ? <DetailScroll controller={scroll}>{body}</DetailScroll> : body}
-    </TitledBox>
+    </Box>
   )
 }
 
@@ -1354,8 +1359,8 @@ function subjectAbsent(row: Pick<Row, "state" | "reason">): string {
 }
 
 /**
- * The Changes tab: one bordered box per change, EVERY box carrying its own
- * header (item 25) — header, bold title, body, HISTORY, METADATA, the diff
+ * The Timeline tab: each change carries its own header (item 25) —
+ * header, bold title, body, HISTORY, METADATA, the diff
  * fold last (items 4, 31).
  */
 function ChangeBox({
@@ -1387,7 +1392,7 @@ function ChangeBox({
   const keyWidth = metadataKeyWidth([...groups, ...compositionGroups])
   const body = detail.body === undefined ? "" : withoutGitConflictsBlock(detail.body).trim()
   return (
-    <TitledBox>
+    <Box flexDirection="column" minWidth={0} minHeight={0} paddingX={1} userSelect="contain">
       {/* The timeline first (25441): this cut's history, oldest first, each with its time to the next. */}
       {historyOf(detail) === undefined ? null : timeline.entries.length === 0 ? (
         <Text color="$fg-muted">no records were read for this change</Text>
@@ -1467,7 +1472,7 @@ function ChangeBox({
       {detail.diffStat === undefined ? null : (
         <DiffFold stat={detail.diffStat} open={diffOpen} diff={diff} onToggle={onToggleDiff} />
       )}
-    </TitledBox>
+    </Box>
   )
 }
 
