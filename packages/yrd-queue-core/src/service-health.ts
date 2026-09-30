@@ -683,6 +683,7 @@ export function believableHealthDocument(document: QueueHealthDocument, now: Dat
  */
 export function relaunchStalledHealthDocument(
   service: string,
+  // The declared next-launch source, or the mutable checkout when no source is declared.
   awaited: Readonly<{ path: string; sha: string; checkout: string }>,
   why: string,
   waiting: Readonly<Record<string, unknown>>,
@@ -707,8 +708,8 @@ export function relaunchStalledHealthDocument(
       // document stays on disk until the RELAUNCHED service writes over it,
       // which it does at its start, before its first round (24523 F1).
       resolution: [
-        `Check out ${awaited.path}@${awaited.sha} in ${awaited.checkout}.`,
-        "No restart, and nothing to delete: this process relaunches itself with exit 0 the moment that checkout lands.",
+        `Ensure ${awaited.checkout} contains ${awaited.path}@${awaited.sha} for the next launch.`,
+        "No restart, and nothing to delete: this process exits 0 for relaunch when that source holds the target.",
         "No queue round runs until then.",
         "This page clears when the relaunched service starts and writes its own document.",
       ],
