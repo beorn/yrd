@@ -42,7 +42,7 @@
     "@silvery/ansi": "^0.25.0",
     "@silvery/commander": "^0.25.0",
     "@silvery/scope": "^0.25.0",
-    "loggily": "github:beorn/loggily#19b29bd9dfbcdf21e7bedecb54757cd27fd1698f",
+    "loggily": "github:beorn/loggily#50abdf7c629759a95e423f27a9db68971eb1b5d0",
     "react": "^19.2.0",
     "silvery": "^0.25.0",
     "zod": "4.6.5"
