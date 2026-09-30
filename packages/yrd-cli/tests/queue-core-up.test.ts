@@ -1074,11 +1074,19 @@ describe("yrd queue up, the service", () => {
 
       if (valid) {
         await expect(attempt).resolves.toBe(0)
-        // The one stderr line a clean submit writes is its remote-call count (25570 row 3): the queue read, the
-        // event push and every fetch, from git's own trace2 log, with no torn line.
-        expect(run.stderr()).toMatch(
+        // Keep the aggregate count and the refresh split in the durable submit receipt.
+        const [summary, detail] = run.stderr().trimEnd().split("\n")
+        expect(`${summary}\n`).toMatch(
           /^yrd: submit remote calls: processes=\d+ ssh_children=0 remote_ms=\d+ unreadable=0 (?=.*\bpush=1\b)[^\n]*\n$/u,
         )
+        expect(detail).toMatch(/^yrd: submit remote call detail: /u)
+        expect(JSON.parse(detail!.slice("yrd: submit remote call detail: ".length))).toMatchObject({
+          refresh_boundary: "GIT_SUPER_PHASE=refresh on component-main fetch",
+          refresh_ssh_children: 0,
+          beyond_refresh_ssh_children: 0,
+          refresh_calls: [],
+          beyond_refresh_calls: [],
+        })
         expect(records(run)[0]).toMatchObject({ head })
         const ref = changesRef("main", branch)
         const history = await (
