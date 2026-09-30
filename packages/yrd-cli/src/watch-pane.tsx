@@ -291,10 +291,14 @@ export type WatchSource = Readonly<{
   resolveRunAddress?: (address: string) => Promise<ResolvedWatchRun>
 }>
 
+export type ReadFailure = Readonly<{ at: Date; message: string }>
+
 type WatchPaneProps = {
   snapshot: WatchSnapshot
   initialKey?: string
   queueShortcuts?: boolean
+  initialFailure?: ReadFailure
+  readFailure?: ReadFailure
   sources?: readonly WatchSource[]
   /** One reading of the queue, with the drafts of the window asked for. The pane calls it on a timer and on `w`, and never reads anything itself. */
   load?: (request?: Readonly<{ draftWindow: DraftWindow }>) => Promise<WatchSnapshot>
@@ -319,12 +323,15 @@ type WatchPaneProps = {
 
 export function WatchPane(props: WatchPaneProps) {
   const source = props.sources?.length === 1 ? props.sources[0] : undefined
-  if (source?.snapshot !== undefined && source.error === undefined) {
+  if (source !== undefined) {
     return (
       <Screen>
         <SingleWatchPane
           {...props}
-          snapshot={source.snapshot}
+          snapshot={source.snapshot ?? props.snapshot}
+          initialFailure={
+            props.initialFailure ?? (source.error === undefined ? undefined : { at: new Date(), message: source.error })
+          }
           load={source.load}
           open={source.open}
           loadDiff={source.loadDiff}
@@ -482,6 +489,7 @@ function QueuesWatchPane({
   const multiple = visible.length > 1
   const selectedSource = sources.find((source) => source.id === focus?.id)
   const focusedSnapshot = focus === undefined ? undefined : readings.get(focus.id)?.snapshot
+  const selectedError = focus === undefined ? undefined : readings.get(focus.id)?.error
   const measured = visible.filter(
     (source) =>
       source.snapshot !== undefined &&
@@ -620,17 +628,12 @@ function QueuesWatchPane({
           onRead={onRead}
         />
       ))}
-      {selectedSource !== undefined && readings.get(selectedSource.id)?.error !== undefined ? (
-        <Text color="$fg-warning">
-          {selectedSource.label}: read failed — {readings.get(selectedSource.id)?.error}; showing last good reading{" "}
-          {focusedSnapshot === undefined ? "unmeasured" : clock(focusedSnapshot.at)}
-        </Text>
-      ) : null}
       {selectedSource !== undefined && focusedSnapshot !== undefined ? (
         <SingleWatchPane
           key={selectedSource.id}
           {...props}
           snapshot={focusedSnapshot}
+          readFailure={selectedError === undefined ? undefined : { at: new Date(), message: selectedError }}
           initialKey={focus?.rowKey}
           navigationSerial={focus?.serial}
           queueShortcuts={false}
@@ -745,6 +748,8 @@ function SingleWatchPane({
   initialKey,
   navigationSerial,
   queueShortcuts = true,
+  initialFailure,
+  readFailure: readFailureProp,
   load,
   open,
   loadDiff,
@@ -766,7 +771,11 @@ function SingleWatchPane({
   const [shown, setShown] = useState(snapshot)
   useEffect(() => setShown(snapshot), [snapshot])
   const [failure, setFailure] = useState<Error | undefined>(undefined)
-  const [readFailure, setReadFailure] = useState<ReadFailure | undefined>(undefined)
+  const [internalReadFailure, setInternalReadFailure] = useState<ReadFailure | undefined>(
+    initialFailure ?? readFailureProp,
+  )
+  const readFailure = readFailureProp !== undefined ? readFailureProp : internalReadFailure
+  const setReadFailure = setInternalReadFailure
   const [detailFailure, setDetailFailure] = useState<(ReadFailure & { key: string }) | undefined>(undefined)
   const [cursor, setCursor] = useState(0)
   // Start split layouts with their detail visible; later resizes preserve the
@@ -819,8 +828,11 @@ function SingleWatchPane({
       const currentInterval = focused ? intervalMs : unfocusedIntervalMs
 
       void (async () => {
-        // Refresh at once on focus-in
-        if (!isFirstRun.current && focused && !wasFocusedRef.current) {
+        // Refresh at once on focus-in or if starting with an initialFailure
+        if (
+          (!isFirstRun.current && focused && !wasFocusedRef.current) ||
+          (isFirstRun.current && initialFailure !== undefined)
+        ) {
           try {
             await refresh()
             setReadFailure(undefined)
@@ -852,7 +864,7 @@ function SingleWatchPane({
         setFailure(error instanceof Error ? error : new Error(String(error)))
       })
     },
-    [focused, intervalMs, unfocusedIntervalMs, live, load, refresh],
+    [focused, intervalMs, unfocusedIntervalMs, live, load, refresh, initialFailure],
   )
 
   // The rows on screen: the status buckets and the queue pills are ON/OFF
@@ -1313,15 +1325,12 @@ function SingleWatchPane({
           queue={formatStoredQueueAddress(shown.queue)}
           queues={shown.queues}
           status={
-            statusTimer(shown, nowProp ?? shown.at) !== undefined ||
-            Math.max(0, (nowProp ?? shown.at).getTime() - shown.at.getTime()) > 120_000
+            statusTimer(shown, now) !== undefined || Math.max(0, now.getTime() - shown.at.getTime()) > 120_000
               ? {
-                  ...queueLineStatus(shown, nowProp ?? shown.at),
-                  timer: (
-                    <LiveStatusTimer snapshot={shown} fallback={queueLineStatus(shown, nowProp ?? shown.at).timer} />
-                  ),
+                  ...queueLineStatus(shown, now),
+                  timer: <LiveStatusTimer snapshot={shown} fallback={queueLineStatus(shown, now).timer} />,
                 }
-              : queueLineStatus(shown, nowProp ?? shown.at)
+              : queueLineStatus(shown, now)
           }
           columns={columns}
           live={live}
@@ -1531,9 +1540,6 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
     ...(reason === undefined ? {} : { reason }),
   }
 }
-
-/** One read that failed: when, and the first line of why. */
-type ReadFailure = Readonly<{ at: Date; message: string }>
 
 /**
  * The warning line for a failed read, most important first so a narrow screen
