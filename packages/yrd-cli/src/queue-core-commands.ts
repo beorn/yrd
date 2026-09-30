@@ -165,6 +165,7 @@ import {
   type Row,
   type StopFact,
   remoteCallsLine,
+  roundRemoteCallsRow,
   traceRemoteCalls,
   withRemoteSeam,
   lookupRunIndex,
@@ -466,12 +467,14 @@ function submitCalls(
 ): Readonly<{ env: NodeJS.ProcessEnv | undefined }> & Disposable {
   if (request.command !== "submit" || request.dryRun === true) return { env, [Symbol.dispose]: () => undefined }
   const directory = mkdtempSync(join(tmpdir(), "yrd-submit-trace2-"))
-  const traced = traceRemoteCalls(directory, { seams: true })
+  const traced = traceRemoteCalls(directory, { seams: true, refresh: true })
   return {
     env: env === undefined ? undefined : { ...env, ...traced.env },
     [Symbol.dispose]() {
       try {
-        io.stderr(`yrd: submit remote calls: ${remoteCallsLine(traced.end())}\n`)
+        const calls = traced.end()
+        io.stderr(`yrd: submit remote calls: ${remoteCallsLine(calls)}\n`)
+        io.stderr(`yrd: submit remote call detail: ${JSON.stringify(roundRemoteCallsRow(calls))}\n`)
       } catch (error) {
         io.stderr(`yrd: submit remote calls unknown: ${error instanceof Error ? error.message : String(error)}\n`)
       }
