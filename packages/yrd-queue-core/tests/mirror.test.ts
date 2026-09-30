@@ -21,7 +21,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { tryAcquireFlock } from "@bearly/flock"
 import { afterAll, describe, expect, it } from "vitest"
-import { type Git, gitIn } from "../src/git.ts"
+import { type Git } from "../src/git.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import {
   MIRROR_REFRESHED_AT,
   invalidateMirrorStamp,

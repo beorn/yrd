@@ -30,7 +30,6 @@ import {
   drop,
   eventRows,
   openLog,
-  gitIn,
   gracefulStopHealthDocument,
   listChanges,
   queueRef,
@@ -43,6 +42,7 @@ import {
   QUEUE_HEALTH_SCHEMA,
   watchRows,
 } from "@yrd/queue-core"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { openEvents } from "gitomic/events"
 import { assertEventListingFence, coreQueueCommand, openEventDetail } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"

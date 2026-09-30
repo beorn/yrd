@@ -34,6 +34,7 @@ import {
   gitIn,
   mergeBase,
   refAt,
+  resolveGitSelection,
   seamProcess,
   type Git,
   type GitInvocationOptions,
@@ -118,8 +119,10 @@ export async function freshWorktree(
     await worktreeWithoutSubmodules(git, git, commit, ["add", "--quiet", "--detach", path, commit])
   } else {
     if (options.populateReference === true) {
+      const selection =
+        options.selection ?? (await resolveGitSelection(repo, { process: options.process, env: options.env }))
       const gitAt = (cwd: string): Git =>
-        gitIn(cwd, options.process, options.selection, {
+        gitIn(cwd, options.process, selection, {
           ...(options.env === undefined ? {} : { env: options.env }),
           ...options.gitOptions,
         })
@@ -324,7 +327,8 @@ export async function checkedTree(
   selection?: GitSelection,
   options: GitInvocationOptions = {},
 ): Promise<CheckedTree> {
-  const wt = gitIn(worktree, process, selection, options)
+  const resolved = selection ?? (await resolveGitSelection(worktree, { process, env: options.env }))
+  const wt = gitIn(worktree, process, resolved, options)
   const candidate = (await wt(["rev-parse", "HEAD"])).trim()
   const base = await mergeBase(wt, candidate, targetSha)
   if (base === undefined) {
@@ -381,7 +385,8 @@ export async function judgedTreeDigest(
   selection?: GitSelection,
   options: GitInvocationOptions = {},
 ): Promise<readonly JudgedFile[]> {
-  const wt = gitIn(worktree, process, selection, options)
+  const resolved = selection ?? (await resolveGitSelection(worktree, { process, env: options.env }))
+  const wt = gitIn(worktree, process, resolved, options)
   // --raw carries the mode, which is the only way to tell a gitlink from a file
   // without a second call per path; -z because a path may carry anything.
   const raw = await wt(["diff", "--raw", "--no-renames", "-z", tree.base, tree.candidate])

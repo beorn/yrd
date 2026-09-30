@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn } from "@yrd/queue-core"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"

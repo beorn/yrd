@@ -11,7 +11,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
-import { createLegacyBackend, gitIn, invokeGit, readRemoteCommit } from "../src/git.ts"
+import { createLegacyBackend, invokeGit, readRemoteCommit } from "../src/git.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { readRemoteCalls, roundRemoteCallsRow, traceRemoteCalls, withRemoteSeam } from "../src/remote-calls.ts"
 
 const roots: string[] = []

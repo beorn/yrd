@@ -26,13 +26,13 @@ import { afterAll, describe, expect, it } from "vitest"
 import {
   createEventQueue,
   createEventStore,
-  gitIn,
   listChanges,
   listRefs,
   readConfig,
   readDrafts,
   submit,
 } from "@yrd/queue-core"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import type { Draft, Row, WatchRow } from "@yrd/queue-core"
 import {
   decisionsOfRows,

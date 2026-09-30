@@ -1,5 +1,13 @@
 import { createProcess, type Process } from "@yrd/process"
-import { gitEnvironment, gitIn, invokeGit, publishGitInvocation, type Git, type GitInvocationOptions } from "./git.ts"
+import {
+  gitEnvironment,
+  gitIn,
+  invokeGit,
+  publishGitInvocation,
+  resolveGitSelection,
+  type Git,
+  type GitInvocationOptions,
+} from "./git.ts"
 import { freshWorktree, type FreshWorktree, type Worktree } from "./worktree.ts"
 import { populateReferenceStores } from "./reference.ts"
 
@@ -88,6 +96,9 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
   }
   if (options.worktree?.populateReference === true) {
     const population = options.worktree
+    const selection =
+      population.selection ??
+      (await resolveGitSelection(options.repo, { process: population.process, env: population.env }))
     // The successful composition owns new child objects. Adopt their exact
     // closure into the queue's stores before releasing that temporary owner.
     // A failed adoption leaves the source intact and propagates the failure.
@@ -108,7 +119,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
       },
       commit: result.commit,
       gitIn: (cwd) =>
-        gitIn(cwd, population.process, population.selection, {
+        gitIn(cwd, population.process, selection, {
           ...(population.env === undefined ? {} : { env: population.env }),
           ...population.gitOptions,
         }),

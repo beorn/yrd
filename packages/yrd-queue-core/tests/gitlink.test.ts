@@ -24,13 +24,13 @@ import {
   createEventQueue,
   createEventStore,
   drop,
-  gitIn,
   queueRun,
   readConfig,
   readStatus,
   setBranchIgnored,
   submit,
 } from "../src/index.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
 import { appendChangeEvent } from "../src/events.ts"
 import { mergeBases } from "../src/git.ts"

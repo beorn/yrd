@@ -8,7 +8,7 @@ import type { Notifier, Target } from "./config.ts"
 import {
   createEventStore,
   gitIn,
-  selectionFor,
+  resolveGitSelection,
   type Git,
   type GitInvocationOptions,
   type GitObservation,
@@ -248,7 +248,10 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     }
   })
   const gitOptions = gitInvocationOptions(options, log)
-  const selected = gitIn(options.repo, options.process, options.selection, gitOptions)
+  const selection =
+    options.selection ?? (await resolveGitSelection(options.repo, { process: options.process, env: options.env }))
+  options = { ...options, selection }
+  const selected = gitIn(options.repo, options.process, selection, gitOptions)
   const git = options.git ?? selected
   const hooksPath = join(options.workdir, "hooks-disabled")
   mkdirSync(hooksPath, { recursive: true })
@@ -259,7 +262,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     )
   }
   const url = await remoteUrl(git, options.target.remote)
-  const store = createEventStore(options.repo, options.target.remote, options.selection ?? selectionFor(selected))
+  const store = createEventStore(options.repo, options.target.remote, selection)
   if ((await queueFormat(store, options.target.branch)) !== "event") {
     throw new Error(
       `${url}#${options.target.branch} in ${options.repo}: expected event queue ref ${queueRef(options.target.branch)}; legacy queue authority is retired`,
@@ -332,7 +335,9 @@ export async function restoreScripts(
   await validateScripts(run, spec)
   const scripts = spec.scripts ?? []
   if (scripts.length === 0) return
-  const wt = gitIn(cwd, run.process, run.selection, run.gitOptions)
+  const selection =
+    run.selection ?? (await resolveGitSelection(cwd, { process: run.process, env: run.gitOptions?.env }))
+  const wt = gitIn(cwd, run.process, selection, run.gitOptions)
   for (const path of scripts) {
     await wt(["checkout", "--quiet", run.targetSha, "--", path])
   }

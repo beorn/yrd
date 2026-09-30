@@ -15,7 +15,6 @@ import {
   changesRef,
   createEventQueue,
   createEventStore,
-  gitIn,
   queueFormat,
   queueRef,
   readConfig,
@@ -25,6 +24,7 @@ import {
   writeQueueEvent,
   type Git,
 } from "../src/index.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { openEvents } from "../src/git.ts"
 import { readEventChain } from "../src/event-read.ts"
 import { pauseRef } from "../src/refs.ts"

@@ -17,7 +17,6 @@ import { afterAll, describe, expect, it } from "vitest"
 import {
   createEventQueue,
   createEventStore,
-  gitIn,
   listChanges,
   listRefs,
   readConfig,
@@ -25,6 +24,7 @@ import {
   submit,
   type Git,
 } from "../src/index.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 
 const roots: string[] = []
 afterAll(() => {

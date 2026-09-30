@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn } from "@yrd/queue-core"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { admissionVerdict, runAdmission } from "../src/admission.ts"
 import type { ProcessResult } from "@yrd/process"
 

@@ -47,7 +47,6 @@ import {
   changesRef,
   formatRunnerClaim,
   parseRunnerClaim,
-  gitIn,
   parseQueueHealthDocument,
   pauseRef,
   queueRef,
@@ -74,6 +73,7 @@ import {
   type QueueRunOutcome,
   type GitRunner,
 } from "@yrd/queue-core"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand, endingCode } from "../src/queue-core-commands.ts"
@@ -811,8 +811,8 @@ describe("yrd queue up, the service", () => {
     const pauseCheck = join(w.workdir, "pause-during-check.ts")
     writeFileSync(
       pauseCheck,
-      `import { createEventStore, gitIn, readEventQueue, writeQueueEvent } from ${JSON.stringify(queueCoreEntry)}\n` +
-        `const git = gitIn(${JSON.stringify(w.work)})\n` +
+      `import { createEventStore, gitIn, readEventQueue, resolveGitSelection, writeQueueEvent } from ${JSON.stringify(queueCoreEntry)}\n` +
+        `const git = gitIn(${JSON.stringify(w.work)}, undefined, await resolveGitSelection(${JSON.stringify(w.work)}))\n` +
         `const store = createEventStore(${JSON.stringify(w.work)}, "origin", git.selection)\n` +
         `if ((await readEventQueue(store, "main")).ops?.pause === undefined) {\n` +
         `  await writeQueueEvent(store, "main", { type: "paused", at: new Date(), by: "@chief", reason: "maintenance" })\n` +

@@ -13,7 +13,6 @@ import {
   changesRef,
   createEventQueue,
   createEventStore,
-  gitIn,
   inspectSubmit,
   issueOf,
   normalizeIssueReference,
@@ -31,6 +30,7 @@ import {
   writeQueueEvent,
   type Git,
 } from "../src/index.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 
 const roots: string[] = []
 afterAll(() => {

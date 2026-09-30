@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { gitIn } from "../src/git.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { resolveRemote } from "../src/remote.ts"
 import { publishMovedGitlinks } from "../src/submit.ts"
 

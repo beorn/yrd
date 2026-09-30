@@ -8,7 +8,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { gitIn } from "@yrd/queue-core"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { afterAll, describe, expect, it } from "vitest"
 import { refreshMirrors } from "../src/mirror-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"

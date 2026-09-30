@@ -1,6 +1,6 @@
 /** Compose the candidate's raised root gitlinks onto the target without its authored content. */
 import type { Process } from "@yrd/process"
-import { gitIn, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
+import { gitIn, resolveGitSelection, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
 import type { RootChanges } from "./root-changes.ts"
 import { freshWorktree, type PlumbingLog } from "./worktree.ts"
 
@@ -21,17 +21,19 @@ export async function settledBaseCommit(
   }>,
 ): Promise<string> {
   if (options.raises.length === 0) return options.targetSha
+  const selection =
+    options.selection ?? (await resolveGitSelection(options.repo, { process: options.process, env: options.env }))
   const composing = await freshWorktree(options.git, options.repo, options.targetSha, options.path, {
     env: options.env,
     gitOptions: options.gitOptions,
     plumbing: options.plumbing,
     populateReference: options.populateReference,
     process: options.process,
-    selection: options.selection,
+    selection,
   })
   let commit = options.targetSha
   try {
-    const wt = gitIn(composing.path, options.process, options.selection, options.gitOptions)
+    const wt = gitIn(composing.path, options.process, selection, options.gitOptions)
     for (const raise of options.raises) {
       const row = await wt([
         "--literal-pathspecs",

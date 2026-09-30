@@ -264,30 +264,18 @@ function selectedExecutable(command: string, env: NodeJS.ProcessEnv, problem: (m
  */
 export function gitIn(
   cwd: string,
-  process?: Pick<Process, "run">,
-  selection?: GitSelection,
+  process: Pick<Process, "run"> | undefined,
+  selection: GitSelection,
   options: GitInvocationOptions = {},
 ): GitRunner {
-  const selected: GitSelection = selection ?? {
-    executable: "git",
-    contract: "native",
-    scope: "default",
-    origin: "native git",
-  }
+  if (selection === undefined) throw new Error(`yrd: gitIn in ${cwd} requires a resolved Git selection`)
   const env = options.env === undefined ? undefined : gitEnvironment(options.env)
   const runner = process ?? createProcess({ cwd, env: env ?? gitEnvironment(globalThis.process.env) })
   let lastInvocation: GitInvocation | undefined
   const invoke = async (originalArgs: readonly string[], input?: string, observation = false) => {
     const args = Object.freeze([...originalArgs])
     const attempt = async (attemptEnv: NodeJS.ProcessEnv | undefined) => {
-      let evidence = await invokeGit(
-        runner,
-        { args, cwd, ...(selection === undefined ? {} : { selection }) },
-        options,
-        attemptEnv,
-        input,
-        observation,
-      )
+      let evidence = await invokeGit(runner, { args, cwd, selection }, options, attemptEnv, input, observation)
       if (observation && evidence.failure === undefined) {
         try {
           evidence = { ...evidence, observation: readObservation(evidence) }
@@ -346,11 +334,11 @@ export function gitIn(
     return result.stdout
   }
   return Object.defineProperties(git, {
-    selection: { value: selected },
+    selection: { value: selection },
     lastInvocation: { get: () => lastInvocation },
     observe: {
       value: async (input: GitObservationInput): Promise<GitObservation> => {
-        if (selection?.contract !== "root-v1") {
+        if (selection.contract !== "root-v1") {
           return {
             contract: "native",
             message: `Child observation is not configured for ${input.root.remote}#${input.root.targetRef}; native Git observes the root queue only.`,

@@ -11,7 +11,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn } from "../src/git.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { publishCheckedChildren } from "../src/publication.ts"
 import { publishMovedGitlinks, retentionRef } from "../src/submit.ts"
 

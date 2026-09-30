@@ -37,7 +37,6 @@ import {
   changeInput,
   changesRef,
   drop,
-  gitIn,
   mergedByRun,
   lookupRunIndex,
   pauseRef,
@@ -61,6 +60,7 @@ import {
   parseUntil,
   writeQueueOverride,
 } from "../src/index.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import type { CheckedTree, CheckSpec, Git, PauseRecord, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
 import { resolveGitSelection } from "../src/git.ts"
 import * as verifying from "../src/verifying.ts"

@@ -17,7 +17,7 @@ import {
   type Event,
   type QueueLocation,
 } from "../packages/yrd-queue-core/src/index.ts"
-import { openEvents } from "../packages/yrd-queue-core/src/git.ts"
+import { openEvents, resolveGitSelection } from "../packages/yrd-queue-core/src/git.ts"
 import { project } from "../packages/yrd-queue-core/src/events.ts"
 import { refuseMaintenance } from "../packages/yrd-queue-core/src/submit.ts"
 
@@ -245,7 +245,7 @@ async function inspectTarget(
 }
 
 async function planQuarantine(options: Options): Promise<{ plan: AdoptionPlan; store: QueueLocation }> {
-  const git = gitIn(options.repo)
+  const git = gitIn(options.repo, undefined, await resolveGitSelection(options.repo))
   const store = createEventStore(options.repo, options.remote, git.selection)
   const targetHead = await readRemoteCommit(git, options.remote, `refs/heads/${options.queue}`)
   if (targetHead === undefined) throw new Error(`${options.remote}: expected refs/heads/${options.queue} missing`)
@@ -312,7 +312,7 @@ async function applyQuarantine(
   options: Options,
 ): Promise<Readonly<{ plan: AdoptionPlan; applied: readonly { branch: string; kind: Kind; targetOid: string }[] }>> {
   const { plan, store } = await planQuarantine(options)
-  const git = gitIn(options.repo)
+  const git = gitIn(options.repo, undefined, store.selection)
   const targetHead = await readRemoteCommit(git, options.remote, `refs/heads/${options.queue}`)
   if (targetHead === undefined) {
     throw new Error(`${options.remote}: expected refs/heads/${options.queue} missing before apply`)

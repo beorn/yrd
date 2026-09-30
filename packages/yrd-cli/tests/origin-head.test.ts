@@ -10,7 +10,7 @@ import { mkdtempSync, renameSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { gitIn } from "@yrd/queue-core"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { originHead, resolveQueueLocation } from "../src/queue-location.ts"
 
 function git(cwd: string, ...args: string[]): string {

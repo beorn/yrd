@@ -1,5 +1,6 @@
 /** Birth a real event queue for CLI fixtures whose subject is format neutral. */
-import { createEventQueue, createEventStore, gitIn, readConfig } from "@yrd/queue-core"
+import { createEventQueue, createEventStore, readConfig } from "@yrd/queue-core"
+import { testGitIn as gitIn } from "../../../../tests/support/test-git-in.ts"
 import { mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { workdirOf } from "../../src/workdir.ts"

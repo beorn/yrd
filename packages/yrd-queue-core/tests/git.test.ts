@@ -5,11 +5,22 @@ import { join, resolve } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import { createScriptedProcess, exitedResult } from "@yrd/process/testing/scripted-process"
-import { gitIn } from "../src/git.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import * as gitRunner from "../src/git.ts"
 import { openLog, readRunLog } from "../src/log.ts"
 import { gitSuperExecution } from "../src/verifying.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
+
+if (false) {
+  // @ts-expect-error a production runner cannot omit its selected Git executable
+  gitRunner.gitIn("/tmp", undefined)
+}
+
+it("refuses an unselected runtime caller before spawning Git", () => {
+  expect(() => (gitRunner.gitIn as (cwd: string) => unknown)("/tmp")).toThrow(
+    "yrd: gitIn in /tmp requires a resolved Git selection",
+  )
+})
 
 it("requires a Git runner's fixed selection before opening Gitomic", () => {
   const selected = {

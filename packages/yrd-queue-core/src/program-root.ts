@@ -2,7 +2,7 @@
 import { existsSync, lstatSync, mkdirSync, readlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
-import { gitIn, refAt, type Git } from "./git.ts"
+import { gitIn, refAt, resolveGitSelection, type Git, type GitSelection } from "./git.ts"
 import type { QueueRunLog } from "./log.ts"
 import {
   checkedTree,
@@ -38,6 +38,8 @@ export type ProgramRootCheck = Readonly<{
   queueRun?: boolean
 }> &
   Pick<PrepareWorktree, "env" | "process" | "selection" | "gitOptions" | "populateReference" | "plumbing">
+
+type SelectedProgramRootCheck = ProgramRootCheck & Readonly<{ selection: GitSelection }>
 
 /** The queue attributes candidate setup failures; check only reports them. */
 export class ProgramSubjectSetupFailed extends Error {
@@ -100,7 +102,7 @@ async function declaredSourceBlobs(
 }
 
 async function onDiskDeclaredPaths(
-  run: ProgramRootCheck,
+  run: SelectedProgramRootCheck,
   root: string,
   scripts: readonly string[],
 ): Promise<ReadonlySet<string>> {
@@ -114,7 +116,7 @@ async function onDiskDeclaredPaths(
 }
 
 async function onDiskSourceBlob(
-  run: ProgramRootCheck,
+  run: SelectedProgramRootCheck,
   root: string,
   path: string,
   expected: SourceBlob | undefined,
@@ -159,7 +161,7 @@ function declaredPathState(root: string, path: string): "present" | "absent" | "
 }
 
 async function witnessDeclaredSources(
-  run: ProgramRootCheck,
+  run: SelectedProgramRootCheck,
   spec: CheckSpec,
   phase: string,
   stage: "program" | "subject",
@@ -295,7 +297,11 @@ async function prepareProgramRoot(
   })
 }
 
-export async function programRootCheck(run: ProgramRootCheck): Promise<CheckResult> {
+export async function programRootCheck(input: ProgramRootCheck): Promise<CheckResult> {
+  const run: SelectedProgramRootCheck = {
+    ...input,
+    selection: input.selection ?? (await resolveGitSelection(input.repo, { process: input.process, env: input.env })),
+  }
   const { spec, tree, phase } = run
   await validateScripts(run, spec)
   const scripts = spec.scripts ?? []

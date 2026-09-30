@@ -16,12 +16,12 @@ import {
   changeInput,
   createEventQueue,
   createEventStore,
-  gitIn,
   listChangeHistories,
   readConfig,
   readStatus,
   type QueueLocation,
 } from "../packages/yrd-queue-core/src/index.ts"
+import { testGitIn as gitIn } from "../tests/support/test-git-in.ts"
 
 const roots: string[] = []
 afterEach(() => {

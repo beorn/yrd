@@ -17,7 +17,6 @@ import { afterAll, describe, expect, it } from "vitest"
 import {
   checksOf,
   clocks,
-  gitIn,
   journalKey,
   readJournals,
   runStartedAt,
@@ -25,6 +24,7 @@ import {
   subjects,
   watchRows,
 } from "../src/index.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import type { CheckSpec, Git, Row } from "../src/index.ts"
 // `openLog` is the writer, and index.ts lists only what a consumer outside the
 // package imports. A test that writes a journal is inside it.

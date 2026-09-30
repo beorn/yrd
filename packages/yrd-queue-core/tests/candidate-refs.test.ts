@@ -19,7 +19,8 @@ import {
   SOURCE_CANDIDATE_REF_NAMESPACE,
   CANDIDATE_REF_NAMESPACE,
 } from "../src/candidate-refs.ts"
-import { gitIn, type Git } from "../src/index.ts"
+import { type Git } from "../src/index.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 
 const roots: string[] = []
 afterAll(() => {

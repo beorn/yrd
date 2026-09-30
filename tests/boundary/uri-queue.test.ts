@@ -14,7 +14,8 @@ import { parseQueueAddress, queueDirectory } from "../../packages/yrd-cli/src/ad
 import { git } from "./fixture.ts"
 import { installSelectedGit } from "../../packages/yrd-cli/tests/support/selected-git.ts"
 import { birthEventQueue } from "../../packages/yrd-cli/tests/support/event-queue-birth.ts"
-import { gitIn, resolveGitSelection } from "../../packages/yrd-queue-core/src/git.ts"
+import { resolveGitSelection } from "../../packages/yrd-queue-core/src/git.ts"
+import { testGitIn as gitIn } from "../support/test-git-in.ts"
 import { publishMovedGitlinks } from "../../packages/yrd-queue-core/src/submit.ts"
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..")

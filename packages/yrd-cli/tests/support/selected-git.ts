@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { gitIn, resolveGitSelection } from "@yrd/queue-core"
+import { resolveGitSelection } from "@yrd/queue-core"
+import { testGitIn as gitIn } from "../../../../tests/support/test-git-in.ts"
 
 export type SelectedGitCall = Readonly<{ cwd: string; args: readonly string[]; marker?: string }>
 

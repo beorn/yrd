@@ -12,7 +12,8 @@ import { join } from "node:path"
 import { acquireExclusive } from "git-super/exclusive"
 import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, type Git } from "../src/git.ts"
+import { type Git } from "../src/git.ts"
+import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import type { LogWrite } from "../src/log.ts"
 import {
   GitlinkNotOnRemote,
