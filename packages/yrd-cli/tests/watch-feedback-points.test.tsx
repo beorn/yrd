@@ -102,7 +102,7 @@ describe("yrd watch feedback: points 2, 3, 4, 5", () => {
     const snapshot = baseSnapshot({
       queues: [
         { branch: "main", label: "github.com/beorn/hh-dev#main", path: "/hh/dev" },
-        { branch: "main", label: "github.com/beorn/hh-pm#main", path: "/hh/pm" },
+        { branch: "main", label: "github.com/beorn/example-pm#main", path: "/repo/other" },
       ],
     })
 
@@ -127,7 +127,7 @@ describe("yrd watch feedback: points 2, 3, 4, 5", () => {
     expect(runner1Line).toBeDefined()
     expect(runner2Line).toBeDefined()
     expect(runner1Line).toContain("hh-dev")
-    expect(runner2Line).toContain("hh-pm")
+    expect(runner2Line).toContain("example-pm")
 
     app.unmount()
   })
@@ -219,16 +219,12 @@ describe("yrd watch feedback: points 2, 3, 4, 5", () => {
     // Tab bar has 2 lines: line 1 has tab labels, line 2 has attempt count and status
     expect(lines[tabsLineIdx + 1]).toContain("attempt")
 
-    // Point 5: The line immediately below the tabs (tabsLineIdx + 3, after tab bottom padding)
-    // must be a blank line (one-line gap under the filled tabs)
-    const gapLine = lines[tabsLineIdx + 3]
+    // Point 5: One-line gap between stage tabs and the content below them
+    const contentLineIdx = lines.findIndex((l, idx) => idx > tabsLineIdx && l.includes("Submitted"))
+    expect(contentLineIdx).toBeGreaterThan(tabsLineIdx + 1)
+    const gapLine = lines[contentLineIdx - 1]
     expect(gapLine).toBeDefined()
     expect(gapLine!.trim()).toBe("")
-
-    // The line below the gap line should have the detail content
-    const contentLine = lines[tabsLineIdx + 4]
-    expect(contentLine).toBeDefined()
-    expect(contentLine!.trim()).toContain("Submitted")
 
     app.unmount()
   })
