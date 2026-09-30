@@ -58,6 +58,8 @@ export {
   CHANGE_EVENT_TYPES,
   CHANGE_STATUSES,
   EVENT_TRAILERS,
+  QueueEventShapeUnreadable,
+  isQueueEventShapeUnreadable,
   adoptedChange,
   appendChangeEvent,
   appendNumberedChangeEvent,

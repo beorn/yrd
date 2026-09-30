@@ -82,6 +82,45 @@ export const QUEUE_RUN_WRITER = "yrd-run"
 /** Producer named by every state-neutral adoption of an old-format ending. */
 export const YRD_ADOPTER_WRITER = "yrd-adopter"
 
+/**
+ * Raised when an event on a queue chain cannot be decoded or validated because
+ * the reading CLI does not recognize the event type, snapshot format, or writer
+ * validation rule written by a newer queue runner.
+ */
+export class QueueEventShapeUnreadable extends Error {
+  readonly ref: string
+  readonly eventId?: string
+  readonly eventType?: string
+
+  constructor(message: string, options?: { ref?: string; eventId?: string; eventType?: string; cause?: unknown }) {
+    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined)
+    this.name = "QueueEventShapeUnreadable"
+    this.ref = options?.ref ?? ""
+    this.eventId = options?.eventId
+    this.eventType = options?.eventType
+  }
+}
+
+export function isQueueEventShapeUnreadable(error: unknown): error is QueueEventShapeUnreadable {
+  if (
+    error instanceof QueueEventShapeUnreadable ||
+    (error instanceof Error && error.name === "QueueEventShapeUnreadable")
+  ) {
+    return true
+  }
+  if (error instanceof Error) {
+    return (
+      error.message.includes("unknown queue event") ||
+      /merge-fenced event [0-9a-f]+ needs writer/u.test(error.message) ||
+      /merge-fenced event [0-9a-f]+ needs ops-cutover/u.test(error.message) ||
+      /merge-fenced event [0-9a-f]+ changed effective ops state/u.test(error.message) ||
+      /unknown Ops: version/u.test(error.message) ||
+      error.message.includes("unknown Yrd change event")
+    )
+  }
+  return false
+}
+
 export const CHANGE_EVENT_TYPES = [
   "opened",
   "admission-warning",
@@ -758,7 +797,10 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       return unignored
     }
     default:
-      throw new Error(`unknown Yrd change event ${event.type} at ${event.id}`)
+      throw new QueueEventShapeUnreadable(`unknown Yrd change event ${event.type} at ${event.id}`, {
+        eventId: event.id,
+        eventType: event.type,
+      })
   }
 }
 
@@ -1426,14 +1468,25 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
         break
       case "merge-fenced": {
         if (opsCutover === undefined || ops === undefined) {
-          throw new Error(`${ref}: merge-fenced event ${event.id} needs ops-cutover`)
+          throw new QueueEventShapeUnreadable(`${ref}: merge-fenced event ${event.id} needs ops-cutover`, {
+            ref,
+            eventId: event.id,
+            eventType: event.type,
+          })
         }
         const next = readOpsEvent(event, ref)
         if (encodeOps(next) !== encodeOps(ops)) {
-          throw new Error(`${ref}: merge-fenced event ${event.id} changed effective ops state`)
+          throw new QueueEventShapeUnreadable(`${ref}: merge-fenced event ${event.id} changed effective ops state`, {
+            ref,
+            eventId: event.id,
+            eventType: event.type,
+          })
         }
         if (event.writer !== QUEUE_RUN_WRITER) {
-          throw new Error(`${ref}: merge-fenced event ${event.id} needs writer ${QUEUE_RUN_WRITER}`)
+          throw new QueueEventShapeUnreadable(
+            `${ref}: merge-fenced event ${event.id} needs writer ${QUEUE_RUN_WRITER}`,
+            { ref, eventId: event.id, eventType: event.type },
+          )
         }
         const merged = requiredProp(event, EVENT_TRAILERS.for)
         if (!COMMIT_OID.test(merged) || !event.links.includes(merged)) {
@@ -1523,7 +1576,11 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
         break
       }
       default:
-        throw new Error(`${ref}: unknown queue event ${event.type} at ${event.id}`)
+        throw new QueueEventShapeUnreadable(`${ref}: unknown queue event ${event.type} at ${event.id}`, {
+          ref,
+          eventId: event.id,
+          eventType: event.type,
+        })
     }
     previous = event.id
   }
@@ -1544,9 +1601,24 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
 function readOpsEvent(event: QueueEventShape, ref: string): OpsState {
   const values = event.props.filter(([name]) => name === "Ops").map(([, value]) => value)
   if (values.length !== 1) {
-    throw new Error(`${ref}: ${event.type} event ${event.id} needs exactly one complete Ops: snapshot`)
+    throw new QueueEventShapeUnreadable(
+      `${ref}: ${event.type} event ${event.id} needs exactly one complete Ops: snapshot`,
+      { ref, eventId: event.id, eventType: event.type },
+    )
   }
-  return decodeOps(values[0] ?? "", event.id, `${ref}: ${event.type} event ${event.id}`)
+  try {
+    return decodeOps(values[0] ?? "", event.id, `${ref}: ${event.type} event ${event.id}`)
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("unknown Ops: version")) {
+      throw new QueueEventShapeUnreadable(error.message, {
+        ref,
+        eventId: event.id,
+        eventType: event.type,
+        cause: error,
+      })
+    }
+    throw error
+  }
 }
 
 function validateOverrideEvent(event: QueueEventShape, before: OpsState, after: OpsState, ref: string): void {

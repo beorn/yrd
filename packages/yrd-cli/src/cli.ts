@@ -33,6 +33,7 @@ import { drainOutput } from "loggily"
 import {
   activateRunIndex,
   createEventStore,
+  isQueueEventShapeUnreadable,
   lookupRunIndex,
   parseDuration,
   readRunLog,
@@ -1310,6 +1311,14 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
       }
       // Commander already printed the refusal, and it names the option or the
       // operand. Exit 2 is what an invocation this program cannot judge is.
+      return 2
+    }
+    if (isQueueEventShapeUnreadable(error)) {
+      const rendered = args.map((arg) => (/[ \t\n"'$`\\]/u.test(arg) ? JSON.stringify(arg) : arg)).join(" ")
+      const mainCommand = `@in main -- bun yrd${rendered.length > 0 ? ` ${rendered}` : ""}`
+      io.stderr(
+        `yrd: ${error.message}: this CLI is older than the queue's writer; run from main instead:\n  ${mainCommand}\n`,
+      )
       return 2
     }
     io.stderr(`yrd: ${error instanceof Error ? error.message : String(error)}\n`)
