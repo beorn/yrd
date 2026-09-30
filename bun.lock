@@ -82,7 +82,7 @@
   "overrides": {
     "git-super": "github:beorn/git-super#f396d497491be6d6af02a6acb3b8e7c7147eccf5",
     "gitomic": "github:beorn/gitomic#9f4ac0bf560d6d5a9724d8682ab2b7b1f619ed72",
-    "loggily": "github:beorn/loggily#19b29bd9dfbcdf21e7bedecb54757cd27fd1698f",
+    "loggily": "github:beorn/loggily#50abdf7c629759a95e423f27a9db68971eb1b5d0",
   },
   "packages": {
     "@bearly/flock": ["@bearly/flock@0.1.1", "", {}, "sha512-YT4E+eanXhIDIHpHqi971KX36IjcfakkAHsSo81B8Fb8mVNwyIKeb6tXTHoOgHJr/p6fjy59iu4QWeqdu9BQbA=="],
@@ -373,7 +373,7 @@
 
     "lightningcss-win32-x64-msvc": ["lightningcss-win32-x64-msvc@1.32.0", "", { "os": "win32", "cpu": "x64" }, "sha512-Amq9B/SoZYdDi1kFrojnoqPLxYhQ4Wo5XiL8EVJrVsB8ARoC1PWW6VGtT0WKCemjy8aC+louJnjS7U18x3b06Q=="],
 
-    "loggily": ["loggily@github:beorn/loggily#19b29bd", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-19b29bd", "sha512-RY582a7e8QBeBwBDLAhIFzozB0zM9/r9EUpM8PtMyxVGNlJISpCESfdlMqqSf8XuZOUgc9cJcpC7u9y5F7srcg=="],
+    "loggily": ["loggily@github:beorn/loggily#50abdf7", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-50abdf7", "sha512-1A0KVBZRFnIcvKIlvSruX5BD7WA2UfLD/CAjuDGULsYy7EQOgkxkk3/LmP19JHhWAvvnZStvAs2QCAxIOfB6nQ=="],
 
     "magic-string": ["magic-string@0.30.21", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.5" } }, "sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ=="],
 
