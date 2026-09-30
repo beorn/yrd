@@ -19,13 +19,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs"
 import { hostname, tmpdir } from "node:os"
-import { dirname, join, relative, sep } from "node:path"
+import { dirname, isAbsolute, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
@@ -1668,6 +1669,31 @@ export async function coreQueueCommand(
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
+      // The supervisor declares the tree its NEXT launch will load. An absent
+      // declaration preserves the mutable-checkout contract of 24515; a
+      // present but unreadable declaration never falls back to that checkout.
+      const relaunchSource = (options.env ?? process.env).YRD_RELAUNCH_SOURCE
+      const readRelaunchSource = (): Readonly<{ resolved?: string; error?: string }> => {
+        if (relaunchSource === undefined) return {}
+        if (!isAbsolute(relaunchSource)) {
+          return { error: "YRD_RELAUNCH_SOURCE must be a nonempty absolute path" }
+        }
+        try {
+          const resolved = realpathSync(relaunchSource)
+          if (!statSync(resolved).isDirectory()) return { error: `${resolved} is not a directory` }
+          return { resolved }
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : String(error) }
+        }
+      }
+      if (relaunchSource !== undefined) {
+        const source = readRelaunchSource()
+        if (source.error !== undefined) {
+          const message = `yrd: relaunch source ${JSON.stringify(relaunchSource)} cannot be read at start: ${source.error}; rounds continue, but a pin move will wait and page until the source is readable`
+          log?.warn?.(message)
+          io.stderr(`${message}\n`)
+        }
+      }
       /** This process, as the supervisor identifies the writer of the document (24523 D2). */
       const writer: HealthWriter = {
         command: process.argv.join(" "),
@@ -1780,6 +1806,9 @@ export async function coreQueueCommand(
               publication: publicationStatus,
               runnerClaim: runnerClaim(),
               ...(runnerPhase === undefined ? {} : { runnerPhase }),
+              ...(relaunchSource === undefined
+                ? {}
+                : { relaunchSource: { declared: relaunchSource, ...readRelaunchSource() } }),
             },
           },
           writer,
@@ -2077,31 +2106,50 @@ export async function coreQueueCommand(
           }
           // An explicitly supplied gitlink has no physical checkout to await.
           if (gitlink.checkout === undefined || gitlink.superproject === undefined) break
-          // THE PROJECTION THIS RUNTIME ACTUALLY RELOADS FROM is its own
-          // superproject's, not the queue clone's (@i/10-yrd/24515). The queue
-          // clone advancing says nothing about whether the tree this process
-          // will re-exec out of has the new code yet — they are different
-          // working trees of the same repository, updated by different things.
-          const projected = await gitlinkAt(
-            gitIn(gitlink.superproject, undefined, selection, { env: options.env }),
-            "HEAD",
-            gitlink.path,
-          )
-          const checkout = (
-            await gitIn(gitlink.checkout, undefined, selection, { env: options.env })([
-              "rev-parse",
-              "--verify",
-              "HEAD^{commit}",
-            ])
-          ).trim()
-          if (projected === now && checkout === now) break
-          const state = `${now}:${projected}:${checkout}`
+          // An undeclared source is the mutable checkout of 24515. A declared
+          // source is the tree the supervisor will load on its next launch;
+          // resolve it on every check so an atomic pointer promotion is seen.
+          const source = readRelaunchSource()
+          const projectedRoot = relaunchSource === undefined ? gitlink.superproject : source.resolved
+          const physicalCheckout =
+            relaunchSource === undefined
+              ? gitlink.checkout
+              : source.resolved === undefined
+                ? relaunchSource
+                : join(source.resolved, gitlink.path)
+          let projected: string | undefined
+          let checkout = "unreadable"
+          let sourceError = relaunchSource === undefined ? undefined : source.error
+          if (projectedRoot !== undefined && sourceError === undefined) {
+            try {
+              projected = await gitlinkAt(
+                gitIn(projectedRoot, undefined, selection, { env: options.env }),
+                "HEAD",
+                gitlink.path,
+              )
+              checkout = (
+                await gitIn(physicalCheckout, undefined, selection, { env: options.env })([
+                  "rev-parse",
+                  "--verify",
+                  "HEAD^{commit}",
+                ])
+              ).trim()
+            } catch (error) {
+              if (relaunchSource === undefined) throw error
+              sourceError = error instanceof Error ? error.message : String(error)
+            }
+          }
+          if (sourceError === undefined && projected === now && checkout === now) break
+          const state = `${now}:${projectedRoot}:${projected}:${checkout}:${sourceError}`
           if (state !== announced) {
-            const waiting = `waiting for checkout ${gitlink.path}: loaded ${gitlink.sha.slice(0, 12)}, target ${now.slice(0, 12)}, local gitlink ${projected?.slice(0, 12) ?? "absent"}, checkout ${checkout.slice(0, 12)}; no queue round will run until the checkout updater materializes the target`
+            const waiting =
+              relaunchSource === undefined
+                ? `waiting for checkout ${gitlink.path}: loaded ${gitlink.sha.slice(0, 12)}, target ${now.slice(0, 12)}, local gitlink ${projected?.slice(0, 12) ?? "absent"}, checkout ${checkout.slice(0, 12)}; no queue round will run until the checkout updater materializes the target`
+                : `waiting for relaunch source ${JSON.stringify(relaunchSource)}: running from ${gitlink.superproject}, resolved source ${projectedRoot ?? "unavailable"}, target ${gitlink.path}@${now.slice(0, 12)}, source gitlink ${projected?.slice(0, 12) ?? "absent"}, checkout ${checkout.slice(0, 12)}${sourceError === undefined ? "" : `, read failed: ${sourceError}`}; no queue round will run until the declared source holds the target`
             // WARN, not info: while this is announced the delivery service is
             // doing nothing, and an INFO line is where the last capability that
             // switched itself off hid for a month.
-            log?.warn?.(waiting, { checkout: gitlink.checkout, gitlink: gitlink.path, projected, target: now })
+            log?.warn?.(waiting, { checkout: physicalCheckout, gitlink: gitlink.path, projected, target: now })
             // THE FACT THE OVERDUE PAGE WILL CARRY. `believableHealthDocument`
             // preserves `facts` when it turns a stale document unhealthy, so
             // writing this at the start of the wait is what makes the eventual
@@ -2120,8 +2168,15 @@ export async function coreQueueCommand(
               waitingForCheckout: gitlink.path,
               waitingTarget: now,
               waitingLocalGitlink: projected ?? "absent",
-              waitingCheckout: gitlink.checkout,
+              waitingCheckout: physicalCheckout,
               waitingCheckoutHead: checkout,
+              ...(relaunchSource === undefined
+                ? {}
+                : {
+                    waitingSourceDeclared: relaunchSource,
+                    waitingSourceResolved: projectedRoot ?? "unavailable",
+                    ...(sourceError === undefined ? {} : { waitingSourceError: sourceError }),
+                  }),
             }
             const alive = roundHealthDocument(SERVICE, lastStop, waitCapMs, new Date(), undefined, undefined, lastStuck)
             writeHealth({ ...alive, facts: { ...alive.facts, ...waitingFacts } })
@@ -2164,12 +2219,17 @@ export async function coreQueueCommand(
           // never runs the admission probe, so the gate above is never met.
           if (Date.now() >= alarmDueAt) {
             const why =
-              `waited ${String(Math.round((Date.now() - waitStartedAt) / 1000))}s for ${gitlink.checkout} to check ` +
-              `out ${gitlink.path}@${now.slice(0, 12)} and it has not: its own gitlink reads ` +
-              `${projected?.slice(0, 12) ?? "absent"} and its working tree reads ${checkout.slice(0, 12)}. ` +
-              `No queue round is running and none will until it lands. Once ${gitlink.path}@${now.slice(0, 12)} ` +
-              `is checked out there, the service relaunches on its own — no restart, and nothing to delete.`
-            log?.warn?.(why, { checkout: gitlink.checkout, gitlink: gitlink.path, projected, target: now })
+              relaunchSource === undefined
+                ? `waited ${String(Math.round((Date.now() - waitStartedAt) / 1000))}s for ${gitlink.checkout} to check ` +
+                  `out ${gitlink.path}@${now.slice(0, 12)} and it has not: its own gitlink reads ` +
+                  `${projected?.slice(0, 12) ?? "absent"} and its working tree reads ${checkout.slice(0, 12)}. ` +
+                  `No queue round is running and none will until it lands. Once ${gitlink.path}@${now.slice(0, 12)} ` +
+                  `is checked out there, the service relaunches on its own — no restart, and nothing to delete.`
+                : `waited ${String(Math.round((Date.now() - waitStartedAt) / 1000))}s for declared relaunch source ${JSON.stringify(relaunchSource)} to load ${gitlink.path}@${now.slice(0, 12)}. ` +
+                  `This process runs from ${gitlink.superproject}; the source now resolves to ${projectedRoot ?? "unavailable"}, whose gitlink reads ${projected?.slice(0, 12) ?? "absent"} and checkout reads ${checkout.slice(0, 12)}. ` +
+                  `${sourceError === undefined ? "" : `Source read failed: ${sourceError}. `}` +
+                  `No queue round runs until the declared source holds the pin. The service then exits 0 for relaunch; no manual restart or edit to the running tree.`
+            log?.warn?.(why, { checkout: physicalCheckout, gitlink: gitlink.path, projected, target: now })
             // `running` is TRUE here and that is the whole point: this process is
             // alive and still waiting, which is what makes the page a page rather
             // than a tombstone.
@@ -2183,7 +2243,7 @@ export async function coreQueueCommand(
             writeHealth(
               relaunchStalledHealthDocument(
                 SERVICE,
-                { checkout: gitlink.checkout, path: gitlink.path, sha: now },
+                { checkout: relaunchSource ?? gitlink.checkout, path: gitlink.path, sha: now },
                 why,
                 { ...waitingFacts, waitingLocalGitlink: projected ?? "absent", waitingCheckoutHead: checkout },
                 stalls,
