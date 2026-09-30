@@ -52,6 +52,10 @@ export type VerificationOptions = Readonly<{
   noFetch?: boolean
   unboundedLocalMain?: boolean
   /**
+   * Run custom preparation or modeling in the candidate worktree before git-super merge runs.
+   */
+  beforeMerge?: (candidateWorktree: string) => Promise<void>
+  /**
    * Times a named part of the verification into the caller's journal. Only the
    * queue round passes it; without it nothing is timed.
    */
@@ -66,6 +70,10 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
   )
   let result: SuperMergeResult
   try {
+    const beforeMerge = options.beforeMerge
+    if (beforeMerge !== undefined) {
+      await timed("beforeMerge", () => beforeMerge(worktree.path))
+    }
     result = await superMerge(options, worktree.path, options.head, options.message)
   } catch (error) {
     await worktree.remove()

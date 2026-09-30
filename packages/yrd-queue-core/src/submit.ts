@@ -19,7 +19,7 @@
  * queue event tip (event format) prevents a stop racing with publication.
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -238,6 +238,96 @@ export async function publishMovedGitlinks(
     published.push(...(await publishMovedGitlinks(child, checkout, before, row.sha, path)))
   }
   return published
+}
+
+/**
+ * In candidate verification (and especially dry-run mode where gitlinks are not published
+ * to remote retention refs), candidate worktrees borrow from the superproject reference.
+ * When the reference was a linked worktree, git-super resolves the reference to the primary
+ * clone, which lacks the author's fresh local component commits.
+ *
+ * This models the publish by fetching moved gitlinks directly from the author's local
+ * component checkouts into the candidate worktree's submodule checkouts under refs/git-super/pins/<sha>.
+ */
+export async function modelMovedGitlinks(
+  git: Git,
+  sourceRoot: string,
+  from: string | readonly string[],
+  to: string,
+  candidateRoot: string,
+  prefix = "",
+): Promise<void> {
+  const bases = typeof from === "string" ? [from] : from
+  if (bases.length === 0) return
+  const spans = await Promise.all(bases.map((base) => gitlinkRows(git, base, to)))
+  const byBase = spans.map((rows) => new Map(rows.map((row) => [row.path, row])))
+  for (const row of spans[0] ?? []) {
+    if (!byBase.every((rows) => rows.has(row.path))) continue
+    if (row.newMode !== "160000" || ZERO_SHA.test(row.sha)) continue
+    const path = prefix === "" ? row.path : `${prefix}/${row.path}`
+    const sourceCheckout = join(sourceRoot, row.path)
+    const targetCheckout = join(candidateRoot, row.path)
+    if (!existsSync(sourceCheckout) || !existsSync(targetCheckout)) continue
+    const sourceChild = gitIn(sourceCheckout, undefined, selectionFor(git))
+    const targetChild = gitIn(targetCheckout, undefined, selectionFor(git))
+    try {
+      await targetChild(["cat-file", "-e", `${row.sha}^{commit}`])
+      continue
+    } catch {
+      let hasSha = false
+      try {
+        await sourceChild(["cat-file", "-e", `${row.sha}^{commit}`])
+        hasSha = true
+      } catch {
+        const remote = await remoteUrl(sourceChild, "origin")
+        try {
+          await sourceChild([
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "origin",
+            row.sha,
+          ])
+          hasSha = true
+        } catch (cause) {
+          throw new Error(
+            `${path} at ${row.sha} is a gitlink this change moved to a commit neither ${sourceCheckout} nor ${remote} holds; ` +
+              "commit it in that checkout (or check the submodule out at it) so submit can publish it, then resubmit",
+            { cause },
+          )
+        }
+      }
+      if (hasSha) {
+        try {
+          await targetChild([
+            "-c",
+            "protocol.file.allow=always",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            sourceCheckout,
+            `${row.sha}:refs/git-super/pins/${row.sha}`,
+          ])
+        } catch (cause) {
+          throw new Error(`could not resolve local component commit ${row.sha} for ${path} from ${sourceCheckout}`, {
+            cause,
+          })
+        }
+      }
+    }
+    const before = await Promise.all(
+      bases.map(async (base, index) =>
+        byBase[index]?.get(row.path)?.oldMode === "160000"
+          ? (await git(["rev-parse", `${base}:${row.path}`])).trim()
+          : EMPTY_TREE,
+      ),
+    )
+    await modelMovedGitlinks(sourceChild, sourceCheckout, before, row.sha, targetCheckout, path)
+  }
 }
 
 /**
@@ -483,6 +573,9 @@ async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitA
       hooksPath,
       noFetch: true,
       unboundedLocalMain: true,
+      beforeMerge: async (candidate) => {
+        await modelMovedGitlinks(git, admitted.root, admitted.bases, admitted.head, candidate)
+      },
     })
     verifying = composed.verifying
     if (composed.state === "failed") {
