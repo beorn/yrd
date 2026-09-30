@@ -1436,8 +1436,8 @@ describe("yrd queue up, the service", () => {
       const resolution = (paged.error?.resolution ?? []).join(" ")
       expect(resolution).not.toContain("yrd queue list")
       expect(resolution).not.toContain("next round")
-      // It names the checkout to make, exactly.
-      expect(resolution).toContain(`Check out submodule@${w.b} in ${join(w.work, "submodule")}`)
+      // It names the source and pin that must meet before relaunch.
+      expect(resolution).toContain(`Ensure ${join(w.work, "submodule")} contains submodule@${w.b}`)
       expect(resolution).toContain("No restart, and nothing to delete")
       // AND IT DOES NOT OVER-PROMISE. The page does not clear when the checkout
       // lands — the process exits 0 then and THIS document stays on disk until
@@ -1470,6 +1470,117 @@ describe("yrd queue up, the service", () => {
       reason: "gitlink-moved",
       to: w.b,
     })
+  })
+
+  /** @failure An immutable Hab landing cannot check out the next gitlink, so waiting on its own HEAD parks the queue after every Yrd landing. @level l2 @consumer Hab's supervised Yrd service */
+  it("waits for a promoted immutable landing, then exits 0 for Hab to launch it", async () => {
+    const w = await gitlinkWorld()
+    const home = join(dirname(w.work), "work-landings")
+    mkdirSync(home)
+    const aRoot = (await w.git(["rev-parse", "main"])).trim()
+    const aLanding = join(home, aRoot)
+    await w.git(["worktree", "add", "--quiet", "--detach", aLanding, aRoot])
+    await gitIn(aLanding)(["submodule", "update", "--init", "--quiet", "--", "submodule"])
+    const aCli = join(aLanding, "submodule/packages/yrd-cli")
+    symlinkSync(resolve(import.meta.dirname, "../node_modules"), join(aCli, "node_modules"), "dir")
+    symlinkSync(aLanding, join(home, "current"), "dir")
+    const { coreQueueCommand: fromLandingA } = await import(join(aCli, "src/queue-core-commands.ts"))
+    await submitGitlink(w, "task/gitlink-landing", w.b)
+
+    const run = capture(w.work)
+    const stop = new AbortController()
+    let rounds = 0
+    const service = fromLandingA(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        relaunchWaitCapMs: 50,
+        afterRound: () => {
+          rounds += 1
+        },
+      },
+      { env: { ...process.env, YRD_RELAUNCH_SOURCE: join(home, "current") }, json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(() => expect(run.stdout()).toContain("relaunch-wait-stalled"), { timeout: 8000 })
+      const paged = JSON.parse(readFileSync(join(w.workdir, "service-health.json"), "utf8")) as {
+        error?: { cause?: string; resolution?: string[] }
+        facts?: { relaunchSource?: { declared: string; resolved?: string } }
+      }
+      const page = `${paged.error?.cause ?? ""} ${(paged.error?.resolution ?? []).join(" ")}`
+      expect(page).toContain(aLanding)
+      expect(page).toContain(join(home, "current"))
+      expect(page).not.toContain(`Check out submodule@${w.b} in ${join(aLanding, "submodule")}`)
+      expect(paged.facts?.relaunchSource).toEqual({ declared: join(home, "current"), resolved: aLanding })
+      expect(rounds).toBe(1)
+
+      // A temporarily unreadable declared source keeps the old process alive
+      // and says why; it must never fall back to A's immutable checkout.
+      renameSync(join(home, "current"), join(home, "current.hold"))
+      await vi.waitFor(
+        () => expect(records(run).filter((record) => record.reason === "relaunch-wait-stalled")).toHaveLength(2),
+        { timeout: 8000 },
+      )
+      const missingPage = JSON.parse(readFileSync(join(w.workdir, "service-health.json"), "utf8")) as {
+        error?: { cause?: string }
+      }
+      expect(missingPage.error?.cause).toContain("Source read failed")
+      expect(missingPage.error?.cause).toContain(join(home, "current"))
+      expect(rounds).toBe(1)
+
+      const bRoot = (await w.git(["rev-parse", "origin/main"])).trim()
+      const bLanding = join(home, bRoot)
+      await w.git(["worktree", "add", "--quiet", "--detach", bLanding, bRoot])
+      await gitIn(bLanding)(["submodule", "update", "--init", "--quiet", "--", "submodule"])
+      symlinkSync(bLanding, join(home, "current.next"), "dir")
+      renameSync(join(home, "current.next"), join(home, "current"))
+      expect(await service, run.stdout()).toBe(0)
+      expect(records(run).at(-1)).toEqual({
+        exitCode: 0,
+        from: w.a,
+        gitlink: "submodule",
+        reason: "gitlink-moved",
+        to: w.b,
+      })
+      expect(rounds).toBe(1)
+    } finally {
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 20_000)
+
+  /** @failure A broken declared next-launch source silently selected the old mutable checkout at startup. @level l2 @consumer Hab's supervised Yrd service */
+  it("reports an unreadable declared relaunch source at startup while rounds still run", async () => {
+    const w = await gitlinkWorld()
+    const source = join(dirname(w.work), "missing-current")
+    const run = capture(w.work)
+    const stop = new AbortController()
+    let rounds = 0
+    const exit = await w.command(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        afterRound: () => {
+          rounds += 1
+          stop.abort()
+        },
+      },
+      { env: { ...process.env, YRD_RELAUNCH_SOURCE: source }, json: true, workdir: w.workdir },
+    )
+    expect(exit).toBe(0)
+    expect(rounds).toBe(1)
+    expect(run.stderr()).toContain(`relaunch source "${source}" cannot be read at start`)
+    const document = JSON.parse(readFileSync(join(w.workdir, "service-health.json"), "utf8")) as {
+      facts?: { relaunchSource?: { declared: string; error?: string } }
+    }
+    expect(document.facts?.relaunchSource?.declared).toBe(source)
+    expect(document.facts?.relaunchSource?.error).toContain("ENOENT")
   })
 
   it.each(["stop", "project", "already projected"])("runs no stale round during checkout lag (%s)", async (ending) => {
