@@ -81,7 +81,7 @@
   },
   "overrides": {
     "git-super": "github:beorn/git-super#7798f4b425216f6bd19db096c1e5f5002f2e22bd",
-    "gitomic": "github:beorn/gitomic#193574ca8feda6c8f4727715b5c49f53252e262e",
+    "gitomic": "github:beorn/gitomic#8f657cd43acea0f2c347d833a6e3fc5a9409bd59",
     "loggily": "github:beorn/loggily#ca9c2d9f4eefeb8048eb4254fae7dd4810bd8c8d",
   },
   "packages": {
@@ -339,7 +339,7 @@
 
     "git-super": ["git-super@github:beorn/git-super#7798f4b", { "dependencies": { "@bearly/flock": "^0.2.1", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-7798f4b", "sha512-1Y9vViPzuDXp+yxbZ71eWUuCkYcDBPdJDf2QD3KHJtYZF2MpZg7J3lP3rjuXSd6f/EQ2J5d8p7zeu2Cnfbw73g=="],
 
-    "gitomic": ["gitomic@github:beorn/gitomic#193574c", { "dependencies": { "@bearly/flock": "^0.1.1", "@bearly/pacing": "^0.1.0" }, "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-193574c", "sha512-ib0/Hgq0QKB6Y0279/Yq6XB5jGGyfB1CTV++a8n3+O1f7m81dxisDRpzWNLbuajmnuoz0LN9Q2QrGBih724lAg=="],
+    "gitomic": ["gitomic@github:beorn/gitomic#8f657cd", { "dependencies": { "@bearly/flock": "^0.1.1", "@bearly/pacing": "^0.1.0" }, "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-8f657cd", "sha512-HQOnFM9OKKmLYgD701sC495Wk10IN7z2nvUK2dA1kqBEdtkFnefm1D8JLh0sMzDtXuqXwSDsrO7gN+6APDLIJA=="],
 
     "hast-util-to-html": ["hast-util-to-html@9.0.5", "", { "dependencies": { "@types/hast": "^3.0.0", "@types/unist": "^3.0.0", "ccount": "^2.0.0", "comma-separated-tokens": "^2.0.0", "hast-util-whitespace": "^3.0.0", "html-void-elements": "^3.0.0", "mdast-util-to-hast": "^13.0.0", "property-information": "^7.0.0", "space-separated-tokens": "^2.0.0", "stringify-entities": "^4.0.0", "zwitch": "^2.0.4" } }, "sha512-OguPdidb+fbHQSU4Q4ZiLKnzWo8Wwsf5bZfbvu7//a9oTYoqD/fWpe96NuHkoS9h0ccGOTe0C4NGXdtS0iObOw=="],
 
