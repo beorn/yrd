@@ -132,7 +132,9 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   const target = commit === undefined ? await originHead(gitIn(root, undefined, selection)) : "HEAD"
   const name = (
     options.bay ??
-    (options.issue === undefined ? undefined : await implicitIssueName(gitIn(root), options.issue)) ??
+    (options.issue === undefined
+      ? undefined
+      : await implicitIssueName(gitIn(root, undefined, selection), options.issue)) ??
     (commit === undefined ? `env-${Date.now().toString(36)}` : `${commit.slice(0, 12)}-${runId()}`)
   ).trim()
   if (name === "") throw new Error("yrd: --bay needs a name")
