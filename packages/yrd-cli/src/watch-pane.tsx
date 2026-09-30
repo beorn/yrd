@@ -74,7 +74,7 @@ import {
 import type { GitObservation, JournalCommand, OverrideFact, Row, StopFact } from "@yrd/queue-core"
 import { NowProvider, useMinute, useNow } from "./watch-clock.ts"
 import {
-  RUNNING_GLYPH,
+  RUNNER_GLYPH,
   STATE_WORDS,
   clock,
   firstLine,
@@ -1259,16 +1259,18 @@ function SingleWatchPane({
     </Box>
   )
 
+  const showDetail = opened && (!isRunnerSelected || roundInFlight)
+  const isWideSplit = showDetail && tier === "right"
+
   const detailPane = (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} backgroundColor={DETAIL_BG}>
-      <Box height={1} flexShrink={0} />
+      {isWideSplit ? null : <Box height={1} flexShrink={0} />}
       {detailContent}
     </Box>
   )
 
-  const showDetail = opened && (!isRunnerSelected || roundInFlight)
   // The width the list pane gets: the whole terminal, or its share of a split.
-  const listColumns = showDetail && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) : columns
+  const listColumns = isWideSplit ? Math.floor(columns * DEFAULT_SPLIT_RATIO) : columns
   const list = (
     <ListStack snapshot={shown} paddingX={1}>
       <Table
@@ -1285,6 +1287,84 @@ function SingleWatchPane({
       />
     </ListStack>
   )
+
+  const topLines = ((shown.queues?.length ?? 0) > 1 ? shown.queues : [undefined]).map((q, idx) => {
+    const queueDigit = (shown.queues?.length ?? 0) > 1 ? idx + 1 : undefined
+    const queueAddress = q !== undefined ? `${q.label ?? shown.queue}` : formatStoredQueueAddress(shown.queue)
+    return (
+      <TopLine
+        key={`${q?.path ?? shown.queue ?? "queue"}:${q?.branch ?? ""}:${String(idx)}`}
+        queueDigit={queueDigit}
+        queue={queueAddress}
+        status={
+          statusTimer(shown, now) !== undefined || Math.max(0, now.getTime() - shown.at.getTime()) > 120_000
+            ? {
+                ...queueLineStatus(shown, now),
+                timer: <LiveStatusTimer snapshot={shown} fallback={queueLineStatus(shown, now).timer} />,
+              }
+            : queueLineStatus(shown, now)
+        }
+        columns={isWideSplit ? listColumns : columns}
+        live={live}
+        onStatusClick={pointAtRunner}
+      />
+    )
+  })
+
+  const topBar = (
+    <Box flexDirection="column" flexShrink={0} minWidth={0}>
+      {topLines}
+      <Box flexDirection="column" flexShrink={0} minWidth={0}>
+        <Box
+          height={1}
+          flexDirection="row"
+          justifyContent="space-between"
+          paddingLeft={1}
+          paddingRight={1}
+          minWidth={0}
+          overflow="hidden"
+        >
+          <Box
+            flexDirection="row"
+            flexShrink={1}
+            minWidth={0}
+            overflow="hidden"
+            onClick={() => {
+              setStatsOpen((was) => !was)
+            }}
+          >
+            <Text color="$fg-muted" wrap="truncate">
+              {statsOpen ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} STATS · {statsLine}
+            </Text>
+          </Box>
+          {terminalRows < PILLS_MIN_ROWS ? null : (
+            <StatusPills buckets={buckets} onToggle={toggleBucket} onSelectOnly={selectOnly} />
+          )}
+        </Box>
+        {statsOpen && decisions !== undefined ? (
+          <StatsBox
+            decisions={decisions}
+            columns={(isWideSplit ? listColumns : columns) - 2}
+            timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
+          />
+        ) : null}
+      </Box>
+      {shown.pause === undefined ? null : <LoudPause snapshot={shown} />}
+      {shown.journalAbsent === undefined ? null : (
+        <Text color="$fg-muted" wrap="truncate">
+          {shown.journalAbsent}
+        </Text>
+      )}
+    </Box>
+  )
+
+  const listColumn = (
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} height="100%">
+      {topBar}
+      {list}
+    </Box>
+  )
+
   const body =
     tier === "full" || !showDetail ? (
       showDetail ? (
@@ -1312,7 +1392,7 @@ function SingleWatchPane({
           dividerSize: DIVIDER_SIZE,
         })}
         dividerSize={DIVIDER_SIZE}
-        primary={list}
+        primary={listColumn}
         secondary={detailPane}
       />
     )
@@ -1320,64 +1400,14 @@ function SingleWatchPane({
   return (
     <NowProvider readAt={nowProp ?? shown.at} live={live}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {/* Line 1 (inverted): YRD, status word and the queue address left, timer right (25630, 24196). */}
-        <TopLine
-          queue={formatStoredQueueAddress(shown.queue)}
-          queues={shown.queues}
-          status={
-            statusTimer(shown, now) !== undefined || Math.max(0, now.getTime() - shown.at.getTime()) > 120_000
-              ? {
-                  ...queueLineStatus(shown, now),
-                  timer: <LiveStatusTimer snapshot={shown} fallback={queueLineStatus(shown, now).timer} />,
-                }
-              : queueLineStatus(shown, now)
-          }
-          columns={columns}
-          live={live}
-          onStatusClick={pointAtRunner}
-        />
-        {/* Line 2 (plain): STATS with fold marker, and filter toggles on that same line (25630). */}
-        <Box flexDirection="column" flexShrink={0} minWidth={0}>
-          <Box
-            height={1}
-            flexDirection="row"
-            justifyContent="space-between"
-            paddingLeft={1}
-            paddingRight={1}
-            minWidth={0}
-            overflow="hidden"
-          >
-            <Box
-              flexDirection="row"
-              flexShrink={1}
-              minWidth={0}
-              overflow="hidden"
-              onClick={() => {
-                setStatsOpen((was) => !was)
-              }}
-            >
-              <Text color="$fg-muted" wrap="truncate">
-                {statsOpen ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} STATS · {statsLine}
-              </Text>
-            </Box>
-            {terminalRows < PILLS_MIN_ROWS ? null : (
-              <StatusPills buckets={buckets} onToggle={toggleBucket} onSelectOnly={selectOnly} />
-            )}
-          </Box>
-          {statsOpen && decisions !== undefined ? (
-            <StatsBox decisions={decisions} columns={columns - 2} timeRows={terminalRows >= STATS_TIME_MIN_ROWS} />
-          ) : null}
-        </Box>
-        {shown.pause === undefined ? null : <LoudPause snapshot={shown} />}
-        {/* Where the journal was looked for, when there was none. A watch that
-            showed no running check because it had no journal to read must say
-            so, or it reads as a queue with nothing to do. */}
-        {shown.journalAbsent === undefined ? null : (
-          <Text color="$fg-muted" wrap="truncate">
-            {shown.journalAbsent}
-          </Text>
+        {isWideSplit ? (
+          body
+        ) : (
+          <>
+            {topBar}
+            {body}
+          </>
         )}
-        {body}
         {/* The loudest bottom-row fact, never hidden: a read that failed, with
             the time of the reading the table still shows. */}
         {readFailure === undefined ? null : (
@@ -1510,9 +1540,9 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
 
   if (word === "RUNNING") {
     return {
-      marker: RUNNING_GLYPH,
+      marker: RUNNER_GLYPH,
       word,
-      color: "$fg-info",
+      color: STATE_WORDS[runner.state].color,
       pulse: true,
       ...(displayTimer === undefined ? {} : { timer: displayTimer }),
     }
@@ -1532,7 +1562,7 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
         ? undefined
         : runner.holds)
   return {
-    marker: "■",
+    marker: RUNNER_GLYPH,
     word,
     color: word === "PAUSED" ? "$fg-warning" : "$fg-error",
     pulse: reason !== undefined,

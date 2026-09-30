@@ -394,6 +394,7 @@ export function WatchDetail({
                 </Tab>
               ))}
             </TabList>
+            <Box height={1} flexShrink={0} />
             {STAGE_TABS.map((stage) => (
               <TabPanel key={stage} value={stage}>
                 <StageTabPanel
@@ -475,6 +476,7 @@ export function WatchDetail({
               </Tab>
             ))}
           </TabList>
+          <Box height={1} flexShrink={0} />
           <TabPanel key={CHANGES_TAB} value={CHANGES_TAB}>
             <DetailScroll controller={changesScroll}>
               {(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? null : (
