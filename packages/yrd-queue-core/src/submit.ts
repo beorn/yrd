@@ -270,16 +270,22 @@ export async function modelMovedGitlinks(
     if (!existsSync(sourceCheckout) || !existsSync(targetCheckout)) continue
     const sourceChild = gitIn(sourceCheckout, undefined, selectionFor(git))
     const targetChild = gitIn(targetCheckout, undefined, selectionFor(git))
+    let targetHasSha = false
     try {
       await targetChild(["cat-file", "-e", `${row.sha}^{commit}`])
-      continue
+      targetHasSha = true
     } catch {
+      // silent-fallback-allow: absence in candidate checkout triggers local resolution from author checkout
+      // catch-cause-allow: absence in candidate checkout triggers local resolution from author checkout
+    }
+    if (!targetHasSha) {
+      const remote = await remoteUrl(sourceChild, "origin")
       let hasSha = false
       try {
         await sourceChild(["cat-file", "-e", `${row.sha}^{commit}`])
         hasSha = true
       } catch {
-        const remote = await remoteUrl(sourceChild, "origin")
+        // catch-cause-allow: absence in source checkout falls back to fetching from remote origin
         try {
           await sourceChild([
             "fetch",
