@@ -68,6 +68,10 @@ export default {
         // unlisted code.
         restart: "on-codes" as const,
         relaunchExitCodes: [0, 1],
+        // The loop exits 0 by itself once the tree its next launch loads holds a new pin (26755), and the
+        // supervisor relaunches it from the current landing: a self-exit bounded at 45 minutes (26774, @cto
+        // 9e7a89d2). Past that bound hab pages the move as late.
+        landingMigration: { mechanism: "self-exit" as const, bound: "45m" },
         // `HabServiceDefinition.owner` is a recognized service key in
         // ag/packages/hab-config. Spreading the registry row's owner here makes
         // every page of this service — the stopped line's and a terminal
