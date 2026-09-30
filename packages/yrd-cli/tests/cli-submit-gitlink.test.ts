@@ -640,6 +640,46 @@ describe("ordinary submit with a local-only component pin", () => {
     expect(await remoteHead(w.remote, "task/local-only-pin")).toBe((await git(["rev-parse", "HEAD"])).trim())
   }, 90_000)
 
+  /** @failure Dry-run fails with generic exit 2 on unpublished component commits (26754).
+   * @level l2 @consumer yrd submit --dry-run with an unpublished local component commit
+   */
+  it("dry-run models unpublished component commit and verifies composition without pushing (26754)", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const git = gitIn(w.work)
+    const wt = join(w.root, "dev-wt")
+    await git(["worktree", "add", "-b", "task/local-only-pin-dry-run", wt, "main"])
+    await identity(wt)
+    const wtGit = gitIn(wt)
+    await wtGit(["submodule", "update", "--init"])
+    const child = gitIn(join(wt, one.path))
+    await child(["fetch", "--quiet", one.work, one.unheld])
+    await child(["checkout", "--quiet", one.unheld])
+    await wtGit(["add", one.path])
+    await wtGit(["commit", "--quiet", "-m", "pin local component for dry run\n\nRefs: 25720"])
+
+    const pinRef = `refs/git-super/pins/${one.unheld}`
+    expect(await gitIn(join(w.root, "one.git"))(["for-each-ref", "--format=%(objectname)", pinRef])).toBe("")
+
+    const ran = await yrd(
+      wt,
+      "submit",
+      "task/local-only-pin-dry-run",
+      "--dry-run",
+      "--issue",
+      "25720",
+      "--submitter",
+      "@dev/1",
+      "--json",
+    )
+    expect(ran.exitCode, ran.report).toBe(0)
+    const receipt = JSON.parse(ran.stdout) as { dryRun: boolean; verifying: { state: string } }
+    expect(receipt.dryRun).toBe(true)
+    expect(receipt.verifying.state).toBe("verified")
+    expect(await gitIn(join(w.root, "one.git"))(["for-each-ref", "--format=%(objectname)", pinRef])).toBe("")
+    expect(await refs(w.remote)).not.toContain("task/local-only-pin-dry-run")
+  }, 90_000)
+
   /** @failure A rejected pin publication leaves a generic compose refusal, obscuring the remote and ref.
    * @level l2 @consumer yrd submit when a component remote refuses its retention ref
    */
