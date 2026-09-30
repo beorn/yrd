@@ -12,7 +12,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, type Git } from "@yrd/queue-core"
+import { createEventQueue, createEventStore, gitIn, readConfig, type Git } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
@@ -111,12 +111,96 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["branch", "task/parent"])
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "parent/child"], run.io)).not.toBe(0)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "parent/child", "--issue", "parent/child"], run.io),
+    ).not.toBe(0)
 
     expect(run.stderr()).toContain("task/parent/child")
     expect(run.stderr()).toContain("task/parent")
     expect(run.stderr()).toContain("--bay <name> --issue parent/child")
     expect(existsSync(join(w.work, ".bays", "parent/child"))).toBe(false)
+  })
+
+  /**
+   * @failure A child issue's implicit branch was nested below its parent's remote branch, so its first submit failed.
+   * @level l2 (real remote, worktree, and queue submission)
+   * @consumer a seat opening and submitting a child issue without a manual branch rename
+   */
+  it("opens a child on a flat branch and submits beside its remote-only parent branch", async () => {
+    const w = await world(":")
+    const target = (await w.git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(w.git, target, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("test target lost .yrd.yml")
+    await createEventQueue(
+      createEventStore(w.work, "origin", gitIn(w.work).selection),
+      "main",
+      target,
+      config,
+      new Date(),
+    )
+    await w.git(["push", "--quiet", "origin", "HEAD:refs/heads/task/parent"])
+    expect((await w.git(["for-each-ref", "--format=%(refname)", "refs/heads/task/parent"])).trim()).toBe("")
+
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "parent/child", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const bay = join(w.work, ".bays", "child")
+    expect(JSON.parse(opened.stdout())).toMatchObject({ path: bay, branch: "task/child" })
+    expect((await gitIn(bay)(["log", "-1", "--format=%(trailers:key=Refs,valueonly)"])).trim()).toBe("parent/child")
+
+    const submitted = capture(bay)
+    expect(
+      await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], submitted.io),
+      submitted.stderr(),
+    ).toBe(0)
+    expect((await w.git(["ls-remote", "--heads", "origin", "refs/heads/task/child"])).trim()).toContain(
+      "refs/heads/task/child",
+    )
+  })
+
+  it.each(["local", "remote"])(
+    "adopts an existing %s nested issue branch before choosing a flat name",
+    async (source) => {
+      const w = await world(":")
+      await w.git(["checkout", "--quiet", "-b", "task/parent/child"])
+      writeFileSync(join(w.work, "retained.txt"), "keep nested work\n")
+      await w.git(["add", "retained.txt"])
+      await w.git(["commit", "--quiet", "-m", "nested issue work\n\nRefs: parent/child"])
+      if (source === "remote") await w.git(["push", "--quiet", "origin", "task/parent/child"])
+      await w.git(["checkout", "--quiet", "main"])
+      const cwd = source === "local" ? w.work : join(w.work, "..", "nested-resumer")
+      if (source === "remote") {
+        const remote = (await w.git(["remote", "get-url", "origin"])).trim()
+        await w.git(["clone", "--quiet", "--branch", "main", "--single-branch", remote, cwd])
+        await gitIn(cwd)(["config", "user.email", "env-open@yrd.test"])
+        await gitIn(cwd)(["config", "user.name", "yrd"])
+      }
+      const run = capture(cwd)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "parent/child", "--json"], run.io),
+        run.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(run.stdout())).toMatchObject({ branch: "task/parent/child" })
+      const bay = join(isolateHome(w.work), "parent/child")
+      expect(readFileSync(join(bay, "retained.txt"), "utf8")).toBe("keep nested work\n")
+      expect((await w.git(["for-each-ref", "--format=%(refname)", "refs/heads/task/child"])).trim()).toBe("")
+    },
+  )
+
+  it("names the holder and --bay when two issues share a flat leaf", async () => {
+    const w = await world("touch setup-ran.txt")
+    await w.git(["checkout", "--quiet", "-b", "task/child"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind other child\n\nRefs: other/child"])
+    await w.git(["checkout", "--quiet", "main"])
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "parent/child"], run.io)).toBe(2)
+    expect(run.stderr()).toContain("parent/child")
+    expect(run.stderr()).toContain("other/child")
+    expect(run.stderr()).toContain("--bay <name>")
+    expect(existsSync(join(w.work, ".bays", "child", "setup-ran.txt"))).toBe(false)
   })
 
   it("runs the target's declared setup after materialization", async () => {

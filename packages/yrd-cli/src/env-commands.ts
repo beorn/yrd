@@ -85,6 +85,19 @@ async function resolveBaseSha(git: Git, target: string): Promise<string> {
   throw new Error(`yrd: target '${target}' is absent at both ${tracking} and the local branch`)
 }
 
+/** A former full-path branch wins for this issue; otherwise every checkout chooses the same flat leaf. */
+async function implicitIssueName(git: Git, issue: string): Promise<string> {
+  const leaf = issue.split("/").at(-1) ?? issue
+  if (leaf === issue) return issue
+  const branchRef = `refs/heads/task/${issue}`
+  if ((await refAt(git, branchRef)) !== undefined) return issue
+  const remote = (await git(["ls-remote", "--refs", "origin", branchRef])).trim()
+  if (remote === "") return leaf
+  const rows = remote.split("\n")
+  if (rows.every((row) => row.split("\t")[1] === branchRef)) return issue
+  throw new Error(`yrd env open: origin returned unexpected refs while checking ${branchRef}: ${remote}`)
+}
+
 /**
  * `yrd env open` — open an environment for one branch and keep it. Prints its
  * path on stdout, which is what a caller `cd`s into.
@@ -117,7 +130,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   const target = commit === undefined ? await originHead(gitIn(root)) : "HEAD"
   const name = (
     options.bay ??
-    options.issue ??
+    (options.issue === undefined ? undefined : await implicitIssueName(gitIn(root), options.issue)) ??
     (commit === undefined ? `env-${Date.now().toString(36)}` : `${commit.slice(0, 12)}-${runId()}`)
   ).trim()
   if (name === "") throw new Error("yrd: --bay needs a name")
@@ -194,8 +207,15 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       }
       headSha = currentHead
     } catch (error) {
+      const conflictHint =
+        options.bay === undefined &&
+        name !== options.issue &&
+        error instanceof Error &&
+        /^declared issue .* conflicts with .* bound at /u.test(error.message)
+          ? `; choose another branch with --bay <name> --issue ${options.issue}`
+          : ""
       throw new Error(
-        `issue binding failed in preserved environment ${path}; setup has not run: ${error instanceof Error ? error.message : String(error)}`,
+        `issue binding failed in preserved environment ${path}; setup has not run: ${error instanceof Error ? error.message : String(error)}${conflictHint}`,
         { cause: error },
       )
     }
