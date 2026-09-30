@@ -2,7 +2,6 @@
 import { Conflict, RetriesExhausted } from "./git.ts"
 import { listRefs, openEvents } from "./git.ts"
 import { readEventChain, readEventChains } from "./event-read.ts"
-import { EVENT_READ_LIMIT } from "./event-read.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
 import {
@@ -832,7 +831,7 @@ type EventQueueProjection = Readonly<{
   notices: Readonly<
     Record<string, Readonly<{ id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }>>
   >
-  /** Present once the chain reaches 75% of Gitomic's unpaged transact span. */
+  /** Present once the chain reaches 75% of a measured remaining limit; omitted when no limit remains. */
   writePressure?: Readonly<{
     count: number
     limit: number
@@ -917,39 +916,8 @@ export async function readEventQueue(store: QueueReadStore, queue: string): Prom
 function eventQueueFromHistory(store: QueueReadStore, queue: string, events: readonly Event[]): EventQueue {
   const ref = queueRef(queue)
   const projected = projectEventQueue(events, ref, store.repo)
-  const warningAt = Math.ceil(EVENT_READ_LIMIT * 0.75)
-  let writePressure: EventQueueProjection["writePressure"]
-  if (events.length >= warningAt) {
-    const now = Date.now()
-    const times = events.map((event) => {
-      const time = prop(event, EVENT_TRAILERS.time)
-      if (time === undefined) throw new Error(`${ref} in ${store.repo}: validated event ${event.id} lost Time:`)
-      return Date.parse(time)
-    })
-    const recent24h = times.filter((time) => time <= now && time > now - 86_400_000).length
-    const recent48h = times.filter((time) => time <= now && time > now - 172_800_000).length
-    const dailyRate = Math.max(recent24h, recent48h / 2)
-    const projectedCrossing =
-      events.length >= EVENT_READ_LIMIT
-        ? new Date(now).toISOString()
-        : dailyRate > 0
-          ? new Date(now + ((EVENT_READ_LIMIT - events.length) / dailyRate) * 86_400_000).toISOString()
-          : null
-    writePressure = {
-      count: events.length,
-      limit: EVENT_READ_LIMIT,
-      warningAt,
-      recent24h,
-      recent48h,
-      projectedCrossing,
-      ...(dailyRate > 0 || events.length >= EVENT_READ_LIMIT
-        ? {}
-        : { projectionReason: "no event growth measured in the last 48 hours; crossing date unknown" }),
-    }
-  }
   const result: EventQueue = {
     ...projected,
-    ...(writePressure === undefined ? {} : { writePressure }),
     [validatedQueue]: true,
   }
   queueLocations.set(result, { repo: store.repo, remote: store.remote, queue, backend: store.backend })

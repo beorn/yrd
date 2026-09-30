@@ -1733,7 +1733,7 @@ export async function coreQueueCommand(
       const setChainPressure = (pressure: typeof chainPressure): void => {
         if (chainPressure === undefined && pressure !== undefined) {
           log?.warn?.(
-            `queue event chain has ${pressure.count}/${pressure.limit} events; Gitomic transact reaches its cap around ${pressure.projectedCrossing ?? "an unknown date (no growth in the last 48 hours)"}`,
+            `queue event chain has ${pressure.count}/${pressure.limit} events; remaining limit reaches its cap around ${pressure.projectedCrossing ?? "an unknown date (no growth in the last 48 hours)"}`,
           )
         }
         chainPressure = pressure
