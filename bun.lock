@@ -8,7 +8,7 @@
         "@silvery/ansi": "^0.25.0",
         "@silvery/commander": "^0.25.0",
         "@silvery/scope": "^0.25.0",
-        "loggily": "github:beorn/loggily#17080119ad54f53dc58a1ac3dca16e26f49855e7",
+        "loggily": "github:beorn/loggily#ca9c2d9f4eefeb8048eb4254fae7dd4810bd8c8d",
         "react": "^19.2.0",
         "silvery": "^0.25.0",
         "zod": "4.6.5",
@@ -82,7 +82,7 @@
   "overrides": {
     "git-super": "github:beorn/git-super#f396d497491be6d6af02a6acb3b8e7c7147eccf5",
     "gitomic": "github:beorn/gitomic#9f4ac0bf560d6d5a9724d8682ab2b7b1f619ed72",
-    "loggily": "github:beorn/loggily#17080119ad54f53dc58a1ac3dca16e26f49855e7",
+    "loggily": "github:beorn/loggily#ca9c2d9f4eefeb8048eb4254fae7dd4810bd8c8d",
   },
   "packages": {
     "@bearly/flock": ["@bearly/flock@0.1.1", "", {}, "sha512-YT4E+eanXhIDIHpHqi971KX36IjcfakkAHsSo81B8Fb8mVNwyIKeb6tXTHoOgHJr/p6fjy59iu4QWeqdu9BQbA=="],
@@ -373,7 +373,7 @@
 
     "lightningcss-win32-x64-msvc": ["lightningcss-win32-x64-msvc@1.32.0", "", { "os": "win32", "cpu": "x64" }, "sha512-Amq9B/SoZYdDi1kFrojnoqPLxYhQ4Wo5XiL8EVJrVsB8ARoC1PWW6VGtT0WKCemjy8aC+louJnjS7U18x3b06Q=="],
 
-    "loggily": ["loggily@github:beorn/loggily#1708011", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-1708011", "sha512-yJt8dWkCydOinsgfd494SWXQtL6VtBg22Ewu48xYrwRqP0RKhU7lj5r7lAx4fgxXkqNRM2bx1osg88oZ7ykL0w=="],
+    "loggily": ["loggily@github:beorn/loggily#ca9c2d9", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-ca9c2d9", "sha512-G3lXYsqPSWBw0qXhZpZg7NeGihfm46Z2tiToZjKKGLaBF0HhLSbqU1Zbbtq6PVP+bz6qsmYkhyJUHZVii+hg5Q=="],
 
     "magic-string": ["magic-string@0.30.21", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.5" } }, "sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ=="],
 
