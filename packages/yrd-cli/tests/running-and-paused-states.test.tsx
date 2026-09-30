@@ -112,10 +112,10 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
 
       const status = queueLineStatus(snap, NOW)
       expect(status.word).toBe("PAUSED")
-      expect(status.marker).toBe("■")
+      expect(status.marker).toBe("▸")
 
       const text = await paint(snap)
-      expect(text).toContain("■ YRD PAUSED")
+      expect(text).toContain("▸ YRD PAUSED")
       expect(text).toContain(`paused by @chief since ${since}: maintenance window`)
       expect(text).not.toContain("IDLE")
       expect(text).not.toContain("STUCK")
@@ -150,10 +150,10 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
 
       const status = queueLineStatus(snap, NOW)
       expect(status.word).toBe("PAUSED")
-      expect(status.marker).toBe("■")
+      expect(status.marker).toBe("▸")
 
       const text = await paint(snap)
-      expect(text).toContain("■ YRD PAUSED")
+      expect(text).toContain("▸ YRD PAUSED")
       expect(text).toContain(`paused since ${since}: stuck on task/bad@${"b".repeat(40)}`)
       expect(text).not.toContain("IDLE")
       expect(text).not.toContain("STUCK")
@@ -172,10 +172,10 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
 
         const status = queueLineStatus(snap, NOW)
         expect(status.word).toBe("RUNNING")
-        expect(status.marker).toBe("◉")
+        expect(status.marker).toBe("▸")
 
         const text = await paint(snap)
-        expect(text).toContain("◉ YRD RUNNING")
+        expect(text).toContain("▸ YRD QUEUE")
         expect(text).not.toContain("IDLE")
         expect(text).not.toContain("STUCK")
       })
@@ -192,10 +192,10 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
 
         const status = queueLineStatus(snap, NOW)
         expect(status.word).toBe("RUNNING")
-        expect(status.marker).toBe("◉")
+        expect(status.marker).toBe("▸")
 
         const text = await paint(snap)
-        expect(text).toContain("◉ YRD RUNNING")
+        expect(text).toContain("▸ YRD QUEUE")
         expect(text).not.toContain("IDLE")
         expect(text).not.toContain("STUCK")
       })
@@ -213,12 +213,12 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         expect(status.word, "ruled (693b0a69): STOPPED with detail unless a beating service or a live run").toBe(
           "STOPPED",
         )
-        expect(status.marker).toBe("■")
+        expect(status.marker).toBe("▸")
         expect(status.color).toBe("$fg-error")
         expect(status.reason).toBeUndefined()
 
         const text = await paint(snap)
-        expect(text).toContain("■ YRD STOPPED")
+        expect(text).toContain("▸ YRD STOPPED")
       })
 
       it("case 4 (dead run): queue line shows STOPPED without detail (25556)", async () => {
@@ -235,12 +235,12 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
         expect(status.word, "ruled (693b0a69): STOPPED with detail unless a beating service or a live run").toBe(
           "STOPPED",
         )
-        expect(status.marker).toBe("■")
+        expect(status.marker).toBe("▸")
         expect(status.color).toBe("$fg-error")
         expect(status.reason).toBeUndefined()
 
         const text = await paint(snap)
-        expect(text).toContain("■ YRD STOPPED")
+        expect(text).toContain("▸ YRD STOPPED")
       })
 
       it("case 5 (recorded stop reason): queue line shows STOPPED with recorded stop reason (25556)", async () => {
@@ -260,12 +260,12 @@ describe("25367 fix-forward: yrd PAUSED state and pause/resume verbs", () => {
 
         const status = queueLineStatus(snap, NOW)
         expect(status.word).toBe("STOPPED")
-        expect(status.marker).toBe("■")
+        expect(status.marker).toBe("▸")
         expect(status.color).toBe("$fg-error")
         expect(status.reason).toBe("maintenance in progress")
 
         const text = await paint(snap)
-        expect(text).toContain("■ YRD STOPPED")
+        expect(text).toContain("▸ YRD STOPPED")
         expect(text).toContain("maintenance in progress")
       })
 
