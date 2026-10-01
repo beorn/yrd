@@ -1712,7 +1712,13 @@ function Table({
               const item = items[index]
               if (item === undefined) return 1
               if (item.kind === "queue") return 1
-              if (item.kind === "runner") return 5
+              if (item.kind === "runner") {
+                const prevIsRunner = index > 0 && items[index - 1]?.kind === "runner"
+                const nextIsRunner = index + 1 < items.length && items[index + 1]?.kind === "runner"
+                const marginTop = prevIsRunner ? 0 : 1
+                const marginBottom = nextIsRunner ? 0 : 1
+                return 3 + marginTop + marginBottom
+              }
               const rowIndex = rows.indexOf(item.item)
               return (separatorBefore(rows, rowIndex) === undefined ? 1 : 2) + bandHeight(plan.before.get(rowIndex))
             }}
@@ -1736,6 +1742,8 @@ function Table({
                 label: itemSnapshot.queues[0]?.label ?? itemSnapshot.queue,
               }
               if (item.kind === "runner") {
+                const prevIsRunner = index > 0 && items[index - 1]?.kind === "runner"
+                const nextIsRunner = index + 1 < items.length && items[index + 1]?.kind === "runner"
                 return (
                   <RunnerTitledBox
                     line={item.line}
@@ -1744,6 +1752,8 @@ function Table({
                     cursor={index === cursor}
                     queueDigit={itemQueue.digit}
                     queueLabel={itemQueue.label}
+                    marginTop={prevIsRunner ? 0 : 1}
+                    marginBottom={nextIsRunner ? 0 : 1}
                   />
                 )
               }

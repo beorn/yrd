@@ -343,8 +343,20 @@ describe("26243: watch uses one clock format, one duration format and plain word
     const t3Line = app.lines.findIndex((l) => l.includes("task/q1-oldest"))
 
     expect(r1Line).toBeGreaterThanOrEqual(0)
-    expect(r2Line).toBeGreaterThan(r1Line)
-    expect(t1Line).toBeGreaterThan(r2Line)
+    expect(r2Line).toBe(r1Line + 3)
+
+    // Stacked RUNNER boxes have 0 blank rows between them (bottom border line directly precedes top border line)
+    expect(app.lines[r1Line + 2]).toContain("╰")
+    expect(app.lines[r1Line + 3]).toContain("╭")
+
+    // Queue 2's runner line displays its own queue ref (refs/yrd/queue2/runner), not main
+    expect(app.lines[r2Line + 1]).toContain("refs/yrd/queue2/runner")
+    expect(app.lines[r2Line + 1]).not.toContain("refs/yrd/main/runner")
+
+    // Exactly 1 blank row after the last RUNNER box before the task list
+    expect(app.lines[r2Line + 2]).toContain("╰")
+    expect(app.lines[r2Line + 3]?.trim()).toBe("")
+    expect(t1Line).toBe(r2Line + 4)
     expect(t2Line).toBeGreaterThan(t1Line)
     expect(t3Line).toBeGreaterThan(t2Line)
 
@@ -360,8 +372,13 @@ describe("26243: watch uses one clock format, one duration format and plain word
     writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5.layout.txt", debugTree(app.getContainer()))
     writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5.ansi", ansi)
     writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5.png", await renderAnsiPng(ansi, size))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5b.layout.txt", debugTree(app.getContainer()))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5b.ansi", ansi)
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5b.png", await renderAnsiPng(ansi, size))
     writeCaptureIfConfigured("yrd-watch-live-round5.ansi", ansi)
     writeCaptureIfConfigured("yrd-watch-live-round5.png", await renderAnsiPng(ansi, size))
+    writeCaptureIfConfigured("yrd-watch-live-round5b.ansi", ansi)
+    writeCaptureIfConfigured("yrd-watch-live-round5b.png", await renderAnsiPng(ansi, size))
 
     app.unmount()
   })

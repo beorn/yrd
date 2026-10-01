@@ -256,6 +256,11 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
       "260927-yrd-watch-25557-stage-tabs-round5.png",
       await renderAnsiScreenshot(ansi, { cols: 220, rows: 40 }),
     )
+    writeCaptureIfConfigured("260927-yrd-watch-25557-stage-tabs-round5b.ansi", ansi)
+    writeCaptureIfConfigured(
+      "260927-yrd-watch-25557-stage-tabs-round5b.png",
+      await renderAnsiScreenshot(ansi, { cols: 220, rows: 40 }),
+    )
 
     app.unmount()
   })

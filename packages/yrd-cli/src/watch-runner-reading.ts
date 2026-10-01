@@ -5,7 +5,7 @@
  * derivation as the page.
  */
 
-import type { Row, StopFact } from "@yrd/queue-core"
+import { parseQueueKey, type Row, type StopFact } from "@yrd/queue-core"
 import { runnerLine, type RunnerFacts, type RunnerLine } from "./watch-runner.ts"
 import type { WatchRow } from "./watch-rows.ts"
 
@@ -13,6 +13,8 @@ export type RunnerReading = Readonly<{
   unfiltered: readonly WatchRow[]
   runner?: RunnerFacts
   stopped?: StopFact | null
+  queue?: string
+  queues?: readonly { branch: string }[]
 }>
 
 /**
@@ -61,9 +63,30 @@ export function runnerOf(snapshot: RunnerReading, now: Date): RunnerLine {
           }
         : undefined
 
+  function queueBranchOf(reading: RunnerReading): string | undefined {
+    if (reading.queues !== undefined && reading.queues.length > 0 && reading.queues[0]?.branch) {
+      return reading.queues[0].branch
+    }
+    if (reading.queue !== undefined && reading.queue !== "") {
+      try {
+        return parseQueueKey(reading.queue).branch
+      } catch {
+        const sep = Math.max(reading.queue.lastIndexOf("#"), reading.queue.lastIndexOf("@"))
+        if (sep >= 0 && sep < reading.queue.length - 1) {
+          return reading.queue.slice(sep + 1)
+        }
+        return reading.queue
+      }
+    }
+    return undefined
+  }
+
+  const queue = queueBranchOf(snapshot)
+
   return runnerLine(snapshot.runner, now, {
     ...(heldChange === undefined ? {} : { held: heldChange }),
     ...(snapshot.stopped === undefined ? {} : { stopped: snapshot.stopped }),
+    ...(queue === undefined ? {} : { queue }),
     waiting: waiting.length,
   })
 }
