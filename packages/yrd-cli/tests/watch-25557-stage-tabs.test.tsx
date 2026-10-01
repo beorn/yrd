@@ -430,4 +430,69 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
 
     app.unmount()
   })
+
+  it("exactly one blank line between the RUNNER block and the stage tabs (operator round 3, Telegram 4b8cefe0)", async () => {
+    const startedAt = new Date(NOW.getTime() - 15_000)
+    const composeStart = startedAt
+    const composeEnd = new Date(startedAt.getTime() + 8_000)
+    const prepareStart = composeEnd
+
+    const snapshot = baseSnapshot({
+      runner: {
+        journalDir: "/w/logs",
+        service: { kind: "beating", state: "healthy" },
+        latest: {
+          id: "run-live-1",
+          number: 408,
+          startedAt,
+          lastWriteAt: NOW,
+          alive: true,
+          checks: ["lint", "unit"],
+          effectiveChecks: ["lint", "unit"],
+          activeStep: {
+            kind: "step",
+            name: "prepare",
+            phase: "provisioning",
+            start: prepareStart,
+          },
+          steps: [
+            {
+              kind: "step",
+              name: "compose",
+              phase: "provisioning",
+              start: composeStart,
+              end: composeEnd,
+            },
+            {
+              kind: "step",
+              name: "prepare",
+              phase: "provisioning",
+              start: prepareStart,
+            },
+          ],
+        },
+      },
+    })
+
+    const app = render(<WatchDetail runnerSnapshot={snapshot} />, { cols: 120, rows: 30 })
+    await settle(app)
+
+    const runnerLastLineIdx = app.lines.findIndex((l) => l.includes("Detail:"))
+    expect(runnerLastLineIdx).toBeGreaterThanOrEqual(0)
+    const tabsTextIdx = app.lines.findIndex((l) => l.includes("provisioning") && l.includes("checking"))
+    expect(tabsTextIdx).toBeGreaterThan(runnerLastLineIdx)
+
+    // Filled tabs start 1 row above the label text (silvery filled tabs have 1 line top padding with non-null bg)
+    const colProvisioning = app.lines[tabsTextIdx]!.indexOf("provisioning")
+    const tabsTopIdx = tabsTextIdx - 1
+    expect(app.cell(colProvisioning, tabsTopIdx).bg).not.toBeNull()
+
+    // Exactly one blank line between the RUNNER block (Detail:) and the stage tabs:
+    const betweenLines = app.lines.slice(runnerLastLineIdx + 1, tabsTopIdx)
+    expect(betweenLines).toHaveLength(1)
+    expect(betweenLines[0]?.trim()).toBe("")
+    expect(app.cell(colProvisioning, runnerLastLineIdx + 1).bg).toBeNull()
+
+    app.unmount()
+  })
 })

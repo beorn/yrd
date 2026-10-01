@@ -380,7 +380,6 @@ export function WatchDetail({
               ) : null}
             </Box>
           </Box>
-          <Box height={1} flexShrink={0} />
           <Tabs
             variant="filled"
             value={tab}
