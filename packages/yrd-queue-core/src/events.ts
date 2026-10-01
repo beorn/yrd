@@ -2,7 +2,6 @@
 import { Conflict, RetriesExhausted } from "./git.ts"
 import { listRefs, openEvents } from "./git.ts"
 import { readEventChain, readEventChains } from "./event-read.ts"
-import { EVENT_READ_LIMIT } from "./event-read.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
 import {
@@ -82,6 +81,45 @@ const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 export const QUEUE_RUN_WRITER = "yrd-run"
 /** Producer named by every state-neutral adoption of an old-format ending. */
 export const YRD_ADOPTER_WRITER = "yrd-adopter"
+
+/**
+ * Raised when an event on a queue chain cannot be decoded or validated because
+ * the reading CLI does not recognize the event type, snapshot format, or writer
+ * validation rule written by a newer queue runner.
+ */
+export class QueueEventShapeUnreadable extends Error {
+  readonly ref: string
+  readonly eventId?: string
+  readonly eventType?: string
+
+  constructor(message: string, options?: { ref?: string; eventId?: string; eventType?: string; cause?: unknown }) {
+    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined)
+    this.name = "QueueEventShapeUnreadable"
+    this.ref = options?.ref ?? ""
+    this.eventId = options?.eventId
+    this.eventType = options?.eventType
+  }
+}
+
+export function isQueueEventShapeUnreadable(error: unknown): error is QueueEventShapeUnreadable {
+  if (
+    error instanceof QueueEventShapeUnreadable ||
+    (error instanceof Error && error.name === "QueueEventShapeUnreadable")
+  ) {
+    return true
+  }
+  if (error instanceof Error) {
+    return (
+      error.message.includes("unknown queue event") ||
+      /merge-fenced event [0-9a-f]+ needs writer/u.test(error.message) ||
+      /merge-fenced event [0-9a-f]+ needs ops-cutover/u.test(error.message) ||
+      /merge-fenced event [0-9a-f]+ changed effective ops state/u.test(error.message) ||
+      /unknown Ops: version/u.test(error.message) ||
+      error.message.includes("unknown Yrd change event")
+    )
+  }
+  return false
+}
 
 export const CHANGE_EVENT_TYPES = [
   "opened",
@@ -759,7 +797,10 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       return unignored
     }
     default:
-      throw new Error(`unknown Yrd change event ${event.type} at ${event.id}`)
+      throw new QueueEventShapeUnreadable(`unknown Yrd change event ${event.type} at ${event.id}`, {
+        eventId: event.id,
+        eventType: event.type,
+      })
   }
 }
 
@@ -832,7 +873,7 @@ type EventQueueProjection = Readonly<{
   notices: Readonly<
     Record<string, Readonly<{ id: string; for: string; to: string; result: NoticeWrite["result"]; reason?: string }>>
   >
-  /** Present once the chain reaches 75% of Gitomic's unpaged transact span. */
+  /** Present once the chain reaches 75% of a measured remaining limit; omitted when no limit remains. */
   writePressure?: Readonly<{
     count: number
     limit: number
@@ -917,39 +958,8 @@ export async function readEventQueue(store: QueueReadStore, queue: string): Prom
 function eventQueueFromHistory(store: QueueReadStore, queue: string, events: readonly Event[]): EventQueue {
   const ref = queueRef(queue)
   const projected = projectEventQueue(events, ref, store.repo)
-  const warningAt = Math.ceil(EVENT_READ_LIMIT * 0.75)
-  let writePressure: EventQueueProjection["writePressure"]
-  if (events.length >= warningAt) {
-    const now = Date.now()
-    const times = events.map((event) => {
-      const time = prop(event, EVENT_TRAILERS.time)
-      if (time === undefined) throw new Error(`${ref} in ${store.repo}: validated event ${event.id} lost Time:`)
-      return Date.parse(time)
-    })
-    const recent24h = times.filter((time) => time <= now && time > now - 86_400_000).length
-    const recent48h = times.filter((time) => time <= now && time > now - 172_800_000).length
-    const dailyRate = Math.max(recent24h, recent48h / 2)
-    const projectedCrossing =
-      events.length >= EVENT_READ_LIMIT
-        ? new Date(now).toISOString()
-        : dailyRate > 0
-          ? new Date(now + ((EVENT_READ_LIMIT - events.length) / dailyRate) * 86_400_000).toISOString()
-          : null
-    writePressure = {
-      count: events.length,
-      limit: EVENT_READ_LIMIT,
-      warningAt,
-      recent24h,
-      recent48h,
-      projectedCrossing,
-      ...(dailyRate > 0 || events.length >= EVENT_READ_LIMIT
-        ? {}
-        : { projectionReason: "no event growth measured in the last 48 hours; crossing date unknown" }),
-    }
-  }
   const result: EventQueue = {
     ...projected,
-    ...(writePressure === undefined ? {} : { writePressure }),
     [validatedQueue]: true,
   }
   queueLocations.set(result, { repo: store.repo, remote: store.remote, queue, backend: store.backend })
@@ -1458,14 +1468,25 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
         break
       case "merge-fenced": {
         if (opsCutover === undefined || ops === undefined) {
-          throw new Error(`${ref}: merge-fenced event ${event.id} needs ops-cutover`)
+          throw new QueueEventShapeUnreadable(`${ref}: merge-fenced event ${event.id} needs ops-cutover`, {
+            ref,
+            eventId: event.id,
+            eventType: event.type,
+          })
         }
         const next = readOpsEvent(event, ref)
         if (encodeOps(next) !== encodeOps(ops)) {
-          throw new Error(`${ref}: merge-fenced event ${event.id} changed effective ops state`)
+          throw new QueueEventShapeUnreadable(`${ref}: merge-fenced event ${event.id} changed effective ops state`, {
+            ref,
+            eventId: event.id,
+            eventType: event.type,
+          })
         }
         if (event.writer !== QUEUE_RUN_WRITER) {
-          throw new Error(`${ref}: merge-fenced event ${event.id} needs writer ${QUEUE_RUN_WRITER}`)
+          throw new QueueEventShapeUnreadable(
+            `${ref}: merge-fenced event ${event.id} needs writer ${QUEUE_RUN_WRITER}`,
+            { ref, eventId: event.id, eventType: event.type },
+          )
         }
         const merged = requiredProp(event, EVENT_TRAILERS.for)
         if (!COMMIT_OID.test(merged) || !event.links.includes(merged)) {
@@ -1555,7 +1576,11 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
         break
       }
       default:
-        throw new Error(`${ref}: unknown queue event ${event.type} at ${event.id}`)
+        throw new QueueEventShapeUnreadable(`${ref}: unknown queue event ${event.type} at ${event.id}`, {
+          ref,
+          eventId: event.id,
+          eventType: event.type,
+        })
     }
     previous = event.id
   }
@@ -1576,9 +1601,24 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
 function readOpsEvent(event: QueueEventShape, ref: string): OpsState {
   const values = event.props.filter(([name]) => name === "Ops").map(([, value]) => value)
   if (values.length !== 1) {
-    throw new Error(`${ref}: ${event.type} event ${event.id} needs exactly one complete Ops: snapshot`)
+    throw new QueueEventShapeUnreadable(
+      `${ref}: ${event.type} event ${event.id} needs exactly one complete Ops: snapshot`,
+      { ref, eventId: event.id, eventType: event.type },
+    )
   }
-  return decodeOps(values[0] ?? "", event.id, `${ref}: ${event.type} event ${event.id}`)
+  try {
+    return decodeOps(values[0] ?? "", event.id, `${ref}: ${event.type} event ${event.id}`)
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("unknown Ops: version")) {
+      throw new QueueEventShapeUnreadable(error.message, {
+        ref,
+        eventId: event.id,
+        eventType: event.type,
+        cause: error,
+      })
+    }
+    throw error
+  }
 }
 
 function validateOverrideEvent(event: QueueEventShape, before: OpsState, after: OpsState, ref: string): void {

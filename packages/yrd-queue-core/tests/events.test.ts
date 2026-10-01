@@ -2364,34 +2364,50 @@ describe("the queue-format boundary", () => {
     expect(listed.get(ref)?.[0]?.id).toBe(first)
   })
 
-  it("reports event-chain pressure at three quarters of Gitomic's write cap", async () => {
-    const { store, location } = remoteMemStore("yrd-chain-pressure")
+  it("omits event-chain pressure when no write cap remains, and succeeds on 1025-event chains (#26760)", async () => {
+    const { store, location } = remoteMemStore("yrd-chain-over-1024")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
     let tip = await seedEventQueue(location, "lab", commit, new Date(Date.now() - 60_000))
     const chain = await openEvents({ ...store, ref: queueRef("lab") })
-    const append = async (): Promise<void> => {
+    const nowIso = new Date().toISOString()
+    for (let i = 0; i < 1024; i++) {
       const written = await chain.append(
         [
           {
             type: "started",
             props: [
               ["Queue", tip],
-              ["Time", new Date().toISOString()],
+              ["Time", nowIso],
             ],
           },
         ],
         { expect: tip },
       )
-      if (written.head === null) throw new Error("fixture start event was not written")
+      if (written.head === null) throw new Error("fixture event was not written")
       tip = written.head
     }
-    for (let i = 0; i < 766; i++) await append()
-    expect((await readEventQueue(location, "lab")).writePressure).toBeUndefined()
-    await append()
-    const pressure = (await readEventQueue(location, "lab")).writePressure
-    expect(pressure).toMatchObject({ count: 768, limit: 1024, warningAt: 768 })
-    expect(Date.parse(pressure?.projectedCrossing ?? "")).toBeGreaterThan(Date.now())
+
+    // 1025 total events in the queue
+    const queue = await readEventQueue(location, "lab")
+    expect(queue.tip).toBe(tip)
+    // No Gitomic transact write cap exists, so writePressure must be omitted rather than reporting a false 1024 cap
+    expect(queue.writePressure).toBeUndefined()
+
+    // Subsequent write past 1024 events still succeeds
+    const nextWrite = await chain.append(
+      [
+        {
+          type: "started",
+          props: [
+            ["Queue", tip],
+            ["Time", new Date().toISOString()],
+          ],
+        },
+      ],
+      { expect: tip },
+    )
+    expect(nextWrite.head).not.toBeNull()
   })
 
   it("ignores and unignores only an existing open change with a reason and actor", async () => {

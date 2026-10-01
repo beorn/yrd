@@ -27,8 +27,8 @@ import { useNow } from "./watch-clock.ts"
 import { STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.ts"
 import type { RunnerState } from "./watch-words.ts"
 import { RunnerRow, clockOf, type ListLayout } from "./watch-list.tsx"
-import { TitledBox } from "./watch-primitives.tsx"
 import { lineOf, runnerOf } from "./watch-runner-reading.ts"
+import { TitledBox } from "./watch-primitives.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import type { WatchRow } from "./watch-rows.ts"
 import { formatStoredQueueAddress } from "./address.ts"
@@ -294,6 +294,8 @@ export function RunnerTitledBox({
   cursor = false,
   queueDigit = 1,
   queueLabel = "main",
+  marginTop = 1,
+  marginBottom = 1,
 }: {
   line: ReturnType<typeof runnerOf>
   _snapshot?: WatchSnapshot
@@ -302,6 +304,8 @@ export function RunnerTitledBox({
   cursor?: boolean
   queueDigit?: number
   queueLabel?: string
+  marginTop?: number
+  marginBottom?: number
 }) {
   const snap = snapshot ?? _snapshot
   const now = useNow()
@@ -311,7 +315,7 @@ export function RunnerTitledBox({
   const queueUrl = snap?.queue === undefined ? undefined : formatStoredQueueAddress(snap.queue)
   const readFailure = snap?.runner?.service.kind === "beating" ? snap.runner.service.readFailure : undefined
   return (
-    <Box flexDirection="column" marginTop={1} marginBottom={1}>
+    <Box flexDirection="column" marginTop={marginTop} marginBottom={marginBottom} minWidth={0} width="100%">
       <TitledBox title={STATE_WORDS.runner.word} titleSuffix={queueUrl} flushTop borderColor={color}>
         <RunnerRow line={activeLine} layout={layout} cursor={cursor} queueDigit={queueDigit} queueLabel={queueLabel} />
         {readFailure === undefined ? null : (

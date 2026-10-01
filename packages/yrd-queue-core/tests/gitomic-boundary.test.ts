@@ -72,7 +72,9 @@ describe("the Yrd Gitomic boundary", () => {
       "publication.ts": ["push"],
       "reference.ts": ["update-ref", "fetch", "ls-remote"],
       "settled-base.ts": ["fetch"],
-      "submit.ts": ["fetch", "push"],
+      // Submit's gitlink retention publication (25570) publishes component pins
+      // to refs/git-super/pins, and modelMovedGitlinks models moved gitlinks during compose verification (26754).
+      "submit.ts": ["fetch", "push", "fetch"],
     })
 
     for (const name of ["git.ts", "pause.ts", "remote.ts", "withdraw.ts"]) {
@@ -82,7 +84,8 @@ describe("the Yrd Gitomic boundary", () => {
     const submit = source("submit.ts")
     const [gitlinkPublication, queueSubmission] = submit.split("export type SubmitInspection")
     // The retention ref is read by name through readRemoteCommit (25570), never an ls-remote.
-    expect(refCommands(gitlinkPublication ?? ""), "gitlink retention publication").toEqual(["fetch", "push"])
+    // modelMovedGitlinks (26754) fetches an unpublished component commit from origin if missing in author checkout.
+    expect(refCommands(gitlinkPublication ?? ""), "gitlink retention publication").toEqual(["fetch", "push", "fetch"])
     expect(refCommands(queueSubmission ?? ""), "queue submission").toEqual([])
 
     // The run's one fetch (the composing checkout's commit) lives in settled-base.ts.

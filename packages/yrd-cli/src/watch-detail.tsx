@@ -272,6 +272,7 @@ export function runnerDetailFromSnapshot(snapshot: WatchSnapshot, now: Date): Ch
     run: {
       kind: "queue",
       id: latest?.id ?? "run",
+      number: latest?.number,
       label: formatStoredQueueAddress(snapshot.queue),
       row,
       steps: stepsOf(checks, row),
@@ -359,13 +360,14 @@ export function WatchDetail({
     return (
       <DetailScroll controller={runnerScroll}>
         <Box flexDirection="column" minWidth={0} paddingX={1} gap={1}>
-          <Box flexDirection="column" minWidth={0}>
+          <Box flexDirection="column" minWidth={0} borderStyle="round" borderColor={color} paddingX={1}>
             <Box flexDirection="row" gap={1}>
               <Text bold color={color}>
                 {RUNNER_GLYPH} RUNNER {STATE_WORDS[runner.state].word}
               </Text>
               {runner.duration ? <Text color="$fg-muted">({runner.duration})</Text> : null}
             </Box>
+            <Box height={1} flexShrink={0} />
             <Box flexDirection="column">
               <Text color="$fg-muted">
                 Queue: <Text color="$fg">{runnerSnapshot.queue}</Text>
@@ -379,7 +381,6 @@ export function WatchDetail({
               ) : null}
             </Box>
           </Box>
-          <Box height={1} flexShrink={0} />
           <Tabs
             variant="filled"
             value={tab}
@@ -394,6 +395,7 @@ export function WatchDetail({
                 </Tab>
               ))}
             </TabList>
+            <Box height={1} flexShrink={0} />
             {STAGE_TABS.map((stage) => (
               <TabPanel key={stage} value={stage}>
                 <StageTabPanel
@@ -475,6 +477,7 @@ export function WatchDetail({
               </Tab>
             ))}
           </TabList>
+          <Box height={1} flexShrink={0} />
           <TabPanel key={CHANGES_TAB} value={CHANGES_TAB}>
             <DetailScroll controller={changesScroll}>
               {(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? null : (
@@ -563,6 +566,9 @@ function provisioningStageInfo(detail: ChangeDetail): StageInfoResult {
   const compose = steps.find((s) => s.name === "compose")
   const prepare = steps.find((s) => s.name === "prepare")
   if (compose === undefined && prepare === undefined) {
+    if (detail.row.live?.phase === "provisioning") {
+      return { since: detail.row.live.since, state: "running" }
+    }
     return { said: " not recorded", state: "not-run" }
   }
   const threw = compose?.threw === true || prepare?.threw === true
@@ -581,7 +587,7 @@ function provisioningStageInfo(detail: ChangeDetail): StageInfoResult {
         : ms > 0
           ? ` ${mediaDuration(ms)}`
           : " passed",
-    since: running ? (compose?.startedAt ?? prepare?.startedAt) : undefined,
+    since: running ? (compose?.startedAt ?? prepare?.startedAt ?? detail.row.live?.since) : undefined,
     state,
   }
 }
@@ -791,6 +797,37 @@ function StageTabPanel({
   )
 }
 
+function StageStepLine({
+  state,
+  name,
+  duration,
+  since,
+  detailText,
+}: {
+  state: CheckView["state"]
+  name: string
+  duration?: number
+  since?: Date
+  detailText?: string
+}) {
+  const glyph = CHECK_GLYPH[state] ?? "−"
+  const color = CHECK_COLOR[state] ?? "$fg-muted"
+  return (
+    <Box flexDirection="row" minWidth={0}>
+      <Text color={color} bold>
+        {glyph}
+      </Text>
+      <Text bold> {name}</Text>
+      {since !== undefined ? (
+        <RunningFor since={since} />
+      ) : duration !== undefined ? (
+        <Text color="$fg-muted"> {mediaDuration(duration)}</Text>
+      ) : null}
+      {detailText !== undefined ? <Text color="$fg-muted"> — {detailText}</Text> : null}
+    </Box>
+  )
+}
+
 function ProvisioningStageBody({ detail, outputs }: { detail: ChangeDetail; outputs: ReadonlyMap<string, DiffText> }) {
   const steps = detail.journal?.steps ?? []
   const roundCommands = detail.journal?.commands ?? []
@@ -802,15 +839,47 @@ function ProvisioningStageBody({ detail, outputs }: { detail: ChangeDetail; outp
 
   const composingCommands = [...roundCommands, ...(readStep?.commands ?? []), ...(composeStep?.commands ?? [])]
 
+  const isComposingRunning =
+    (composeStep !== undefined && composeStep.endedAt === undefined && composeStep.unended !== true) ||
+    detail.row.live?.check === "compose" ||
+    (detail.row.live?.phase === "provisioning" && prepareStep === undefined && composeStep?.endedAt === undefined)
+
+  const composingState: CheckView["state"] =
+    composeStep?.threw === true
+      ? "failed"
+      : isComposingRunning
+        ? "running"
+        : composeStep !== undefined
+          ? "passed"
+          : "not-run"
+
+  const isPreparingRunning =
+    !checksOff &&
+    ((prepareStep !== undefined && prepareStep.endedAt === undefined && prepareStep.unended !== true) ||
+      detail.row.live?.check === "prepare" ||
+      (detail.row.live?.phase === "provisioning" &&
+        composeStep?.endedAt !== undefined &&
+        prepareStep?.endedAt === undefined))
+
+  const preparingState: CheckView["state"] = checksOff
+    ? "off"
+    : prepareStep?.threw === true
+      ? "failed"
+      : isPreparingRunning
+        ? "running"
+        : prepareStep !== undefined
+          ? "passed"
+          : "not-run"
+
   return (
-    <Box flexDirection="column" minWidth={0} gap={1}>
-      {/* Subphase 1: composing (the scratch worktree and the git-super merge result) */}
+    <Box flexDirection="column" minWidth={0}>
       <Box flexDirection="column" minWidth={0}>
-        <Text bold color="$fg-info">
-          COMPOSING
-          {composeStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(composeStep.ms)}</Text> : null}
-        </Text>
-        <Text color="$fg-muted">scratch worktree and git-super merge result</Text>
+        <StageStepLine
+          state={composingState}
+          name="composing"
+          duration={composeStep?.ms}
+          since={isComposingRunning ? (composeStep?.startedAt ?? detail.row.live?.since) : undefined}
+        />
         {composingCommands.length > 0 ? (
           <CommandsList commands={composingCommands} step={composeStep} outputs={outputs} />
         ) : null}
@@ -819,24 +888,16 @@ function ProvisioningStageBody({ detail, outputs }: { detail: ChangeDetail; outp
             {part.name} {mediaDuration(part.ms)}
           </Text>
         ))}
-        {composeStep !== undefined && composeStep.endedAt === undefined && composeStep.unended !== true ? (
-          <Text color="$fg-info">still writing</Text>
-        ) : null}
       </Box>
 
-      <Box height={1} flexShrink={0} />
-
-      {/* Subphase 2: preparing (the check worktree and its setup log) */}
       <Box flexDirection="column" minWidth={0}>
-        <Text bold color={checksOff ? "$fg-muted" : "$fg-info"}>
-          PREPARING
-          {checksOff ? (
-            <Text color="$fg-muted"> — skipped (all declared checks off)</Text>
-          ) : prepareStep?.ms !== undefined ? (
-            <Text color="$fg-muted"> · {mediaDuration(prepareStep.ms)}</Text>
-          ) : null}
-        </Text>
-        <Text color="$fg-muted">check worktree and setup log</Text>
+        <StageStepLine
+          state={preparingState}
+          name="preparing"
+          duration={checksOff ? undefined : prepareStep?.ms}
+          since={isPreparingRunning ? (prepareStep?.startedAt ?? detail.row.live?.since) : undefined}
+          detailText={checksOff ? "skipped (all declared checks off)" : undefined}
+        />
         {!checksOff && prepareStep?.commands !== undefined && prepareStep.commands.length > 0 ? (
           <CommandsList commands={prepareStep.commands} step={prepareStep} outputs={outputs} />
         ) : null}
@@ -947,7 +1008,6 @@ function CheckingStageBody({ detail, selectedSubIndex }: { detail: ChangeDetail;
       {/* Subphase 2: attributing (the base re-run after a failure) */}
       {baseChecks.length > 0 ? (
         <Box flexDirection="column" minWidth={0}>
-          <Box height={1} flexShrink={0} />
           <Text bold color="$fg-info">
             ATTRIBUTING (base re-run after failure)
           </Text>
@@ -971,7 +1031,6 @@ function CheckingStageBody({ detail, selectedSubIndex }: { detail: ChangeDetail;
       {/* Subphase 3: deferring (handed to the long tier) */}
       {deferredChecks.length > 0 ? (
         <Box flexDirection="column" minWidth={0}>
-          <Box height={1} flexShrink={0} />
           <Text bold color="$fg-warning">
             DEFERRING
           </Text>
@@ -989,48 +1048,71 @@ function MergingStageBody({ detail, outputs }: { detail: ChangeDetail; outputs: 
   const notifyStep = steps.find((s) => s.name === "notify")
   const mergeCommit = detail.row.merge ?? detail.journal?.merge
 
+  const isPublishRunning = publishStep !== undefined && publishStep.endedAt === undefined
+  const publishState: CheckView["state"] =
+    publishStep?.threw === true
+      ? "failed"
+      : isPublishRunning
+        ? "running"
+        : publishStep !== undefined
+          ? "passed"
+          : "not-run"
+
+  const isMergeRunning = mergeStep !== undefined && mergeStep.endedAt === undefined
+  const mergeState: CheckView["state"] =
+    mergeStep?.threw === true ? "failed" : isMergeRunning ? "running" : mergeStep !== undefined ? "passed" : "not-run"
+
+  const isNotifyRunning = notifyStep !== undefined && notifyStep.endedAt === undefined
+  const notifyState: CheckView["state"] =
+    notifyStep?.threw === true
+      ? "failed"
+      : isNotifyRunning
+        ? "running"
+        : notifyStep !== undefined
+          ? "passed"
+          : "not-run"
+
   return (
-    <Box flexDirection="column" minWidth={0} gap={1}>
-      {/* Subphase 1: publishing components */}
+    <Box flexDirection="column" minWidth={0}>
       <Box flexDirection="column" minWidth={0}>
-        <Text bold color="$fg-info">
-          PUBLISHING COMPONENTS
-          {publishStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(publishStep.ms)}</Text> : null}
-        </Text>
+        <StageStepLine
+          state={publishState}
+          name="publishing components"
+          duration={publishStep?.ms}
+          since={isPublishRunning ? publishStep?.startedAt : undefined}
+          detailText={
+            publishStep === undefined && detail.row.state === "merged" ? "component pins published" : undefined
+          }
+        />
         {publishStep?.commands !== undefined && publishStep.commands.length > 0 ? (
           <CommandsList commands={publishStep.commands} step={publishStep} outputs={outputs} />
-        ) : (
-          <Text color="$fg-muted">component pins published</Text>
-        )}
+        ) : null}
       </Box>
 
-      <Box height={1} flexShrink={0} />
-
-      {/* Subphase 2: publishing root (the CAS; a moved root retries) */}
       <Box flexDirection="column" minWidth={0}>
-        <Text bold color="$fg-info">
-          PUBLISHING ROOT
-          {mergeStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(mergeStep.ms)}</Text> : null}
-        </Text>
+        <StageStepLine
+          state={mergeState}
+          name="publishing root"
+          duration={mergeStep?.ms}
+          since={isMergeRunning ? mergeStep?.startedAt : undefined}
+        />
         {mergeCommit !== undefined ? <Text color="$fg-success">CAS merge commit: {mergeCommit}</Text> : null}
         {mergeStep?.commands !== undefined && mergeStep.commands.length > 0 ? (
           <CommandsList commands={mergeStep.commands} step={mergeStep} outputs={outputs} />
         ) : null}
       </Box>
 
-      <Box height={1} flexShrink={0} />
-
-      {/* Subphase 3: notifying */}
       <Box flexDirection="column" minWidth={0}>
-        <Text bold color="$fg-info">
-          NOTIFYING
-          {notifyStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(notifyStep.ms)}</Text> : null}
-        </Text>
+        <StageStepLine
+          state={notifyState}
+          name="notifying"
+          duration={notifyStep?.ms}
+          since={isNotifyRunning ? notifyStep?.startedAt : undefined}
+          detailText={notifyStep === undefined && detail.row.state === "merged" ? "receipts sent" : undefined}
+        />
         {notifyStep?.commands !== undefined && notifyStep.commands.length > 0 ? (
           <CommandsList commands={notifyStep.commands} step={notifyStep} outputs={outputs} />
-        ) : (
-          <Text color="$fg-muted">receipts sent</Text>
-        )}
+        ) : null}
       </Box>
     </Box>
   )
@@ -1047,34 +1129,60 @@ function DeprovisioningStageBody({
   const removeStep = steps.find((s) => s.name === "remove" || s.name === "retain")
   const retireStep = steps.find((s) => s.name === "retire")
 
+  const isRemoveRunning = removeStep !== undefined && removeStep.endedAt === undefined
+  const removeState: CheckView["state"] =
+    removeStep?.threw === true
+      ? "failed"
+      : isRemoveRunning
+        ? "running"
+        : removeStep !== undefined
+          ? "passed"
+          : "not-run"
+
+  const isRetireRunning = retireStep !== undefined && retireStep.endedAt === undefined
+  const retireState: CheckView["state"] =
+    retireStep?.threw === true
+      ? "failed"
+      : isRetireRunning
+        ? "running"
+        : retireStep !== undefined
+          ? "passed"
+          : "not-run"
+
   return (
-    <Box flexDirection="column" minWidth={0} gap={1}>
-      {/* Subphase 1: removing or retaining (path shown) */}
+    <Box flexDirection="column" minWidth={0}>
       <Box flexDirection="column" minWidth={0}>
-        <Text bold color="$fg-info">
-          REMOVING OR RETAINING
-          {removeStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(removeStep.ms)}</Text> : null}
-        </Text>
+        <StageStepLine
+          state={removeState}
+          name="removing worktree"
+          duration={removeStep?.ms}
+          since={isRemoveRunning ? removeStep?.startedAt : undefined}
+          detailText={
+            removeStep === undefined && (detail.row.state === "merged" || detail.row.state === "failed")
+              ? "worktree deprovisioned"
+              : undefined
+          }
+        />
         {removeStep?.commands !== undefined && removeStep.commands.length > 0 ? (
           <CommandsList commands={removeStep.commands} step={removeStep} outputs={outputs} />
-        ) : (
-          <Text color="$fg-muted">worktree deprovisioned</Text>
-        )}
+        ) : null}
       </Box>
 
-      <Box height={1} flexShrink={0} />
-
-      {/* Subphase 2: retiring */}
       <Box flexDirection="column" minWidth={0}>
-        <Text bold color="$fg-info">
-          RETIRING
-          {retireStep?.ms !== undefined ? <Text color="$fg-muted"> · {mediaDuration(retireStep.ms)}</Text> : null}
-        </Text>
+        <StageStepLine
+          state={retireState}
+          name="retiring branch"
+          duration={retireStep?.ms}
+          since={isRetireRunning ? retireStep?.startedAt : undefined}
+          detailText={
+            retireStep === undefined && (detail.row.state === "merged" || detail.row.state === "failed")
+              ? "branch retired"
+              : undefined
+          }
+        />
         {retireStep?.commands !== undefined && retireStep.commands.length > 0 ? (
           <CommandsList commands={retireStep.commands} step={retireStep} outputs={outputs} />
-        ) : (
-          <Text color="$fg-muted">branch retired</Text>
-        )}
+        ) : null}
       </Box>
     </Box>
   )

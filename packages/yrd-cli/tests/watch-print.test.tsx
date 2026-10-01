@@ -153,7 +153,7 @@ describe("the printed page's frame", () => {
     latest: { alive: false, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
   }
 
-  it("puts RUNNER in the table, under the header, in a box", async () => {
+  it("puts RUNNER in the table, under the header (borderless per operator round-2 feedback Telegram 1cfdbd57)", async () => {
     const text = await paint(snapshot({ pause, runner }))
     const lines = text.split("\n").filter((line) => line.trim() !== "")
     const title = lines.findIndex((line) => line.includes("YRD"))
@@ -163,7 +163,7 @@ describe("the printed page's frame", () => {
     expect(header).toBeGreaterThan(title)
     // The band is IN the table now, between what waits and what is done.
     expect(runnerRow).toBeGreaterThan(header)
-    expect(text).toContain("\u256d\u2500 RUNNER")
+    expect(text).toContain("RUNNER")
     expect(text.match(new RegExp(pause, "gu"))).toHaveLength(1)
     // The pause is the loudest state on the page and it leads it; the runner's
     // row says the WORD paused and what lifts the stop, never the same sentence.
@@ -372,14 +372,14 @@ describe("the flow page: four bands, one row per change", () => {
     expect(index("task/draft"), text).toBeLessThan(index("task/late"))
   })
 
-  it("draws the runner in the table's own columns and says `?` where no status is published", async () => {
+  it("draws the runner in the table's own columns and says `?` where no status is published (borderless per operator round-2 feedback Telegram 1cfdbd57)", async () => {
     const text = await paint(flowSnapshot({ runner: undefined }))
     const lines = table(text)
     const runner = lines.find((line) => line.includes("?") && line.includes("no runner status"))
 
     expect(runner, text).toBeDefined()
     expect(runner).toContain("?")
-    expect(text).toContain("╭─ RUNNER")
+    expect(text).toContain("RUNNER")
     const header = lines.find((line) => line.includes("CHANGES"))
     expect(header).toContain("QUEUE")
     expect(header).toContain("RUN")

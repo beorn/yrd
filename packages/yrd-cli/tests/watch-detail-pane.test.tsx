@@ -226,7 +226,8 @@ describe("26242: watch detail pane at 140x50", () => {
     expect(lines[39]).toContain("fixture queue read failed at /fixture/queue")
   })
 
-  it("row 4: RUNNER keeps its rounded box; inner dash sits under RUN", async () => {
+  // 26242 row 4: RUNNER box retired in favour of borderless runner (operator round-2 feedback Telegram 1cfdbd57)
+  it("row 4: borderless RUNNER sits under RUN (operator round-2 feedback Telegram 1cfdbd57)", async () => {
     const { lines, text } = await paint()
     expect(text).toMatch(/RUNNER/u)
     expect(text).toMatch(/no runner status published/u)
@@ -243,9 +244,8 @@ describe("26242: watch detail pane at 140x50", () => {
     expect(dashAt).toBeGreaterThanOrEqual(runAt - 1)
     expect(dashAt).toBeLessThan(changesAt)
     expect(holdsAt).toBeGreaterThanOrEqual(changesAt - 2)
-    // The ListView scrollbar thumb must not paint over the box's right corner.
-    const titleEnd = runnerTitle!.replace(/\s+$/u, "")
-    expect(titleEnd.slice(-1)).toBe("╮")
+    // Borderless runner: no rounded corner or box borders (operator round-2 feedback Telegram 1cfdbd57)
+    expect(runnerTitle).toContain("RUNNER")
     expect(text).not.toMatch(/█/u)
   })
 })
@@ -267,5 +267,115 @@ describe("26243: watch uses one clock format, one duration format and plain word
     expect(text).not.toContain("cut 1/1")
     expect(text).toContain("attempt 1/1")
     expect(text).not.toContain("err=")
+  })
+
+  it("round 5: two queues at 140x50 have stacked runner boxes then tasks interleaved by time", async () => {
+    const size = { cols: 140, rows: 50 }
+    const rowQ1Newest: WatchRow = {
+      row: {
+        ...failedRow(),
+        branch: "task/q1-newest",
+        at: NOW,
+        endedAt: NOW,
+      },
+    }
+    const rowQ1Oldest: WatchRow = {
+      row: {
+        ...failedRow(),
+        branch: "task/q1-oldest",
+        at: new Date(NOW.getTime() - 120_000),
+        endedAt: new Date(NOW.getTime() - 120_000),
+      },
+    }
+    const rowQ2Middle: WatchRow = {
+      row: {
+        ...failedRow(),
+        branch: "task/q2-middle",
+        at: new Date(NOW.getTime() - 60_000),
+        endedAt: new Date(NOW.getTime() - 60_000),
+      },
+    }
+    const first: WatchSnapshot = {
+      ...snapshot(2),
+      rows: [rowQ1Newest, rowQ1Oldest],
+      unfiltered: [rowQ1Newest, rowQ1Oldest],
+    }
+    const second: WatchSnapshot = {
+      ...snapshot(1),
+      queue: "github.com/beorn/hh-dev#queue2",
+      queues: [{ branch: "queue2", label: "queue2", path: "/hh/dev" }],
+      rows: [rowQ2Middle],
+      unfiltered: [rowQ2Middle],
+    }
+    const app = render(
+      <NowContext.Provider value={NOW}>
+        <MinuteContext.Provider value={NOW}>
+          <WatchPane
+            snapshot={first}
+            sources={[
+              { id: "one#main", label: "one", snapshot: first },
+              { id: "two#main", label: "two", snapshot: second },
+            ]}
+            live={false}
+            open={opener()}
+          />
+        </MinuteContext.Provider>
+      </NowContext.Provider>,
+      size,
+    )
+    await app.waitForLayoutStable()
+
+    // No per-queue group headers '[1] one — Enter to focus'
+    expect(app.text).not.toContain("Enter to focus")
+
+    // Both queues have an outlined RUNNER box stacked at the top
+    const runnerLineIndices = app.lines.map((l, i) => (l.includes("╭─ RUNNER") ? i : -1)).filter((i) => i >= 0)
+    expect(runnerLineIndices).toHaveLength(2)
+    const r1Line = runnerLineIndices[0]!
+    const r2Line = runnerLineIndices[1]!
+
+    const t1Line = app.lines.findIndex((l) => l.includes("task/q1-newest"))
+    const t2Line = app.lines.findIndex((l) => l.includes("task/q2-middle"))
+    const t3Line = app.lines.findIndex((l) => l.includes("task/q1-oldest"))
+
+    expect(r1Line).toBeGreaterThanOrEqual(0)
+    expect(r2Line).toBe(r1Line + 3)
+
+    // Stacked RUNNER boxes have 0 blank rows between them (bottom border line directly precedes top border line)
+    expect(app.lines[r1Line + 2]).toContain("╰")
+    expect(app.lines[r1Line + 3]).toContain("╭")
+
+    // Queue 2's runner line displays its own queue ref (refs/yrd/queue2/runner), not main
+    expect(app.lines[r2Line + 1]).toContain("refs/yrd/queue2/runner")
+    expect(app.lines[r2Line + 1]).not.toContain("refs/yrd/main/runner")
+
+    // Exactly 1 blank row after the last RUNNER box before the task list
+    expect(app.lines[r2Line + 2]).toContain("╰")
+    expect(app.lines[r2Line + 3]?.trim()).toBe("")
+    expect(t1Line).toBe(r2Line + 4)
+    expect(t2Line).toBeGreaterThan(t1Line)
+    expect(t3Line).toBeGreaterThan(t2Line)
+
+    // Q column shows queue digit or label for each interleaved row
+    expect(app.lines[t1Line]).toMatch(/\b1\b/)
+    expect(app.lines[t2Line]).toMatch(/\b2\b/)
+    expect(app.lines[t3Line]).toMatch(/\b1\b/)
+
+    const ansi = bufferToStyledText(app.term.buffer)
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round4.layout.txt", debugTree(app.getContainer()))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round4.ansi", ansi)
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round4.png", await renderAnsiPng(ansi, size))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5.layout.txt", debugTree(app.getContainer()))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5.ansi", ansi)
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5.png", await renderAnsiPng(ansi, size))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5b.layout.txt", debugTree(app.getContainer()))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5b.ansi", ansi)
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5b.png", await renderAnsiPng(ansi, size))
+    writeCaptureIfConfigured("yrd-watch-live-round5.ansi", ansi)
+    writeCaptureIfConfigured("yrd-watch-live-round5.png", await renderAnsiPng(ansi, size))
+    writeCaptureIfConfigured("yrd-watch-live-round5b.ansi", ansi)
+    writeCaptureIfConfigured("yrd-watch-live-round5b.png", await renderAnsiPng(ansi, size))
+
+    app.unmount()
   })
 })

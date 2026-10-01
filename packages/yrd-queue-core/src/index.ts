@@ -58,6 +58,8 @@ export {
   CHANGE_EVENT_TYPES,
   CHANGE_STATUSES,
   EVENT_TRAILERS,
+  QueueEventShapeUnreadable,
+  isQueueEventShapeUnreadable,
   adoptedChange,
   appendChangeEvent,
   appendNumberedChangeEvent,
@@ -187,7 +189,15 @@ export {
 } from "./submit.ts"
 export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
 export type { PinCarrierPin, PreparedPinCarrier } from "./pin-carrier.ts"
-export type { AdmissionOutcome, AdmissionVerdict, IssueResolution, IssueResolver, Submitted } from "./submit.ts"
+export type {
+  AdmissionOutcome,
+  AdmissionVerdict,
+  IssueResolution,
+  IssueResolver,
+  Submitted,
+  SubmitGitlink,
+  SubmitVerification,
+} from "./submit.ts"
 export { withdraw, NothingToWithdraw } from "./withdraw.ts"
 export type { WithdrawRequest, Withdrawn, WithdrawnChange } from "./withdraw.ts"
 export { QueuePaused, QueueNotPaused, liftLine, pauseLine, stopFact, stuckCures } from "./pause.ts"
@@ -263,7 +273,13 @@ export type { RuntimeGitlinkDecision, RuntimeGitlinkOff, RuntimeGitlinkPath } fr
 
 export { programRootCheck } from "./program-root.ts"
 
-export { readRemoteCalls, remoteCallsLine, traceRemoteCalls, withRemoteSeam } from "./remote-calls.ts"
+export {
+  readRemoteCalls,
+  remoteCallsLine,
+  roundRemoteCallsRow,
+  traceRemoteCalls,
+  withRemoteSeam,
+} from "./remote-calls.ts"
 export type { RemoteCalls } from "./remote-calls.ts"
 export {
   MIRROR_LOCK_WAIT_MS,

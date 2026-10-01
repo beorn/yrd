@@ -321,15 +321,17 @@ async function localSourceMiss(gitIn: (cwd: string) => Git, source: string, sha:
     accessSync(join(source, ".git"), constants.R_OK)
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    if (code === "ENOENT" || code === "EACCES" || code === "EPERM")
+    if (code === "ENOENT" || code === "EACCES" || code === "EPERM") {
       return `local store ${source} is missing or unreadable (${code})`
+    }
     throw error
   }
   const git = gitIn(source)
   try {
     const toplevel = (await git(["rev-parse", "--path-format=absolute", "--show-toplevel"])).trim()
-    if (resolve(toplevel) !== source)
+    if (resolve(toplevel) !== source) {
       throw new Error(`local source ${source} resolved to another repository: ${toplevel}`)
+    }
     // Batch-check reports "missing" with exit zero for corrupt loose objects,
     // too. Only the strict command's exact absence answer is a cache miss.
     await git(["cat-file", "-e", `${sha}^{commit}`])
@@ -396,7 +398,67 @@ export async function gitlinksAt(
   commit: string,
   paths: readonly string[],
 ): Promise<readonly Readonly<{ path: string; sha: string }>[]> {
-  const listed = await git(["ls-tree", commit, "--", ...paths])
+  if (paths.length === 0) return []
+  const levels: Array<{ git: Git; commit: string; paths: readonly string[]; prefix: string; store?: string }> = [
+    { git, commit, paths, prefix: "" },
+  ]
+  const gitlinks: Array<Readonly<{ path: string; sha: string }>> = []
+  let root: string | undefined
+  while (levels.length > 0) {
+    const level = levels.shift()
+    if (level === undefined) break
+    // Request prefixes to discover boundaries from mode 160000 in the tree.
+    // A slash in a requested path does not itself identify a submodule.
+    const prefixes = new Set<string>()
+    for (const path of level.paths) {
+      const parts = path.split("/")
+      for (let count = 1; count <= parts.length; count++) prefixes.add(parts.slice(0, count).join("/"))
+    }
+    let listed: string
+    try {
+      listed = await level.git(["ls-tree", level.commit, "--", ...prefixes])
+    } catch (cause) {
+      throw new Error(
+        `cannot read gitlinks ${level.paths.join(", ")} at level ${level.prefix || "."} in store ${level.store || "root"} at ${level.commit}`,
+        { cause },
+      )
+    }
+    for (const row of readGitlinks(listed)) {
+      const named = level.prefix === "" ? row.path : `${level.prefix}/${row.path}`
+      if (level.paths.includes(row.path)) gitlinks.push({ path: named, sha: row.sha })
+      const children = level.paths.filter((path) => path.startsWith(`${row.path}/`))
+      if (children.length === 0) continue
+      root ??= (await git(["rev-parse", "--show-toplevel"])).trim()
+      const store = join(root, named)
+      const inStore =
+        (cwd: string): Git =>
+        (args, input) =>
+          git(["-C", cwd, ...args], input)
+      if (!(await isRepositoryAt(inStore, store))) {
+        throw new Error(
+          `cannot read ${children.join(", ")} across ${named}: unknown gitlink store ${store} at level ${named}`,
+        )
+      }
+      const childGit = inStore(store)
+      if (!(await holdsCommit(childGit, row.sha))) {
+        throw new Error(
+          `cannot read ${children.join(", ")} at level ${named}: store ${store} does not hold parent commit ${row.sha}`,
+        )
+      }
+      levels.push({
+        git: childGit,
+        commit: row.sha,
+        paths: children.map((path) => path.slice(row.path.length + 1)),
+        prefix: named,
+        store,
+      })
+    }
+  }
+  return gitlinks
+}
+
+/** The same tree-entry parser serves root and nested candidate reads. */
+function readGitlinks(listed: string): readonly Readonly<{ path: string; sha: string }>[] {
   const gitlinks: Array<Readonly<{ path: string; sha: string }>> = []
   for (const row of listed.split("\n")) {
     const match = GITLINK_ROW.exec(row)

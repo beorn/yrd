@@ -355,22 +355,20 @@ export function TopLine({
   onStatusClick?: () => void
 }) {
   const queueAddress = queue ?? (queues && queues[0]?.label) ?? ""
-  const showRunnerDigits = (queues?.length ?? 0) > 1
 
   const timerText = typeof status.timer === "string" ? toHms(status.timer) : status.timer
-  const timerLen = typeof timerText === "string" ? timerText.length : timerText !== undefined ? 8 : 0
+  const timerLen =
+    (typeof timerText === "string" ? timerText.length : timerText !== undefined ? 8 : 0) +
+    (timerText !== undefined ? 3 : 0)
   const statusParts = [timerLen, status.reason ? status.reason.length : 0].filter((n) => n > 0)
   const statusGaps = Math.max(0, statusParts.length - 1)
   const statusRightLen = statusParts.reduce((a, b) => a + b, 0) + statusGaps
 
-  const runnerDigitsLen =
-    queueDigit !== undefined
-      ? 4
-      : showRunnerDigits
-        ? (queues ?? []).map(() => 3).reduce((a, b) => a + b, 0) + ((queues?.length ?? 0) - 1) + 1
-        : 0
+  const runnerDigitsLen = queueDigit !== undefined ? 4 : 0
+  const statusWord = status.word === "RUNNING" ? "QUEUE" : status.word
+  const statusWordColor = status.word === "RUNNING" ? "$fg-on-inverse" : status.color
   // Left side prefix: marker (1) + gap (1) + runner digits + YRD (3) + gap (1) + status word + gap (1) + separator before right group (1)
-  const leftPrefixLen = 1 + 1 + runnerDigitsLen + 3 + 1 + status.word.length + 1 + 1 + (queueFirst ? 6 : 0)
+  const leftPrefixLen = 1 + 1 + runnerDigitsLen + 3 + 1 + statusWord.length + 1 + 1 + (queueFirst ? 6 : 0)
   const availableForAddress =
     columns !== undefined ? Math.max(0, columns - leftPrefixLen - statusRightLen - 2) : undefined
   const displayAddress =
@@ -405,13 +403,6 @@ export function TopLine({
       <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden" gap={1}>
         {queueFirst ? null : marker}
         {queueDigit === undefined ? null : <Text color="$fg-on-inverse-muted">[{queueDigit}]</Text>}
-        {showRunnerDigits
-          ? (queues ?? []).map((_, index) => (
-              <Text key={index} color="$fg-on-inverse-muted" flexShrink={0}>
-                [{index + 1}]
-              </Text>
-            ))
-          : null}
         <Text bold color="$fg-on-inverse" flexShrink={0}>
           YRD
         </Text>
@@ -426,8 +417,8 @@ export function TopLine({
           </Text>
         ) : null}
         {queueFirst ? marker : null}
-        <Text bold color={status.color} flexShrink={0}>
-          {status.word}
+        <Text bold color={statusWordColor} flexShrink={0}>
+          {statusWord}
         </Text>
         {queueFirst ? null : (
           <Text color="$fg-on-inverse" wrap="truncate">
@@ -450,7 +441,7 @@ export function TopLine({
         ) : null}
         {timerText === undefined ? null : (
           <Text color="$fg-on-inverse-muted" flexShrink={0}>
-            {timerText}
+            up {timerText}
           </Text>
         )}
       </Box>
@@ -832,13 +823,13 @@ export function RunnerRow({
               </Text>
               <Text color={forced ?? color} wrap="truncate">
                 {" "}
-                {runnerStatusWord(line)}
+                {runnerStatusWord(line).replace(/[—\s]+$/u, "")}
               </Text>
             </Box>
           ),
           agent: (
             <Text color={forced ?? color} wrap="truncate">
-              {line.by ?? "—"}
+              {line.by ?? " "}
             </Text>
           ),
           ageRun: (

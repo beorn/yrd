@@ -230,7 +230,7 @@ describe("the STATS line's summary (25416)", () => {
       "current: 0 drafts, 0 waiting · 24h: — wait, — run, 0 merges, 0 failed, 1 stuck",
     )
     expect(statsSummary({ drafts: undefined, waiting: 0 }, undefined)).toBe(
-      "current: 0 drafts, 0 waiting · 24h: no run journal read on this machine",
+      "current: 0 drafts, 0 waiting · 24h: no history here",
     )
     expect(
       statsSummary(

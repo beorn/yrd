@@ -363,7 +363,7 @@ export function statsSummary(
   journalAbsent?: string,
 ): string {
   const now = `current: ${current.drafts ?? `0 ${STATE_WORDS.draft.word}s`}, ${String(current.waiting)} ${STATE_WORDS.waiting.word}`
-  if (day === undefined) return `${now} · 24h: ${journalAbsent ?? "no run journal read on this machine"}`
+  if (day === undefined) return `${now} · 24h: ${journalAbsent ?? "no history here"}`
   const span = (ms: number | undefined): string => (ms === undefined ? "—" : runTime(ms))
   return (
     `${now} · 24h: ${span(day.queuedMs)} wait, ${span(day.runMs)} run, ` +

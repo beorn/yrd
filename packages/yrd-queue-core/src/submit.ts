@@ -19,7 +19,7 @@
  * queue event tip (event format) prevents a stop racing with publication.
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -50,8 +50,45 @@ import {
   readEventOpsWithRefs,
 } from "./events.ts"
 import { classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
-import { verifyCandidate, type Verification } from "./verifying.ts"
+import { verifyCandidate, type Verification, type SettledGitlink } from "./verifying.ts"
+import { gitlinksAt } from "./reference.ts"
 import { withRemoteSeam } from "./remote-calls.ts"
+
+/** Outward submission evidence observes the candidate rather than relabelling the producer's claims. */
+export type SubmitGitlink = Readonly<
+  Omit<SettledGitlink, "state"> &
+    ({ state: "not-run" } | { state: Exclude<SettledGitlink["state"], "not-run">; recorded: string })
+>
+
+export type SubmitVerification =
+  | Readonly<Omit<Extract<Verification, { state: "verified" }>, "gitlinks"> & { gitlinks: readonly SubmitGitlink[] }>
+  | Extract<Verification, { state: "failed" }>
+
+async function submissionReceipt(git: Git, verifying: Verification): Promise<SubmitVerification> {
+  if (verifying.state !== "verified") return verifying
+  const settled = verifying.gitlinks.filter((row) => row.state !== "not-run")
+  const observed = new Map(
+    (
+      await gitlinksAt(
+        git,
+        verifying.candidate,
+        settled.map((row) => row.path),
+      )
+    ).map((row) => [row.path, row.sha]),
+  )
+  const gitlinks = verifying.gitlinks.map((row): SubmitGitlink => {
+    if (row.state === "not-run") return { ...row, state: "not-run" }
+    const recorded = observed.get(row.path)
+    const expected = row.state === "raised" ? row.to : row.from
+    if (recorded !== expected) {
+      throw new Error(
+        `submission receipt ${row.path} state ${row.state}: producer ${expected}, candidate tree ${recorded ?? "absent"} at ${verifying.candidate}`,
+      )
+    }
+    return { ...row, recorded }
+  })
+  return { ...verifying, gitlinks }
+}
 
 export type SubmitRequest = Readonly<{
   /** The branch being submitted: the change's own. */
@@ -101,7 +138,7 @@ export type Submitted = Readonly<{
   retry: boolean
   /** Gitlinks this change moved whose commits submit published to their submodule remotes (24454). */
   published: readonly PublishedGitlink[]
-  verifying: Verification
+  verifying: SubmitVerification
   issue?: IssueResolution
   admission: AdmissionOutcome
   /** Present only when this submit appended a new warning event; its caller sends one notification. */
@@ -241,6 +278,102 @@ export async function publishMovedGitlinks(
 }
 
 /**
+ * In candidate verification (and especially dry-run mode where gitlinks are not published
+ * to remote retention refs), candidate worktrees borrow from the superproject reference.
+ * When the reference was a linked worktree, git-super resolves the reference to the primary
+ * clone, which lacks the author's fresh local component commits.
+ *
+ * This models the publish by fetching moved gitlinks directly from the author's local
+ * component checkouts into the candidate worktree's submodule checkouts under refs/git-super/pins/<sha>.
+ */
+export async function modelMovedGitlinks(
+  git: Git,
+  sourceRoot: string,
+  from: string | readonly string[],
+  to: string,
+  candidateRoot: string,
+  prefix = "",
+): Promise<void> {
+  const bases = typeof from === "string" ? [from] : from
+  if (bases.length === 0) return
+  const spans = await Promise.all(bases.map((base) => gitlinkRows(git, base, to)))
+  const byBase = spans.map((rows) => new Map(rows.map((row) => [row.path, row])))
+  for (const row of spans[0] ?? []) {
+    if (!byBase.every((rows) => rows.has(row.path))) continue
+    if (row.newMode !== "160000" || ZERO_SHA.test(row.sha)) continue
+    const path = prefix === "" ? row.path : `${prefix}/${row.path}`
+    const sourceCheckout = join(sourceRoot, row.path)
+    const targetCheckout = join(candidateRoot, row.path)
+    if (!existsSync(sourceCheckout) || !existsSync(targetCheckout)) continue
+    const sourceChild = gitIn(sourceCheckout, undefined, selectionFor(git))
+    const targetChild = gitIn(targetCheckout, undefined, selectionFor(git))
+    let targetHasSha = false
+    try {
+      await targetChild(["cat-file", "-e", `${row.sha}^{commit}`])
+      targetHasSha = true
+    } catch {
+      // silent-fallback-allow: absence in candidate checkout triggers local resolution from author checkout
+      // catch-cause-allow: absence in candidate checkout triggers local resolution from author checkout
+    }
+    if (!targetHasSha) {
+      const remote = await remoteUrl(sourceChild, "origin")
+      let hasSha = false
+      try {
+        await sourceChild(["cat-file", "-e", `${row.sha}^{commit}`])
+        hasSha = true
+      } catch {
+        // catch-cause-allow: absence in source checkout falls back to fetching from remote origin
+        try {
+          await sourceChild([
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "origin",
+            row.sha,
+          ])
+          hasSha = true
+        } catch (cause) {
+          throw new Error(
+            `${path} at ${row.sha} is a gitlink this change moved to a commit neither ${sourceCheckout} nor ${remote} holds; ` +
+              "commit it in that checkout (or check the submodule out at it) so submit can publish it, then resubmit",
+            { cause },
+          )
+        }
+      }
+      if (hasSha) {
+        try {
+          await targetChild([
+            "-c",
+            "protocol.file.allow=always",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            sourceCheckout,
+            `${row.sha}:refs/git-super/pins/${row.sha}`,
+          ])
+        } catch (cause) {
+          throw new Error(`could not resolve local component commit ${row.sha} for ${path} from ${sourceCheckout}`, {
+            cause,
+          })
+        }
+      }
+    }
+    const before = await Promise.all(
+      bases.map(async (base, index) =>
+        byBase[index]?.get(row.path)?.oldMode === "160000"
+          ? (await git(["rev-parse", `${base}:${row.path}`])).trim()
+          : EMPTY_TREE,
+      ),
+    )
+    await modelMovedGitlinks(sourceChild, sourceCheckout, before, row.sha, targetCheckout, path)
+  }
+}
+
+/**
  * The target is not a change. Thrown at the one path in, and by the CLI's
  * dry run before it says what it would open: a preview that accepts what
  * the action refuses is the reverse of the flag's purpose (2026-09-03).
@@ -255,7 +388,7 @@ export type SubmitInspection = Readonly<{
   head: string
   targetHead: string
   base: string
-  verifying: Verification
+  verifying: SubmitVerification
   issue?: IssueResolution
   admission: AdmissionOutcome
   /** An operator or stuck stop is echoed; maintenance refuses intake. */
@@ -327,7 +460,7 @@ export async function inspectSubmitAtHead(
   const admitted = await admitSubmitAtHead(git, remote, request, head)
   const verifying = await composeSubmit(git, request, admitted)
   const { root: _root, bases: _bases, operational: _operational, ...inspection } = admitted
-  return { ...inspection, verifying }
+  return { ...inspection, verifying: await submissionReceipt(git, verifying) }
 }
 
 async function admitSubmitAtHead(
@@ -483,6 +616,9 @@ async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitA
       hooksPath,
       noFetch: true,
       unboundedLocalMain: true,
+      beforeMerge: async (candidate) => {
+        await modelMovedGitlinks(git, admitted.root, admitted.bases, admitted.head, candidate)
+      },
     })
     verifying = composed.verifying
     if (composed.state === "failed") {
@@ -506,9 +642,10 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
     publishMovedGitlinks(git, admitted.root, admitted.bases, head),
   )
   const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted))
+  const receipt = await submissionReceipt(git, verifying)
   const { root, bases: _bases, operational, ...inspection } = admitted
   return withRemoteSeam("submitEvent", () =>
-    submitEvent(git, remote, request, root, { ...inspection, verifying }, operational, published),
+    submitEvent(git, remote, request, root, { ...inspection, verifying: receipt }, operational, published),
   )
 }
 

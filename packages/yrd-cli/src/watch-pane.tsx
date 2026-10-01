@@ -74,7 +74,7 @@ import {
 import type { GitObservation, JournalCommand, OverrideFact, Row, StopFact } from "@yrd/queue-core"
 import { NowProvider, useMinute, useNow } from "./watch-clock.ts"
 import {
-  RUNNING_GLYPH,
+  RUNNER_GLYPH,
   STATE_WORDS,
   clock,
   firstLine,
@@ -101,6 +101,7 @@ import {
   StatusPills,
   TopLine,
   bucketOf,
+  clockOf,
   listLayout,
   separatorBefore,
   type DraftWindow,
@@ -291,10 +292,14 @@ export type WatchSource = Readonly<{
   resolveRunAddress?: (address: string) => Promise<ResolvedWatchRun>
 }>
 
+export type ReadFailure = Readonly<{ at: Date; message: string }>
+
 type WatchPaneProps = {
   snapshot: WatchSnapshot
   initialKey?: string
   queueShortcuts?: boolean
+  initialFailure?: ReadFailure
+  readFailure?: ReadFailure
   sources?: readonly WatchSource[]
   /** One reading of the queue, with the drafts of the window asked for. The pane calls it on a timer and on `w`, and never reads anything itself. */
   load?: (request?: Readonly<{ draftWindow: DraftWindow }>) => Promise<WatchSnapshot>
@@ -319,12 +324,15 @@ type WatchPaneProps = {
 
 export function WatchPane(props: WatchPaneProps) {
   const source = props.sources?.length === 1 ? props.sources[0] : undefined
-  if (source?.snapshot !== undefined && source.error === undefined) {
+  if (source !== undefined) {
     return (
       <Screen>
         <SingleWatchPane
           {...props}
-          snapshot={source.snapshot}
+          snapshot={source.snapshot ?? props.snapshot}
+          initialFailure={
+            props.initialFailure ?? (source.error === undefined ? undefined : { at: new Date(), message: source.error })
+          }
           load={source.load}
           open={source.open}
           loadDiff={source.loadDiff}
@@ -482,6 +490,7 @@ function QueuesWatchPane({
   const multiple = visible.length > 1
   const selectedSource = sources.find((source) => source.id === focus?.id)
   const focusedSnapshot = focus === undefined ? undefined : readings.get(focus.id)?.snapshot
+  const selectedError = focus === undefined ? undefined : readings.get(focus.id)?.error
   const measured = visible.filter(
     (source) =>
       source.snapshot !== undefined &&
@@ -494,7 +503,6 @@ function QueuesWatchPane({
       reading.rows.filter((item) => buckets.has(bucketOf(item.row))),
       false,
     )
-  const rows = visible.flatMap((source) => (source.snapshot === undefined ? [] : visibleRows(source.snapshot)))
   const decisions = measured.flatMap((source) =>
     source.snapshot === undefined ? [] : decisionsOfRows(visibleRows(source.snapshot)),
   )
@@ -524,29 +532,51 @@ function QueuesWatchPane({
       measured.length === 0 ? undefined : lastDayBucket(decisions, at),
       unmeasured.length > 0 ? `unmeasured: ${unmeasured.join(", ")}` : undefined,
     ) + (measured.length > 0 && unmeasured.length > 0 ? ` · unmeasured: ${unmeasured.join(", ")}` : "")
-  const items: WatchPaneItem[] = visible.flatMap((source) => {
+  const runnerItems: WatchPaneItem[] = visible.flatMap((source) => {
     const reading = source.snapshot
-    const context = { sourceId: source.id, snapshot: reading, digit: source.digit }
-    const header: WatchPaneItem = {
-      ...context,
-      kind: "queue",
-      label: `${multiple ? `[${source.digit}] ` : ""}${source.label} — Enter to focus`,
-      key: `${source.id}:queue`,
-    }
-    if (reading === undefined) return [header]
-    const grouped = visibleRows(reading)
-    const rowItems = (band: Band): WatchPaneItem[] =>
-      grouped
-        .filter((item) => bandOf(item.row, false) === band)
-        .map((item) => ({ ...context, kind: "row", item, key: `${source.id}:${watchRowKey(item)}` }))
+    if (reading === undefined) return []
     return [
-      header,
-      ...rowItems("drafts"),
-      ...rowItems("waiting"),
-      { ...context, kind: "runner", line: runnerOf(reading, at), key: `${source.id}:runner` } as WatchPaneItem,
-      ...rowItems("done"),
+      {
+        sourceId: source.id,
+        snapshot: reading,
+        digit: source.digit,
+        kind: "runner",
+        line: runnerOf(reading, at),
+        key: `${source.id}:runner`,
+      } as WatchPaneItem,
     ]
   })
+  const taskItems: (WatchPaneItem & { kind: "row" })[] = visible.flatMap((source) => {
+    const reading = source.snapshot
+    if (reading === undefined) return []
+    const context = { sourceId: source.id, snapshot: reading, digit: source.digit }
+    const filteredRows = reading.rows.filter((item) => buckets.has(bucketOf(item.row)))
+    return filteredRows.map((item) => ({
+      ...context,
+      kind: "row" as const,
+      item,
+      key: `${source.id}:${watchRowKey(item)}`,
+    }))
+  })
+  taskItems.sort((a, b) => {
+    const aBand = bandOf(a.item.row, false)
+    const bBand = bandOf(b.item.row, false)
+    const bandOrder: Record<Band, number> = { drafts: 0, waiting: 1, runner: 2, done: 3 }
+    if (aBand !== bBand) {
+      return bandOrder[aBand] - bandOrder[bBand]
+    }
+    if (aBand === "waiting") {
+      const aPos = a.item.row.position ?? Infinity
+      const bPos = b.item.row.position ?? Infinity
+      if (aPos !== bPos) return aPos - bPos
+    }
+    const aTime = clockOf(a.item.row)?.getTime() ?? 0
+    const bTime = clockOf(b.item.row)?.getTime() ?? 0
+    if (bTime !== aTime) return bTime - aTime
+    return (a.digit ?? 0) - (b.digit ?? 0)
+  })
+  const items: WatchPaneItem[] = [...runnerItems, ...taskItems]
+  const rows: readonly WatchRow[] = taskItems.map((item) => item.item)
   const cursor = Math.max(
     0,
     items.findIndex((item) => item.key === cursorKey),
@@ -620,17 +650,12 @@ function QueuesWatchPane({
           onRead={onRead}
         />
       ))}
-      {selectedSource !== undefined && readings.get(selectedSource.id)?.error !== undefined ? (
-        <Text color="$fg-warning">
-          {selectedSource.label}: read failed — {readings.get(selectedSource.id)?.error}; showing last good reading{" "}
-          {focusedSnapshot === undefined ? "unmeasured" : clock(focusedSnapshot.at)}
-        </Text>
-      ) : null}
       {selectedSource !== undefined && focusedSnapshot !== undefined ? (
         <SingleWatchPane
           key={selectedSource.id}
           {...props}
           snapshot={focusedSnapshot}
+          readFailure={selectedError === undefined ? undefined : { at: new Date(), message: selectedError }}
           initialKey={focus?.rowKey}
           navigationSerial={focus?.serial}
           queueShortcuts={false}
@@ -745,6 +770,8 @@ function SingleWatchPane({
   initialKey,
   navigationSerial,
   queueShortcuts = true,
+  initialFailure,
+  readFailure: readFailureProp,
   load,
   open,
   loadDiff,
@@ -766,7 +793,11 @@ function SingleWatchPane({
   const [shown, setShown] = useState(snapshot)
   useEffect(() => setShown(snapshot), [snapshot])
   const [failure, setFailure] = useState<Error | undefined>(undefined)
-  const [readFailure, setReadFailure] = useState<ReadFailure | undefined>(undefined)
+  const [internalReadFailure, setInternalReadFailure] = useState<ReadFailure | undefined>(
+    initialFailure ?? readFailureProp,
+  )
+  const readFailure = readFailureProp !== undefined ? readFailureProp : internalReadFailure
+  const setReadFailure = setInternalReadFailure
   const [detailFailure, setDetailFailure] = useState<(ReadFailure & { key: string }) | undefined>(undefined)
   const [cursor, setCursor] = useState(0)
   // Start split layouts with their detail visible; later resizes preserve the
@@ -819,8 +850,11 @@ function SingleWatchPane({
       const currentInterval = focused ? intervalMs : unfocusedIntervalMs
 
       void (async () => {
-        // Refresh at once on focus-in
-        if (!isFirstRun.current && focused && !wasFocusedRef.current) {
+        // Refresh at once on focus-in or if starting with an initialFailure
+        if (
+          (!isFirstRun.current && focused && !wasFocusedRef.current) ||
+          (isFirstRun.current && initialFailure !== undefined)
+        ) {
           try {
             await refresh()
             setReadFailure(undefined)
@@ -852,7 +886,7 @@ function SingleWatchPane({
         setFailure(error instanceof Error ? error : new Error(String(error)))
       })
     },
-    [focused, intervalMs, unfocusedIntervalMs, live, load, refresh],
+    [focused, intervalMs, unfocusedIntervalMs, live, load, refresh, initialFailure],
   )
 
   // The rows on screen: the status buckets and the queue pills are ON/OFF
@@ -1247,16 +1281,18 @@ function SingleWatchPane({
     </Box>
   )
 
+  const showDetail = opened && (!isRunnerSelected || roundInFlight)
+  const isWideSplit = showDetail && tier === "right"
+
   const detailPane = (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} backgroundColor={DETAIL_BG}>
-      <Box height={1} flexShrink={0} />
+      {isWideSplit ? null : <Box height={1} flexShrink={0} />}
       {detailContent}
     </Box>
   )
 
-  const showDetail = opened && (!isRunnerSelected || roundInFlight)
   // The width the list pane gets: the whole terminal, or its share of a split.
-  const listColumns = showDetail && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) : columns
+  const listColumns = isWideSplit ? Math.floor(columns * DEFAULT_SPLIT_RATIO) : columns
   const list = (
     <ListStack snapshot={shown} paddingX={1}>
       <Table
@@ -1273,6 +1309,84 @@ function SingleWatchPane({
       />
     </ListStack>
   )
+
+  const topLines = ((shown.queues?.length ?? 0) > 1 ? shown.queues : [undefined]).map((q, idx) => {
+    const queueDigit = (shown.queues?.length ?? 0) > 1 ? idx + 1 : undefined
+    const queueAddress = q !== undefined ? `${q.label ?? shown.queue}` : formatStoredQueueAddress(shown.queue)
+    return (
+      <TopLine
+        key={`${q?.path ?? shown.queue ?? "queue"}:${q?.branch ?? ""}:${String(idx)}`}
+        queueDigit={queueDigit}
+        queue={queueAddress}
+        status={
+          statusTimer(shown, now) !== undefined || Math.max(0, now.getTime() - shown.at.getTime()) > 120_000
+            ? {
+                ...queueLineStatus(shown, now),
+                timer: <LiveStatusTimer snapshot={shown} fallback={queueLineStatus(shown, now).timer} />,
+              }
+            : queueLineStatus(shown, now)
+        }
+        columns={isWideSplit ? listColumns : columns}
+        live={live}
+        onStatusClick={pointAtRunner}
+      />
+    )
+  })
+
+  const topBar = (
+    <Box flexDirection="column" flexShrink={0} minWidth={0}>
+      {topLines}
+      <Box flexDirection="column" flexShrink={0} minWidth={0}>
+        <Box
+          height={1}
+          flexDirection="row"
+          justifyContent="space-between"
+          paddingLeft={1}
+          paddingRight={1}
+          minWidth={0}
+          overflow="hidden"
+        >
+          <Box
+            flexDirection="row"
+            flexShrink={1}
+            minWidth={0}
+            overflow="hidden"
+            onClick={() => {
+              setStatsOpen((was) => !was)
+            }}
+          >
+            <Text color="$fg-muted" wrap="truncate">
+              {statsOpen ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} STATS · {statsLine}
+            </Text>
+          </Box>
+          {terminalRows < PILLS_MIN_ROWS ? null : (
+            <StatusPills buckets={buckets} onToggle={toggleBucket} onSelectOnly={selectOnly} />
+          )}
+        </Box>
+        {statsOpen && decisions !== undefined ? (
+          <StatsBox
+            decisions={decisions}
+            columns={(isWideSplit ? listColumns : columns) - 2}
+            timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
+          />
+        ) : null}
+      </Box>
+      {shown.pause === undefined ? null : <LoudPause snapshot={shown} />}
+      {shown.journalAbsent === undefined ? null : (
+        <Text color="$fg-muted" wrap="truncate">
+          {shown.journalAbsent}
+        </Text>
+      )}
+    </Box>
+  )
+
+  const listColumn = (
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} height="100%">
+      {topBar}
+      {list}
+    </Box>
+  )
+
   const body =
     tier === "full" || !showDetail ? (
       showDetail ? (
@@ -1300,7 +1414,7 @@ function SingleWatchPane({
           dividerSize: DIVIDER_SIZE,
         })}
         dividerSize={DIVIDER_SIZE}
-        primary={list}
+        primary={listColumn}
         secondary={detailPane}
       />
     )
@@ -1308,67 +1422,14 @@ function SingleWatchPane({
   return (
     <NowProvider readAt={nowProp ?? shown.at} live={live}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {/* Line 1 (inverted): YRD, status word and the queue address left, timer right (25630, 24196). */}
-        <TopLine
-          queue={formatStoredQueueAddress(shown.queue)}
-          queues={shown.queues}
-          status={
-            statusTimer(shown, nowProp ?? shown.at) !== undefined ||
-            Math.max(0, (nowProp ?? shown.at).getTime() - shown.at.getTime()) > 120_000
-              ? {
-                  ...queueLineStatus(shown, nowProp ?? shown.at),
-                  timer: (
-                    <LiveStatusTimer snapshot={shown} fallback={queueLineStatus(shown, nowProp ?? shown.at).timer} />
-                  ),
-                }
-              : queueLineStatus(shown, nowProp ?? shown.at)
-          }
-          columns={columns}
-          live={live}
-          onStatusClick={pointAtRunner}
-        />
-        {/* Line 2 (plain): STATS with fold marker, and filter toggles on that same line (25630). */}
-        <Box flexDirection="column" flexShrink={0} minWidth={0}>
-          <Box
-            height={1}
-            flexDirection="row"
-            justifyContent="space-between"
-            paddingLeft={1}
-            paddingRight={1}
-            minWidth={0}
-            overflow="hidden"
-          >
-            <Box
-              flexDirection="row"
-              flexShrink={1}
-              minWidth={0}
-              overflow="hidden"
-              onClick={() => {
-                setStatsOpen((was) => !was)
-              }}
-            >
-              <Text color="$fg-muted" wrap="truncate">
-                {statsOpen ? DISCLOSURE_MARKERS.expanded : DISCLOSURE_MARKERS.collapsed} STATS · {statsLine}
-              </Text>
-            </Box>
-            {terminalRows < PILLS_MIN_ROWS ? null : (
-              <StatusPills buckets={buckets} onToggle={toggleBucket} onSelectOnly={selectOnly} />
-            )}
-          </Box>
-          {statsOpen && decisions !== undefined ? (
-            <StatsBox decisions={decisions} columns={columns - 2} timeRows={terminalRows >= STATS_TIME_MIN_ROWS} />
-          ) : null}
-        </Box>
-        {shown.pause === undefined ? null : <LoudPause snapshot={shown} />}
-        {/* Where the journal was looked for, when there was none. A watch that
-            showed no running check because it had no journal to read must say
-            so, or it reads as a queue with nothing to do. */}
-        {shown.journalAbsent === undefined ? null : (
-          <Text color="$fg-muted" wrap="truncate">
-            {shown.journalAbsent}
-          </Text>
+        {isWideSplit ? (
+          body
+        ) : (
+          <>
+            {topBar}
+            {body}
+          </>
         )}
-        {body}
         {/* The loudest bottom-row fact, never hidden: a read that failed, with
             the time of the reading the table still shows. */}
         {readFailure === undefined ? null : (
@@ -1501,9 +1562,9 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
 
   if (word === "RUNNING") {
     return {
-      marker: RUNNING_GLYPH,
+      marker: RUNNER_GLYPH,
       word,
-      color: "$fg-info",
+      color: STATE_WORDS[runner.state].color,
       pulse: true,
       ...(displayTimer === undefined ? {} : { timer: displayTimer }),
     }
@@ -1523,7 +1584,7 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
         ? undefined
         : runner.holds)
   return {
-    marker: "■",
+    marker: RUNNER_GLYPH,
     word,
     color: word === "PAUSED" ? "$fg-warning" : "$fg-error",
     pulse: reason !== undefined,
@@ -1531,9 +1592,6 @@ export function queueLineStatus(snapshot: WatchSnapshot, now: Date): LineStatus 
     ...(reason === undefined ? {} : { reason }),
   }
 }
-
-/** One read that failed: when, and the first line of why. */
-type ReadFailure = Readonly<{ at: Date; message: string }>
 
 /**
  * The warning line for a failed read, most important first so a narrow screen
@@ -1654,7 +1712,13 @@ function Table({
               const item = items[index]
               if (item === undefined) return 1
               if (item.kind === "queue") return 1
-              if (item.kind === "runner") return 5
+              if (item.kind === "runner") {
+                const prevIsRunner = index > 0 && items[index - 1]?.kind === "runner"
+                const nextIsRunner = index + 1 < items.length && items[index + 1]?.kind === "runner"
+                const marginTop = prevIsRunner ? 0 : 1
+                const marginBottom = nextIsRunner ? 0 : 1
+                return 3 + marginTop + marginBottom
+              }
               const rowIndex = rows.indexOf(item.item)
               return (separatorBefore(rows, rowIndex) === undefined ? 1 : 2) + bandHeight(plan.before.get(rowIndex))
             }}
@@ -1678,6 +1742,8 @@ function Table({
                 label: itemSnapshot.queues[0]?.label ?? itemSnapshot.queue,
               }
               if (item.kind === "runner") {
+                const prevIsRunner = index > 0 && items[index - 1]?.kind === "runner"
+                const nextIsRunner = index + 1 < items.length && items[index + 1]?.kind === "runner"
                 return (
                   <RunnerTitledBox
                     line={item.line}
@@ -1686,6 +1752,8 @@ function Table({
                     cursor={index === cursor}
                     queueDigit={itemQueue.digit}
                     queueLabel={itemQueue.label}
+                    marginTop={prevIsRunner ? 0 : 1}
+                    marginBottom={nextIsRunner ? 0 : 1}
                   />
                 )
               }

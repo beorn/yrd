@@ -231,6 +231,15 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       expect(receipt.branch).toBe(branch)
       expect(receipt.head).toBe(await remoteHead(w.remote, branch))
       expect(receipt.opened).toBe((await gitIn(w.remote)(["rev-parse", `refs/yrd/main/changes/${branch}`])).trim())
+      const observed = JSON.parse(ran.stdout) as {
+        verifying: { gitlinks: { path: string; state: string; recorded: string; to: string }[] }
+      }
+      const two = w.components[1]!
+      expect(observed.verifying.gitlinks.find((row) => row.path === two.path)).toMatchObject({
+        state: "raised",
+        recorded: two.held,
+        to: two.held,
+      })
       await assertCarrier(w, branch, [{ path: one.path, sha: one.held }])
       const location = await resolveQueueLocation(w.work, undefined, process.env, "queue")
       const local = await gitIn(location.repo)(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])
@@ -313,6 +322,15 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     const before = await refs(w.remote)
     const preview = await yrd(w.work, "submit", "--gitlink", pin, "--issue", "25804", "--dry-run", "--json")
     expect(preview.exitCode, preview.report).toBe(0)
+    const observed = JSON.parse(preview.stdout) as {
+      verifying: { gitlinks: { path: string; state: string; recorded: string; to: string }[] }
+    }
+    const two = w.components[1]!
+    expect(observed.verifying.gitlinks.find((row) => row.path === two.path)).toMatchObject({
+      state: "raised",
+      recorded: two.held,
+      to: two.held,
+    })
     expect((JSON.parse(preview.stdout) as { dryRun: boolean; branch: string }).branch).toBe(
       `pin/vendor-one/${one.held.slice(0, 12)}`,
     )
@@ -638,6 +656,79 @@ describe("ordinary submit with a local-only component pin", () => {
     ).toContainEqual(expect.objectContaining({ path: one.path, sha: one.unheld, state: "published" }))
     expect((await gitIn(join(w.root, "one.git"))(["rev-parse", pinRef])).trim()).toBe(one.unheld)
     expect(await remoteHead(w.remote, "task/local-only-pin")).toBe((await git(["rev-parse", "HEAD"])).trim())
+  }, 90_000)
+
+  /** @failure Dry-run fails with generic exit 2 on unpublished component commits (26754).
+   * @level l2 @consumer yrd submit --dry-run with an unpublished local component commit
+   */
+  it("dry-run models unpublished component commit and verifies composition without pushing (26754)", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const git = gitIn(w.work)
+    const wt = join(w.root, "dev-wt")
+    await git(["worktree", "add", "-b", "task/local-only-pin-dry-run", wt, "main"])
+    await identity(wt)
+    const wtGit = gitIn(wt)
+    await wtGit(["submodule", "update", "--init"])
+    const child = gitIn(join(wt, one.path))
+    await child(["fetch", "--quiet", one.work, one.unheld])
+    await child(["checkout", "--quiet", one.unheld])
+    await wtGit(["add", one.path])
+    await wtGit(["commit", "--quiet", "-m", "pin local component for dry run\n\nRefs: 25720"])
+
+    const pinRef = `refs/git-super/pins/${one.unheld}`
+    expect(await gitIn(join(w.root, "one.git"))(["for-each-ref", "--format=%(objectname)", pinRef])).toBe("")
+
+    const ran = await yrd(
+      wt,
+      "submit",
+      "task/local-only-pin-dry-run",
+      "--dry-run",
+      "--issue",
+      "25720",
+      "--submitter",
+      "@dev/1",
+      "--json",
+    )
+    expect(ran.exitCode, ran.report).toBe(0)
+    const receipt = JSON.parse(ran.stdout) as {
+      dryRun: boolean
+      verifying: {
+        state: string
+        gitlinks: { path: string; state: string; recorded: string; from: string; to: string }[]
+      }
+    }
+    expect(receipt.dryRun).toBe(true)
+    expect(receipt.verifying.state).toBe("verified")
+    expect(receipt.verifying.gitlinks.find((row) => row.path === one.path)).toMatchObject({
+      state: "kept-ahead",
+      recorded: one.unheld,
+      from: one.unheld,
+      to: one.held,
+    })
+    expect(await gitIn(join(w.root, "one.git"))(["for-each-ref", "--format=%(objectname)", pinRef])).toBe("")
+    expect(await refs(w.remote)).not.toContain("task/local-only-pin-dry-run")
+    // 26835: the ordinary action must print the same observed identity as its preview.
+    const submitted = await yrd(
+      wt,
+      "submit",
+      "task/local-only-pin-dry-run",
+      "--issue",
+      "25720",
+      "--submitter",
+      "@dev/1",
+      "--json",
+    )
+    expect(submitted.exitCode, submitted.report).toBe(0)
+    const result = JSON.parse(submitted.stdout) as {
+      verifying: { gitlinks: { path: string; state: string; recorded: string; from: string; to: string }[] }
+    }
+    expect(result.verifying.gitlinks.find((row) => row.path === one.path)).toMatchObject({
+      state: "kept-ahead",
+      recorded: one.unheld,
+      from: one.unheld,
+      to: one.held,
+    })
   }, 90_000)
 
   /** @failure A rejected pin publication leaves a generic compose refusal, obscuring the remote and ref.

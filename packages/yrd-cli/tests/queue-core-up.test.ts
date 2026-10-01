@@ -978,12 +978,11 @@ describe("yrd queue up, the service", () => {
     // clone, so it outranks every host-only rung. `?` here would hide the one
     // thing an operator most needs to see behind "I am not on that machine".
     // The row says the WORD and the cure; the record's own sentence is the loud
-    // line above and is said exactly once.
-    // Boxed RUNNER puts `╭─ RUNNER` on its own title line; the status row
-    // inside still names the WORD and the cure (24196).
+    // Borderless RUNNER puts `RUNNER` on its own title line (operator round-2 feedback Telegram 1cfdbd57);
+    // the status row inside still names the WORD and the cure (24196).
     const runnerBoxStart = page.findIndex((line) => line.includes("RUNNER"))
-    const runnerBoxEnd = page.findIndex((line, i) => i > runnerBoxStart && line.includes("╰"))
-    const runnerBox = page.slice(runnerBoxStart, runnerBoxEnd + 1).join("\n")
+    const runnerBoxEnd = page.findIndex((line, i) => i > runnerBoxStart && (line.includes("╰") || line.trim() === ""))
+    const runnerBox = page.slice(runnerBoxStart, runnerBoxEnd === -1 ? undefined : runnerBoxEnd + 1).join("\n")
     expect(runnerBox, listed.stdout()).toContain("paused")
     expect(runnerBox, listed.stdout()).toContain("resume: yrd queue resume")
     expect(runnerBox, listed.stdout()).not.toContain("refs/yrd/main/runner")
@@ -1074,11 +1073,19 @@ describe("yrd queue up, the service", () => {
 
       if (valid) {
         await expect(attempt).resolves.toBe(0)
-        // The one stderr line a clean submit writes is its remote-call count (25570 row 3): the queue read, the
-        // event push and every fetch, from git's own trace2 log, with no torn line.
-        expect(run.stderr()).toMatch(
+        // Keep the aggregate count and the refresh split in the durable submit receipt.
+        const [summary, detail] = run.stderr().trimEnd().split("\n")
+        expect(`${summary}\n`).toMatch(
           /^yrd: submit remote calls: processes=\d+ ssh_children=0 remote_ms=\d+ unreadable=0 (?=.*\bpush=1\b)[^\n]*\n$/u,
         )
+        expect(detail).toMatch(/^yrd: submit remote call detail: /u)
+        expect(JSON.parse(detail!.slice("yrd: submit remote call detail: ".length))).toMatchObject({
+          refresh_boundary: "GIT_SUPER_PHASE=refresh on component-main fetch",
+          refresh_ssh_children: 0,
+          beyond_refresh_ssh_children: 0,
+          refresh_calls: [],
+          beyond_refresh_calls: [],
+        })
         expect(records(run)[0]).toMatchObject({ head })
         const ref = changesRef("main", branch)
         const history = await (

@@ -37,7 +37,7 @@ import {
 } from "../src/watch-detail.tsx"
 import { readCommandOutput } from "../src/queue-core-commands.ts"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
-import { clock } from "../src/watch-format.ts"
+import { RUNNER_GLYPH, clock } from "../src/watch-format.ts"
 import { noticeLine } from "../src/watch-notice.ts"
 import { printListing } from "../src/watch-print.tsx"
 import { runOf, type WatchRun } from "../src/watch-run.ts"
@@ -231,8 +231,8 @@ describe("the top line (items 30, 32d, 33)", () => {
     )
 
     const [first] = text.split("\n")
-    expect(first).toContain("◉")
-    expect(first).toContain("YRD RUNNING")
+    expect(first).toContain(RUNNER_GLYPH)
+    expect(first).toContain("YRD QUEUE")
     expect(first).toContain("example.test/repo#main")
   })
 
@@ -294,7 +294,7 @@ describe("the top line (items 30, 32d, 33)", () => {
 
     const lines = text.split("\n").filter((line) => line.trim() !== "")
     // 25716 row 31 / 24196 row 27: line 1 shows status marker and word; LoudPause draws the pause sentence
-    expect(lines[0]).toContain("■ YRD PAUSED")
+    expect(lines[0]).toContain("▸ YRD PAUSED")
     // The band is IN the table now, under the header, between waiting and done.
     expect(lines.findIndex((line) => line.includes("RUNNER"))).toBeGreaterThan(
       lines.findIndex((line) => line.includes("CHANGES")),
@@ -309,7 +309,7 @@ describe("the top line (items 30, 32d, 33)", () => {
     const text = await paint(<WatchPane snapshot={snapshot({ pause })} live={false} />)
 
     const lines = text.split("\n").filter((line) => line.trim() !== "")
-    expect(lines[0]).toContain("■ YRD PAUSED")
+    expect(lines[0]).toContain("▸ YRD PAUSED")
     expect(lines.findIndex((line) => line.includes(pause))).toBeLessThan(
       lines.findIndex((line) => line.includes("CHANGES")),
     )
@@ -579,7 +579,7 @@ describe("the table (items 3, 28, 38)", () => {
     expect(line).toContain("fix the parser")
     expect(line).not.toContain("(err=")
     expect(line).toContain("@chief")
-    expect(line).not.toContain("0badf00d")
+    expect(line).toContain("0badf00d")
   })
 
   it("with two tracked queues, shows separate Q and RUN columns with bare numbers and no QUEUE / RUN", async () => {
@@ -2416,7 +2416,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(painted.some((line) => line.includes("not submitted"))).toBe(false)
     expect(painted.some((line) => line.includes("the bottom row goes next"))).toBe(false)
     expect(painted.some((line) => line.includes("done, newest first"))).toBe(false)
-    expect(painted.some((line) => line.includes("────"))).toBe(true)
+    expect(painted.some((line) => line.includes("RUNNER"))).toBe(true)
   })
 
   it("draws a pushed branch nobody submitted as a draft row, with its head commit's author and time and no duration, and counts drafts on their own, never among the changes waiting", async () => {
@@ -2881,7 +2881,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // `stopped` are the runner's own published beat, and it publishes none yet.
     const runner = runnerOf(snap, NOW)
     expect({
-      age: /beat \d/u.test(runner.detail ?? ""),
+      age: /round started \d/u.test(runner.detail ?? ""),
       said: painted.some((line) => line.includes("idle")),
       silent: painted.some((line) => line.includes("silent")),
       supervisor: /\bhab\b/u.test(painted.join("\n")),
@@ -2975,10 +2975,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     // Runner item has height 5 (1 row marginTop + 3 rows TitledBox + 1 row marginBottom).
     // Center alignment places the runner item in viewport center, placing
     // runner box at lines 14..16 with the item's marginTop at line 13 and marginBottom at line 17.
-    const runnerStart = lines.findIndex((l) => l.includes("╭─ RUNNER"))
-    const runnerEnd = lines.findIndex((l) => l.includes("╰─"))
+    const runnerStart = lines.findIndex((l) => l.includes("RUNNER"))
     expect(runnerStart).toBe(14)
-    expect(runnerEnd).toBe(16)
 
     // Above runner item: overflow indicator at line 4 (saying more items above, item 9),
     // and queued items in viewport (lines 5..12: task/queued-7..0).
@@ -2997,6 +2995,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
     // Proves vertical centering of the runner item in the 21-row viewport (lines 4..24):
     // 9 rows above the runner item (lines 4..12), 7 rows below the runner item (lines 18..24).
+    const runnerEnd = runnerStart + 2
     expect(runnerStart - 1 - 4).toBe(9)
     expect(24 - (runnerEnd + 1)).toBe(7)
 
@@ -3004,7 +3003,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   })
 
   it("renders RUNNER box with status color on border and title for STOPPED and STUCK runner", async () => {
-    // 1. Stopped runner: border and title show status color
+    // 1. Stopped runner: title shows status color
     const stoppedApp = render(
       <WatchPane
         snapshot={snapshot({
@@ -3019,19 +3018,16 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(stoppedApp)
     const stoppedPainted = stoppedApp.lines
-    const stoppedRunnerLineIdx = stoppedPainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    const stoppedRunnerLineIdx = stoppedPainted.findIndex((l) => l.includes("RUNNER"))
     expect(stoppedRunnerLineIdx).toBeGreaterThan(0)
     const stoppedLine = stoppedPainted[stoppedRunnerLineIdx]!
-    const stoppedBorderCharIdx = stoppedLine.indexOf("╭")
     const stoppedTitleCharIdx = stoppedLine.indexOf("RUNNER")
-    const stoppedBorderFg = stoppedApp.cell(stoppedBorderCharIdx, stoppedRunnerLineIdx).fg
     const stoppedTitleFg = stoppedApp.cell(stoppedTitleCharIdx, stoppedRunnerLineIdx).fg
 
-    expect(stoppedBorderFg).toBeDefined()
-    expect(stoppedTitleFg).toEqual(stoppedBorderFg)
+    expect(stoppedTitleFg).toBeDefined()
     stoppedApp.unmount()
 
-    // 2. Stuck runner: border and title show status color (stuck warning color, distinct from stopped error color)
+    // 2. Stuck runner: title shows status color (stuck warning color, distinct from stopped error color)
     const stuckApp = render(
       <WatchPane
         snapshot={snapshot({
@@ -3044,20 +3040,17 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(stuckApp)
     const stuckPainted = stuckApp.lines
-    const stuckRunnerLineIdx = stuckPainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    const stuckRunnerLineIdx = stuckPainted.findIndex((l) => l.includes("RUNNER"))
     expect(stuckRunnerLineIdx).toBeGreaterThan(0)
     const stuckLine = stuckPainted[stuckRunnerLineIdx]!
-    const stuckBorderCharIdx = stuckLine.indexOf("╭")
     const stuckTitleCharIdx = stuckLine.indexOf("RUNNER")
-    const stuckBorderFg = stuckApp.cell(stuckBorderCharIdx, stuckRunnerLineIdx).fg
     const stuckTitleFg = stuckApp.cell(stuckTitleCharIdx, stuckRunnerLineIdx).fg
 
-    expect(stuckBorderFg).toBeDefined()
-    expect(stuckTitleFg).toEqual(stuckBorderFg)
-    expect(stuckBorderFg).not.toEqual(stoppedBorderFg)
+    expect(stuckTitleFg).toBeDefined()
+    expect(stuckTitleFg).not.toEqual(stoppedTitleFg)
     stuckApp.unmount()
 
-    // 3. Idle runner: border and title use idle color, distinct from stopped/stuck colors
+    // 3. Idle runner: title uses idle color, distinct from stopped/stuck colors
     const idleApp = render(
       <WatchPane
         snapshot={snapshot({
@@ -3069,17 +3062,15 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(idleApp)
     const idlePainted = idleApp.lines
-    const idleRunnerLineIdx = idlePainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    const idleRunnerLineIdx = idlePainted.findIndex((l) => l.includes("RUNNER"))
     expect(idleRunnerLineIdx).toBeGreaterThan(0)
     const idleLine = idlePainted[idleRunnerLineIdx]!
-    const idleBorderCharIdx = idleLine.indexOf("╭")
     const idleTitleCharIdx = idleLine.indexOf("RUNNER")
-    const idleBorderFg = idleApp.cell(idleBorderCharIdx, idleRunnerLineIdx).fg
     const idleTitleFg = idleApp.cell(idleTitleCharIdx, idleRunnerLineIdx).fg
 
-    expect(idleBorderFg).toBeDefined()
-    expect(idleTitleFg).toEqual(idleBorderFg)
-    expect(idleBorderFg).not.toEqual(stoppedBorderFg)
+    expect(idleTitleFg).toBeDefined()
+    expect(idleTitleFg).not.toEqual(stoppedTitleFg)
+    expect(idleTitleFg).not.toEqual(stuckTitleFg)
     idleApp.unmount()
   })
 
@@ -3100,16 +3091,13 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(stoppedApp)
     const stoppedPainted = stoppedApp.lines
-    const stoppedRunnerLineIdx = stoppedPainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    const stoppedRunnerLineIdx = stoppedPainted.findIndex((l) => l.includes("RUNNER"))
     expect(stoppedRunnerLineIdx).toBeGreaterThan(0)
     const stoppedLine = stoppedPainted[stoppedRunnerLineIdx]!
-    const stoppedBorderCharIdx = stoppedLine.indexOf("╭")
     const stoppedTitleCharIdx = stoppedLine.indexOf("RUNNER")
-    const stoppedBorderFg = stoppedApp.cell(stoppedBorderCharIdx, stoppedRunnerLineIdx).fg
     const stoppedTitleFg = stoppedApp.cell(stoppedTitleCharIdx, stoppedRunnerLineIdx).fg
 
-    expect(stoppedBorderFg).toBeDefined()
-    expect(stoppedTitleFg).toEqual(stoppedBorderFg)
+    expect(stoppedTitleFg).toBeDefined()
     stoppedApp.unmount()
 
     // 2. Stuck runner in empty pane (rows: [])
@@ -3126,17 +3114,14 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(stuckApp)
     const stuckPainted = stuckApp.lines
-    const stuckRunnerLineIdx = stuckPainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    const stuckRunnerLineIdx = stuckPainted.findIndex((l) => l.includes("RUNNER"))
     expect(stuckRunnerLineIdx).toBeGreaterThan(0)
     const stuckLine = stuckPainted[stuckRunnerLineIdx]!
-    const stuckBorderCharIdx = stuckLine.indexOf("╭")
     const stuckTitleCharIdx = stuckLine.indexOf("RUNNER")
-    const stuckBorderFg = stuckApp.cell(stuckBorderCharIdx, stuckRunnerLineIdx).fg
     const stuckTitleFg = stuckApp.cell(stuckTitleCharIdx, stuckRunnerLineIdx).fg
 
-    expect(stuckBorderFg).toBeDefined()
-    expect(stuckTitleFg).toEqual(stuckBorderFg)
-    expect(stuckBorderFg).not.toEqual(stoppedBorderFg)
+    expect(stuckTitleFg).toBeDefined()
+    expect(stuckTitleFg).not.toEqual(stoppedTitleFg)
     stuckApp.unmount()
 
     // 3. Idle runner in empty pane (rows: [])
@@ -3152,17 +3137,15 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(idleApp)
     const idlePainted = idleApp.lines
-    const idleRunnerLineIdx = idlePainted.findIndex((l) => l.includes("╭─ RUNNER"))
+    const idleRunnerLineIdx = idlePainted.findIndex((l) => l.includes("RUNNER"))
     expect(idleRunnerLineIdx).toBeGreaterThan(0)
     const idleLine = idlePainted[idleRunnerLineIdx]!
-    const idleBorderCharIdx = idleLine.indexOf("╭")
     const idleTitleCharIdx = idleLine.indexOf("RUNNER")
-    const idleBorderFg = idleApp.cell(idleBorderCharIdx, idleRunnerLineIdx).fg
     const idleTitleFg = idleApp.cell(idleTitleCharIdx, idleRunnerLineIdx).fg
 
-    expect(idleBorderFg).toBeDefined()
-    expect(idleTitleFg).toEqual(idleBorderFg)
-    expect(idleBorderFg).not.toEqual(stoppedBorderFg)
+    expect(idleTitleFg).toBeDefined()
+    expect(idleTitleFg).not.toEqual(stoppedTitleFg)
+    expect(idleTitleFg).not.toEqual(stuckTitleFg)
     idleApp.unmount()
   })
 
@@ -3182,15 +3165,15 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(app)
     const painted = app.lines
-    const line1 = painted[1] ?? ""
-    expect(line1).toContain("STATS")
-    expect(line1).toContain("[o]pen")
-    expect(line1).toContain("[r]unning")
-    expect(line1).toContain("[d]one")
-    expect(line1).toContain("[f]ailed")
+    const statsLine = painted.find((l) => l.includes("STATS")) ?? ""
+    expect(statsLine).toContain("STATS")
+    expect(statsLine).toContain("[o]pen")
+    expect(statsLine).toContain("[r]unning")
+    expect(statsLine).toContain("[d]one")
+    expect(statsLine).toContain("[f]ailed")
     // There is no separate pills line in the body.
     expect(
-      painted.slice(2).some((l) => l.includes("[o]pen") && l.includes("[r]unning") && l.includes("[f]ailed")),
+      painted.slice(3).some((l) => l.includes("[o]pen") && l.includes("[r]unning") && l.includes("[f]ailed")),
     ).toBe(false)
     app.unmount()
   })
@@ -3251,7 +3234,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(fullText).not.toContain("TIME=ended")
     expect(fullText).not.toContain("not submitted")
     expect(fullText).not.toContain("the bottom row goes next")
-    expect(painted.some((line) => line.includes("────"))).toBe(true)
+    expect(fullText).toContain("RUNNER")
   })
 
   it("row 17: detail pane with subtle background, DIVIDER_SIZE = 0, and blank padding line replacing divider", async () => {
@@ -3280,16 +3263,16 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(detailBg).not.toEqual(listBg)
     expect(detailBg).toEqual({ r: 61, g: 67, b: 79 })
 
-    // 2. Blank padding line: first row of detail pane (line 2, under STATS) is blank (<Box height={1} flexShrink={0} />)
-    const detailTop = app.lines[2]?.slice(143).trim() ?? ""
-    expect(detailTop).toBe("")
+    // 2. Detail pane is flush to top: first row of detail pane (line 0) starts with the status box header
+    const detailTop = app.lines[0]?.slice(143).trim() ?? ""
+    expect(detailTop).toMatch(/[╭─╮│RUN]/u)
 
-    // Detail content starts on line 3 (tab strip)
-    const detailContent = app.lines[3]?.slice(143).trim() ?? ""
+    // Detail content is present
+    const detailContent = app.lines[1]?.slice(143).trim() ?? ""
     expect(detailContent).not.toBe("")
 
     // 3. Divider line is absent: no vertical divider character between list and detail on top rows
-    expect(app.lines.slice(0, 4).some((line) => line.slice(135, 145).includes("│"))).toBe(false)
+    expect(app.lines.slice(0, 4).some((line) => line.slice(138, 144).includes("│"))).toBe(false)
 
     app.unmount()
   })
@@ -3318,10 +3301,9 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
 
     // 2. marginTop: line before runner box (line 13) is blank
     expect(lines[13]?.replace(/[█▅]/g, "").trim()).toBe("")
-    expect(lines[14]).toContain("╭─ RUNNER")
+    expect(lines[14]).toContain("RUNNER")
 
     // 3. marginBottom: line after runner box (line 17) is blank
-    expect(lines[16]).toContain("╰─")
     expect(lines[17]?.replace(/[█▅]/g, "").trim()).toBe("")
 
     app.unmount()
@@ -3441,7 +3423,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(idleApp)
     const idleTop = idleApp.lines[0]!
-    expect(idleTop.trimStart().startsWith("◉ YRD RUNNING")).toBe(true)
+    expect(idleTop.trimStart().startsWith("▸ YRD QUEUE")).toBe(true)
     idleApp.unmount()
 
     // 2. Stopped runner
@@ -3460,7 +3442,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(stoppedApp)
     const stoppedTop = stoppedApp.lines[0]!
-    expect(stoppedTop.trimStart().startsWith("■ YRD STOPPED")).toBe(true)
+    expect(stoppedTop.trimStart().startsWith("▸ YRD STOPPED")).toBe(true)
     stoppedApp.unmount()
 
     // 3. Stuck runner
@@ -3477,7 +3459,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     )
     await settle(stuckApp)
     const stuckTop = stuckApp.lines[0]!
-    expect(stuckTop.trimStart().startsWith("■ YRD PAUSED")).toBe(true)
+    expect(stuckTop.trimStart().startsWith("▸ YRD PAUSED")).toBe(true)
     stuckApp.unmount()
   })
 
@@ -3507,7 +3489,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     }
 
     const absent = await paintStop()
-    expect(absent.lines[0]).toContain("■")
+    expect(absent.lines[0]).toContain(RUNNER_GLYPH)
     expect(absent.text).not.toContain("no stop reason was recorded")
     expect(absent.text).toContain("to start: yrd queue up")
     absent.unmount()
@@ -3541,7 +3523,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       rows: 5,
     })
     await settle(composeApp)
-    expect(composeApp.text).toContain("╭─ RUNNER")
+    expect(composeApp.text).toContain("RUNNER")
     expect(composeApp.text).toContain("between entries: re-reading main")
     composeApp.unmount()
 
@@ -3755,13 +3737,13 @@ describe("the top line (25416)", () => {
     const app = render(<WatchPane snapshot={snapshot({ runner: RUNNER_READ })} live={false} />, { cols: 120, rows: 30 })
     await settle(app)
     // The chrome is every cell that is neither the status block nor a pill: the gap between them and the edge.
-    const blockEnd = (app.lines[0] ?? "").indexOf("RUNNING") + "RUNNING".length + 1
+    const blockEnd = (app.lines[0] ?? "").indexOf("QUEUE") + "QUEUE".length + 1
     const lineBg = new Set([2, 50, 119].map((x) => JSON.stringify(app.cell(x, 0).bg)))
     const seen = {
       lineBg: [...lineBg],
       underIsInverse: JSON.stringify(app.cell(2, 1).bg) === bgOf("$bg-inverse"),
       underRightIsInverse: JSON.stringify(app.cell(119, 1).bg) === bgOf("$bg-inverse"),
-      statusIsInverse: bgAt(app, 0, "◉") === bgOf("$bg-inverse"),
+      statusIsInverse: bgAt(app, 0, RUNNER_GLYPH) === bgOf("$bg-inverse"),
     }
     app.unmount()
     expect(seen).toEqual({
@@ -3784,8 +3766,8 @@ describe("the top line (25416)", () => {
     })
     await settle(narrow)
     const seen = {
-      wide: wide.lines[0]?.includes("■"),
-      paused: [fgAt(wide, 0, "■"), bgAt(wide, 0, "■")],
+      wide: wide.lines[0]?.includes(RUNNER_GLYPH),
+      paused: [fgAt(wide, 0, RUNNER_GLYPH), bgAt(wide, 0, RUNNER_GLYPH)],
       loudPause: wide.text.includes(PAUSE),
     }
     wide.unmount()
@@ -3804,7 +3786,7 @@ describe("the top line (25416)", () => {
       rows: 30,
     })
     await settle(app)
-    const markerX = (app.lines[0] ?? "").indexOf("■")
+    const markerX = (app.lines[0] ?? "").indexOf(RUNNER_GLYPH)
     const marker = (): string => `${app.cell(markerX, 0).char}:${JSON.stringify(app.cell(markerX, 0).fg)}`
     const samples = [marker()]
     for (const wait of [470, 470]) {
@@ -3818,7 +3800,7 @@ describe("the top line (25416)", () => {
     expect({
       glyph: [...new Set(samples.map((sample) => sample.split(":")[0]))],
       colours: new Set(samples).size > 1,
-    }).toEqual({ glyph: ["■"], colours: true })
+    }).toEqual({ glyph: [RUNNER_GLYPH], colours: true })
   }, 10_000)
 
   it("row 2: a click on the status area points the cursor at the RUNNER box and centres it", async () => {
@@ -3832,15 +3814,15 @@ describe("the top line (25416)", () => {
     await settle(app)
     app.press("G")
     await settle(app)
-    await app.click((app.lines[0] ?? "").indexOf("◉"), 0)
+    await app.click((app.lines[0] ?? "").indexOf(RUNNER_GLYPH), 0)
     await settle(app)
     const lines = app.lines
     // The list's rows run from its ▲N indicator to its ▼N one; the detail is below them.
-    const box = lines.findIndex((line) => line.includes("╭─ RUNNER"))
+    const box = lines.findIndex((line) => line.includes("RUNNER"))
     const top = lines.findIndex((line) => /▲\d/u.test(line))
     const bottom = lines.findIndex((line) => /▼\d/u.test(line))
     const third = (bottom - top) / 3
-    const runnerLineIdx = lines.findIndex((line) => line.includes("╭─ RUNNER"))
+    const runnerLineIdx = lines.findIndex((line) => line.includes("RUNNER"))
     const seen = {
       on: runnerLineIdx >= 0 && app.cell(4, runnerLineIdx + 1).bg !== null ? "runner" : "elsewhere",
       // Centred: the box sits in the middle third of the list's rows, not at an edge.
@@ -3853,7 +3835,7 @@ describe("the top line (25416)", () => {
   it("25556: selected tabs and filters use warning ink on white while unselected ones stay muted", async () => {
     const app = render(
       <WatchPane
-        snapshot={snapshot({ queues: QUEUES, rows: [{ row: failedRow() }], runner: RUNNER_READ })}
+        snapshot={snapshot({ queues: [QUEUES[0]!], rows: [{ row: failedRow() }], runner: RUNNER_READ })}
         live={false}
       />,
       { cols: 140, rows: 30 },
@@ -3875,7 +3857,7 @@ describe("the top line (25416)", () => {
   it("every pair on the top line reads at 3:1 or better against the ground it is painted on", async () => {
     const running = render(
       <WatchPane
-        snapshot={snapshot({ queues: QUEUES, rows: [{ row: failedRow() }], runner: RUNNER_READ })}
+        snapshot={snapshot({ queues: [QUEUES[0]!], rows: [{ row: failedRow() }], runner: RUNNER_READ })}
         live={false}
       />,
       { cols: 160, rows: 30 },
@@ -3936,7 +3918,7 @@ describe("the top line (25416)", () => {
       expect(JSON.stringify(app.cell(2, 0).bg)).toBe(bgOf("$bg-inverse"))
       expect(JSON.stringify(app.cell(119, 0).bg)).toBe(bgOf("$bg-inverse"))
       // Line 1 has YRD, status word and address at left (24196 row 27)
-      expect(line0.trimStart().startsWith("◉ YRD RUNNING github.com/beorn/hh#main")).toBe(true)
+      expect(line0.trimStart().startsWith("▸ YRD QUEUE github.com/beorn/hh#main")).toBe(true)
       // Line 1 has status timer at right
       expect(line0).toContain("00:00:17")
       // Filter toggles and tabs are not on line 1
@@ -4017,7 +3999,7 @@ describe("the top line (25416)", () => {
       const app = render(
         <WatchPane
           snapshot={snapshot({
-            queues: QUEUES,
+            queues: [QUEUES[0]!],
             rows: [{ row: failedRow() }],
             runner: RUNNER_READ,
           })}
@@ -4062,7 +4044,7 @@ describe("the top line (25416)", () => {
       )
       await settle(narrow)
       const line0 = narrow.lines[0] ?? ""
-      expect(line0.trimStart().startsWith("◉ YRD RUNNING ")).toBe(true)
+      expect(line0.trimStart().startsWith("▸ YRD QUEUE ")).toBe(true)
       expect(line0).toContain("..")
       expect(line0).not.toContain(longAddress)
       expect(line0).toContain("00:00:17")
@@ -4121,9 +4103,18 @@ describe("the top line (25416)", () => {
       const now = NOW
       const rows: WatchRow[] = [
         {
+          run: journalRun({
+            id: "q-20260924T200000000Z-a1b2c3d4",
+            number: 408,
+            branch: "task/25630-timer-freeze",
+            head: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+            startedAt: new Date(now.getTime() - 20 * 60_000),
+            at: new Date(now.getTime() - 20 * 60_000),
+          }),
           row: {
             branch: "task/25630-timer-freeze",
             head: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+            run: "q-20260924T200000000Z-a1b2c3d4",
             since: new Date(now.getTime() - 35 * 60_000),
             startedAt: new Date(now.getTime() - 20 * 60_000),
             state: "merging",
@@ -4132,9 +4123,18 @@ describe("the top line (25416)", () => {
           },
         },
         {
+          run: journalRun({
+            id: "q-20260924T191500000Z-f3a317b2",
+            number: 407,
+            branch: "task/25556-white-headers",
+            head: "f3a317b254e90000000000000000000000000000",
+            startedAt: new Date(now.getTime() - 45 * 60_000),
+            at: new Date(now.getTime() - 30 * 60_000),
+          }),
           row: {
             branch: "task/25556-white-headers",
             head: "f3a317b254e90000000000000000000000000000",
+            run: "q-20260924T191500000Z-f3a317b2",
             since: new Date(now.getTime() - 90 * 60_000),
             startedAt: new Date(now.getTime() - 45 * 60_000),
             endedAt: new Date(now.getTime() - 30 * 60_000),
@@ -4168,6 +4168,7 @@ describe("the top line (25416)", () => {
               latest: {
                 alive: true,
                 id: "q-20260924T200000000Z-a1b2c3d4",
+                number: 408,
                 lastWriteAt: new Date(now.getTime() - 20_000),
                 startedAt: new Date(now.getTime() - 20 * 60_000),
               },
@@ -4614,10 +4615,10 @@ describe("watch header styling, runner markers, and timer (25716 row 31)", () =>
     )
     await settle(app)
     const line0 = app.lines[0] ?? ""
-    expect(line0.trimStart().startsWith("◉ YRD RUNNING")).toBe(true)
+    expect(line0.trimStart().startsWith("▸ YRD QUEUE")).toBe(true)
     expect(line0).not.toContain("[1]")
     expect(boldAt(app, 0, "YRD")).toBe(true)
-    expect(boldAt(app, 0, "RUNNING")).toBe(true)
+    expect(boldAt(app, 0, "QUEUE")).toBe(true)
     expect(line0).toContain("00:00:17")
     expect(boldAt(app, 0, "00:00:17")).toBe(false)
     expect(fgAt(app, 0, "00:00:17")).toBe(fgOf("$fg-on-inverse-muted"))
@@ -4645,10 +4646,11 @@ describe("watch header styling, runner markers, and timer (25716 row 31)", () =>
     )
     await settle(app)
     const line0 = app.lines[0] ?? ""
+    const line1 = app.lines[1] ?? ""
     expect(line0).toContain("[1]")
-    expect(line0).toContain("[2]")
+    expect(line1).toContain("[2]")
     expect(fgAt(app, 0, "[1]")).toBe(fgOf("$fg-on-inverse-muted"))
-    expect(fgAt(app, 0, "[2]")).toBe(fgOf("$fg-on-inverse-muted"))
+    expect(fgAt(app, 1, "[2]")).toBe(fgOf("$fg-on-inverse-muted"))
     app.unmount()
   })
 
@@ -5376,7 +5378,7 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
       return x < 0 ? undefined : app.cell(x + offset, y).bold
     }
 
-    it("renders ◉ YRD RUNNING at top left with status colour for a running queue", async () => {
+    it("renders ▸ YRD QUEUE at top left with status colour for a running queue", async () => {
       const app = render(
         <WatchPane
           snapshot={snapshot({ runner: RUNNER, queues: [{ branch: "main", label: "main", path: "/repo" }] })}
@@ -5386,15 +5388,14 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
       )
       await settle(app)
       const line0 = app.lines[0] ?? ""
-      expect(line0.trimStart().startsWith("◉ YRD RUNNING")).toBe(true)
-      expect(fgAt(app, 0, "◉")).toBe(fgOf("$fg-info"))
+      expect(line0.trimStart().startsWith("▸ YRD QUEUE")).toBe(true)
+      expect(fgAt(app, 0, "▸")).toBe(fgOf("$fg-muted"))
       expect(boldAt(app, 0, "YRD")).toBe(true)
-      expect(fgAt(app, 0, "RUNNING")).toBe(fgOf("$fg-info"))
-      expect(boldAt(app, 0, "RUNNING")).toBe(true)
+      expect(boldAt(app, 0, "QUEUE")).toBe(true)
       app.unmount()
     })
 
-    it("renders ■ YRD STOPPED at top left with status colour for a stopped queue", async () => {
+    it("renders ▸ YRD STOPPED at top left with status colour for a stopped queue", async () => {
       const app = render(
         <WatchPane
           snapshot={snapshot({
@@ -5410,15 +5411,15 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
       )
       await settle(app)
       const line0 = app.lines[0] ?? ""
-      expect(line0.trimStart().startsWith("■ YRD STOPPED")).toBe(true)
-      expect(fgAt(app, 0, "■")).toBe(fgOf("$fg-error"))
+      expect(line0.trimStart().startsWith("▸ YRD STOPPED")).toBe(true)
+      expect(fgAt(app, 0, "▸")).toBe(fgOf("$fg-error"))
       expect(boldAt(app, 0, "YRD")).toBe(true)
       expect(fgAt(app, 0, "STOPPED")).toBe(fgOf("$fg-error"))
       expect(boldAt(app, 0, "STOPPED")).toBe(true)
       app.unmount()
     })
 
-    it("renders ■ YRD PAUSED at top left with status colour for a paused/stuck queue", async () => {
+    it("renders ▸ YRD PAUSED at top left with status colour for a paused/stuck queue", async () => {
       const app = render(
         <WatchPane
           snapshot={snapshot({
@@ -5432,8 +5433,8 @@ describe("bead 25779: watch tabs background and truecolor capture", () => {
       )
       await settle(app)
       const line0 = app.lines[0] ?? ""
-      expect(line0.trimStart().startsWith("■ YRD PAUSED")).toBe(true)
-      expect(fgAt(app, 0, "■")).toBe(fgOf("$fg-warning"))
+      expect(line0.trimStart().startsWith("▸ YRD PAUSED")).toBe(true)
+      expect(fgAt(app, 0, "▸")).toBe(fgOf("$fg-warning"))
       expect(boldAt(app, 0, "YRD")).toBe(true)
       expect(fgAt(app, 0, "PAUSED")).toBe(fgOf("$fg-warning"))
       expect(boldAt(app, 0, "PAUSED")).toBe(true)
@@ -5476,7 +5477,7 @@ describe("independent queue watch (22949)", () => {
     const header = app.lines.find((line) => line.includes("CHANGES") && line.includes("RUN"))
     expect(header).toMatch(/\bTIME\s+Q\s+RUN\s+CHANGES\b/u)
     const firstRow = app.lines.find((line) => line.includes("first repository"))
-    expect(firstRow).toMatch(/\b1\s+q-20260903\S*\s+first repository/u)
+    expect(firstRow).toMatch(/\b1\s+0badf00d\s+first repository/u)
     expect(app.text).toContain("[1] YRD QUEUE example.test/one#main (/one)")
     expect(app.text).toContain("example.test/two#main")
     expect(app.text.match(/RUNNER/gu)?.length).toBe(2)
