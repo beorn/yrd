@@ -206,7 +206,10 @@ import { workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
 
 function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution | undefined) {
-  if (resolution === undefined) return {}
+  if (resolution === undefined) {
+    io.stderr(`yrd: WARNING: ${branch} admitted with no issue link; no explicit issue binding was found\n`)
+    return {}
+  }
   if (resolution.source === "legacy-branch") {
     io.stderr(
       `yrd: legacy branch-name fallback: ${branch} -> ${resolution.issue}; no explicit issue binding was found\n`,
