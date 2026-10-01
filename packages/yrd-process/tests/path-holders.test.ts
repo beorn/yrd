@@ -4,7 +4,17 @@
  * @consumer @yrd/process inspectPathHolderCensus
  */
 import { afterEach, describe, expect, test, vi } from "vitest"
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { inspectPathHolderCensus, pathHolderRefusal, type PathHolder } from "../src/index.ts"
@@ -381,15 +391,16 @@ describe("inspectPathHolderCensus", () => {
             otherUid: 0,
             zombie: 0,
             sourceDenied: 0,
-            unavailable: { exited: 0, denied: 0 },
+            sourceUnanswered: 0,
+            unavailable: { exited: 0, denied: 0, unanswered: 0 },
           },
           sources: {
-            cwd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
-            exe: { readable: 0, unavailable: { exited: 0, denied: 0 } },
-            root: { readable: 0, unavailable: { exited: 0, denied: 0 } },
-            argv: { readable: 0, unavailable: { exited: 0, denied: 0 } },
-            maps: { readable: 0, unavailable: { exited: 0, denied: 0 } },
-            fd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+            cwd: { readable: 0, unavailable: { exited: 0, denied: 0, unanswered: 0 } },
+            exe: { readable: 0, unavailable: { exited: 0, denied: 0, unanswered: 0 } },
+            root: { readable: 0, unavailable: { exited: 0, denied: 0, unanswered: 0 } },
+            argv: { readable: 0, unavailable: { exited: 0, denied: 0, unanswered: 0 } },
+            maps: { readable: 0, unavailable: { exited: 0, denied: 0, unanswered: 0 } },
+            fd: { readable: 0, unavailable: { exited: 0, denied: 0, unanswered: 0 } },
           },
         },
       })
@@ -436,16 +447,55 @@ describe("inspectPathHolderCensus", () => {
       expect(census.coverage).toMatchObject({ complete: true, sources: { argv: { readable: 1 } } })
     })
 
-    test.runIf(process.platform === "linux")("script text or a flag value that mentions the path holds nothing", async () => {
-      const probe = argvFixture([])
-      writeFileSync(
-        join(probe.processRoot, "cmdline"),
-        `sh\0-c\0cd ${probe.ownedPath} && run\0--config=${probe.ownedPath}/x.json\0`,
-      )
-      const census = await inspectPathHolderCensusInProc(probe.ownedPath, probe.procRoot)
-      expect(census.holders).toEqual([])
-      expect(census.coverage).toMatchObject({ complete: true })
-    })
+    test.runIf(process.platform === "linux")(
+      "script text or a flag value that mentions the path holds nothing",
+      async () => {
+        const probe = argvFixture([])
+        writeFileSync(
+          join(probe.processRoot, "cmdline"),
+          `sh\0-c\0cd ${probe.ownedPath} && run\0--config=${probe.ownedPath}/x.json\0`,
+        )
+        const census = await inspectPathHolderCensusInProc(probe.ownedPath, probe.procRoot)
+        expect(census.holders).toEqual([])
+        expect(census.coverage).toMatchObject({ complete: true })
+      },
+    )
+
+    // @hab/26947 (@cto 3a61d4df): reading a live cmdline waits on the target's mmap lock, once for 23 minutes (24248).
+    // A FIFO with no writer stands in for that lock: the open never returns until a writer arrives.
+    test.runIf(process.platform === "linux")(
+      "a source that does not answer by the deadline is named, the census answers, and the other pids are read",
+      async () => {
+        const probe = argvFixture([])
+        rmSync(join(probe.processRoot, "cmdline"))
+        const fifo = join(probe.processRoot, "cmdline")
+        expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0)
+        const neighbour = join(probe.procRoot, "4343")
+        mkdirSync(join(neighbour, "fd"), { recursive: true })
+        symlinkSync(probe.ownedPath, join(neighbour, "cwd"))
+        symlinkSync("/bin/sh", join(neighbour, "exe"))
+        symlinkSync("/", join(neighbour, "root"))
+        writeFileSync(join(neighbour, "maps"), "")
+        writeFileSync(join(neighbour, "stat"), "4343 (sh) S 1 0 0 0\n")
+        writeFileSync(join(neighbour, "cmdline"), "sh\0")
+        try {
+          const started = performance.now()
+          const census = await inspectPathHolderCensusInProc(probe.ownedPath, probe.procRoot, { deadlineMs: 300 })
+          expect(performance.now() - started).toBeLessThan(5_000)
+          expect(census.holders).toEqual([{ pid: 4343, source: "cwd", target: probe.ownedPath }])
+          expect(census.coverage).toMatchObject({
+            complete: false,
+            processes: { sameUid: 2, sourceDenied: 0, sourceUnanswered: 1 },
+            sources: { argv: { readable: 1, unavailable: { exited: 0, denied: 0, unanswered: 1 } } },
+            unreadable: [{ pid: 4242, comm: "bun", denied: [], unanswered: ["argv"] }],
+          })
+        } finally {
+          // Release the abandoned read so the worker can exit: a reader waiting in open() already counts as a reader,
+          // so a non-blocking writer open succeeds and its close hands the reader EOF.
+          closeSync(openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK))
+        }
+      },
+    )
 
     test.runIf(process.platform === "linux")("an unreadable cmdline is a denial, never an empty argv", async () => {
       const probe = argvFixture(["bun"])
