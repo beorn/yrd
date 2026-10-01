@@ -482,9 +482,11 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
     const tabsTextIdx = app.lines.findIndex((l) => l.includes("provisioning") && l.includes("checking"))
     expect(tabsTextIdx).toBeGreaterThan(runnerLastLineIdx)
 
-    // Filled tabs start 1 row above the label text (silvery filled tabs have 1 line top padding with non-null bg)
+    // The tabs start at their first filled row. silvery 0.26 draws one padding row above the label;
+    // 0.25, which standalone yrd and its CI resolve, starts on the label row itself.
     const colProvisioning = app.lines[tabsTextIdx]!.indexOf("provisioning")
-    const tabsTopIdx = tabsTextIdx - 1
+    let tabsTopIdx = runnerLastLineIdx + 1
+    while (tabsTopIdx < tabsTextIdx && app.cell(colProvisioning, tabsTopIdx).bg === null) tabsTopIdx++
     expect(app.cell(colProvisioning, tabsTopIdx).bg).not.toBeNull()
 
     // Exactly one blank line between the RUNNER block (Detail:) and the stage tabs:
