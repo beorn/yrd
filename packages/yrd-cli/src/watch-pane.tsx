@@ -101,6 +101,7 @@ import {
   StatusPills,
   TopLine,
   bucketOf,
+  clockOf,
   listLayout,
   separatorBefore,
   type DraftWindow,
@@ -502,7 +503,6 @@ function QueuesWatchPane({
       reading.rows.filter((item) => buckets.has(bucketOf(item.row))),
       false,
     )
-  const rows = visible.flatMap((source) => (source.snapshot === undefined ? [] : visibleRows(source.snapshot)))
   const decisions = measured.flatMap((source) =>
     source.snapshot === undefined ? [] : decisionsOfRows(visibleRows(source.snapshot)),
   )
@@ -532,29 +532,51 @@ function QueuesWatchPane({
       measured.length === 0 ? undefined : lastDayBucket(decisions, at),
       unmeasured.length > 0 ? `unmeasured: ${unmeasured.join(", ")}` : undefined,
     ) + (measured.length > 0 && unmeasured.length > 0 ? ` · unmeasured: ${unmeasured.join(", ")}` : "")
-  const items: WatchPaneItem[] = visible.flatMap((source) => {
+  const runnerItems: WatchPaneItem[] = visible.flatMap((source) => {
     const reading = source.snapshot
-    const context = { sourceId: source.id, snapshot: reading, digit: source.digit }
-    const header: WatchPaneItem = {
-      ...context,
-      kind: "queue",
-      label: `${multiple ? `[${source.digit}] ` : ""}${source.label} — Enter to focus`,
-      key: `${source.id}:queue`,
-    }
-    if (reading === undefined) return [header]
-    const grouped = visibleRows(reading)
-    const rowItems = (band: Band): WatchPaneItem[] =>
-      grouped
-        .filter((item) => bandOf(item.row, false) === band)
-        .map((item) => ({ ...context, kind: "row", item, key: `${source.id}:${watchRowKey(item)}` }))
+    if (reading === undefined) return []
     return [
-      header,
-      ...rowItems("drafts"),
-      ...rowItems("waiting"),
-      { ...context, kind: "runner", line: runnerOf(reading, at), key: `${source.id}:runner` } as WatchPaneItem,
-      ...rowItems("done"),
+      {
+        sourceId: source.id,
+        snapshot: reading,
+        digit: source.digit,
+        kind: "runner",
+        line: runnerOf(reading, at),
+        key: `${source.id}:runner`,
+      } as WatchPaneItem,
     ]
   })
+  const taskItems: (WatchPaneItem & { kind: "row" })[] = visible.flatMap((source) => {
+    const reading = source.snapshot
+    if (reading === undefined) return []
+    const context = { sourceId: source.id, snapshot: reading, digit: source.digit }
+    const filteredRows = reading.rows.filter((item) => buckets.has(bucketOf(item.row)))
+    return filteredRows.map((item) => ({
+      ...context,
+      kind: "row" as const,
+      item,
+      key: `${source.id}:${watchRowKey(item)}`,
+    }))
+  })
+  taskItems.sort((a, b) => {
+    const aBand = bandOf(a.item.row, false)
+    const bBand = bandOf(b.item.row, false)
+    const bandOrder: Record<Band, number> = { drafts: 0, waiting: 1, runner: 2, done: 3 }
+    if (aBand !== bBand) {
+      return bandOrder[aBand] - bandOrder[bBand]
+    }
+    if (aBand === "waiting") {
+      const aPos = a.item.row.position ?? Infinity
+      const bPos = b.item.row.position ?? Infinity
+      if (aPos !== bPos) return aPos - bPos
+    }
+    const aTime = clockOf(a.item.row)?.getTime() ?? 0
+    const bTime = clockOf(b.item.row)?.getTime() ?? 0
+    if (bTime !== aTime) return bTime - aTime
+    return (a.digit ?? 0) - (b.digit ?? 0)
+  })
+  const items: WatchPaneItem[] = [...runnerItems, ...taskItems]
+  const rows: readonly WatchRow[] = taskItems.map((item) => item.item)
   const cursor = Math.max(
     0,
     items.findIndex((item) => item.key === cursorKey),
@@ -1690,7 +1712,13 @@ function Table({
               const item = items[index]
               if (item === undefined) return 1
               if (item.kind === "queue") return 1
-              if (item.kind === "runner") return 5
+              if (item.kind === "runner") {
+                const prevIsRunner = index > 0 && items[index - 1]?.kind === "runner"
+                const nextIsRunner = index + 1 < items.length && items[index + 1]?.kind === "runner"
+                const marginTop = prevIsRunner ? 0 : 1
+                const marginBottom = nextIsRunner ? 0 : 1
+                return 3 + marginTop + marginBottom
+              }
               const rowIndex = rows.indexOf(item.item)
               return (separatorBefore(rows, rowIndex) === undefined ? 1 : 2) + bandHeight(plan.before.get(rowIndex))
             }}
@@ -1714,6 +1742,8 @@ function Table({
                 label: itemSnapshot.queues[0]?.label ?? itemSnapshot.queue,
               }
               if (item.kind === "runner") {
+                const prevIsRunner = index > 0 && items[index - 1]?.kind === "runner"
+                const nextIsRunner = index + 1 < items.length && items[index + 1]?.kind === "runner"
                 return (
                   <RunnerTitledBox
                     line={item.line}
@@ -1722,6 +1752,8 @@ function Table({
                     cursor={index === cursor}
                     queueDigit={itemQueue.digit}
                     queueLabel={itemQueue.label}
+                    marginTop={prevIsRunner ? 0 : 1}
+                    marginBottom={nextIsRunner ? 0 : 1}
                   />
                 )
               }

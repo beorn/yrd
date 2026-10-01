@@ -360,13 +360,14 @@ export function WatchDetail({
     return (
       <DetailScroll controller={runnerScroll}>
         <Box flexDirection="column" minWidth={0} paddingX={1} gap={1}>
-          <Box flexDirection="column" minWidth={0}>
+          <Box flexDirection="column" minWidth={0} borderStyle="round" borderColor={color} paddingX={1}>
             <Box flexDirection="row" gap={1}>
               <Text bold color={color}>
                 {RUNNER_GLYPH} RUNNER {STATE_WORDS[runner.state].word}
               </Text>
               {runner.duration ? <Text color="$fg-muted">({runner.duration})</Text> : null}
             </Box>
+            <Box height={1} flexShrink={0} />
             <Box flexDirection="column">
               <Text color="$fg-muted">
                 Queue: <Text color="$fg">{runnerSnapshot.queue}</Text>

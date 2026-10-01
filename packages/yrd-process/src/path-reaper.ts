@@ -1,20 +1,65 @@
 /**
  * Path process ownership — the census of every process still holding a path.
  *
- * cwd, executable, process root, a mapped file or an open descriptor under the
- * path all count as holding it, so a descendant that changed session is still
- * attributed. The census reports its own COVERAGE beside its holders: a
+ * cwd, executable, process root, a mapped file, an open descriptor, or an argv
+ * element that is itself a path under the path all count as holding it, so a
+ * descendant that changed session is still attributed, and so is a supervisor
+ * started as `bun <tree>/entry.ts` that later resolves files beside its entry
+ * (@hab/26947: it holds its tree by argv alone, with cwd elsewhere and nothing
+ * mapped or open). The census reports its own COVERAGE beside its holders: a
  * permission denial is reduced coverage, never an empty result, so "nothing
  * holds this" and "we were not allowed to look" can never read the same.
+ *
+ * The census also answers by a DEADLINE, whatever its sources do: reading
+ * `/proc/<pid>/cmdline` or `maps` waits on the target's mmap lock, measured once
+ * at 23 minutes (24248). A source that has not answered by then is a coverage
+ * fact like a denial, `unanswered`, and no caller waits for it (@hab/26947).
  */
 
 import { readFile, readdir, readlink, realpath, stat } from "node:fs/promises"
 import { resolve, sep } from "node:path"
 import { linuxBootTimeMs, procStatStartedAtMs } from "./pid-identity.ts"
 
+/**
+ * How long a census waits for its sources before it answers with what it has. Measured normal: the whole Linux
+ * census took 33-45 ms over about 870 processes on hab1 (2026-10-01, @hab/26947); 24248 gave a whole `ps` 2 s.
+ */
+export const PATH_HOLDER_CENSUS_DEADLINE_MS = 2_000
+
+export type PathHolderCensusOptions = Readonly<{ deadlineMs?: number }>
+
+/**
+ * One deadline shared by every read of a census. `answer` settles with the read's value, or as unanswered once the
+ * deadline has passed; a read given up on keeps running in the runtime, and its late value or error is dropped. The
+ * timer never holds the process open.
+ */
+export type CensusDeadline = Readonly<{
+  answer<T>(read: Promise<T>): Promise<Readonly<{ answered: true; value: T }> | Readonly<{ answered: false }>>
+  clear(): void
+}>
+
+export function censusDeadline(ms: number): CensusDeadline {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    throw new RangeError(`census deadline must be a positive number of ms, got ${ms}`)
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<Readonly<{ answered: false }>>((resolve) => {
+    timer = setTimeout(() => resolve({ answered: false }), ms)
+    timer.unref?.()
+  })
+  return {
+    answer: <T>(read: Promise<T>) => {
+      // The race below handles an answer in time; this keeps a late rejection of an abandoned read from surfacing.
+      read.catch(() => {})
+      return Promise.race([read.then((value) => ({ answered: true as const, value })), expired])
+    },
+    clear: () => clearTimeout(timer),
+  }
+}
+
 export type PathHolder = Readonly<{
   pid: number
-  source: "cwd" | "exe" | "root" | `fd/${string}`
+  source: "cwd" | "exe" | "root" | "argv" | `fd/${string}`
   target: string
 }>
 
@@ -23,6 +68,8 @@ export type PathHolderUnavailableCoverage = Readonly<{
   exited: number
   /** EACCES/EPERM: the entry remained but the caller was not allowed to inspect it. */
   denied: number
+  /** The read had not answered by the census deadline. Optional for censuses recorded before the deadline existed. */
+  unanswered?: number
 }>
 
 export type PathHolderSourceCoverage = Readonly<{
@@ -56,7 +103,9 @@ export type UnreadableProcess = Readonly<{
    * host's boot time; absent when either could not be read.
    */
   startedAt?: string
-  denied: readonly ("process" | "cwd" | "exe" | "root" | "maps" | "fd")[]
+  denied: readonly ("process" | "cwd" | "exe" | "root" | "argv" | "maps" | "fd")[]
+  /** Observations that had not answered by the census deadline; a gap exactly like a denial. */
+  unanswered?: readonly ("process" | "cwd" | "exe" | "root" | "argv" | "maps" | "fd")[]
 }>
 
 export type LinuxPathHolderCoverage = Readonly<{
@@ -64,10 +113,11 @@ export type LinuxPathHolderCoverage = Readonly<{
   /** Linux filters numeric proc entries to the caller's UID before inspecting holder sources. */
   scope: "same-uid"
   procRoot: string
-  /** False only when permission denial may have hidden a same-UID holder. Exited entries are not
-   * gaps. Always justified beside itself: an incomplete census carries a nonzero
-   * `processes.unavailable.denied` or `processes.sourceDenied`, so no projection of the head can
-   * read "incomplete with nothing unavailable" (24638). */
+  /** False only when permission denial, or a read that did not answer by the deadline, may have hidden a same-UID
+   * holder. Exited entries are not gaps. Always justified beside itself: an incomplete census carries a nonzero
+   * `processes.unavailable.denied`, `processes.sourceDenied`, `processes.unavailable.unanswered` or
+   * `processes.sourceUnanswered`, so no projection of the head can read "incomplete with nothing unavailable"
+   * (24638). */
   complete: boolean
   processes: Readonly<{
     enumerated: number
@@ -93,16 +143,19 @@ export type LinuxPathHolderCoverage = Readonly<{
     zombie: number
     /**
      * Live same-uid procs whose entry was readable but at least one holder
-     * source (cwd/exe/root/maps/fd) was denied — exactly the procs `unreadable`
+     * source (cwd/exe/root/argv/maps/fd) was denied — exactly the procs `unreadable`
      * names. Declared BEFORE the per-source breakdown so it serializes into the
      * head of the census: a hab page truncated this JSON mid-`sources`, leaving
      * a head that read `complete:false` beside all-zero counters and named no
      * gap (24638). A bounded prefix must carry the nonzero reason.
      */
     sourceDenied: number
+    /** Live same-uid procs with at least one holder source that had not answered by the deadline. Optional for
+     * censuses recorded before the deadline existed. */
+    sourceUnanswered?: number
     unavailable: PathHolderUnavailableCoverage
   }>
-  sources: Readonly<Record<"cwd" | "exe" | "root" | "maps" | "fd", PathHolderSourceCoverage>>
+  sources: Readonly<Record<"cwd" | "exe" | "root" | "argv" | "maps" | "fd", PathHolderSourceCoverage>>
   /** Every same-uid proc behind the denied counts, identified — the counts say
    * HOW MANY observations were hidden, this says WHO hid them. Optional for
    * censuses recorded before the field existed. */
@@ -112,6 +165,8 @@ export type LinuxPathHolderCoverage = Readonly<{
 export type DarwinPathHolderCoverage = Readonly<{
   platform: "darwin"
   mechanism: "lsof"
+  /** lsof reports cwd, executable, root and open files; it has no argv source, so a holder by argv alone is not
+   * seen on Darwin. */
   /** A successful lsof traversal is complete; failures throw instead of returning an empty census. */
   complete: true
 }>
@@ -140,20 +195,34 @@ export function pathHolderRefusal(holders: readonly PathHolder[]): string | unde
  * result means the reported scope was searched and no holders were found; permission
  * denial is returned as reduced coverage, never collapsed into that empty result.
  */
-export async function inspectPathHolderCensus(path: string): Promise<PathHolderCensus> {
-  return pathProcessHolderCensus(await canonicalPath(path))
+export async function inspectPathHolderCensus(
+  path: string,
+  options: PathHolderCensusOptions = {},
+): Promise<PathHolderCensus> {
+  return pathProcessHolderCensus(await canonicalPath(path), options)
 }
 
 /** @internal Deterministic Linux seam for a synthetic proc tree. */
-export async function inspectPathHolderCensusInProc(path: string, procRoot: string): Promise<PathHolderCensus> {
-  return pathProcessHolderCensus(await canonicalPath(path), { procRoot })
+export async function inspectPathHolderCensusInProc(
+  path: string,
+  procRoot: string,
+  options: PathHolderCensusOptions = {},
+): Promise<PathHolderCensus> {
+  return pathProcessHolderCensus(await canonicalPath(path), { ...options, procRoot })
 }
 
 async function pathProcessHolderCensus(
   root: string,
-  options: Readonly<{ procRoot?: string }> = {},
+  options: Readonly<{ procRoot?: string; deadlineMs?: number }> = {},
 ): Promise<PathHolderCensus> {
-  if (process.platform === "linux") return linuxPathProcessHolderCensus(root, options.procRoot ?? "/proc")
+  if (process.platform === "linux") {
+    const deadline = censusDeadline(options.deadlineMs ?? PATH_HOLDER_CENSUS_DEADLINE_MS)
+    try {
+      return await linuxPathProcessHolderCensus(root, options.procRoot ?? "/proc", deadline)
+    } finally {
+      deadline.clear()
+    }
+  }
   if (process.platform === "darwin") return darwinPathProcessHolderCensus(root)
   throw new Error(`unsupported platform ${process.platform}; cannot census path ownership`)
 }
@@ -205,10 +274,14 @@ async function darwinPathProcessHolderCensus(root: string): Promise<PathHolderCe
   }
 }
 
-type SourceAvailability = "readable" | "exited" | "denied"
+type SourceAvailability = "readable" | "exited" | "denied" | "unanswered"
 type SourceObservation<T> = Readonly<{ availability: SourceAvailability; value: T }>
 
-async function linuxPathProcessHolderCensus(root: string, procRoot: string): Promise<PathHolderCensus> {
+async function linuxPathProcessHolderCensus(
+  root: string,
+  procRoot: string,
+  deadline: CensusDeadline,
+): Promise<PathHolderCensus> {
   const entries = await readdir(procRoot, { withFileTypes: true }).catch((error: unknown) => {
     throw new Error(`Linux path-holder census requires readable proc root '${procRoot}': ${errorDetail(error)}`, {
       cause: error,
@@ -225,12 +298,14 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
     otherUid: 0,
     zombie: 0,
     sourceDenied: 0,
-    unavailable: { exited: 0, denied: 0 },
+    sourceUnanswered: 0,
+    unavailable: { exited: 0, denied: 0, unanswered: 0 },
   }
-  const sourceCoverage: Record<"cwd" | "exe" | "root" | "maps" | "fd", MutableSourceCoverage> = {
+  const sourceCoverage: Record<"cwd" | "exe" | "root" | "argv" | "maps" | "fd", MutableSourceCoverage> = {
     cwd: emptySourceCoverage(),
     exe: emptySourceCoverage(),
     root: emptySourceCoverage(),
+    argv: emptySourceCoverage(),
     maps: emptySourceCoverage(),
     fd: emptySourceCoverage(),
   }
@@ -239,11 +314,19 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
     numericEntries.map(async (entry): Promise<PathHolder[]> => {
       const pid = Number(entry.name)
       const proc = `${procRoot}/${entry.name}`
-      const metadata = await observeSource(() => stat(proc), undefined)
+      const metadata = await observeSource(deadline, () => stat(proc), undefined)
       if (metadata.availability !== "readable") {
         processCoverage.unavailable[metadata.availability] += 1
         if (metadata.availability === "denied") {
-          unreadable.push({ pid, ...(await observeProcessIdentity(proc, bootedAtMs)), denied: ["process"] })
+          unreadable.push({ pid, ...(await observeProcessIdentity(deadline, proc, bootedAtMs)), denied: ["process"] })
+        }
+        if (metadata.availability === "unanswered") {
+          unreadable.push({
+            pid,
+            ...(await observeProcessIdentity(deadline, proc, bootedAtMs)),
+            denied: [],
+            unanswered: ["process"],
+          })
         }
         return []
       }
@@ -257,37 +340,46 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
       // is counted and skipped rather than probed and then reported as a gap.
       // Reading it here also means the denial path below reuses this read
       // instead of making a second one.
-      const identity = await observeProcessIdentity(proc, bootedAtMs)
+      const identity = await observeProcessIdentity(deadline, proc, bootedAtMs)
       if (identity.state === "Z") {
         processCoverage.zombie += 1
         return []
       }
-      const [cwd, executable, processRoot, mappedFiles, descriptors] = await Promise.all([
-        observeProcessLink(`${proc}/cwd`),
-        observeProcessLink(`${proc}/exe`),
-        observeProcessLink(`${proc}/root`),
-        observeProcessMaps(`${proc}/maps`),
-        observeProcessDescriptors(`${proc}/fd`),
+      const [cwd, executable, processRoot, argv, mappedFiles, descriptors] = await Promise.all([
+        observeProcessLink(deadline, `${proc}/cwd`),
+        observeProcessLink(deadline, `${proc}/exe`),
+        observeProcessLink(deadline, `${proc}/root`),
+        observeProcessArgv(deadline, `${proc}/cmdline`),
+        observeProcessMaps(deadline, `${proc}/maps`),
+        observeProcessDescriptors(deadline, `${proc}/fd`),
       ])
       recordSourceCoverage(sourceCoverage.cwd, cwd.availability)
       recordSourceCoverage(sourceCoverage.exe, executable.availability)
       recordSourceCoverage(sourceCoverage.root, processRoot.availability)
+      recordSourceCoverage(sourceCoverage.argv, argv.availability)
       recordSourceCoverage(sourceCoverage.maps, mappedFiles.availability)
       recordSourceCoverage(sourceCoverage.fd, descriptors.availability)
-      const deniedSources = (
-        [
-          ["cwd", cwd.availability],
-          ["exe", executable.availability],
-          ["root", processRoot.availability],
-          ["maps", mappedFiles.availability],
-          ["fd", descriptors.availability],
-        ] as const
-      )
-        .filter(([, availability]) => availability === "denied")
+      const availabilities = [
+        ["cwd", cwd.availability],
+        ["exe", executable.availability],
+        ["root", processRoot.availability],
+        ["argv", argv.availability],
+        ["maps", mappedFiles.availability],
+        ["fd", descriptors.availability],
+      ] as const
+      const deniedSources = availabilities.filter(([, availability]) => availability === "denied").map(([name]) => name)
+      const unansweredSources = availabilities
+        .filter(([, availability]) => availability === "unanswered")
         .map(([name]) => name)
-      if (deniedSources.length > 0) {
-        processCoverage.sourceDenied += 1
-        unreadable.push({ pid, ...identity, denied: deniedSources })
+      if (deniedSources.length > 0) processCoverage.sourceDenied += 1
+      if (unansweredSources.length > 0) processCoverage.sourceUnanswered += 1
+      if (deniedSources.length > 0 || unansweredSources.length > 0) {
+        unreadable.push({
+          pid,
+          ...identity,
+          denied: deniedSources,
+          ...(unansweredSources.length === 0 ? {} : { unanswered: unansweredSources }),
+        })
       }
       const holders: PathHolder[] = []
       if (cwd.value !== undefined && pathWithin(root, cwd.value)) {
@@ -298,6 +390,11 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
       }
       if (processRoot.value !== undefined && pathWithin(root, processRoot.value)) {
         holders.push({ pid, source: "root", target: processRoot.value })
+      }
+      // Per element, never the joined line: an element must itself be a path under the root, so script text or a
+      // `--flag=<path>` that mentions the path pins nothing.
+      for (const element of argv.value) {
+        if (element.startsWith("/") && pathWithin(root, element)) holders.push({ pid, source: "argv", target: element })
       }
       for (const mappedFile of mappedFiles.value) {
         if (pathWithin(root, mappedFile)) holders.push({ pid, source: "fd/maps", target: mappedFile })
@@ -311,9 +408,13 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
     }),
   )
   // One derivation from the process-level counters. Equivalent to scanning the
-  // per-source table: a source records a denial exactly when some live same-uid
-  // proc had that source denied, which is exactly when `sourceDenied` counted it.
-  const complete = processCoverage.unavailable.denied === 0 && processCoverage.sourceDenied === 0
+  // per-source table: a source records a denial (or an unanswered read) exactly when some live same-uid
+  // proc had that source denied (or unanswered), which is exactly when `sourceDenied` (`sourceUnanswered`) counted it.
+  const complete =
+    processCoverage.unavailable.denied === 0 &&
+    processCoverage.sourceDenied === 0 &&
+    processCoverage.unavailable.unanswered === 0 &&
+    processCoverage.sourceUnanswered === 0
   return {
     holders: uniquePathHolders(matches.flat()),
     coverage: {
@@ -329,8 +430,9 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
 }
 
 async function canonicalPath(path: string): Promise<string> {
-  if (typeof path !== "string" || path.trim() === "")
+  if (typeof path !== "string" || path.trim() === "") {
     throw new TypeError("yrd: path-holder census requires a non-empty path")
+  }
   return realpath(resolve(path))
 }
 
@@ -355,13 +457,19 @@ function darwinHolderSource(field: string): PathHolder["source"] {
   return `fd/${field}`
 }
 
+async function observeProcessArgv(deadline: CensusDeadline, path: string): Promise<SourceObservation<string[]>> {
+  const observed = await observeSource(deadline, () => readFile(path, "utf8"), "")
+  if (observed.availability !== "readable") return { availability: observed.availability, value: [] }
+  return { availability: "readable", value: observed.value.split("\0").filter((element) => element !== "") }
+}
+
 type MutableSourceCoverage = {
   readable: number
-  unavailable: { exited: number; denied: number }
+  unavailable: { exited: number; denied: number; unanswered: number }
 }
 
 function emptySourceCoverage(): MutableSourceCoverage {
-  return { readable: 0, unavailable: { exited: 0, denied: 0 } }
+  return { readable: 0, unavailable: { exited: 0, denied: 0, unanswered: 0 } }
 }
 
 function recordSourceCoverage(coverage: MutableSourceCoverage, availability: SourceAvailability): void {
@@ -369,9 +477,16 @@ function recordSourceCoverage(coverage: MutableSourceCoverage, availability: Sou
   else coverage.unavailable[availability] += 1
 }
 
-async function observeSource<T>(read: () => Promise<T>, unavailableValue: T): Promise<SourceObservation<T>> {
+async function observeSource<T>(
+  deadline: CensusDeadline,
+  read: () => Promise<T>,
+  unavailableValue: T,
+): Promise<SourceObservation<T>> {
   try {
-    return { availability: "readable", value: await read() }
+    const answer = await deadline.answer(read())
+    return answer.answered
+      ? { availability: "readable", value: answer.value }
+      : { availability: "unanswered", value: unavailableValue }
   } catch (error) {
     const availability = processEntryUnavailability(error)
     if (availability === undefined) throw error
@@ -379,12 +494,12 @@ async function observeSource<T>(read: () => Promise<T>, unavailableValue: T): Pr
   }
 }
 
-function observeProcessLink(path: string): Promise<SourceObservation<string | undefined>> {
-  return observeSource(() => readlink(path), undefined)
+function observeProcessLink(deadline: CensusDeadline, path: string): Promise<SourceObservation<string | undefined>> {
+  return observeSource(deadline, () => readlink(path), undefined)
 }
 
-async function observeProcessMaps(path: string): Promise<SourceObservation<string[]>> {
-  const observed = await observeSource(() => readFile(path, "utf8"), "")
+async function observeProcessMaps(deadline: CensusDeadline, path: string): Promise<SourceObservation<string[]>> {
+  const observed = await observeSource(deadline, () => readFile(path, "utf8"), "")
   if (observed.availability !== "readable") return { availability: observed.availability, value: [] }
   const contents = observed.value
   const mappedFiles: string[] = []
@@ -399,18 +514,21 @@ async function observeProcessMaps(path: string): Promise<SourceObservation<strin
 }
 
 async function observeProcessDescriptors(
+  deadline: CensusDeadline,
   path: string,
 ): Promise<SourceObservation<Array<Readonly<{ name: string; target: string }>>>> {
-  const directory = await observeSource(() => readdir(path), [] as string[])
+  const directory = await observeSource(deadline, () => readdir(path), [] as string[])
   if (directory.availability !== "readable") return { availability: directory.availability, value: [] }
   const links = await Promise.all(
-    directory.value.map(async (name) => ({ name, observed: await observeProcessLink(`${path}/${name}`) })),
+    directory.value.map(async (name) => ({ name, observed: await observeProcessLink(deadline, `${path}/${name}`) })),
   )
-  const availability = links.some(({ observed }) => observed.availability === "denied")
+  const availability: SourceAvailability = links.some(({ observed }) => observed.availability === "denied")
     ? "denied"
-    : links.some(({ observed }) => observed.availability === "exited")
-      ? "exited"
-      : "readable"
+    : links.some(({ observed }) => observed.availability === "unanswered")
+      ? "unanswered"
+      : links.some(({ observed }) => observed.availability === "exited")
+        ? "exited"
+        : "readable"
   return {
     availability,
     value: links.flatMap(({ name, observed }) =>
@@ -426,11 +544,15 @@ async function observeProcessDescriptors(
  * read means the entry exited after the denied source read, which is recorded
  * as `exited` so the gap clears itself instead of being named for a waiver. */
 async function observeProcessIdentity(
+  deadline: CensusDeadline,
   proc: string,
   bootedAtMs: number | undefined,
 ): Promise<{ comm?: string; ppid?: number; state?: string; startedAt?: string; exited?: true }> {
   try {
-    const contents = await readFile(`${proc}/stat`, "utf8")
+    const answer = await deadline.answer(readFile(`${proc}/stat`, "utf8"))
+    // Identity is decoration: an unanswered stat read leaves the pid and its gap named without it.
+    if (!answer.answered) return {}
+    const contents = answer.value
     const open = contents.indexOf("(")
     const close = contents.lastIndexOf(")")
     if (open === -1 || close === -1 || close < open) return {}
