@@ -596,18 +596,8 @@ function checkingStageInfo(detail: ChangeDetail): StageInfoResult {
   const unmeasured = detail.checks.find((c) => c.state === "unmeasured" && c.result === undefined)
   if (unmeasured) return { said: " unended", state: "unmeasured" }
   const checks = detail.checks.filter((c) => c.phase !== "base" && c.name !== "setup")
-  if (checks.length === 0) {
-    if (detail.row.live?.phase === "check" || detail.row.live?.phase === "submit" || detail.row.state === "checking") {
-      return { since: detail.row.live?.since, state: "running" }
-    }
-    return { said: " not run", state: "not-run" }
-  }
-  if (checks.every((c) => c.state === "not-run")) {
-    if (detail.row.live?.phase === "check" || detail.row.live?.phase === "submit" || detail.row.state === "checking") {
-      return { since: detail.row.live?.since, state: "running" }
-    }
-    return { said: " not run", state: "not-run" }
-  }
+  if (checks.length === 0) return { said: " not run", state: "not-run" }
+  if (checks.every((c) => c.state === "not-run")) return { said: " not run", state: "not-run" }
   const failed = checks.find((c) => c.state === "failed" || c.state === "stuck")
   if (failed) return { said: " failed", state: failed.state }
   const running = checks.find((c) => c.state === "running")

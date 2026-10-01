@@ -236,7 +236,6 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
     // 3. Stage detail: one line per step with a mark and a time ('✓ composing 0:08', '◉ preparing 0:15'), no blank gap between steps
     expect(app.text).toContain("✓ composing 0:08")
     expect(app.text).toContain("◉ preparing")
-
     if (process.env.YRD_CAPTURE_DIR) {
       const ansi = bufferToStyledText(app.term.buffer)
       writeCaptureIfConfigured("260927-yrd-watch-25557-stage-tabs.ansi", ansi)
@@ -369,5 +368,66 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
     // Checking tab must not say "not run" while active check is running
     expect(appChecking.text).not.toContain("checking not run")
     appChecking.unmount()
+  })
+
+  it("only the lit active stage tab carries ◉ and running time; inactive tabs read not run or elapsed", async () => {
+    const startedAt = new Date(NOW.getTime() - 15_000)
+    const composeStart = startedAt
+    const composeEnd = new Date(startedAt.getTime() + 8_000)
+    const prepareStart = composeEnd
+
+    const snapshot = baseSnapshot({
+      runner: {
+        journalDir: "/w/logs",
+        service: { kind: "beating", state: "healthy" },
+        latest: {
+          id: "run-live-1",
+          number: 408,
+          startedAt,
+          lastWriteAt: NOW,
+          alive: true,
+          checks: ["lint", "unit"],
+          effectiveChecks: ["lint", "unit"],
+          activeStep: {
+            kind: "step",
+            name: "prepare",
+            phase: "provisioning",
+            start: prepareStart,
+          },
+          steps: [
+            {
+              kind: "step",
+              name: "compose",
+              phase: "provisioning",
+              start: composeStart,
+              end: composeEnd,
+            },
+            {
+              kind: "step",
+              name: "prepare",
+              phase: "provisioning",
+              start: prepareStart,
+            },
+          ],
+        },
+      },
+    })
+
+    const app = render(<WatchPane snapshot={snapshot} live={false} />, { cols: 220, rows: 40 })
+    await settle(app)
+
+    const lines = app.text.split("\n")
+    const tabRowIndex = lines.findIndex((l) => l.includes("provisioning") && l.includes("checking"))
+    expect(tabRowIndex).toBeGreaterThanOrEqual(0)
+    const subRow = lines[tabRowIndex + 1] ?? ""
+
+    // Exactly one tab carries ◉ in the stage tab status subrow
+    const glyphMatches = (subRow.match(/◉/gu) ?? []).length
+    expect(glyphMatches).toBe(1)
+
+    // Checking tab must show '− not run', NOT '◉ 0:07'
+    expect(subRow).toContain("− not run")
+
+    app.unmount()
   })
 })

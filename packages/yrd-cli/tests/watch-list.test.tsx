@@ -19,13 +19,16 @@ import { render } from "silvery/test"
 import { type Row, type WatchRow } from "@yrd/queue-core"
 import {
   ListRow,
+  RunnerRow,
   TopLine,
   changesSuffix,
   listLayout,
+  runnerStatusWord,
   taskExtrasLayout,
   truncateWithEllipsis,
   type ListLayout,
 } from "../src/watch-list.tsx"
+import type { RunnerLine } from "../src/watch-runner.ts"
 import { draftsSaid } from "../src/watch-frame.tsx"
 import { NowContext, NowProvider } from "../src/watch-clock.ts"
 
@@ -324,6 +327,28 @@ describe("TopLine top-right clock", () => {
       await app.waitForLayoutStable()
     })
     expect(app.text).toContain("up 00:00:45")
+    app.unmount()
+  })
+
+  it("RunnerRow STATUS cell and runnerStatusWord have no trailing dash", async () => {
+    const line: RunnerLine = {
+      state: "provisioning",
+      subphase: "preparing",
+      holds: "prepare",
+      duration: "0:07",
+      detail: "runner alive · round started 04:59 · lint, unit",
+    }
+    const layout = listLayout([], 120, NOW, line)
+    const app = render(<RunnerRow line={line} layout={layout} cursor={false} />, { cols: 120, rows: 2 })
+    await act(async () => {
+      await app.waitForLayoutStable()
+    })
+    const text = app.lines[0] ?? ""
+    expect(runnerStatusWord(line)).toBe("provisioning · preparing")
+    expect(runnerStatusWord(line)).not.toMatch(/[—\s]+$/u)
+    expect(text).toContain("provisioning · preparing")
+    expect(text).not.toContain("provisioning · preparing —")
+    expect(text).not.toMatch(/provisioning · preparing\s+—/u)
     app.unmount()
   })
 })

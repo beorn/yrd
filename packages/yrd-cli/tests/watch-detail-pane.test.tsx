@@ -226,7 +226,8 @@ describe("26242: watch detail pane at 140x50", () => {
     expect(lines[39]).toContain("fixture queue read failed at /fixture/queue")
   })
 
-  it("row 4: RUNNER keeps its rounded box; inner dash sits under RUN", async () => {
+  // 26242 row 4: RUNNER box retired in favour of borderless runner (operator round-2 feedback Telegram 1cfdbd57)
+  it("row 4: borderless RUNNER sits under RUN (operator round-2 feedback Telegram 1cfdbd57)", async () => {
     const { lines, text } = await paint()
     expect(text).toMatch(/RUNNER/u)
     expect(text).toMatch(/no runner status published/u)
@@ -243,9 +244,8 @@ describe("26242: watch detail pane at 140x50", () => {
     expect(dashAt).toBeGreaterThanOrEqual(runAt - 1)
     expect(dashAt).toBeLessThan(changesAt)
     expect(holdsAt).toBeGreaterThanOrEqual(changesAt - 2)
-    // The ListView scrollbar thumb must not paint over the box's right corner.
-    const titleEnd = runnerTitle!.replace(/\s+$/u, "")
-    expect(titleEnd.slice(-1)).toBe("╮")
+    // Borderless runner: no rounded corner or box borders (operator round-2 feedback Telegram 1cfdbd57)
+    expect(runnerTitle).toContain("RUNNER")
     expect(text).not.toMatch(/█/u)
   })
 })

@@ -823,13 +823,13 @@ export function RunnerRow({
               </Text>
               <Text color={forced ?? color} wrap="truncate">
                 {" "}
-                {runnerStatusWord(line)}
+                {runnerStatusWord(line).replace(/[—\s]+$/u, "")}
               </Text>
             </Box>
           ),
           agent: (
             <Text color={forced ?? color} wrap="truncate">
-              {line.by ?? "—"}
+              {line.by ?? " "}
             </Text>
           ),
           ageRun: (
