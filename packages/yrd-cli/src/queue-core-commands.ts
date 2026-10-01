@@ -207,7 +207,7 @@ import { originHead } from "./queue-location.ts"
 
 function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution | undefined) {
   if (resolution === undefined) {
-    io.stderr(`yrd: WARNING: ${branch} admitted with no issue link; no explicit issue binding was found\n`)
+    io.stderr(`yrd: WARNING: ${branch} has no issue link; no explicit issue binding was found\n`)
     return {}
   }
   if (resolution.source === "legacy-branch") {

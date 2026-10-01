@@ -902,14 +902,18 @@ export async function issueOf(
         candidateIssues.push(issue)
       }
     }
-    // Also parse "Refs <issue>" or "Refs: <issue>" or "Resolves <issue>" or "Resolves: <issue>"
+    // Also parse trailer-shaped lines like "Refs <issue>" or "Refs: <issue>" or "Resolves <issue>"
     // from commit body to accept trailers without colon (27041).
-    const lineRegex = /^\s*(?:refs|resolves)(?::|\s)\s*(.+)$/gim
-    let match: RegExpExecArray | null
-    while ((match = lineRegex.exec(body)) !== null) {
-      const issue = match[1]?.trim() ?? ""
-      if (issue !== "" && !candidateIssues.includes(issue)) {
-        candidateIssues.push(issue)
+    // Never inspect the subject line, and require a single-token issue value to avoid binding prose lines.
+    const nonSubjectLines = body.split(/\r?\n/).slice(1)
+    const trailerRegex = /^[ \t]*(?:refs|resolves)[ \t]*:?[ \t]+(\S+)[ \t]*$/i
+    for (const line of nonSubjectLines) {
+      const match = trailerRegex.exec(line)
+      if (match !== null) {
+        const issue = match[1]?.trim() ?? ""
+        if (issue !== "" && !candidateIssues.includes(issue)) {
+          candidateIssues.push(issue)
+        }
       }
     }
     for (const issue of candidateIssues) {
