@@ -904,6 +904,27 @@ describe("yrd queue up, the service", () => {
     }
   })
 
+  /** @failure Submitting a change with no issue link admits silently without warning the submitter (27041).
+   * @level l2 @consumer Yrd submit and its diagnostics
+   */
+  it.each([true, false])("warns loudly when submitted with no issue link (dryRun=%s) (27041)", async (dryRun) => {
+    const w = await world()
+    const branch = "task/unbound-feature"
+    await w.git(["checkout", "--quiet", "-b", branch])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "feature without an issue link"])
+    const run = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        { branch, command: "submit", dryRun, submitter: "@dev/2" },
+        { workdir: w.workdir, json: true },
+      ),
+    ).toBe(0)
+    expect(run.stderr()).toContain(`WARNING: ${branch}`)
+    expect(run.stderr()).toContain("no issue link")
+  })
+
   // THE OPERATOR'S CONDITION (2026-09-16): submits are accepted while the line
   // is stopped, echoing who stopped it, why, and what lifts it. This case used
   // to assert the refusal; its subject — what a pause does to a submit, said

@@ -536,6 +536,39 @@ describe("event submit", () => {
     expect((await readStatus(store(w), "main", "task/26050")).issue).toBe(canonical)
   })
 
+  /** @failure Admission drops an unparsed issue link when commit uses Refs without colon (27041).
+   * @level l2 @consumer Yrd submit and its opened change record
+   */
+  it("submits and admits with issue binding when commit uses Refs without colon (27041)", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/fixer-ladder-fails", "change.txt")
+    await w.git(["checkout", "--quiet", "task/fixer-ladder-fails"])
+    await w.git([
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "test(maddoc): the unordered-ladder row runs as it.fails until 26335\n\nRefs 26335\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n\nChange-Id: I44e7953dd775ac9f16381cc76183ab0ee1e05f54",
+    ])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await issueOf(w.git, "task/fixer-ladder-fails", head, w.target)).toEqual({
+      issue: "26335",
+      source: "binding",
+      commit: head,
+    })
+    const admit = vi.fn(async () => ({ kind: "admit" as const }))
+    const submitted = await submit(w.git, "origin", {
+      branch: "task/fixer-ladder-fails",
+      submitter: "author",
+      target: { remote: "origin", branch: "main" },
+      admit,
+    })
+    expect(submitted.issue?.issue).toBe("26335")
+    expect(admit).toHaveBeenCalledWith("26335", "task/fixer-ladder-fails", submitted.head, submitted.targetHead)
+    expect(submitted.admission).toEqual({ kind: "admitted" })
+    expect((await readStatus(store(w), "main", "task/fixer-ladder-fails")).issue).toBe("26335")
+  })
+
   /** @failure An absolute vault path and a vault-relative bead reference refuse as conflicting bindings (25719).
    * @level l2 @consumer Yrd submit and its opened change record
    */
