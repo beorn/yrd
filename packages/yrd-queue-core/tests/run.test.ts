@@ -99,7 +99,11 @@ function beforeGitomicPublish(
     options?: gitomic.FetchRefsOptions,
   ) => Promise<void>,
   after?: (repo: string, updates: readonly RefUpdate[], remote?: string) => Promise<void>,
-  beforeListRefs?: (repo: string, prefix: string, remote?: string) => Promise<ReadonlyMap<string, string> | undefined>,
+  beforeListRefs?: (
+    repo: string,
+    prefix: string | readonly string[],
+    remote?: string,
+  ) => Promise<ReadonlyMap<string, string> | undefined>,
 ): ReturnType<typeof vi.spyOn> {
   const createBackend = gitomic.createShellBackend
   return vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
