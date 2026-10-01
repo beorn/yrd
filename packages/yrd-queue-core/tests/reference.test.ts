@@ -11,7 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { acquireExclusive } from "git-super/exclusive"
 import { safeRemoveSync } from "removely"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import { type Git } from "../src/git.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import type { LogWrite } from "../src/log.ts"
@@ -22,6 +22,7 @@ import {
   ReferenceUnpopulated,
 } from "../src/reference.ts"
 import { verifyCandidate } from "../src/verifying.ts"
+import { inspectSubmit, submit } from "../src/submit.ts"
 import { freshWorktree, registeredWorktrees } from "../src/worktree.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
@@ -485,7 +486,8 @@ describe("freshWorktree", () => {
     await productGit(["config", "-f", ".gitmodules", "submodule.vendor/dep.url", componentRemote])
     const componentBase = (await vendorGit(["rev-parse", "HEAD"])).trim()
     await productGit(["update-index", "--add", "--cacheinfo", `160000,${componentBase},vendor/dep`])
-    await productGit(["add", ".gitmodules"])
+    writeFileSync(join(product, ".yrd.yml"), "{}\n")
+    await productGit(["add", ".gitmodules", ".yrd.yml"])
     await productGit([...author, "commit", "--quiet", "--message", "name hosted component remote"])
     const repo = await queueClone(root, product)
     const logicalOrigin = "https://github.com/beorn/yrd-reference-fixture.git"
@@ -529,6 +531,18 @@ describe("freshWorktree", () => {
     await vendorGit(["add", "--all"])
     await vendorGit([...author, "commit", "--quiet", "--message", "advance component main independently"])
     const mainPin = (await vendorGit(["rev-parse", "HEAD"])).trim()
+    const nestedGit = gitIn(nested)
+    const nestedPin = (await nestedGit(["rev-parse", "HEAD"])).trim()
+    writeFileSync(join(nested, "nested.txt"), "nested main advanced\n")
+    await nestedGit(["add", "nested.txt"])
+    await nestedGit([...author, "commit", "--quiet", "--message", "advance nested main independently"])
+    const nestedMain = (await nestedGit(["rev-parse", "HEAD"])).trim()
+    await gitIn(join(repo, "vendor/dep/apps/nested"), undefined, undefined, { env: fixtureEnv })([
+      "fetch",
+      "--quiet",
+      "origin",
+      "main",
+    ])
     await gitIn(join(repo, "vendor/dep"), undefined, undefined, { env: fixtureEnv })([
       "fetch",
       "--quiet",
@@ -569,6 +583,48 @@ describe("freshWorktree", () => {
     expect(mergedGitlink?.from).toBe(composedPin)
     expect(mergedGitlink?.to).toBe(mainPin)
     expect(mergedGitlink?.composition).toMatchObject({ parent: mainPin, pin: candidatePin })
+    expect(verified.verifying.gitlinks.find(({ path }) => path === "vendor/dep/apps/nested")).toMatchObject({
+      state: "kept-behind",
+      from: nestedPin,
+      to: nestedMain,
+    })
+
+    // @failure 26835: outward receipts identify component main as the output.
+    // @level l2 @consumer library preview and submit
+    // The custody assertions above never inspect the outward receipt contract.
+    await git(["branch", "candidate", head])
+    for (const [key, value] of Object.entries(fixtureEnv)) {
+      if ((key === "PATH" || key.startsWith("GIT_CONFIG_")) && value !== undefined) vi.stubEnv(key, value)
+    }
+    try {
+      for (const action of [inspectSubmit, submit]) {
+        const receipt = await action(git, "origin", {
+          branch: "candidate",
+          submitter: "@dev/2",
+          target: { remote: "origin", branch: "main" },
+        })
+        if (receipt.verifying.state !== "verified") throw new Error("receipt fixture did not verify")
+        const recordedPin = (await git(["rev-parse", `${receipt.verifying.candidate}:vendor/dep`])).trim()
+        expect(receipt.verifying.gitlinks.find(({ path }) => path === "vendor/dep")).toMatchObject({
+          state: "merged",
+          recorded: recordedPin,
+          from: recordedPin,
+          to: mainPin,
+          composition: { parent: mainPin, pin: candidatePin },
+        })
+        const parentGit = gitIn(join(repo, "vendor/dep"), undefined, undefined, { env: fixtureEnv })
+        const recordedNested = (await parentGit(["rev-parse", `${recordedPin}:apps/nested`])).trim()
+        expect(recordedNested).toBe(nestedPin)
+        expect(receipt.verifying.gitlinks.find(({ path }) => path === "vendor/dep/apps/nested")).toMatchObject({
+          state: "kept-behind",
+          recorded: recordedNested,
+          from: nestedPin,
+          to: nestedMain,
+        })
+      }
+    } finally {
+      vi.unstubAllEnvs()
+    }
     const store = join(repo, "vendor/dep")
     const storeGit = gitIn(store)
     await expect(storeGit(["cat-file", "-e", `${composedPin}^{commit}`])).resolves.toBe("")
