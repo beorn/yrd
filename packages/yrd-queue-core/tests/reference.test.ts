@@ -601,9 +601,24 @@ describe("freshWorktree", () => {
     renameSync(parentStore, `${parentStore}-held`)
     try {
       await expect(gitlinksAt(git, verifiedRoot, [nestedPath])).rejects.toThrow(/vendor\/dep.*store/u)
+      mkdirSync(parentStore)
+      await gitIn(parentStore)(["init", "--quiet", "--initial-branch=main"])
+      await expect(gitlinksAt(git, verifiedRoot, [nestedPath])).rejects.toThrow(
+        new RegExp(`level vendor/dep: store .* does not hold parent commit ${composedPin}`, "u"),
+      )
     } finally {
+      if (existsSync(parentStore)) safeRemoveSync(parentStore, { within: realpathSync(tmpdir()) })
       renameSync(`${parentStore}-held`, parentStore)
     }
+    const unreadable = new Error("fixture cannot read parent tree")
+    const unreadableParent: Git = (args, input) => {
+      if (args[0] === "-C" && args[1] === parentStore && args[2] === "ls-tree") return Promise.reject(unreadable)
+      return git(args, input)
+    }
+    await expect(gitlinksAt(unreadableParent, verifiedRoot, [nestedPath])).rejects.toMatchObject({
+      message: expect.stringContaining(`at level vendor/dep in store ${parentStore}`),
+      cause: unreadable,
+    })
 
     // @failure 26835: outward receipts identify component main as the output.
     // @level l2 @consumer library preview and submit

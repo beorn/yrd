@@ -708,6 +708,27 @@ describe("ordinary submit with a local-only component pin", () => {
     })
     expect(await gitIn(join(w.root, "one.git"))(["for-each-ref", "--format=%(objectname)", pinRef])).toBe("")
     expect(await refs(w.remote)).not.toContain("task/local-only-pin-dry-run")
+    // 26835: the ordinary action must print the same observed identity as its preview.
+    const submitted = await yrd(
+      wt,
+      "submit",
+      "task/local-only-pin-dry-run",
+      "--issue",
+      "25720",
+      "--submitter",
+      "@dev/1",
+      "--json",
+    )
+    expect(submitted.exitCode, submitted.report).toBe(0)
+    const result = JSON.parse(submitted.stdout) as {
+      verifying: { gitlinks: { path: string; state: string; recorded: string; from: string; to: string }[] }
+    }
+    expect(result.verifying.gitlinks.find((row) => row.path === one.path)).toMatchObject({
+      state: "kept-ahead",
+      recorded: one.unheld,
+      from: one.unheld,
+      to: one.held,
+    })
   }, 90_000)
 
   /** @failure A rejected pin publication leaves a generic compose refusal, obscuring the remote and ref.
