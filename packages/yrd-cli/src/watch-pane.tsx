@@ -1752,6 +1752,7 @@ function Table({
                     cursor={index === cursor}
                     queueDigit={itemQueue.digit}
                     queueLabel={itemQueue.label}
+                    showQueueDigit={!isSingleQueue}
                     marginTop={prevIsRunner ? 0 : 1}
                     marginBottom={nextIsRunner ? 0 : 1}
                   />
