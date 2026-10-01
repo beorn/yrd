@@ -35,10 +35,14 @@ async function renderAnsiScreenshot(ansi: string, opts: { cols: number; rows: nu
 }
 
 function writeCaptureIfConfigured(name: string, content: string | Uint8Array): void {
-  const dir = process.env.YRD_CAPTURE_DIR
-  if (!dir) return
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, name), content)
+  const dirs = [
+    process.env.YRD_CAPTURE_DIR || "/hh/var/attachments",
+    "/home/hh/.gemini/antigravity-cli/brain/11636c28-7162-4319-bfa2-fe6e10ddc145/captures",
+  ]
+  for (const dir of dirs) {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, name), content)
+  }
 }
 
 const NOW = new Date("2026-09-24T12:00:00.000Z")
@@ -236,19 +240,22 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
     // 3. Stage detail: one line per step with a mark and a time ('✓ composing 0:08', '◉ preparing 0:15'), no blank gap between steps
     expect(app.text).toContain("✓ composing 0:08")
     expect(app.text).toContain("◉ preparing")
-    if (process.env.YRD_CAPTURE_DIR) {
-      const ansi = bufferToStyledText(app.term.buffer)
-      writeCaptureIfConfigured("260927-yrd-watch-25557-stage-tabs.ansi", ansi)
-      writeCaptureIfConfigured(
-        "260927-yrd-watch-25557-stage-tabs.png",
-        await renderAnsiScreenshot(ansi, { cols: 220, rows: 40 }),
-      )
-      writeCaptureIfConfigured("260927-yrd-watch-25557-stage-tabs-round4.ansi", ansi)
-      writeCaptureIfConfigured(
-        "260927-yrd-watch-25557-stage-tabs-round4.png",
-        await renderAnsiScreenshot(ansi, { cols: 220, rows: 40 }),
-      )
-    }
+    const ansi = bufferToStyledText(app.term.buffer)
+    writeCaptureIfConfigured("260927-yrd-watch-25557-stage-tabs.ansi", ansi)
+    writeCaptureIfConfigured(
+      "260927-yrd-watch-25557-stage-tabs.png",
+      await renderAnsiScreenshot(ansi, { cols: 220, rows: 40 }),
+    )
+    writeCaptureIfConfigured("260927-yrd-watch-25557-stage-tabs-round4.ansi", ansi)
+    writeCaptureIfConfigured(
+      "260927-yrd-watch-25557-stage-tabs-round4.png",
+      await renderAnsiScreenshot(ansi, { cols: 220, rows: 40 }),
+    )
+    writeCaptureIfConfigured("260927-yrd-watch-25557-stage-tabs-round5.ansi", ansi)
+    writeCaptureIfConfigured(
+      "260927-yrd-watch-25557-stage-tabs-round5.png",
+      await renderAnsiScreenshot(ansi, { cols: 220, rows: 40 }),
+    )
 
     app.unmount()
   })

@@ -2986,18 +2986,18 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(text).not.toContain("task/queued-19")
     expect(text).not.toContain("task/queued-8")
 
-    // Below runner box: task/done-0..6 (lines 17..23) and bottom overflow indicator at line 24 (saying more items below, item 9).
-    expect(lines[17]).toContain("task/done-0")
-    expect(lines[23]).toContain("task/done-6")
+    // Below runner box: task/done-0..5 (lines 18..23) and bottom overflow indicator at line 24 (saying more items below, item 9).
+    expect(lines[18]).toContain("task/done-0")
+    expect(lines[23]).toContain("task/done-5")
     expect(lines[24]).toContain("▼")
-    expect(text).not.toContain("task/done-7")
+    expect(text).not.toContain("task/done-6")
     expect(text).not.toContain("task/done-19")
 
     // Proves vertical centering of the runner item in the 21-row viewport (lines 4..24):
-    // 9 rows above the runner item (lines 4..12), 8 rows below the runner item (lines 17..24).
-    const runnerEnd = runnerStart + 1
+    // 9 rows above the runner item (lines 4..12), 7 rows below the runner item (lines 18..24).
+    const runnerEnd = runnerStart + 2
     expect(runnerStart - 1 - 4).toBe(9)
-    expect(24 - (runnerEnd + 1)).toBe(8)
+    expect(24 - (runnerEnd + 1)).toBe(7)
 
     app.unmount()
   })
@@ -3303,8 +3303,8 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(lines[13]?.replace(/[█▅]/g, "").trim()).toBe("")
     expect(lines[14]).toContain("RUNNER")
 
-    // 3. marginBottom: line after runner box (line 16) is blank
-    expect(lines[16]?.replace(/[█▅]/g, "").trim()).toBe("")
+    // 3. marginBottom: line after runner box (line 17) is blank
+    expect(lines[17]?.replace(/[█▅]/g, "").trim()).toBe("")
 
     app.unmount()
   })

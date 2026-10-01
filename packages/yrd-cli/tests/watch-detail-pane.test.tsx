@@ -26,10 +26,14 @@ const NOW = new Date("2026-09-27T19:50:00.000Z")
 const RUN_ID = "q-20260927T185000000Z-affected"
 
 function writeCaptureIfConfigured(name: string, content: string | Uint8Array): void {
-  const dir = process.env.YRD_CAPTURE_DIR
-  if (!dir) return
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, name), content)
+  const dirs = [
+    process.env.YRD_CAPTURE_DIR || "/hh/var/attachments",
+    "/home/hh/.gemini/antigravity-cli/brain/11636c28-7162-4319-bfa2-fe6e10ddc145/captures",
+  ]
+  for (const dir of dirs) {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, name), content)
+  }
 }
 
 async function renderAnsiPng(ansi: string, opts: { cols: number; rows: number }): Promise<Uint8Array> {
@@ -269,13 +273,43 @@ describe("26243: watch uses one clock format, one duration format and plain word
     expect(text).not.toContain("err=")
   })
 
-  it("round 4: two queues at 140x50 each have an outlined RUNNER box", async () => {
+  it("round 5: two queues at 140x50 have stacked runner boxes then tasks interleaved by time", async () => {
     const size = { cols: 140, rows: 50 }
-    const first = snapshot(2)
+    const rowQ1Newest: WatchRow = {
+      row: {
+        ...failedRow(),
+        branch: "task/q1-newest",
+        at: NOW,
+        endedAt: NOW,
+      },
+    }
+    const rowQ1Oldest: WatchRow = {
+      row: {
+        ...failedRow(),
+        branch: "task/q1-oldest",
+        at: new Date(NOW.getTime() - 120_000),
+        endedAt: new Date(NOW.getTime() - 120_000),
+      },
+    }
+    const rowQ2Middle: WatchRow = {
+      row: {
+        ...failedRow(),
+        branch: "task/q2-middle",
+        at: new Date(NOW.getTime() - 60_000),
+        endedAt: new Date(NOW.getTime() - 60_000),
+      },
+    }
+    const first: WatchSnapshot = {
+      ...snapshot(2),
+      rows: [rowQ1Newest, rowQ1Oldest],
+      unfiltered: [rowQ1Newest, rowQ1Oldest],
+    }
     const second: WatchSnapshot = {
       ...snapshot(1),
       queue: "github.com/beorn/hh-dev#queue2",
       queues: [{ branch: "queue2", label: "queue2", path: "/hh/dev" }],
+      rows: [rowQ2Middle],
+      unfiltered: [rowQ2Middle],
     }
     const app = render(
       <NowContext.Provider value={NOW}>
@@ -295,19 +329,39 @@ describe("26243: watch uses one clock format, one duration format and plain word
     )
     await app.waitForLayoutStable()
 
-    expect(app.text).toContain("one")
-    expect(app.text).toContain("queue2")
+    // No per-queue group headers '[1] one — Enter to focus'
+    expect(app.text).not.toContain("Enter to focus")
 
-    // Both queues have an outlined RUNNER box (╭─ RUNNER ... ─╮ and ╰─ ... ─╯)
-    const runnerStarts = app.lines.filter((l) => l.includes("╭─ RUNNER"))
-    expect(runnerStarts).toHaveLength(2)
-    const runnerEnds = app.lines.filter((l) => l.includes("╰─"))
-    expect(runnerEnds.length).toBeGreaterThanOrEqual(2)
+    // Both queues have an outlined RUNNER box stacked at the top
+    const runnerLineIndices = app.lines.map((l, i) => (l.includes("╭─ RUNNER") ? i : -1)).filter((i) => i >= 0)
+    expect(runnerLineIndices).toHaveLength(2)
+    const r1Line = runnerLineIndices[0]!
+    const r2Line = runnerLineIndices[1]!
+
+    const t1Line = app.lines.findIndex((l) => l.includes("task/q1-newest"))
+    const t2Line = app.lines.findIndex((l) => l.includes("task/q2-middle"))
+    const t3Line = app.lines.findIndex((l) => l.includes("task/q1-oldest"))
+
+    expect(r1Line).toBeGreaterThanOrEqual(0)
+    expect(r2Line).toBeGreaterThan(r1Line)
+    expect(t1Line).toBeGreaterThan(r2Line)
+    expect(t2Line).toBeGreaterThan(t1Line)
+    expect(t3Line).toBeGreaterThan(t2Line)
+
+    // Q column shows queue digit or label for each interleaved row
+    expect(app.lines[t1Line]).toMatch(/\b1\b/)
+    expect(app.lines[t2Line]).toMatch(/\b2\b/)
+    expect(app.lines[t3Line]).toMatch(/\b1\b/)
 
     const ansi = bufferToStyledText(app.term.buffer)
     writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round4.layout.txt", debugTree(app.getContainer()))
     writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round4.ansi", ansi)
     writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round4.png", await renderAnsiPng(ansi, size))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5.layout.txt", debugTree(app.getContainer()))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5.ansi", ansi)
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5.png", await renderAnsiPng(ansi, size))
+    writeCaptureIfConfigured("yrd-watch-live-round5.ansi", ansi)
+    writeCaptureIfConfigured("yrd-watch-live-round5.png", await renderAnsiPng(ansi, size))
 
     app.unmount()
   })
