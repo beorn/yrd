@@ -6,7 +6,7 @@
  * @consumer every queue run, `yrd check` and `yrd env` compose — all borrow from one reference
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { acquireExclusive } from "git-super/exclusive"
@@ -17,11 +17,13 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import type { LogWrite } from "../src/log.ts"
 import {
   GitlinkNotOnRemote,
+  gitlinksAt,
   populateReferenceStores,
   type ReferenceAcquisition,
   ReferenceUnpopulated,
 } from "../src/reference.ts"
 import { verifyCandidate } from "../src/verifying.ts"
+import * as verifying from "../src/verifying.ts"
 import { inspectSubmit, submit } from "../src/submit.ts"
 import { freshWorktree, registeredWorktrees } from "../src/worktree.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
@@ -588,6 +590,20 @@ describe("freshWorktree", () => {
       from: nestedPin,
       to: nestedMain,
     })
+    // Nested receipts must read the pin in the owning commit, and cannot
+    // silently use the enclosing repository when the parent store is absent.
+    const nestedPath = "vendor/dep/apps/nested"
+    expect(await gitlinksAt(git, verifiedRoot, ["vendor/dep", nestedPath])).toEqual([
+      { path: "vendor/dep", sha: composedPin },
+      { path: nestedPath, sha: nestedPin },
+    ])
+    const parentStore = join(repo, "vendor/dep")
+    renameSync(parentStore, `${parentStore}-held`)
+    try {
+      await expect(gitlinksAt(git, verifiedRoot, [nestedPath])).rejects.toThrow(/vendor\/dep.*store/u)
+    } finally {
+      renameSync(`${parentStore}-held`, parentStore)
+    }
 
     // @failure 26835: outward receipts identify component main as the output.
     // @level l2 @consumer library preview and submit
@@ -622,6 +638,28 @@ describe("freshWorktree", () => {
           to: nestedMain,
         })
       }
+      // A producer disagreement must fail before a misleading receipt escapes.
+      const actualVerify = verifying.verifyCandidate
+      using forged = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
+        const result = await actualVerify(options)
+        if (result.state !== "verified") return result
+        return {
+          ...result,
+          verifying: {
+            ...result.verifying,
+            gitlinks: result.verifying.gitlinks.map((row) =>
+              row.path === "vendor/dep" ? { ...row, from: mainPin } : row,
+            ),
+          },
+        }
+      })
+      await expect(
+        inspectSubmit(git, "origin", {
+          branch: "candidate",
+          submitter: "@dev/2",
+          target: { remote: "origin", branch: "main" },
+        }),
+      ).rejects.toThrow(new RegExp(`vendor/dep state merged: producer ${mainPin}, candidate tree [0-9a-f]+`, "u"))
     } finally {
       vi.unstubAllEnvs()
     }

@@ -189,7 +189,15 @@ export {
 } from "./submit.ts"
 export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
 export type { PinCarrierPin, PreparedPinCarrier } from "./pin-carrier.ts"
-export type { AdmissionOutcome, AdmissionVerdict, IssueResolution, IssueResolver, Submitted } from "./submit.ts"
+export type {
+  AdmissionOutcome,
+  AdmissionVerdict,
+  IssueResolution,
+  IssueResolver,
+  Submitted,
+  SubmitGitlink,
+  SubmitVerification,
+} from "./submit.ts"
 export { withdraw, NothingToWithdraw } from "./withdraw.ts"
 export type { WithdrawRequest, Withdrawn, WithdrawnChange } from "./withdraw.ts"
 export { QueuePaused, QueueNotPaused, liftLine, pauseLine, stopFact, stuckCures } from "./pause.ts"

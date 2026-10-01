@@ -231,6 +231,15 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
       expect(receipt.branch).toBe(branch)
       expect(receipt.head).toBe(await remoteHead(w.remote, branch))
       expect(receipt.opened).toBe((await gitIn(w.remote)(["rev-parse", `refs/yrd/main/changes/${branch}`])).trim())
+      const observed = JSON.parse(ran.stdout) as {
+        verifying: { gitlinks: { path: string; state: string; recorded: string; to: string }[] }
+      }
+      const two = w.components[1]!
+      expect(observed.verifying.gitlinks.find((row) => row.path === two.path)).toMatchObject({
+        state: "raised",
+        recorded: two.held,
+        to: two.held,
+      })
       await assertCarrier(w, branch, [{ path: one.path, sha: one.held }])
       const location = await resolveQueueLocation(w.work, undefined, process.env, "queue")
       const local = await gitIn(location.repo)(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])
@@ -313,6 +322,15 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     const before = await refs(w.remote)
     const preview = await yrd(w.work, "submit", "--gitlink", pin, "--issue", "25804", "--dry-run", "--json")
     expect(preview.exitCode, preview.report).toBe(0)
+    const observed = JSON.parse(preview.stdout) as {
+      verifying: { gitlinks: { path: string; state: string; recorded: string; to: string }[] }
+    }
+    const two = w.components[1]!
+    expect(observed.verifying.gitlinks.find((row) => row.path === two.path)).toMatchObject({
+      state: "raised",
+      recorded: two.held,
+      to: two.held,
+    })
     expect((JSON.parse(preview.stdout) as { dryRun: boolean; branch: string }).branch).toBe(
       `pin/vendor-one/${one.held.slice(0, 12)}`,
     )
@@ -673,9 +691,21 @@ describe("ordinary submit with a local-only component pin", () => {
       "--json",
     )
     expect(ran.exitCode, ran.report).toBe(0)
-    const receipt = JSON.parse(ran.stdout) as { dryRun: boolean; verifying: { state: string } }
+    const receipt = JSON.parse(ran.stdout) as {
+      dryRun: boolean
+      verifying: {
+        state: string
+        gitlinks: { path: string; state: string; recorded: string; from: string; to: string }[]
+      }
+    }
     expect(receipt.dryRun).toBe(true)
     expect(receipt.verifying.state).toBe("verified")
+    expect(receipt.verifying.gitlinks.find((row) => row.path === one.path)).toMatchObject({
+      state: "kept-ahead",
+      recorded: one.unheld,
+      from: one.unheld,
+      to: one.held,
+    })
     expect(await gitIn(join(w.root, "one.git"))(["for-each-ref", "--format=%(objectname)", pinRef])).toBe("")
     expect(await refs(w.remote)).not.toContain("task/local-only-pin-dry-run")
   }, 90_000)

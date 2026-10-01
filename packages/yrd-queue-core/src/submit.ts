@@ -50,8 +50,45 @@ import {
   readEventOpsWithRefs,
 } from "./events.ts"
 import { classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
-import { verifyCandidate, type Verification } from "./verifying.ts"
+import { verifyCandidate, type Verification, type SettledGitlink } from "./verifying.ts"
+import { gitlinksAt } from "./reference.ts"
 import { withRemoteSeam } from "./remote-calls.ts"
+
+/** Outward submission evidence observes the candidate rather than relabelling the producer's claims. */
+export type SubmitGitlink = Readonly<
+  Omit<SettledGitlink, "state"> &
+    ({ state: "not-run" } | { state: Exclude<SettledGitlink["state"], "not-run">; recorded: string })
+>
+
+export type SubmitVerification =
+  | Readonly<Omit<Extract<Verification, { state: "verified" }>, "gitlinks"> & { gitlinks: readonly SubmitGitlink[] }>
+  | Extract<Verification, { state: "failed" }>
+
+async function submissionReceipt(git: Git, verifying: Verification): Promise<SubmitVerification> {
+  if (verifying.state !== "verified") return verifying
+  const settled = verifying.gitlinks.filter((row) => row.state !== "not-run")
+  const observed = new Map(
+    (
+      await gitlinksAt(
+        git,
+        verifying.candidate,
+        settled.map((row) => row.path),
+      )
+    ).map((row) => [row.path, row.sha]),
+  )
+  const gitlinks = verifying.gitlinks.map((row): SubmitGitlink => {
+    if (row.state === "not-run") return { ...row, state: "not-run" }
+    const recorded = observed.get(row.path)
+    const expected = row.state === "raised" ? row.to : row.from
+    if (recorded !== expected) {
+      throw new Error(
+        `submission receipt ${row.path} state ${row.state}: producer ${expected}, candidate tree ${recorded ?? "absent"} at ${verifying.candidate}`,
+      )
+    }
+    return { ...row, recorded }
+  })
+  return { ...verifying, gitlinks }
+}
 
 export type SubmitRequest = Readonly<{
   /** The branch being submitted: the change's own. */
@@ -101,7 +138,7 @@ export type Submitted = Readonly<{
   retry: boolean
   /** Gitlinks this change moved whose commits submit published to their submodule remotes (24454). */
   published: readonly PublishedGitlink[]
-  verifying: Verification
+  verifying: SubmitVerification
   issue?: IssueResolution
   admission: AdmissionOutcome
   /** Present only when this submit appended a new warning event; its caller sends one notification. */
@@ -351,7 +388,7 @@ export type SubmitInspection = Readonly<{
   head: string
   targetHead: string
   base: string
-  verifying: Verification
+  verifying: SubmitVerification
   issue?: IssueResolution
   admission: AdmissionOutcome
   /** An operator or stuck stop is echoed; maintenance refuses intake. */
@@ -423,7 +460,7 @@ export async function inspectSubmitAtHead(
   const admitted = await admitSubmitAtHead(git, remote, request, head)
   const verifying = await composeSubmit(git, request, admitted)
   const { root: _root, bases: _bases, operational: _operational, ...inspection } = admitted
-  return { ...inspection, verifying }
+  return { ...inspection, verifying: await submissionReceipt(git, verifying) }
 }
 
 async function admitSubmitAtHead(
@@ -605,9 +642,10 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
     publishMovedGitlinks(git, admitted.root, admitted.bases, head),
   )
   const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted))
+  const receipt = await submissionReceipt(git, verifying)
   const { root, bases: _bases, operational, ...inspection } = admitted
   return withRemoteSeam("submitEvent", () =>
-    submitEvent(git, remote, request, root, { ...inspection, verifying }, operational, published),
+    submitEvent(git, remote, request, root, { ...inspection, verifying: receipt }, operational, published),
   )
 }
 
