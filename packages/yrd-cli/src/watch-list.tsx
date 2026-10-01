@@ -357,7 +357,9 @@ export function TopLine({
   const queueAddress = queue ?? (queues && queues[0]?.label) ?? ""
 
   const timerText = typeof status.timer === "string" ? toHms(status.timer) : status.timer
-  const timerLen = typeof timerText === "string" ? timerText.length : timerText !== undefined ? 8 : 0
+  const timerLen =
+    (typeof timerText === "string" ? timerText.length : timerText !== undefined ? 8 : 0) +
+    (timerText !== undefined ? 3 : 0)
   const statusParts = [timerLen, status.reason ? status.reason.length : 0].filter((n) => n > 0)
   const statusGaps = Math.max(0, statusParts.length - 1)
   const statusRightLen = statusParts.reduce((a, b) => a + b, 0) + statusGaps
@@ -439,7 +441,7 @@ export function TopLine({
         ) : null}
         {timerText === undefined ? null : (
           <Text color="$fg-on-inverse-muted" flexShrink={0}>
-            {timerText}
+            up {timerText}
           </Text>
         )}
       </Box>

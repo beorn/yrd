@@ -17,6 +17,7 @@ import {
   diagnosticLines,
   friendlyPath,
   mediaDuration,
+  runIdentifier,
   runShortName,
   stateGlyph,
   stateWord,
@@ -292,5 +293,21 @@ describe("done changes freeze their clocks (25630)", () => {
     expect(ageRunText(queued, T3)).toBe("1h03m / —")
     expect(ageRunText(running, T3)).toBe("1h03m / 1h02m")
     expect(ageRunText(merged, T3)).toBe("3:00 / 2:00")
+  })
+})
+
+describe("runIdentifier and runShortName format (round 2)", () => {
+  it("shows #seq for numbered runs", () => {
+    expect(runIdentifier("q-20260903T115800000Z-0badf00d", 42)).toBe("#42")
+    expect(runShortName("main", "q-20260903T115800000Z-0badf00d", 42)).toBe("main#42")
+  })
+
+  it("shows short hex tail for unnumbered runs in RUN column, never full id", () => {
+    expect(runIdentifier("q-20260903T115800000Z-0badf00d")).toBe("0badf00d")
+    expect(runShortName("main", "q-20260903T115800000Z-0badf00d")).toBe("main [q-20260903T115800000Z-0badf00d]")
+  })
+
+  it("returns dash for undefined id", () => {
+    expect(runIdentifier(undefined)).toBe("—")
   })
 })

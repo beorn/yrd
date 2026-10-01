@@ -77,6 +77,7 @@ export type RunnerJournalStep = Readonly<{
 
 export type RunnerRun = Readonly<{
   id: string
+  number?: number
   startedAt: Date
   /** The instant the journal was last appended to: the file's mtime. */
   lastWriteAt: Date
@@ -766,6 +767,42 @@ function running(pid: number): boolean {
  * every row read `queued`, which is what a row reads when the queue is healthy
  * and merely busy. A dead queue cannot read `idle` here: rung 2 is above it.
  */
+/** The one stage derivation for an active step, shared between runnerLine and stage tabs. */
+export function activeStepStage(step: ActiveRunnerStep): "provisioning" | "checking" | "merging" | "deprovisioning" {
+  if (
+    step.phase === "merge" ||
+    step.name === "publish" ||
+    step.name === "components" ||
+    step.name === "merge" ||
+    step.name === "push" ||
+    step.name === "root" ||
+    step.name === "notify"
+  ) {
+    return "merging"
+  }
+  if (
+    step.name === "remove" ||
+    step.name === "retain" ||
+    step.name === "deprovision" ||
+    step.name === "retire" ||
+    step.phase === "deprovision" ||
+    step.phase === "deprovisioning"
+  ) {
+    return "deprovisioning"
+  }
+  if (
+    step.kind === "check" ||
+    step.name === "check" ||
+    step.name === "checking" ||
+    step.phase === "check" ||
+    step.phase === "checking"
+  ) {
+    if (step.name === "setup") return "provisioning"
+    return "checking"
+  }
+  return "provisioning"
+}
+
 export function runnerWord(
   facts: RunnerFacts | undefined,
   underCheck: boolean,
@@ -785,16 +822,7 @@ export function runnerWord(
       return "stopped"
     case "beating": {
       if (facts.latest?.activeStep !== undefined) {
-        const step = facts.latest.activeStep
-        if (step.phase === "merge") return "merging"
-        if (step.kind === "check") {
-          if (step.name === "setup") return "provisioning"
-          return "checking"
-        }
-        if (step.name === "remove" || step.name === "retain" || step.name === "deprovision" || step.name === "retire") {
-          return "deprovisioning"
-        }
-        return "provisioning"
+        return activeStepStage(facts.latest.activeStep)
       }
       if (underCheck) return "checking"
       if (facts.roundLockHolder !== undefined) return "provisioning"
@@ -811,16 +839,7 @@ export function runnerWord(
     return "unpublished"
   }
   if (facts.latest.alive && facts.latest.activeStep !== undefined) {
-    const step = facts.latest.activeStep
-    if (step.phase === "merge") return "merging"
-    if (step.kind === "check") {
-      if (step.name === "setup") return "provisioning"
-      return "checking"
-    }
-    if (step.name === "remove" || step.name === "retain" || step.name === "deprovision" || step.name === "retire") {
-      return "deprovisioning"
-    }
-    return "provisioning"
+    return activeStepStage(facts.latest.activeStep)
   }
   if (facts.roundLockHolder !== undefined) return "provisioning"
   // No document, so the run's own pid is the liveness fact. Nothing is claimed
@@ -943,13 +962,12 @@ function runnerLineOf(
   // without one it says where it looked and whose machine the output is on.
   const found =
     latest === undefined
-      ? `${facts?.absent ?? "no run journal was read on this machine"} · the check output is on the queue's machine only`
+      ? `${facts?.absent ?? "no history here"} · the check output is on the queue's machine only`
       : (died ??
-        [
-          `${latest.alive ? "alive" : "no process"}: beat ${String(beat)} ago`,
-          `this round since ${clock(latest.startedAt)}`,
-          `${checksText}, output ${String(beat)} ago (this machine only)`,
-        ].join(" · "))
+        [`${latest.alive ? "runner alive" : "no process"} · round started ${clock(latest.startedAt)}`, checksText]
+          .filter((part) => part !== "")
+          .join(" · ")
+          .replace(/[—\s]+$/u, ""))
   // A health document that is there and is not a document decides no word, so
   // it would go unsaid entirely if it were not said here.
   const localDetail = service?.kind === "unreadable" ? `${service.why} · ${found}` : found
@@ -961,7 +979,8 @@ function runnerLineOf(
       : published?.why === undefined
         ? undefined
         : `${published.why}${unjudged}`
-  const detail = publishedDetail === undefined ? localDetail : `${publishedDetail} · ${localDetail}`
+  const rawDetail = publishedDetail === undefined ? localDetail : `${publishedDetail} · ${localDetail}`
+  const detail = rawDetail.replace(/[—\s]+$/u, "")
   switch (state) {
     case "provisioning":
     case "checking":
@@ -982,13 +1001,16 @@ function runnerLineOf(
         const stepElapsed = since(activeStep.start)
         durationText = stepElapsed
 
-        if (activeStep.kind === "check") {
-          subphase = activeStep.name === "setup" ? "preparing" : activeStep.name
-        } else if (activeStep.name === "compose" || activeStep.name === "worktree") {
-          subphase = "composing"
-        } else if (activeStep.name === "prepare") {
-          subphase = "preparing"
-        } else if (activeStep.phase === "merge") {
+        if (state === "provisioning") {
+          subphase = activeStep.name === "compose" || activeStep.name === "worktree" ? "composing" : "preparing"
+        } else if (state === "checking") {
+          subphase =
+            activeStep.name === "checking" || activeStep.name === "check"
+              ? undefined
+              : activeStep.name === "setup"
+                ? "preparing"
+                : activeStep.name
+        } else if (state === "merging") {
           step = activeStep.name
           subphase =
             activeStep.name === "publish" || activeStep.name === "components"
@@ -998,12 +1020,7 @@ function runnerLineOf(
                 : activeStep.name === "notify"
                   ? "notifying"
                   : activeStep.name
-        } else if (
-          activeStep.name === "remove" ||
-          activeStep.name === "retain" ||
-          activeStep.name === "deprovision" ||
-          activeStep.name === "retire"
-        ) {
+        } else if (state === "deprovisioning") {
           subphase = activeStep.name === "retain" ? "retaining" : activeStep.name === "retire" ? "retiring" : "removing"
         } else {
           subphase = stepName

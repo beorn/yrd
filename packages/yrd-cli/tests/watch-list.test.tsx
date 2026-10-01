@@ -19,6 +19,7 @@ import { render } from "silvery/test"
 import { type Row, type WatchRow } from "@yrd/queue-core"
 import {
   ListRow,
+  TopLine,
   changesSuffix,
   listLayout,
   taskExtrasLayout,
@@ -311,4 +312,18 @@ describe("CHANGES column capping and title preservation (25716)", () => {
       }
     })
   }
+})
+
+describe("TopLine top-right clock", () => {
+  it("labels the top-right clock with 'up '", async () => {
+    const app = render(
+      <TopLine status={{ marker: "▸", word: "QUEUE", color: "$fg-info", timer: "00:00:45", pulse: false }} />,
+      { cols: 80, rows: 2 },
+    )
+    await act(async () => {
+      await app.waitForLayoutStable()
+    })
+    expect(app.text).toContain("up 00:00:45")
+    app.unmount()
+  })
 })

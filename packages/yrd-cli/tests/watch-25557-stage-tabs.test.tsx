@@ -129,7 +129,11 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
     const names = ["Timeline", "provisioning", "checking", "merging", "deprovisioning"]
     const nameCols = names.map((name) => lines[nameRow]!.indexOf(name))
     // Each label's second line, read where its name starts, up to the next run of padding.
-    const seconds = nameCols.map((col) => lines[nameRow + 1]!.slice(col).split(/\s{2,}/u)[0]!.trim())
+    const seconds = nameCols.map((col) =>
+      lines[nameRow + 1]!.slice(col)
+        .split(/\s{2,}/u)[0]!
+        .trim(),
+    )
     const bgKey = (bg: unknown) => JSON.stringify(bg)
     const tabBgs = nameCols.map((col) => bgKey(app.cell(col, nameRow).bg))
     const active = tabBgs.findIndex((bg) => tabBgs.filter((other) => other === bg).length === 1)
@@ -183,6 +187,7 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
         service: { kind: "beating", state: "healthy" },
         latest: {
           id: "run-live-1",
+          number: 408,
           startedAt,
           lastWriteAt: NOW,
           alive: true,
@@ -216,10 +221,11 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
     const app = render(<WatchPane snapshot={snapshot} live={false} />, { cols: 220, rows: 40 })
     await settle(app)
 
-    // With a round in flight, the detail pane MUST be shown
-    // 1. The alive, beat and this-round-since line stays first
-    expect(app.text).toContain("alive: beat")
-    expect(app.text).toContain("this round since")
+    // 1. The alive and round started line stays first
+    expect(app.text).toContain("runner alive")
+    expect(app.text).toContain("round started")
+    expect(app.text).not.toContain("(this machine only)")
+    expect(app.text).not.toContain("output 0:00 ago")
 
     // 2. Stage tabs are rendered
     expect(app.text).toContain("provisioning")
@@ -227,11 +233,9 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
     expect(app.text).toContain("merging")
     expect(app.text).toContain("deprovisioning")
 
-    // 3. Finished step compose shows its duration (8s = 0:08)
-    expect(app.text).toContain("0:08")
-
-    // 4. Current running step prepare shows "still writing" or running status
-    expect(app.text).toContain("PREPARING")
+    // 3. Stage detail: one line per step with a mark and a time ('✓ composing 0:08', '◉ preparing 0:15'), no blank gap between steps
+    expect(app.text).toContain("✓ composing 0:08")
+    expect(app.text).toContain("◉ preparing")
 
     if (process.env.YRD_CAPTURE_DIR) {
       const ansi = bufferToStyledText(app.term.buffer)
@@ -333,5 +337,37 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
     expect(app.text).not.toContain("deprovisioning")
 
     app.unmount()
+  })
+
+  it("stage agreement: runner row status word and lit stage tab agree on stage", async () => {
+    const startedAt = new Date(NOW.getTime() - 20_000)
+    const snapshotChecking = baseSnapshot({
+      runner: {
+        journalDir: "/w/logs",
+        service: { kind: "beating", state: "healthy" },
+        latest: {
+          id: "run-live-1",
+          startedAt,
+          lastWriteAt: NOW,
+          alive: true,
+          checks: ["typecheck"],
+          effectiveChecks: ["typecheck"],
+          activeStep: {
+            kind: "check",
+            name: "typecheck",
+            phase: "submit",
+            start: new Date(NOW.getTime() - 10_000),
+          },
+          steps: [],
+        },
+      },
+    })
+    const appChecking = render(<WatchPane snapshot={snapshotChecking} live={false} />, { cols: 220, rows: 40 })
+    await settle(appChecking)
+    // Runner line status column:
+    expect(appChecking.text).toContain("checking · typecheck")
+    // Checking tab must not say "not run" while active check is running
+    expect(appChecking.text).not.toContain("checking not run")
+    appChecking.unmount()
   })
 })

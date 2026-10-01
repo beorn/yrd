@@ -222,6 +222,24 @@ export function friendlyPath(path: string, home: string = homedir()): string {
   return path.startsWith(`${root}/`) ? `~${path.slice(root.length)}` : path
 }
 
+/**
+ * Short run id: for unnumbered runs, extracts the hex tail (or short id), never printing full opaque q-2026...
+ */
+export function shortRunId(id: string): string {
+  const lastDash = id.lastIndexOf("-")
+  if (lastDash !== -1 && lastDash < id.length - 1) {
+    const tail = id.slice(lastDash + 1)
+    if (tail.length >= 6) {
+      return tail.slice(0, 8)
+    }
+  }
+  if (id.startsWith("q-")) {
+    const rest = id.slice(2)
+    return rest.length > 8 ? rest.slice(0, 8) : rest
+  }
+  return id.length > 8 ? id.slice(0, 8) : id
+}
+
 /** A durable queue number after publication, or the full opaque id before one exists. */
 export function runShortName(label: string, id: string, number?: number): string {
   return number === undefined ? `${label} [${id}]` : `${label}#${number}`
@@ -318,10 +336,11 @@ export function runTime(milliseconds: number): string {
 /** The AGE / RUN cell's least width: an mm:ss age and an mm:ss run time, so a run time appearing never widens the column (25421). */
 export const AGE_RUN_MIN_WIDTH = "00:00 / 00:00".length
 
-/** Bare numeric attempt / timestamp identifier without label prefix: `085315` or `—`. */
+/** Bare numeric attempt / timestamp identifier without label prefix: `#seq`, `0badf00d` or `—`. */
 export function runIdentifier(id: string | undefined, number?: number): string {
   if (id === undefined) return "—"
-  return number === undefined ? id : String(number)
+  if (number !== undefined) return `#${number}`
+  return shortRunId(id)
 }
 
 /** Queue digit beside the run: `1 · main#2342`, or `1 · —` with no attempt. */
