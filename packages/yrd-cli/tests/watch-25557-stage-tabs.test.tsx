@@ -35,14 +35,10 @@ async function renderAnsiScreenshot(ansi: string, opts: { cols: number; rows: nu
 }
 
 function writeCaptureIfConfigured(name: string, content: string | Uint8Array): void {
-  const dirs = [
-    process.env.YRD_CAPTURE_DIR || "/hh/var/attachments",
-    "/home/hh/.gemini/antigravity-cli/brain/11636c28-7162-4319-bfa2-fe6e10ddc145/captures",
-  ]
-  for (const dir of dirs) {
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, name), content)
-  }
+  const dir = process.env.YRD_CAPTURE_DIR
+  if (!dir) return
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, name), content)
 }
 
 const NOW = new Date("2026-09-24T12:00:00.000Z")

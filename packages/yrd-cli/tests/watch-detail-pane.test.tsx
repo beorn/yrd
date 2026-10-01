@@ -26,14 +26,10 @@ const NOW = new Date("2026-09-27T19:50:00.000Z")
 const RUN_ID = "q-20260927T185000000Z-affected"
 
 function writeCaptureIfConfigured(name: string, content: string | Uint8Array): void {
-  const dirs = [
-    process.env.YRD_CAPTURE_DIR || "/hh/var/attachments",
-    "/home/hh/.gemini/antigravity-cli/brain/11636c28-7162-4319-bfa2-fe6e10ddc145/captures",
-  ]
-  for (const dir of dirs) {
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, name), content)
-  }
+  const dir = process.env.YRD_CAPTURE_DIR
+  if (!dir) return
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, name), content)
 }
 
 async function renderAnsiPng(ansi: string, opts: { cols: number; rows: number }): Promise<Uint8Array> {
