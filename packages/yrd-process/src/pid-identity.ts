@@ -1,53 +1,15 @@
 /**
- * Linux `/proc/[pid]/stat` boot-time and process-start-time parsing.
+ * Linux process-start identity from `/proc/[pid]/stat`.
  *
- * The one parser of `/proc/[pid]/stat` field 22. Callers read it:
- * `path-reaper.ts`'s path-holder census, to attribute a held path to the
- * process that has held it since before the census began, and the queue's
- * round lock, whose body names its holder's boot and start tick as diagnostic
- * bytes. The lock itself is a kernel flock, so yrd compares neither. Runner
- * recovery compares the recorded identity before replacing a fresh claim.
+ * yrd's one parser of `/proc/[pid]/stat` field 22. Callers read it: the
+ * queue's round lock, whose body names its holder's boot and start tick as
+ * diagnostic bytes (the lock itself is a kernel flock, so yrd compares
+ * neither), and runner recovery, which compares the recorded identity before
+ * replacing a fresh claim. The path-holder census and its wall-clock start
+ * time live in removely (hh 26990).
  */
 
 import { readFileSync, readlinkSync } from "node:fs"
-
-/**
- * Linux fixes USER_HZ at 100 for `/proc/[pid]/stat` regardless of CONFIG_HZ; it
- * is ABI, which is why procps hardcodes it too.
- */
-const LINUX_USER_HZ = 100
-
-/**
- * Boot time in wall-clock ms, from `btime` in `/proc/stat`; undefined when the
- * proc root carries none. One value per host, so a census reads it once.
- */
-export function linuxBootTimeMs(procRoot: string): number | undefined {
-  let raw: string
-  try {
-    raw = readFileSync(`${procRoot}/stat`, "utf8")
-  } catch {
-    // silent-fallback-allow: without btime there is no start time, which the
-    // classifier reports as an unproven identity rather than as liveness.
-    return undefined
-  }
-  const line = raw.split("\n").find((candidate) => candidate.startsWith("btime "))
-  if (line === undefined) return undefined
-  const seconds = Number(line.slice("btime ".length).trim())
-  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : undefined
-}
-
-/**
- * Wall-clock ms at which the process behind this `/proc/[pid]/stat` line
- * started: field 22, in clock ticks since boot, against the boot time. The
- * path-holder census reads it through here. It reads up to a second early,
- * because `btime` is whole seconds (0.9 s early on the host measured
- * 2026-09-16), and it moves when the wall clock is stepped.
- */
-export function procStatStartedAtMs(stat: string, bootedAtMs: number | undefined): number | undefined {
-  if (bootedAtMs === undefined) return undefined
-  const ticks = procStatStartTicks(stat)
-  return ticks === undefined ? undefined : bootedAtMs + (ticks / LINUX_USER_HZ) * 1_000
-}
 
 /**
  * Field 22 of a `/proc/[pid]/stat` line, the clock tick since boot at which the
@@ -101,8 +63,7 @@ export function pidPresence(pid: number): "present" | "absent" {
  * a process that has exited, or a line that does not parse), so a boot that
  * differs is known even where the process's own line is not.
  *
- * Ticks, not the wall-clock start {@link procStatStartedAtMs} computes: that
- * start is read against `btime`, which the kernel derives from the wall clock
+ * Ticks, not a wall-clock start: that start is read against `btime`, which the kernel derives from the wall clock
  * and which moves when the clock is stepped, so one process can read two
  * different wall-clock starts. Its tick count never moves. The boot id tells
  * this boot's tick from the same tick of an earlier boot, when a process that
