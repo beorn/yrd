@@ -17,23 +17,6 @@ export { adaptProcessGit, cleanGitEnvironment, gitFailure, type GitProcessDefaul
 
 export { pidPresence, processStartIdentity, type ProcessStartIdentity } from "./pid-identity.ts"
 
-export {
-  censusDeadline,
-  inspectPathHolderCensus,
-  pathHolderRefusal,
-  PATH_HOLDER_CENSUS_DEADLINE_MS,
-  type CensusDeadline,
-  type PathHolderCensusOptions,
-  type DarwinPathHolderCoverage,
-  type LinuxPathHolderCoverage,
-  type UnreadableProcess,
-  type PathHolder,
-  type PathHolderCensus,
-  type PathHolderCoverage,
-  type PathHolderSourceCoverage,
-  type PathHolderUnavailableCoverage,
-} from "./path-reaper.ts"
-
 export type ProcessRequest = Readonly<{
   argv: readonly string[]
   cwd?: string

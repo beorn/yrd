@@ -61,7 +61,7 @@ import {
   stateGlyph,
   withoutGitConflictsBlock,
 } from "./watch-format.ts"
-import { runnerOf } from "./watch-frame.tsx"
+import { runnerOf, runnerStatusColor } from "./watch-frame.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
 import { runTitle, statusLineOf, stepsOf, timingRows, type WatchRun } from "./watch-run.ts"
@@ -351,7 +351,7 @@ export function WatchDetail({
 
   if (runnerSnapshot !== undefined) {
     const runner = runnerOf(runnerSnapshot, now)
-    const color = STATE_WORDS[runner.state].color
+    const color = runnerStatusColor(runnerSnapshot, runner)
     const effectiveDetail = detail ?? runnerDetailFromSnapshot(runnerSnapshot, now)
     const resolved = resolveTab(selected ?? defaultRunnerTab(runner.state), effectiveDetail)
     const tab = resolved.tab

@@ -329,10 +329,14 @@ describe("26243: watch uses one clock format, one duration format and plain word
     expect(app.text).not.toContain("Enter to focus")
 
     // Both queues have an outlined RUNNER box stacked at the top
-    const runnerLineIndices = app.lines.map((l, i) => (l.includes("╭─ RUNNER") ? i : -1)).filter((i) => i >= 0)
+    const runnerLineIndices = app.lines
+      .map((l, i) => (l.includes("RUNNER") && l.includes("╭─") ? i : -1))
+      .filter((i) => i >= 0)
     expect(runnerLineIndices).toHaveLength(2)
     const r1Line = runnerLineIndices[0]!
     const r2Line = runnerLineIndices[1]!
+    expect(app.lines[r1Line]).toContain("╭─ [1] RUNNER")
+    expect(app.lines[r2Line]).toContain("╭─ [2] RUNNER")
 
     const t1Line = app.lines.findIndex((l) => l.includes("task/q1-newest"))
     const t2Line = app.lines.findIndex((l) => l.includes("task/q2-middle"))
@@ -371,6 +375,9 @@ describe("26243: watch uses one clock format, one duration format and plain word
     writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5b.layout.txt", debugTree(app.getContainer()))
     writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5b.ansi", ansi)
     writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round5b.png", await renderAnsiPng(ansi, size))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round6.layout.txt", debugTree(app.getContainer()))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round6.ansi", ansi)
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round6.png", await renderAnsiPng(ansi, size))
     writeCaptureIfConfigured("yrd-watch-live-round5.ansi", ansi)
     writeCaptureIfConfigured("yrd-watch-live-round5.png", await renderAnsiPng(ansi, size))
     writeCaptureIfConfigured("yrd-watch-live-round5b.ansi", ansi)
