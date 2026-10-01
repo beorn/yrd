@@ -1329,6 +1329,114 @@ it("explains the parser-first order after a parser commit lands and the followin
   expect(reason).toMatch(/land parser support first/u)
 })
 
+/** A notify command that signals it started and holds until the case releases it, then records like the notifier. */
+function holdingNotifier(w: World): Readonly<{ run: string; started: string; release: string }> {
+  const dir = dirname(w.notifyLog)
+  const started = join(dir, "notice-started")
+  const release = join(dir, "notice-release")
+  const run = join(dir, "holding-notify.sh")
+  writeFileSync(
+    run,
+    [
+      "#!/bin/sh",
+      `touch "${started}"`,
+      `i=0; while [ ! -f "${release}" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done`,
+      `cat >> "${w.notifyLog}"`,
+      "",
+    ].join("\n"),
+  )
+  chmodSync(run, 0o755)
+  return { run, started, release }
+}
+
+async function noticeStarted(started: string): Promise<void> {
+  for (let waited = 0; waited < 20_000; waited += 25) {
+    if (existsSync(started)) return
+    await new Promise((done) => setTimeout(done, 25))
+  }
+  throw new Error(`the notice never started: ${started} was never written`)
+}
+
+/** @failure A resubmission that landed between a change's merged event and its notice record stopped the queue:
+ *   the run's notified append found the new submission at the chain tip and exited 2 (stuck), 02:14-02:19 PDT.
+ * @level l3 @consumer the queue line and the resubmitting seat (@i/10-yrd/26989)
+ */
+it("a resubmission between merged and the notice record stays queued, and the run finishes", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const branch = "task/resubmit-mid-notice"
+  await submitCommit(w, branch, "one.txt")
+  const notifier = holdingNotifier(w)
+  const run = queueRun({
+    ...(await w.options({ exit: 0 })),
+    notify: [{ name: "recorder", on: ["merged"], run: notifier.run }],
+  })
+  await noticeStarted(notifier.started)
+
+  // The seat resubmits the same branch with one more commit while the merged notice is being delivered.
+  await w.git(["checkout", "--quiet", branch])
+  writeFileSync(join(w.work, "two.txt"), "two\n")
+  await w.git(["add", "two.txt"])
+  await w.git(["commit", "--quiet", "-m", "two"])
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", {
+    branch,
+    submitter: "@dev/5",
+    target: { branch: "main", remote: "origin" },
+    issue: "@i/10-yrd/26989",
+  })
+  writeFileSync(notifier.release, "")
+
+  const outcome = await run
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [branch] })
+  expect(await readStatus(store, "main", branch)).toMatchObject({ status: "queued", commit: head })
+  expect(readFileSync(w.notifyLog, "utf8")).toContain('"record":"merged"')
+  const opened = (await (await openEvents({ ...store, ref: changesRef("main", branch) })).events()).findLast(
+    (event) => event.type === "opened",
+  )
+  expect(logRecords(outcome)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "notice-unrecorded",
+        branch,
+        to: "recorder",
+        result: "delivered",
+        opened: opened?.id,
+      }),
+    ]),
+  )
+})
+
+/** @failure Reading every moved chain tip as a resubmission would let a rewound or forged change chain pass silently.
+ * @level l3 @consumer the queue line (@i/10-yrd/26989)
+ */
+it("a change chain moved any other way during the notice still stops the run with the expected-tip conflict", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const branch = "task/rewound-mid-notice"
+  await submitCommit(w, branch, "one.txt")
+  const notifier = holdingNotifier(w)
+  const run = queueRun({
+    ...(await w.options({ exit: 0 })),
+    notify: [{ name: "recorder", on: ["merged"], run: notifier.run }],
+  })
+  await noticeStarted(notifier.started)
+
+  const ref = changesRef("main", branch)
+  const events = await (await openEvents({ ...store, ref })).events()
+  const merged = events.findIndex((event) => event.type === "merged")
+  const prior = events[merged - 1]?.id
+  if (prior === undefined) throw new Error(`${ref}: no event before merged`)
+  await w.git(["push", "--quiet", "--force", "origin", `${prior}:${ref}`])
+  writeFileSync(notifier.release, "")
+
+  // Today's words for a moved chain: the pre-append read refuses a rewind, the CAS a forward move.
+  await expect(run).rejects.toThrow(/rewound-mid-notice (moved after the selected reading|is at .* not the expected)/u)
+})
+
 /** @failure An event ending gave the notifier no message or repeatable receipt after the journal vanished.
  * @level l3 @consumer queue operator and notified recipient
  */

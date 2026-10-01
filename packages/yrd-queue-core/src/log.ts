@@ -177,6 +177,9 @@ export const LOG_KINDS = [
   // branch moved or was already gone, and `saw` says which, a sha or "absent".
   "branch-deleted",
   "branch-kept",
+  // A notice delivered for an ending after a resubmission opened a new change above it (26989): the `opened`
+  // clears the ending's notices, so its `notified` cannot be recorded. Names the delivery and the `opened` event.
+  "notice-unrecorded",
   // The round's remote calls, counted from git's trace2 log when the round ends (25570 row 3): processes,
   // ssh_children (an upper bound on logins), remote_ms, unreadable lines and one field per remote verb. Readers match kinds by equality, so this
   // closing row breaks none of them.

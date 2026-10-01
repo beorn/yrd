@@ -554,6 +554,10 @@ export async function eventQueueRun(
       ...(kind === "merged" ? { merge } : {}),
       ...(kind === "deferred" ? { projectedMs: change.deferred?.projectedMs, boundMs: change.deferred?.boundMs } : {}),
     })
+    // A resubmission that lands while a notice is being delivered opens a new change above this ending (26989).
+    // Its `opened` clears the ending's notices, so no `notified` can be recorded above it any more: the notice is
+    // delivered and logged as unrecorded, and the new submission stays queued for its own round.
+    let resubmitted: string | undefined
     // Non-merged endings written by this round cannot carry migration provenance.
     // Existing endings and merged notices use the actual event.
     for (const entry of options.notify ?? []) {
@@ -581,19 +585,49 @@ export async function eventQueueRun(
         },
         { about: branch, branch, head, id: eventId, text },
       )
-      tip = await appendOwnedChange(store, queue, branch, tip, {
-        type: "notified",
-        at: new Date(),
-        ...(final.reason === undefined ? {} : { reason: final.reason }),
-        notice: {
-          for: eventId,
-          to: entry.name,
-          key,
-          result: final.result,
-          ...(final.reason === undefined ? {} : { reason: final.reason }),
-        },
+      if (resubmitted === undefined) {
+        try {
+          tip = await appendOwnedChange(store, queue, branch, tip, {
+            type: "notified",
+            at: new Date(),
+            ...(final.reason === undefined ? {} : { reason: final.reason }),
+            notice: {
+              for: eventId,
+              to: entry.name,
+              key,
+              result: final.result,
+              ...(final.reason === undefined ? {} : { reason: final.reason }),
+            },
+          })
+          continue
+        } catch (error) {
+          // Any other move, and a chain that cannot even be read back, stops the run with the conflict itself.
+          resubmitted = error instanceof Conflict ? await openedAfter(branch, tip).catch(() => undefined) : undefined
+          if (resubmitted === undefined) throw error
+        }
+      }
+      log.write({
+        kind: "notice-unrecorded",
+        branch,
+        head,
+        for: eventId,
+        to: entry.name,
+        result: final.result,
+        opened: resubmitted,
       })
     }
+  }
+  /**
+   * The `opened` event directly above `expected` on this change's chain, when a new submission is what moved it;
+   * otherwise undefined, and the caller's conflict stands. A tip moved any other way is still the loud stop.
+   */
+  const openedAfter = async (branch: string, expected: string): Promise<string | undefined> => {
+    const latest = await readStatus(store, queue, branch)
+    if (latest.tip === undefined || latest.tip === expected) return undefined
+    const history = await readChangeEvents(store, queue, branch, latest.tip)
+    const at = history.findIndex((event) => event.id === expected)
+    const next = at < 0 ? undefined : history[at + 1]
+    return next !== undefined && next.type === "opened" && !owned.has(next.id) ? next.id : undefined
   }
   const tellDirect = async (commit: string, eventId: string): Promise<void> => {
     if (!options.notify?.some((entry) => entry.on.includes("merged-direct"))) return
