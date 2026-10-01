@@ -1,9 +1,12 @@
 /**
  * Path process ownership — the census of every process still holding a path.
  *
- * cwd, executable, process root, a mapped file or an open descriptor under the
- * path all count as holding it, so a descendant that changed session is still
- * attributed. The census reports its own COVERAGE beside its holders: a
+ * cwd, executable, process root, a mapped file, an open descriptor, or an argv
+ * element that is itself a path under the path all count as holding it, so a
+ * descendant that changed session is still attributed, and so is a supervisor
+ * started as `bun <tree>/entry.ts` that later resolves files beside its entry
+ * (@hab/26947: it holds its tree by argv alone, with cwd elsewhere and nothing
+ * mapped or open). The census reports its own COVERAGE beside its holders: a
  * permission denial is reduced coverage, never an empty result, so "nothing
  * holds this" and "we were not allowed to look" can never read the same.
  */
@@ -14,7 +17,7 @@ import { linuxBootTimeMs, procStatStartedAtMs } from "./pid-identity.ts"
 
 export type PathHolder = Readonly<{
   pid: number
-  source: "cwd" | "exe" | "root" | `fd/${string}`
+  source: "cwd" | "exe" | "root" | "argv" | `fd/${string}`
   target: string
 }>
 
@@ -56,7 +59,7 @@ export type UnreadableProcess = Readonly<{
    * host's boot time; absent when either could not be read.
    */
   startedAt?: string
-  denied: readonly ("process" | "cwd" | "exe" | "root" | "maps" | "fd")[]
+  denied: readonly ("process" | "cwd" | "exe" | "root" | "argv" | "maps" | "fd")[]
 }>
 
 export type LinuxPathHolderCoverage = Readonly<{
@@ -93,7 +96,7 @@ export type LinuxPathHolderCoverage = Readonly<{
     zombie: number
     /**
      * Live same-uid procs whose entry was readable but at least one holder
-     * source (cwd/exe/root/maps/fd) was denied — exactly the procs `unreadable`
+     * source (cwd/exe/root/argv/maps/fd) was denied — exactly the procs `unreadable`
      * names. Declared BEFORE the per-source breakdown so it serializes into the
      * head of the census: a hab page truncated this JSON mid-`sources`, leaving
      * a head that read `complete:false` beside all-zero counters and named no
@@ -102,7 +105,7 @@ export type LinuxPathHolderCoverage = Readonly<{
     sourceDenied: number
     unavailable: PathHolderUnavailableCoverage
   }>
-  sources: Readonly<Record<"cwd" | "exe" | "root" | "maps" | "fd", PathHolderSourceCoverage>>
+  sources: Readonly<Record<"cwd" | "exe" | "root" | "argv" | "maps" | "fd", PathHolderSourceCoverage>>
   /** Every same-uid proc behind the denied counts, identified — the counts say
    * HOW MANY observations were hidden, this says WHO hid them. Optional for
    * censuses recorded before the field existed. */
@@ -112,6 +115,8 @@ export type LinuxPathHolderCoverage = Readonly<{
 export type DarwinPathHolderCoverage = Readonly<{
   platform: "darwin"
   mechanism: "lsof"
+  /** lsof reports cwd, executable, root and open files; it has no argv source, so a holder by argv alone is not
+   * seen on Darwin. */
   /** A successful lsof traversal is complete; failures throw instead of returning an empty census. */
   complete: true
 }>
@@ -227,10 +232,11 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
     sourceDenied: 0,
     unavailable: { exited: 0, denied: 0 },
   }
-  const sourceCoverage: Record<"cwd" | "exe" | "root" | "maps" | "fd", MutableSourceCoverage> = {
+  const sourceCoverage: Record<"cwd" | "exe" | "root" | "argv" | "maps" | "fd", MutableSourceCoverage> = {
     cwd: emptySourceCoverage(),
     exe: emptySourceCoverage(),
     root: emptySourceCoverage(),
+    argv: emptySourceCoverage(),
     maps: emptySourceCoverage(),
     fd: emptySourceCoverage(),
   }
@@ -262,16 +268,18 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
         processCoverage.zombie += 1
         return []
       }
-      const [cwd, executable, processRoot, mappedFiles, descriptors] = await Promise.all([
+      const [cwd, executable, processRoot, argv, mappedFiles, descriptors] = await Promise.all([
         observeProcessLink(`${proc}/cwd`),
         observeProcessLink(`${proc}/exe`),
         observeProcessLink(`${proc}/root`),
+        observeProcessArgv(`${proc}/cmdline`),
         observeProcessMaps(`${proc}/maps`),
         observeProcessDescriptors(`${proc}/fd`),
       ])
       recordSourceCoverage(sourceCoverage.cwd, cwd.availability)
       recordSourceCoverage(sourceCoverage.exe, executable.availability)
       recordSourceCoverage(sourceCoverage.root, processRoot.availability)
+      recordSourceCoverage(sourceCoverage.argv, argv.availability)
       recordSourceCoverage(sourceCoverage.maps, mappedFiles.availability)
       recordSourceCoverage(sourceCoverage.fd, descriptors.availability)
       const deniedSources = (
@@ -279,6 +287,7 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
           ["cwd", cwd.availability],
           ["exe", executable.availability],
           ["root", processRoot.availability],
+          ["argv", argv.availability],
           ["maps", mappedFiles.availability],
           ["fd", descriptors.availability],
         ] as const
@@ -298,6 +307,11 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
       }
       if (processRoot.value !== undefined && pathWithin(root, processRoot.value)) {
         holders.push({ pid, source: "root", target: processRoot.value })
+      }
+      // Per element, never the joined line: an element must itself be a path under the root, so script text or a
+      // `--flag=<path>` that mentions the path pins nothing.
+      for (const element of argv.value) {
+        if (element.startsWith("/") && pathWithin(root, element)) holders.push({ pid, source: "argv", target: element })
       }
       for (const mappedFile of mappedFiles.value) {
         if (pathWithin(root, mappedFile)) holders.push({ pid, source: "fd/maps", target: mappedFile })
@@ -353,6 +367,12 @@ function darwinHolderSource(field: string): PathHolder["source"] {
   if (field === "txt") return "exe"
   if (field === "rtd") return "root"
   return `fd/${field}`
+}
+
+async function observeProcessArgv(path: string): Promise<SourceObservation<string[]>> {
+  const observed = await observeSource(() => readFile(path, "utf8"), "")
+  if (observed.availability !== "readable") return { availability: observed.availability, value: [] }
+  return { availability: "readable", value: observed.value.split("\0").filter((element) => element !== "") }
 }
 
 type MutableSourceCoverage = {

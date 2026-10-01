@@ -387,6 +387,7 @@ describe("inspectPathHolderCensus", () => {
             cwd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
             exe: { readable: 0, unavailable: { exited: 0, denied: 0 } },
             root: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+            argv: { readable: 0, unavailable: { exited: 0, denied: 0 } },
             maps: { readable: 0, unavailable: { exited: 0, denied: 0 } },
             fd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
           },
@@ -405,5 +406,58 @@ describe("inspectPathHolderCensus", () => {
     await expect(inspectPathHolderCensusInProc(ownedPath, procRoot)).rejects.toThrow(
       `Linux path-holder census requires readable proc root '${procRoot}'`,
     )
+  })
+  // @hab/26947 (@cto a2bfdf39): a supervisor started as `bun <tree>/entry.ts` holds its tree by argv alone (cwd
+  // elsewhere, nothing mapped, no descriptor) and later resolves files beside its entry. Judged per argv element.
+  describe("argv holds a path only through an element that is itself a path under it", () => {
+    function argvFixture(argv: readonly string[]): { ownedPath: string; procRoot: string; processRoot: string } {
+      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-argv-"))
+      temporary.push(fixture)
+      const ownedPath = join(fixture, "owned")
+      const procRoot = join(fixture, "proc")
+      const processRoot = join(procRoot, "4242")
+      mkdirSync(ownedPath)
+      mkdirSync(join(processRoot, "fd"), { recursive: true })
+      symlinkSync("/", join(processRoot, "cwd"))
+      symlinkSync("/bin/sh", join(processRoot, "exe"))
+      symlinkSync("/", join(processRoot, "root"))
+      writeFileSync(join(processRoot, "maps"), "")
+      writeFileSync(join(processRoot, "stat"), "4242 (bun) S 1 0 0 0\n")
+      writeFileSync(join(processRoot, "cmdline"), argv.map((element) => `${element}\0`).join(""))
+      return { ownedPath, procRoot, processRoot }
+    }
+
+    test.runIf(process.platform === "linux")("an argv element under the root holds it", async () => {
+      const probe = argvFixture([])
+      const entry = join(probe.ownedPath, "ag", "inhab.ts")
+      writeFileSync(join(probe.processRoot, "cmdline"), `bun\0${entry}\0--name\0@dev.5\0`)
+      const census = await inspectPathHolderCensusInProc(probe.ownedPath, probe.procRoot)
+      expect(census.holders).toEqual([{ pid: 4242, source: "argv", target: entry }])
+      expect(census.coverage).toMatchObject({ complete: true, sources: { argv: { readable: 1 } } })
+    })
+
+    test.runIf(process.platform === "linux")("script text or a flag value that mentions the path holds nothing", async () => {
+      const probe = argvFixture([])
+      writeFileSync(
+        join(probe.processRoot, "cmdline"),
+        `sh\0-c\0cd ${probe.ownedPath} && run\0--config=${probe.ownedPath}/x.json\0`,
+      )
+      const census = await inspectPathHolderCensusInProc(probe.ownedPath, probe.procRoot)
+      expect(census.holders).toEqual([])
+      expect(census.coverage).toMatchObject({ complete: true })
+    })
+
+    test.runIf(process.platform === "linux")("an unreadable cmdline is a denial, never an empty argv", async () => {
+      const probe = argvFixture(["bun"])
+      chmodSync(join(probe.processRoot, "cmdline"), 0o000)
+      const census = await inspectPathHolderCensusInProc(probe.ownedPath, probe.procRoot)
+      expect(census.holders).toEqual([])
+      expect(census.coverage).toMatchObject({
+        complete: false,
+        processes: { sourceDenied: 1 },
+        sources: { argv: { readable: 0, unavailable: { exited: 0, denied: 1 } } },
+        unreadable: [{ pid: 4242, comm: "bun", denied: ["argv"] }],
+      })
+    })
   })
 })
