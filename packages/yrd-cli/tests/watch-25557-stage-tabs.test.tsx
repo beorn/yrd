@@ -243,6 +243,11 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
         "260927-yrd-watch-25557-stage-tabs.png",
         await renderAnsiScreenshot(ansi, { cols: 220, rows: 40 }),
       )
+      writeCaptureIfConfigured("260927-yrd-watch-25557-stage-tabs-round4.ansi", ansi)
+      writeCaptureIfConfigured(
+        "260927-yrd-watch-25557-stage-tabs-round4.png",
+        await renderAnsiScreenshot(ansi, { cols: 220, rows: 40 }),
+      )
     }
 
     app.unmount()
@@ -477,23 +482,36 @@ describe("25557: stage tabs in yrd watch detail pane", () => {
     const app = render(<WatchDetail runnerSnapshot={snapshot} />, { cols: 120, rows: 30 })
     await settle(app)
 
+    const runnerHeaderIdx = app.lines.findIndex((l) => l.includes("RUNNER"))
+    expect(runnerHeaderIdx).toBeGreaterThanOrEqual(1)
+    // RUNNER header block is an outlined box with top border:
+    expect(app.lines[runnerHeaderIdx - 1]).toContain("╭")
+    // A blank line under the RUNNER header line inside the box:
+    expect(app.lines[runnerHeaderIdx + 1]?.replace(/[│\s]/g, "")).toBe("")
+    expect(app.lines[runnerHeaderIdx + 2]).toContain("Queue:")
+
     const runnerLastLineIdx = app.lines.findIndex((l) => l.includes("Detail:"))
-    expect(runnerLastLineIdx).toBeGreaterThanOrEqual(0)
+    expect(runnerLastLineIdx).toBeGreaterThan(runnerHeaderIdx)
+
+    // Outlined box bottom border:
+    const runnerBoxBottomIdx = app.lines.findIndex((l, i) => i > runnerLastLineIdx && l.includes("╰"))
+    expect(runnerBoxBottomIdx).toBeGreaterThan(runnerLastLineIdx)
+
     const tabsTextIdx = app.lines.findIndex((l) => l.includes("provisioning") && l.includes("checking"))
-    expect(tabsTextIdx).toBeGreaterThan(runnerLastLineIdx)
+    expect(tabsTextIdx).toBeGreaterThan(runnerBoxBottomIdx)
 
     // The tabs start at their first filled row. silvery 0.26 draws one padding row above the label;
     // 0.25, which standalone yrd and its CI resolve, starts on the label row itself.
     const colProvisioning = app.lines[tabsTextIdx]!.indexOf("provisioning")
-    let tabsTopIdx = runnerLastLineIdx + 1
+    let tabsTopIdx = runnerBoxBottomIdx + 1
     while (tabsTopIdx < tabsTextIdx && app.cell(colProvisioning, tabsTopIdx).bg === null) tabsTopIdx++
     expect(app.cell(colProvisioning, tabsTopIdx).bg).not.toBeNull()
 
-    // Exactly one blank line between the RUNNER block (Detail:) and the stage tabs:
-    const betweenLines = app.lines.slice(runnerLastLineIdx + 1, tabsTopIdx)
+    // Exactly one blank line between the RUNNER block (its bottom border ╰) and the stage tabs:
+    const betweenLines = app.lines.slice(runnerBoxBottomIdx + 1, tabsTopIdx)
     expect(betweenLines).toHaveLength(1)
     expect(betweenLines[0]?.trim()).toBe("")
-    expect(app.cell(colProvisioning, runnerLastLineIdx + 1).bg).toBeNull()
+    expect(app.cell(colProvisioning, runnerBoxBottomIdx + 1).bg).toBeNull()
 
     app.unmount()
   })

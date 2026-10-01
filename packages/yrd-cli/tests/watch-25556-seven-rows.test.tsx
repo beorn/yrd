@@ -251,11 +251,11 @@ describe("25556: seven rows on yrd watch", () => {
     // Status column: "▸ idle"
     expect(app.lines[2]).toContain("▸ idle")
 
-    // Runner box is borderless like the rest
-    expect(app.text).not.toContain("╭─")
-    expect(app.text).not.toContain("╮")
-    expect(app.text).not.toContain("╰─")
-    expect(app.text).not.toContain("╯")
+    // Runner box is an outlined box
+    expect(app.text).toContain("╭─")
+    expect(app.text).toContain("╮")
+    expect(app.text).toContain("╰─")
+    expect(app.text).toContain("╯")
 
     app.unmount()
   })

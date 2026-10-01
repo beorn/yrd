@@ -268,4 +268,47 @@ describe("26243: watch uses one clock format, one duration format and plain word
     expect(text).toContain("attempt 1/1")
     expect(text).not.toContain("err=")
   })
+
+  it("round 4: two queues at 140x50 each have an outlined RUNNER box", async () => {
+    const size = { cols: 140, rows: 50 }
+    const first = snapshot(2)
+    const second: WatchSnapshot = {
+      ...snapshot(1),
+      queue: "github.com/beorn/hh-dev#queue2",
+      queues: [{ branch: "queue2", label: "queue2", path: "/hh/dev" }],
+    }
+    const app = render(
+      <NowContext.Provider value={NOW}>
+        <MinuteContext.Provider value={NOW}>
+          <WatchPane
+            snapshot={first}
+            sources={[
+              { id: "one#main", label: "one", snapshot: first },
+              { id: "two#main", label: "two", snapshot: second },
+            ]}
+            live={false}
+            open={opener()}
+          />
+        </MinuteContext.Provider>
+      </NowContext.Provider>,
+      size,
+    )
+    await app.waitForLayoutStable()
+
+    expect(app.text).toContain("one")
+    expect(app.text).toContain("queue2")
+
+    // Both queues have an outlined RUNNER box (╭─ RUNNER ... ─╮ and ╰─ ... ─╯)
+    const runnerStarts = app.lines.filter((l) => l.includes("╭─ RUNNER"))
+    expect(runnerStarts).toHaveLength(2)
+    const runnerEnds = app.lines.filter((l) => l.includes("╰─"))
+    expect(runnerEnds.length).toBeGreaterThanOrEqual(2)
+
+    const ansi = bufferToStyledText(app.term.buffer)
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round4.layout.txt", debugTree(app.getContainer()))
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round4.ansi", ansi)
+    writeCaptureIfConfigured("yrd-watch-two-queues-140x50-round4.png", await renderAnsiPng(ansi, size))
+
+    app.unmount()
+  })
 })

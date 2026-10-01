@@ -28,6 +28,7 @@ import { STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.
 import type { RunnerState } from "./watch-words.ts"
 import { RunnerRow, clockOf, type ListLayout } from "./watch-list.tsx"
 import { lineOf, runnerOf } from "./watch-runner-reading.ts"
+import { TitledBox } from "./watch-primitives.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import type { WatchRow } from "./watch-rows.ts"
 import { formatStoredQueueAddress } from "./address.ts"
@@ -311,22 +312,14 @@ export function RunnerTitledBox({
   const readFailure = snap?.runner?.service.kind === "beating" ? snap.runner.service.readFailure : undefined
   return (
     <Box flexDirection="column" marginTop={1} marginBottom={1} minWidth={0} width="100%">
-      <Box flexDirection="row" width="100%" flexShrink={0} minWidth={0}>
-        <Text color={color} bold flexShrink={0}>
-          {STATE_WORDS.runner.word}
-        </Text>
-        {queueUrl !== undefined && queueUrl !== "" ? (
-          <Text color={color} flexShrink={0}>
-            {` ${queueUrl}`}
+      <TitledBox title={STATE_WORDS.runner.word} titleSuffix={queueUrl} flushTop borderColor={color}>
+        <RunnerRow line={activeLine} layout={layout} cursor={cursor} queueDigit={queueDigit} queueLabel={queueLabel} />
+        {readFailure === undefined ? null : (
+          <Text color="$fg-error" wrap="wrap" minWidth={0}>
+            {`Last round failed reading ${readFailure.ref} (${String(readFailure.count)} consecutive): ${readFailure.error}; service alive, retrying`}
           </Text>
-        ) : null}
-      </Box>
-      <RunnerRow line={activeLine} layout={layout} cursor={cursor} queueDigit={queueDigit} queueLabel={queueLabel} />
-      {readFailure === undefined ? null : (
-        <Text color="$fg-error" wrap="wrap" minWidth={0}>
-          {`Last round failed reading ${readFailure.ref} (${String(readFailure.count)} consecutive): ${readFailure.error}; service alive, retrying`}
-        </Text>
-      )}
+        )}
+      </TitledBox>
     </Box>
   )
 }
