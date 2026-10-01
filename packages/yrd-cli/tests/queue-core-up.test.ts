@@ -1080,7 +1080,7 @@ describe("yrd queue up, the service", () => {
       writeFileSync(join(w.work, ".yrd.yml"), valid ? "target: origin#main\nchecks: [{\n" : legacy)
       writeFileSync(join(w.work, "change.txt"), "candidate\n")
       await w.git(["add", ".yrd.yml", "change.txt"])
-      await w.git(["commit", "--quiet", "-m", "candidate declaration"])
+      await w.git(["commit", "--quiet", "-m", "candidate declaration\n\nRefs: 25000"])
       const head = (await w.git(["rev-parse", "HEAD"])).trim()
       const beforeRemote = await w.git(["ls-remote", "--refs", "origin"])
       const beforeLocal = await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/main/"])
@@ -1095,7 +1095,9 @@ describe("yrd queue up, the service", () => {
       if (valid) {
         await expect(attempt).resolves.toBe(0)
         // Keep the aggregate count and the refresh split in the durable submit receipt.
-        const [summary, detail] = run.stderr().trimEnd().split("\n")
+        const stderrLines = run.stderr().trimEnd().split("\n")
+        const summary = stderrLines.find((line) => line.startsWith("yrd: submit remote calls: "))
+        const detail = stderrLines.find((line) => line.startsWith("yrd: submit remote call detail: "))
         expect(`${summary}\n`).toMatch(
           /^yrd: submit remote calls: processes=\d+ ssh_children=0 remote_ms=\d+ unreadable=0 (?=.*\bpush=1\b)[^\n]*\n$/u,
         )
