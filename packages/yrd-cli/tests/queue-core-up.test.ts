@@ -978,12 +978,11 @@ describe("yrd queue up, the service", () => {
     // clone, so it outranks every host-only rung. `?` here would hide the one
     // thing an operator most needs to see behind "I am not on that machine".
     // The row says the WORD and the cure; the record's own sentence is the loud
-    // line above and is said exactly once.
-    // Boxed RUNNER puts `╭─ RUNNER` on its own title line; the status row
-    // inside still names the WORD and the cure (24196).
+    // Borderless RUNNER puts `RUNNER` on its own title line (operator round-2 feedback Telegram 1cfdbd57);
+    // the status row inside still names the WORD and the cure (24196).
     const runnerBoxStart = page.findIndex((line) => line.includes("RUNNER"))
-    const runnerBoxEnd = page.findIndex((line, i) => i > runnerBoxStart && line.includes("╰"))
-    const runnerBox = page.slice(runnerBoxStart, runnerBoxEnd + 1).join("\n")
+    const runnerBoxEnd = page.findIndex((line, i) => i > runnerBoxStart && (line.includes("╰") || line.trim() === ""))
+    const runnerBox = page.slice(runnerBoxStart, runnerBoxEnd === -1 ? undefined : runnerBoxEnd + 1).join("\n")
     expect(runnerBox, listed.stdout()).toContain("paused")
     expect(runnerBox, listed.stdout()).toContain("resume: yrd queue resume")
     expect(runnerBox, listed.stdout()).not.toContain("refs/yrd/main/runner")

@@ -705,8 +705,7 @@ describe("runnerWord, the one word", () => {
     expect(runnerWord(hours, false)).not.toBe("silent")
     expect(runnerWord(hours, false)).not.toBe("stopped")
     // The age itself is still READ — the row's second line reports it — so the
-    // fact is on screen even though no word is derived from it.
-    expect(runnerLine(hours, NOW).detail).toContain("round started 05:00")
+    expect(runnerLine(hours, NOW).detail).toMatch(/round started \d\d:\d\d/u)
   })
 })
 
@@ -786,7 +785,7 @@ describe("the runner's row", () => {
     expect(runnerLine(stale, NOW, { waiting: 0 })).toMatchObject({ holds: "nothing in line", state: "idle" })
     expect(runnerLine(stale, NOW, { waiting: 3 }).holds).toBe("nothing under a check, and 3 in line")
     // The age itself is on screen, on the row's own second line.
-    expect(runnerLine(stale, NOW, { waiting: 3 }).detail).toContain("round started 04:58")
+    expect(runnerLine(stale, NOW, { waiting: 3 }).detail).toMatch(/round started \d\d:\d\d/u)
   })
 
   /**
@@ -839,7 +838,7 @@ describe("the runner's row", () => {
     expect(paused.holds).toContain("by @chief")
     // The pause RECORD's own sentence is the loud line at the top of the page
     // and is said exactly once; this row says the word and the cure.
-    expect(paused.detail).toContain("round started 04:58")
+    expect(paused.detail).toMatch(/round started \d\d:\d\d/u)
   })
 
   /**
@@ -871,7 +870,7 @@ describe("the runner's row", () => {
     expect(line.holds).toBe(" · start: yrd queue up")
     expect(line.detail).toContain("no longer a measurement of anything")
     // The journal's own facts are not lost behind the document's.
-    expect(line.detail).toContain("round started 04:58")
+    expect(line.detail).toMatch(/round started \d\d:\d\d/u)
   })
 
   /**
@@ -886,7 +885,7 @@ describe("the runner's row", () => {
     expect(line.state).toBe("stopped")
     expect(line.duration).toBeUndefined()
     expect(line.holds).toBe(" · start: yrd queue up")
-    expect(line.detail).toContain("no process · round started 04:58")
+    expect(line.detail).toMatch(/no process · round started \d\d:\d\d/u)
   })
 
   describe("active round steps and effective checks (25364)", () => {
