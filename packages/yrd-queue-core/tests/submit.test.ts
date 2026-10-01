@@ -536,6 +536,91 @@ describe("event submit", () => {
     expect((await readStatus(store(w), "main", "task/26050")).issue).toBe(canonical)
   })
 
+  /** @failure Admission drops an unparsed issue link when commit uses Refs without colon (27041).
+   * @level l2 @consumer Yrd submit and its opened change record
+   */
+  it("submits and admits with issue binding when commit uses Refs without colon (27041)", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/fixer-ladder-fails", "change.txt")
+    await w.git(["checkout", "--quiet", "task/fixer-ladder-fails"])
+    await w.git([
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "test(maddoc): the unordered-ladder row runs as it.fails until 26335\n\nRefs 26335\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n\nChange-Id: I44e7953dd775ac9f16381cc76183ab0ee1e05f54",
+    ])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await issueOf(w.git, "task/fixer-ladder-fails", head, w.target)).toEqual({
+      issue: "26335",
+      source: "binding",
+      commit: head,
+    })
+    const admit = vi.fn(async () => ({ kind: "admit" as const }))
+    const submitted = await submit(w.git, "origin", {
+      branch: "task/fixer-ladder-fails",
+      submitter: "author",
+      target: { remote: "origin", branch: "main" },
+      admit,
+    })
+    expect(submitted.issue?.issue).toBe("26335")
+    expect(admit).toHaveBeenCalledWith("26335", "task/fixer-ladder-fails", submitted.head, submitted.targetHead)
+    expect(submitted.admission).toEqual({ kind: "admitted" })
+    expect((await readStatus(store(w), "main", "task/fixer-ladder-fails")).issue).toBe("26335")
+  })
+
+  /** @failure A prose line starting with Resolves or Refs in subject incorrectly binds as issue (27041).
+   * @level l2 @consumer Yrd submit and its opened change record
+   */
+  it("colonless Refs #NNNNN binds, while prose starting with Resolves or Refs in subject does not bind (27041)", async () => {
+    const w = await world()
+    // 1. Colonless Refs #26691 binds
+    await branchWithCommit(w, "task/colonless-hash", "change1.txt")
+    await w.git(["checkout", "--quiet", "task/colonless-hash"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "fix something\n\nRefs #26691"])
+    const head1 = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await issueOf(w.git, "task/colonless-hash", head1, w.target)).toEqual({
+      issue: "#26691",
+      source: "binding",
+      commit: head1,
+    })
+
+    // 2. Prose line starting with 'resolves without a word...' plus real 'Refs: 27041' binds 27041 and does not refuse
+    await branchWithCommit(w, "task/prose-resolves", "change2.txt")
+    await w.git(["checkout", "--quiet", "task/prose-resolves"])
+    await w.git([
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "wrapped commit\n\nresolves without a word. bun.lock loses it, ...\n\nRefs: 27041",
+    ])
+    const head2 = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await issueOf(w.git, "task/prose-resolves", head2, w.target)).toEqual({
+      issue: "27041",
+      source: "binding",
+      commit: head2,
+    })
+
+    // 3. Subject starting with 'Resolves ...' or 'Refs ...' does not bind or refuse
+    await branchWithCommit(w, "task/subject-resolves", "change3.txt")
+    await w.git(["checkout", "--quiet", "task/subject-resolves"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "Resolves the race in submit\n\nRefs: 27041"])
+    const head3 = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await issueOf(w.git, "task/subject-resolves", head3, w.target)).toEqual({
+      issue: "27041",
+      source: "binding",
+      commit: head3,
+    })
+
+    // 4. Prose starting with 'Refs and tags both move here' does not bind
+    await branchWithCommit(w, "task/prose-refs", "change4.txt")
+    await w.git(["checkout", "--quiet", "task/prose-refs"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "commit with prose\n\nRefs and tags both move here."])
+    const head4 = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await issueOf(w.git, "task/prose-refs", head4, w.target)).toBeUndefined()
+  })
+
   /** @failure An absolute vault path and a vault-relative bead reference refuse as conflicting bindings (25719).
    * @level l2 @consumer Yrd submit and its opened change record
    */

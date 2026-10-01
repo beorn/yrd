@@ -845,14 +845,15 @@ export async function issueOf(
   try {
     const base = await mergeBase(git, head, targetHead)
     if (base === undefined) throw new Error("no merge base")
-    // NUL separates each commit and its trailer block. Git supplies trailer
-    // parsing; record separators distinguish values within that block.
+    // NUL separates each commit, its trailer block, and its body. Git supplies trailer
+    // parsing; record separators distinguish values within that block. The body allows
+    // fallback extraction for trailers without a colon (e.g. "Refs 26335", 27041).
     history = await git([
       "log",
       "--reverse",
       "--topo-order",
       "-z",
-      "--format=%H%x00%(trailers:key=Resolves,key=Refs,valueonly,separator=%x1e)",
+      "--format=%H%x00%(trailers:key=Resolves,key=Refs,valueonly,separator=%x1e)%x00%B",
       `${base}..${head}`,
       `^${targetHead}`,
       "--",
@@ -887,15 +888,35 @@ export async function issueOf(
   if (records.pop() !== "") {
     throw new Error(`incomplete issue binding history for ${branch} at ${head} against target ${targetHead}`)
   }
-  for (let index = 0; index < records.length; index += 2) {
+  for (let index = 0; index < records.length; index += 3) {
     const commit = records[index]
     const values = records[index + 1]
-    if (commit === undefined || values === undefined) {
+    const body = records[index + 2]
+    if (commit === undefined || values === undefined || body === undefined) {
       throw new Error(`incomplete issue binding history for ${branch} at ${head} against target ${targetHead}`)
     }
+    const candidateIssues: string[] = []
     for (const value of values.split("\u001e")) {
       const issue = value.trim()
-      if (issue === "") continue
+      if (issue !== "" && !candidateIssues.includes(issue)) {
+        candidateIssues.push(issue)
+      }
+    }
+    // Also parse trailer-shaped lines like "Refs <issue>" or "Refs: <issue>" or "Resolves <issue>"
+    // from commit body to accept trailers without colon (27041).
+    // Never inspect the subject line, and require a single-token issue value to avoid binding prose lines.
+    const nonSubjectLines = body.split(/\r?\n/).slice(1)
+    const trailerRegex = /^[ \t]*(?:refs|resolves)[ \t]*:?[ \t]+(\S+)[ \t]*$/i
+    for (const line of nonSubjectLines) {
+      const match = trailerRegex.exec(line)
+      if (match !== null) {
+        const issue = match[1]?.trim() ?? ""
+        if (issue !== "" && !candidateIssues.includes(issue)) {
+          candidateIssues.push(issue)
+        }
+      }
+    }
+    for (const issue of candidateIssues) {
       if (/[\u0000-\u001f\u007f]/u.test(issue)) {
         throw new Error(
           `invalid issue binding in ${branch} at ${commit}: expected a single-line value without control characters`,

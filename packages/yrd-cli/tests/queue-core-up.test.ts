@@ -904,6 +904,27 @@ describe("yrd queue up, the service", () => {
     }
   })
 
+  /** @failure Submitting a change with no issue link admits silently without warning the submitter (27041).
+   * @level l2 @consumer Yrd submit and its diagnostics
+   */
+  it.each([true, false])("warns loudly when submitted with no issue link (dryRun=%s) (27041)", async (dryRun) => {
+    const w = await world()
+    const branch = "task/unbound-feature"
+    await w.git(["checkout", "--quiet", "-b", branch])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "feature without an issue link"])
+    const run = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        { branch, command: "submit", dryRun, submitter: "@dev/2" },
+        { workdir: w.workdir, json: true },
+      ),
+    ).toBe(0)
+    expect(run.stderr()).toContain(`WARNING: ${branch}`)
+    expect(run.stderr()).toContain("no issue link")
+  })
+
   // THE OPERATOR'S CONDITION (2026-09-16): submits are accepted while the line
   // is stopped, echoing who stopped it, why, and what lifts it. This case used
   // to assert the refusal; its subject — what a pause does to a submit, said
@@ -1059,7 +1080,7 @@ describe("yrd queue up, the service", () => {
       writeFileSync(join(w.work, ".yrd.yml"), valid ? "target: origin#main\nchecks: [{\n" : legacy)
       writeFileSync(join(w.work, "change.txt"), "candidate\n")
       await w.git(["add", ".yrd.yml", "change.txt"])
-      await w.git(["commit", "--quiet", "-m", "candidate declaration"])
+      await w.git(["commit", "--quiet", "-m", "candidate declaration\n\nRefs: 25000"])
       const head = (await w.git(["rev-parse", "HEAD"])).trim()
       const beforeRemote = await w.git(["ls-remote", "--refs", "origin"])
       const beforeLocal = await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/main/"])
@@ -1074,7 +1095,9 @@ describe("yrd queue up, the service", () => {
       if (valid) {
         await expect(attempt).resolves.toBe(0)
         // Keep the aggregate count and the refresh split in the durable submit receipt.
-        const [summary, detail] = run.stderr().trimEnd().split("\n")
+        const stderrLines = run.stderr().trimEnd().split("\n")
+        const summary = stderrLines.find((line) => line.startsWith("yrd: submit remote calls: "))
+        const detail = stderrLines.find((line) => line.startsWith("yrd: submit remote call detail: "))
         expect(`${summary}\n`).toMatch(
           /^yrd: submit remote calls: processes=\d+ ssh_children=0 remote_ms=\d+ unreadable=0 (?=.*\bpush=1\b)[^\n]*\n$/u,
         )
