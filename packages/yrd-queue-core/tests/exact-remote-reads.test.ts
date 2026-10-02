@@ -27,7 +27,7 @@ afterAll(() => {
  * fetch also traces its packets to `fetch-packets.log`, so a test counts the refs a server advertised.
  */
 async function recordingGit(): Promise<
-  Readonly<{ root: string; commands: () => string[]; fetchAdvertised: () => number }>
+  Readonly<{ root: string; commands: () => string[]; advertisedRefs: () => string[] }>
 > {
   const root = mkdtempSync(join(tmpdir(), "yrd-exact-reads-"))
   roots.push(root)
@@ -56,10 +56,8 @@ async function recordingGit(): Promise<
       readFileSync(log, "utf8")
         .split("\n")
         .filter((line) => line !== ""),
-    fetchAdvertised: () =>
-      readFileSync(packets, "utf8")
-        .split("\n")
-        .filter((line) => /packet:.*< [0-9a-f]{40} refs\//u.test(line)).length,
+    advertisedRefs: () =>
+      [...readFileSync(packets, "utf8").matchAll(/packet:.*< [0-9a-f]{40} (refs\/\S+)/gu)].map((match) => match[1]!),
   }
 }
 
@@ -107,8 +105,19 @@ describe("one remote ref is read by name, never from the whole advertisement", (
     expect(again.map(({ sha, state }) => ({ sha, state }))).toEqual([{ sha: pin, state: "retained" }])
     expect((await gitIn(dependency)(["rev-parse", retentionRef(pin)])).trim()).toBe(pin)
     expect(recording.commands().filter((line) => line.startsWith("ls-remote"))).toEqual([])
-    // The first read finds no pin (nothing advertised), the second finds the one just pushed.
-    expect(recording.fetchAdvertised()).toBe(1)
+    // 27091: preserve 25570's exact-ref invariant through the approved Git-super executor.
+    // The old count alone could not distinguish repeated exact reads from an unrelated advertisement.
+    const ref = retentionRef(pin)
+    const remoteReads = recording.commands().filter((line) => line.startsWith("fetch "))
+    expect(remoteReads).toHaveLength(5)
+    for (const read of remoteReads) {
+      expect(read).toContain("--refmap=")
+      expect(read.endsWith(`origin +${ref}:refs/git-super/observed/${ref.slice(5)}`)).toBe(true)
+    }
+    // Git-super observes during planning, rechecks before applying, and observes after pushing.
+    // The first two reads find no pin; post-push and both identical-retry reads advertise only that pin.
+    expect(recording.advertisedRefs()).toEqual([ref, ref, ref])
+    expect(recording.advertisedRefs()).toHaveLength(3)
   }, 60_000)
 
   it("the publication marker is read by name: a moved or absent marker still refuses, with no ls-remote", async () => {
@@ -140,6 +149,6 @@ describe("one remote ref is read by name, never from the whole advertisement", (
     )
     expect(recording.commands().filter((line) => line.startsWith("ls-remote"))).toEqual([])
     // The present marker is the one ref advertised; the absent one advertises none.
-    expect(recording.fetchAdvertised()).toBe(1)
+    expect(recording.advertisedRefs()).toEqual([marker])
   }, 60_000)
 })
