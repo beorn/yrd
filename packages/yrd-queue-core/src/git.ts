@@ -38,8 +38,6 @@ import {
 import type { QueueObservation } from "./remote.ts"
 import { remoteSeam } from "./remote-calls.ts"
 
-/** Git's expected old value when a ref must be absent. */
-
 /** Attribution written on a merge made by a queue round. */
 export function mergedBy(queue: string, run: string): string {
   return `yrd queue ${queue} [${run}]`
