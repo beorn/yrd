@@ -103,6 +103,8 @@ Without a commit, `--bay <name>` opens or adopts exactly `task/<name>`. `--issue
 
 `env close` refuses a held worktree and names the reason. `git worktree unlock <path>` clears the hold. Close still requires a clean worktree and preserves submodule stores.
 
+Close also refuses when a submodule declared `private = true` in the retained commit's `.gitmodules` has a `.git` entry in the environment. It names the path and reports `custody unproven until 27058's merge exclusion; operator decision pending`. The environment is preserved before cleanliness checks, teardown, or removal. An absent private submodule permits normal close.
+
 With `--issue`, an initial `Refs:` commit records the binding before setup and preserves the current tree and history. A matching binding adds no commit.
 
 Conflicting bindings refuse and name the preserved environment. Setup and output use the resulting head; setup failure preserves that environment.

@@ -288,6 +288,39 @@ describe("yrd env open prepares the retained environment", () => {
 })
 
 describe("yrd env close preserves anything it cannot safely remove", () => {
+  // #27156: existence admission precedes teardown and every child-content read.
+  it.each([false, true])("private custody gates close before teardown: initialized=%s", async (initialized) => {
+    const w = await world(":", "printf touched > ../private-teardown-ran.txt")
+    await addMaterializedDependency(w)
+    await w.git(["config", "-f", ".gitmodules", "submodule.vendor/dependency.private", "true"])
+    await w.git(["add", ".gitmodules"])
+    await w.git(["commit", "--quiet", "-m", "declare private dependency"])
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openEnvironment(w.work, selected)
+    const gitfile = join(path, "vendor/dependency/.git")
+    expect(existsSync(gitfile)).toBe(false)
+    if (initialized) {
+      // A fixture-only historical checkout. Read only its gitfile's existence.
+      await w.git(["-C", path, "submodule", "update", "--init", "vendor/dependency"])
+      expect(existsSync(gitfile)).toBe(true)
+    }
+    const closed = capture(w.work)
+    const exit = await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io)
+    const teardown = join(dirname(path), "private-teardown-ran.txt")
+    if (initialized) {
+      expect(exit, closed.stderr()).toBe(2)
+      expect(closed.stderr()).toContain("vendor/dependency")
+      expect(closed.stderr()).toContain("custody unproven until 27058's merge exclusion; operator decision pending")
+      expect(existsSync(path)).toBe(true)
+      expect(existsSync(gitfile)).toBe(true)
+      expect(existsSync(teardown)).toBe(false)
+    } else {
+      expect(exit, closed.stderr()).toBe(0)
+      expect(existsSync(path)).toBe(false)
+      expect(existsSync(teardown)).toBe(true)
+    }
+  })
+
   it("opens, lists and closes a workdir configured through a symlink", async () => {
     const w = await world(":")
     const actual = join(w.work, "state-actual")
