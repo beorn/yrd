@@ -72,9 +72,10 @@ describe("the Yrd Gitomic boundary", () => {
       "publication.ts": ["push"],
       "reference.ts": ["update-ref", "fetch", "ls-remote"],
       "settled-base.ts": ["fetch"],
-      // Submit's gitlink retention publication (25570) publishes component pins
-      // to refs/git-super/pins, and modelMovedGitlinks models moved gitlinks during compose verification (26754).
-      "submit.ts": ["fetch", "push", "fetch"],
+      // Submit's two object-only fetches: collect an absent component pin (27091)
+      // and model moved gitlinks during compose verification (26754).
+      // Retention writes go through the sanctioned Git-super executor below.
+      "submit.ts": ["fetch", "fetch"],
     })
 
     for (const name of ["git.ts", "pause.ts", "remote.ts", "withdraw.ts"]) {
@@ -83,9 +84,12 @@ describe("the Yrd Gitomic boundary", () => {
 
     const submit = source("submit.ts")
     const [gitlinkPublication, queueSubmission] = submit.split("export type SubmitInspection")
-    // The retention ref is read by name through readRemoteCommit (25570), never an ls-remote.
-    // modelMovedGitlinks (26754) fetches an unpublished component commit from origin if missing in author checkout.
-    expect(refCommands(gitlinkPublication ?? ""), "gitlink retention publication").toEqual(["fetch", "push", "fetch"])
+    // CTO 7b4d2a85 / f9ca8343 sanctions pushRefUpdates through the checkout-bound seamProcess
+    // for refs/git-super/pins (27091); queue refs still belong to the Gitomic boundary.
+    // This census catches raw ref calls outside that approved seam, which event journeys cannot detect.
+    expect(refCommands(gitlinkPublication ?? ""), "gitlink retention publication").toEqual(["fetch", "fetch"])
+    expect(gitlinkPublication).toContain("await pushRefUpdates({")
+    expect(gitlinkPublication).toContain("git: seamProcess(first.child, checkout)")
     expect(refCommands(queueSubmission ?? ""), "queue submission").toEqual([])
 
     // The run's one fetch (the composing checkout's commit) lives in settled-base.ts.

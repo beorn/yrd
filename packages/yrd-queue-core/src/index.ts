@@ -181,6 +181,7 @@ export { directMergeLine, eventDirectMergeCommits } from "./direct.ts"
 export {
   refuseTarget,
   inspectSubmit,
+  prepareSubmit,
   inspectSubmitAtHead,
   freshnessLine,
   submit,
@@ -195,6 +196,7 @@ export type {
   IssueResolution,
   IssueResolver,
   Submitted,
+  Prepared,
   SubmitGitlink,
   SubmitVerification,
 } from "./submit.ts"

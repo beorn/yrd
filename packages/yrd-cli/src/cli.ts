@@ -65,6 +65,7 @@ type SubmitOptions = Readonly<{
   notify?: string
   issue?: string
   dryRun?: boolean
+  prepare?: boolean
   queue?: string
   gitlink?: string[]
 }>
@@ -102,6 +103,10 @@ const DRY_RUN_HELP = "preview admission and push nothing; fetches the queue tip 
 const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to origin/HEAD inside a clone"
 
 const SUBMIT_HELP: [string, string][] = [
+  [
+    "Preparation",
+    "run --prepare before lock sync to retain moved child commits; then commit regenerated locks and submit normally. Refuses --dry-run and --gitlink combinations.",
+  ],
   ["Result", "one recipient: --submitter; another seat can read yrd queue show <branch> after submission"],
   [
     "Pin-only",
@@ -311,6 +316,12 @@ function buildProgram(
   }
 
   const queueSubmit = async (branch: string | undefined, options: SubmitOptions): Promise<void> => {
+    if (options.prepare === true && options.dryRun === true) {
+      throw new Error("--prepare writes permanent child refs and cannot be combined with --dry-run")
+    }
+    if (options.prepare === true && (options.gitlink?.length ?? 0) > 0) {
+      throw new Error("--prepare cannot be combined with --gitlink; prepare an existing authored branch")
+    }
     const pins = (options.gitlink ?? []).map((value) => {
       const separator = value.indexOf("=")
       if (separator <= 0 || separator === value.length - 1) {
@@ -334,6 +345,7 @@ function buildProgram(
         ...(branch === undefined ? {} : { branch }),
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.dryRun === true ? { dryRun: true } : {}),
+        ...(options.prepare === true ? { prepare: true } : {}),
         ...(pins.length === 0 ? {} : { pins }),
       },
       {
@@ -423,6 +435,7 @@ function buildProgram(
   queue
     .command("submit [branch]")
     .description("push the branch and open its change; defaults to the branch checked out here")
+    .option("--prepare", "retain moved child commits before lock sync; leave the root branch and change unopened")
     .option("--json", "emit stable JSON")
     .option("--submitter <agent>", SUBMITTER_HELP)
     .option("--notify <seat>", NOTIFY_HELP)
@@ -934,6 +947,35 @@ function buildProgram(
     )
     setExit(taken)
   }
+  const LS_DESCRIPTION =
+    "group changes by status (in check, waiting, draft, ended in the last 24 h) with issue number, title, and owner seat"
+  const queueLs = async (filters: readonly string[] | undefined, options: unknown): Promise<void> => {
+    const { json, queue, fresh } = options as {
+      json?: boolean
+      queue?: string
+      fresh?: boolean
+    }
+    const location = await resolveQueueLocation(cwd(), queue, env, "reader")
+    const taken = await coreQueueCommand(
+      location.repo,
+      io,
+      {
+        command: "ls",
+        terms: filters ?? [],
+      },
+      {
+        selection: location.selection,
+        populateReference: location.owned,
+        queue: location.queue,
+        workdir: location.workdir,
+        json,
+        env,
+        ...(fresh === true ? {} : { localStatusStore: localStatusStore(location) }),
+        log: log(),
+      },
+    )
+    setExit(taken)
+  }
   listOptions(
     queue
       .command("list [filter...]")
@@ -951,6 +993,23 @@ function buildProgram(
       .option("--watch", WATCH_FLAG_HELP)
       .addHelpSection("States:", STATES_HELP),
   ).action(async (filters, options) => queueList(filters as string[] | undefined, options))
+  queue
+    .command("ls [filter...]")
+    .description(LS_DESCRIPTION)
+    .option("--json", "emit stable JSON: one document, complete on a pipe or a file")
+    .option("--fresh", "read the queue from its source rather than the cached mirror")
+    .option("--queue <value>", QUEUE_HELP)
+    .action(async (filters, options) => queueLs(filters as string[] | undefined, options))
+  // `yrd ls` is `yrd queue ls` (the operator's spelling, #27093),
+  // registered the way `yrd list` is: the same action, the same options, one
+  // alias visible in `--help`. `yrd queue ls` stays the canonical form.
+  program
+    .command("ls [filter...]")
+    .description(`${LS_DESCRIPTION} (the same as ${name} queue ls)`)
+    .option("--json", "emit stable JSON: one document, complete on a pipe or a file")
+    .option("--fresh", "read the queue from its source rather than the cached mirror")
+    .option("--queue <value>", QUEUE_HELP)
+    .action(async (filters, options) => queueLs(filters as string[] | undefined, options))
   queue
     .command("stats")
     .description(
@@ -1038,6 +1097,7 @@ function buildProgram(
   program
     .command("submit [branch]")
     .description("push the branch and open its change")
+    .option("--prepare", "retain moved child commits before lock sync; leave the root branch and change unopened")
     .option("--json", "emit stable JSON")
     .option("--submitter <agent>", SUBMITTER_HELP)
     .option("--notify <seat>", NOTIFY_HELP)
@@ -1249,6 +1309,7 @@ function addExamples(program: CliCommand, name: string): void {
     [`${name} submit`, `${name} queue submit`],
     [`${name} withdraw`, `${name} queue withdraw`],
     [`${name} list`, `${name} queue list`],
+    [`${name} ls`, `${name} queue ls`],
     [`${name} bay`, `${name} env (today's word)`],
   ])
   program.addHelpSection("Examples:", [

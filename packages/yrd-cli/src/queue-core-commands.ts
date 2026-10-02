@@ -90,6 +90,7 @@ import {
   STEP_STATES,
   roundBoundMs,
   inspectSubmit,
+  prepareSubmit,
   inspectSubmitAtHead,
   preparePinCarrier,
   freshnessLine,
@@ -196,6 +197,7 @@ import {
   type SinceOrigin,
   type StatsBy,
 } from "./queue-stats.ts"
+import { formatQueueLs, queueLs, filterLsRows, LS_FILTER_FIELDS } from "./queue-ls.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { SERVICE } from "./queue-health.ts"
 
@@ -301,6 +303,7 @@ export type CoreQueueCommand =
       submitter: string
       issue?: string
       dryRun?: boolean
+      prepare?: boolean
       pins?: readonly PinCarrierPin[]
     }>
   | Readonly<{ command: "pause"; by: string; reason: string; cause?: "operator" | "maintenance" }>
@@ -438,12 +441,19 @@ export type CoreQueueCommand =
       now?: Date
     }>
   | Readonly<{ command: "check"; names: readonly string[] }>
+  | Readonly<{
+      command: "ls"
+      terms?: readonly string[]
+      now?: Date
+      requireMatch?: boolean
+    }>
 
 /** What each command is called when it has to say it needs a queue. */
 const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   check: "check",
   drop: "drop",
   ignore: "ignore",
+  ls: "queue ls",
   pause: "queue pause",
   list: "queue list",
   merge: "merge",
@@ -566,8 +576,8 @@ export async function coreQueueCommand(
   using traced = submitCalls(request, options.env, io)
   const env = traced.env
   if (options.localStatusStore !== undefined) {
-    if (request.command !== "list" && request.command !== "show") {
-      throw new Error("the local queue status store is only for list/show")
+    if (request.command !== "list" && request.command !== "show" && request.command !== "ls") {
+      throw new Error("the local queue status store is only for list/show/ls")
     }
     if (!existsSync(options.localStatusStore.path)) {
       throw new Error(`queue status store ${options.localStatusStore.path} is absent`)
@@ -1357,6 +1367,12 @@ export async function coreQueueCommand(
       return result.failed.length > 0 ? 1 : 0
     }
     case "submit": {
+      if (request.prepare === true && request.dryRun === true) {
+        throw new Error("--prepare writes permanent child refs and cannot be combined with --dry-run")
+      }
+      if (request.prepare === true && request.pins !== undefined) {
+        throw new Error("--prepare cannot be combined with --gitlink; prepare an existing authored branch")
+      }
       assertPlainEventQueueConfig(config, "submit")
       if (request.pins !== undefined) {
         if (request.branch !== undefined) throw new Error("--gitlink does not take a branch operand")
@@ -1462,6 +1478,31 @@ export async function coreQueueCommand(
       }
       // Operator and stuck stops accept submits (the andon, operator 2026-09-16).
       // A maintenance stop refuses in the shared inspection before this echo.
+      if (request.prepare === true) {
+        const prepared = await prepareSubmit(git, config.target.remote, submission)
+        const { head, targetHead, base, published, admission, stop, issue } = prepared
+        emit(
+          io,
+          options.json,
+          {
+            branch,
+            head,
+            targetHead,
+            base,
+            published,
+            admission,
+            stopped: stopFact(stop),
+            ...issueOutput(io, branch, issue),
+          },
+          `prepared ${branch} at ${head}; inspected base ${base} against ${targetHead}; ${published.length} child retention receipts` +
+            published.map((row) => `\n${row.state} ${row.path}@${row.sha} at ${row.remote} ${row.ref}`).join(""),
+        )
+        echoStop(stop)
+        if (admission.kind === "warn" || admission.kind === "cannot-judge") {
+          io.stderr(`preparation admission ${admission.kind}: ${admission.reason}\n`)
+        }
+        return 0
+      }
       if (request.dryRun === true) {
         const inspected = await inspectSubmit(git, config.target.remote, submission)
         const { head, targetHead, verifying } = inspected
@@ -3309,6 +3350,51 @@ export async function coreQueueCommand(
       })
       const name = queueName(config.target, await remoteUrl(git, config.target.remote))
       emit(io, options.json, { queue: name, ...stats }, formatQueueStats(stats, name))
+      return 0
+    }
+    case "ls": {
+      const selectedStore = statusEventStore(config.target.remote)
+      if (localStatus !== undefined && (await queueFormat(selectedStore, config.target.branch)) === "legacy") {
+        await refuseMissingEventMarker(config.target.remote, config.target.branch)
+      }
+      const reading = await readEventListing(git, config, repo, workdir, captured.oid, selectedStore, {
+        all: true,
+        drafts: true,
+        draftWindow: "all",
+      })
+      if (options.json !== true) narrateMalformed(io, reading.journals, new Set())
+      if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") return 2
+
+      const unfiltered = watchRows(reading.all, { journals: reading.journals })
+      const filtered = filterLsRows(unfiltered, request.terms ?? [])
+
+      const queue = queueName(config.target, await remoteUrl(git, config.target.remote))
+      const baseScope = `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
+      const ignoreScope =
+        config.ignore.length === 0
+          ? undefined
+          : `Excluded draft heads matching .yrd.yml ignore: ${config.ignore.map((pattern) => JSON.stringify(pattern)).join(", ")}.`
+      const filteredScope =
+        request.terms === undefined || request.terms.length === 0
+          ? undefined
+          : `${String(filtered.length)} of ${String(unfiltered.length)} change(s) match ${request.terms.join(" or ")}` +
+            (filtered.length === 0 ? `. Checked ${LS_FILTER_FIELDS}.` : "")
+      const scopeParts = [filteredScope, statusLine(), baseScope, ignoreScope].filter((part) => part !== undefined)
+      const scope = scopeParts.length === 0 ? undefined : scopeParts.join(" ")
+
+      const lsResult = queueLs(filtered, {
+        queueName: queue,
+        scope,
+        now: request.now,
+      })
+
+      if (options.json === true) {
+        emit(io, true, lsResult, "")
+      } else {
+        io.stdout(`${formatQueueLs(lsResult)}\n`)
+      }
+
+      if (request.requireMatch === true && selectedNothing(request.terms, filtered)) return 1
       return 0
     }
     case "show": {
