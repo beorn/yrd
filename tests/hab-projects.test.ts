@@ -44,7 +44,7 @@ describe("Yrd Hab runner declarations", () => {
     // Not the cadence — that is DECLARED here, and re-spelling it made every
     // interval change a two-repository atomic landing (measured 2026-09-10).
     // What must hold is that the argv names the runtime entry and the verb.
-    expect(hab.services["yrd"]?.command).toMatch(/^bun tools\/yrd-runtime\.mjs yrd queue up\b/u)
+    expect(hab.habitants["yrd"]?.command).toMatch(/^bun tools\/yrd-runtime\.mjs yrd queue up\b/u)
   })
 
   it("declares a health probe", () => {
@@ -53,11 +53,11 @@ describe("Yrd Hab runner declarations", () => {
     // re-derives nothing, reads the one document the loop itself wrote, touches
     // no network and captures no declaration. Its COMMAND is the requirement;
     // what it prints belongs to the health contract, not to this file.
-    expect(hab.services["yrd"]?.health?.command).toBeDefined()
+    expect(hab.habitants["yrd"]?.health?.command).toBeDefined()
   })
 
   it("relaunches only on endings the loop chose, and stays down on the rest", () => {
-    const service = hab.services["yrd"]
+    const service = hab.habitants["yrd"]
     expect(service?.restart).toBe("on-codes")
     // 0 is the SELF-RELAUNCH exit (@i/10-yrd/24515): the loop exits 0 when its
     // own gitlink moves and the supervisor respawns it on the new code. That
@@ -77,14 +77,14 @@ describe("Yrd Hab runner declarations", () => {
   it("names an owner who can be woken", () => {
     // The owner decides who is PAGED. An undeclared owner silently resolves to
     // the fleet-wide default, so a service that means to name someone must.
-    expect(hab.services["yrd"]?.owner).toBeDefined()
+    expect(hab.habitants["yrd"]?.owner).toBeDefined()
   })
 
   it("pages the seat that owns the stop-line: a stuck change stops the line and pages @chief", () => {
     // The andon (operator 2026-09-16): a stuck change stops the line and the
     // service stays up with an unhealthy page whose owner is @chief, the seat
     // that decides stop-line matters. The page reaches whoever this names.
-    expect(hab.services["yrd"]?.owner).toBe("@chief")
+    expect(hab.habitants["yrd"]?.owner).toBe("@chief")
   })
 
   it("asserts no file under packages/*/src imports outside its package directory", () => {
