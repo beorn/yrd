@@ -6,9 +6,19 @@
  *          occupancy; remote-only branches were silently replaced by the base.
  * @level   l2 (real bare remote and real retained Git worktree)
  * @consumer every seat opening a fresh environment through `yrd env open`
+ * @reach    fs-walk <fixture-only: lists the temp fixture bay's private submodule directory and its reference store (27147)>
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -663,6 +673,78 @@ describe("yrd env open prepares the retained environment", () => {
  * @level   l2 (real clone, real refs, through the CLI)
  * @consumer anyone reading `yrd env open --help` or hitting its refusal
  */
+/** Add a second child the target declares `private = true` in `.gitmodules` (27147). Returns its reference store. */
+async function addPrivateDependency(w: World): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-private-"))
+  roots.push(root)
+  const seed = gitIn(root)
+  const remote = join(root, "remote.git")
+  const work = join(root, "work")
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, work])
+  const git = gitIn(work)
+  await git(["config", "user.email", "env-open@yrd.test"])
+  await git(["config", "user.name", "yrd"])
+  await git(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(work, "SECRET"), "never materialized\n")
+  await git(["add", "SECRET"])
+  await git(["commit", "--quiet", "-m", "seed private dependency"])
+  await git(["push", "--quiet", "origin", "main"])
+  await w.git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", remote, "vendor/secret"])
+  await w.git(["config", "--file", ".gitmodules", "submodule.vendor/secret.private", "true"])
+  await w.git(["add", ".gitmodules"])
+  await w.git(["commit", "--quiet", "-m", "add a private dependency"])
+  await w.git(["push", "--quiet", "origin", "main"])
+  return join(w.work, ".git", "modules", "vendor", "secret")
+}
+
+/** The child is a bare gitlink here: empty, uninitialized, no gitfile, no module store of the environment's own. */
+async function expectPrivateAbsent(environment: string): Promise<void> {
+  const git = gitIn(environment)
+  expect(readdirSync(join(environment, "vendor/secret"))).toEqual([])
+  expect((await git(["submodule", "status", "--", "vendor/secret"])).trim()).toMatch(/^-/u)
+  const gitDir = (await git(["rev-parse", "--absolute-git-dir"])).trim()
+  expect(existsSync(join(gitDir, "modules", "vendor", "secret"))).toBe(false)
+  expect(readFileSync(join(environment, "vendor/dependency/READY"), "utf8")).toBe("materialized\n")
+}
+
+describe("yrd env open leaves a declared private submodule out (27147)", () => {
+  /**
+   * @failure `yrd env open` checks out a submodule its target declares private, so every seat environment carries the
+   *          operator's private module and every recursive tool run consults it (27147).
+   * @level l2 (real bare remotes, real reference store, real git-super materialization)
+   * @consumer every seat opening an environment of a repository with a private child
+   */
+  it("opens a bay with the private child empty and uninitialized, and closes it", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const store = await addPrivateDependency(w)
+    const storeBefore = readdirSync(store).sort()
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "private"], run.io), run.stderr()).toBe(0)
+
+    const bay = join(w.work, ".bays", "private")
+    await expectPrivateAbsent(bay)
+    expect(readdirSync(store).sort()).toEqual(storeBefore)
+    const closed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", bay, "--json"], closed.io), closed.stderr()).toBe(0)
+    expect(existsSync(bay)).toBe(false)
+  })
+
+  it("opens an exact commit detached with the private child empty and uninitialized", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    await addPrivateDependency(w)
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", head], run.io), run.stderr()).toBe(0)
+
+    await expectPrivateAbsent(run.stdout().trim())
+  })
+})
+
 describe("yrd env open says which input selects which path", () => {
   it("names both spellings in its own help, so the argument cannot be read as a branch", async () => {
     const w = await world("true")

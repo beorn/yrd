@@ -31,6 +31,8 @@ export type ProvisionBayInput = Readonly<{
   name: string
   branch: string
   base: string
+  /** Root-relative submodule paths left empty and uninitialized (27147). */
+  excludedSubmodules?: readonly string[]
 }>
 
 export type ProvisionedBay = Readonly<{

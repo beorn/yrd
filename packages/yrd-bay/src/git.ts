@@ -114,7 +114,10 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
             await git.run(path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
           }
         }
-        await worktrees.materializeSubmodules(path)
+        await worktrees.materializeSubmodules(
+          path,
+          input.excludedSubmodules === undefined ? {} : { excludedSubmodules: input.excludedSubmodules },
+        )
         const headSha = await git.commit(path, "HEAD")
         return { status: "completed", conclusion: "success", output: { path, headSha, baseSha, adoption } }
       } catch (cause) {

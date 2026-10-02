@@ -79,6 +79,13 @@ export type FreshWorktree = Readonly<{
    * that decision.
    */
   populateReference?: boolean
+  /**
+   * Root-relative submodule paths git-super leaves empty and uninitialized, with
+   * no init, store or gitfile (27147). `yrd env open` passes the paths the commit
+   * declares `private = true`; the queue's own trees pass nothing until merge
+   * excludes them too (27058).
+   */
+  excludedSubmodules?: readonly string[]
   plumbing?: PlumbingLog
   /** The command's fixed selection and invocation evidence, for the reference stores as for the tree. */
   selection?: GitSelection
@@ -118,6 +125,13 @@ export async function freshWorktree(
     // take the plain path with a submodule-bearing commit.
     await worktreeWithoutSubmodules(git, git, commit, ["add", "--quiet", "--detach", path, commit])
   } else {
+    const excluded = options.excludedSubmodules ?? []
+    if (options.populateReference === true && excluded.length > 0) {
+      throw new Error(
+        `freshWorktree: populating the reference cannot honour excluded submodules (${excluded.join(", ")}) yet; ` +
+          "the queue's trees exclude private submodules only after 27058's merge exclusion",
+      )
+    }
     if (options.populateReference === true) {
       const selection =
         options.selection ?? (await resolveGitSelection(repo, { process: options.process, env: options.env }))
@@ -151,7 +165,17 @@ export async function freshWorktree(
     }
     let output: string
     try {
-      output = await git(["super", "--json", "worktree", "add", path, commit, "--reference", repo])
+      output = await git([
+        "super",
+        "--json",
+        "worktree",
+        "add",
+        path,
+        commit,
+        "--reference",
+        repo,
+        ...excluded.flatMap((excludedPath) => ["--exclude-submodule", excludedPath]),
+      ])
     } catch (error) {
       const said = error instanceof Error ? error.message : String(error)
       // The reference has no store for a gitlink of this commit — because it
