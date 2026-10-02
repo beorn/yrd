@@ -9,7 +9,7 @@
   "dependencies": {
     "@bearly/flock": "^0.1.1",
     "@yrd/process": "workspace:*",
-    "git-super": "^0.1.0",
+    "git-super": "^0.4.0",
     "gitomic": "^0.4.0",
     "removely": "^0.3.0"
   }
