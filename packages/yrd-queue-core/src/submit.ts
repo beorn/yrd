@@ -304,7 +304,7 @@ export async function publishMovedGitlinks(
         })
       } else if (receipt?.detail?.code === "destination-changed") {
         failures.push(
-          `${pin.remote} ${pin.ref} names ${receipt.observed ?? "an unconfirmed object"}, not ${pin.sha}: a retention ref is named by its object and never moves`,
+          `${receipt.detail.message} ${pin.remote} ${pin.ref} must name ${pin.sha}: a retention ref is named by its object and never moves`,
         )
       } else {
         failures.push(
