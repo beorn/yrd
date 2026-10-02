@@ -52,6 +52,8 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout
 async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ path: string; head: string }>> {
   const run = capture(cwd)
   expect(await runYrdProcess(["bun", "yrd", "env", "open", commit, "--json"], run.io), run.stderr()).toBe(0)
+  expect(JSON.parse(run.stdout())).toMatchObject({ base: commit, head: commit })
+  expect(run.stderr()).not.toMatch(/reus/iu)
   return JSON.parse(run.stdout()) as { path: string; head: string }
 }
 
@@ -232,6 +234,9 @@ describe("yrd env open prepares the retained environment", () => {
     expect(await runYrdProcess(["bun", "yrd", "env", "open", selected], run.io), run.stderr()).toBe(0)
 
     const bay = run.stdout().trim()
+    expect(run.stderr()).toContain("detached")
+    expect(run.stderr()).toContain("cut from")
+    expect(run.stderr()).not.toMatch(/reus/iu)
     expect(readFileSync(join(bay, "setup-ready.txt"), "utf8")).toBe(`${bay}\n`)
     expect((await gitIn(bay)(["branch", "--show-current"])).trim()).toBe("")
   })
