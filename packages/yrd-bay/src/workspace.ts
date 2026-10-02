@@ -35,7 +35,11 @@ export type ProvisionBayInput = Readonly<{
 
 export type ProvisionedBay = Readonly<{
   path: string
+  /** The branch decision made by this provision, including equal-SHA adoption. */
+  adoption: "local" | "tracking" | "remote" | "fresh"
+  /** Starting commit, before the CLI adds any issue binding. */
   headSha: string
+  /** Requested target used for the setup comparison. */
   baseSha: string
 }>
 
