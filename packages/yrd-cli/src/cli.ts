@@ -65,6 +65,7 @@ type SubmitOptions = Readonly<{
   notify?: string
   issue?: string
   dryRun?: boolean
+  prepare?: boolean
   queue?: string
   gitlink?: string[]
 }>
@@ -102,6 +103,10 @@ const DRY_RUN_HELP = "preview admission and push nothing; fetches the queue tip 
 const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to origin/HEAD inside a clone"
 
 const SUBMIT_HELP: [string, string][] = [
+  [
+    "Preparation",
+    "run --prepare before lock sync to retain moved child commits; then commit regenerated locks and submit normally. Refuses --dry-run and --gitlink combinations.",
+  ],
   ["Result", "one recipient: --submitter; another seat can read yrd queue show <branch> after submission"],
   [
     "Pin-only",
@@ -311,6 +316,12 @@ function buildProgram(
   }
 
   const queueSubmit = async (branch: string | undefined, options: SubmitOptions): Promise<void> => {
+    if (options.prepare === true && options.dryRun === true) {
+      throw new Error("--prepare writes permanent child refs and cannot be combined with --dry-run")
+    }
+    if (options.prepare === true && (options.gitlink?.length ?? 0) > 0) {
+      throw new Error("--prepare cannot be combined with --gitlink; prepare an existing authored branch")
+    }
     const pins = (options.gitlink ?? []).map((value) => {
       const separator = value.indexOf("=")
       if (separator <= 0 || separator === value.length - 1) {
@@ -334,6 +345,7 @@ function buildProgram(
         ...(branch === undefined ? {} : { branch }),
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.dryRun === true ? { dryRun: true } : {}),
+        ...(options.prepare === true ? { prepare: true } : {}),
         ...(pins.length === 0 ? {} : { pins }),
       },
       {
@@ -423,6 +435,7 @@ function buildProgram(
   queue
     .command("submit [branch]")
     .description("push the branch and open its change; defaults to the branch checked out here")
+    .option("--prepare", "retain moved child commits before lock sync; leave the root branch and change unopened")
     .option("--json", "emit stable JSON")
     .option("--submitter <agent>", SUBMITTER_HELP)
     .option("--notify <seat>", NOTIFY_HELP)
@@ -1084,6 +1097,7 @@ function buildProgram(
   program
     .command("submit [branch]")
     .description("push the branch and open its change")
+    .option("--prepare", "retain moved child commits before lock sync; leave the root branch and change unopened")
     .option("--json", "emit stable JSON")
     .option("--submitter <agent>", SUBMITTER_HELP)
     .option("--notify <seat>", NOTIFY_HELP)

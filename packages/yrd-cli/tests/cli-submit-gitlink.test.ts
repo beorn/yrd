@@ -633,6 +633,52 @@ describe("ordinary submit with a local-only component pin", () => {
     expect(await remoteHead(join(w.root, "one.git"), "main")).toBe(childMain)
     expect(await gitIn(w.remote)(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(rootRefs)
     expect((await git(["rev-parse", "HEAD"])).trim()).toBe(head)
+    const retry = await yrd(w.work, "submit", branch, "--prepare", "--submitter", "@dev/3", "--json")
+    expect(retry.exitCode, retry.report).toBe(0)
+    const retryReceipt = JSON.parse(retry.stdout) as typeof receipt
+    expect(retryReceipt.published).toEqual([
+      expect.objectContaining({ path: one.path, sha: one.unheld, state: "retained" }),
+    ])
+    expect(await gitIn(w.remote)(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(rootRefs)
+    const submitted = await yrd(w.work, "submit", branch, "--submitter", "@dev/3", "--json")
+    expect(submitted.exitCode, submitted.report).toBe(0)
+    expect((JSON.parse(submitted.stdout) as typeof receipt).published).toEqual(retryReceipt.published)
+    expect(await remoteHead(w.remote, branch)).toBe(head)
+  }, 90_000)
+
+  /** @failure Preparation accepts contradictory write/dry-run or carrier-building flags (27091 AC4).
+   * @level l2 @consumer yrd submit --prepare
+   */
+  // The positive preparation path cannot prove incompatible flags refuse before remote writes.
+  it.each(["--dry-run", "--gitlink"])(
+    "refuses preparation combined with %s before changing refs",
+    async (flag) => {
+      const w = await world()
+      const before = await gitIn(w.remote)(["for-each-ref", "--format=%(refname) %(objectname)"])
+      const args = flag === "--gitlink" ? [flag, `${w.components[0]!.path}=${w.components[0]!.held}`] : [flag]
+      const ran = await yrd(w.work, "submit", "--prepare", ...args, "--submitter", "@dev/3")
+      expect(ran.exitCode, ran.report).toBe(2)
+      expect(ran.stderr).toContain("--prepare")
+      expect(ran.stderr).toContain(flag)
+      expect(await gitIn(w.remote)(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(before)
+    },
+    90_000,
+  )
+
+  /** @failure An empty preparation claims work without identifying the inspected branch, head and base (27091 AC2).
+   * @level l2 @consumer yrd submit --prepare receipts
+   */
+  // Child publication tests always have moved pins, so cannot prove the empty receipt's identity.
+  it("names the inspected branch, head and base when no gitlink moved", async () => {
+    const w = await world()
+    const git = gitIn(w.work)
+    const branch = "task/prepare-no-gitlinks"
+    await git(["checkout", "--quiet", "-b", branch])
+    await git(["commit", "--allow-empty", "--quiet", "-m", "prepare no pins\n\nRefs: 27091"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const ran = await yrd(w.work, "submit", branch, "--prepare", "--submitter", "@dev/3", "--json")
+    expect(ran.exitCode, ran.report).toBe(0)
+    expect(JSON.parse(ran.stdout)).toMatchObject({ branch, head, base: w.base, published: [] })
   }, 90_000)
 
   /** @failure Submit composes before publishing the component pin, so git-super cannot fetch it.

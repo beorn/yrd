@@ -22,19 +22,20 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import {
-  ABSENT,
-  Conflict,
-  RetriesExhausted,
-  createEventStore,
-  listRefs,
-  openEvents,
-  selectionFor,
-  type Event,
-} from "./git.ts"
+import { pushRefUpdates } from "git-super/push"
+import { Conflict, RetriesExhausted, createEventStore, listRefs, openEvents, selectionFor, type Event } from "./git.ts"
 import { readEventChain } from "./event-read.ts"
 import { readConfig, targetName, type Target } from "./config.ts"
-import { gitIn, gitlinkRows, isAncestor, mergeBase, mergeBases, readRemoteCommit, type Git } from "./git.ts"
+import {
+  gitIn,
+  gitlinkRows,
+  isAncestor,
+  mergeBase,
+  mergeBases,
+  readRemoteCommit,
+  seamProcess,
+  type Git,
+} from "./git.ts"
 import { type PauseRecord } from "./pause.ts"
 import { remoteUrl } from "./remote.ts"
 import {
@@ -157,10 +158,8 @@ export type PublishedGitlink = Readonly<{
   ref: string
   /**
    * `published`: this submit wrote the ref. `retained`: it already named the pin (a retry, or a prior submit).
-   * `fetchable`: the checkout lacked the pin and the remote already held it under some ref (a branch somebody
-   * pushed), so nothing was written; the queue fetches by sha exactly as this did.
    */
-  state: "published" | "retained" | "fetchable"
+  state: "published" | "retained"
 }>
 
 /** git-super's retention namespace: one ref per object, named by it, create-only, never advanced. */
@@ -185,9 +184,9 @@ const ZERO_SHA = /^0+$/u
  * value already there is the one write it accepts again (a retry). Nothing
  * about a submodule main moves here; that is the queue's, at merge.
  *
- * The pin has to be in the submitter's own submodule checkout, because that is
- * the only store that holds it; a checkout that lacks it refuses the submit
- * and says which commit and which checkout, before anything is pushed.
+ * A missing local pin is fetched from its remote before collection completes.
+ * Every collected pin gets a permanent retention ref, including fetched pins.
+ * Missing objects refuse with the path, checkout and remote before any push.
  */
 export async function publishMovedGitlinks(
   git: Git,
@@ -197,82 +196,127 @@ export async function publishMovedGitlinks(
   prefix = "",
 ): Promise<readonly PublishedGitlink[]> {
   const published: PublishedGitlink[] = []
-  const bases = typeof from === "string" ? [from] : from
-  if (bases.length === 0) throw new Error(`cannot publish gitlinks in ${root}: no merge base`)
-  const spans = await Promise.all(bases.map((base) => gitlinkRows(git, base, to)))
-  const byBase = spans.map((rows) => new Map(rows.map((row) => [row.path, row])))
-  for (const row of spans[0] ?? []) {
-    // In criss-cross history a pin is branch-authored only if it differs
-    // from every best common ancestor, not just Git's first merge base.
-    if (!byBase.every((rows) => rows.has(row.path))) continue
-    if (row.newMode !== "160000" || ZERO_SHA.test(row.sha)) continue
-    const path = prefix === "" ? row.path : `${prefix}/${row.path}`
-    const checkout = join(root, row.path)
-    const child = gitIn(checkout, undefined, selectionFor(git))
-    // The DECLARED submodule url is what the record names; the transport rewrite is the host's.
-    const remote = await remoteUrl(child, "origin")
-    // Where the pin is: this checkout, else the remote under some ref (a branch
-    // somebody pushed by hand; the queue fetches by sha, so ask the same way),
-    // else nowhere, which is a refusal before anything is pushed.
-    let fetchedFromRemote = false
-    try {
-      await child(["cat-file", "-e", `${row.sha}^{commit}`])
-    } catch {
-      // catch-cause-allow: absence IS the answer here, not a failure. This
-      // `cat-file -e` asks "does this checkout already hold the pin?", and the
-      // error it throws on a miss carries nothing a caller could act on — the
-      // next line goes and fetches it. Nothing is swallowed: if the fetch ALSO
-      // fails, the inner catch below rethrows with `{ cause }` and the message
-      // names the checkout, the remote and the sha.
+  type Pin = Omit<PublishedGitlink, "state"> & { checkout: string; child: Git }
+  const pins: Pin[] = []
+  const collect = async (git: Git, root: string, from: string | readonly string[], to: string, prefix: string) => {
+    const bases = typeof from === "string" ? [from] : from
+    if (bases.length === 0) throw new Error(`cannot publish gitlinks in ${root}: no merge base`)
+    const spans = await Promise.all(bases.map((base) => gitlinkRows(git, base, to)))
+    const byBase = spans.map((rows) => new Map(rows.map((row) => [row.path, row])))
+    for (const row of spans[0] ?? []) {
+      // In criss-cross history a pin is branch-authored only if it differs
+      // from every best common ancestor, not just Git's first merge base.
+      if (!byBase.every((rows) => rows.has(row.path))) continue
+      if (row.newMode !== "160000" || ZERO_SHA.test(row.sha)) continue
+      const path = prefix === "" ? row.path : `${prefix}/${row.path}`
+      const checkout = join(root, row.path)
+      const child = gitIn(checkout, undefined, selectionFor(git))
+      // The DECLARED submodule url is what the record names; the transport rewrite is the host's.
+      const remote = await remoteUrl(child, "origin")
+      // Where the pin is: this checkout, else the remote under some ref (a branch
+      // somebody pushed by hand; the queue fetches by sha, so ask the same way),
+      // else nowhere, which is a refusal before anything is pushed.
       try {
-        await child([
-          "fetch",
-          "--quiet",
-          "--no-tags",
-          "--no-recurse-submodules",
-          "--no-write-fetch-head",
-          "origin",
-          row.sha,
-        ])
-        fetchedFromRemote = true
-      } catch (cause) {
-        throw new Error(
-          `${path} at ${row.sha} is a gitlink this change moved to a commit neither ${checkout} nor ${remote} holds; ` +
-            "commit it in that checkout (or check the submodule out at it) so submit can publish it, then resubmit",
+        await child(["cat-file", "-e", `${row.sha}^{commit}`])
+      } catch {
+        // catch-cause-allow: absence IS the answer here, not a failure. This
+        // `cat-file -e` asks "does this checkout already hold the pin?", and the
+        // error it throws on a miss carries nothing a caller could act on — the
+        // next line goes and fetches it. Nothing is swallowed: if the fetch ALSO
+        // fails, the inner catch below rethrows with `{ cause }` and the message
+        // names the checkout, the remote and the sha.
+        try {
+          await child([
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "origin",
+            row.sha,
+          ])
+        } catch (cause) {
+          throw new Error(
+            `${path} at ${row.sha} is a gitlink this change moved to a commit neither ${checkout} nor ${remote} holds; ` +
+              "commit it in that checkout (or check the submodule out at it) so submit can publish it, then resubmit",
+            { cause },
+          )
+        }
+      }
+      const ref = retentionRef(row.sha)
+      pins.push({ path, sha: row.sha, remote, ref, checkout, child })
+      // A moved submodule may itself have moved a gitlink: the nested pin has to
+      // be fetchable too, from ITS remote, or the queue cannot materialize km.
+      const before = await Promise.all(
+        bases.map(async (base, index) =>
+          byBase[index]?.get(row.path)?.oldMode === "160000"
+            ? (await git(["rev-parse", `${base}:${row.path}`])).trim()
+            : EMPTY_TREE,
+        ),
+      )
+      await collect(child, checkout, before, row.sha, path)
+    }
+  }
+  // Discover every eligible nested pin before the first remote write.
+  await collect(git, root, from, to, prefix)
+  const checkouts = new Map<string, Pin[]>()
+  for (const pin of pins) {
+    const group = checkouts.get(pin.checkout) ?? []
+    group.push(pin)
+    checkouts.set(pin.checkout, group)
+  }
+  for (const [checkout, group] of checkouts) {
+    const first = group[0]
+    if (first === undefined) throw new Error(`empty retention plan for child checkout ${checkout}`)
+    let result: Awaited<ReturnType<typeof pushRefUpdates>>
+    try {
+      result = await pushRefUpdates({
+        root: checkout,
+        git: seamProcess(first.child, checkout),
+        updates: group.map((pin) => ({
+          repository: checkout,
+          remote: "origin",
+          source: pin.sha,
+          destination: pin.ref,
+          expectedDestination: { state: "missing" },
+        })),
+      })
+    } catch (cause) {
+      throw Object.assign(
+        new Error(
+          `could not publish ${group.map((pin) => `${pin.path}@${pin.sha} at ${pin.remote} ${pin.ref}`).join(", ")} from ${checkout}; retained receipts: ${JSON.stringify(published)}`,
           { cause },
+        ),
+        { published },
+      )
+    }
+    const refs = result.repositories.flatMap((repository) => repository.refs)
+    const failures: string[] = []
+    for (const pin of group) {
+      const receipt = refs.find((ref) => ref.source === pin.sha && ref.destination === pin.ref)
+      if (receipt?.state === "updated" || receipt?.state === "unchanged") {
+        published.push({
+          path: pin.path,
+          sha: pin.sha,
+          remote: pin.remote,
+          ref: pin.ref,
+          state: receipt.state === "updated" ? "published" : "retained",
+        })
+      } else if (receipt?.detail?.code === "destination-changed") {
+        failures.push(
+          `${pin.remote} ${pin.ref} names ${receipt.observed ?? "an unconfirmed object"}, not ${pin.sha}: a retention ref is named by its object and never moves`,
+        )
+      } else {
+        failures.push(
+          `could not publish ${pin.path}@${pin.sha} from ${checkout} at ${pin.remote} ${pin.ref}: ${receipt?.state ?? result.state}; ${receipt?.detail?.message ?? result.detail?.message ?? "no confirmed ref receipt"}`,
         )
       }
     }
-    const ref = retentionRef(row.sha)
-    // By name: `ls-remote origin <ref>` carries the whole advertisement to filter it here (25570).
-    const listed = (await readRemoteCommit(child, "origin", ref)) ?? ""
-    if (listed === row.sha) {
-      published.push({ path, sha: row.sha, remote, ref, state: "retained" })
-    } else if (listed !== "") {
-      throw new Error(
-        `${remote} ${ref} names ${listed}, not ${row.sha}: a retention ref is named by its object and never moves; ` +
-          "repair that ref at the submodule remote before resubmitting",
-      )
-    } else if (fetchedFromRemote) {
-      published.push({ path, sha: row.sha, remote, ref, state: "fetchable" })
-    } else {
-      try {
-        await child(["push", "--quiet", `--force-with-lease=${ref}:${ABSENT}`, "origin", `${row.sha}:${ref}`])
-      } catch (cause) {
-        throw new Error(`could not publish ${path}@${row.sha} to ${remote} ${ref}`, { cause })
-      }
-      published.push({ path, sha: row.sha, remote, ref, state: "published" })
+    if (failures.length > 0) {
+      throw Object.assign(new Error(`${failures.join("; ")}; retained receipts: ${JSON.stringify(published)}`), {
+        published,
+      })
     }
-    // A moved submodule may itself have moved a gitlink: the nested pin has to
-    // be fetchable too, from ITS remote, or the queue cannot materialize km.
-    const before = await Promise.all(
-      bases.map(async (base, index) =>
-        byBase[index]?.get(row.path)?.oldMode === "160000"
-          ? (await git(["rev-parse", `${base}:${row.path}`])).trim()
-          : EMPTY_TREE,
-      ),
-    )
-    published.push(...(await publishMovedGitlinks(child, checkout, before, row.sha, path)))
   }
   return published
 }
@@ -399,6 +443,12 @@ type SubmitOps = Awaited<ReturnType<typeof readEventOpsWithRefs>>
 type SubmitAdmission = Readonly<
   Omit<SubmitInspection, "verifying"> & { root: string; bases: readonly string[]; operational: SubmitOps }
 >
+
+/** Captured admission and permanent child receipts, before composition or opening a change.
+ * root, bases and operational preserve the same admission snapshot for ordinary submit.
+ * Product adapters project the branch/head/base and published receipts, not operational storage.
+ */
+export type Prepared = SubmitAdmission & Readonly<{ branch: string; published: readonly PublishedGitlink[] }>
 
 export function refuseMaintenance(
   stop: PauseRecord | undefined,
@@ -634,13 +684,18 @@ async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitA
   return verifying
 }
 
-export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
+export async function prepareSubmit(git: Git, remote: string, request: SubmitRequest): Promise<Prepared> {
   refuseTarget(request.branch, request.target.branch)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const admitted = await withRemoteSeam("inspectSubmit", () => admitSubmitAtHead(git, remote, request, head))
   const published = await withRemoteSeam("publishMovedGitlinks", () =>
     publishMovedGitlinks(git, admitted.root, admitted.bases, head),
   )
+  return { ...admitted, branch: request.branch, published }
+}
+
+export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
+  const { branch: _branch, published, ...admitted } = await prepareSubmit(git, remote, request)
   const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted))
   const receipt = await submissionReceipt(git, verifying)
   const { root, bases: _bases, operational, ...inspection } = admitted

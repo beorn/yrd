@@ -90,6 +90,7 @@ import {
   STEP_STATES,
   roundBoundMs,
   inspectSubmit,
+  prepareSubmit,
   inspectSubmitAtHead,
   preparePinCarrier,
   freshnessLine,
@@ -302,6 +303,7 @@ export type CoreQueueCommand =
       submitter: string
       issue?: string
       dryRun?: boolean
+      prepare?: boolean
       pins?: readonly PinCarrierPin[]
     }>
   | Readonly<{ command: "pause"; by: string; reason: string; cause?: "operator" | "maintenance" }>
@@ -1365,6 +1367,12 @@ export async function coreQueueCommand(
       return result.failed.length > 0 ? 1 : 0
     }
     case "submit": {
+      if (request.prepare === true && request.dryRun === true) {
+        throw new Error("--prepare writes permanent child refs and cannot be combined with --dry-run")
+      }
+      if (request.prepare === true && request.pins !== undefined) {
+        throw new Error("--prepare cannot be combined with --gitlink; prepare an existing authored branch")
+      }
       assertPlainEventQueueConfig(config, "submit")
       if (request.pins !== undefined) {
         if (request.branch !== undefined) throw new Error("--gitlink does not take a branch operand")
@@ -1470,6 +1478,31 @@ export async function coreQueueCommand(
       }
       // Operator and stuck stops accept submits (the andon, operator 2026-09-16).
       // A maintenance stop refuses in the shared inspection before this echo.
+      if (request.prepare === true) {
+        const prepared = await prepareSubmit(git, config.target.remote, submission)
+        const { head, targetHead, base, published, admission, stop, issue } = prepared
+        emit(
+          io,
+          options.json,
+          {
+            branch,
+            head,
+            targetHead,
+            base,
+            published,
+            admission,
+            stopped: stopFact(stop),
+            ...issueOutput(io, branch, issue),
+          },
+          `prepared ${branch} at ${head}; inspected base ${base} against ${targetHead}; ${published.length} child retention receipts` +
+            published.map((row) => `\n${row.state} ${row.path}@${row.sha} at ${row.remote} ${row.ref}`).join(""),
+        )
+        echoStop(stop)
+        if (admission.kind === "warn" || admission.kind === "cannot-judge") {
+          io.stderr(`preparation admission ${admission.kind}: ${admission.reason}\n`)
+        }
+        return 0
+      }
       if (request.dryRun === true) {
         const inspected = await inspectSubmit(git, config.target.remote, submission)
         const { head, targetHead, verifying } = inspected
