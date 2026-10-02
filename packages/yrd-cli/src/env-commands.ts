@@ -19,7 +19,7 @@
 
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
-import { createGitWorkspace, worktreeHomeRoot } from "@yrd/bay"
+import { createGitWorkspace, worktreeHomeRoot, type ProvisionedBay } from "@yrd/bay"
 import {
   checkedTree,
   freshWorktree,
@@ -149,14 +149,14 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   }
   const config = await readConfig(git, base, { remote: "origin", branch: target })
   const resolveIssue = config === undefined ? undefined : issueResolver(config, root)
-  let provisioned: { path: string; headSha: string; baseSha: string }
+  let provisioned: { path: string; headSha: string; baseSha: string; adoption: ProvisionedBay["adoption"] | "detached" }
   if (branch === undefined) {
     const environments = join(resolve(root, await workdirOf(git)), "environments")
     const path = resolve(environments, name)
     if (!path.startsWith(`${environments}/`)) throw new Error(`environment name '${name}' escapes ${environments}`)
     mkdirSync(environments, { recursive: true })
     await freshWorktree(git, root, base, path)
-    provisioned = { path, headSha: base, baseSha: base }
+    provisioned = { path, headSha: base, baseSha: base, adoption: "detached" }
   } else {
     const shadow = await branchPathConflict(git, branch)
     if (shadow !== undefined) {
@@ -247,12 +247,20 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       )
     }
   }
-  if (options.json === true) {
-    io.stdout(`${JSON.stringify({ base: baseSha, branch, head: headSha, name, path })}\n`)
-  } else {
+  const reused = provisioned.adoption !== "fresh" && provisioned.adoption !== "detached"
+  if (reused) {
     io.stderr(
-      `${name} ${branch === undefined ? "detached" : `on ${branch}`} at ${headSha.slice(0, 12)}, cut from ${target} ${baseSha.slice(0, 12)}\n`,
+      `${name}: reused ${provisioned.adoption} branch ${branch} at ${provisioned.headSha}; requested target ${target} ${baseSha}\n`,
     )
+  }
+  if (options.json === true) {
+    io.stdout(`${JSON.stringify({ base: provisioned.headSha, branch, head: headSha, name, path })}\n`)
+  } else {
+    if (!reused) {
+      io.stderr(
+        `${name} ${branch === undefined ? "detached" : `on ${branch}`} at ${headSha.slice(0, 12)}, cut from ${target} ${baseSha.slice(0, 12)}\n`,
+      )
+    }
     io.stdout(`${path}\n`)
   }
   return 0
