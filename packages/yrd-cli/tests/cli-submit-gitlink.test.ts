@@ -599,6 +599,215 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
 })
 
 describe("ordinary submit with a local-only component pin", () => {
+  /** @failure A remotely fetchable commit is reported without a permanent retention ref (27091 AC2).
+   * @level l2 @consumer preparation before GitHub archive installation
+   */
+  // Existing local-only tests cannot reach the fetch-then-retain path.
+  it("retains a fetched remote commit that has no pin ref", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    await gitIn(one.work)(["push", "--quiet", "origin", `${one.unheld}:refs/heads/published-without-retention`])
+    const git = gitIn(w.work)
+    const child = gitIn(join(w.work, one.path))
+    await expect(child(["cat-file", "-e", `${one.unheld}^{commit}`])).rejects.toThrow()
+    await git(["checkout", "--quiet", "-b", "task/prepare-fetched-pin"])
+    await git(["update-index", "--cacheinfo", `160000,${one.unheld},${one.path}`])
+    await git(["commit", "--quiet", "-m", "prepare fetched pin\n\nRefs: 27091"])
+    const ran = await yrd(w.work, "submit", "--prepare", "--submitter", "@dev/3", "--json")
+    expect(ran.exitCode, ran.report).toBe(0)
+    const receipt = JSON.parse(ran.stdout) as { published: { state: string; sha: string; path: string }[] }
+    expect(receipt.published).toContainEqual(
+      expect.objectContaining({ path: one.path, sha: one.unheld, state: "published" }),
+    )
+    expect((await gitIn(join(w.root, "one.git"))(["rev-parse", `refs/git-super/pins/${one.unheld}`])).trim()).toBe(
+      one.unheld,
+    )
+  }, 90_000)
+
+  /** @failure Preparation moves an immutable ref held by a conflicting winner, or hides its two object IDs (27091 AC4).
+   * @level l2 @consumer create-only permanent child retention
+   */
+  // Identical retries do not exercise an existing destination holding a different object.
+  it("refuses a conflicting retention winner and names both commits", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const git = gitIn(w.work)
+    const child = gitIn(join(w.work, one.path))
+    await child(["fetch", "--quiet", one.work, one.unheld])
+    await child(["checkout", "--quiet", one.unheld])
+    const pin = `refs/git-super/pins/${one.unheld}`
+    await gitIn(one.work)(["push", "--quiet", "origin", `${one.old}:${pin}`])
+    await git(["checkout", "--quiet", "-b", "task/prepare-conflicting-pin"])
+    await git(["add", one.path])
+    await git(["commit", "--quiet", "-m", "prepare conflicting pin\n\nRefs: 27091"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const refsBefore = await refs(w.remote)
+    const ran = await yrd(w.work, "submit", "--prepare", "--submitter", "@dev/3")
+    expect(ran.exitCode, ran.report).toBe(2)
+    expect(ran.stderr).toContain("never moves")
+    expect(ran.stderr).toContain(one.old)
+    expect(ran.stderr).toContain(one.unheld)
+    expect((await gitIn(join(w.root, "one.git"))(["rev-parse", pin])).trim()).toBe(one.old)
+    expect((await git(["rev-parse", "HEAD"])).trim()).toBe(head)
+    expect(await refs(w.remote)).toEqual(refsBefore)
+  }, 90_000)
+
+  /** @failure A later rejected child publication hides or discards an earlier permanent receipt (27091 AC4).
+   * @level l2 @consumer retry after partial preparation
+   */
+  // A single-child failure cannot demonstrate preserved partial effects.
+  it("preserves and reports an earlier child when a later remote refuses", async () => {
+    const w = await world()
+    const git = gitIn(w.work)
+    for (const component of w.components) {
+      const child = gitIn(join(w.work, component.path))
+      await child(["fetch", "--quiet", component.work, component.unheld])
+      await child(["checkout", "--quiet", component.unheld])
+    }
+    await git(["checkout", "--quiet", "-b", "task/prepare-partial-pins"])
+    await git(["add", ...w.components.map((component) => component.path)])
+    await git(["commit", "--quiet", "-m", "prepare partial pins\n\nRefs: 27091"])
+    const one = w.components[0]!
+    const two = w.components[1]!
+    const hook = join(w.root, "two.git/hooks/pre-receive")
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n")
+    chmodSync(hook, 0o755)
+    const rootRefs = await refs(w.remote)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const ran = await yrd(w.work, "submit", "--prepare", "--submitter", "@dev/3")
+    expect(ran.exitCode, ran.report).toBe(2)
+    expect(ran.stderr).toContain(`could not publish ${two.path}@${two.unheld}`)
+    expect(ran.stderr).toContain("retained receipts:")
+    expect(ran.stderr).toContain(`refs/git-super/pins/${one.unheld}`)
+    expect((await gitIn(join(w.root, "one.git"))(["rev-parse", `refs/git-super/pins/${one.unheld}`])).trim()).toBe(
+      one.unheld,
+    )
+    expect(
+      await gitIn(join(w.root, "two.git"))([
+        "for-each-ref",
+        "--format=%(objectname)",
+        `refs/git-super/pins/${two.unheld}`,
+      ]),
+    ).toBe("")
+    expect(await refs(w.remote)).toEqual(rootRefs)
+    expect((await git(["rev-parse", "HEAD"])).trim()).toBe(head)
+  }, 90_000)
+
+  /** @failure A nested moved pin writes through the parent Git seam or remains unretained (27091 AC2/AC3).
+   * @level l2 @consumer recursive preparation from each child's own checkout
+   */
+  // Flat moved children cannot catch a parent-bound process adapter used for a nested child.
+  it("retains nested pins through their own checkouts", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const two = w.components[1]!
+    const git = gitIn(w.work)
+    const childRoot = join(w.work, one.path)
+    const child = gitIn(childRoot)
+    await identity(childRoot)
+    await child(["submodule", "add", "--quiet", two.remote, "nested"])
+    const nested = gitIn(join(childRoot, "nested"))
+    await nested(["fetch", "--quiet", two.work, two.unheld])
+    await nested(["checkout", "--quiet", two.unheld])
+    await child(["add", ".gitmodules", "nested"])
+    await child(["commit", "--quiet", "-m", "add local nested pin"])
+    const childHead = (await child(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "-b", "task/prepare-nested-pins"])
+    await git(["add", one.path])
+    await git(["commit", "--quiet", "-m", "prepare nested pins\n\nRefs: 27091"])
+    const ran = await yrd(w.work, "submit", "--prepare", "--submitter", "@dev/3", "--json")
+    expect(ran.exitCode, ran.report).toBe(0)
+    const receipt = JSON.parse(ran.stdout) as { published: { path: string; sha: string; state: string }[] }
+    expect(receipt.published).toEqual([
+      expect.objectContaining({ path: one.path, sha: childHead, state: "published" }),
+      expect.objectContaining({ path: `${one.path}/nested`, sha: two.unheld, state: "published" }),
+    ])
+    expect((await gitIn(join(w.root, "two.git"))(["rev-parse", `refs/git-super/pins/${two.unheld}`])).trim()).toBe(
+      two.unheld,
+    )
+  }, 90_000)
+  /** @failure Authors must open a root change to retain the child needed before lock regeneration (27091).
+   * @level l2 @consumer yrd submit --prepare before the author's lock regeneration
+   */
+  it("prepares a local-only pin without publishing the root branch or opening a change", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const git = gitIn(w.work)
+    const child = gitIn(join(w.work, one.path))
+    await child(["fetch", "--quiet", one.work, one.unheld])
+    await child(["checkout", "--quiet", one.unheld])
+    const branch = "task/prepare-local-only-pin"
+    await git(["checkout", "--quiet", "-b", branch, "main"])
+    await git(["add", one.path])
+    await git(["commit", "--quiet", "-m", "prepare local pin\n\nRefs: 27091"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const rootRefs = await gitIn(w.remote)(["for-each-ref", "--format=%(refname) %(objectname)"])
+    const childMain = await remoteHead(join(w.root, "one.git"), "main")
+
+    const ran = await yrd(w.work, "submit", branch, "--prepare", "--issue", "27091", "--submitter", "@dev/3", "--json")
+    expect(ran.exitCode, ran.report).toBe(0)
+    const receipt = JSON.parse(ran.stdout) as {
+      head: string
+      published: readonly { path: string; sha: string; state: string }[]
+    }
+    expect(receipt.head).toBe(head)
+    expect(receipt.published).toContainEqual(
+      expect.objectContaining({ path: one.path, sha: one.unheld, state: "published" }),
+    )
+    expect((await gitIn(join(w.root, "one.git"))(["rev-parse", `refs/git-super/pins/${one.unheld}`])).trim()).toBe(
+      one.unheld,
+    )
+    expect(await remoteHead(join(w.root, "one.git"), "main")).toBe(childMain)
+    expect(await gitIn(w.remote)(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(rootRefs)
+    expect((await git(["rev-parse", "HEAD"])).trim()).toBe(head)
+    const retry = await yrd(w.work, "submit", branch, "--prepare", "--submitter", "@dev/3", "--json")
+    expect(retry.exitCode, retry.report).toBe(0)
+    const retryReceipt = JSON.parse(retry.stdout) as typeof receipt
+    expect(retryReceipt.published).toEqual([
+      expect.objectContaining({ path: one.path, sha: one.unheld, state: "retained" }),
+    ])
+    expect(await gitIn(w.remote)(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(rootRefs)
+    const submitted = await yrd(w.work, "submit", branch, "--submitter", "@dev/3", "--json")
+    expect(submitted.exitCode, submitted.report).toBe(0)
+    expect((JSON.parse(submitted.stdout) as typeof receipt).published).toEqual(retryReceipt.published)
+    expect(await remoteHead(w.remote, branch)).toBe(head)
+  }, 90_000)
+
+  /** @failure Preparation accepts contradictory write/dry-run or carrier-building flags (27091 AC4).
+   * @level l2 @consumer yrd submit --prepare
+   */
+  // The positive preparation path cannot prove incompatible flags refuse before remote writes.
+  it.each(["--dry-run", "--gitlink"])(
+    "refuses preparation combined with %s before changing refs",
+    async (flag) => {
+      const w = await world()
+      const before = await gitIn(w.remote)(["for-each-ref", "--format=%(refname) %(objectname)"])
+      const args = flag === "--gitlink" ? [flag, `${w.components[0]!.path}=${w.components[0]!.held}`] : [flag]
+      const ran = await yrd(w.work, "submit", "--prepare", ...args, "--submitter", "@dev/3")
+      expect(ran.exitCode, ran.report).toBe(2)
+      expect(ran.stderr).toContain("--prepare")
+      expect(ran.stderr).toContain(flag)
+      expect(await gitIn(w.remote)(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(before)
+    },
+    90_000,
+  )
+
+  /** @failure An empty preparation claims work without identifying the inspected branch, head and base (27091 AC2).
+   * @level l2 @consumer yrd submit --prepare receipts
+   */
+  // Child publication tests always have moved pins, so cannot prove the empty receipt's identity.
+  it("names the inspected branch, head and base when no gitlink moved", async () => {
+    const w = await world()
+    const git = gitIn(w.work)
+    const branch = "task/prepare-no-gitlinks"
+    await git(["checkout", "--quiet", "-b", branch])
+    await git(["commit", "--allow-empty", "--quiet", "-m", "prepare no pins\n\nRefs: 27091"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const ran = await yrd(w.work, "submit", branch, "--prepare", "--submitter", "@dev/3", "--json")
+    expect(ran.exitCode, ran.report).toBe(0)
+    expect(JSON.parse(ran.stdout)).toMatchObject({ branch, head, base: w.base, published: [] })
+  }, 90_000)
+
   /** @failure Submit composes before publishing the component pin, so git-super cannot fetch it.
    * @level l2 @consumer yrd submit of a root carrier with a locally committed component
    */

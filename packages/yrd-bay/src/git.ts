@@ -84,7 +84,9 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         // Git's worktree registration owns the branch, not an issue marker.
         // Preserve existing work in local > tracking > remote order; ordinary
         // non-force worktree add refuses if another worktree already owns it.
+        let adoption: ProvisionedBay["adoption"]
         if (local.code === 0) {
+          adoption = "local"
           try {
             await worktrees.add({ kind: "branch", path, branch: input.branch })
           } catch (cause) {
@@ -93,6 +95,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           madeWorktree = true
         } else {
           const remoteHead = tracking.code === 0 ? undefined : await remoteBranchHead(git, repo, input.branch)
+          adoption = tracking.code === 0 ? "tracking" : remoteHead === undefined ? "fresh" : "remote"
           if (remoteHead !== undefined) {
             // Fetch the captured object, not a branch that may move after the
             // observation. Adoption does not widen a single-branch clone's
@@ -113,7 +116,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         }
         await worktrees.materializeSubmodules(path)
         const headSha = await git.commit(path, "HEAD")
-        return { status: "completed", conclusion: "success", output: { path, headSha, baseSha } }
+        return { status: "completed", conclusion: "success", output: { path, headSha, baseSha, adoption } }
       } catch (cause) {
         if (!madeWorktree) return failure("provision-failed", cause)
         const undone: string[] = []
