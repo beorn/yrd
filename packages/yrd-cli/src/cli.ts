@@ -934,6 +934,35 @@ function buildProgram(
     )
     setExit(taken)
   }
+  const LS_DESCRIPTION =
+    "group changes by status (in check, waiting, draft, ended in the last 24 h) with issue number, title, and owner seat"
+  const queueLs = async (filters: readonly string[] | undefined, options: unknown): Promise<void> => {
+    const { json, queue, fresh } = options as {
+      json?: boolean
+      queue?: string
+      fresh?: boolean
+    }
+    const location = await resolveQueueLocation(cwd(), queue, env, "reader")
+    const taken = await coreQueueCommand(
+      location.repo,
+      io,
+      {
+        command: "ls",
+        terms: filters ?? [],
+      },
+      {
+        selection: location.selection,
+        populateReference: location.owned,
+        queue: location.queue,
+        workdir: location.workdir,
+        json,
+        env,
+        ...(fresh === true ? {} : { localStatusStore: localStatusStore(location) }),
+        log: log(),
+      },
+    )
+    setExit(taken)
+  }
   listOptions(
     queue
       .command("list [filter...]")
@@ -951,6 +980,23 @@ function buildProgram(
       .option("--watch", WATCH_FLAG_HELP)
       .addHelpSection("States:", STATES_HELP),
   ).action(async (filters, options) => queueList(filters as string[] | undefined, options))
+  queue
+    .command("ls [filter...]")
+    .description(LS_DESCRIPTION)
+    .option("--json", "emit stable JSON: one document, complete on a pipe or a file")
+    .option("--fresh", "read the queue from its source rather than the cached mirror")
+    .option("--queue <value>", QUEUE_HELP)
+    .action(async (filters, options) => queueLs(filters as string[] | undefined, options))
+  // `yrd ls` is `yrd queue ls` (the operator's spelling, #27093),
+  // registered the way `yrd list` is: the same action, the same options, one
+  // alias visible in `--help`. `yrd queue ls` stays the canonical form.
+  program
+    .command("ls [filter...]")
+    .description(`${LS_DESCRIPTION} (the same as ${name} queue ls)`)
+    .option("--json", "emit stable JSON: one document, complete on a pipe or a file")
+    .option("--fresh", "read the queue from its source rather than the cached mirror")
+    .option("--queue <value>", QUEUE_HELP)
+    .action(async (filters, options) => queueLs(filters as string[] | undefined, options))
   queue
     .command("stats")
     .description(
@@ -1249,6 +1295,7 @@ function addExamples(program: CliCommand, name: string): void {
     [`${name} submit`, `${name} queue submit`],
     [`${name} withdraw`, `${name} queue withdraw`],
     [`${name} list`, `${name} queue list`],
+    [`${name} ls`, `${name} queue ls`],
     [`${name} bay`, `${name} env (today's word)`],
   ])
   program.addHelpSection("Examples:", [
