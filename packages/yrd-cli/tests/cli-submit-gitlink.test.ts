@@ -599,6 +599,42 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
 })
 
 describe("ordinary submit with a local-only component pin", () => {
+  /** @failure Authors must open a root change to retain the child needed before lock regeneration (27091).
+   * @level l2 @consumer yrd submit --prepare before the author's lock regeneration
+   */
+  it("prepares a local-only pin without publishing the root branch or opening a change", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const git = gitIn(w.work)
+    const child = gitIn(join(w.work, one.path))
+    await child(["fetch", "--quiet", one.work, one.unheld])
+    await child(["checkout", "--quiet", one.unheld])
+    const branch = "task/prepare-local-only-pin"
+    await git(["checkout", "--quiet", "-b", branch, "main"])
+    await git(["add", one.path])
+    await git(["commit", "--quiet", "-m", "prepare local pin\n\nRefs: 27091"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const rootRefs = await gitIn(w.remote)(["for-each-ref", "--format=%(refname) %(objectname)"])
+    const childMain = await remoteHead(join(w.root, "one.git"), "main")
+
+    const ran = await yrd(w.work, "submit", branch, "--prepare", "--issue", "27091", "--submitter", "@dev/3", "--json")
+    expect(ran.exitCode, ran.report).toBe(0)
+    const receipt = JSON.parse(ran.stdout) as {
+      head: string
+      published: readonly { path: string; sha: string; state: string }[]
+    }
+    expect(receipt.head).toBe(head)
+    expect(receipt.published).toContainEqual(
+      expect.objectContaining({ path: one.path, sha: one.unheld, state: "published" }),
+    )
+    expect((await gitIn(join(w.root, "one.git"))(["rev-parse", `refs/git-super/pins/${one.unheld}`])).trim()).toBe(
+      one.unheld,
+    )
+    expect(await remoteHead(join(w.root, "one.git"), "main")).toBe(childMain)
+    expect(await gitIn(w.remote)(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(rootRefs)
+    expect((await git(["rev-parse", "HEAD"])).trim()).toBe(head)
+  }, 90_000)
+
   /** @failure Submit composes before publishing the component pin, so git-super cannot fetch it.
    * @level l2 @consumer yrd submit of a root carrier with a locally committed component
    */
