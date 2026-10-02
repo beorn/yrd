@@ -75,7 +75,7 @@ function isolateHome(work: string): string {
   return home
 }
 
-async function world(setup: string): Promise<World> {
+async function world(setup: string, options: Readonly<{ declareSetup?: boolean }> = {}): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-open-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -87,9 +87,10 @@ async function world(setup: string): Promise<World> {
   await git(["config", "user.email", "env-open@yrd.test"])
   await git(["config", "user.name", "yrd"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), `setup: ${JSON.stringify(setup)}\n`)
+  const declaresSetup = options.declareSetup !== false
+  writeFileSync(join(work, ".yrd.yml"), declaresSetup ? `setup: ${JSON.stringify(setup)}\n` : "{}\n")
   await git(["add", ".yrd.yml"])
-  await git(["commit", "--quiet", "-m", "declare environment setup"])
+  await git(["commit", "--quiet", "-m", declaresSetup ? "declare environment setup" : "declare the queue"])
   await git(["push", "--quiet", "origin", "main"])
   isolateHome(work)
   return { git, work }
@@ -345,7 +346,8 @@ describe("yrd env open prepares the retained environment", () => {
       const bay = join(w.work, ".bays", "reopened")
       const openedGit = gitIn(bay)
       const opened = (await openedGit(["rev-parse", "HEAD"])).trim()
-      expect.soft(JSON.parse(run.stdout())).toMatchObject({ base: candidate, head: opened })
+      // `base` is the REQUESTED base (the target), not the reused branch's head: the head is `head` (27165).
+      expect.soft(JSON.parse(run.stdout())).toMatchObject({ base: target, head: opened })
       expect.soft(run.stderr()).toContain("reused local")
       expect.soft(run.stderr()).toContain("task/reopened")
       expect.soft(run.stderr()).toContain(candidate)
@@ -508,7 +510,8 @@ describe("yrd env open prepares the retained environment", () => {
 
     const path = join(isolateHome(w.work), "resume")
     const opened = (await gitIn(path)(["rev-parse", "HEAD"])).trim()
-    expect.soft(JSON.parse(run.stdout())).toMatchObject({ base: head, branch: "task/resume", head: opened, path })
+    // `base` is the REQUESTED base (the target); the resumed branch's head is reported as `head` (27165).
+    expect.soft(JSON.parse(run.stdout())).toMatchObject({ base: target, branch: "task/resume", head: opened, path })
     expect.soft(run.stderr()).toContain(`reused ${source}`)
     expect.soft(run.stderr()).toContain("task/resume")
     expect.soft(run.stderr()).toContain(head)
@@ -790,4 +793,63 @@ describe("yrd env open says which input selects which path", () => {
     expect(run.stderr()).toContain("not-a-ref-at-all")
     expect(run.stderr()).toContain("git rev-parse")
   })
+})
+
+/**
+ * @failure `yrd env open` cut a fresh environment at a commit with no history in common with the CODE
+ *          root — a declared-private child's gitlink, an object in the root store but no ancestor of
+ *          root main — and then bound new work onto it (27165).
+ * @level   l2 (real bare remote, real orphan history, real retained branch, through the CLI)
+ * @consumer every seat opening an environment of a repository with an excluded private child
+ * @reach   fs-walk <fixture-only: the temp fixture's bay directory, real repo (27165)>
+ */
+describe("yrd env open refuses a base foreign to the root (27165)", () => {
+  /** A commit with no ancestor in common with the fixture's main: the shape a private child's gitlink
+   * takes in the root store, where it is an object but no ancestor of root main (27165). */
+  async function addForeignHistory(w: World): Promise<string> {
+    await w.git(["checkout", "--quiet", "--orphan", "foreign-history"])
+    writeFileSync(join(w.work, "FOREIGN"), "no history in common with the root\n")
+    await w.git(["add", "FOREIGN"])
+    await w.git(["commit", "--quiet", "-m", "a commit with no history in common with the root"])
+    const foreign = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    return foreign
+  }
+
+  it("reports the requested root base and the final head separately", async () => {
+    const w = await world(":")
+    const target = (await w.git(["rev-parse", "refs/remotes/origin/main"])).trim()
+    const run = capture(w.work)
+
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "root-base", "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+
+    const reported = JSON.parse(run.stdout()) as { base: string; head: string }
+    // The base is the REQUESTED base, named for the root repository — not
+    // whatever head the environment happens to stand at (27165 row 2).
+    expect(reported.base).toBe(target)
+    expect(reported.head).toBe(target)
+  })
+
+  it.each(["with setup", "without setup"])(
+    "refuses a retained head that shares no history with the root (%s)",
+    async (variant) => {
+      const w = await world(":", { declareSetup: variant === "with setup" })
+      const foreign = await addForeignHistory(w)
+      await w.git(["branch", "task/foreign-head", foreign])
+      const run = capture(w.work)
+
+      // The guard must not depend on the repository declaring `setup:`: a base
+      // no check can tell a diff from is refused on every path (27165 row 4).
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "foreign-head"], run.io),
+        run.stderr(),
+      ).not.toBe(0)
+
+      expect(run.stderr()).toContain(foreign.slice(0, 12))
+      expect(run.stderr()).toMatch(/shares no history/iu)
+    },
+  )
 })
