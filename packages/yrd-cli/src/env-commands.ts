@@ -228,11 +228,14 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       )
     }
   }
+  // A base the environment shares no history with cannot be judged: no check could tell a diff from it
+  // and no ancestry can be established for it. The guard runs on EVERY path, not only where the target
+  // declares `setup:` — a repository without setup used to accept a foreign head silently (27165).
+  const tree = await checkedTree(path, baseSha, process)
   const setup = config?.setup
   if (setup !== undefined) {
     const artifacts = join(resolve(root, await workdirOf(git)), "logs", "environments", name, runId())
     try {
-      const tree = await checkedTree(path, baseSha, process)
       await runSetup({
         cwd: path,
         process,
@@ -257,8 +260,10 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       `${name}: reused ${provisioned.adoption} branch ${branch} at ${provisioned.headSha}; requested target ${target} ${baseSha}\n`,
     )
   }
+  // `base` is the base the caller REQUESTED, resolved in the owning root repository — never the head the
+  // environment happens to stand at: a reused branch's head is reported as `head`, not as `base` (27165).
   if (options.json === true) {
-    io.stdout(`${JSON.stringify({ base: provisioned.headSha, branch, head: headSha, name, path })}\n`)
+    io.stdout(`${JSON.stringify({ base: baseSha, branch, head: headSha, name, path })}\n`)
   } else {
     if (!reused) {
       io.stderr(
