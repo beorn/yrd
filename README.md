@@ -51,6 +51,7 @@ A direct merge that reached the queue branch without going through the queue is 
 
 ```
 yrd submit [branch] [--submitter <agent>] [--issue <id>] [--dry-run]   verify and push the unchanged branch head (the current one when none is named); same head again is a retry
+yrd submit [branch] --prepare [--submitter <agent>] [--issue <id>]   retain moved child commits before lock regeneration; leave the root branch and change unopened
 yrd submit --gitlink <path>=<full-sha> [--gitlink ...] --issue <id> [--submitter <agent>] [--dry-run]   build and submit an exact-parent root carrier for remote-held component commits
 yrd merge <branch> [--submitter <agent>] [--issue <id>]      merge the branch now, ahead of the line and on a stopped line too: submit it unless its change is in line, then run its checks and its merge in this process
 yrd queue run                                                     one queue run; a round already running in the queue's workdir finishes first
@@ -128,13 +129,19 @@ Close reads teardown from the environment's current commit and refuses dirty, lo
 
 In a superproject, `git super status`, `git super diff` and `git super push` work across submodule boundaries.
 
+**Before lock regeneration.** If your dependency installer needs an unpublished submodule commit, run `yrd submit fix-login --prepare --submitter <agent>` first. Then regenerate lockfiles with your project's existing synchronizer, commit the resulting files, and run ordinary `yrd submit fix-login --submitter <agent>`.
+
+Preparation validates the branch, issue and admission, then retains each moved child commit at its declared remote under `refs/git-super/pins/<sha>`. It prints the branch, head, base and each permanent child ref; an unchanged retry reports `retained`. It leaves root refs, component main and unrelated refs untouched. It neither composes the change nor runs queue checks. Successful child refs remain available if a later child fails, and the error includes their receipts. `--prepare` refuses combinations with `--dry-run` or `--gitlink`.
+
 **What submit does, in order:**
 
 1. Refuses the queue branch, reads the local branch head, then reads and fetches the configured target's advertised commit. Fetch obtains the commit objects without pulling or integrating them into your branch. Operator and stuck stops accept the submit; a maintenance stop refuses it before publication. No queue check runs at submit.
 2. Checks shared history and refuses a head already contained by the target.
-3. Resolves the issue and runs the target's optional `admission` command before any push. A policy exit 1 refuses with its stdout cure. A timeout, signal or other failure cannot judge: submit proceeds with a visible warning event and target-declared notification. Issue-free changes skip admission and say so. It then composes the submitted commit onto the observed target and settles gitlinks with git-super. A conflict refuses submission before a change opens, naming the conflict. The submitted commit remains unchanged.
-4. Creates the opened record for that submitted commit, then publishes it as the branch head together with the record in one atomic push. The branch, change and stop authority use leases against the remote values just observed; a concurrent maintenance stop refuses the whole push.
-5. Returns the submitted change. The queue runs checks and merges later, revalidating against the target at merge time. Successful submission means queued, not merged.
+3. Resolves the issue and runs the target's optional `admission` command before any push. A policy exit 1 refuses with its stdout cure. A timeout, signal or other failure cannot judge: ordinary submit proceeds with a visible warning event and target-declared notification. Issue-free changes skip admission and say so.
+4. Retains moved child commits through Git-super's create-only ref executor, including nested pins and commits fetched from their remotes. A pin ref already naming that commit is a retry; one naming another commit refuses and never moves. `--prepare` returns here with its retention receipts.
+5. Composes the submitted commit onto the observed target and settles gitlinks with git-super. A conflict refuses before a change opens, naming the conflict. The submitted commit remains unchanged.
+6. Creates the opened record for that submitted commit, then publishes it as the branch head together with the record in one atomic push. The branch, change and stop authority use leases against the remote values just observed; a concurrent maintenance stop refuses the whole push.
+7. Returns the submitted change. The queue runs checks and merges later, revalidating against the target at merge time. Successful submission means queued, not merged.
 
 `--dry-run` performs the same git-only verification without pushing or opening a change and reports its result. Submission captures a target commit at one instant; it does not reserve the target. `--notify` remains a deprecated alias for `--submitter` for one release and prints a warning.
 
