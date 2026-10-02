@@ -1,3 +1,4 @@
+import { join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import {
   gitEnvironment,
@@ -10,6 +11,7 @@ import {
 } from "./git.ts"
 import { freshWorktree, type FreshWorktree, type Worktree } from "./worktree.ts"
 import { populateReferenceStores } from "./reference.ts"
+import { DeriveFailed, deriveInWorktree, type Derived, type DeriveSpec } from "./derive.ts"
 
 /** `descents` records git-super's two-direction ancestry checks of nested pins (24320). */
 export type Verification =
@@ -18,6 +20,8 @@ export type Verification =
       head: string
       targetHead: string
       candidate: string
+      /** Present when the target's `derive:` changed something: the composed merge before it, and what it did. */
+      derived?: Derived & Readonly<{ composed: string }>
       gitlinks: readonly SettledGitlink[]
       descents?: readonly SuperMergeDescent[]
       steps?: readonly SuperMergeStep[]
@@ -60,6 +64,12 @@ export type VerificationOptions = Readonly<{
    * queue round passes it; without it nothing is timed.
    */
   timed?: <T>(name: string, work: () => Promise<T>) => Promise<T>
+  /**
+   * The target's `derive:`, run in the merged worktree after the compose and before adoption; only the queue's
+   * round passes it (derive.ts). A derive that changes a submodule is composed in as a second merge here, so the
+   * candidate that leaves is still one two-parent merge with its own frozen publication intent.
+   */
+  derive?: DeriveSpec
 }>
 
 /** Shared by submit admission and both queue phases; only git-super composes gitlinks. */
@@ -101,6 +111,88 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
   if (result.commit === undefined) {
     await worktree.remove()
     throw new Error(`git-super merge of ${options.head} reported updated without a commit`)
+  }
+  let derived: (Derived & Readonly<{ composed: string }>) | undefined
+  if (options.derive !== undefined) {
+    const composed = result.commit
+    let outcome: Derived | undefined
+    try {
+      outcome = await timed("derive", () =>
+        deriveInWorktree({
+          cwd: worktree.path,
+          repo: options.repo,
+          candidate: composed,
+          targetHead: options.targetHead,
+          derive: options.derive as DeriveSpec,
+          process: options.process,
+          env: options.env,
+          selection: options.worktree?.selection,
+          gitOptions: options.worktree?.gitOptions,
+          hooksPath: options.hooksPath,
+          queueRun: true,
+        }),
+      )
+    } catch (error) {
+      await worktree.remove()
+      throw error
+    }
+    if (outcome !== undefined) {
+      // The carrier holds the derived pins on the target; the same compose folds it into the merge, so the
+      // candidate is again a two-parent merge whose frozen intent names the derived child (27176).
+      const [, ...body] = options.message.split("\n\n")
+      const message = [`${outcome.subject} (derived into ${options.head.slice(0, 12)})`, "", ...body].join("\n\n")
+      const recomposed = await superMerge(options, worktree.path, outcome.carrier, message)
+      if (recomposed.state !== "updated" || recomposed.partial || recomposed.commit === undefined) {
+        await worktree.remove()
+        throw new Error(
+          `derive: composing the carrier ${outcome.carrier.slice(0, 12)} into ${composed.slice(0, 12)} returned ${recomposed.state}${
+            recomposed.detail === undefined ? "" : `: ${recomposed.detail.message}`
+          }`,
+        )
+      }
+      // derive is a function of the merged gitlinks, so a second run on the final candidate leaves a clean tree;
+      // the compose proves it while the step is young (@cto fa8ef67c), and a dirty second run is stuck by name.
+      let again: Derived | undefined
+      try {
+        again = await timed("derive-again", () =>
+          deriveInWorktree({
+            cwd: worktree.path,
+            repo: options.repo,
+            candidate: recomposed.commit as string,
+            targetHead: options.targetHead,
+            derive: { ...(options.derive as DeriveSpec), logDir: join((options.derive as DeriveSpec).logDir, "again") },
+            process: options.process,
+            env: options.env,
+            selection: options.worktree?.selection,
+            gitOptions: options.worktree?.gitOptions,
+            hooksPath: options.hooksPath,
+            queueRun: true,
+          }),
+        )
+      } catch (error) {
+        await worktree.remove()
+        throw error
+      }
+      if (again !== undefined) {
+        await worktree.remove()
+        throw new DeriveFailed(
+          recomposed.commit,
+          `a second run on the derived candidate changed ${again.submodules.map((row) => row.path).join(", ")} again; derive must be a function of the merged gitlinks`,
+          again.ran,
+        )
+      }
+      derived = { ...outcome, composed }
+      result = {
+        ...recomposed,
+        gitlinks: [...result.gitlinks, ...recomposed.gitlinks],
+        ...(result.descents === undefined && recomposed.descents === undefined
+          ? {}
+          : { descents: [...(result.descents ?? []), ...(recomposed.descents ?? [])] }),
+        ...(result.steps === undefined && recomposed.steps === undefined
+          ? {}
+          : { steps: [...(result.steps ?? []), ...(recomposed.steps ?? [])] }),
+      }
+    }
   }
   if (options.worktree?.populateReference === true) {
     const population = options.worktree
@@ -145,7 +237,20 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
     })
   }
   await worktree.remove()
-  return { state: "verified", verifying: { ...evidence, state: "verified", candidate: result.commit } }
+  const candidate = result.commit
+  if (candidate === undefined) throw new Error(`git-super merge of ${options.head} lost its commit after derivation`)
+  return {
+    state: "verified",
+    verifying: {
+      ...evidence,
+      gitlinks: result.gitlinks,
+      ...(result.descents === undefined ? {} : { descents: result.descents }),
+      ...(result.steps === undefined ? {} : { steps: result.steps }),
+      state: "verified",
+      candidate,
+      ...(derived === undefined ? {} : { derived }),
+    },
+  }
 }
 
 async function superMerge(

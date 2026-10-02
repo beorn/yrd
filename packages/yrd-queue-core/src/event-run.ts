@@ -51,6 +51,7 @@ import { queueRefPrefix, runIndexRef } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { publishCheckedChildren } from "./publication.ts"
 import { prepareWorktree, SETUP, SetupFailed } from "./worktree.ts"
+import { DERIVE, DeriveFailed } from "./derive.ts"
 import {
   allDeclaredChecksOff,
   QueueAuthorityUnreadable,
@@ -1518,36 +1519,71 @@ export async function eventQueueRun(
     log.write({ kind: "change", branch, head })
     const path = join(options.workdir, "worktrees", log.id, branch.replaceAll("/", "_"))
     mkdirSync(join(options.workdir, "worktrees", log.id), { recursive: true })
-    const verified = await timedStep(log, { branch, head, name: "compose", phase: "submit" }, () =>
-      verifyCandidate({
-        git,
-        repo: options.repo,
-        noFetch: true,
-        targetHead: target,
-        head,
-        path,
-        message: [
-          `merge ${short(branch, head)} into ${queue}`,
-          "",
-          `Change: ${changeName({ branch, head })}`,
-          `Merged-By: ${mergedBy(queue, log.id)}`,
-          ...(selectedChange.issue === undefined ? [] : [`Issue: ${selectedChange.issue}`]),
-          ...(selectedChange.submitter === undefined ? [] : [`Submitter: ${selectedChange.submitter}`]),
-        ].join("\n"),
-        process: options.process,
-        env: options.env,
-        hooksPath,
-        timed: (name, work) => timedStep(log, { branch, head, phase: "submit", name }, work),
-        worktree: {
-          plumbing,
-          env: options.env,
-          gitOptions,
-          populateReference: options.populateReference,
+    let verified: Awaited<ReturnType<typeof verifyCandidate>>
+    try {
+      verified = await timedStep(log, { branch, head, name: "compose", phase: "submit" }, () =>
+        verifyCandidate({
+          git,
+          repo: options.repo,
+          noFetch: true,
+          targetHead: target,
+          head,
+          path,
+          // The target's `derive:` regenerates what the merged gitlinks decide, inside this compose (27176); a
+          // derive that fails ends the change stuck below, the queue's, never the submitter's.
+          ...(options.derive === undefined
+            ? {}
+            : {
+                derive: {
+                  run: options.derive,
+                  logDir: join(options.workdir, "checks", `${branch}@${head}`, log.id, "compose"),
+                  tmpdir: join(options.workdir, "tmp"),
+                },
+              }),
+          message: [
+            `merge ${short(branch, head)} into ${queue}`,
+            "",
+            `Change: ${changeName({ branch, head })}`,
+            `Merged-By: ${mergedBy(queue, log.id)}`,
+            ...(selectedChange.issue === undefined ? [] : [`Issue: ${selectedChange.issue}`]),
+            ...(selectedChange.submitter === undefined ? [] : [`Submitter: ${selectedChange.submitter}`]),
+          ].join("\n"),
           process: options.process,
-          selection: options.selection,
-        },
-      }),
-    )
+          env: options.env,
+          hooksPath,
+          timed: (name, work) => timedStep(log, { branch, head, phase: "submit", name }, work),
+          worktree: {
+            plumbing,
+            env: options.env,
+            gitOptions,
+            populateReference: options.populateReference,
+            process: options.process,
+            selection: options.selection,
+          },
+        }),
+      )
+    } catch (error) {
+      if (!(error instanceof DeriveFailed)) throw error
+      const reason = `${DERIVE} stopped the compose: ${error.why}`
+      const ended = await appendOwnedChange(store, queue, branch, tip, { type: "stuck", at: new Date(), reason })
+      await writeStuckStop(branch, head, ended, reason)
+      await tell(branch, "stuck", ended)
+      writeStuck(branch, head, {
+        code: "yrd-derive-failed",
+        subject: reason,
+        via: `${DERIVE} in the compose of ${short(branch, head)}`,
+        next: "read the derive log, repair the derive command or what it reads, then resume the queue",
+      })
+      return result(2, observedMerged, failed, [branch])
+    }
+    if (verified.state === "verified" && verified.verifying.derived !== undefined) {
+      const { derived } = verified.verifying
+      log.write({
+        kind: "observation",
+        subject: DERIVE,
+        reason: `${derived.subject}: ${derived.submodules.map((row) => `${row.path} ${row.from.slice(0, 12)}..${row.to.slice(0, 12)}`).join(", ")}; composed ${derived.composed.slice(0, 12)} -> ${verified.verifying.candidate.slice(0, 12)} via carrier ${derived.carrier.slice(0, 12)}`,
+      })
+    }
     try {
       if (verified.state === "failed") {
         await timedStep(log, { branch, head, name: "remove", phase: "deprovision" }, () =>

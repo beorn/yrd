@@ -3713,6 +3713,8 @@ function runOptions(
     // A fresh worktree has submodules and no dependencies; `setup:` is what
     // finishes it, once per worktree, before any check runs in it.
     setup: config.setup,
+    // `derive:` regenerates what the merged gitlinks decide, inside the queue's compose (27176).
+    ...(config.derive === undefined ? {} : { derive: config.derive }),
     teardown: config.teardown,
     target: config.target,
     targetSha: oid,

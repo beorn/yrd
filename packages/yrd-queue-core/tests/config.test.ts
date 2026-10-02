@@ -46,6 +46,7 @@ describe("the queue declaration grammar", () => {
     const config = parseConfig(
       [
         "setup: bun install --frozen-lockfile",
+        "derive: bun tools/derive.ts",
         "teardown: bun run clean",
         "archive-after: never",
         "ignore: [draft/*, 'scratch/**']",
@@ -113,6 +114,7 @@ describe("the queue declaration grammar", () => {
         },
       ],
       setup: "bun install --frozen-lockfile",
+      derive: "bun tools/derive.ts",
       target: TARGET,
       teardown: "bun run clean",
     })
