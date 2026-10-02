@@ -111,27 +111,37 @@ describe("yrd env open prepares the retained environment", () => {
    * @consumer a caller opening a target whose submodule was added after its reference checkout
    * @testonly none
    */
-  it("names the adding commit when the reference predates a target submodule", async () => {
-    const w = await world(":")
-    const beforeAddition = (await w.git(["rev-parse", "HEAD"])).trim()
-    await addMaterializedDependency(w)
-    const addingCommit = (await w.git(["rev-parse", "HEAD"])).trim()
-    const reference = join(w.work, "..", "older-reference")
-    await w.git(["clone", "--quiet", w.work, reference])
-    await gitIn(reference)(["checkout", "--quiet", "--detach", beforeAddition])
-    isolateHome(reference)
-    const run = capture(reference)
+  it.each(["new path", "replaced file"])(
+    "names the adding commit when the reference predates a target submodule (%s)",
+    async (pathHistory) => {
+      const w = await world(":")
+      const beforeAddition = (await w.git(["rev-parse", "HEAD"])).trim()
+      if (pathHistory === "replaced file") {
+        mkdirSync(join(w.work, "vendor"))
+        writeFileSync(join(w.work, "vendor/dependency"), "previous file\n")
+        await w.git(["add", "vendor/dependency"])
+        await w.git(["commit", "--quiet", "-m", "add file before submodule"])
+        await w.git(["rm", "--quiet", "vendor/dependency"])
+      }
+      await addMaterializedDependency(w)
+      const addingCommit = (await w.git(["rev-parse", "HEAD"])).trim()
+      const reference = join(w.work, "..", "older-reference")
+      await w.git(["clone", "--quiet", w.work, reference])
+      await gitIn(reference)(["checkout", "--quiet", "--detach", beforeAddition])
+      isolateHome(reference)
+      const run = capture(reference)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "future-module"], run.io)).not.toBe(0)
+      expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "future-module"], run.io)).not.toBe(0)
 
-    expect(run.stderr()).toMatch(/reference.*predates.*add/isu)
-    expect(run.stderr()).toContain("vendor/dependency")
-    expect(run.stderr()).toContain(addingCommit.slice(0, 7))
-    expect(run.stderr()).toMatch(/retry.*reference.*at or after/isu)
-    expect(run.stderr()).not.toContain("was removed")
-    expect(run.stderr()).not.toMatch(/re-author/iu)
-    expect(existsSync(join(reference, ".bays", "future-module"))).toBe(false)
-  })
+      expect(run.stderr()).toMatch(/reference.*predates.*add/isu)
+      expect(run.stderr()).toContain("vendor/dependency")
+      expect(run.stderr()).toContain(addingCommit.slice(0, 7))
+      expect(run.stderr()).toMatch(/retry.*reference.*at or after/isu)
+      expect(run.stderr()).not.toContain("was removed")
+      expect(run.stderr()).not.toMatch(/re-author/iu)
+      expect(existsSync(join(reference, ".bays", "future-module"))).toBe(false)
+    },
+  )
 
   // A bead nested under another opens task/<parent>/<leaf> beside task/<parent>, and git stores a branch as a path,
   // so the raw refusal named neither cause nor way out (@dev/fixer, 25850 beside 25843, 2026-09-25).
