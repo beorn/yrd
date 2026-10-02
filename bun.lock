@@ -80,7 +80,7 @@
     },
   },
   "overrides": {
-    "git-super": "github:beorn/git-super#b1b4bda66e3dd5a7821250978eda443c23c18749",
+    "git-super": "github:beorn/git-super#2388283c26d52e0b28fe19b24e06e9583b2986c3",
     "gitomic": "github:beorn/gitomic#22862284c27c8a179e4dc018635d2832d6a86403",
     "loggily": "github:beorn/loggily#150970b79e8c9efb1833038bf98aabeb0b47413b",
   },
@@ -379,7 +379,7 @@
 
     "gifenc": ["gifenc@1.0.3", "", {}, "sha512-xdr6AdrfGBcfzncONUOlXMBuc5wJDtOueE3c5rdG0oNgtINLD+f2iFZltrBRZYzACRbKr+mSVU/x98zv2u3jmw=="],
 
-    "git-super": ["git-super@github:beorn/git-super#b1b4bda", { "dependencies": { "@bearly/flock": "0.2.2", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-b1b4bda", "sha512-57S2FbyflNiM0IB90pYLseoqBik1WIz5JcvXQSdNXB5KLnUcgHEDVgYVG1ByVymyaPqa2VVdR8QwDFprRZsybw=="],
+    "git-super": ["git-super@github:beorn/git-super#2388283", { "dependencies": { "@bearly/flock": "0.2.2", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-2388283", "sha512-DeSmYpsODLJPkZSLmYsR7gG9WTUFAj1ahbqjk4YCXw8qWEWj5kTx+p1iSTBgUvBnIbsR0gNEMNNJO7OiuFdZGw=="],
 
     "gitomic": ["gitomic@github:beorn/gitomic#2286228", { "dependencies": { "@bearly/cli-process": "^0.1.0", "@bearly/flock": "^0.2.2", "@bearly/pacing": "^0.1.0" }, "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-2286228", "sha512-3L2CGipNRaavbT6Bgl01gXbTkUmcjbdFrGdMjpFP4LOhou0pf5kfr5Mgc8UaMDxkpeOsS4eHKUCXkpkjlQrs7w=="],
 
