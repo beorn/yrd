@@ -17,7 +17,7 @@
  * have the worktree, the environment is not there.
  */
 
-import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace, worktreeHomeRoot, type ProvisionedBay } from "@yrd/bay"
 import {
@@ -352,8 +352,24 @@ export async function closeEnvironment(
     )
   }
   const treeGit = gitIn(path, process, selection)
-  await requireClean(treeGit, path)
   const commit = (await treeGit(["rev-parse", "HEAD"])).trim()
+  for (const privatePath of await declaredPrivateSubmodules(treeGit, path, commit)) {
+    const gitfile = join(path, privatePath, ".git")
+    try {
+      lstatSync(gitfile)
+    } catch (cause) {
+      const code = (cause as NodeJS.ErrnoException).code
+      if (code === "ENOENT" || code === "ENOTDIR") continue
+      throw new Error(`Cannot inspect private submodule gitfile ${gitfile}; environment ${path} was preserved`, {
+        cause,
+      })
+    }
+    throw new Error(
+      `environment ${path} cannot close with initialized private submodule ${privatePath}: ` +
+        "custody unproven until 27058's merge exclusion; operator decision pending. Keep this environment until that decision.",
+    )
+  }
+  await requireClean(treeGit, path)
   const config = await readConfig(treeGit, commit, { branch: "HEAD", remote: "origin" })
   if (config?.teardown !== undefined) {
     const artifacts = join(workdir, "logs", "environments", basename(path), runId())
