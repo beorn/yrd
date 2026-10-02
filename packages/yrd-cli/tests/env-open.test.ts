@@ -291,44 +291,73 @@ describe("yrd env open prepares the retained environment", () => {
     expect(typecheck.stdout).toContain("declared root typecheck ran")
   })
 
-  it.each(["--bay", "--issue"])("%s preserves a reopened branch and derives setup's tree", async (selector) => {
-    const w = await world('printf \'%s\\n%s\\n\' "$YRD_BASE_SHA" "$YRD_CANDIDATE_SHA" > setup-tree.txt')
-    const mergeBase = (await w.git(["rev-parse", "HEAD"])).trim()
-    await w.git(["checkout", "--quiet", "-b", "task/reopened"])
-    writeFileSync(join(w.work, "branch.txt"), "branch change\n")
-    await w.git(["add", "branch.txt"])
-    await w.git(["commit", "--quiet", "-m", "change on retained branch"])
-    const candidate = (await w.git(["rev-parse", "HEAD"])).trim()
-    await w.git(["checkout", "--quiet", "main"])
-    writeFileSync(join(w.work, "main.txt"), "target change\n")
-    await w.git(["add", "main.txt"])
-    await w.git(["commit", "--quiet", "-m", "advance target"])
-    await w.git(["push", "--quiet", "origin", "main"])
-    const run = capture(w.work)
+  /**
+   * @failure Retained branches were reported as starting at the requested target, with no reuse notice.
+   * @level l2 (real retained branch through CLI output and setup)
+   * @consumer seats resuming work through environment opening
+   */
+  it.each([
+    { selector: "--bay", diverged: true },
+    { selector: "--issue", diverged: true },
+    { selector: "--bay", diverged: false },
+    { selector: "--issue", diverged: false },
+  ])(
+    "$selector preserves a reopened branch and derives setup's tree (diverged=$diverged)",
+    async ({ selector, diverged }) => {
+      const w = await world('printf \'%s\\n%s\\n\' "$YRD_BASE_SHA" "$YRD_CANDIDATE_SHA" > setup-tree.txt')
+      const mergeBase = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["checkout", "--quiet", "-b", "task/reopened"])
+      if (diverged) {
+        writeFileSync(join(w.work, "branch.txt"), "branch change\n")
+        await w.git(["add", "branch.txt"])
+        await w.git(["commit", "--quiet", "-m", "change on retained branch"])
+      }
+      const candidate = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["checkout", "--quiet", "main"])
+      if (diverged) {
+        writeFileSync(join(w.work, "main.txt"), "target change\n")
+        await w.git(["add", "main.txt"])
+        await w.git(["commit", "--quiet", "-m", "advance target"])
+      }
+      await w.git(["push", "--quiet", "origin", "main"])
+      const target = (await w.git(["rev-parse", "main"])).trim()
+      const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened"], run.io), run.stderr()).toBe(0)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened", "--json"], run.io),
+        run.stderr(),
+      ).toBe(0)
 
-    const bay = join(w.work, ".bays", "reopened")
-    const openedGit = gitIn(bay)
-    const opened = (await openedGit(["rev-parse", "HEAD"])).trim()
-    if (selector === "--issue") {
-      expect((await openedGit(["rev-parse", "HEAD^"])).trim()).toBe(candidate)
-      expect((await openedGit(["rev-parse", "HEAD^{tree}"])).trim()).toBe(
-        (await w.git(["rev-parse", `${candidate}^{tree}`])).trim(),
-      )
-      expect(await openedGit(["log", "-1", "--format=%B"])).toContain("Refs: reopened")
-    } else expect(opened).toBe(candidate)
-    expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${opened}\n`)
+      const bay = join(w.work, ".bays", "reopened")
+      const openedGit = gitIn(bay)
+      const opened = (await openedGit(["rev-parse", "HEAD"])).trim()
+      expect.soft(JSON.parse(run.stdout())).toMatchObject({ base: candidate, head: opened })
+      expect.soft(run.stderr()).toMatch(/reus/iu)
+      expect.soft(run.stderr()).toContain("task/reopened")
+      expect.soft(run.stderr()).toContain(candidate)
+      expect.soft(run.stderr()).toContain(target)
+      if (selector === "--issue") {
+        expect((await openedGit(["rev-parse", "HEAD^"])).trim()).toBe(candidate)
+        expect((await openedGit(["rev-parse", "HEAD^{tree}"])).trim()).toBe(
+          (await w.git(["rev-parse", `${candidate}^{tree}`])).trim(),
+        )
+        expect(await openedGit(["log", "-1", "--format=%B"])).toContain("Refs: reopened")
+      } else expect(opened).toBe(candidate)
+      expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${opened}\n`)
 
-    await w.git(["worktree", "remove", "--force", bay])
-    const reopened = capture(w.work)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened"], reopened.io),
-      reopened.stderr(),
-    ).toBe(0)
-    expect((await gitIn(bay)(["rev-parse", "HEAD"])).trim()).toBe(opened)
-    expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${opened}\n`)
-  })
+      await w.git(["worktree", "remove", "--force", bay])
+      const reopened = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened"], reopened.io),
+        reopened.stderr(),
+      ).toBe(0)
+      expect.soft(reopened.stderr()).toMatch(/reus/iu)
+      expect.soft(reopened.stderr()).toContain(opened)
+      expect.soft(reopened.stderr()).toContain(target)
+      expect((await gitIn(bay)(["rev-parse", "HEAD"])).trim()).toBe(opened)
+      expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${opened}\n`)
+    },
+  )
 
   it("binds a fresh issue before setup and reports the exact binding head", async () => {
     const w = await world("printf '%s\\n' \"$YRD_CANDIDATE_SHA\" > setup-head.txt")
