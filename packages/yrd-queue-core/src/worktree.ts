@@ -29,6 +29,7 @@ import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type 
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
 import { GIT_SUPER_ABSENT_STORE, populateReferenceStores, ReferenceUnpopulated } from "./reference.ts"
+import { declaredPrivateSubmodules } from "./private-submodules.ts"
 import {
   GitExit,
   gitIn,
@@ -60,6 +61,13 @@ export type Worktree = Readonly<{
   path: string
   /** The commit it holds. */
   commit: string
+  /**
+   * The root-relative submodule paths `commit` declares `private = true`, left
+   * empty and uninitialized (27147). Read once, here, at the commit the tree
+   * holds; every later git-super call in the same compose passes this list, so
+   * no call excludes a path the tree materialized or the reverse.
+   */
+  excludedSubmodules: readonly string[]
   /** Remove the worktree and everything under it. */
   remove(): Promise<void>
 }>
@@ -79,13 +87,6 @@ export type FreshWorktree = Readonly<{
    * that decision.
    */
   populateReference?: boolean
-  /**
-   * Root-relative submodule paths git-super leaves empty and uninitialized, with
-   * no init, store or gitfile (27147). `yrd env open` passes the paths the commit
-   * declares `private = true`; the queue's own trees pass nothing until merge
-   * excludes them too (27058).
-   */
-  excludedSubmodules?: readonly string[]
   plumbing?: PlumbingLog
   /** The command's fixed selection and invocation evidence, for the reference stores as for the tree. */
   selection?: GitSelection
@@ -118,6 +119,7 @@ export async function freshWorktree(
   // Query the selected commit, not the reference checkout's working tree.
   // An invalid commit makes ls-tree fail; only empty output means absence.
   const modules = await git(["ls-tree", commit, "--", ".gitmodules"])
+  let excluded: readonly string[] = []
   if (modules.trim() === "") {
     // A commit that declares no submodules has no boundary for git-super to
     // cross. `worktreeWithoutSubmodules` re-asks that question rather than
@@ -125,13 +127,9 @@ export async function freshWorktree(
     // take the plain path with a submodule-bearing commit.
     await worktreeWithoutSubmodules(git, git, commit, ["add", "--quiet", "--detach", path, commit])
   } else {
-    const excluded = options.excludedSubmodules ?? []
-    if (options.populateReference === true && excluded.length > 0) {
-      throw new Error(
-        `freshWorktree: populating the reference cannot honour excluded submodules (${excluded.join(", ")}) yet; ` +
-          "the queue's trees exclude private submodules only after 27058's merge exclusion",
-      )
-    }
+    // 27147: a submodule the commit declares `private = true` is never
+    // materialized, and its store is never populated or read.
+    excluded = await declaredPrivateSubmodules(git, resolve(repo), commit)
     if (options.populateReference === true) {
       const selection =
         options.selection ?? (await resolveGitSelection(repo, { process: options.process, env: options.env }))
@@ -156,6 +154,7 @@ export async function freshWorktree(
           })
         },
         commit,
+        excludedSubmodules: excluded,
         gitIn: gitAt,
         populated: (store) => {
           plumbing?.journal?.({ head: commit, kind: "reference", ms: store.ms, path: store.path, sha: store.sha })
@@ -232,6 +231,7 @@ export async function freshWorktree(
   }
   return {
     commit,
+    excludedSubmodules: excluded,
     path,
     remove: async () => {
       await removeWorktree(git, path)

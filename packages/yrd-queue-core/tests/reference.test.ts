@@ -775,6 +775,8 @@ describe("freshWorktree", () => {
     const stubbed = async (args: readonly string[]): Promise<string> => {
       if (args[0] === "ls-tree") return `100644 blob 0\t.gitmodules\n`
       if (args[0] === "super") return JSON.stringify(composed)
+      // The private-submodule declaration (27147) is read from the real commit.
+      if (args[0] === "config") return gitIn(repo)(args)
       throw new Error(`the degraded-compose stub was asked for ${args.join(" ")}`)
     }
 
