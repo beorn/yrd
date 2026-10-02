@@ -13,7 +13,7 @@ export { yrdQueueRunnerDeclarations, type YrdQueueRunnerDeclaration }
 
 export default {
   name: "yrd",
-  services: Object.fromEntries(
+  habitants: Object.fromEntries(
     yrdQueueRunnerDeclarations.map(({ serviceName, owner }) => [
       serviceName,
       {
