@@ -1,7 +1,16 @@
 import { spawnSync } from "node:child_process"
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
+import { hostname, tmpdir } from "node:os"
+import { dirname, join, resolve } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import { createScriptedProcess, exitedResult } from "@yrd/process/testing/scripted-process"
@@ -33,6 +42,8 @@ it("requires a Git runner's fixed selection before opening Gitomic", () => {
   expect(gitRunner.selectionFor(runner)).toBe(selected)
   expect(gitRunner.executableFor(runner)).toBe(selected.executable)
   expect(() => gitRunner.selectionFor(async () => "")).toThrow(/needs a Yrd Git runner with a resolved selection/u)
+  const bare = Object.assign(async () => "", { selection: selected })
+  expect(() => gitRunner.runnerFor(bare)).toThrow(/requires GitRunner.at and its backend/u)
 })
 
 function temporaryRoot(name: string): string {
@@ -73,20 +84,67 @@ describe("the git runner", () => {
     }
     const own = seed(directory, "public-own\n")
     const borrowed = seed(alternate, "public-alternate\n")
+    const trace = join(root, "object-environment.jsonl")
     const git = gitIn(root, undefined, undefined, {
       env: {
         ...process.env,
+        PATH: `${dirname(gitSuperBin)}:${process.env.PATH}`,
+        GIT_DIR: "/absent-ambient-git",
+        GIT_WORK_TREE: "/absent-ambient-worktree",
         GIT_OBJECT_DIRECTORY: "/absent-ambient-objects",
         GIT_ALTERNATE_OBJECT_DIRECTORIES: "/absent-ambient-alternates",
+        GIT_TRACE2_EVENT: trace,
+        GIT_TRACE2_ENV_VARS: "GIT_OBJECT_DIRECTORY,GIT_ALTERNATE_OBJECT_DIRECTORIES",
       },
       objects: { directory, alternates: [alternate] },
     })
     expect(await git(["cat-file", "blob", own])).toBe("public-own\n")
     const child = git.at(childRoot)
     expect(await child(["cat-file", "blob", borrowed])).toBe("public-alternate\n")
+    const traceValues = (text: string) =>
+      text
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { event: string; param?: string; value?: string })
+        .filter((row) => row.event === "def_param" && row.param?.startsWith("GIT_") === true)
+        .map(({ param, value }) => [param, value])
+    const directTrace = readFileSync(trace, "utf8")
+    const expectedVariables = [
+      ["GIT_OBJECT_DIRECTORY", directory],
+      ["GIT_ALTERNATE_OBJECT_DIRECTORIES", alternate],
+    ]
+    expect(traceValues(directTrace)).toEqual(expect.arrayContaining(expectedVariables))
     const blobs = await child.backend.readBlobs(childRoot, [own, borrowed])
     expect(blobs.get(own)).toBe("public-own\n")
     expect(blobs.get(borrowed)).toBe("public-alternate\n")
+    expect(traceValues(readFileSync(trace, "utf8").slice(directTrace.length))).toEqual(
+      expect.arrayContaining(expectedVariables),
+    )
+    const ref = "refs/yrd/public-object-proof"
+    expect(await child.backend.compareAndSwap(childRoot, ref, borrowed, "0".repeat(40))).toBe("swapped")
+    expect((await child(["rev-parse", ref])).trim()).toBe(borrowed)
+    expect(await child.backend.compareAndSwap(childRoot, ref, own, "0".repeat(40))).toBe("moved")
+    expect((await child(["rev-parse", ref])).trim()).toBe(borrowed)
+
+    await child(["config", "user.name", "fixture"])
+    await child(["config", "user.email", "fixture@yrd.test"])
+    await child(["commit", "--quiet", "--allow-empty", "-m", "public base"])
+    const base = (await child(["rev-parse", "HEAD"])).trim()
+    writeFileSync(join(childRoot, "feature.txt"), "public feature\n")
+    await child(["add", "feature.txt"])
+    await child(["commit", "--quiet", "-m", "public feature"])
+    const feature = (await child(["rev-parse", "HEAD"])).trim()
+    await child(["checkout", "--quiet", "--detach", base])
+    const composed = await gitSuperExecution({ git }, childRoot, [
+      "merge",
+      feature,
+      "-m",
+      "public candidate",
+      "--no-fetch",
+    ])
+    expect(composed.exitCode, composed.stderr || composed.stdout).toBe(0)
+    expect(JSON.parse(composed.stdout)).toMatchObject({ state: "updated", partial: false })
+    expect(await child(["show", "HEAD:feature.txt"])).toBe("public feature\n")
   })
 
   it("refuses missing explicit public objects before any Git spawn", () => {
@@ -103,6 +161,77 @@ describe("the git runner", () => {
         },
       ),
     ).toThrow(`public object directory ${directory}`)
+    mkdirSync(directory)
+    const alternate = join(root, "missing-alternate")
+    const selected = { executable, contract: "native", scope: "local", origin: "fixture" } as const
+    expect(() => gitIn(root, undefined, selected, { objects: { directory, alternates: [alternate] } })).toThrow(
+      `public object alternate ${alternate}`,
+    )
+    mkdirSync(alternate)
+    chmodSync(alternate, 0)
+    try {
+      expect(() => gitIn(root, undefined, selected, { objects: { directory, alternates: [alternate] } })).toThrow(
+        `public object alternate ${alternate}`,
+      )
+    } finally {
+      chmodSync(alternate, 0o700)
+    }
+    chmodSync(directory, 0)
+    try {
+      expect(() => gitIn(root, undefined, selected, { objects: { directory } })).toThrow(
+        `public object directory ${directory}`,
+      )
+    } finally {
+      chmodSync(directory, 0o700)
+    }
+  })
+
+  // @failure: omission of explicit objects changes the existing routing scrub or committer environment.
+  // @level l2; @consumer ordinary submit; @testonly none
+  // The selected-object journey cannot prove the compatibility contract when objects are omitted.
+  it("keeps the scrubbed child environment unchanged when public objects are omitted", async () => {
+    const root = temporaryRoot("omitted-objects")
+    await gitIn(root)(["init", "--quiet"])
+    await using real = createProcess({ cwd: root })
+    let observed: NodeJS.ProcessEnv | undefined
+    const git = gitIn(
+      root,
+      {
+        async run(request) {
+          observed = request.env
+          return real.run(request)
+        },
+      },
+      undefined,
+      {
+        env: {
+          PATH: process.env.PATH,
+          KEEP: "literal-value",
+          OMIT: undefined,
+          GIT_DIR: "/absent-git",
+          GIT_WORK_TREE: "/absent-worktree",
+          GIT_OBJECT_DIRECTORY: "/absent-objects",
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: "/absent-alternates",
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "protocol.file.allow",
+          GIT_CONFIG_VALUE_0: "always",
+        },
+      },
+    )
+    expect((await git(["rev-parse", "--show-toplevel"])).trim()).toBe(root)
+    expect(observed).toEqual({
+      PATH: process.env.PATH,
+      KEEP: "literal-value",
+      GIT_COMMITTER_EMAIL: `yrd@${hostname()}`,
+      GIT_COMMITTER_NAME: "yrd",
+      GIT_CONFIG_COUNT: "3",
+      GIT_CONFIG_KEY_0: "protocol.file.allow",
+      GIT_CONFIG_VALUE_0: "always",
+      GIT_CONFIG_KEY_1: "fetch.recurseSubmodules",
+      GIT_CONFIG_VALUE_1: "no",
+      GIT_CONFIG_KEY_2: "push.recurseSubmodules",
+      GIT_CONFIG_VALUE_2: "no",
+    })
   })
 
   // 25282: a settled SSH refusal used to end the read immediately. This test
