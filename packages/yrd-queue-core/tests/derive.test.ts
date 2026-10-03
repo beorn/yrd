@@ -17,7 +17,6 @@ import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 import { testGitIn as rawGitIn } from "../../../tests/support/test-git-in.ts"
 import { DeriveFailed, deriveInWorktree } from "../src/derive.ts"
 import { verifyCandidate } from "../src/verifying.ts"
-import type { Git } from "../src/git.ts"
 import { createEventQueue, createEventStore, queueRun, readConfig, submit } from "../src/index.ts"
 
 const roots: string[] = []
@@ -28,7 +27,7 @@ afterAll(() => {
 type World = Readonly<{
   root: string
   work: string
-  git: Git
+  git: ReturnType<typeof rawGitIn>
   childRemote: string
   target: string
   head: string
