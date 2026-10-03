@@ -59,7 +59,15 @@ import { withRemoteSeam } from "./remote-calls.ts"
 /** Outward submission evidence observes the candidate rather than relabelling the producer's claims. */
 export type SubmitGitlink = Readonly<
   Omit<SettledGitlink, "state"> &
-    ({ state: "not-run" } | { state: Exclude<SettledGitlink["state"], "not-run">; recorded: string })
+    (
+      | { state: "not-run" }
+      | {
+          state: Exclude<SettledGitlink["state"], "not-run">
+          recorded: string
+          authorHead: string
+          landingPin: string
+        }
+    )
 >
 
 export type SubmitVerification =
@@ -87,7 +95,9 @@ async function submissionReceipt(git: Git, verifying: Verification): Promise<Sub
         `submission receipt ${row.path} state ${row.state}: producer ${expected}, candidate tree ${recorded ?? "absent"} at ${verifying.candidate}`,
       )
     }
-    return { ...row, recorded }
+    const authorHead = row.state === "merged" && row.composition?.pin ? row.composition.pin : row.from
+    const landingPin = row.state === "raised" ? row.to : row.from
+    return { ...row, recorded, authorHead, landingPin }
   })
   return { ...verifying, gitlinks }
 }
