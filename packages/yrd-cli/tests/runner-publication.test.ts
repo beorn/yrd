@@ -495,5 +495,68 @@ describe("runner ref publication", () => {
       expect(published.signal).toBe("unreadable")
       expect(published.why).toContain(`git fetch no-such-remote ${f.ref} failed:`)
     })
+
+    /**
+     * @failure An INDETERMINATE object query (corruption, permission, transport) was swallowed
+     *          into absence, so the reader fetched over the network and reported "not fetched"
+     *          instead of the real cause. @level l2
+     */
+    it("names an initial object query that failed and does not fetch on a guess", async () => {
+      const f = await unfetchedFixture()
+      const fetches: string[][] = []
+      let queries = 0
+      const failing = async (args: readonly string[], input?: string): Promise<string> => {
+        if (args[0] === "cat-file") {
+          queries += 1
+          throw new Error("simulated object query failure: repository index is corrupt")
+        }
+        if (args[0] === "fetch") fetches.push([...args])
+        return await f.reader(args, input)
+      }
+
+      const published = await readPublishedRunner(failing, "main", "origin", f.tip)
+
+      expect(published.signal).toBe("unreadable")
+      expect(queries, "the probe is asked exactly once").toBe(1)
+      expect(fetches, "an indeterminate query must not license a network fetch").toEqual([])
+      expect(published.why, "the query command is preserved").toContain(
+        "git cat-file --batch-check=%(objectname) %(objecttype)",
+      )
+      expect(published.why, "the tip is preserved").toContain(f.tip)
+      expect(published.why, "the location is preserved").toContain(`origin ${f.ref}`)
+      expect(published.why, "the cause is preserved").toContain("simulated object query failure")
+    })
+
+    /**
+     * @failure A query that fails AFTER a successful fetch was reported as "left the object
+     *          absent", hiding the fault behind the one outcome the fetch already ruled out.
+     *          @level l2
+     */
+    it("names a failed object query after a successful fetch instead of calling the object absent", async () => {
+      const f = await unfetchedFixture()
+      const fetches: string[][] = []
+      let queries = 0
+      const flaky = async (args: readonly string[], input?: string): Promise<string> => {
+        if (args[0] === "cat-file") {
+          queries += 1
+          if (queries === 2) throw new Error("simulated query failure after fetch")
+          return await f.reader(args, input)
+        }
+        if (args[0] === "fetch") fetches.push([...args])
+        return await f.reader(args, input)
+      }
+
+      const published = await readPublishedRunner(flaky, "main", "origin", f.tip)
+
+      expect(published.signal).toBe("unreadable")
+      expect(queries, "one probe before the fetch, one after").toBe(2)
+      expect(fetches, "the proved-missing tip is still fetched once").toHaveLength(1)
+      expect(published.why, "absence is not claimed when the query failed").not.toContain("left the object absent")
+      expect(published.why, "the successful fetch is named").toContain(`git fetch origin ${f.ref}`)
+      expect(published.why, "the failed query command is named").toContain(
+        "git cat-file --batch-check=%(objectname) %(objecttype)",
+      )
+      expect(published.why, "the cause is preserved").toContain("simulated query failure after fetch")
+    })
   })
 })

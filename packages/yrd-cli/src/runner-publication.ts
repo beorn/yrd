@@ -76,14 +76,40 @@ async function claimAt(git: Git, oid: string, ref: string): Promise<RunnerClaim>
   return parseRunnerClaim(await git(["show", "-s", "--format=%B", oid]))
 }
 
-/** Whether this repository already holds the object, without touching the network. */
-async function holdsObject(git: Git, oid: string): Promise<boolean> {
+type ObjectPresence =
+  | { readonly kind: "present" }
+  | { readonly kind: "missing" }
+  | { readonly kind: "indeterminate"; readonly why: string }
+
+const PRESENCE_QUERY = "git cat-file --batch-check=%(objectname) %(objecttype)"
+
+/**
+ * Whether this repository already holds the object, without touching the network.
+ *
+ * `git cat-file --batch-check` ANSWERS for an object it does not hold (`<oid> missing`), so
+ * absence is data rather than an exception. A command failure or an answer we cannot parse is an
+ * INDETERMINATE query: a permission, corruption or transport fault must never be read as absence,
+ * because absence licenses a network fetch and an "unreadable: not fetched" cause (#27264). Same
+ * plumbing contract as `yrd-queue-core/src/drafts.ts` presentCommits.
+ */
+async function objectPresence(git: Git, oid: string): Promise<ObjectPresence> {
+  const query = `${PRESENCE_QUERY} (stdin: ${oid})`
+  let answer: string
   try {
-    await git(["cat-file", "-e", oid])
-    return true
-  } catch {
-    return false
+    answer = await git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], `${oid}\n`)
+  } catch (error) {
+    return {
+      kind: "indeterminate",
+      why: `${query} failed for ${oid}: ${error instanceof Error ? error.message : String(error)}`,
+    }
   }
+  const [name, type] = answer.trim().split(/\s+/u)
+  if (name !== oid) {
+    return { kind: "indeterminate", why: `${query} answered ${JSON.stringify(answer.trim())} for ${oid}` }
+  }
+  if (type === "commit") return { kind: "present" }
+  if (type === "missing") return { kind: "missing" }
+  return { kind: "indeterminate", why: `${query} answered ${JSON.stringify(answer.trim())} for ${oid}` }
 }
 
 /**
@@ -103,7 +129,11 @@ export async function readPublishedRunner(
   const ref = runnerRef(queue)
   if (tip === undefined) return { signal: "absent", why: `${remote} ${ref} is absent` }
   const fetchCommand = `git fetch ${remote} ${ref}`
-  if (!(await holdsObject(git, tip))) {
+  const initial = await objectPresence(git, tip)
+  if (initial.kind === "indeterminate") {
+    return { signal: "unreadable", why: `${remote} ${ref} at ${tip} could not be read: ${initial.why}` }
+  }
+  if (initial.kind === "missing") {
     try {
       await git(["fetch", "--no-tags", "--quiet", remote, ref])
     } catch (error) {
@@ -114,7 +144,14 @@ export async function readPublishedRunner(
         }`,
       }
     }
-    if (!(await holdsObject(git, tip))) {
+    const afterFetch = await objectPresence(git, tip)
+    if (afterFetch.kind === "indeterminate") {
+      return {
+        signal: "unreadable",
+        why: `${remote} ${ref} at ${tip} could not be read: object query failed after ${fetchCommand} succeeded: ${afterFetch.why}`,
+      }
+    }
+    if (afterFetch.kind === "missing") {
       return {
         signal: "unreadable",
         why: `${remote} ${ref} at ${tip} could not be read: not fetched; ${fetchCommand} left the object absent`,
