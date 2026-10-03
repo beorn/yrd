@@ -32,6 +32,7 @@ import {
 } from "../src/index.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runnerFor } from "../src/git.ts"
+import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -1104,10 +1105,11 @@ describe("event submit", () => {
     const targetHead = (await w.git(["rev-parse", "refs/heads/main"])).trim()
     await using real = createProcess({ cwd: w.work })
     const recordedArgvs: (readonly string[])[] = []
+    const executable = join(gitSuperBin, "git-super")
     const recording: Process = {
       ...real,
       async run(request) {
-        if (request.argv.includes("super") && request.argv.includes("merge")) {
+        if (request.argv[0] === executable && request.argv.includes("merge")) {
           recordedArgvs.push(request.argv)
         }
         return real.run(request)
@@ -1132,10 +1134,9 @@ describe("event submit", () => {
       rmSync(scratch, { recursive: true, force: true })
     }
     expect(recordedArgvs).toEqual([
-      ["git", "super", "--json", "merge", head, "-m", "verify candidate with noFetch", "--no-fetch"],
+      [executable, "--json", "merge", head, "-m", "verify candidate with noFetch", "--no-fetch"],
       [
-        "git",
-        "super",
+        executable,
         "--json",
         "merge",
         head,
