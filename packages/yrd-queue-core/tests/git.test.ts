@@ -18,6 +18,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import * as gitRunner from "../src/git.ts"
 import { openLog, readRunLog } from "../src/log.ts"
 import { gitSuperExecution } from "../src/verifying.ts"
+import { freshWorktree } from "../src/worktree.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
 if (false) {
@@ -128,6 +129,27 @@ describe("the git runner", () => {
 
     await child(["config", "user.name", "fixture"])
     await child(["config", "user.email", "fixture@yrd.test"])
+    const nestedRoot = join(childRoot, "nested")
+    mkdirSync(nestedRoot)
+    const nested = child.at(nestedRoot)
+    await nested(["init", "--quiet"])
+    await nested(["config", "user.name", "fixture"])
+    await nested(["config", "user.email", "fixture@yrd.test"])
+    await nested(["remote", "add", "origin", "https://github.com/yrd-context-fixture/nested.git"])
+    await child(["remote", "add", "origin", "https://github.com/yrd-context-fixture/root.git"])
+    writeFileSync(join(nestedRoot, "nested.txt"), "public nested\n")
+    await nested(["add", "nested.txt"])
+    await nested(["commit", "--quiet", "-m", "public nested base"])
+    const nestedHead = (await nested(["rev-parse", "HEAD"])).trim()
+    const nestedBranch = (await nested(["symbolic-ref", "--short", "HEAD"])).trim()
+    await nested(["update-ref", `refs/remotes/origin/${nestedBranch}`, nestedHead])
+    writeFileSync(
+      join(childRoot, ".gitmodules"),
+      `[submodule "nested"]\n\tpath = nested\n\turl = https://github.com/yrd-context-fixture/nested.git\n\tbranch = ${nestedBranch}\n`,
+    )
+    await child(["update-index", "--add", "--cacheinfo", `160000,${nestedHead},nested`])
+    await child(["add", ".gitmodules"])
+    await child(["config", "submodule.nested.ignore", "all"])
     await child(["commit", "--quiet", "--allow-empty", "-m", "public base"])
     const base = (await child(["rev-parse", "HEAD"])).trim()
     writeFileSync(join(childRoot, "feature.txt"), "public feature\n")
@@ -141,10 +163,25 @@ describe("the git runner", () => {
       "-m",
       "public candidate",
       "--no-fetch",
+      "--unbounded-local-main",
     ])
     expect(composed.exitCode, composed.stderr || composed.stdout).toBe(0)
     expect(JSON.parse(composed.stdout)).toMatchObject({ state: "updated", partial: false })
     expect(await child(["show", "HEAD:feature.txt"])).toBe("public feature\n")
+    // Creation takes a separate Git-super child; composition alone cannot prove its carrier.
+    const worktreePath = join(root, "candidate-worktree")
+    const materialized = await freshWorktree(child, childRoot, feature, worktreePath)
+    expect(await child.at(worktreePath)(["show", "HEAD:feature.txt"])).toBe("public feature\n")
+    const beforeRemove = readFileSync(trace, "utf8").length
+    await materialized.remove()
+    expect(existsSync(worktreePath)).toBe(false)
+    const removeVariables = traceValues(readFileSync(trace, "utf8").slice(beforeRemove))
+    expect(removeVariables).toEqual(expect.arrayContaining(expectedVariables))
+    expect(
+      removeVariables.every(([name, value]) =>
+        expectedVariables.some(([key, selected]) => name === key && value === selected),
+      ),
+    ).toBe(true)
   })
 
   it("refuses missing explicit public objects before any Git spawn", () => {
