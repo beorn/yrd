@@ -57,7 +57,7 @@
   },
   "overrides": {
     "git-super": "github:beorn/git-super#44366df27c43824f6640dd089cee6e5f63c6c507",
-    "gitomic": "github:beorn/gitomic#029aa460ea23753c56fc20014566ad62bb6e4d1c",
+    "gitomic": "github:beorn/gitomic#5f763a6625c36047d76e09e311b39a871707873d",
     "loggily": "github:beorn/loggily#4fd5b54274d19734ca07f30eb68f673c1da96e3c"
   }
 }
