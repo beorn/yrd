@@ -133,7 +133,7 @@ describe("`yrd withdraw` is `yrd queue withdraw`", () => {
     const aliasHelp = await yrd(work, "withdraw", "--help")
     expect(canonicalHelp.exitCode, canonicalHelp.report).toBe(0)
     expect(aliasHelp.exitCode, aliasHelp.report).toBe(0)
-    expect(flagsOf(aliasHelp.stdout)).toEqual(["--json", "--notify", "--queue", "--reason"])
+    expect(flagsOf(aliasHelp.stdout)).toEqual(["--json", "--notify", "--queue", "--reason", "--submitter"])
     expect(flagsOf(aliasHelp.stdout)).toEqual(flagsOf(canonicalHelp.stdout))
     // One explanation, on both spellings.
     for (const help of [canonicalHelp, aliasHelp]) {

@@ -69,7 +69,14 @@ type SubmitOptions = Readonly<{
   queue?: string
   gitlink?: string[]
 }>
-type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string; maintenance?: string }>
+type PauseOptions = Readonly<{
+  json?: boolean
+  notify?: string
+  submitter?: string
+  queue?: string
+  reason?: string
+  maintenance?: string
+}>
 type MergeOptions = Readonly<{
   json?: boolean
   submitter?: string
@@ -213,18 +220,26 @@ function buildProgram(
   const withdrawOptions = <T extends { option: (flags: string, description: string) => T }>(command: T): T =>
     command
       .option("--json", "emit stable JSON")
-      .option("--notify <seat>", "name who withdrew the change")
+      .option("--submitter <agent>", SUBMITTER_HELP)
+      .option("--notify <seat>", "the notified seat; it no longer names the actor (27262)")
       .option("--queue <value>", QUEUE_HELP)
       .option("--reason <text>", "why the change leaves the line, written on the record")
   const queueEnd = async (branch: string, options: PauseOptions, command: "withdraw" | "drop"): Promise<void> => {
     const location = await resolveQueueLocation(cwd(), options.queue, env)
+    if (options.notify !== undefined) {
+      io.stderr(
+        "yrd: `--notify` on withdraw names the notified seat, not the actor; the actor is `--submitter` (or " +
+          DEFAULT_SUBMITTER_ENV +
+          ")\n",
+      )
+    }
     setExit(
       await coreQueueCommand(
         location.repo,
         io,
         {
           branch,
-          by: resolveSubmitter(options.notify, env),
+          by: resolveSubmitter(options.submitter, env),
           command,
           ...(options.reason === undefined ? {} : { reason: options.reason }),
         },
