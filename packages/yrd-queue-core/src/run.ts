@@ -50,6 +50,8 @@ export type QueueRunOptions = Readonly<{
   checks: readonly CheckSpec[]
   /** The target's `setup:`: one shell command run in every worktree this run makes, before any check runs in it. */
   setup?: string
+  /** The target's `derive:`: run once in each composed merge before it is verified (derive.ts). */
+  derive?: string
   /** The target's retained-environment teardown; event queues refuse it until #25065 defines its event evidence. */
   teardown?: string
   /** The blob the checks were read from, recorded on every checked record. */
