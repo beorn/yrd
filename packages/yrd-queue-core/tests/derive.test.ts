@@ -6,6 +6,7 @@
  * conflict on it; or the queue's regeneration leaves the candidate without a frozen publication intent.
  * @level l2
  * @consumer the event queue's compose step (event-run.ts) through verifyCandidate
+ * @testonly none
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
