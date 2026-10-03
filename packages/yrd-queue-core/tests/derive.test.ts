@@ -194,7 +194,7 @@ async function compose(w: World, run: string | undefined, path: string, process?
     targetHead: w.target,
     head: w.head,
     path: join(w.root, "candidates", path),
-    message: "merge task/bump into main\n\nChange: task/bump\nMerged-By: yrd",
+    message: `merge task/bump@${w.head.slice(0, 12)} into main\n\nChange: task/bump\nMerged-By: yrd`,
     noFetch: true,
     // As the queue runs it: the derived child objects are adopted into the queue clone's stores before the
     // worktree goes, which is where publication reads them.
@@ -228,8 +228,9 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
     expect(derived.subject).toBe("chore(lib): derived.txt follows lib two")
     expect((await lib(["show", `${pin}:derived.txt`])).trim()).toBe("derived-from: two")
     expect((await lib(["show", "-s", "--format=%P", pin])).trim()).toBe(l2)
-    // The candidate's message keeps the change's trailers and says what it is.
+    // Landing readers use one canonical subject; derivation details stay in the body (27205).
     const message = await w.git(["show", "-s", "--format=%B", candidate])
+    expect(message.split("\n")[0]).toBe(`merge task/bump@${w.head.slice(0, 12)} into main`)
     expect(message).toContain("derived into")
     expect(message).toContain("Change: task/bump")
     expect(message).toMatch(/Git-Super-Push:/u)
