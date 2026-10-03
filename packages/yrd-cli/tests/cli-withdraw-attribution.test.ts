@@ -3,8 +3,10 @@
  *           the change's canceller instead of the actor who ran the command
  *           (27262). Withdraw/drop expose only `--notify`, so it fills `By:`,
  *           and a reader of the cancelled record names the wrong seat.
+ * @level    l2 (the public CLI, real worktrees, real queue refs)
  * @consumer the operator or agent ending a change, and every reader of the
  *           cancelled record (`yrd queue show`, bead close, the /yrd skill)
+ * @testonly none
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
