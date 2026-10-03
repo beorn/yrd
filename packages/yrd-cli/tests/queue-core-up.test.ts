@@ -1065,34 +1065,43 @@ describe("yrd queue up, the service", () => {
   // the queue runs the key, submit only addresses the queue — but it is said on
   // stderr, with the cure. Service rereads (`up`) stay strict: a key they cannot
   // read is a step they would skip.
-  it("submit tolerates a top-level declaration key newer than its parser, out loud", async () => {
-    const w = await world()
-    await redeclare(w, "later: bun tools/later.ts\n")
-    const branch = "task/newer-key"
-    await w.git(["checkout", "--quiet", "-b", branch, "main"])
-    writeFileSync(join(w.work, "change.txt"), "candidate\n")
-    await w.git(["add", "change.txt"])
-    await w.git(["commit", "--quiet", "-m", "a change against a newer declaration\n\nRefs: 27187"])
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    const run = capture(w.work)
-    await expect(
-      coreQueueCommand(
-        w.work,
-        run.io,
-        { branch, command: "submit", submitter: "@dev/3" },
-        { json: true, workdir: w.workdir },
-      ),
-    ).resolves.toBe(0)
-    expect(records(run)[0]).toMatchObject({ head })
-    expect(run.stderr()).toContain("has a key this environment's Yrd does not know: later:")
-    expect(run.stderr()).toContain("The queue runs it; submit does not")
-    expect(run.stderr()).toContain("Update this environment's Yrd to the one the target pins")
-    // The service's own read of the same declaration refuses it: it would run the key.
-    const up = capture(w.work)
-    await expect(
-      coreQueueCommand(w.work, up.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir }),
-    ).rejects.toThrow(/the declaration at origin\/main cannot be read: \.yrd\.yml: unknown key later/u)
-  }, 30_000)
+  // First-submit queue creation rereads the declaration; an existing queue cannot cover that path.
+  it.each([true, false])(
+    "submit tolerates a top-level declaration key newer than its parser, out loud (existing queue: %s)",
+    async (eventQueue) => {
+      using creationWarning = vi.spyOn(console, "warn").mockImplementation(() => {})
+      const w = await world(eventQueue)
+      await redeclare(w, "later: bun tools/later.ts\n")
+      const branch = "task/newer-key"
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, "change.txt"), "candidate\n")
+      await w.git(["add", "change.txt"])
+      await w.git(["commit", "--quiet", "-m", "a change against a newer declaration\n\nRefs: 27187"])
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      const run = capture(w.work)
+      await expect(
+        coreQueueCommand(
+          w.work,
+          run.io,
+          { branch, command: "submit", submitter: "@dev/3" },
+          { json: true, workdir: w.workdir },
+        ),
+      ).resolves.toBe(0)
+      expect(records(run)[0]).toMatchObject({ head })
+      expect(run.stderr()).toContain("has a key this environment's Yrd does not know: later:")
+      expect(run.stderr()).toContain("The queue runs it; submit does not")
+      expect(run.stderr()).toContain("Update this environment's Yrd to the one the target pins")
+      if (!eventQueue) {
+        expect(creationWarning).toHaveBeenCalledWith(expect.stringContaining("newer declaration keys later:"))
+      }
+      // The service's own read of the same declaration refuses it: it would run the key.
+      const up = capture(w.work)
+      await expect(
+        coreQueueCommand(w.work, up.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir }),
+      ).rejects.toThrow(/the declaration at origin\/main cannot be read: \.yrd\.yml: unknown key later/u)
+    },
+    30_000,
+  )
 
   // Accepted: a legacy protected declaration and its absent successor cannot
   // open a submission; malformed LOCAL hints still diagnose and reach a valid
