@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
 
 /**
  * The superproject's sibling checkout, `vendor/git-super/bin`. Inside hh this sibling is the pin every
@@ -21,7 +20,7 @@ export const superprojectRoot = execFileSync("git", ["-C", yrdRoot, "rev-parse",
 export const gitSuperBin =
   superprojectRoot !== ""
     ? siblingGitSuperBin
-    : join(dirname(fileURLToPath(import.meta.resolve("git-super/package.json"))), "bin")
+    : join(dirname(Bun.resolveSync("git-super/package.json", yrdRoot)), "bin")
 
 if (!existsSync(join(gitSuperBin, "git-super"))) {
   throw new Error(`git-super bin not found for ${superprojectRoot || "standalone yrd"}: ${gitSuperBin}/git-super`)
