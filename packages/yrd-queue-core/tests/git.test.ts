@@ -25,7 +25,7 @@ import { createScriptedProcess, exitedResult } from "@yrd/process/testing/script
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import * as gitRunner from "../src/git.ts"
 import { openLog, readRunLog } from "../src/log.ts"
-import { gitSuperExecution } from "../src/verifying.ts"
+import { gitSuperExecution, verifyCandidate } from "../src/verifying.ts"
 import { freshWorktree } from "../src/worktree.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
@@ -176,6 +176,28 @@ describe("the git runner", () => {
     expect(composed.exitCode, composed.stderr || composed.stdout).toBe(0)
     expect(JSON.parse(composed.stdout)).toMatchObject({ state: "updated", partial: false })
     expect(await child(["show", "HEAD:feature.txt"])).toBe("public feature\n")
+    // The queue supplies an existing Process. Direct gitSuperExecution above
+    // cannot catch that supervised path dropping the selected object context.
+    const supervisedEnv = {
+      ...gitRunner.gitEnvironment(process.env),
+      PATH: `${dirname(gitSuperBin)}:${process.env.PATH}`,
+    }
+    await using supervised = createProcess({ cwd: childRoot, env: supervisedEnv })
+    const supervisedPath = join(root, "supervised-candidate")
+    const verified = await verifyCandidate({
+      git: child,
+      repo: childRoot,
+      targetHead: base,
+      head: feature,
+      path: supervisedPath,
+      message: "supervised public candidate",
+      process: supervised,
+      env: supervisedEnv,
+      noFetch: true,
+      unboundedLocalMain: true,
+    })
+    expect(verified.state, JSON.stringify(verified.verifying)).toBe("verified")
+    expect(existsSync(supervisedPath)).toBe(false)
     // Creation takes a separate Git-super child; composition alone cannot prove its carrier.
     const worktreePath = join(root, "candidate-worktree")
     const materialized = await freshWorktree(child, childRoot, feature, worktreePath)

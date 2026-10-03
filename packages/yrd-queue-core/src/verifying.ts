@@ -308,7 +308,11 @@ async function superMerge(
   // The tree's own list (27147): the merge compares nothing under a path the
   // tree left out, and refuses, by its own admission, a candidate that moves it.
   const execution = await gitSuperExecution(
-    { ...options, git: options.process === undefined ? options.git : undefined },
+    {
+      ...options,
+      git: options.process === undefined ? options.git : undefined,
+      ...(options.process === undefined ? {} : { gitOptions: { objects: runnerFor(options.git).objects } }),
+    },
     cwd,
     [
       "merge",
