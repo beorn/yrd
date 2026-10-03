@@ -186,8 +186,41 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
         )
       }
       derived = { ...outcome, composed }
+      // THE DERIVED CANDIDATE LANDS LIKE A PLAIN COMPOSE. The recompose merged the carrier INTO the first compose,
+      // so its first parent was that compose; the land reads the candidate's first parent as the target it
+      // compares-and-swaps onto (event-run.ts, `targetExpect: parent`) and a derived candidate could never land —
+      // every derived round deferred as "root target moved" and re-derived (27170 round 1, dev11 e1975a26, 27192
+      // on 2026-10-02). Same tree, same frozen message and push intent, parents [target, head].
+      const selection =
+        options.worktree?.selection ??
+        (await resolveGitSelection(options.repo, { process: options.process, env: options.env }))
+      const inWorktree = gitIn(worktree.path, options.process, selection, {
+        ...(options.env === undefined ? {} : { env: options.env }),
+        ...options.worktree?.gitOptions,
+      })
+      const frozen = await inWorktree(["show", "-s", "--format=%B", recomposed.commit])
+      const tree = (await inWorktree(["rev-parse", `${recomposed.commit}^{tree}`])).trim()
+      const landable = (
+        await inWorktree(
+          [
+            "-c",
+            "user.name=yrd",
+            "-c",
+            "user.email=yrd@derive",
+            "commit-tree",
+            tree,
+            "-p",
+            options.targetHead,
+            "-p",
+            options.head,
+          ],
+          frozen,
+        )
+      ).trim()
+      await inWorktree(["update-ref", "HEAD", landable, recomposed.commit])
       result = {
         ...recomposed,
+        commit: landable,
         gitlinks: [...result.gitlinks, ...recomposed.gitlinks],
         ...(result.descents === undefined && recomposed.descents === undefined
           ? {}
