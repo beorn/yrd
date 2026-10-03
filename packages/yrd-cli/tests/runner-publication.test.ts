@@ -434,4 +434,66 @@ describe("runner ref publication", () => {
     expect(f.notices.join(" ")).toContain("verifying no live runner")
     expect(f.notices.join(" ")).toContain(`git push origin :${f.ref}`)
   })
+  describe("a runner ref whose tip object was never fetched", () => {
+    /** A reader clone that never fetched the runner ref, plus the live remote tip. */
+    async function unfetchedFixture() {
+      const root = mkdtempSync(join(tmpdir(), "yrd-runner-unfetched-"))
+      roots.push(root)
+      const boot = gitIn(root)
+      const remote = join(root, "remote.git")
+      const work = join(root, "work")
+      await boot(["init", "--quiet", "--bare", remote])
+      await boot(["clone", "--quiet", remote, work])
+      const git = gitIn(work)
+      await git(["config", "user.email", "runner@yrd.test"])
+      await git(["config", "user.name", "yrd runner"])
+      const now = new Date().toISOString()
+      const claim: RunnerClaim = {
+        host: "host",
+        pid: 42,
+        started: now,
+        at: now,
+        beatMs: 60_000,
+        state: "idle",
+        since: now,
+      }
+      await new RunnerPublisher(
+        git,
+        "origin",
+        "main",
+        () => {},
+        () => {},
+      ).publish(claim)
+      const ref = runnerRef("main")
+      const tip = await readRemoteCommit(git, "origin", ref)
+      const readerRoot = join(root, "reader")
+      await boot(["clone", "--no-local", "--quiet", remote, readerRoot])
+      return { reader: gitIn(readerRoot), tip, ref }
+    }
+
+    /** @failure The remote tip was reported unreadable instead of fetching its object. @level l2 */
+    it("fetches the runner ref before reading a tip whose object is not local", async () => {
+      const f = await unfetchedFixture()
+      const published = await readPublishedRunner(f.reader, "main", "origin", f.tip)
+      expect(published.signal).not.toBe("unreadable")
+      expect(published.claim?.Runner).toBe("host/42")
+    })
+
+    /** @failure A tip that cannot be obtained reported a bare `rev-list` failure, not the fetch attempted. @level l2 */
+    it("names the fetch it attempted when the runner tip stays absent", async () => {
+      const f = await unfetchedFixture()
+      const published = await readPublishedRunner(f.reader, "main", "origin", "f".repeat(40))
+      expect(published.signal).toBe("unreadable")
+      expect(published.why).toContain("not fetched")
+      expect(published.why).toContain(`git fetch origin ${f.ref}`)
+    })
+
+    /** @failure A failed fetch was hidden behind the same bare `rev-list` failure. @level l2 */
+    it("names a failed fetch when the remote cannot be reached", async () => {
+      const f = await unfetchedFixture()
+      const published = await readPublishedRunner(f.reader, "main", "no-such-remote", "f".repeat(40))
+      expect(published.signal).toBe("unreadable")
+      expect(published.why).toContain(`git fetch no-such-remote ${f.ref} failed:`)
+    })
+  })
 })

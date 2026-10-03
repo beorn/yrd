@@ -76,7 +76,23 @@ async function claimAt(git: Git, oid: string, ref: string): Promise<RunnerClaim>
   return parseRunnerClaim(await git(["show", "-s", "--format=%B", oid]))
 }
 
-/** The tip comes from the same queue-ref fetch as the event listing, once per refresh. */
+/** Whether this repository already holds the object, without touching the network. */
+async function holdsObject(git: Git, oid: string): Promise<boolean> {
+  try {
+    await git(["cat-file", "-e", oid])
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The tip comes from the ls-remote listing of the queue prefix, and the runner
+ * ref is deliberately kept out of the fetched queue refs, so its object may
+ * never have arrived locally. Fetch it once before reading; a tip that still
+ * cannot be read names the fetch that was attempted rather than a bare
+ * `rev-list` failure.
+ */
 export async function readPublishedRunner(
   git: Git,
   queue: string,
@@ -86,6 +102,25 @@ export async function readPublishedRunner(
 ): Promise<PublishedRunner> {
   const ref = runnerRef(queue)
   if (tip === undefined) return { signal: "absent", why: `${remote} ${ref} is absent` }
+  const fetchCommand = `git fetch ${remote} ${ref}`
+  if (!(await holdsObject(git, tip))) {
+    try {
+      await git(["fetch", "--no-tags", "--quiet", remote, ref])
+    } catch (error) {
+      return {
+        signal: "unreadable",
+        why: `${remote} ${ref} at ${tip} could not be read: not fetched; ${fetchCommand} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      }
+    }
+    if (!(await holdsObject(git, tip))) {
+      return {
+        signal: "unreadable",
+        why: `${remote} ${ref} at ${tip} could not be read: not fetched; ${fetchCommand} left the object absent`,
+      }
+    }
+  }
   try {
     const claim = await claimAt(git, tip, ref)
     const verdict = judgeRunnerClaim(claim, now)
