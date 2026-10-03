@@ -5,6 +5,7 @@
  * @consumer yrd submit's admission and publication path
  * @testonly none
  */
+import { createProcess } from "@yrd/process"
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -31,7 +32,9 @@ import { pauseRef } from "../src/refs.ts"
 import { traceRemoteCalls } from "../src/remote-calls.ts"
 
 const roots: string[] = []
-afterAll(() => {
+const processes: ReturnType<typeof createProcess>[] = []
+afterAll(async () => {
+  for (const process of processes) await process[Symbol.asyncDispose]()
   for (const root of roots) rmSync(root, { recursive: true, force: true })
 })
 
@@ -96,14 +99,21 @@ const request = {
 /** A real runner with one mutation between admission and the submit-event prefix listing. */
 function beforePublication(w: World, mutate: () => Promise<void>): Git {
   let done = false
-  const git: Git = async (args, input) => {
-    if (!done && args[0] === "diff-tree") {
-      done = true
-      await mutate()
-    }
-    return w.git(args, input)
-  }
-  return Object.assign(git, { selection: selectionFor(w.git) })
+  const process = createProcess({ cwd: w.work })
+  processes.push(process)
+  return gitIn(
+    w.work,
+    {
+      async run(request) {
+        if (!done && request.argv[1] === "diff-tree") {
+          done = true
+          await mutate()
+        }
+        return process.run(request)
+      },
+    },
+    selectionFor(w.git),
+  )
 }
 
 async function moveM2(w: World): Promise<string> {
@@ -349,6 +359,7 @@ describe("submit reuses a fenced admission observation", () => {
       change: { branch: "task/stuck", head: w.target, event: stuck },
     })
     const trace = traceRemoteCalls(join(w.root, "trace-stuck"), { seams: true })
+    w.git = gitIn(w.work, undefined, selectionFor(w.git), { env: { ...process.env, ...trace.env } })
     let calls: ReturnType<typeof trace.end>
     try {
       const result = await submit(w.git, "origin", request)
@@ -378,8 +389,15 @@ exec git "$@"
 `,
     )
     chmodSync(script, 0o755)
-    const runner = gitIn(w.work, undefined, { ...selectionFor(w.git), executable: script })
     const trace = traceRemoteCalls(join(w.root, "trace-batch-fail"), { seams: true })
+    const runner = gitIn(
+      w.work,
+      undefined,
+      { ...selectionFor(w.git), executable: script },
+      {
+        env: { ...process.env, ...trace.env },
+      },
+    )
     let failure: unknown
     try {
       await submit(runner, "origin", request)
@@ -425,8 +443,15 @@ exec git "$@"
 `,
     )
     chmodSync(script, 0o755)
-    const runner = gitIn(w.work, undefined, { ...selectionFor(w.git), executable: script })
     const trace = traceRemoteCalls(join(w.root, "trace-maintenance"), { seams: true })
+    const runner = gitIn(
+      w.work,
+      undefined,
+      { ...selectionFor(w.git), executable: script },
+      {
+        env: { ...process.env, ...trace.env },
+      },
+    )
     try {
       await expect(submit(runner, "origin", request)).rejects.toThrow(/submission stopped for maintenance/u)
     } finally {
@@ -467,8 +492,15 @@ exec git "$@"
 `,
     )
     chmodSync(script, 0o755)
-    const runner = gitIn(w.work, undefined, { ...selectionFor(w.git), executable: script })
     const trace = traceRemoteCalls(join(w.root, "trace-operator-race"), { seams: true })
+    const runner = gitIn(
+      w.work,
+      undefined,
+      { ...selectionFor(w.git), executable: script },
+      {
+        env: { ...process.env, ...trace.env },
+      },
+    )
     let calls: ReturnType<typeof trace.end>
     try {
       const result = await submit(runner, "origin", request)
@@ -507,8 +539,15 @@ exec git "$@"
 `,
     )
     chmodSync(script, 0o755)
-    const runner = gitIn(w.work, undefined, { ...selectionFor(w.git), executable: script })
     const trace = traceRemoteCalls(join(w.root, "trace-fail"), { seams: true })
+    const runner = gitIn(
+      w.work,
+      undefined,
+      { ...selectionFor(w.git), executable: script },
+      {
+        env: { ...process.env, ...trace.env },
+      },
+    )
     try {
       await expect(submit(runner, "origin", request)).rejects.toThrow(/fixture fresh prefix listing failed/u)
     } finally {
