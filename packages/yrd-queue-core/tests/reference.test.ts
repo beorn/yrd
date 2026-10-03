@@ -788,13 +788,14 @@ describe("freshWorktree", () => {
       requested: commit,
       state: "updated",
     }
-    const stubbed = async (args: readonly string[]): Promise<string> => {
-      if (args[0] === "ls-tree") return `100644 blob 0\t.gitmodules\n`
-      if (args[0] === "super") return JSON.stringify(composed)
-      // The private-submodule declaration (27147) is read from the real commit.
-      if (args[0] === "config") return gitIn(repo)(args)
-      throw new Error(`the degraded-compose stub was asked for ${args.join(" ")}`)
-    }
+    // Preserve the selected runner and stub only git-super's degraded result;
+    // a bare callback cannot carry its object context and execution ownership.
+    const stubbed = new Proxy(gitIn(repo), {
+      apply(target, thisArg, args) {
+        if ((args[0] as readonly string[])[0] === "super") return Promise.resolve(JSON.stringify(composed))
+        return Reflect.apply(target, thisArg, args)
+      },
+    })
 
     await freshWorktree(stubbed, repo, commit, path, { plumbing: { journal: (r) => void journal.push(r) } })
 

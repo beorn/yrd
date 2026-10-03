@@ -31,6 +31,7 @@ import {
   type Git,
 } from "../src/index.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
+import { runnerFor } from "../src/git.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -705,7 +706,11 @@ describe("event submit", () => {
         calls.push([...args])
         return w.git(args, input)
       }
-      Object.assign(observed, { selection: selectionFor(w.git) })
+      Object.assign(observed, {
+        selection: selectionFor(w.git),
+        at: runnerFor(w.git).at,
+        backend: runnerFor(w.git).backend,
+      })
       for (const call of [inspectSubmit, submit]) {
         const attempt = call(observed, "origin", {
           branch: "task/bound",
@@ -805,7 +810,11 @@ describe("event submit", () => {
     ).rejects.toThrow(`found no merge base, expected ${w.target}`)
     const broken: Git = (args, input) =>
       args[0] === "merge-base" ? w.git(["merge-base", "missing-object", w.target]) : w.git(args, input)
-    Object.assign(broken, { selection: selectionFor(w.git) })
+    Object.assign(broken, {
+      selection: selectionFor(w.git),
+      at: runnerFor(w.git).at,
+      backend: runnerFor(w.git).backend,
+    })
     await expect(
       inspectSubmit(broken, "origin", {
         branch: "task/unrelated",

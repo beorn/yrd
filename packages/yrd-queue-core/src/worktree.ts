@@ -35,6 +35,7 @@ import {
   gitIn,
   mergeBase,
   refAt,
+  runnerFor,
   resolveGitSelection,
   seamProcess,
   type Git,
@@ -164,9 +165,19 @@ export async function freshWorktree(
     }
     let output: string
     try {
+      const objects = runnerFor(git).objects
       output = await git([
         "super",
         "--json",
+        ...(objects === undefined
+          ? []
+          : [
+              "--repo",
+              resolve(repo),
+              "--object-directory",
+              objects.directory,
+              ...(objects.alternates ?? []).flatMap((alternate) => ["--alternate-object-directory", alternate]),
+            ]),
         "worktree",
         "add",
         path,

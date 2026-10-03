@@ -693,7 +693,7 @@ export async function coreQueueCommand(
   const captured = await withRemoteSeam("declaration", declaration)
   if (captured === undefined) return noQueueOnTarget(targetLabel)
   const config = captured.config
-  const eventStore = createEventStore(repo, config.target.remote, selection)
+  const eventStore = createEventStore(repo, config.target.remote, selection, git.backend)
   const advertisedFormat = await withRemoteSeam("queueFormat", () => queueFormat(eventStore, config.target.branch))
   switch (advertisedFormat) {
     case "legacy":

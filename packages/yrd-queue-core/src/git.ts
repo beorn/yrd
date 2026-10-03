@@ -34,6 +34,8 @@ import {
   isSshSessionDrop,
   verboseSshRetryEnvironment,
   type GitProcess,
+  applyGitObjectContext,
+  type GitObjectContext,
 } from "git-super/process"
 import type { QueueObservation } from "./remote.ts"
 import { remoteSeam } from "./remote-calls.ts"
@@ -119,6 +121,8 @@ export type GitOutputSink = Readonly<{
 
 export type GitInvocationOptions = Readonly<{
   env?: NodeJS.ProcessEnv
+  /** Host-owned public stores, asserted physically closed before constructing the runner. */
+  objects?: GitObjectContext
   signal?: AbortSignal
   timeoutMs?: number
   openOutput?: (invocation: Pick<GitInvocation, "args" | "cwd" | "selection">) => GitOutputSink
@@ -128,6 +132,9 @@ export type GitInvocationOptions = Readonly<{
 export type GitRunner = Git &
   Readonly<{
     selection: GitSelection
+    objects: GitObjectContext | undefined
+    at(cwd: string): GitRunner
+    backend: GitomicBackend
     /** Bounded evidence for the latest settled call, including successful stderr.
      * Run owners use onInvocation to retain every call in their existing log. */
     lastInvocation: GitInvocation | undefined
@@ -266,8 +273,17 @@ export function gitIn(
   options: GitInvocationOptions = {},
 ): GitRunner {
   if (selection === undefined) throw new Error(`yrd: gitIn in ${cwd} requires a resolved Git selection`)
-  const env = options.env === undefined ? undefined : gitEnvironment(options.env)
-  const runner = process ?? createProcess({ cwd, env: env ?? gitEnvironment(globalThis.process.env) })
+  const source = { ...(options.env ?? globalThis.process.env) }
+  const objects =
+    options.objects === undefined
+      ? undefined
+      : {
+          directory: options.objects.directory,
+          alternates: [...(options.objects.alternates ?? [])],
+        }
+  const env = gitEnvironment(source, objects)
+  const runner = process ?? createProcess({ cwd, env })
+  let backend: GitomicBackend | undefined
   let lastInvocation: GitInvocation | undefined
   const invoke = async (originalArgs: readonly string[], input?: string, observation = false) => {
     const args = Object.freeze([...originalArgs])
@@ -332,6 +348,14 @@ export function gitIn(
   }
   return Object.defineProperties(git, {
     selection: { value: selection },
+    objects: {
+      value:
+        objects === undefined
+          ? undefined
+          : Object.freeze({ directory: objects.directory, alternates: Object.freeze([...(objects.alternates ?? [])]) }),
+    },
+    at: { value: (path: string) => gitIn(path, runner, selection, { ...options, env: source, objects }) },
+    backend: { get: () => (backend ??= createLegacyBackend(selection.executable, source, objects)) },
     lastInvocation: { get: () => lastInvocation },
     observe: {
       value: async (input: GitObservationInput): Promise<GitObservation> => {
@@ -722,13 +746,16 @@ const ROUTING_VARIABLES = new Set<string>([
  * change wrote it, and a merge commit's author is the run's git identity as it
  * always was.
  */
-export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function gitEnvironment(
+  source: NodeJS.ProcessEnv,
+  objects?: GitInvocationOptions["objects"],
+): NodeJS.ProcessEnv {
   const env = Object.fromEntries(
     Object.entries(source).filter(([key, value]) => value !== undefined && !ROUTING_VARIABLES.has(key)),
   )
   const declared = Number(env.GIT_CONFIG_COUNT ?? "0")
   const count = Number.isInteger(declared) && declared >= 0 ? declared : 0
-  return {
+  const composed: NodeJS.ProcessEnv = {
     ...env,
     GIT_COMMITTER_EMAIL: `yrd@${hostname()}`,
     GIT_COMMITTER_NAME: "yrd",
@@ -738,6 +765,7 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     [`GIT_CONFIG_KEY_${count + 1}`]: "push.recurseSubmodules",
     [`GIT_CONFIG_VALUE_${count + 1}`]: "no",
   }
+  return applyGitObjectContext(composed, objects)
 }
 
 /** Attach the current call's trace label at the spawn boundary, never at runner or store creation. */
@@ -749,8 +777,12 @@ function seamEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 /** The one configured Gitomic backend for every legacy queue ref operation. */
-export function createLegacyBackend(gitExecutable = "git"): GitomicBackend {
-  const baseEnv = gitEnvironment(globalThis.process.env)
+export function createLegacyBackend(
+  gitExecutable = "git",
+  source: NodeJS.ProcessEnv = globalThis.process.env,
+  objects?: GitInvocationOptions["objects"],
+): GitomicBackend {
+  const baseEnv = gitEnvironment(source, objects)
   const makeReader = (env: NodeJS.ProcessEnv) => {
     const backend = createShellBackend({
       baseEnv: env,
@@ -894,6 +926,18 @@ export function selectionFor(git: Git): GitSelection {
   return selection
 }
 
+/** Require the execution context rather than rebuilding a caller's missing context from ambient state. */
+export function runnerFor(git: Git): GitRunner {
+  selectionFor(git)
+  const runner = git as Partial<GitRunner>
+  if (typeof runner.at !== "function" || runner.backend === undefined) {
+    throw new TypeError(
+      "yrd: submit execution requires GitRunner.at and its backend; construct the selected runner with gitIn instead of forwarding a bare Git callback",
+    )
+  }
+  return git as GitRunner
+}
+
 export function executableFor(git: Git): string {
   return selectionFor(git).executable
 }
@@ -959,7 +1003,7 @@ export async function refAt(
 export async function readRemoteCommit(git: Git, remote: string, ref: string): Promise<string | undefined> {
   const repo = (await git(["rev-parse", "--absolute-git-dir"])).trim()
   if (repo === "") throw new Error(`cannot read ${remote} ${ref}: git returned an empty repository store`)
-  const backend = createLegacyBackend(executableFor(git))
+  const backend = runnerFor(git).backend
   if (backend.fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs")
   return (await backend.fetchRefs(repo, ref, remote)).get(ref)
 }
