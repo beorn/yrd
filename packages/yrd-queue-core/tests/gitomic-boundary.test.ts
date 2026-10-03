@@ -70,7 +70,10 @@ describe("the Yrd Gitomic boundary", () => {
       // can fetch it, and a read of the local refs/heads/<branch> it would create. Neither reads or writes a queue ref.
       "pin-carrier.ts": ["fetch", "for-each-ref"],
       "publication.ts": ["push"],
-      "reference.ts": ["update-ref", "fetch", "ls-remote"],
+      // The reference store owner: (27176, first) the derive step's fresh read of a component's main into the store's
+      // refs/remotes/origin/main — a component ref, not a queue ref, read where its store lives rather than from
+      // derive.ts — then the pin ref it keeps, the object-only fetch of a pin, and the remote-answers probe.
+      "reference.ts": ["fetch", "update-ref", "fetch", "ls-remote"],
       "settled-base.ts": ["fetch"],
       // Submit's two object-only fetches: collect an absent component pin (27091)
       // and model moved gitlinks during compose verification (26754).

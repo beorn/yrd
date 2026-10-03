@@ -186,6 +186,41 @@ function pinRef(sha: string): string {
  * repair git-super would make lazily at compose, made once instead of once per
  * worktree.
  */
+/**
+ * The component's main as its remote holds it NOW, read through the reference store at `store` (`<queue clone>/<gitlink
+ * path>`, the store `populateReferenceStores` keeps): one fetch of `refs/heads/main` into the store's
+ * `refs/remotes/origin/main`, then the ref. The compose reads main through git-super's refresh cache, and a derive
+ * that trusted a cached observation forked from the main an earlier round had just published (27176, 2026-10-02
+ * 18:02 PDT) — the derive step reads it fresh here, on derivation rounds only. Returns `undefined` when the store is
+ * absent or holds no main after the fetch; a fetch that fails leaves the stored ref and is reported to `onStale`.
+ */
+export async function readComponentMain(
+  gitIn: (cwd: string) => Git,
+  store: string,
+  onStale: (why: string) => Promise<void> | void,
+): Promise<string | undefined> {
+  if (!existsSync(store)) return undefined
+  const storeGit = gitIn(store)
+  try {
+    await storeGit([
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--no-recurse-submodules",
+      "--no-write-fetch-head",
+      "origin",
+      "+refs/heads/main:refs/remotes/origin/main",
+    ])
+  } catch (error) {
+    await onStale(error instanceof Error ? (error.message.split("\n")[0] ?? error.message) : String(error))
+  }
+  try {
+    return (await storeGit(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main^{commit}"])).trim()
+  } catch {
+    return undefined
+  }
+}
+
 export async function populateReferenceStores(options: PopulateReference): Promise<readonly ReferenceStore[]> {
   const root = resolve(options.repo)
   const excluded = options.excludedSubmodules ?? []
