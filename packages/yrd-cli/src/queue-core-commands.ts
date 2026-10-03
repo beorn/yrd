@@ -173,6 +173,7 @@ import {
   runIndexRef,
   runIndexPath,
   RUN_INDEX_CODES,
+  type SubmitGitlink,
 } from "@yrd/queue-core"
 import { formatQueueAddress, formatStoredQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
 import { readUnitIntent } from "./unit-intent.ts"
@@ -1443,7 +1444,8 @@ export async function coreQueueCommand(
               freshness: freshnessLine(inspected.targetHead),
               stopped: stopFact(inspected.stop),
             },
-            `would open ${changeName({ branch: prepared.branch, head: prepared.head })} on ${targetName(config.target)}; nothing was pushed; ${freshnessLine(inspected.targetHead)}`,
+            `would open ${changeName({ branch: prepared.branch, head: prepared.head })} on ${targetName(config.target)}; nothing was pushed; ${freshnessLine(inspected.targetHead)}` +
+              formatDryRunGitlinks(inspected.verifying.state === "verified" ? inspected.verifying.gitlinks : undefined),
           )
           echoStop(inspected.stop)
           echoAdmission(inspected.admission, true)
@@ -1553,7 +1555,8 @@ export async function coreQueueCommand(
             ...issueOutput(io, branch, issue),
           },
           `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}` +
-            `${issue === undefined ? "" : ` (issue ${issue.issue})`}; nothing was pushed; ${freshnessLine(targetHead)}`,
+            `${issue === undefined ? "" : ` (issue ${issue.issue})`}; nothing was pushed; ${freshnessLine(targetHead)}` +
+            formatDryRunGitlinks(verifying.state === "verified" ? verifying.gitlinks : undefined),
         )
         echoStop(inspected.stop)
         echoAdmission(inspected.admission, true)
@@ -4973,4 +4976,34 @@ async function instantOfCommit(git: Git, text: string): Promise<Date | undefined
 function emit(io: YrdCliIO, json: boolean | undefined, data: unknown, human: string): void {
   if (json === true) io.stdout(`${JSON.stringify(data)}\n`)
   else io.stdout(`${human}\n`)
+}
+
+function formatDryRunGitlinks(gitlinks: readonly SubmitGitlink[] | undefined): string {
+  if (gitlinks === undefined || gitlinks.length === 0) return ""
+  const moved = gitlinks.filter(
+    (row): row is Extract<SubmitGitlink, { state: Exclude<SubmitGitlink["state"], "not-run"> }> =>
+      row.state !== "not-run",
+  )
+  if (moved.length === 0) return ""
+  return moved
+    .map((row) => {
+      const authorHead = row.authorHead.slice(0, 12)
+      const landingPin = row.landingPin.slice(0, 12)
+      let note = ""
+      if (row.state === "merged") {
+        note = " (component merge happens at land)"
+      } else if (row.state === "kept-ahead") {
+        note = " (lands directly)"
+      } else if (row.state === "raised") {
+        note = " (raised to target)"
+      } else if (row.state === "kept-behind") {
+        note = " (kept behind)"
+      } else if (row.state === "as-written") {
+        note = " (as written)"
+      } else if (row.state === "left-off-main") {
+        note = " (left off main)"
+      }
+      return `\ncomponent ${row.path}: author head ${authorHead}, landing pin ${landingPin}${note}`
+    })
+    .join("")
 }
