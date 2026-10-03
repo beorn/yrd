@@ -144,7 +144,18 @@ export async function deriveInWorktree(options: DeriveInWorktree): Promise<Deriv
   for (const path of [...changedPaths].sort()) {
     const child = gitAt(join(cwd, path))
     const from = (await child(["rev-parse", "HEAD"])).trim()
-    await rebaseDerivationOnComponentMain({ child, cwd, derive, from, path, repo: options.repo, gitAt })
+    const main = await rebaseDerivationOnComponentMain({ child, cwd, derive, from, path, repo: options.repo, gitAt })
+    if (main !== undefined && (await child(["status", "--porcelain=v1", "--untracked-files=all"])).trim() === "") {
+      // THE DEFERRED ROUND REUSES WHAT IT PUBLISHED. Main already holds this exact derivation — the earlier round
+      // of this change published it and the root land was deferred — so the pin is main, no sibling commit is
+      // written, and nothing diverges (27176; yrd 83bb9161 and c4040ecb were two such siblings on 2026-10-02).
+      await appendFile(
+        join(derive.logDir, "derive-base.log"),
+        `${path}: the derivation equals component main ${main.slice(0, 12)}; the pin reuses it, no commit written\n`,
+      )
+      submodules.push({ path, from, to: main })
+      continue
+    }
     await child(["add", "-A"])
     await child([
       ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
@@ -183,8 +194,8 @@ export async function deriveInWorktree(options: DeriveInWorktree): Promise<Deriv
  * and the carrier's recompose merge-trees two forks of the same two generated files — that conflict stopped
  * the line on 2026-10-02 18:02 PDT (27170, round q-…7ea6a5fa). Built on main instead, the new derived commit
  * is main's child and publication is a fast-forward. Main is read from the queue clone's reference store at
- * the component's path (`refs/remotes/origin/main`, refreshed by git-super's compose); a pin main does not
- * descend from is left where it stands, and the recompose judges it.
+ * the component's path (`refs/remotes/origin/main`, read fresh here); a pin main does not descend from is left
+ * where it stands, and the recompose judges it. Returns main when the derivation now stands on it.
  */
 async function rebaseDerivationOnComponentMain(
   options: Readonly<{
@@ -196,7 +207,7 @@ async function rebaseDerivationOnComponentMain(
     repo: string
     gitAt: (path: string) => Git
   }>,
-): Promise<void> {
+): Promise<string | undefined> {
   const { child, derive, from, path } = options
   const note = (line: string) => appendFile(join(derive.logDir, "derive-base.log"), `${path}: ${line}\n`)
   const store = join(options.repo, path)
@@ -263,6 +274,7 @@ async function rebaseDerivationOnComponentMain(
   await note(
     `component main ${main.slice(0, 12)} descends from the merged pin ${from.slice(0, 12)}; the derived commit is built on main`,
   )
+  return main
 }
 
 /** The command's first non-empty output line names the derived commit; without one the paths do. */
