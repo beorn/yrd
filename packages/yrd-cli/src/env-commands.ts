@@ -36,6 +36,7 @@ import {
   SetupFailed,
   worktreeWithoutSubmodules,
   type Git,
+  type GitRunner,
 } from "@yrd/queue-core"
 import { createProcess } from "@yrd/process"
 import { createLocalGitWorktreeStore } from "git-super/worktree"
@@ -98,6 +99,71 @@ async function implicitIssueName(git: Git, issue: string): Promise<string> {
   const rows = remote.split("\n")
   if (rows.every((row) => row.split("\t")[1] === branchRef)) return issue
   throw new Error(`yrd env open: origin returned unexpected refs while checking ${branchRef}: ${remote}`)
+}
+
+/**
+ * The identity the harness declared for this caller, as `GIT_AUTHOR_NAME` /
+ * `GIT_AUTHOR_EMAIL`. A seat exports both (hab re-declares them at launch), so
+ * absent-both means "not a seat": the repository's global or common identity
+ * stays in force untouched. Half-declared is refused rather than guessed —
+ * completing it from the other half would misattribute in the exact way this
+ * change exists to stop (#27299).
+ */
+function declaredSeatIdentity(): Readonly<{ email: string; name: string }> | undefined {
+  const name = process.env.GIT_AUTHOR_NAME?.trim() ?? ""
+  const email = process.env.GIT_AUTHOR_EMAIL?.trim() ?? ""
+  if (name === "" && email === "") return undefined
+  if (name === "" || email === "") {
+    const declared = name === "" ? "GIT_AUTHOR_EMAIL" : "GIT_AUTHOR_NAME"
+    const missing = name === "" ? "GIT_AUTHOR_NAME" : "GIT_AUTHOR_EMAIL"
+    throw new Error(
+      `yrd env open: the caller declares ${declared} without ${missing}; ` +
+        `a seat identity needs both variables, or neither (leaving the repository's own identity in force)`,
+    )
+  }
+  return { email, name }
+}
+
+/**
+ * Pin the caller's declared identity into the environment's OWN worktree
+ * config, so a commit made there names the seat and not whichever seat last
+ * wrote the shared config (#27299).
+ *
+ * `git config --worktree` writes the SHARED file unless the repository enables
+ * `extensions.worktreeConfig` — that extension is exactly what gives a
+ * worktree its own `config.worktree`, and enabling it is a repository
+ * migration (paired with `core.bare`), so this never enables it. Without it the
+ * pin is refused on stderr with the cure, and the shared config is never
+ * written from here; the caller's exported `GIT_AUTHOR_*` still names every
+ * commit. The write is verified against the shared file and refused loudly if
+ * it ever landed there.
+ */
+async function pinDeclaredIdentity(path: string, git: GitRunner, io: YrdCliIO): Promise<void> {
+  const identity = declaredSeatIdentity()
+  if (identity === undefined) return
+  const scoped = (
+    await git(["config", "--local", "--type=bool", "--get", "--default=false", "extensions.worktreeConfig"])
+  ).trim()
+  if (scoped !== "true") {
+    io.stderr(
+      `${path}: not pinning ${identity.name} <${identity.email}> here: the repository does not enable ` +
+        `extensions.worktreeConfig, so git would write the shared config instead. Enable it (with its core.bare ` +
+        `migration), or set the identity by hand: git config --worktree user.name ${identity.name} && ` +
+        `git config --worktree user.email ${identity.email}\n`,
+    )
+    return
+  }
+  const sharedBefore = (await git(["config", "--local", "--get", "--default=", "user.name"])).trim()
+  await git(["config", "--worktree", "user.name", identity.name])
+  await git(["config", "--worktree", "user.email", identity.email])
+  const sharedAfter = (await git(["config", "--local", "--get", "--default=", "user.name"])).trim()
+  if (sharedAfter !== sharedBefore) {
+    throw new Error(
+      `yrd env open: pinning the seat identity in ${path} wrote the shared config ` +
+        `(user.name '${sharedBefore}' became '${sharedAfter}'); extensions.worktreeConfig is enabled but git stored it ` +
+        `outside this worktree`,
+    )
+  }
 }
 
 /**
@@ -177,6 +243,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     provisioned = result.output
   }
   const { path, baseSha } = provisioned
+  await pinDeclaredIdentity(path, gitIn(path, process, selection), io)
   if (options.hold !== undefined) {
     try {
       await createLocalGitWorktreeStore({ repo: root }).lock(path, options.hold)

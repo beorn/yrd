@@ -853,3 +853,89 @@ describe("yrd env open refuses a base foreign to the root (27165)", () => {
     },
   )
 })
+
+/**
+ * @failure A seat's git identity written into the shared CODE config attributes
+ *          every seat's commits to it; `yrd env open` left the identity to be
+ *          set by hand, so the next plain `git config user.name` poisoned the
+ *          file every worktree inherits.
+ * @level   l2 (real bare remote, real linked worktree, real git config files)
+ * @consumer every seat opening a fresh environment through `yrd env open`
+ * @reach   fs-walk <fixture-only: reads the temp fixture bay's own worktree config and the shared config beside it>
+ */
+describe("yrd env open pins the caller's declared seat identity (#27299)", () => {
+  async function withDeclaredIdentity<T>(
+    name: string | undefined,
+    email: string | undefined,
+    body: () => Promise<T>,
+  ): Promise<T> {
+    const savedName = process.env.GIT_AUTHOR_NAME
+    const savedEmail = process.env.GIT_AUTHOR_EMAIL
+    if (name === undefined) delete process.env.GIT_AUTHOR_NAME
+    else process.env.GIT_AUTHOR_NAME = name
+    if (email === undefined) delete process.env.GIT_AUTHOR_EMAIL
+    else process.env.GIT_AUTHOR_EMAIL = email
+    try {
+      return await body()
+    } finally {
+      if (savedName === undefined) delete process.env.GIT_AUTHOR_NAME
+      else process.env.GIT_AUTHOR_NAME = savedName
+      if (savedEmail === undefined) delete process.env.GIT_AUTHOR_EMAIL
+      else process.env.GIT_AUTHOR_EMAIL = savedEmail
+    }
+  }
+
+  it("writes --worktree user.name/user.email and leaves the shared config alone", async () => {
+    const w = await world(":")
+    await w.git(["config", "extensions.worktreeConfig", "true"])
+    await withDeclaredIdentity("@dev/luna6-fixture", "dev-luna6-fixture@main.hh.invalid", async () => {
+      const run = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "pinned", "--json"], run.io),
+        run.stderr(),
+      ).toBe(0)
+
+      const bay = join(w.work, ".bays", "pinned")
+      const bayGit = gitIn(bay)
+      // The identity a plain `git commit` inside the bay resolves, and the
+      // per-worktree value it came from.
+      expect((await bayGit(["config", "user.name"])).trim()).toBe("@dev/luna6-fixture")
+      expect((await bayGit(["config", "user.email"])).trim()).toBe("dev-luna6-fixture@main.hh.invalid")
+      expect((await bayGit(["config", "--worktree", "--get", "user.name"])).trim()).toBe("@dev/luna6-fixture")
+      // The shared config every seat inherits is untouched.
+      expect((await w.git(["config", "--local", "--get", "--default=SENTINEL", "user.name"])).trim()).toBe("yrd")
+      expect((await w.git(["config", "--local", "--get", "--default=SENTINEL", "user.email"])).trim()).toBe(
+        "env-open@yrd.test",
+      )
+      expect(run.stderr()).not.toContain("not pinning")
+    })
+  })
+
+  it("never writes the shared config when extensions.worktreeConfig is disabled, and names the cure", async () => {
+    const w = await world(":")
+    await withDeclaredIdentity("@dev/luna6-fixture", "dev-luna6-fixture@main.hh.invalid", async () => {
+      const run = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "unscoped", "--json"], run.io),
+        run.stderr(),
+      ).toBe(0)
+
+      const bay = join(w.work, ".bays", "unscoped")
+      // The repository's own identity still applies; the shared file is untouched.
+      expect((await gitIn(bay)(["config", "user.name"])).trim()).toBe("yrd")
+      expect((await w.git(["config", "--local", "--get", "--default=SENTINEL", "user.name"])).trim()).toBe("yrd")
+      expect(run.stderr()).toContain("extensions.worktreeConfig")
+      expect(run.stderr()).toContain("git config --worktree user.name @dev/luna6-fixture")
+    })
+  })
+
+  it("refuses a half-declared identity rather than guessing the other half", async () => {
+    const w = await world(":")
+    await withDeclaredIdentity("@dev/luna6-fixture", undefined, async () => {
+      const run = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "half"], run.io), run.stderr()).not.toBe(0)
+      expect(run.stderr()).toMatch(/GIT_AUTHOR_EMAIL/u)
+      expect(run.stderr()).toMatch(/needs both/u)
+    })
+  })
+})
