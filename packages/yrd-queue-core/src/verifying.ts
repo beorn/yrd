@@ -143,11 +143,15 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
       const message = [`${outcome.subject} (derived into ${options.head.slice(0, 12)})`, "", ...body].join("\n\n")
       const recomposed = await superMerge(options, worktree.path, outcome.carrier, message, worktree.excludedSubmodules)
       if (recomposed.state !== "updated" || recomposed.partial || recomposed.commit === undefined) {
+        // The CHANGE is stuck by name, never the run: the service exited on this very refusal on 2026-10-02
+        // 18:02 PDT (27170 round 2) because it surfaced as a run error the runner could not judge.
         await worktree.remove()
-        throw new Error(
-          `derive: composing the carrier ${outcome.carrier.slice(0, 12)} into ${composed.slice(0, 12)} returned ${recomposed.state}${
+        throw new DeriveFailed(
+          composed,
+          `composing the carrier ${outcome.carrier.slice(0, 12)} into ${composed.slice(0, 12)} returned ${recomposed.state}${
             recomposed.detail === undefined ? "" : `: ${recomposed.detail.message}`
           }`,
+          outcome.ran,
         )
       }
       // derive is a function of the merged gitlinks, so a second run on the final candidate leaves a clean tree;

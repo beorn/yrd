@@ -21,11 +21,13 @@
  * change outside a submodule, or a command that is not there stops the
  * compose by name: the change is stuck, the queue's, never the submitter's.
  */
-import { join } from "node:path"
+import { existsSync } from "node:fs"
+import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
 import type { Process } from "@yrd/process"
 import { composeGitlinkCarrier } from "git-super/gitlink-carrier"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
-import { gitIn, resolveGitSelection, type GitInvocationOptions, type GitSelection } from "./git.ts"
+import { gitIn, resolveGitSelection, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
 
 /** The name the derive runs, logs and ends a change under. */
 export const DERIVE = "derive"
@@ -142,6 +144,7 @@ export async function deriveInWorktree(options: DeriveInWorktree): Promise<Deriv
   for (const path of [...changedPaths].sort()) {
     const child = gitAt(join(cwd, path))
     const from = (await child(["rev-parse", "HEAD"])).trim()
+    await rebaseDerivationOnComponentMain({ child, cwd, derive, from, path, repo: options.repo, gitAt })
     await child(["add", "-A"])
     await child([
       ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
@@ -168,6 +171,98 @@ export async function deriveInWorktree(options: DeriveInWorktree): Promise<Deriv
     message: `${subject}\n\nDerived-From: ${candidate}\n`,
   })
   return { subject, submodules, carrier: carrier.commit, ran }
+}
+
+/**
+ * THE DERIVED COMMIT IS BUILT ON THE COMPONENT'S MAIN WHEN MAIN ALREADY DESCENDS FROM THE MERGED PIN.
+ *
+ * The compose settles a pin and leaves one that equals the target's alone, so the merged worktree can stand
+ * BEHIND the component's main: a component main only moves through this queue, and it moves at publication,
+ * before the root lands. A round whose root land is deferred has published its derived commit to main; the
+ * next round re-derives from the same stale pin, the composed sha it names is a fresh merge and so differs,
+ * and the carrier's recompose merge-trees two forks of the same two generated files — that conflict stopped
+ * the line on 2026-10-02 18:02 PDT (27170, round q-…7ea6a5fa). Built on main instead, the new derived commit
+ * is main's child and publication is a fast-forward. Main is read from the queue clone's reference store at
+ * the component's path (`refs/remotes/origin/main`, refreshed by git-super's compose); a pin main does not
+ * descend from is left where it stands, and the recompose judges it.
+ */
+async function rebaseDerivationOnComponentMain(
+  options: Readonly<{
+    child: Git
+    cwd: string
+    derive: DeriveSpec
+    from: string
+    path: string
+    repo: string
+    gitAt: (path: string) => Git
+  }>,
+): Promise<void> {
+  const { child, derive, from, path } = options
+  const note = (line: string) => appendFile(join(derive.logDir, "derive-base.log"), `${path}: ${line}\n`)
+  const store = join(options.repo, path)
+  if (!existsSync(store)) {
+    await note(`no reference store at ${store}; the derived commit stays on the merged pin ${from.slice(0, 12)}`)
+    return
+  }
+  // Read main FRESH: the compose that settled this pin may have read a cached observation (git-super's refresh
+  // window), and the recompose that follows reads a fresh one — deriving against the cached main is how the two
+  // forks met. One fetch per derived submodule, on derivation rounds only; a fetch that fails leaves the stored ref.
+  const storeGit = options.gitAt(store)
+  try {
+    await storeGit(["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+  } catch (error) {
+    await note(
+      `refreshing ${store} refs/remotes/origin/main failed (${error instanceof Error ? error.message.split("\n")[0] : String(error)}); reading the stored ref`,
+    )
+  }
+  let main: string
+  try {
+    main = (await storeGit(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main^{commit}"])).trim()
+  } catch {
+    await note(
+      `${store} has no refs/remotes/origin/main; the derived commit stays on the merged pin ${from.slice(0, 12)}`,
+    )
+    return
+  }
+  if (main === from) {
+    await note(`component main ${main.slice(0, 12)} is the merged pin; the derived commit is its child`)
+    return
+  }
+  let descends = false
+  try {
+    await child(["merge-base", "--is-ancestor", from, main])
+    descends = true
+  } catch {
+    descends = false
+  }
+  if (!descends) {
+    await note(
+      `component main ${main.slice(0, 12)} does not descend from the merged pin ${from.slice(0, 12)}; the derived commit stays on the pin and the recompose judges it`,
+    )
+    return
+  }
+  // Carry the derived FILES onto main, bytes for bytes: the derive is a function of the merged gitlinks, so what it
+  // wrote is what belongs on main too; a patch of the stale pin would conflict with main's own derivation.
+  const written = (await child(["status", "--porcelain=v1", "--untracked-files=all"]))
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => ({ deleted: line.startsWith(" D") || line.startsWith("D "), file: line.slice(3).trim() }))
+  const bytes = new Map<string, Buffer | undefined>()
+  for (const { deleted, file } of written) {
+    bytes.set(file, deleted ? undefined : await readFile(join(options.cwd, path, file)))
+  }
+  await child(["checkout", "--quiet", "--force", "--detach", main])
+  for (const [file, content] of bytes) {
+    const at = join(options.cwd, path, file)
+    if (content === undefined) await rm(at, { force: true })
+    else {
+      await mkdir(dirname(at), { recursive: true })
+      await writeFile(at, content)
+    }
+  }
+  await note(
+    `component main ${main.slice(0, 12)} descends from the merged pin ${from.slice(0, 12)}; the derived commit is built on main`,
+  )
 }
 
 /** The command's first non-empty output line names the derived commit; without one the paths do. */
