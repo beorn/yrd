@@ -134,7 +134,7 @@ describe("the Yrd Gitomic boundary", () => {
     const git = source("git.ts")
     expect(git).toContain("const GIT_ROOT_INVOCATION_MS = 5 * 60_000")
     // Bound once, so the publickey retry (25282) resolves its SSH command from attempt 1's environment.
-    expect(git).toContain("const baseEnv = gitEnvironment(globalThis.process.env)")
+    expect(git).toContain("const baseEnv = gitEnvironment(source, objects)")
     expect(git).toContain("remoteTimeoutMs: GIT_ROOT_INVOCATION_MS")
     expect(git).toContain("gitExecutable,")
     expect(source("events.ts")).toContain("backend: GitomicBackend = createLegacyBackend(selection.executable)")

@@ -177,11 +177,19 @@ describe("yrd submit refusal when git super worktree add fails (25979)", () => {
 
   it("prints exit code none and error message without synthesized command on non-git spawn failure (25979 P3)", async () => {
     async function said(thrown: unknown): Promise<string> {
-      const git = (async (args: readonly string[]) => {
-        if (args[0] === "ls-tree") return "100644 blob 0123456789abcdef0123456789abcdef01234567\t.gitmodules\n"
-        if (args[0] === "super") throw thrown
-        return ""
-      }) as never
+      const git = gitIn("/repo", {
+        async run({ argv }) {
+          if (argv[1] === "super") throw thrown
+          return {
+            exitCode: 0,
+            signal: null,
+            stdout: argv[1] === "ls-tree" ? "100644 blob 0123456789abcdef0123456789abcdef01234567\t.gitmodules\n" : "",
+            stderr: "",
+            durationMs: 0,
+            timedOut: false,
+          }
+        },
+      })
       try {
         await freshWorktree(git, "/repo", "c0ffee", "/work/bay")
         return "(no error)"
@@ -195,9 +203,9 @@ describe("yrd submit refusal when git super worktree add fails (25979)", () => {
     expect(resLines[0]).toContain(
       "worktree /work/bay at c0ffee requires git-super because that commit records .gitmodules; git super worktree add failed:",
     )
-    expect(resLines[1]).toBe("exit code: none (the command did not run)")
+    expect(resLines[1]).toBe("exit code: none (the runner returned no exit result)")
     expect(resLines.some((l) => l.startsWith("command:"))).toBe(false)
-    expect(resLines).toContain("not found on the selected environment's PATH")
+    expect(resLines).toContain("Git invocation failed: Error: not found on the selected environment's PATH")
     expect(resLines).not.toContain("exit code: 2")
 
     const enoent = await said(new Error("spawn git-super ENOENT"))
@@ -205,9 +213,9 @@ describe("yrd submit refusal when git super worktree add fails (25979)", () => {
     expect(enoentLines[0]).toContain(
       "worktree /work/bay at c0ffee requires git-super because that commit records .gitmodules; git super worktree add failed:",
     )
-    expect(enoentLines[1]).toBe("exit code: none (the command did not run)")
+    expect(enoentLines[1]).toBe("exit code: none (the runner returned no exit result)")
     expect(enoentLines.some((l) => l.startsWith("command:"))).toBe(false)
-    expect(enoentLines).toContain("spawn git-super ENOENT")
+    expect(enoentLines).toContain("Git invocation failed: Error: spawn git-super ENOENT")
     expect(enoentLines).not.toContain("exit code: 2")
   })
 })
