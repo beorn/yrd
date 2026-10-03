@@ -12,6 +12,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
+import { createProcess, type Process } from "@yrd/process"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 import { testGitIn as rawGitIn } from "../../../tests/support/test-git-in.ts"
 import { DeriveFailed } from "../src/derive.ts"
@@ -55,7 +56,7 @@ function hostedEnv(rootRemote: string, childRemote: string): NodeJS.ProcessEnv {
  * A root with one submodule `lib`, both with bare remotes; `main` pins lib at L1 and the change `task/bump` pins it
  * at L2 (a commit on lib's main). `lib/derived.txt` is the file a derive regenerates from the pin.
  */
-async function world(): Promise<World> {
+async function world(options: Readonly<{ privateChild?: boolean }> = {}): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-derive-"))
   roots.push(root)
   const rootRemote = join(root, "root.git")
@@ -87,7 +88,17 @@ async function world(): Promise<World> {
   writeFileSync(join(work, "target.txt"), "base\n")
   writeFileSync(join(work, ".yrd.yml"), "{}\n")
   await git(["submodule", "add", "--quiet", LIB_URL, "lib"])
+  if (options.privateChild === true) {
+    // 27147: a child declared private is never materialized; the compose excludes it, and so must the derived one.
+    await git(["config", "--file", ".gitmodules", "submodule.vendor/secret.path", "vendor/secret"])
+    await git(["config", "--file", ".gitmodules", "submodule.vendor/secret.url", "https://example.invalid/secret.git"])
+    await git(["config", "--file", ".gitmodules", "submodule.vendor/secret.private", "true"])
+  }
   await git(["add", "-A"])
+  // The gitlink is staged by plumbing AFTER add -A: with no directory on disk, add -A would drop it again.
+  if (options.privateChild === true) {
+    await git(["update-index", "--add", "--cacheinfo", `160000,${"f".repeat(40)},vendor/secret`])
+  }
   await git(["commit", "--quiet", "-m", "base"])
   await git(["push", "--quiet", "origin", "main"])
   const target = (await git(["rev-parse", "HEAD"])).trim()
@@ -133,12 +144,13 @@ function deriveScript(root: string, variant: "ok" | "root" | "fail" = "ok"): str
   return script
 }
 
-async function compose(w: World, run: string | undefined, path: string) {
+async function compose(w: World, run: string | undefined, path: string, process?: Process) {
   const logDir = join(w.root, "logs", path)
   mkdirSync(logDir, { recursive: true })
   return verifyCandidate({
     git: w.git,
     env: w.env,
+    ...(process === undefined ? {} : { process }),
     repo: w.work,
     targetHead: w.target,
     head: w.head,
@@ -196,6 +208,28 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
     expect((await w.git(["rev-parse", `${plain.verifying.candidate}:lib`])).trim()).toBe(
       (await w.git(["rev-parse", `${verified.verifying.candidate}:lib`])).trim(),
     )
+  })
+
+  it("the derived recompose excludes the same private submodules as the first compose (27147 × 27176)", async () => {
+    const w = await world({ privateChild: true })
+    await using real = createProcess({ cwd: w.work, env: w.env })
+    const merges: (readonly string[])[] = []
+    const recording: Process = {
+      ...real,
+      async run(request) {
+        if (request.argv.includes("super") && request.argv.includes("merge")) merges.push(request.argv)
+        return real.run(request)
+      },
+    }
+    const verified = await compose(w, deriveScript(w.root), "private", recording)
+    if (verified.state !== "verified") throw new Error(`compose failed: ${verified.verifying.detail.message}`)
+    expect(verified.verifying.derived).toBeDefined()
+    expect(merges).toHaveLength(2)
+    for (const argv of merges) {
+      const at = argv.indexOf("--exclude-submodule")
+      expect(at, argv.join(" ")).toBeGreaterThan(0)
+      expect(argv[at + 1]).toBe("vendor/secret")
+    }
   })
 
   it("a change outside every submodule stops the compose by name and says root derivation is not admitted", async () => {
