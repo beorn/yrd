@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process"
-import { existsSync } from "node:fs"
-import { dirname, join, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
+import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 /**
  * The superproject's sibling checkout, `vendor/git-super/bin`. Inside hh this sibling is the pin every
@@ -18,11 +17,46 @@ export const superprojectRoot = execFileSync("git", ["-C", yrdRoot, "rev-parse",
  * sibling checkout. A standalone clone has no sibling, so the git-super this repository depends on (its
  * package.json pin) supplies it. A missing bin fails loudly and names both places it looked.
  */
-export const gitSuperBin =
-  superprojectRoot !== ""
-    ? siblingGitSuperBin
-    : join(dirname(fileURLToPath(import.meta.resolve("git-super/package.json"))), "bin")
+function standaloneGitSuperBin(): string {
+  const packagePath = realpathSync(Bun.resolveSync("git-super/package.json", yrdRoot))
+  const installed = relative(join(realpathSync(yrdRoot), "node_modules"), packagePath)
+  if (installed === ".." || installed.startsWith("../") || isAbsolute(installed)) {
+    throw new Error(
+      `standalone yrd requires its own installed git-super package under ${yrdRoot}/node_modules; resolved ${packagePath}`,
+    )
+  }
+  return join(dirname(packagePath), "bin")
+}
+
+export const gitSuperBin = superprojectRoot !== "" ? siblingGitSuperBin : standaloneGitSuperBin()
 
 if (!existsSync(join(gitSuperBin, "git-super"))) {
   throw new Error(`git-super bin not found for ${superprojectRoot || "standalone yrd"}: ${gitSuperBin}/git-super`)
 }
+
+function standaloneGitSuperSha(): string {
+  const manifest = JSON.parse(readFileSync(join(yrdRoot, "package.json"), "utf8")) as {
+    overrides?: Record<string, unknown>
+  }
+  const declared = manifest.overrides?.["git-super"]
+  const oid = typeof declared === "string" ? /^github:beorn\/git-super#([a-f0-9]{40})$/u.exec(declared)?.[1] : undefined
+  if (oid === undefined) {
+    throw new Error(
+      `standalone yrd package.json requires an exact full-OID github:beorn/git-super override: ${yrdRoot}`,
+    )
+  }
+  const lock = Bun.JSON5.parse(readFileSync(join(yrdRoot, "bun.lock"), "utf8")) as {
+    overrides?: Record<string, unknown>
+  }
+  if (lock.overrides?.["git-super"] !== declared) {
+    throw new Error(`standalone yrd git-super override differs between package.json and bun.lock: ${yrdRoot}`)
+  }
+  return oid
+}
+
+// Installed GitHub archives have no Git metadata; git -C there sees Yrd's HEAD.
+// Frozen install supplies archive provenance; the matching declaration supplies identity.
+export const gitSuperSha =
+  superprojectRoot !== ""
+    ? execFileSync("git", ["-C", gitSuperBin, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
+    : standaloneGitSuperSha()
