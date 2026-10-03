@@ -217,7 +217,8 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
           frozen,
         )
       ).trim()
-      await inWorktree(["update-ref", "HEAD", landable, recomposed.commit])
+      // Same tree, so the checkout moves only HEAD; the worktree is a detached, throwaway compose tree.
+      await inWorktree(["checkout", "--quiet", "--detach", landable])
       result = {
         ...recomposed,
         commit: landable,
