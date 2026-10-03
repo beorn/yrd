@@ -2512,3 +2512,86 @@ describe("the queue-format boundary", () => {
     await expect(listChanges(location, "lab")).rejects.toThrow(/created.*Commit/)
   })
 })
+
+describe("a cancellation names its actor and its coordination recipient (27262)", () => {
+  const at = new Date("2026-10-03T12:00:00.000Z")
+
+  it("writes Recipient: only on cancelled, beside the actor in By:", () => {
+    const cancelled = changeInput("cancelled", {
+      queueTip: A,
+      at,
+      commit: B,
+      by: "@dev/actor",
+      recipient: "@dev/recipient",
+      reason: "withdrawn",
+    })
+    expect(cancelled.props).toContainEqual(["By", "@dev/actor"])
+    expect(cancelled.props).toContainEqual(["Recipient", "@dev/recipient"])
+  })
+
+  it("refuses an empty Recipient: at write and at replay", () => {
+    expect(() =>
+      changeInput("cancelled", { queueTip: A, at, commit: B, by: "@dev/actor", recipient: "   ", reason: "withdrawn" }),
+    ).toThrow(/Recipient: cannot be empty/)
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    expect(() =>
+      evolve(
+        opened,
+        event("cancelled", B, [
+          ["Reason", "withdrawn"],
+          ["Recipient", "  "],
+        ]),
+      ),
+    ).toThrow(/empty Recipient/)
+  })
+
+  it("refuses Recipient: on any event but cancelled, at write and at replay", () => {
+    expect(() =>
+      changeInput("opened", { queueTip: A, at, commit: B, by: "@dev/actor", recipient: "@dev/recipient" }),
+    ).toThrow(/Recipient: belongs on cancelled/)
+    expect(() =>
+      evolve(
+        initial,
+        event(
+          "opened",
+          A,
+          [
+            ["Commit", A],
+            ["Recipient", "@dev/recipient"],
+          ],
+          [A],
+        ),
+      ),
+    ).toThrow(/carries Recipient: on opened/)
+  })
+
+  it("refuses a repeated Recipient: at replay", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    expect(() =>
+      evolve(
+        opened,
+        event("cancelled", B, [
+          ["Reason", "withdrawn"],
+          ["Recipient", "@dev/one"],
+          ["Recipient", "@dev/two"],
+        ]),
+      ),
+    ).toThrow(/repeats Recipient:/)
+  })
+
+  it("accepts one seat as both actor and recipient, and accepts an absent Recipient:", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const same = evolve(
+      opened,
+      event("cancelled", B, [
+        ["Reason", "withdrawn"],
+        ["By", "@dev/same"],
+        ["Recipient", "@dev/same"],
+      ]),
+    )
+    expect(same.status).toBe("cancelled")
+    const absent = evolve(opened, event("cancelled", B, [["Reason", "resubmitted"]]))
+    expect(absent.status).toBe("cancelled")
+    expect(absent.reason).toBe("resubmitted")
+  })
+})

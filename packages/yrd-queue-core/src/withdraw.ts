@@ -9,6 +9,7 @@ export type WithdrawRequest = Readonly<{
   target: Readonly<{ remote: string; branch: string }>
   by: string
   reason?: string
+  recipient?: string
 }>
 
 export type WithdrawnChange = Readonly<{ branch: string; head: string; record: string }>
@@ -53,6 +54,7 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
     at: new Date(),
     commit: head,
     by: request.by,
+    ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
     reason: "withdrawn",
     title: `${request.by} withdrew ${request.branch} from ${queue}`,
     ...(request.reason === undefined ? {} : { content: request.reason }),
