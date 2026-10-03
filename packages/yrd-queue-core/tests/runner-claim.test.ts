@@ -151,9 +151,10 @@ describe("runner claim", () => {
       "true",
       1,
     )
-    // 30m line read; two attempts of: 5 other steps, 2 phase worktrees,
-    // 4 protected worktrees, 2 checks, 6 setups; one settled-base allowance.
-    const attempt = 5 * 30 + 2 * 2 * 30 + 4 * 2 * 30 + 2 * 5 + 6 * 30
+    // 30m line read; two attempts of: 8 other steps (compose, worktree, beforeMerge, derive, derive-again,
+    // publish, merge, notify — every bounded step but line-read, prepare and remove; 27176 added the compose's
+    // three sub-steps), 2 phase worktrees, 4 protected worktrees, 2 checks, 6 setups; one settled-base allowance.
+    const attempt = 8 * 30 + 2 * 2 * 30 + 4 * 2 * 30 + 2 * 5 + 6 * 30
     const attribution = 2 * 30 + 5 * 2 * 30 + 5 * 30 + 2 * 5
     expect(bound).toBe((30 + 2 * attempt + attribution) * 60_000)
   })
