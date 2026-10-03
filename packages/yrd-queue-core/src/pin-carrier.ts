@@ -5,7 +5,7 @@ import { createLocalGitProcess } from "git-super/process"
 import type { Target } from "./config.ts"
 import {
   createEventStore,
-  gitIn,
+  runnerFor,
   gitlinkRows,
   isAncestor,
   mergeBase,
@@ -73,7 +73,7 @@ export async function preparePinCarrier(
   const pins = orderedPins(options.pins)
   const targetHead = await readRemoteCommit(git, target.remote, `refs/heads/${target.branch}`)
   if (targetHead === undefined) throw new Error(`${target.remote}/${target.branch} has no advertised target branch`)
-  const childGit = (path: string) => gitIn(path, undefined, selectionFor(git), { env })
+  const childGit = (path: string) => runnerFor(git).at(path)
   // 27147: a submodule the target declares private has no store here, so its pin cannot be carried.
   const excludedSubmodules = await declaredPrivateSubmodules(git, repo, targetHead)
   await populateReferenceStores({ repo, commit: targetHead, excludedSubmodules, gitIn: childGit })
@@ -113,7 +113,7 @@ export async function preparePinCarrier(
 
   const identity = pinIdentity(pins)
   const changes: Array<Readonly<{ branch: string; head: string; open: boolean }>> = []
-  const store = createEventStore(repo, target.remote, selectionFor(git))
+  const store = createEventStore(repo, target.remote, selectionFor(git), runnerFor(git).backend)
   if ((await queueFormat(store, target.branch)) !== "event") {
     throw new Error(`${target.remote}#${target.branch} in ${repo}: expected event queue ref ${queueRef(target.branch)}`)
   }

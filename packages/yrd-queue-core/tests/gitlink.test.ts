@@ -247,8 +247,9 @@ it("runs a gitlink-bearing event change through the checked candidate", async ()
  * Core tests cannot catch the round caller omitting the existing option.
  */
 it("refreshes only the moved component in a round with an untouched warm Equal component", async () => {
-  const w = await world()
+  let w = await world()
   await addSecondChild(w)
+  w = { ...w, git: gitIn(w.work) }
   await createWorldEventQueue(w)
   const ahead = await aheadOfSubmodule(w, "one-moved-component")
   await submitGitlink(w, "task/one-moved-component", ahead)
@@ -702,8 +703,9 @@ it("re-verifies an event after a root race and finishes without another child up
  * A fresh clone must replay the marker's frozen candidate, treating child one's source as identical.
  */
 it("finishes a two-child event from a cold clone after the runner dies between child pushes", async () => {
-  const w = await world()
+  let w = await world()
   const other = await addSecondChild(w)
+  w = { ...w, git: gitIn(w.work) }
   await createWorldEventQueue(w)
   const subAhead = await aheadOfSubmodule(w, "event-two-child")
   await submitTwoChildren(w, "task/event-two-child", other.ahead, subAhead)
@@ -1095,8 +1097,9 @@ it("finishes a marked event after its branch is deleted before resume", async ()
  * A file-only event merge must leave both component branches at their observed mains.
  */
 it("keeps a nested behind-main event pin without publishing either child", async () => {
-  const w = await world()
+  let w = await world()
   const nested = await addNestedSubmodule(w)
+  w = { ...w, git: gitIn(w.work) }
   await createWorldEventQueue(w)
   await submitFile(w, "task/event-nested-behind")
 
@@ -1119,8 +1122,9 @@ it("keeps a nested behind-main event pin without publishing either child", async
  * Existing publication assertions cannot observe the shared plan or prove collection makes no retention writes.
  */
 it("collects and publishes the same nested pins that the branch authored", async () => {
-  const w = await world()
+  let w = await world()
   await addNestedSubmodule(w)
+  w = { ...w, git: gitIn(w.work) }
   await createWorldEventQueue(w)
   const root = dirname(w.work)
   const leafWork = gitIn(join(root, "leaf-work"))

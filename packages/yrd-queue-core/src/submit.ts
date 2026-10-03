@@ -24,19 +24,19 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pushRefUpdates } from "git-super/push"
 import { refuseMovedPrivateGitlinks } from "./private-submodules.ts"
-import { Conflict, RetriesExhausted, createEventStore, listRefs, openEvents, selectionFor, type Event } from "./git.ts"
+import {
+  Conflict,
+  RetriesExhausted,
+  createEventStore,
+  listRefs,
+  openEvents,
+  selectionFor,
+  runnerFor,
+  type Event,
+} from "./git.ts"
 import { readEventChain } from "./event-read.ts"
 import { readConfig, targetName, type Target } from "./config.ts"
-import {
-  gitIn,
-  gitlinkRows,
-  isAncestor,
-  mergeBase,
-  mergeBases,
-  readRemoteCommit,
-  seamProcess,
-  type Git,
-} from "./git.ts"
+import { gitlinkRows, isAncestor, mergeBase, mergeBases, readRemoteCommit, seamProcess, type Git } from "./git.ts"
 import { type PauseRecord } from "./pause.ts"
 import { remoteUrl } from "./remote.ts"
 import {
@@ -202,7 +202,7 @@ export async function collectMovedGitlinks(
       if (row.newMode !== "160000" || ZERO_SHA.test(row.sha)) continue
       const path = prefix === "" ? row.path : `${prefix}/${row.path}`
       const checkout = join(root, row.path)
-      const child = gitIn(checkout, undefined, selectionFor(git))
+      const child = runnerFor(git).at(checkout)
       // The DECLARED submodule url is what the record names; the transport rewrite is the host's.
       const remote = await remoteUrl(child, "origin")
       // Where the pin is: this checkout, else the remote under some ref (a branch
@@ -368,8 +368,8 @@ export async function modelMovedGitlinks(
     const sourceCheckout = join(sourceRoot, row.path)
     const targetCheckout = join(candidateRoot, row.path)
     if (!existsSync(sourceCheckout) || !existsSync(targetCheckout)) continue
-    const sourceChild = gitIn(sourceCheckout, undefined, selectionFor(git))
-    const targetChild = gitIn(targetCheckout, undefined, selectionFor(git))
+    const sourceChild = runnerFor(git).at(sourceCheckout)
+    const targetChild = runnerFor(git).at(targetCheckout)
     let targetHasSha = false
     try {
       await targetChild(["cat-file", "-e", `${row.sha}^{commit}`])
@@ -555,7 +555,7 @@ async function admitSubmitAtHead(
     // The target may have advanced past this branch's exact landing. Consult
     // its retained event chain so the refusal names the merge and the cure.
     const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-    const store = createEventStore(root, remote, selectionFor(git))
+    const store = createEventStore(root, remote, selectionFor(git), runnerFor(git).backend)
     if ((await queueFormat(store, request.target.branch)) === "event") {
       const ref = changesRef(request.target.branch, request.branch)
       const chain = await openEvents({ ...store, ref })
@@ -619,7 +619,7 @@ async function admitSubmitAtHead(
   // repository composition starts; every other refusal below still carries
   // this captured stop.
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
-  const store = createEventStore(root, remote, selectionFor(git))
+  const store = createEventStore(root, remote, selectionFor(git), runnerFor(git).backend)
   const queue = request.target.branch
   const format = await queueFormat(store, queue)
   switch (format) {
@@ -750,7 +750,7 @@ async function submitEvent(
   published: readonly PublishedGitlink[],
 ): Promise<Submitted> {
   const head = inspected.head
-  const store = createEventStore(root, remote, selectionFor(git))
+  const store = createEventStore(root, remote, selectionFor(git), runnerFor(git).backend)
   const ref = changesRef(request.target.branch, request.branch)
   const branchRef = `refs/heads/${request.branch}`
   const chain = await openEvents({ ...store, ref, writer: request.submitter })
