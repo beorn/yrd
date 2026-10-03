@@ -211,10 +211,14 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
     const { candidate, derived } = verified.verifying
     expect(derived).toBeDefined()
     if (derived === undefined) throw new Error("no derivation recorded")
+    // The land compares-and-swaps the target onto the candidate's FIRST parent, so a derived candidate's parents
+    // are the target and the change head — exactly a plain compose's — while its tree carries the derived pin.
     const parents = (await w.git(["show", "-s", "--format=%P", candidate])).trim().split(" ")
-    expect(parents).toHaveLength(2)
-    expect(parents[0]).toBe(derived.composed)
-    expect(parents[1]).toBe(derived.carrier)
+    expect(parents).toEqual([w.target, w.head])
+    expect(derived.composed).not.toBe(candidate)
+    expect((await w.git(["rev-parse", `${derived.carrier}:lib`])).trim()).toBe(
+      (await w.git(["rev-parse", `${candidate}:lib`])).trim(),
+    )
     const pin = (await w.git(["rev-parse", `${candidate}:lib`])).trim()
     expect(derived.submodules).toEqual([{ path: "lib", from: expect.any(String), to: pin }])
     const l2 = (await w.git(["rev-parse", `${w.head}:lib`])).trim()
