@@ -141,7 +141,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
       // candidate is again a two-parent merge whose frozen intent names the derived child (27176).
       const [, ...body] = options.message.split("\n\n")
       const message = [`${outcome.subject} (derived into ${options.head.slice(0, 12)})`, "", ...body].join("\n\n")
-      const recomposed = await superMerge(options, worktree.path, outcome.carrier, message)
+      const recomposed = await superMerge(options, worktree.path, outcome.carrier, message, worktree.excludedSubmodules)
       if (recomposed.state !== "updated" || recomposed.partial || recomposed.commit === undefined) {
         await worktree.remove()
         throw new Error(
