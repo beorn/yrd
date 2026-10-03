@@ -171,34 +171,25 @@ export function retentionRef(sha: string): string {
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 const ZERO_SHA = /^0+$/u
 
+/** One branch-authored component pin, with its local object reader and exact comparison bases. */
+export type MovedGitlink = Readonly<
+  Omit<PublishedGitlink, "state"> & { checkout: string; child: Git; bases: readonly string[] }
+>
+
 /**
- * Publish every gitlink `to` moved against `from`, nested paths included, to
- * its submodule's remote under git-super's retention ref (24454).
- *
- * A submodule change lands as an ordinary submit of the root: the author
- * commits inside the submodule, bumps the gitlink, and submits the root. The
- * queue judges the whole tree and, after every check has passed, moves the
- * submodule main itself. For that the queue must be able to FETCH the pin
- * from the submodule's remote, and a commit made in a bay is nowhere else,
- * so submit puts it there first, on a ref that advances no branch: the
- * retention ref is named by the object, written create-only, and an identical
- * value already there is the one write it accepts again (a retry). Nothing
- * about a submodule main moves here; that is the queue's, at merge.
- *
+ * Discover every branch-authored moved pin, nested paths included, without publishing refs.
  * A missing local pin is fetched from its remote before collection completes.
- * Every collected pin gets a permanent retention ref, including fetched pins.
  * Missing objects refuse with the path, checkout and remote before any push.
+ * Local checkout and reader fields are construction facts, never receiver path authority.
  */
-export async function publishMovedGitlinks(
+export async function collectMovedGitlinks(
   git: Git,
   root: string,
   from: string | readonly string[],
   to: string,
   prefix = "",
-): Promise<readonly PublishedGitlink[]> {
-  const published: PublishedGitlink[] = []
-  type Pin = Omit<PublishedGitlink, "state"> & { checkout: string; child: Git }
-  const pins: Pin[] = []
+): Promise<readonly MovedGitlink[]> {
+  const pins: MovedGitlink[] = []
   const collect = async (git: Git, root: string, from: string | readonly string[], to: string, prefix: string) => {
     const bases = typeof from === "string" ? [from] : from
     if (bases.length === 0) throw new Error(`cannot publish gitlinks in ${root}: no merge base`)
@@ -245,7 +236,6 @@ export async function publishMovedGitlinks(
         }
       }
       const ref = retentionRef(row.sha)
-      pins.push({ path, sha: row.sha, remote, ref, checkout, child })
       // A moved submodule may itself have moved a gitlink: the nested pin has to
       // be fetchable too, from ITS remote, or the queue cannot materialize km.
       const before = await Promise.all(
@@ -255,12 +245,40 @@ export async function publishMovedGitlinks(
             : EMPTY_TREE,
         ),
       )
+      pins.push({ path, sha: row.sha, remote, ref, checkout, child, bases: before })
       await collect(child, checkout, before, row.sha, path)
     }
   }
-  // Discover every eligible nested pin before the first remote write.
   await collect(git, root, from, to, prefix)
-  const checkouts = new Map<string, Pin[]>()
+  return pins
+}
+
+/**
+ * Publish every gitlink `to` moved against `from`, nested paths included, to
+ * its submodule's remote under git-super's retention ref (24454).
+ *
+ * A submodule change lands as an ordinary submit of the root: the author
+ * commits inside the submodule, bumps the gitlink, and submits the root. The
+ * queue judges the whole tree and, after every check has passed, moves the
+ * submodule main itself. For that the queue must be able to FETCH the pin
+ * from the submodule's remote, and a commit made in a bay is nowhere else,
+ * so submit puts it there first, on a ref that advances no branch: the
+ * retention ref is named by the object, written create-only, and an identical
+ * value already there is the one write it accepts again (a retry). Nothing
+ * about a submodule main moves here; that is the queue's, at merge.
+ * Every collected pin gets a permanent retention ref, including fetched pins.
+ */
+export async function publishMovedGitlinks(
+  git: Git,
+  root: string,
+  from: string | readonly string[],
+  to: string,
+  prefix = "",
+): Promise<readonly PublishedGitlink[]> {
+  const published: PublishedGitlink[] = []
+  // Discover every eligible nested pin before the first remote write.
+  const pins = await collectMovedGitlinks(git, root, from, to, prefix)
+  const checkouts = new Map<string, MovedGitlink[]>()
   for (const pin of pins) {
     const group = checkouts.get(pin.checkout) ?? []
     group.push(pin)

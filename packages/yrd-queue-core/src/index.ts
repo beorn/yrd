@@ -181,6 +181,7 @@ export type { Draft, DraftReading } from "./drafts.ts"
 export { directMergeLine, eventDirectMergeCommits } from "./direct.ts"
 export {
   refuseTarget,
+  collectMovedGitlinks,
   inspectSubmit,
   prepareSubmit,
   inspectSubmitAtHead,
@@ -193,6 +194,7 @@ export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
 export type { PinCarrierPin, PreparedPinCarrier } from "./pin-carrier.ts"
 export type {
   AdmissionOutcome,
+  MovedGitlink,
   AdmissionVerdict,
   IssueResolution,
   IssueResolver,

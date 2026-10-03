@@ -22,6 +22,7 @@ import * as gitomic from "gitomic"
 import type { RefUpdate } from "gitomic"
 import {
   createEventQueue,
+  collectMovedGitlinks,
   createEventStore,
   drop,
   queueRun,
@@ -384,6 +385,7 @@ it("does not publish a pin unchanged at one of several criss-cross merge bases",
 
   const bases = await mergeBases(w.git, leftMerge, rightMerge)
   expect(new Set(bases)).toEqual(new Set([left, right]))
+  expect(await collectMovedGitlinks(w.git, w.work, bases, leftMerge)).toEqual([])
   expect(await publishMovedGitlinks(w.git, w.work, bases, leftMerge)).toEqual([])
 })
 
@@ -1111,7 +1113,12 @@ it("keeps a nested behind-main event pin without publishing either child", async
   expect(nested.leafRecorded).not.toBe(nested.leafMain)
 })
 
-it("publishes a nested pin that the branch authored", async () => {
+/** @failure Bundle construction and publication select different branch-authored nested pins (27143).
+ * @level l2 @consumer contained submit client and credentialed publisher
+ * @testonly none
+ * Existing publication assertions cannot observe the shared plan or prove collection makes no retention writes.
+ */
+it("collects and publishes the same nested pins that the branch authored", async () => {
   const w = await world()
   await addNestedSubmodule(w)
   await createWorldEventQueue(w)
@@ -1134,12 +1141,25 @@ it("publishes a nested pin that the branch authored", async () => {
   await subWork(["push", "--quiet", "origin", "nested-feature"])
 
   await w.git(["checkout", "--quiet", "-b", "task/nested-pin", "main"])
+  const base = (await w.git(["rev-parse", "main"])).trim()
+  const subBase = (await w.git(["rev-parse", `${base}:submodule`])).trim()
   const sub = gitIn(join(w.work, "submodule"))
   await sub(["fetch", "--quiet", "origin", "nested-feature"])
   await sub(["checkout", "--quiet", subAhead])
   await sub(["submodule", "update", "--init", "--recursive"])
   await w.git(["add", "submodule"])
   await w.git(["commit", "--quiet", "-m", "carry nested pin"])
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  const leafBase = (await sub(["rev-parse", `${subBase}:apps/leaf`])).trim()
+  const pins = await collectMovedGitlinks(w.git, w.work, [base], head)
+  const expected = [
+    { path: "submodule", sha: subAhead, bases: [subBase] },
+    { path: "submodule/apps/leaf", sha: leafAhead, bases: [leafBase] },
+  ]
+  expect(pins.map(({ path, sha, bases }) => ({ path, sha, bases }))).toEqual(expected)
+  for (const pin of pins) {
+    expect((await pin.child(["ls-remote", "--refs", "origin", pin.ref])).trim()).toBe("")
+  }
   await w.git(["checkout", "--quiet", "main"])
 
   const result = await submit(w.git, "origin", {
@@ -1147,7 +1167,9 @@ it("publishes a nested pin that the branch authored", async () => {
     submitter: "@dev/11",
     target: { branch: "main", remote: "origin" },
   })
-  expect(result.published.map(({ path }) => path)).toEqual(["submodule", "submodule/apps/leaf"])
+  expect(result.published.map(({ path, sha }) => ({ path, sha }))).toEqual(
+    expected.map(({ path, sha }) => ({ path, sha })),
+  )
 })
 
 async function gitlinkAt(w: World, commit: string): Promise<string> {
