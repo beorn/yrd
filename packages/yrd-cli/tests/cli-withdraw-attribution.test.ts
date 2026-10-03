@@ -84,8 +84,8 @@ async function queueWithChanges(...branches: readonly string[]): Promise<string>
   return work
 }
 
-/** The `By:` and `To:` the cancelled record carries, read back through `yrd queue show`. */
-async function cancelledRecord(work: string, branch: string): Promise<Readonly<{ by?: string; to?: string }>> {
+/** The `By:` and `Recipient:` the cancelled record carries, read back through `yrd queue show`. */
+async function cancelledRecord(work: string, branch: string): Promise<Readonly<{ by?: string; recipient?: string }>> {
   const shown = await yrd(work, "queue", "show", branch, "--json")
   expect(shown.exitCode, shown.report).toBe(0)
   const parsed = JSON.parse(shown.stdout) as {
@@ -97,7 +97,7 @@ async function cancelledRecord(work: string, branch: string): Promise<Readonly<{
   const change = parsed.changes.find((row) => row.branch === branch)
   const cancelled = change?.events.findLast((event) => event.type === "cancelled")
   const prop = (key: string): string | undefined => cancelled?.props.find(([name]) => name === key)?.[1]
-  return { by: prop("By"), to: prop("To") }
+  return { by: prop("By"), recipient: prop("Recipient") }
 }
 
 describe("`yrd withdraw` records the actor, not the notified seat (27262)", () => {
@@ -123,10 +123,10 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     expect(record.by, ran.report).not.toBe("@dev/notified")
   })
 
-  // The notified seat is a separate record fact. It is recorded by a `To:`
-  // trailer on the `cancelled` event, which is a Yrd record-schema change and
-  // awaits @cto (`cancelled` currently has no such trailer). Enabled on approval.
-  it.skip("records the notified seat separately from the actor", async () => {
+  // @cto 5753a5ce: the separate fact is the optional `Recipient:` trailer, a
+  // recorded coordination target — never delivery proof (manual withdraw sends
+  // no notice, README).
+  it("records the notified seat separately from the actor", async () => {
     const work = await queueWithChanges("task/three")
 
     const ran = await yrd(
@@ -145,7 +145,7 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
 
     const record = await cancelledRecord(work, "task/three")
     expect(record.by, ran.report).toBe("@dev/actor")
-    expect(record.to, ran.report).toBe("@dev/notified")
+    expect(record.recipient, ran.report).toBe("@dev/notified")
   })
 
   it("takes the actor from YRD_DEFAULT_SUBMITTER when `--notify` names another seat", async () => {

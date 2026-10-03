@@ -221,18 +221,11 @@ function buildProgram(
     command
       .option("--json", "emit stable JSON")
       .option("--submitter <agent>", SUBMITTER_HELP)
-      .option("--notify <seat>", "the notified seat; it no longer names the actor (27262)")
+      .option("--notify <seat>", "the coordination seat recorded as Recipient:; no notice is sent (27262)")
       .option("--queue <value>", QUEUE_HELP)
       .option("--reason <text>", "why the change leaves the line, written on the record")
   const queueEnd = async (branch: string, options: PauseOptions, command: "withdraw" | "drop"): Promise<void> => {
     const location = await resolveQueueLocation(cwd(), options.queue, env)
-    if (options.notify !== undefined) {
-      io.stderr(
-        "yrd: `--notify` on withdraw names the notified seat, not the actor; the actor is `--submitter` (or " +
-          DEFAULT_SUBMITTER_ENV +
-          ")\n",
-      )
-    }
     setExit(
       await coreQueueCommand(
         location.repo,
@@ -240,6 +233,7 @@ function buildProgram(
         {
           branch,
           by: resolveSubmitter(options.submitter, env),
+          ...(options.notify === undefined ? {} : { recipient: options.notify }),
           command,
           ...(options.reason === undefined ? {} : { reason: options.reason }),
         },
