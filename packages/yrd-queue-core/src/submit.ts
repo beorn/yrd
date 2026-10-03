@@ -606,7 +606,16 @@ async function admitSubmitAtHead(
   const format = await queueFormat(store, queue)
   switch (format) {
     case "empty": {
-      const config = await readConfig(git, targetHead, request.target)
+      // Queue creation addresses the declaration; only the runner executes its newer keys (27187).
+      const config = await readConfig(git, targetHead, request.target, {
+        newerKeys: (keys) => {
+          console.warn(
+            `yrd: creating event queue ${targetName(request.target)} from ${targetHead}: newer declaration keys ` +
+              `${keys.map((key) => `${key}:`).join(", ")}. The queue runs them; submit does not. ` +
+              "Update this environment's Yrd to the one the target pins to silence this.",
+          )
+        },
+      })
       if (config === undefined) {
         throw new Error(
           `cannot create event queue ${remote}#${queue}: the pinned commit ${targetHead} has no .yrd.yml; declare checks in .yrd.yml at that commit before creating an event queue`,
