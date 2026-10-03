@@ -1,3 +1,10 @@
+/**
+ * @failure Captured public Git context is lost across native descendants or materialization.
+ * @level l2
+ * @consumer Contained Yrd submit
+ * @reach fs-walk <fixture-only: temporaryRoot native Git metadata/object directories>
+ * @testonly none
+ */
 import { spawnSync } from "node:child_process"
 import {
   appendFileSync,
@@ -6,6 +13,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs"
@@ -172,6 +180,28 @@ describe("the git runner", () => {
     const worktreePath = join(root, "candidate-worktree")
     const materialized = await freshWorktree(child, childRoot, feature, worktreePath)
     expect(await child.at(worktreePath)(["show", "HEAD:feature.txt"])).toBe("public feature\n")
+    // Creation must produce usable standard child metadata without copying the
+    // selected public objects or turning that context into persistent custody.
+    const createdNestedRoot = join(worktreePath, "nested")
+    const createdNested = child.at(createdNestedRoot)
+    expect(await createdNested(["show", "HEAD:nested.txt"])).toBe("public nested\n")
+    expect((await createdNested(["rev-parse", "HEAD"])).trim()).toBe(nestedHead)
+    expect((await createdNested(["remote", "get-url", "origin"])).trim()).toBe(
+      "https://github.com/yrd-context-fixture/nested.git",
+    )
+    expect((await createdNested(["rev-parse", `refs/remotes/origin/${nestedBranch}`])).trim()).toBe(nestedHead)
+    const moduleDir = (await createdNested(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    const parentGitDir = (await child.at(worktreePath)(["rev-parse", "--absolute-git-dir"])).trim()
+    expect(moduleDir).toBe(join(parentGitDir, "modules", "nested"))
+    const gitfile = readFileSync(join(createdNestedRoot, ".git"), "utf8").trim()
+    expect(gitfile.startsWith("gitdir: ")).toBe(true)
+    expect(resolve(createdNestedRoot, gitfile.slice("gitdir: ".length))).toBe(moduleDir)
+    expect(readdirSync(join(moduleDir, "objects")).filter((name) => !["info", "pack"].includes(name))).toEqual([])
+    const physicalAlternates = readFileSync(join(moduleDir, "objects", "info", "alternates"), "utf8")
+    for (const selected of [directory, alternate]) {
+      expect(physicalAlternates.split("\n")).not.toContain(selected)
+      expect(existsSync(join(selected, "info", "alternates"))).toBe(false)
+    }
     const beforeRemove = readFileSync(trace, "utf8").length
     await materialized.remove()
     expect(existsSync(worktreePath)).toBe(false)
