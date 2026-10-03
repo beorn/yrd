@@ -91,7 +91,11 @@ describe("standalone CLI boot", () => {
       ])
       expect(selectionExit, selectionStderr).toBe(0)
       const selection = JSON.parse(selectionStdout) as { bin: string; sha: string }
-      const declared = JSON.parse(await readFile(join(root, "package.json"), "utf8")).overrides["git-super"] as string
+      const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as {
+        overrides: Record<string, string>
+      }
+      const declared = manifest.overrides["git-super"]
+      if (declared === undefined) throw new Error("standalone fixture requires its declared git-super override")
       expect(selection.sha).toBe(declared.split("#")[1])
       expect(selection.bin.startsWith(join(root, "node_modules") + "/")).toBe(true)
     } finally {
