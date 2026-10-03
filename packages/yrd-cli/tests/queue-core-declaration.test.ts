@@ -453,7 +453,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         new Date("2026-09-22T14:00:00.000Z"),
       ),
     ).rejects.toThrow(
-      /cannot create event queue main at .*: the pinned commit has no \.yrd\.yml; declare checks in \.yrd\.yml at that commit before creating an event queue/u,
+      /cannot create event queue main at .*: the pinned \.yrd\.yml could not be validated in .*; declare checks there and restore its public objects before creating an event queue/u,
     )
     expect(await git(["ls-remote", "--refs", "origin", "refs/yrd/main/*"])).toBe("")
   })

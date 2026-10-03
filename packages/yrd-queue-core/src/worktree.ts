@@ -753,7 +753,11 @@ function formatGitSuperWorktreeRefusal(error: unknown, path: string, commit: str
   let exitCode: string
   let stderrDetail: string
 
-  if (error instanceof GitExit) {
+  if (error instanceof GitExit && error.evidence?.result === undefined && error.evidence?.failure !== undefined) {
+    command = undefined
+    exitCode = "none (the runner returned no exit result)"
+    stderrDetail = error.detail
+  } else if (error instanceof GitExit) {
     command = `git ${error.args.join(" ")} in ${error.cwd}`
     exitCode = String(error.exitCode)
     stderrDetail = error.detail
