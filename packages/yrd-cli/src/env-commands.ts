@@ -150,15 +150,15 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   }
   const config = await readConfig(git, base, { remote: "origin", branch: target })
   const resolveIssue = config === undefined ? undefined : issueResolver(config, root)
-  // 27147: a submodule the base declares `private = true` is left empty and uninitialized.
-  const excludedSubmodules = await declaredPrivateSubmodules(git, resolve(root), base)
+  // 27147: a submodule the base declares `private = true` is left empty and uninitialized; a detached
+  // environment's freshWorktree reads the declaration itself.
   let provisioned: { path: string; headSha: string; baseSha: string; adoption: ProvisionedBay["adoption"] | "detached" }
   if (branch === undefined) {
     const environments = join(resolve(root, await workdirOf(git)), "environments")
     const path = resolve(environments, name)
     if (!path.startsWith(`${environments}/`)) throw new Error(`environment name '${name}' escapes ${environments}`)
     mkdirSync(environments, { recursive: true })
-    await freshWorktree(git, root, base, path, { excludedSubmodules })
+    await freshWorktree(git, root, base, path)
     provisioned = { path, headSha: base, baseSha: base, adoption: "detached" }
   } else {
     const shadow = await branchPathConflict(git, branch)
@@ -169,6 +169,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       )
     }
     const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(), process })
+    const excludedSubmodules = await declaredPrivateSubmodules(git, resolve(root), base)
     const result = await workspace.provision({ bay: name, name, branch, base, excludedSubmodules })
     if (result.conclusion !== "success") {
       throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)

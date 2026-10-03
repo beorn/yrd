@@ -74,7 +74,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
     if (beforeMerge !== undefined) {
       await timed("beforeMerge", () => beforeMerge(worktree.path))
     }
-    result = await superMerge(options, worktree.path, options.head, options.message)
+    result = await superMerge(options, worktree.path, options.head, options.message, worktree.excludedSubmodules)
   } catch (error) {
     await worktree.remove()
     throw error
@@ -126,6 +126,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
         })
       },
       commit: result.commit,
+      excludedSubmodules: worktree.excludedSubmodules,
       gitIn: (cwd) =>
         gitIn(cwd, population.process, selection, {
           ...(population.env === undefined ? {} : { env: population.env }),
@@ -153,7 +154,10 @@ async function superMerge(
   cwd: string,
   commit: string,
   message: string,
+  excludedSubmodules: readonly string[],
 ): Promise<SuperMergeResult> {
+  // The tree's own list (27147): the merge compares nothing under a path the
+  // tree left out, and refuses, by its own admission, a candidate that moves it.
   const execution = await gitSuperExecution(options, cwd, [
     "merge",
     commit,
@@ -161,6 +165,7 @@ async function superMerge(
     message,
     ...(options.noFetch ? ["--no-fetch"] : []),
     ...(options.unboundedLocalMain ? ["--unbounded-local-main"] : []),
+    ...excludedSubmodules.flatMap((path) => ["--exclude-submodule", path]),
   ])
   let parsed: unknown
   try {

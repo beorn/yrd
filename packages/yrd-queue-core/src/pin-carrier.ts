@@ -14,6 +14,7 @@ import {
   type Git,
 } from "./git.ts"
 import { isOpen, listChanges, queueFormat, queueRef } from "./events.ts"
+import { declaredPrivateSubmodules } from "./private-submodules.ts"
 import { populateReferenceStores } from "./reference.ts"
 import { remoteUrl } from "./remote.ts"
 
@@ -73,9 +74,17 @@ export async function preparePinCarrier(
   const targetHead = await readRemoteCommit(git, target.remote, `refs/heads/${target.branch}`)
   if (targetHead === undefined) throw new Error(`${target.remote}/${target.branch} has no advertised target branch`)
   const childGit = (path: string) => gitIn(path, undefined, selectionFor(git), { env })
-  await populateReferenceStores({ repo, commit: targetHead, gitIn: childGit })
+  // 27147: a submodule the target declares private has no store here, so its pin cannot be carried.
+  const excludedSubmodules = await declaredPrivateSubmodules(git, repo, targetHead)
+  await populateReferenceStores({ repo, commit: targetHead, excludedSubmodules, gitIn: childGit })
   const subjects: string[] = []
   for (const pin of pins) {
+    if (excludedSubmodules.includes(pin.path)) {
+      throw new Error(
+        `${pin.path} is declared private = true in ${target.remote}/${target.branch}'s .gitmodules; ` +
+          "the queue does not hold it, so a carrier cannot move its gitlink",
+      )
+    }
     const child = childGit(join(repo, pin.path))
     const remote = await remoteUrl(child, "origin")
     try {

@@ -63,6 +63,12 @@ export type PopulateReference = Readonly<{
   commit?: string
   /** Local root whose matching gitlink stores can serve exact pins before origin is asked. */
   source?: string
+  /**
+   * Root-relative submodule paths the composed tree leaves out (27147: declared
+   * `private = true`). Skipped, with everything under them, before any store is
+   * read, created or fetched into.
+   */
+  excludedSubmodules?: readonly string[]
   /** One acquisition fact per pin. Observer failures propagate. */
   acquired?: (pin: ReferenceAcquisition) => void
   /** Told about each store as it is created. A store already there says nothing. */
@@ -182,6 +188,7 @@ function pinRef(sha: string): string {
  */
 export async function populateReferenceStores(options: PopulateReference): Promise<readonly ReferenceStore[]> {
   const root = resolve(options.repo)
+  const excluded = options.excludedSubmodules ?? []
   const created: ReferenceStore[] = []
   const levels: Array<Readonly<{ dir: string; prefix: string; commit: string }>> = [
     { dir: root, prefix: "", commit: options.commit ?? "HEAD" },
@@ -191,8 +198,12 @@ export async function populateReferenceStores(options: PopulateReference): Promi
     if (level === undefined) break
     const git = options.gitIn(level.dir)
     const urls = await declaredSubmodules(git, level.commit)
-    if (urls.size === 0) continue
-    const gitlinks = await gitlinksAt(git, level.commit, [...urls.keys()])
+    const included = [...urls.keys()].filter((path) => {
+      const named = level.prefix === "" ? path : join(level.prefix, path)
+      return !excluded.some((root) => named === root || named.startsWith(`${root}/`))
+    })
+    if (included.length === 0) continue
+    const gitlinks = await gitlinksAt(git, level.commit, included)
     for (const { path, sha } of gitlinks) {
       const named = level.prefix === "" ? path : join(level.prefix, path)
       const url = urls.get(path)
