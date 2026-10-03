@@ -102,6 +102,7 @@ describe("27098: the queue's frozen git-super selection", () => {
     const frozen = stubBin(join(dir, "frozen"))
     const poisoned = stubBin(join(dir, "poisoned"))
     const seen: readonly string[][] = []
+    const invocations: Array<{ selection?: { origin?: string } }> = []
     const real = createProcess({ cwd: dir })
     try {
       const recording = {
@@ -113,6 +114,9 @@ describe("27098: the queue's frozen git-super selection", () => {
       }
       const git = gitIn(dir, recording, NATIVE, {
         env: { ...process.env, [YRD_GIT_SUPER_BIN]: frozen, [YRD_GIT_SUPER_SHA]: "a".repeat(40) },
+        onInvocation: (invocation) => {
+          invocations.push(invocation as unknown as { selection?: { origin?: string } })
+        },
       })
       // A later mutation must not move the selected tool: the runner captured it.
       const prior = process.env[YRD_GIT_SUPER_BIN]
@@ -126,6 +130,8 @@ describe("27098: the queue's frozen git-super selection", () => {
       expect(seen).toHaveLength(1)
       expect(seen[0]?.[0]).toBe(frozen)
       expect(seen[0]).not.toContain("super")
+      // 27098 step 3: the receipt names path (executable) and pin (origin).
+      expect(invocations[0]?.selection?.origin).toBe("frozen git-super@aaaaaaaaaaaa")
     } finally {
       await real.close()
     }

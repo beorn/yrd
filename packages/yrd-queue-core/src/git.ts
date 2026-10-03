@@ -320,7 +320,13 @@ export function gitIn(
     if (direct !== undefined) {
       const frozen = requireFrozenGitSuper(source, `git-super ${direct.direct[0] ?? "command"}`)
       invocationArgs = direct.direct
-      invocationSelection = Object.freeze({ ...selection, executable: frozen.bin })
+      // 27098 step 3: the invocation evidence names the frozen tool's path
+      // (executable) AND its pin (origin), so a receipt shows both.
+      invocationSelection = Object.freeze({
+        ...selection,
+        executable: frozen.bin,
+        origin: "frozen git-super@" + frozen.sha.slice(0, 12),
+      })
       hooks = direct.hooks
     }
     const attempt = async (attemptEnv: NodeJS.ProcessEnv | undefined) => {

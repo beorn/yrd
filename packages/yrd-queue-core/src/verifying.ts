@@ -400,7 +400,12 @@ export async function gitSuperExecution(
   const invocation = {
     args: Object.freeze(["--json", ...objectArgs, ...argv]),
     cwd,
-    selection: { executable: frozen.bin, contract: "native", scope: "default", origin: "frozen git-super" } as const,
+    selection: {
+      executable: frozen.bin,
+      contract: "native",
+      scope: "default",
+      origin: "frozen git-super@" + frozen.sha.slice(0, 12),
+    } as const,
   }
   try {
     const evidence = await invokeGit(runner, invocation, options.gitOptions ?? {}, childEnv, undefined)
