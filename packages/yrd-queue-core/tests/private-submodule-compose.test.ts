@@ -4,6 +4,7 @@
  *          populate a submodule the commit declares `private = true`, which no Yrd environment holds (27147, 27157).
  * @level   l2 (real repositories, real `git super worktree add` and `git super merge`)
  * @consumer `yrd submit` (verifying) and every queue run
+ * @testonly none
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
