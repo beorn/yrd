@@ -191,6 +191,43 @@ describe("the queue declaration grammar", () => {
     expect(() => parseConfig(text, SOURCE)).toThrow(problem)
   })
 
+  // 27187: a read that never RUNS the declaration (submit, list) hears the names of
+  // top-level keys newer than its parser and reads the rest; a read that runs it
+  // (the queue's round, check) still refuses, as do retired keys and nested fields.
+  describe("a top-level key newer than this parser", () => {
+    const text = "later: bun tools/later.ts\nsetup: bun install\n"
+    it("refuses in a strict read, as the queue's round reads it", () => {
+      expect(() => parseConfig(text, SOURCE)).toThrow(/\.yrd\.yml: unknown key later \(known:/u)
+    })
+    it("is named to the handler and left out of a tolerant read", () => {
+      const heard: string[][] = []
+      const config = parseConfig(text, { ...SOURCE, newerKeys: (keys) => heard.push([...keys]) })
+      expect(heard).toEqual([["later"]])
+      expect(config.setup).toBe("bun install")
+      expect("later" in config).toBe(false)
+    })
+    it("leaves the handler silent when every key is known", () => {
+      const heard: string[][] = []
+      parseConfig("setup: bun install\n", { ...SOURCE, newerKeys: (keys) => heard.push([...keys]) })
+      expect(heard).toEqual([])
+    })
+    it.each([
+      ["a retired key", "workdir: /var/tmp/yrd\n", /unknown key workdir .*git config yrd\.workdir/u],
+      [
+        "Gitomic's legacy landing: declaration",
+        "landing: none\n",
+        /unknown key landing .*protected-branch declaration.*checks:/u,
+      ],
+      [
+        "an unknown field inside checks:",
+        "checks:\n  - verify:\n      run: bun run verify\n      later: true\n",
+        /checks\[0\] verify: unknown key later/u,
+      ],
+    ] as const)("still refuses %s in a tolerant read", (_name, declaration, problem) => {
+      expect(() => parseConfig(declaration, { ...SOURCE, newerKeys: () => undefined })).toThrow(problem)
+    })
+  })
+
   it.each([
     ["unknown top-level key", "setupp: bun install\n", /unknown key setupp .*known:/u],
     ["empty setup", "setup: ''\n", /setup: must be a non-empty string/u],
