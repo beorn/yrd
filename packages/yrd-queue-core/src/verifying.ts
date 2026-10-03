@@ -14,6 +14,7 @@ import {
 import { freshWorktree, type FreshWorktree, type Worktree } from "./worktree.ts"
 import { populateReferenceStores } from "./reference.ts"
 import { DeriveFailed, deriveInWorktree, type Derived, type DeriveSpec } from "./derive.ts"
+import { requireFrozenGitSuper, withGitConfig } from "./git-super-selection.ts"
 
 /** `descents` records git-super's two-direction ancestry checks of nested pins (24320). */
 export type Verification =
@@ -351,11 +352,8 @@ export async function gitSuperExecution(
   argv: readonly string[],
 ): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
   const objects = options.git === undefined ? options.gitOptions?.objects : runnerFor(options.git).objects
-  const gitArgs = [
-    ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
-    "super",
-    "--json",
-    ...(objects === undefined
+  const objectArgs =
+    objects === undefined
       ? []
       : [
           "--repo",
@@ -363,7 +361,12 @@ export async function gitSuperExecution(
           "--object-directory",
           objects.directory,
           ...(objects.alternates ?? []).flatMap((path) => ["--alternate-object-directory", path]),
-        ]),
+        ]
+  const gitArgs = [
+    ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
+    "super",
+    "--json",
+    ...objectArgs,
     ...argv,
   ]
   if (options.git !== undefined) {
@@ -383,23 +386,29 @@ export async function gitSuperExecution(
       return evidence.result
     }
   }
+  // No GitRunner here: run the launcher-frozen absolute binary directly (27098).
+  // `core.hooksPath` is re-homed from `-c` to GIT_CONFIG_* because the binary has
+  // no git in front of it to parse the prefix; its own git children honour it.
+  const source = options.env ?? options.gitOptions?.env ?? globalThis.process.env
+  const frozen = requireFrozenGitSuper(source, `git-super ${argv[0] ?? "command"}`)
+  const childEnv = withGitConfig(
+    gitEnvironment(source, options.gitOptions?.objects),
+    options.hooksPath === undefined ? [] : [`core.hooksPath=${options.hooksPath}`],
+  )
   const owned = options.process === undefined
-  const runner =
-    options.process ??
-    createProcess({ cwd, env: gitEnvironment(options.env ?? globalThis.process.env, options.gitOptions?.objects) })
+  const runner = options.process ?? createProcess({ cwd, env: childEnv })
   const invocation = {
-    args: Object.freeze(gitArgs),
+    args: Object.freeze(["--json", ...objectArgs, ...argv]),
     cwd,
-    selection: { executable: "git", contract: "native", scope: "default", origin: "native git" } as const,
+    selection: {
+      executable: frozen.bin,
+      contract: "native",
+      scope: "default",
+      origin: "frozen git-super@" + frozen.sha.slice(0, 12),
+    } as const,
   }
   try {
-    const evidence = await invokeGit(
-      runner,
-      invocation,
-      options.gitOptions ?? {},
-      gitEnvironment(options.env ?? options.gitOptions?.env ?? globalThis.process.env, options.gitOptions?.objects),
-      undefined,
-    )
+    const evidence = await invokeGit(runner, invocation, options.gitOptions ?? {}, childEnv, undefined)
     const published = publishGitInvocation(options.gitOptions, evidence, true)
     if (published.failure !== undefined) {
       throw new Error(`git-super ${argv[0] ?? "command"} did not settle normally: ${published.failure}`)
