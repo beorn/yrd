@@ -638,6 +638,18 @@ export async function coreQueueCommand(
     throw new Error(`queue status store ${repo} has ${observed}; use --fresh for this reading`)
   }
   type CapturedDeclaration = Readonly<{ config: QueueConfig; oid: string }>
+  // The commands that EXECUTE the target's declaration read it strictly: a key they
+  // cannot read is a step they would skip. Every other command only addresses the
+  // queue — submit, list, show, ls, stats, withdraw, drop, pause, resume, ignore,
+  // unignore, override, sweep-candidates — and tolerates a key newer than its own
+  // parser, out loud (27187; the `derive:` landing of 2026-10-02 refused every
+  // older environment's submit).
+  const RUNS_THE_DECLARATION: ReadonlySet<CoreQueueCommand["command"]> = new Set<CoreQueueCommand["command"]>([
+    "up",
+    "run",
+    "merge",
+    "check",
+  ])
   // The target's declaration as the target holds it now: fetched, read in full
   // and held to its keys, then the remote it names resolved. Undefined when the
   // target carries no `.yrd.yml` at all — there is no queue there; a
@@ -652,7 +664,23 @@ export async function coreQueueCommand(
     if (oid === undefined) throw new Error(`the target ${targetLabel} is not at ${remote}`)
     let declared: QueueConfig | undefined
     try {
-      declared = await readConfig(git, oid, target)
+      declared = await readConfig(
+        git,
+        oid,
+        target,
+        RUNS_THE_DECLARATION.has(request.command)
+          ? {}
+          : {
+              newerKeys: (keys) => {
+                const one = keys.length === 1
+                io.stderr(
+                  `yrd: the declaration at ${targetLabel} has ${one ? "a key" : "keys"} this environment's Yrd does not know: ` +
+                    `${keys.map((key) => `${key}:`).join(", ")}. The queue runs ${one ? "it" : "them"}; ${NAMED[request.command]} does not, ` +
+                    `so it proceeds without ${one ? "it" : "them"}. Update this environment's Yrd to the one the target pins to silence this.\n`,
+                )
+              },
+            },
+      )
     } catch (error) {
       throw new Error(
         `the declaration at ${targetLabel} cannot be read: ${error instanceof Error ? error.message : String(error)}`,
