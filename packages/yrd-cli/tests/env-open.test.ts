@@ -911,7 +911,7 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
     })
   })
 
-  it("never writes the shared config when extensions.worktreeConfig is disabled, and names the cure", async () => {
+  it("never writes the shared config when extensions.worktreeConfig is disabled, and requires the shared-owner migration", async () => {
     const w = await world(":")
     await withDeclaredIdentity("@dev/luna6-fixture", "dev-luna6-fixture@main.hh.invalid", async () => {
       const run = capture(w.work)
@@ -925,7 +925,10 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
       expect((await gitIn(bay)(["config", "user.name"])).trim()).toBe("yrd")
       expect((await w.git(["config", "--local", "--get", "--default=SENTINEL", "user.name"])).trim()).toBe("yrd")
       expect(run.stderr()).toContain("extensions.worktreeConfig")
-      expect(run.stderr()).toContain("git config --worktree user.name @dev/luna6-fixture")
+      expect(run.stderr()).toContain("core.bare")
+      // @dev/review2 2026-10-03: the offered remedy must respect the precondition. --worktree is NOT scoped
+      // without the extension, so the refusal must not offer it as a by-hand substitute.
+      expect(run.stderr()).not.toMatch(/--worktree\s+user\.(?:name|email)/u)
     })
   })
 

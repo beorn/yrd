@@ -133,10 +133,12 @@ function declaredSeatIdentity(): Readonly<{ email: string; name: string }> | und
  * `extensions.worktreeConfig` — that extension is exactly what gives a
  * worktree its own `config.worktree`, and enabling it is a repository
  * migration (paired with `core.bare`), so this never enables it. Without it the
- * pin is refused on stderr with the cure, and the shared config is never
- * written from here; the caller's exported `GIT_AUTHOR_*` still names every
- * commit. The write is verified against the shared file and refused loudly if
- * it ever landed there.
+ * pin is refused on stderr naming the migration the shared config's owner must
+ * make first — with no by-hand substitute, because the manual form is the write
+ * that would poison every co-resident worktree (@dev/review2, 2026-10-03) — and
+ * the shared config is never written from here; the caller's exported
+ * `GIT_AUTHOR_*` still names every commit. The write is verified against the
+ * shared file and refused loudly if it ever landed there.
  */
 async function pinDeclaredIdentity(path: string, git: GitRunner, io: YrdCliIO): Promise<void> {
   const identity = declaredSeatIdentity()
@@ -147,9 +149,10 @@ async function pinDeclaredIdentity(path: string, git: GitRunner, io: YrdCliIO): 
   if (scoped !== "true") {
     io.stderr(
       `${path}: not pinning ${identity.name} <${identity.email}> here: the repository does not enable ` +
-        `extensions.worktreeConfig, so git would write the shared config instead. Enable it (with its core.bare ` +
-        `migration), or set the identity by hand: git config --worktree user.name ${identity.name} && ` +
-        `git config --worktree user.email ${identity.email}\n`,
+        `extensions.worktreeConfig, so a per-worktree write is not available — git stores user.* in the shared ` +
+        `config every co-resident worktree inherits. This is the shared config's own migration, made once by its ` +
+        `owner (extensions.worktreeConfig together with its core.bare change); until it lands there is no by-hand ` +
+        `substitute, and the caller's exported GIT_AUTHOR_*/GIT_COMMITTER_* still name every commit made here.\n`,
     )
     return
   }
