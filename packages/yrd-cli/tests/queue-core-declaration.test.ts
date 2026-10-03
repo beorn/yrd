@@ -1145,7 +1145,10 @@ describe("a queue is the selected origin branch carrying config", () => {
     for (const name of ["first", "second"]) {
       writeFileSync(join(repo, `${name}.txt`), `${name}\n`)
       await git(["add", `${name}.txt`])
-      await git(["commit", "--quiet", "-m", `${name} direct`])
+      const at = name === "first" ? "2026-09-22T14:01:00Z" : "2026-09-22T14:02:00Z"
+      await gitIn(repo, undefined, git.selection, {
+        env: { ...process.env, GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at },
+      })(["commit", "--quiet", "-m", `${name} direct`])
       direct.push((await git(["rev-parse", "HEAD"])).trim())
     }
     await git(["push", "--quiet", "origin", "main"])
@@ -1154,7 +1157,8 @@ describe("a queue is the selected origin branch carrying config", () => {
       0,
     )
     const rows = (JSON.parse(shown.stdout()) as { changes: readonly { head: string; state: string }[] }).changes
-    expect(rows.filter((row) => row.state === "direct").map((row) => row.head)).toEqual(direct)
+    // The listing is newest first; distinct fixed times expose the order even on a fast host.
+    expect(rows.filter((row) => row.state === "direct").map((row) => row.head)).toEqual([direct[1], direct[0]])
   }, 15_000)
 
   it("submits an unpublished branch, then drops its open change and branch atomically", async () => {
