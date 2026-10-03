@@ -351,7 +351,15 @@ export async function gitSuperExecution(
     ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
     "super",
     "--json",
-    ...(objects === undefined ? [] : ["--repo", cwd, "--object-directory", objects.directory, ...(objects.alternates ?? []).flatMap((path) => ["--alternate-object-directory", path])]),
+    ...(objects === undefined
+      ? []
+      : [
+          "--repo",
+          cwd,
+          "--object-directory",
+          objects.directory,
+          ...(objects.alternates ?? []).flatMap((path) => ["--alternate-object-directory", path]),
+        ]),
     ...argv,
   ]
   if (options.git !== undefined) {

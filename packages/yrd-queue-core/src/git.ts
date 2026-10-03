@@ -348,7 +348,12 @@ export function gitIn(
   }
   return Object.defineProperties(git, {
     selection: { value: selection },
-    objects: { value: objects === undefined ? undefined : Object.freeze({ directory: objects.directory, alternates: Object.freeze([...(objects.alternates ?? [])]) }) },
+    objects: {
+      value:
+        objects === undefined
+          ? undefined
+          : Object.freeze({ directory: objects.directory, alternates: Object.freeze([...(objects.alternates ?? [])]) }),
+    },
     at: { value: (path: string) => gitIn(path, runner, selection, { ...options, env: source, objects }) },
     backend: { get: () => (backend ??= createLegacyBackend(selection.executable, source, objects)) },
     lastInvocation: { get: () => lastInvocation },
