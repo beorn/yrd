@@ -334,7 +334,9 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
     const recording: Process = {
       ...real,
       async run(request) {
-        if (request.argv.includes("super") && request.argv.includes("merge")) merges.push(request.argv)
+        // 27098: the queue runs the frozen git-super binary directly, so a compose
+        // merge child no longer carries the `super` subcommand token.
+        if (request.argv.includes("merge")) merges.push(request.argv)
         return real.run(request)
       },
     }

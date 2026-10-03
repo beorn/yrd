@@ -1,6 +1,9 @@
 /** Child-first publication of a checked merge, shared by legacy and event markers. */
 import type { Process } from "@yrd/process"
-import { readRemoteCommit, type Git, type GitInvocationOptions } from "./git.ts"
+import { createLocalGitProcess } from "git-super/process"
+import { readFrozenPushIntent } from "git-super/push-intent"
+import { gitlinkRows, readRemoteCommit, type Git, type GitInvocationOptions } from "./git.ts"
+import { requireFrozenGitSuper } from "./git-super-selection.ts"
 import { gitSuperExecution, readSuperMergeDetail, type SuperMergeDetail } from "./verifying.ts"
 
 export type ChildPublication = Readonly<{
@@ -95,12 +98,86 @@ export async function publishCheckedChildren(
     }
   }
   const detail = result.detail === undefined ? undefined : readSuperMergeDetail(result.detail)
-  const evidence =
-    `git-super push exit ${String(execution.exitCode)} state=${String(result.state)} partial=${String(result.partial)}` +
+  // Record the frozen tool in the existing publish evidence (27098 step 3): the
+  // receipt names the absolute bin and the landing root's pin it was launched with.
+  const frozen = requireFrozenGitSuper(
+    options.env ?? globalThis.process.env,
+    `git-super push of ${options.candidate.slice(0, 12)}`,
+  )
+  let evidence =
+    `git-super ${frozen.bin}@${frozen.sha.slice(0, 12)} push exit ${String(execution.exitCode)} state=${String(result.state)} partial=${String(result.partial)}` +
     (detail === undefined ? "" : ` ${detail.code} (${detail.phase}): ${detail.message}`) +
     (moved.length === 0 ? "; nothing moved" : `; moved: ${moved.join(", ")}`)
   if (execution.exitCode === 0 && (result.state === "updated" || result.state === "unchanged") && !result.partial) {
-    return { state: "published", moved, evidence }
+    // The JSON is a claim, never the proof: confirm the expected child refs from
+    // their remotes before recording published.
+    const proof = await verifyExpectedChildRefs(options)
+    if (proof.disagreement === undefined) return { state: "published", moved, evidence }
+    evidence = `${evidence}; independent remote proof refused: ${proof.disagreement}`
+    return { state: "refused", moved, evidence }
   }
   return { state: "refused", moved, evidence, ...(detail === undefined ? {} : { detail }) }
+}
+
+/**
+ * The independent publication proof (27098 step 4). The expected child
+ * destinations come from the candidate's OWN frozen push intent joined with the
+ * root gitlinks it changed against its first parent — never from git-super's
+ * success JSON — and every one is read from its remote. A well-formed `updated`
+ * with `repositories: []` therefore cannot pass, and no expected ref is silently
+ * skipped. Any disagreement (wrong value, absent ref, unreadable remote, or a
+ * changed gitlink the intent never named) refuses; there is no second push planner.
+ */
+async function verifyExpectedChildRefs(
+  options: Readonly<{ git: Git; cwd: string; candidate: string; env?: NodeJS.ProcessEnv }>,
+): Promise<Readonly<{ disagreement?: string }>> {
+  const intent = await readFrozenPushIntent(
+    createLocalGitProcess(options.env ?? globalThis.process.env),
+    options.cwd,
+    options.candidate,
+  )
+  const parents = (await options.git(["show", "-s", "--format=%P", options.candidate])).trim().split(/\s+/u)
+  const firstParent = parents[0]
+  const changed =
+    firstParent === undefined || firstParent === ""
+      ? []
+      : (await gitlinkRows(options.git, firstParent, options.candidate)).map((row) => row.path)
+  const children = intent?.children ?? []
+  const known = new Set(children.map((child) => child.path))
+  const unexplained = changed.filter((path) => !known.has(path))
+  if (unexplained.length > 0) {
+    return { disagreement: `the candidate moved gitlink(s) ${unexplained.join(", ")} with no frozen push intent row` }
+  }
+  const expected = children.flatMap((child) =>
+    child.publication === undefined
+      ? []
+      : [
+          {
+            destination: child.publication.destination,
+            path: child.path,
+            remote: child.remote,
+            source: child.publication.source,
+          },
+        ],
+  )
+  const disagreements: string[] = []
+  for (const child of expected) {
+    let observed: string | undefined
+    try {
+      observed = await readRemoteCommit(options.git, child.remote, child.destination)
+    } catch (error) {
+      disagreements.push(
+        `${child.path} ${child.destination}: unreadable (${error instanceof Error ? error.message : String(error)})`,
+      )
+      continue
+    }
+    if (observed !== child.source) {
+      disagreements.push(
+        `${child.path} ${child.destination}: expected ${child.source.slice(0, 12)}, found ${
+          observed === undefined ? "absent" : observed.slice(0, 12)
+        }`,
+      )
+    }
+  }
+  return disagreements.length === 0 ? {} : { disagreement: disagreements.join("; ") }
 }
