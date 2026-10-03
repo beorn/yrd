@@ -54,6 +54,7 @@ const LANDING_IN_PROGRESS = "landing in progress; resubmit after merged/failed/s
 
 export const EVENT_TRAILERS = {
   by: "By",
+  recipient: "Recipient",
   commit: "Commit",
   issue: "Issue",
   queue: "Queue",
@@ -214,6 +215,7 @@ type ChangeInputDetails = Readonly<{
   commit?: string
   issue?: string
   by?: string
+  recipient?: string
   reason?: string
   warningKind?: "policy-warning"
   title?: string
@@ -315,6 +317,10 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   if (type === "opened" && (details.by === undefined || details.by.trim() === "")) {
     throw new TypeError("opened needs By:")
   }
+  if (details.recipient !== undefined) {
+    if (type !== "cancelled") throw new TypeError("Recipient: belongs on cancelled")
+    if (details.recipient.trim() === "") throw new TypeError("Recipient: cannot be empty")
+  }
   if ((type === "ignored" || type === "unignored") && (details.by === undefined || details.by.trim() === "")) {
     throw new TypeError(`yrd-ignore-event-malformed: ${type} needs By:`)
   }
@@ -342,6 +348,7 @@ export function changeInput(type: ChangeEventType, details: ChangeInputDetails):
   if (details.commit !== undefined) props.push([EVENT_TRAILERS.commit, details.commit])
   if (details.issue !== undefined) props.push([EVENT_TRAILERS.issue, details.issue])
   if (details.by !== undefined) props.push([EVENT_TRAILERS.by, details.by])
+  if (details.recipient !== undefined) props.push([EVENT_TRAILERS.recipient, details.recipient])
   if (details.reason !== undefined) props.push([EVENT_TRAILERS.reason, details.reason])
   if (details.warningKind !== undefined) props.push([EVENT_TRAILERS.warningKind, details.warningKind])
   if (details.run !== undefined) props.push([EVENT_TRAILERS.run, details.run])
@@ -591,6 +598,11 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
   }
   const at = requireCause(event)
   checkedRows(event)
+  const recipients = event.props.filter(([key]) => key === EVENT_TRAILERS.recipient)
+  if (recipients.length > 1) throw new Error(`event ${event.id} repeats ${EVENT_TRAILERS.recipient}:`)
+  if (recipients.length === 1 && event.type !== "cancelled") {
+    throw new Error(`event ${event.id} carries ${EVENT_TRAILERS.recipient}: on ${event.type}; it belongs on cancelled`)
+  }
   if (event.props.some(([key]) => key === "Status")) {
     throw new Error(`event ${event.id} stores Status:; status must be a fold`)
   }
@@ -690,6 +702,10 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         throw new Error(`event ${event.id} failed must keep checked candidate ${state.candidate ?? "absent"}`)
       }
       if (event.type === "cancelled") {
+        const recipient = prop(event, EVENT_TRAILERS.recipient)
+        if (recipient !== undefined && recipient.trim() === "") {
+          throw new Error(`event ${event.id} cancelled has empty ${EVENT_TRAILERS.recipient}:`)
+        }
         const migrated = event.props
           .filter(([key]) => key === "Migrated-From")
           .some(([, value]) => {
@@ -853,7 +869,7 @@ export function createLocalEventStore(
 ): LocalQueueReadStore {
   return { repo, selection, backend }
 }
-export type DropRequest = Readonly<{ queue: string; branch: string; by: string; note?: string }>
+export type DropRequest = Readonly<{ queue: string; branch: string; by: string; note?: string; recipient?: string }>
 export type Dropped = Readonly<{ queue: string; branch: string; head: string; event: string }>
 export type SetBranchIgnoredRequest = Readonly<
   { queue: string; branch: string; by: string } & ({ ignored: true; reason: string } | { ignored: false })
@@ -2112,6 +2128,7 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
     commit: keptHead,
     reason: "dropped",
     by: request.by,
+    ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
     title: `dropped ${branch}`,
     ...(note === undefined ? {} : { content: note }),
   })

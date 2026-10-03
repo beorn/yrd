@@ -317,8 +317,8 @@ export type CoreQueueCommand =
       by: string
       verified: boolean
     }>
-  | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string }>
-  | Readonly<{ command: "drop"; branch: string; by: string; reason?: string }>
+  | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string; recipient?: string }>
+  | Readonly<{ command: "drop"; branch: string; by: string; reason?: string; recipient?: string }>
   | Readonly<{ command: "ignore"; branch: string; by: string; reason: string }>
   | Readonly<{ command: "unignore"; branch: string; by: string }>
   | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
@@ -1145,6 +1145,7 @@ export async function coreQueueCommand(
         branch: request.branch,
         by: request.by,
         ...(request.reason === undefined ? {} : { note: request.reason }),
+        ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
       })
       emit(
         io,
@@ -1333,6 +1334,7 @@ export async function coreQueueCommand(
           by: request.by,
           target: config.target,
           ...(request.reason === undefined ? {} : { reason: request.reason }),
+          ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
         })
         emit(
           io,
