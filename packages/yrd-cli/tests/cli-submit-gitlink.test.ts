@@ -378,24 +378,25 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     mkdirSync(bin)
     const compositions = join(w.root, "compositions.jsonl")
     const wrapper = join(bin, "git-super")
+    const previousBin = process.env.YRD_GIT_SUPER_BIN
+    expect(previousBin).toBeDefined()
     writeFileSync(
       wrapper,
       [
-        "#!/usr/bin/env bun",
+        `#!${process.execPath}`,
         'import { appendFileSync } from "node:fs"',
         'import { spawnSync } from "node:child_process"',
         "const args = process.argv.slice(2)",
         'if (args[0] === "--json" && args[1] === "merge")',
         `  appendFileSync(${JSON.stringify(compositions)}, JSON.stringify({ head: args[2] }) + "\\n")`,
-        `const ran = spawnSync(${JSON.stringify(join(import.meta.dirname, "../../../node_modules/.bin/git-super"))}, args, { stdio: "inherit" })`,
+        `const ran = spawnSync(${JSON.stringify(previousBin)}, args, { stdio: "inherit" })`,
         "if (ran.error) throw ran.error",
         "process.exit(ran.status ?? 1)",
         "",
       ].join("\n"),
     )
     chmodSync(wrapper, 0o755)
-    const previousPath = process.env.PATH
-    process.env.PATH = `${bin}:${previousPath ?? ""}`
+    process.env.YRD_GIT_SUPER_BIN = wrapper
     let ran: Awaited<ReturnType<typeof yrd>>
     try {
       ran = await yrd(
@@ -409,8 +410,8 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
         "@dev/2",
       )
     } finally {
-      if (previousPath === undefined) delete process.env.PATH
-      else process.env.PATH = previousPath
+      if (previousBin === undefined) delete process.env.YRD_GIT_SUPER_BIN
+      else process.env.YRD_GIT_SUPER_BIN = previousBin
     }
     expect(ran.exitCode, ran.report).toBe(0)
     await assertCarrier(w, branch, [{ path: one.path, sha: one.held }])
