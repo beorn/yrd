@@ -723,9 +723,15 @@ describe("yrd env open leaves a declared private submodule out (27147)", () => {
     await addMaterializedDependency(w)
     const store = await addPrivateDependency(w)
     const storeBefore = readdirSync(store).sort()
+    const target = (await w.git(["rev-parse", "refs/remotes/origin/main"])).trim()
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "private"], run.io), run.stderr()).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "private", "--json"], run.io), run.stderr()).toBe(
+      0,
+    )
+    // 27181: absence alone would pass if selection cut the bay at a foreign child commit.
+    const opened = JSON.parse(run.stdout()) as { base: string }
+    expect(opened.base).toBe(target)
 
     const bay = join(w.work, ".bays", "private")
     await expectPrivateAbsent(bay)
