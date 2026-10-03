@@ -1201,14 +1201,12 @@ function buildProgram(
       .description(`${SWEEP_CANDIDATES_DESCRIPTION} (the same as ${name} queue sweep-candidates)`),
   ).action(async (options) => queueSweepCandidates(options as SweepCandidatesOptions))
 
-  program
-    .command("drop <branch>")
-    .description("end an event change and delete its branch in one leased publish")
-    .option("--json", "emit stable JSON")
-    .option("--notify <seat>", "name who dropped the change")
-    .option("--queue <value>", QUEUE_HELP)
-    .option("--reason <text>", "operator note kept in the ending event")
-    .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
+  // One option table with withdraw (24824 §1): the actor and the coordination
+  // recipient are separate facts on BOTH endings, so drop must not carry its own
+  // table that names neither --submitter (@dev/11 27262 HOLD fba7572b).
+  withdrawOptions(
+    program.command("drop <branch>").description("end an event change and delete its branch in one leased publish"),
+  ).action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
 
   program
     .command("ignore <branch>")

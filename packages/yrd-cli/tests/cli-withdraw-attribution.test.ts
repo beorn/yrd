@@ -170,4 +170,30 @@ describe("`yrd withdraw` records the actor, not the notified seat (27262)", () =
     expect(record.by, ran.report).toBe("@dev/env-actor")
     expect(record.by, ran.report).not.toBe("@dev/notified")
   })
+
+  // @dev/11 27262 HOLD fba7572b: withdraw rows never traverse drop's parsing, so
+  // the drop path needs its own row. `drop` carried its own option table with no
+  // --submitter and a --notify help that named the actor.
+  it("`yrd drop` names `--submitter` as the actor while `--notify` names another seat", async () => {
+    const work = await queueWithChanges("task/four")
+
+    const ran = await yrd(
+      work,
+      "drop",
+      "task/four",
+      "--submitter",
+      "@dev/drop-actor",
+      "--notify",
+      "@dev/drop-notified",
+      "--reason",
+      "the actor drops it",
+      "--json",
+    )
+    expect(ran.exitCode, ran.report).toBe(0)
+
+    const record = await cancelledRecord(work, "task/four")
+    expect(record.by, ran.report).toBe("@dev/drop-actor")
+    expect(record.by, ran.report).not.toBe("@dev/drop-notified")
+    expect(record.recipient, ran.report).toBe("@dev/drop-notified")
+  })
 })
