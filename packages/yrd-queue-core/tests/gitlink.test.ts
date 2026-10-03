@@ -247,6 +247,49 @@ it("runs a gitlink-bearing event change through the checked candidate", async ()
   expect(state.candidate).toBe(await remoteTip(w.git, "refs/heads/main"))
 })
 
+/** @failure A well-formed git-super success with an empty repository list records
+ * published while no child ref moved — git-super's JSON is taken as the proof of
+ * its own push (27098 step 4).
+ * @level l3 @consumer queue operator and every component author
+ * The frozen push intent, not the JSON, must name the expected child refs.
+ */
+it("refuses a forged git-super success with an empty repository list (27098)", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const ahead = await aheadOfSubmodule(w, "forged-empty")
+  await submitGitlink(w, "task/forged-empty", ahead)
+  const realBin = join(gitSuperBin, "git-super")
+  const stub = join(dirname(w.work), "forging-git-super")
+  const stubBody = [
+    "#!/usr/bin/env bun",
+    'import { spawnSync } from "node:child_process"',
+    'if (process.argv.includes("push")) {',
+    '  process.stdout.write(JSON.stringify({ state: "updated", partial: false, repositories: [] }))',
+    "  process.exit(0)",
+    "}",
+    `const real = spawnSync(${JSON.stringify(realBin)}, process.argv.slice(2), { stdio: "inherit" })`,
+    "process.exit(real.status ?? 1)",
+    "",
+  ].join("\n")
+  writeFileSync(stub, stubBody, { mode: 0o755 })
+  chmodSync(stub, 0o755)
+  const priorBin = process.env.YRD_GIT_SUPER_BIN
+  const priorSha = process.env.YRD_GIT_SUPER_SHA
+  process.env.YRD_GIT_SUPER_BIN = stub
+  try {
+    const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [] })
+    expect(outcome.merged).toEqual([])
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/forged-empty"])
+    expect(await submoduleMain(w)).not.toBe(ahead)
+  } finally {
+    if (priorBin === undefined) delete process.env.YRD_GIT_SUPER_BIN
+    else process.env.YRD_GIT_SUPER_BIN = priorBin
+    if (priorSha === undefined) delete process.env.YRD_GIT_SUPER_SHA
+    else process.env.YRD_GIT_SUPER_SHA = priorSha
+  }
+}, 120_000)
+
 /** @failure A queue round omits bounded reuse and refreshes every component despite a warm Equal observation (26263).
  * @level l3 @consumer queue operator's component refresh budget
  * @testonly none
