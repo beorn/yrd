@@ -179,7 +179,7 @@ describe("yrd submit refusal when git super worktree add fails (25979)", () => {
     async function said(thrown: unknown): Promise<string> {
       const git = gitIn("/repo", {
         async run({ argv }) {
-          if (argv[1] === "super") throw thrown
+          if (argv[0] === process.env.YRD_GIT_SUPER_BIN) throw thrown
           return {
             exitCode: 0,
             signal: null,
