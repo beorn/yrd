@@ -23,6 +23,7 @@ const QUEUE_KEYS = {
   blob: "supported",
   notify: "supported",
   setup: "supported",
+  derive: "supported",
   teardown: "refused",
 } as const satisfies Record<keyof QueueConfig, "supported" | "refused">
 const CHECK_KEYS = new Set([

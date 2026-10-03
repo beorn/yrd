@@ -127,6 +127,12 @@ export type QueueConfig = Readonly<{
   checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
   setup?: string
+  /**
+   * One shell command the queue's compose runs in the merged worktree, after the gitlinks are settled and before
+   * anything is verified, to regenerate files whose inputs are the merged gitlinks (see derive.ts). Only the queue
+   * runs it: a submit-side compose has no final inputs.
+   */
+  derive?: string
   /** One shell command run before closing a retained environment. */
   teardown?: string
   /** What the queue notifies, per ending; empty when the declaration names none. */
@@ -182,6 +188,7 @@ export function parseConfig(
   onlyKeys(raw, TOP_KEYS, ".yrd.yml")
   const notify = readNotify(raw.notify)
   const setup = optionalString(raw, "setup")
+  const derive = optionalString(raw, "derive")
   const teardown = optionalString(raw, "teardown")
   const issueResolver = readIssueResolver(raw.issueResolver)
   const admission = readAdmission(raw.admission)
@@ -195,6 +202,7 @@ export function parseConfig(
     ...(admission === undefined ? {} : { admission }),
     notify,
     setup,
+    ...(derive === undefined ? {} : { derive }),
     teardown,
     target,
   }
@@ -384,6 +392,7 @@ const TOP_KEYS = [
   "admission",
   "archive-after",
   "checks",
+  "derive",
   "health",
   "ignore",
   "issueResolver",
