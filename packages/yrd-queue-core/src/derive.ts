@@ -21,12 +21,12 @@
  * change outside a submodule, or a command that is not there stops the
  * compose by name: the change is stuck, the queue's, never the submitter's.
  */
-import { existsSync } from "node:fs"
 import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { Process } from "@yrd/process"
 import { composeGitlinkCarrier } from "git-super/gitlink-carrier"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
+import { readComponentMain } from "./reference.ts"
 import { gitIn, resolveGitSelection, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
 
 /** The name the derive runs, logs and ends a change under. */
@@ -210,28 +210,16 @@ async function rebaseDerivationOnComponentMain(
 ): Promise<string | undefined> {
   const { child, derive, from, path } = options
   const note = (line: string) => appendFile(join(derive.logDir, "derive-base.log"), `${path}: ${line}\n`)
+  // Read main FRESH through the reference store's owner: the compose that settled this pin may have read a cached
+  // observation (git-super's refresh window), and the recompose that follows reads a fresh one — deriving against the
+  // cached main is how the two forks met. One fetch per derived submodule, on derivation rounds only.
   const store = join(options.repo, path)
-  if (!existsSync(store)) {
-    await note(`no reference store at ${store}; the derived commit stays on the merged pin ${from.slice(0, 12)}`)
-    return
-  }
-  // Read main FRESH: the compose that settled this pin may have read a cached observation (git-super's refresh
-  // window), and the recompose that follows reads a fresh one — deriving against the cached main is how the two
-  // forks met. One fetch per derived submodule, on derivation rounds only; a fetch that fails leaves the stored ref.
-  const storeGit = options.gitAt(store)
-  try {
-    await storeGit(["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
-  } catch (error) {
+  const main = await readComponentMain(options.gitAt, store, (why) =>
+    note(`refreshing ${store} refs/remotes/origin/main failed (${why}); reading the stored ref`),
+  )
+  if (main === undefined) {
     await note(
-      `refreshing ${store} refs/remotes/origin/main failed (${error instanceof Error ? error.message.split("\n")[0] : String(error)}); reading the stored ref`,
-    )
-  }
-  let main: string
-  try {
-    main = (await storeGit(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main^{commit}"])).trim()
-  } catch {
-    await note(
-      `${store} has no refs/remotes/origin/main; the derived commit stays on the merged pin ${from.slice(0, 12)}`,
+      `no reference store with a main at ${store}; the derived commit stays on the merged pin ${from.slice(0, 12)}`,
     )
     return
   }
