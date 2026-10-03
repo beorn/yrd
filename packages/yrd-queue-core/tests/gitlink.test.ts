@@ -44,6 +44,12 @@ beforeEach(() => {
   process.env.PATH = `${gitSuperBin}:${process.env.PATH ?? ""}`
 })
 
+/** The frozen git-super runs DIRECTLY (27098): its request carries no `super`
+ *  token, so a git-super child is the executable ending in `git-super`, never a
+ *  native `git` re-resolving one on PATH. */
+const isGitSuper = (argv: readonly string[], command: string): boolean =>
+  argv[0]?.endsWith("git-super") === true && argv.includes(command)
+
 const roots: string[] = []
 
 /** Intercept the real Gitomic publication seam while retaining its shell backend. */
@@ -273,7 +279,7 @@ it("refreshes only the moved component in a round with an untouched warm Equal c
   const recording: Process = {
     ...real,
     async run(request) {
-      if (request.argv.includes("super") && request.argv.includes("merge")) {
+      if (isGitSuper(request.argv, "merge")) {
         compositions++
         return real.run({
           ...request,
@@ -624,7 +630,7 @@ it("keeps the event candidate and stops on a third component main value", async 
   const racing: Process = {
     ...real,
     async run(request) {
-      if (request.argv.includes("super") && request.argv.includes("push") && !sawMarker) {
+      if (isGitSuper(request.argv, "push") && !sawMarker) {
         const marker = await readStatus(eventStore(w), "main", "task/event-third")
         expect(marker).toMatchObject({ status: "merging" })
         expect(marker.candidate).toBeDefined()
@@ -683,7 +689,7 @@ it("re-verifies an event after a root race and finishes without another child up
     ...real,
     async run(request) {
       const execution = await real.run(request)
-      if (request.argv.includes("super") && request.argv.includes("push")) {
+      if (isGitSuper(request.argv, "push")) {
         const parsed = JSON.parse(execution.stdout) as { repositories?: { refs?: { state: string }[] }[] }
         for (const repository of parsed.repositories ?? []) {
           for (const ref of repository.refs ?? []) if (ref.state === "updated") childUpdates.push(ref.state)
@@ -762,7 +768,7 @@ exit 0
   const interrupting: Process = {
     ...real,
     async run(request) {
-      if (!(request.argv.includes("super") && request.argv.includes("push"))) return real.run(request)
+      if (!isGitSuper(request.argv, "push")) return real.run(request)
       const controller = new AbortController()
       let finished = false
       const pending = real.run({ ...request, signal: controller.signal }).finally(() => {
@@ -829,7 +835,7 @@ it("sticks a cold event replay when the marker's child source has vanished", asy
   const interrupted: Process = {
     ...real,
     run(request) {
-      if (request.argv.includes("super") && request.argv.includes("push")) {
+      if (isGitSuper(request.argv, "push")) {
         throw new Error("fixture killed the runner after its durable marker")
       }
       return real.run(request)
@@ -946,7 +952,7 @@ it("refuses resubmit between marker read-back and child push, then admits it aft
   const interleaved: Process = {
     ...real,
     async run(request) {
-      if (!attempted && request.argv.includes("super") && request.argv.includes("push")) {
+      if (!attempted && isGitSuper(request.argv, "push")) {
         attempted = true
         const state = await readStatus(eventStore(w), "main", "task/event-rival-after-readback")
         expect(state).toMatchObject({ status: "merging" })
@@ -1007,7 +1013,7 @@ it("refuses ignore between marker read-back and child push, then admits it after
   const interleaved: Process = {
     ...real,
     async run(request) {
-      if (!attempted && request.argv.includes("super") && request.argv.includes("push")) {
+      if (!attempted && isGitSuper(request.argv, "push")) {
         attempted = true
         expect(await readStatus(eventStore(w), "main", "task/event-ignore-after-readback")).toMatchObject({
           status: "merging",
@@ -1072,7 +1078,7 @@ it("finishes a marked event after its branch is deleted before resume", async ()
   const interrupted: Process = {
     ...real,
     run(request) {
-      if (request.argv.includes("super") && request.argv.includes("push")) {
+      if (isGitSuper(request.argv, "push")) {
         throw new Error("fixture stops after merging marker")
       }
       return real.run(request)

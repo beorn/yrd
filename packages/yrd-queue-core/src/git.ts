@@ -17,12 +17,13 @@
 import { hostname } from "node:os"
 import { randomUUID } from "node:crypto"
 import { accessSync, constants, statSync } from "node:fs"
-import { isAbsolute, resolve } from "node:path"
+import { basename, isAbsolute, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createShellBackend, type GitomicBackend } from "gitomic"
 import type { Event } from "gitomic/events"
 import { GIT_REPOSITORY_LOCAL_ENV_VARS } from "removely"
+import { requireFrozenGitSuper, withGitConfig } from "./git-super-selection.ts"
 export { chainsUnder, listRefs, openEvents } from "gitomic/events"
 export type { AlsoRef, Event, EventInput } from "gitomic/events"
 export type { CommitMeta, GitomicBackend, Oid } from "gitomic"
@@ -253,6 +254,28 @@ function selectedExecutable(command: string, env: NodeJS.ProcessEnv, problem: (m
 }
 
 /**
+ * A `git super …` child and any leading `-c key=value` pairs, or `undefined`
+ * for an ordinary native git call. Every git-super child converges here (the
+ * compose, the frozen publication, `observe`, and the worktree materializer),
+ * so the queue runs the launcher-frozen absolute binary directly instead of a
+ * native `git` that re-resolves `git-super` on the ambient PATH at exec time
+ * (27098). The direct binary takes no `-c` prefix, so those pairs are re-homed
+ * as `GIT_CONFIG_*` for the binary's own git children.
+ */
+function directGitSuperArgv(
+  args: readonly string[],
+): Readonly<{ hooks: readonly string[]; direct: readonly string[] }> | undefined {
+  let index = 0
+  const hooks: string[] = []
+  while (args[index] === "-c" && args[index + 1] !== undefined) {
+    hooks.push(args[index + 1] as string)
+    index += 2
+  }
+  if (args[index] !== "super") return undefined
+  return Object.freeze({ hooks: Object.freeze(hooks), direct: Object.freeze(args.slice(index + 1)) })
+}
+
+/**
  * A git runner rooted at one repository. Non-zero exits throw, loudly.
  *
  * Two settings travel in its environment (`gitEnvironment`), so no call site
@@ -287,8 +310,29 @@ export function gitIn(
   let lastInvocation: GitInvocation | undefined
   const invoke = async (originalArgs: readonly string[], input?: string, observation = false) => {
     const args = Object.freeze([...originalArgs])
+    // Only a native `git` re-resolves git-super on the ambient PATH at exec time.
+    // A caller that selected a different executable (a fixture, or the frozen
+    // binary itself) keeps it: that selection is not the indirection (27098).
+    const direct = basename(selection.executable) === "git" ? directGitSuperArgv(args) : undefined
+    let invocationArgs = args
+    let invocationSelection = selection
+    let hooks: readonly string[] = []
+    if (direct !== undefined) {
+      const frozen = requireFrozenGitSuper(source, `git-super ${direct.direct[0] ?? "command"}`)
+      invocationArgs = direct.direct
+      invocationSelection = Object.freeze({ ...selection, executable: frozen.bin })
+      hooks = direct.hooks
+    }
     const attempt = async (attemptEnv: NodeJS.ProcessEnv | undefined) => {
-      let evidence = await invokeGit(runner, { args, cwd, selection }, options, attemptEnv, input, observation)
+      const runEnv = hooks.length === 0 || attemptEnv === undefined ? attemptEnv : withGitConfig(attemptEnv, hooks)
+      let evidence = await invokeGit(
+        runner,
+        { args: invocationArgs, cwd, selection: invocationSelection },
+        options,
+        runEnv,
+        input,
+        observation,
+      )
       if (observation && evidence.failure === undefined) {
         try {
           evidence = { ...evidence, observation: readObservation(evidence) }
