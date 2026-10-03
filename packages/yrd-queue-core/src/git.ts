@@ -16,7 +16,8 @@
 
 import { hostname } from "node:os"
 import { randomUUID } from "node:crypto"
-import { resolve } from "node:path"
+import { accessSync, constants, statSync } from "node:fs"
+import { isAbsolute, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createShellBackend, type GitomicBackend } from "gitomic"
