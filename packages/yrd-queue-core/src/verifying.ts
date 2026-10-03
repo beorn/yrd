@@ -346,10 +346,12 @@ export async function gitSuperExecution(
   cwd: string,
   argv: readonly string[],
 ): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
+  const objects = options.git === undefined ? options.gitOptions?.objects : runnerFor(options.git).objects
   const gitArgs = [
     ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
     "super",
     "--json",
+    ...(objects === undefined ? [] : ["--repo", cwd, "--object-directory", objects.directory, ...(objects.alternates ?? []).flatMap((path) => ["--alternate-object-directory", path])]),
     ...argv,
   ]
   if (options.git !== undefined) {

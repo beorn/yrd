@@ -16,8 +16,7 @@
 
 import { hostname } from "node:os"
 import { randomUUID } from "node:crypto"
-import { accessSync, constants, statSync } from "node:fs"
-import { isAbsolute, resolve } from "node:path"
+import { resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createShellBackend, type GitomicBackend } from "gitomic"
@@ -34,6 +33,8 @@ import {
   isSshSessionDrop,
   verboseSshRetryEnvironment,
   type GitProcess,
+  applyGitObjectContext,
+  type GitObjectContext,
 } from "git-super/process"
 import type { QueueObservation } from "./remote.ts"
 import { remoteSeam } from "./remote-calls.ts"
@@ -120,7 +121,7 @@ export type GitOutputSink = Readonly<{
 export type GitInvocationOptions = Readonly<{
   env?: NodeJS.ProcessEnv
   /** Host-owned public stores, asserted physically closed before constructing the runner. */
-  objects?: Readonly<{ directory: string; alternates?: readonly string[] }>
+  objects?: GitObjectContext
   signal?: AbortSignal
   timeoutMs?: number
   openOutput?: (invocation: Pick<GitInvocation, "args" | "cwd" | "selection">) => GitOutputSink
@@ -130,6 +131,7 @@ export type GitInvocationOptions = Readonly<{
 export type GitRunner = Git &
   Readonly<{
     selection: GitSelection
+    objects: GitObjectContext | undefined
     at(cwd: string): GitRunner
     backend: GitomicBackend
     /** Bounded evidence for the latest settled call, including successful stderr.
@@ -345,6 +347,7 @@ export function gitIn(
   }
   return Object.defineProperties(git, {
     selection: { value: selection },
+    objects: { value: objects === undefined ? undefined : Object.freeze({ directory: objects.directory, alternates: Object.freeze([...(objects.alternates ?? [])]) }) },
     at: { value: (path: string) => gitIn(path, runner, selection, { ...options, env: source, objects }) },
     backend: { get: () => (backend ??= createLegacyBackend(selection.executable, source, objects)) },
     lastInvocation: { get: () => lastInvocation },
@@ -756,27 +759,7 @@ export function gitEnvironment(
     [`GIT_CONFIG_KEY_${count + 1}`]: "push.recurseSubmodules",
     [`GIT_CONFIG_VALUE_${count + 1}`]: "no",
   }
-  if (objects !== undefined) {
-    for (const [label, paths] of [
-      ["directory", [objects.directory]],
-      ["alternate", objects.alternates ?? []],
-    ] as const) {
-      for (const path of paths) {
-        try {
-          if (!isAbsolute(path) || !statSync(path).isDirectory()) throw new Error("expected an absolute directory")
-          accessSync(path, constants.R_OK | constants.X_OK)
-        } catch (cause) {
-          throw new Error(
-            `yrd: public object ${label} ${path} is missing, unreadable or not an absolute directory; restore the declared public store before Git runs`,
-            { cause },
-          )
-        }
-      }
-    }
-    composed.GIT_OBJECT_DIRECTORY = objects.directory
-    composed.GIT_ALTERNATE_OBJECT_DIRECTORIES = (objects.alternates ?? []).join(":")
-  }
-  return composed
+  return applyGitObjectContext(composed, objects)
 }
 
 /** Attach the current call's trace label at the spawn boundary, never at runner or store creation. */
