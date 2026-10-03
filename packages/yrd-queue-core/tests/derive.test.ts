@@ -11,13 +11,14 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import { createProcess, type Process } from "@yrd/process"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 import { testGitIn as rawGitIn } from "../../../tests/support/test-git-in.ts"
 import { DeriveFailed, deriveInWorktree } from "../src/derive.ts"
 import { verifyCandidate } from "../src/verifying.ts"
 import type { Git } from "../src/git.ts"
+import { createEventQueue, createEventStore, queueRun, readConfig, submit } from "../src/index.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -204,6 +205,79 @@ async function compose(w: World, run: string | undefined, path: string, process?
 }
 
 describe("derive: the compose regenerates what the merged gitlinks decide", () => {
+  /** @failure 27176 AC1: child publication can precede verification or publish a different derived candidate.
+   * @level l2 @consumer the real event queue's check and child-publication path
+   */
+  it("verifies the derived tree before publishing that exact candidate", async () => {
+    const w = await world()
+    // Submit's verifier and Gitomic's event backend read the ambient transport environment.
+    for (const [key, value] of Object.entries(w.env)) {
+      if (key.startsWith("GIT_CONFIG_")) vi.stubEnv(key, value)
+    }
+    using _fixtureEnvironment = {
+      [Symbol.dispose]() {
+        vi.unstubAllEnvs()
+      },
+    }
+    const target = { branch: "main", remote: "origin" }
+    const config = await readConfig(w.git, w.target, target)
+    if (config === undefined) throw new Error("fixture target lost its declaration")
+    await createEventQueue(createEventStore(w.work, "origin", w.git.selection), "main", w.target, config, new Date())
+    await submit(w.git, "origin", { branch: "task/bump", target, submitter: "fixture", issue: "@i/10-yrd/1" })
+    const checked = join(w.root, "checked-candidate.txt")
+    const check = join(w.root, "verify-derived.sh")
+    writeFileSync(
+      check,
+      [
+        "#!/bin/sh",
+        "set -e",
+        'test "$(cat lib/derived.txt)" = "derived-from: two"',
+        `printf '%s\\n' "$YRD_CANDIDATE_SHA" > "${checked}"`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    )
+    const published: string[] = []
+    await using real = createProcess({ cwd: w.work, env: w.env })
+    const recording: Process = {
+      ...real,
+      async run(request) {
+        if (request.argv.includes("--recurse-submodules=only")) {
+          const refspec = request.argv.find((arg) => arg.endsWith(":refs/heads/main"))
+          if (refspec === undefined) throw new Error("child publication omitted its candidate")
+          const candidate = refspec.split(":")[0]!
+          // This receipt exists only after the real merge check has inspected the derived file.
+          expect(readFileSync(checked, "utf8").trim()).toBe(candidate)
+          expect((await w.git(["ls-remote", "origin", "refs/heads/main"])).split("\t")[0]).toBe(w.target)
+          published.push(candidate)
+        }
+        return real.run(request)
+      },
+    }
+    const outcome = await queueRun({
+      repo: w.work,
+      target,
+      targetSha: w.target,
+      configBlob: config.blob,
+      workdir: join(w.root, "queue"),
+      git: w.git,
+      env: w.env,
+      process: recording,
+      populateReference: true,
+      derive: deriveScript(w.root),
+      checks: [{ name: "verified-derived", run: check }],
+      notify: [],
+    })
+    expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/bump"] })
+    const landed = (await w.git(["ls-remote", "origin", "refs/heads/main"])).split("\t")[0]!
+    expect(published).toEqual([landed])
+    expect(readFileSync(checked, "utf8").trim()).toBe(landed)
+    const pin = (await w.git(["rev-parse", `${landed}:lib`])).trim()
+    const lib = rawGitIn(join(w.work, "lib"), undefined, undefined, { env: w.env })
+    expect((await lib(["ls-remote", "origin", "refs/heads/main"])).split("\t")[0]).toBe(pin)
+    expect((await lib(["show", `${pin}:derived.txt`])).trim()).toBe("derived-from: two")
+  })
+
   it("commits the regenerated file on the settled pin and composes it in as a two-parent merge", async () => {
     const w = await world()
     const verified = await compose(w, deriveScript(w.root), "ok")
