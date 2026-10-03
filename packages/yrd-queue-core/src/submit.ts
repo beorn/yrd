@@ -944,7 +944,7 @@ export async function issueOf(
       "--reverse",
       "--topo-order",
       "-z",
-      "--format=%H%x00%(trailers:key=Resolves,key=Refs,valueonly,separator=%x1e)%x00%B",
+      "--format=%H%x00%(trailers:key=Resolves,key=Refs,valueonly,separator=%x1e)%x00%B%x00%(trailers:key=Resolves,key=Refs,separator=%x1e)",
       `${base}..${head}`,
       `^${targetHead}`,
       "--",
@@ -979,35 +979,47 @@ export async function issueOf(
   if (records.pop() !== "") {
     throw new Error(`incomplete issue binding history for ${branch} at ${head} against target ${targetHead}`)
   }
-  for (let index = 0; index < records.length; index += 3) {
+  for (let index = 0; index < records.length; index += 4) {
     const commit = records[index]
     const values = records[index + 1]
     const body = records[index + 2]
-    if (commit === undefined || values === undefined || body === undefined) {
+    const keyed = records[index + 3]
+    if (commit === undefined || values === undefined || body === undefined || keyed === undefined) {
       throw new Error(`incomplete issue binding history for ${branch} at ${head} against target ${targetHead}`)
     }
-    const candidateIssues: string[] = []
+    // The second trailer block keeps each key beside its value, so a refusal can
+    // name the trailer that bound the second issue instead of guessing (27300).
+    const trailerNames = new Map<string, string>()
+    for (const entry of keyed.split("\u001e")) {
+      const named = /^[ \t]*([A-Za-z][A-Za-z-]*)[ \t]*:[ \t]*(\S.*)$/u.exec(entry)
+      if (named !== null && named[1] !== undefined && named[2] !== undefined) {
+        trailerNames.set(named[2].trim(), named[1])
+      }
+    }
+    const candidates: { issue: string; trailer: string | undefined }[] = []
+    const consider = (issue: string, trailer: string | undefined): void => {
+      if (issue !== "" && !candidates.some((candidate) => candidate.issue === issue)) {
+        candidates.push({ issue, trailer })
+      }
+    }
     for (const value of values.split("\u001e")) {
       const issue = value.trim()
-      if (issue !== "" && !candidateIssues.includes(issue)) {
-        candidateIssues.push(issue)
-      }
+      consider(issue, trailerNames.get(issue))
     }
     // Also parse trailer-shaped lines like "Refs <issue>" or "Refs: <issue>" or "Resolves <issue>"
     // from commit body to accept trailers without colon (27041).
     // Never inspect the subject line, and require a single-token issue value to avoid binding prose lines.
     const nonSubjectLines = body.split(/\r?\n/).slice(1)
-    const trailerRegex = /^[ \t]*(?:refs|resolves)[ \t]*:?[ \t]+(\S+)[ \t]*$/i
+    const trailerRegex = /^[ \t]*(refs|resolves)[ \t]*:?[ \t]+(\S+)[ \t]*$/i
     for (const line of nonSubjectLines) {
       const match = trailerRegex.exec(line)
       if (match !== null) {
-        const issue = match[1]?.trim() ?? ""
-        if (issue !== "" && !candidateIssues.includes(issue)) {
-          candidateIssues.push(issue)
-        }
+        const keyword = match[1]?.toLowerCase() ?? ""
+        consider(match[2]?.trim() ?? "", keyword === "refs" ? "Refs" : "Resolves")
       }
     }
-    for (const issue of candidateIssues) {
+    for (const candidate of candidates) {
+      const issue = candidate.issue
       if (/[\u0000-\u001f\u007f]/u.test(issue)) {
         throw new Error(
           `invalid issue binding in ${branch} at ${commit}: expected a single-line value without control characters`,
@@ -1016,8 +1028,12 @@ export async function issueOf(
       const canonicalIssue = await canonical(issue)
       if (binding === undefined) binding = { issue: canonicalIssue, source: "binding", commit }
       else if (binding.issue !== canonicalIssue) {
+        const trailer = candidate.trailer ?? "Refs/Resolves"
         throw new Error(
-          `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${canonicalIssue} at ${commit}; fix trailer at ${commit}`,
+          `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${canonicalIssue} at ${commit}; ` +
+            `the second binding is a ${trailer} trailer, and a Refs or Resolves trailer always binds; ` +
+            `keep a follow-up link without binding it with a "Follow-up: ${canonicalIssue}" line, ` +
+            `then fix trailer at ${commit}`,
         )
       }
     }
