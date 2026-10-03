@@ -434,4 +434,129 @@ describe("runner ref publication", () => {
     expect(f.notices.join(" ")).toContain("verifying no live runner")
     expect(f.notices.join(" ")).toContain(`git push origin :${f.ref}`)
   })
+  describe("a runner ref whose tip object was never fetched", () => {
+    /** A reader clone that never fetched the runner ref, plus the live remote tip. */
+    async function unfetchedFixture() {
+      const root = mkdtempSync(join(tmpdir(), "yrd-runner-unfetched-"))
+      roots.push(root)
+      const boot = gitIn(root)
+      const remote = join(root, "remote.git")
+      const work = join(root, "work")
+      await boot(["init", "--quiet", "--bare", remote])
+      await boot(["clone", "--quiet", remote, work])
+      const git = gitIn(work)
+      await git(["config", "user.email", "runner@yrd.test"])
+      await git(["config", "user.name", "yrd runner"])
+      const now = new Date().toISOString()
+      const claim: RunnerClaim = {
+        host: "host",
+        pid: 42,
+        started: now,
+        at: now,
+        beatMs: 60_000,
+        state: "idle",
+        since: now,
+      }
+      await new RunnerPublisher(
+        git,
+        "origin",
+        "main",
+        () => {},
+        () => {},
+      ).publish(claim)
+      const ref = runnerRef("main")
+      const tip = await readRemoteCommit(git, "origin", ref)
+      const readerRoot = join(root, "reader")
+      await boot(["clone", "--no-local", "--quiet", remote, readerRoot])
+      return { reader: gitIn(readerRoot), tip, ref }
+    }
+
+    /** @failure The remote tip was reported unreadable instead of fetching its object. @level l2 */
+    it("fetches the runner ref before reading a tip whose object is not local", async () => {
+      const f = await unfetchedFixture()
+      const published = await readPublishedRunner(f.reader, "main", "origin", f.tip)
+      expect(published.signal).not.toBe("unreadable")
+      expect(published.claim?.Runner).toBe("host/42")
+    })
+
+    /** @failure A tip that cannot be obtained reported a bare `rev-list` failure, not the fetch attempted. @level l2 */
+    it("names the fetch it attempted when the runner tip stays absent", async () => {
+      const f = await unfetchedFixture()
+      const published = await readPublishedRunner(f.reader, "main", "origin", "f".repeat(40))
+      expect(published.signal).toBe("unreadable")
+      expect(published.why).toContain("not fetched")
+      expect(published.why).toContain(`git fetch origin ${f.ref}`)
+    })
+
+    /** @failure A failed fetch was hidden behind the same bare `rev-list` failure. @level l2 */
+    it("names a failed fetch when the remote cannot be reached", async () => {
+      const f = await unfetchedFixture()
+      const published = await readPublishedRunner(f.reader, "main", "no-such-remote", "f".repeat(40))
+      expect(published.signal).toBe("unreadable")
+      expect(published.why).toContain(`git fetch no-such-remote ${f.ref} failed:`)
+    })
+
+    /**
+     * @failure An INDETERMINATE object query (corruption, permission, transport) was swallowed
+     *          into absence, so the reader fetched over the network and reported "not fetched"
+     *          instead of the real cause. @level l2
+     */
+    it("names an initial object query that failed and does not fetch on a guess", async () => {
+      const f = await unfetchedFixture()
+      const fetches: string[][] = []
+      let queries = 0
+      const failing = async (args: readonly string[], input?: string): Promise<string> => {
+        if (args[0] === "cat-file") {
+          queries += 1
+          throw new Error("simulated object query failure: repository index is corrupt")
+        }
+        if (args[0] === "fetch") fetches.push([...args])
+        return await f.reader(args, input)
+      }
+
+      const published = await readPublishedRunner(failing, "main", "origin", f.tip)
+
+      expect(published.signal).toBe("unreadable")
+      expect(queries, "the probe is asked exactly once").toBe(1)
+      expect(fetches, "an indeterminate query must not license a network fetch").toEqual([])
+      expect(published.why, "the query command is preserved").toContain(
+        "git cat-file --batch-check=%(objectname) %(objecttype)",
+      )
+      expect(published.why, "the tip is preserved").toContain(f.tip)
+      expect(published.why, "the location is preserved").toContain(`origin ${f.ref}`)
+      expect(published.why, "the cause is preserved").toContain("simulated object query failure")
+    })
+
+    /**
+     * @failure A query that fails AFTER a successful fetch was reported as "left the object
+     *          absent", hiding the fault behind the one outcome the fetch already ruled out.
+     *          @level l2
+     */
+    it("names a failed object query after a successful fetch instead of calling the object absent", async () => {
+      const f = await unfetchedFixture()
+      const fetches: string[][] = []
+      let queries = 0
+      const flaky = async (args: readonly string[], input?: string): Promise<string> => {
+        if (args[0] === "cat-file") {
+          queries += 1
+          if (queries === 2) throw new Error("simulated query failure after fetch")
+          return await f.reader(args, input)
+        }
+        if (args[0] === "fetch") fetches.push([...args])
+        return await f.reader(args, input)
+      }
+
+      const published = await readPublishedRunner(flaky, "main", "origin", f.tip)
+
+      expect(published.signal).toBe("unreadable")
+      expect(queries, "one probe before the fetch, one after").toBe(2)
+      expect(fetches, "the proved-missing tip is still fetched once").toHaveLength(1)
+      expect(published.why, "absence is not claimed when the query failed").not.toContain("left the object absent")
+      expect(published.why, "the successful fetch is named").toContain(`git fetch origin ${f.ref}`)
+      expect(published.why, "the failed query command is named").toContain(
+        "git cat-file --batch-check=%(objectname) %(objecttype)",
+      )
+      expect(published.why, "the cause is preserved").toContain("simulated query failure after fetch")
+    })
+  })
 })
