@@ -15,7 +15,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { createProcess, type Process } from "@yrd/process"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 import { testGitIn as rawGitIn } from "../../../tests/support/test-git-in.ts"
-import { DeriveFailed } from "../src/derive.ts"
+import { DeriveFailed, deriveInWorktree } from "../src/derive.ts"
 import { verifyCandidate } from "../src/verifying.ts"
 import type { Git } from "../src/git.ts"
 
@@ -56,7 +56,15 @@ function hostedEnv(rootRemote: string, childRemote: string): NodeJS.ProcessEnv {
  * A root with one submodule `lib`, both with bare remotes; `main` pins lib at L1 and the change `task/bump` pins it
  * at L2 (a commit on lib's main). `lib/derived.txt` is the file a derive regenerates from the pin.
  */
-async function world(options: Readonly<{ privateChild?: boolean }> = {}): Promise<World> {
+/**
+ * `componentMain`: the change and the target pin lib EQUALLY (at L2, so the compose never examines lib) while lib's
+ * main stands elsewhere — `descends`: at L3, a child of L2 that rewrote derived.txt, the shape a deferred round's
+ * publication leaves (27170, 2026-10-02 18:02 PDT); `forks`: at L3', a child of L1 that rewrote derived.txt, so no
+ * derived commit on L2 can fast-forward it.
+ */
+async function world(
+  options: Readonly<{ privateChild?: boolean; componentMain?: "descends" | "forks" }> = {},
+): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-derive-"))
   roots.push(root)
   const rootRemote = join(root, "root.git")
@@ -117,7 +125,34 @@ async function world(options: Readonly<{ privateChild?: boolean }> = {}): Promis
   await git(["push", "--quiet", "origin", "task/bump"])
   const head = (await git(["rev-parse", "HEAD"])).trim()
   await git(["checkout", "--quiet", "main"])
-  return { root, work, git, childRemote, target, head, env }
+  if (options.componentMain === undefined) return { root, work, git, childRemote, target, head, env }
+
+  // Equal pins: the target takes the bump too, and the change moves only a root file on top of it.
+  await git(["merge", "--quiet", "--ff-only", "task/bump"])
+  await git(["push", "--quiet", "origin", "main"])
+  const equalTarget = (await git(["rev-parse", "HEAD"])).trim()
+  await git(["checkout", "--quiet", "-B", "task/bump", "main"])
+  writeFileSync(join(work, "target.txt"), "changed\n")
+  await git(["commit", "--quiet", "-am", "a root-only change over the equal pin"])
+  await git(["push", "--quiet", "--force", "origin", "task/bump"])
+  const equalHead = (await git(["rev-parse", "HEAD"])).trim()
+  await git(["checkout", "--quiet", "main"])
+  // lib's main moves past (or beside) the pin, rewriting the derived file as a published derivation would.
+  if (options.componentMain === "forks") await lib(["checkout", "--quiet", l1])
+  writeFileSync(join(libWork, "derived.txt"), "derived-from: a published derivation\n")
+  await lib(["commit", "--quiet", "-am", "chore(lib): derived.txt follows lib (published by an earlier round)"])
+  await lib(["push", "--quiet", "--force", "origin", "HEAD:main"])
+  // The queue clone's store still holds the main it last observed (L2 = the pin) under a FRESH git-super refresh
+  // stamp, as the round that stopped the line did: its compose trusted that observation, derived on the pin, and the
+  // recompose's own fresh read met the fork.
+  await gitIn(join(work, "lib"))([
+    "update-ref",
+    "-m",
+    `git-super component-main refresh ${LIB_URL}`,
+    "refs/remotes/origin/main",
+    l2,
+  ])
+  return { root, work, git, childRemote, target: equalTarget, head: equalHead, env }
 }
 
 /**
@@ -230,6 +265,49 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
       expect(at, argv.join(" ")).toBeGreaterThan(0)
       expect(argv[at + 1]).toBe("vendor/secret")
     }
+  })
+
+  it("builds the derived commit on the component's main when main already descends from the merged pin", async () => {
+    // Run the derive step itself on the queue clone standing at the change (lib at the pin, as a compose that
+    // trusted its cached main observation leaves it): git-super raises an equal pin only when it reads main afresh.
+    const w = await world({ componentMain: "descends" })
+    const lib = rawGitIn(join(w.work, "lib"), undefined, undefined, { env: w.env })
+    const pin = (await w.git(["rev-parse", `${w.head}:lib`])).trim()
+    const main = (await lib(["ls-remote", "origin", "refs/heads/main"])).split("\t")[0]?.trim()
+    if (main === undefined) throw new Error("lib has no main at its remote")
+    expect(main).not.toBe(pin)
+    expect((await lib(["rev-parse", "refs/remotes/origin/main"])).trim()).toBe(pin)
+    await w.git(["checkout", "--quiet", "task/bump"])
+    await w.git(["submodule", "--quiet", "update", "--init", "lib"])
+    expect((await lib(["rev-parse", "HEAD"])).trim()).toBe(pin)
+    const logDir = join(w.root, "logs", "on-main")
+    mkdirSync(logDir, { recursive: true })
+    const derived = await deriveInWorktree({
+      cwd: w.work,
+      repo: w.work,
+      candidate: w.head,
+      targetHead: w.target,
+      derive: { run: deriveScript(w.root), logDir, tmpdir: join(w.root, "tmp") },
+      env: w.env,
+    })
+    if (derived === undefined) throw new Error("no derivation recorded")
+    const to = derived.submodules[0]?.to
+    expect(derived.submodules).toEqual([{ path: "lib", from: pin, to }])
+    // main's child, so publication fast-forwards main; the content is the derive's, not the stale publication's.
+    expect((await lib(["show", "-s", "--format=%P", to as string])).trim()).toBe(main)
+    expect((await lib(["show", `${to}:derived.txt`])).trim()).toBe("derived-from: two")
+    expect(readFileSync(join(logDir, "derive-base.log"), "utf8")).toContain("built on main")
+    expect((await w.git(["rev-parse", `${derived.carrier}:lib`])).trim()).toBe(to)
+  })
+
+  it("a recompose the component refuses sticks the change by name, never the run", async () => {
+    const w = await world({ componentMain: "forks" })
+    const failure = await compose(w, deriveScript(w.root), "forked").catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(DeriveFailed)
+    if (!(failure instanceof DeriveFailed)) throw new Error("expected DeriveFailed")
+    expect(failure.message).toMatch(/composing the carrier \S+ into \S+ returned failed/u)
+    expect(failure.message).toMatch(/derived\.txt/u)
+    expect(readFileSync(join(w.root, "logs", "forked", "derive-base.log"), "utf8")).toContain("does not descend")
   })
 
   it("a change outside every submodule stops the compose by name and says root derivation is not admitted", async () => {
