@@ -162,12 +162,30 @@ export class UnknownConfigKey extends Error {
   override readonly name = "UnknownConfigKey"
 }
 
-export async function readConfig(git: Git, commit: string, target: Target): Promise<QueueConfig | undefined> {
+/**
+ * How a read treats a TOP-level key this parser does not know (27187). A read that
+ * will RUN the declaration — the queue's round, `check`, `merge` — refuses it, because
+ * running a declaration it cannot read in full is the silent error. A read that only
+ * submits against the target or lists it hands the key names to `newerKeys` and reads
+ * the rest: the target commit is the authority on its own declaration, and the parser
+ * that must know every key is the one in the queue, not the one in the submitter's
+ * environment (27176 added `derive:` on 2026-10-02 and every older environment's
+ * `yrd submit` refused `unknown key derive` until this). A RETIRED key refuses in
+ * every read; so does an unknown field inside `checks:` or any nested block.
+ */
+export type ReadConfigOptions = Readonly<{ newerKeys?: (keys: readonly string[]) => void }>
+
+export async function readConfig(
+  git: Git,
+  commit: string,
+  target: Target,
+  options: ReadConfigOptions = {},
+): Promise<QueueConfig | undefined> {
   const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
   if (blob === undefined) return undefined
   const text = await git(["show", `${commit}:.yrd.yml`])
   try {
-    return parseConfig(text, { at: commit, blob, target })
+    return parseConfig(text, { at: commit, blob, target, ...options })
   } catch (error) {
     throw new InvalidQueueConfig(error instanceof Error ? error.message : String(error), { cause: error })
   }
@@ -176,7 +194,7 @@ export async function readConfig(git: Git, commit: string, target: Target): Prom
 /** Parse the declaration's text with its captured source and caller-owned queue identity. */
 export function parseConfig(
   text: string,
-  { at, blob, target }: Readonly<{ at: string; blob: string; target: Target }>,
+  { at, blob, target, newerKeys }: Readonly<{ at: string; blob: string; target: Target }> & ReadConfigOptions,
 ): QueueConfig {
   let raw: unknown
   try {
@@ -185,19 +203,19 @@ export function parseConfig(
     throw new Error(`.yrd.yml at ${at} does not parse: ${error instanceof Error ? error.message : String(error)}`)
   }
   if (!isRecord(raw)) throw new Error(`.yrd.yml at ${at.slice(0, 12)} is not a mapping`)
-  onlyKeys(raw, TOP_KEYS, ".yrd.yml")
-  const notify = readNotify(raw.notify)
-  const setup = optionalString(raw, "setup")
-  const derive = optionalString(raw, "derive")
-  const teardown = optionalString(raw, "teardown")
-  const issueResolver = readIssueResolver(raw.issueResolver)
-  const admission = readAdmission(raw.admission)
+  const declared = newerKeys === undefined ? strictTop(raw) : withoutNewerKeys(raw, newerKeys)
+  const notify = readNotify(declared.notify)
+  const setup = optionalString(declared, "setup")
+  const derive = optionalString(declared, "derive")
+  const teardown = optionalString(declared, "teardown")
+  const issueResolver = readIssueResolver(declared.issueResolver)
+  const admission = readAdmission(declared.admission)
   return {
-    archiveAfter: readArchiveAfter(raw["archive-after"]),
+    archiveAfter: readArchiveAfter(declared["archive-after"]),
     blob,
-    checks: readChecks(raw.checks),
-    health: readHealth(raw.health),
-    ignore: readIgnore(raw.ignore),
+    checks: readChecks(declared.checks),
+    health: readHealth(declared.health),
+    ignore: readIgnore(declared.ignore),
     ...(issueResolver === undefined ? {} : { issueResolver }),
     ...(admission === undefined ? {} : { admission }),
     notify,
@@ -433,11 +451,33 @@ function readIssueResolver(value: unknown): readonly string[] | undefined {
  * reader that the queue forgot how to write somewhere, not where to say it now.
  */
 const RETIRED: Readonly<Record<string, string>> = {
+  landing: "landing: was Gitomic's protected-branch declaration; an event queue declares its gates under checks:",
   owner: `the queue addresses nobody: a notify: entry decides who hears about an ending, in its own arguments (${NOTIFY_SHAPE})`,
   remote: "select the queue with --queue <branch> at origin or --queue <repo>#<queue>",
   scratch: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   workdir: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   target: "target: is not read; submit resolves the queue from --queue or the origin head",
+}
+
+function strictTop(raw: Record<string, unknown>): Record<string, unknown> {
+  onlyKeys(raw, TOP_KEYS, ".yrd.yml")
+  return raw
+}
+
+/** The mapping without the top-level keys this parser postdates, after the handler heard their names; a RETIRED key still refuses. */
+function withoutNewerKeys(
+  raw: Record<string, unknown>,
+  newerKeys: (keys: readonly string[]) => void,
+): Record<string, unknown> {
+  const newer = Object.keys(raw).filter((key) => !(TOP_KEYS as readonly string[]).includes(key))
+  if (newer.length === 0) return raw
+  onlyKeys(
+    Object.fromEntries(newer.filter((key) => key in RETIRED).map((key) => [key, raw[key]])),
+    TOP_KEYS,
+    ".yrd.yml",
+  )
+  newerKeys(newer)
+  return Object.fromEntries(Object.entries(raw).filter(([key]) => !newer.includes(key)))
 }
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */
