@@ -18,7 +18,7 @@ export { queueRef } from "./refs.ts"
 export { changesRef } from "./refs.ts"
 import type { PauseRecord } from "./pause.ts"
 import { assertPlainEventQueueConfig } from "./event-config.ts"
-import { createLegacyBackend, gitIn, refAt } from "./git.ts"
+import { createLegacyBackend, gitIn } from "./git.ts"
 import type { Git, GitSelection } from "./git.ts"
 import type { QueueConfig } from "./config.ts"
 import { checkTrailer, readCheckTrailer } from "./check.ts"
@@ -913,10 +913,13 @@ export async function createEventQueue(
       `cannot create event queue ${store.remote}#${queue}: QueueConfig targets ${config.target.remote}#${config.target.branch}`,
     )
   }
-  const blob = await refAt(gitIn(store.repo, undefined, store.selection), `${commit}:.yrd.yml`, "blob")
-  if (blob === undefined) {
+  let blob: string
+  try {
+    blob = await store.backend.head(store.repo, `${commit}:.yrd.yml`)
+  } catch (cause) {
     throw new Error(
-      `cannot create event queue ${queue} at ${commit}: the pinned commit has no .yrd.yml; declare checks in .yrd.yml at that commit before creating an event queue`,
+      `cannot create event queue ${queue} at ${commit}: the pinned .yrd.yml could not be validated in ${store.repo}; declare checks there and restore its public objects before creating an event queue`,
+      { cause },
     )
   }
   if (blob !== config.blob) {

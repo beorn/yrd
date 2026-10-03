@@ -50,6 +50,61 @@ function declareGit(root: string, value: string, file?: string): void {
 }
 
 describe("the git runner", () => {
+  // @failure: explicit public object selection is lost by descendants or Gitomic; ambient objects leak in.
+  // @level l2; @consumer contained submit; @testonly none
+  // Native blobs live outside either checkout, so executable/option identity alone cannot pass this row.
+  it("reads explicit public objects through the runner, descendants and Gitomic", async () => {
+    const root = temporaryRoot("explicit-objects")
+    const childRoot = join(root, "child")
+    const directory = join(root, "public-objects")
+    const alternate = join(root, "public-alternate")
+    for (const path of [childRoot, directory, alternate]) mkdirSync(path)
+    await gitIn(root)(["init", "--quiet"])
+    await gitIn(childRoot)(["init", "--quiet"])
+    const seed = (where: string, text: string): string => {
+      const wrote = spawnSync("git", ["hash-object", "-w", "--stdin"], {
+        cwd: root,
+        input: text,
+        encoding: "utf8",
+        env: { ...gitRunner.gitEnvironment(process.env), GIT_OBJECT_DIRECTORY: where },
+      })
+      if (wrote.status !== 0) throw new Error(`public object fixture failed: ${wrote.stderr}`)
+      return wrote.stdout.trim()
+    }
+    const own = seed(directory, "public-own\n")
+    const borrowed = seed(alternate, "public-alternate\n")
+    const git = gitIn(root, undefined, undefined, {
+      env: {
+        ...process.env,
+        GIT_OBJECT_DIRECTORY: "/absent-ambient-objects",
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: "/absent-ambient-alternates",
+      },
+      objects: { directory, alternates: [alternate] },
+    })
+    expect(await git(["cat-file", "blob", own])).toBe("public-own\n")
+    const child = git.at(childRoot)
+    expect(await child(["cat-file", "blob", borrowed])).toBe("public-alternate\n")
+    const blobs = await child.backend.readBlobs(childRoot, [own, borrowed])
+    expect(blobs.get(own)).toBe("public-own\n")
+    expect(blobs.get(borrowed)).toBe("public-alternate\n")
+  })
+
+  it("refuses missing explicit public objects before any Git spawn", () => {
+    const root = temporaryRoot("missing-explicit-objects")
+    const executable = join(root, "must-not-spawn")
+    const directory = join(root, "missing-public-objects")
+    expect(() =>
+      gitIn(
+        root,
+        undefined,
+        { executable, contract: "native", scope: "local", origin: "fixture" },
+        {
+          objects: { directory },
+        },
+      ),
+    ).toThrow(`public object directory ${directory}`)
+  })
+
   // 25282: a settled SSH refusal used to end the read immediately. This test
   // proves the retry traverses the real supervised runner and retains BOTH
   // invocations, which a predicate-only unit test would miss.

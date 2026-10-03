@@ -6,6 +6,8 @@ import {
   invokeGit,
   publishGitInvocation,
   resolveGitSelection,
+  runnerFor,
+  GitExit,
   type Git,
   type GitInvocationOptions,
 } from "./git.ts"
@@ -297,7 +299,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
 }
 
 async function superMerge(
-  options: Pick<VerificationOptions, "process" | "env" | "hooksPath" | "noFetch" | "unboundedLocalMain">,
+  options: Pick<VerificationOptions, "git" | "process" | "env" | "hooksPath" | "noFetch" | "unboundedLocalMain">,
   cwd: string,
   commit: string,
   message: string,
@@ -305,15 +307,19 @@ async function superMerge(
 ): Promise<SuperMergeResult> {
   // The tree's own list (27147): the merge compares nothing under a path the
   // tree left out, and refuses, by its own admission, a candidate that moves it.
-  const execution = await gitSuperExecution(options, cwd, [
-    "merge",
-    commit,
-    "-m",
-    message,
-    ...(options.noFetch ? ["--no-fetch"] : []),
-    ...(options.unboundedLocalMain ? ["--unbounded-local-main"] : []),
-    ...excludedSubmodules.flatMap((path) => ["--exclude-submodule", path]),
-  ])
+  const execution = await gitSuperExecution(
+    { ...options, git: options.process === undefined ? options.git : undefined },
+    cwd,
+    [
+      "merge",
+      commit,
+      "-m",
+      message,
+      ...(options.noFetch ? ["--no-fetch"] : []),
+      ...(options.unboundedLocalMain ? ["--unbounded-local-main"] : []),
+      ...excludedSubmodules.flatMap((path) => ["--exclude-submodule", path]),
+    ],
+  )
   let parsed: unknown
   try {
     parsed = JSON.parse(execution.stdout)
@@ -335,18 +341,38 @@ async function superMerge(
 export async function gitSuperExecution(
   options: Pick<VerificationOptions, "process" | "env" | "hooksPath"> & {
     gitOptions?: GitInvocationOptions
+    git?: Git
   },
   cwd: string,
   argv: readonly string[],
 ): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
-  const owned = options.process === undefined
-  const runner = options.process ?? createProcess({ cwd, env: gitEnvironment(options.env ?? globalThis.process.env) })
   const gitArgs = [
     ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
     "super",
     "--json",
     ...argv,
   ]
+  if (options.git !== undefined) {
+    const child = runnerFor(options.git).at(cwd)
+    try {
+      const stdout = await child(gitArgs)
+      return { exitCode: 0, stdout, stderr: child.lastInvocation?.result?.stderr ?? "" }
+    } catch (error) {
+      const evidence = error instanceof GitExit ? error.evidence : undefined
+      if (
+        evidence?.failure !== undefined ||
+        evidence?.protocol?.refusal !== undefined ||
+        evidence?.result === undefined
+      ) {
+        throw error
+      }
+      return evidence.result
+    }
+  }
+  const owned = options.process === undefined
+  const runner =
+    options.process ??
+    createProcess({ cwd, env: gitEnvironment(options.env ?? globalThis.process.env, options.gitOptions?.objects) })
   const invocation = {
     args: Object.freeze(gitArgs),
     cwd,
@@ -357,7 +383,7 @@ export async function gitSuperExecution(
       runner,
       invocation,
       options.gitOptions ?? {},
-      gitEnvironment(options.env ?? options.gitOptions?.env ?? globalThis.process.env),
+      gitEnvironment(options.env ?? options.gitOptions?.env ?? globalThis.process.env, options.gitOptions?.objects),
       undefined,
     )
     const published = publishGitInvocation(options.gitOptions, evidence, true)
