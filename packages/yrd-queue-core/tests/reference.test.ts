@@ -19,6 +19,7 @@ import {
   GitlinkNotOnRemote,
   gitlinksAt,
   populateReferenceStores,
+  readComponentMain,
   type ReferenceAcquisition,
   ReferenceUnpopulated,
 } from "../src/reference.ts"
@@ -38,6 +39,21 @@ afterAll(() => {
 })
 
 const author = ["-c", "user.email=reference@yrd.test", "-c", "user.name=yrd"] as const
+
+it("reports the reference store and query when component main cannot be read", async () => {
+  const store = mkdtempSync(join(tmpdir(), "yrd-reference-main-read-"))
+  roots.push(store)
+  const git = vi.fn<Git>().mockResolvedValueOnce("").mockRejectedValueOnce(new Error("object database unreadable"))
+  await expect(
+    readComponentMain(
+      () => git,
+      store,
+      () => undefined,
+    ),
+  ).rejects.toThrow(
+    `readComponentMain: cannot read refs/remotes/origin/main^{commit} in ${store}: object database unreadable`,
+  )
+})
 
 /**
  * The git-super this repository PINS, not whichever one the host happens to

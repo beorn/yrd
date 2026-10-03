@@ -192,7 +192,8 @@ function pinRef(sha: string): string {
  * `refs/remotes/origin/main`, then the ref. The compose reads main through git-super's refresh cache, and a derive
  * that trusted a cached observation forked from the main an earlier round had just published (27176, 2026-10-02
  * 18:02 PDT) — the derive step reads it fresh here, on derivation rounds only. Returns `undefined` when the store is
- * absent or holds no main after the fetch; a fetch that fails leaves the stored ref and is reported to `onStale`.
+ * absent; an unreadable main fails with the store and query. A fetch that fails leaves the stored ref and is
+ * reported to `onStale`.
  */
 export async function readComponentMain(
   gitIn: (cwd: string) => Git,
@@ -216,8 +217,11 @@ export async function readComponentMain(
   }
   try {
     return (await storeGit(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main^{commit}"])).trim()
-  } catch {
-    return undefined
+  } catch (error) {
+    throw new Error(
+      `readComponentMain: cannot read refs/remotes/origin/main^{commit} in ${store}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
   }
 }
 
