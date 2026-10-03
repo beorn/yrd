@@ -139,6 +139,11 @@ describe("`yrd withdraw` is `yrd queue withdraw`", () => {
     for (const help of [canonicalHelp, aliasHelp]) {
       expect(help.stdout, help.report).toContain("On withdraw:")
       expect(help.stdout.replace(/\s+/gu, " "), help.report).toContain("resubmitting the branch re-opens it")
+      // 27262: the actor and the coordination recipient are separate fields on
+      // withdraw/drop. --submitter sets only By:; --notify sets Recipient.
+      const submitterHelp = help.stdout.split("\n").find((line) => line.includes("--submitter")) ?? ""
+      expect(submitterHelp, help.report).toMatch(/actor/iu)
+      expect(submitterHelp, help.report).not.toMatch(/result recipient/iu)
     }
 
     const help = await yrd(work, "--help")

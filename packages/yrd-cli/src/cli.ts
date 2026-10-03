@@ -104,6 +104,10 @@ const queueHealthCommand = async (workdir: string, io: YrdCliIO): Promise<YrdCli
 
 const NOTIFY_HELP = "deprecated alias for --submitter; both flags must name the same submitter"
 const SUBMITTER_HELP = `the submitter and result recipient; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
+// 27262: on withdraw/drop the actor and the coordination recipient are two
+// fields. `--submitter` sets only `By:`; `--notify` sets `Recipient:` and sends
+// no notice, so this help must not reuse the "result recipient" wording.
+const WITHDRAW_SUBMITTER_HELP = `the actor who ends the change, recorded as By:; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP =
   "the issue, checked against the branch's first Refs/Resolves binding; unbound legacy name fallback is reported"
 const DRY_RUN_HELP = "preview admission and push nothing; fetches the queue tip into refs/gitomic/fetched/"
@@ -220,7 +224,7 @@ function buildProgram(
   const withdrawOptions = <T extends { option: (flags: string, description: string) => T }>(command: T): T =>
     command
       .option("--json", "emit stable JSON")
-      .option("--submitter <agent>", SUBMITTER_HELP)
+      .option("--submitter <agent>", WITHDRAW_SUBMITTER_HELP)
       .option("--notify <seat>", "the coordination seat recorded as Recipient:; no notice is sent (27262)")
       .option("--queue <value>", QUEUE_HELP)
       .option("--reason <text>", "why the change leaves the line, written on the record")
