@@ -1,9 +1,8 @@
 import { cpus } from "node:os"
 import { defineConfig } from "vitest/config"
 import { pinYrdTestStateHome } from "./tests/support/state-home.ts"
-import { gitSuperBin } from "./tests/support/git-super-bin.ts"
+import { gitSuperBin, gitSuperSha } from "./tests/support/git-super-bin.ts"
 import { resolveVitestMaxWorkers } from "./vitest-workers.ts"
-import { execFileSync } from "node:child_process"
 import { join } from "node:path"
 
 // Before any worker: XDG_STATE_HOME and the bun install cache point at a
@@ -21,7 +20,7 @@ export default defineConfig({
     // never an ambient `git super`. These tests compose through that same binary.
     env: {
       YRD_GIT_SUPER_BIN: join(gitSuperBin, "git-super"),
-      YRD_GIT_SUPER_SHA: execFileSync("git", ["-C", gitSuperBin, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      YRD_GIT_SUPER_SHA: gitSuperSha,
     },
     // Removes the pinned state root after the run (the pin itself is above).
     globalSetup: ["./tests/support/state-home.ts"],
