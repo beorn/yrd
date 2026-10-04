@@ -955,6 +955,7 @@ export function StatusPills({
           key={bucket}
           label={`[${bucket.slice(0, 1)}]${bucket.slice(1)}`}
           active={buckets.has(bucket)}
+          idleActiveColor="$fg-muted"
           onToggle={() => {
             handleToggle(bucket)
           }}
