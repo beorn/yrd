@@ -1,6 +1,5 @@
 /**
- * @reach fs-walk <fixture-only: the Git handle is an in-memory recorder and the
- *        git-super store is a stub; the SUBJECT is the argument yrd hands over>
+ * @reach fs-walk <fixture-only: the Git handle is an in-memory recorder and the git-super store is a stub>
  * @failure  pruneWorktrees derives the git COMMON DIR and hands it to
  *           createGitWorktreeStore as its `repo`, but git-super's `repo` is a
  *           CHECKOUT — its store reads `<repo>/.git`, so with `repo` = the git
