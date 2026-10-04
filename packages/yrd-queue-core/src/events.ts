@@ -217,7 +217,7 @@ type ChangeInputDetails = Readonly<{
   by?: string
   recipient?: string
   reason?: string
-  warningKind?: "policy-warning"
+  warningKind?: "policy-warning" | "reverted-paths"
   title?: string
   content?: string
   checks?: readonly EventCheck[]
@@ -655,12 +655,21 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       const reason = requiredProp(event, EVENT_TRAILERS.reason)
       if (reason.trim() === "") throw new Error(`event ${event.id} admission-warning has empty Reason:`)
       const warningKind = prop(event, EVENT_TRAILERS.warningKind)
-      if (warningKind !== undefined && warningKind !== "policy-warning") {
+      // 27363: a second admitted kind beside the policy warning. `reverted-paths`
+      // names the compose revert detector's durable finding (submit AND queue
+      // append it); anything else is still refused by name.
+      if (warningKind !== undefined && warningKind !== "policy-warning" && warningKind !== "reverted-paths") {
         throw new Error(`event ${event.id} admission-warning has unknown Warning-Kind: ${warningKind}`)
       }
       return diagnose(
         next,
-        `admission ${warningKind === "policy-warning" ? "policy warning" : "could not judge"} ${head.slice(0, 12)}: ${reason}`,
+        `admission ${
+          warningKind === "policy-warning"
+            ? "policy warning"
+            : warningKind === "reverted-paths"
+              ? "reverted paths"
+              : "could not judge"
+        } ${head.slice(0, 12)}: ${reason}`,
       )
     }
     case "verifying":

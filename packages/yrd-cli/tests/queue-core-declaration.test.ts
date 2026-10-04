@@ -63,6 +63,7 @@ it("refuses future event queue and check keys by name", () => {
   const plain: QueueConfig = {
     target: { remote: "origin", branch: "main" },
     archiveAfter: "never",
+    revertGuard: "observe",
     checks: [{ name: "verify", run: "true" }],
     health: { declared: false, stallAfterMs: 45 * 60_000 },
     ignore: [],
@@ -113,6 +114,7 @@ it("accepts a declared admission command for event queue submission", () => {
   const config: QueueConfig = {
     target: { remote: "origin", branch: "main" },
     archiveAfter: "never",
+    revertGuard: "observe",
     checks: [],
     health: { declared: false, stallAfterMs: 45 * 60_000 },
     ignore: [],
@@ -437,6 +439,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const config: QueueConfig = {
       target: { remote: "origin", branch: "main" },
       archiveAfter: "never",
+      revertGuard: "observe",
       checks: [{ name: "verify", run: "true" }],
       health: { declared: false, stallAfterMs: 45 * 60_000 },
       ignore: [],

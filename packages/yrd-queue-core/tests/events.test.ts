@@ -374,6 +374,41 @@ describe("ADR-0016 event fold", () => {
     expect(() => evolve(opened, event("cancelled", B, [["Reason", "unrecorded"]]))).toThrow(/cancelled needs Reason/)
   })
 
+  it("accepts a reverted-paths admission-warning and refuses an unknown Warning-Kind (27363)", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const reverted = evolve(
+      opened,
+      event(
+        "admission-warning",
+        B,
+        [
+          ["Commit", A],
+          ["Reason", "km: 9 reverted path(s) (coverage complete)"],
+          ["Warning-Kind", "reverted-paths"],
+        ],
+        [A],
+      ),
+    )
+    expect(reverted.diagnostic).toMatch(/admission reverted paths/u)
+
+    // An unknown kind is still refused BY NAME (a throw, not a diagnostic).
+    expect(() =>
+      evolve(
+        opened,
+        event(
+          "admission-warning",
+          B,
+          [
+            ["Commit", A],
+            ["Reason", "x"],
+            ["Warning-Kind", "banana"],
+          ],
+          [A],
+        ),
+      ),
+    ).toThrow(/unknown Warning-Kind: banana/u)
+  })
+
   it("keeps the approved change-event vocabulary exact", () => {
     expect(CHANGE_EVENT_TYPES).toEqual([
       "opened",
