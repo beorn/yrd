@@ -217,6 +217,10 @@ describe("the git runner", () => {
     await child(["commit", "--quiet", "-m", "public feature"])
     const feature = (await child(["rev-parse", "HEAD"])).trim()
     await child(["checkout", "--quiet", "--detach", base])
+    for (const owner of [child, nested]) {
+      const common = (await owner(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+      mkdirSync(join(common, "objects"), { recursive: true })
+    }
     const composed = await gitSuperExecution({ git }, childRoot, [
       "merge",
       feature,
@@ -225,9 +229,15 @@ describe("the git runner", () => {
       "--no-fetch",
       "--unbounded-local-main",
     ])
-    expect(composed.exitCode, composed.stderr || composed.stdout).toBe(0)
-    expect(JSON.parse(composed.stdout)).toMatchObject({ state: "updated", partial: false })
-    expect(await child(["show", "HEAD:feature.txt"])).toBe("public feature\n")
+    expect(composed.exitCode, composed.stderr || composed.stdout).not.toBe(0)
+    const refused = JSON.parse(composed.stdout)
+    expect(refused).toMatchObject({
+      state: "failed",
+      partial: false,
+      detail: { message: expect.stringContaining("merge owner object view differs from association") },
+    })
+    expect((await child(["rev-parse", "HEAD"])).trim()).toBe(base)
+    expect(await child(["show", `${feature}:feature.txt`])).toBe("public feature\n")
     // The queue supplies an existing Process. Direct gitSuperExecution above
     // cannot catch that supervised path dropping the selected object context.
     const supervisedEnv = {
@@ -248,7 +258,13 @@ describe("the git runner", () => {
       noFetch: true,
       unboundedLocalMain: true,
     })
-    expect(verified.state, JSON.stringify(verified.verifying)).toBe("verified")
+    expect(verified.state, JSON.stringify(verified.verifying)).toBe("failed")
+    if (verified.state !== "failed") throw new Error("unowned writer object view unexpectedly verified")
+    const nestedCommon = (await nested(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    expect(verified.verifying.detail?.message).toContain(
+      `unapproved alternate object store: ${join(nestedCommon, "objects")}`,
+    )
+    await verified.failedWorktree.remove()
     expect(existsSync(supervisedPath)).toBe(false)
     // Creation takes a separate Git-super child; composition alone cannot prove its carrier.
     const worktreePath = join(root, "candidate-worktree")
