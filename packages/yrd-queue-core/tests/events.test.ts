@@ -374,6 +374,41 @@ describe("ADR-0016 event fold", () => {
     expect(() => evolve(opened, event("cancelled", B, [["Reason", "unrecorded"]]))).toThrow(/cancelled needs Reason/)
   })
 
+  it("accepts a reverted-paths admission-warning and refuses an unknown Warning-Kind (27363)", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const reverted = evolve(
+      opened,
+      event(
+        "admission-warning",
+        B,
+        [
+          ["Commit", A],
+          ["Reason", "km: 9 reverted path(s) (coverage complete)"],
+          ["Warning-Kind", "reverted-paths"],
+        ],
+        [A],
+      ),
+    )
+    expect(reverted.diagnostic).toMatch(/admission reverted paths/u)
+
+    // An unknown kind is still refused BY NAME (a throw, not a diagnostic).
+    expect(() =>
+      evolve(
+        opened,
+        event(
+          "admission-warning",
+          B,
+          [
+            ["Commit", A],
+            ["Reason", "x"],
+            ["Warning-Kind", "banana"],
+          ],
+          [A],
+        ),
+      ),
+    ).toThrow(/unknown Warning-Kind: banana/u)
+  })
+
   it("keeps the approved change-event vocabulary exact", () => {
     expect(CHANGE_EVENT_TYPES).toEqual([
       "opened",
@@ -1277,6 +1312,79 @@ describe("the queue-format boundary", () => {
     })
     expect((await readStatus(location, "lab", "task/42")).status).toBe("merged")
     expect(await target.head()).toBe(composed)
+  })
+
+  it("appends a reverted-paths admission warning and keeps its Warning-Kind through appendChangeEvent (27363)", async () => {
+    const { store, location } = remoteMemStore("yrd-event-reverted-paths")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const queueTip = await seedEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/42" })
+    const head = (await branch.transact(async (map) => map.set("work.txt", "one"), "work")).oid
+    const ref = changesRef("lab", "task/42")
+    const chain = await openEvents({ ...store, ref })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      { expect: null },
+    )
+    if (opened.head === null) throw new Error("fixture opened event has no tip")
+    const warning = await appendChangeEvent(location, "lab", "task/42", opened.head, {
+      type: "admission-warning",
+      at: new Date("2026-09-22T14:02:00.000Z"),
+      commit: head,
+      reason:
+        '1 reverted/swallowed path(s): child/a.txt; {"count":1,"coverage":"complete","paths":["child/a.txt"],"swallowed":[]}',
+      warningKind: "reverted-paths",
+    })
+    const stored = (await chain.events()).find((row) => row.id === warning)
+    // appendDecision builds the event from ChangeWrite; a dropped Warning-Kind would
+    // silently read as "could not judge" instead of the revert detector's finding.
+    expect(stored).toMatchObject({ type: "admission-warning" })
+    expect(stored?.props.find(([key]) => key === "Warning-Kind")?.[1]).toBe("reverted-paths")
+    await expect(
+      appendChangeEvent(location, "lab", "task/42", warning, {
+        type: "admission-warning",
+        at: new Date("2026-09-22T14:03:00.000Z"),
+        commit: head,
+        reason: "bad kind",
+        warningKind: "not-a-kind" as never,
+      }),
+    ).rejects.toThrow(/Warning-Kind/)
+  })
+
+  it("folds the reverted-paths admission kind and keeps folding an old-shape record (27363)", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    // 27363: the revert detector writes this kind. A reader that predates it must
+    // fold the record, not refuse it as an unknown Warning-Kind.
+    const reverted = evolve(
+      opened,
+      event(
+        "admission-warning",
+        B,
+        [
+          ["Commit", A],
+          ["Reason", "1 reverted/swallowed path(s): child/a.txt"],
+          ["Warning-Kind", "reverted-paths"],
+        ],
+        [A],
+      ),
+    )
+    expect(reverted.diagnostic).toContain("admission reverted paths")
+
+    // Old shape, unchanged: an admission warning with no Warning-Kind still folds.
+    const old = evolve(
+      opened,
+      event(
+        "admission-warning",
+        B,
+        [
+          ["Commit", A],
+          ["Reason", "no kind on the old shape"],
+        ],
+        [A],
+      ),
+    )
+    expect(old.diagnostic).toContain("admission could not judge")
   })
 
   it("refuses a stuck event if a queue resume raced its causal queue tip", async () => {

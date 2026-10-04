@@ -856,6 +856,14 @@ export async function coreQueueCommand(
       )
     }
   }
+  const echoRevertWarning = (submitted: Submitted): void => {
+    const revert = submitted.revertWarning
+    if (revert === undefined) return
+    io.stderr(
+      `yrd: REVERTED PATHS: ${revert.reason}; the compose put a target advance back (coverage ${revert.coverage}, ` +
+        `${String(revert.count)} path(s)); recorded as admission-warning ${revert.event}\n`,
+    )
+  }
   const notifyAdmissionWarning = async (submitted: Submitted, submitter: string): Promise<void> => {
     const warning = submitted.admissionWarning
     if (warning === undefined) return
@@ -1496,6 +1504,7 @@ export async function coreQueueCommand(
         )
         echoStop(acceptedUnder)
         echoAdmission(submitted.admission)
+        echoRevertWarning(submitted)
         return 0
       }
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
@@ -1577,6 +1586,7 @@ export async function coreQueueCommand(
       )
       echoStop(acceptedUnder)
       echoAdmission(submitted.admission)
+      echoRevertWarning(submitted)
       return 0
     }
     case "run": {

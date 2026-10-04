@@ -245,7 +245,7 @@ export async function freshWorktree(
     excludedSubmodules: excluded,
     path,
     remove: async () => {
-      await removeWorktree(git, path)
+      await removeWorktree(git, path, repo)
       plumbing?.trace?.("released worktree", { commit, path })
     },
   }
@@ -594,12 +594,12 @@ export async function prepareWorktree(
   }
 }
 
-async function removeWorktree(git: Git, path: string): Promise<void> {
+async function removeWorktree(git: Git, path: string, repo: string): Promise<void> {
   // `worktree remove --force` refuses a tree with untracked files it did not
   // make; a check may have written anything, so the directory goes first and
   // git is told to forget the entry afterwards.
   rmSync(path, { force: true, recursive: true })
-  await pruneWorktrees(git)
+  await pruneWorktrees(git, repo)
 }
 
 /** An ended run drops its parent only after every child worktree is gone. */
@@ -620,11 +620,14 @@ export function removeEmptyWorktreeRunDirectory(directory: string): void {
 }
 
 /** Forget stale registrations under git-super's repository worktree mutation lock (26240). */
-async function pruneWorktrees(git: Git): Promise<void> {
-  const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
-  if (common === "") throw new Error("cannot prune worktrees: git returned an empty common directory")
-  const repo = resolve(common)
-  await createGitWorktreeStore({ gitProcess: seamProcess(git, repo), repo }).prune()
+async function pruneWorktrees(git: Git, repo: string): Promise<void> {
+  // git-super's `repo` is a CHECKOUT, not a git dir (27392): its store reads
+  // `<repo>/.git` for its own metadata pointer. Deriving `--git-common-dir`
+  // here handed it the git dir itself, which the store then read as
+  // `<gitdir>/.git` and died ENOENT from a linked (commondir) worktree. The
+  // caller already holds the reference checkout, so thread it through instead.
+  const checkout = resolve(repo)
+  await createGitWorktreeStore({ gitProcess: seamProcess(git, checkout), repo: checkout }).prune()
 }
 
 /**

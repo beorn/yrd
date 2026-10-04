@@ -53,6 +53,7 @@ import {
 } from "./events.ts"
 import { classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
 import { verifyCandidate, type Verification, type SettledGitlink } from "./verifying.ts"
+import { revertedPathsFinding } from "./revert-guard.ts"
 import { gitlinksAt } from "./reference.ts"
 import { withRemoteSeam } from "./remote-calls.ts"
 
@@ -155,6 +156,17 @@ export type Submitted = Readonly<{
   admission: AdmissionOutcome
   /** Present only when this submit appended a new warning event; its caller sends one notification. */
   admissionWarning?: Readonly<{ event: string; reason: string; at: string }>
+  /**
+   * Present only when this submit appended a `reverted-paths` warning (#27363): the compose put a
+   * target advance back, or could not prove it did not. Durable in the change chain either way.
+   */
+  revertWarning?: Readonly<{
+    event: string
+    reason: string
+    count: number
+    coverage: "complete" | "incomplete"
+    at: string
+  }>
   /** The stop the line stood under when this was accepted: the change waits behind it. */
   stop?: PauseRecord
 }>
@@ -807,27 +819,60 @@ async function submitEvent(
         : undefined
     const warningKind = inspected.admission.kind === "warn" ? "policy-warning" : undefined
     const warningAt = new Date()
-    const warning =
-      warningReason !== undefined
-        ? changeInput("admission-warning", {
-            queueTip: ops.queue.tip,
-            at: warningAt,
-            commit: head,
-            reason: warningReason,
-            ...(warningKind === undefined ? {} : { warningKind }),
-            title: `admission ${warningKind === undefined ? "could not judge" : "policy warning"} ${request.branch}@${head.slice(0, 12)}`,
-          })
-        : undefined
+    // #27363: the compose revert detector reports through its OWN durable admission-warning,
+    // beside the admission policy warning and never folded into it.
+    const revertFinding = revertedPathsFinding(
+      inspected.verifying.state === "verified" ? inspected.verifying.reverted : undefined,
+    )
+    type PendingWarning = Readonly<{
+      input: ReturnType<typeof changeInput>
+      kind: "policy-warning" | "reverted-paths" | undefined
+      reason: string
+    }>
+    const warningInputs: readonly PendingWarning[] = [
+      ...(warningReason === undefined
+        ? []
+        : [
+            {
+              input: changeInput("admission-warning", {
+                at: warningAt,
+                commit: head,
+                queueTip: ops.queue.tip,
+                reason: warningReason,
+                ...(warningKind === undefined ? {} : { warningKind }),
+                title: `admission ${warningKind === undefined ? "could not judge" : "policy warning"} ${request.branch}@${head.slice(0, 12)}`,
+              }),
+              kind: warningKind as PendingWarning["kind"],
+              reason: warningReason,
+            },
+          ]),
+      ...(revertFinding === undefined
+        ? []
+        : [
+            {
+              input: changeInput("admission-warning", {
+                at: warningAt,
+                commit: head,
+                queueTip: ops.queue.tip,
+                reason: revertFinding.reason,
+                title: `admission reverted paths ${request.branch}@${head.slice(0, 12)}`,
+                warningKind: "reverted-paths" as const,
+              }),
+              kind: "reverted-paths" as const,
+              reason: revertFinding.reason,
+            },
+          ]),
+    ]
     let retry = false
     let retryOpened: string | undefined
-    let warningWritten = false
+    let written: readonly PendingWarning[] = []
     // Lease the authoritative queue tip beside this change. A new maintenance
     // event between the read and publish makes the whole atomic push fail.
     let result
     try {
       result = await chain.transact(
         (events) => {
-          warningWritten = false
+          written = []
           let current
           try {
             current = events.length === 0 ? initial : project(events, ref, root)
@@ -846,21 +891,22 @@ async function submitEvent(
               current.status === "stuck")
           if (retry) {
             retryOpened = events.findLast((event) => event.type === "opened")?.id
-            if (warning === undefined) return []
+            if (warningInputs.length === 0) return []
             const currentSegment = events.slice(events.findLastIndex((event) => event.type === "opened"))
-            const repeated = currentSegment.some(
-              (event) =>
-                event.type === "admission-warning" &&
-                event.props.some(([key, value]) => key === "Commit" && value === head) &&
-                event.props.some(([key, value]) => key === "Reason" && value === warningReason) &&
-                event.props.find(([key]) => key === "Warning-Kind")?.[1] === warningKind,
+            written = warningInputs.filter(
+              (warning) =>
+                !currentSegment.some(
+                  (event) =>
+                    event.type === "admission-warning" &&
+                    event.props.some(([key, value]) => key === "Commit" && value === head) &&
+                    event.props.some(([key, value]) => key === "Reason" && value === warning.reason) &&
+                    event.props.find(([key]) => key === "Warning-Kind")?.[1] === warning.kind,
+                ),
             )
-            if (repeated) return []
-            warningWritten = true
-            return [warning]
+            return written.map((warning) => warning.input)
           }
-          warningWritten = warning !== undefined
-          return [...decide(events, input), ...(warning === undefined ? [] : [warning])]
+          written = warningInputs
+          return [...decide(events, input), ...warningInputs.map((warning) => warning.input)]
         },
         `submit ${request.branch}`,
         {
@@ -885,12 +931,17 @@ async function submitEvent(
     }
     const opened = retryOpened ?? result.events.findLast((event) => event.type === "opened")?.id
     if (opened === undefined) throw new Error(`${ref} in ${root}: submit published no opened event`)
-    const warningEvent = warningWritten
-      ? result.events.findLast((event) => event.type === "admission-warning")?.id
-      : undefined
-    if (warningWritten && warningEvent === undefined) {
-      throw new Error(`${ref} in ${root}: submit published no admission-warning event`)
-    }
+    const appended = result.events.filter(
+      (event) =>
+        event.type === "admission-warning" && event.props.some(([key, value]) => key === "Commit" && value === head),
+    )
+    const warningEvents = written.map((warning, index) => {
+      const event = appended[appended.length - written.length + index]?.id
+      if (event === undefined) throw new Error(`${ref} in ${root}: submit published no admission-warning event`)
+      return { event, kind: warning.kind, reason: warning.reason }
+    })
+    const policyWarning = warningEvents.find((warning) => warning.kind !== "reverted-paths")
+    const revertWarning = warningEvents.find((warning) => warning.kind === "reverted-paths")
     if (retry) {
       const latest = await readEventOps(store, git, request.target.branch, inspected.targetHead)
       refuseMaintenance(latest.stop, remote, request.target.branch, published)
@@ -904,12 +955,23 @@ async function submitEvent(
       published,
       verifying: inspected.verifying,
       admission: inspected.admission,
-      ...(warningEvent !== undefined && warningReason !== undefined
+      ...(policyWarning !== undefined
         ? {
             admissionWarning: {
-              event: warningEvent,
-              reason: warningReason,
+              event: policyWarning.event,
+              reason: policyWarning.reason,
               at: warningAt.toISOString(),
+            },
+          }
+        : {}),
+      ...(revertWarning !== undefined
+        ? {
+            revertWarning: {
+              at: warningAt.toISOString(),
+              coverage: revertFinding?.coverage ?? "complete",
+              count: revertFinding?.count ?? 0,
+              event: revertWarning.event,
+              reason: revertWarning.reason,
             },
           }
         : {}),

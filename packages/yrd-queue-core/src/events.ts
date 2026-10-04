@@ -217,7 +217,7 @@ type ChangeInputDetails = Readonly<{
   by?: string
   recipient?: string
   reason?: string
-  warningKind?: "policy-warning"
+  warningKind?: "policy-warning" | "reverted-paths"
   title?: string
   content?: string
   checks?: readonly EventCheck[]
@@ -655,12 +655,21 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       const reason = requiredProp(event, EVENT_TRAILERS.reason)
       if (reason.trim() === "") throw new Error(`event ${event.id} admission-warning has empty Reason:`)
       const warningKind = prop(event, EVENT_TRAILERS.warningKind)
-      if (warningKind !== undefined && warningKind !== "policy-warning") {
+      // 27363: a second admitted kind beside the policy warning. `reverted-paths`
+      // names the compose revert detector's durable finding; an old reader must
+      // admit it before any writer emits it, and anything else is still refused.
+      if (warningKind !== undefined && warningKind !== "policy-warning" && warningKind !== "reverted-paths") {
         throw new Error(`event ${event.id} admission-warning has unknown Warning-Kind: ${warningKind}`)
       }
       return diagnose(
         next,
-        `admission ${warningKind === "policy-warning" ? "policy warning" : "could not judge"} ${head.slice(0, 12)}: ${reason}`,
+        `admission ${
+          warningKind === "policy-warning"
+            ? "policy warning"
+            : warningKind === "reverted-paths"
+              ? "reverted paths"
+              : "could not judge"
+        } ${head.slice(0, 12)}: ${reason}`,
       )
     }
     case "verifying":
@@ -1809,6 +1818,8 @@ type ChangeWrite = Readonly<{
   notice?: NoticeWrite
   run?: string
   writer?: string
+  /** #27363: the admitted `admission-warning` kinds; every other event refuses it. */
+  warningKind?: "policy-warning" | "reverted-paths"
   /** A target or branch ref moved in the same CAS publish as this event. */
   also?: readonly AlsoRef[]
   /** Stage dependent refs after the change event has its exact oid, before one atomic publish. */
@@ -1976,6 +1987,7 @@ async function appendDecision(
     ...(write.base === undefined ? {} : { base: write.base }),
     ...(write.config === undefined ? {} : { config: write.config }),
     ...(write.retry === undefined ? {} : { retry: write.retry }),
+    ...(write.warningKind === undefined ? {} : { warningKind: write.warningKind }),
     ...(write.deferred === undefined ? {} : { deferred: write.deferred }),
     ...(write.notice === undefined ? {} : { notice: write.notice }),
     ...(write.run === undefined ? {} : { run: write.run }),

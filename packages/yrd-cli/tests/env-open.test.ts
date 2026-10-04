@@ -950,4 +950,32 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
       expect(run.stderr()).toMatch(/needs both/u)
     })
   })
+
+  it("pins the declared identity into each materialized submodule, not only the root (#27403)", async () => {
+    const w = await world(":")
+    await w.git(["config", "extensions.worktreeConfig", "true"])
+    await addMaterializedDependency(w)
+    await withDeclaredIdentity("@dev/luna6-fixture", "dev-luna6-fixture@main.hh.invalid", async () => {
+      const run = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "pinned-modules", "--json"], run.io),
+        run.stderr(),
+      ).toBe(0)
+
+      const bay = join(w.work, ".bays", "pinned-modules")
+      const dep = gitIn(join(bay, "vendor/dependency"))
+      // A commit made inside the materialized submodule names the seat, not the
+      // identity the submodule's own store would otherwise fall through to.
+      expect((await dep(["config", "user.name"])).trim()).toBe("@dev/luna6-fixture")
+      expect((await dep(["config", "user.email"])).trim()).toBe("dev-luna6-fixture@main.hh.invalid")
+      // The submodule store shared with every worktree of the root is untouched,
+      // and the root's shared config still carries the repository's own identity.
+      const sharedDep = gitIn(join(w.work, ".git", "modules", "vendor", "dependency"))
+      expect((await sharedDep(["config", "--local", "--get", "--default=SENTINEL", "user.name"])).trim()).toBe(
+        "SENTINEL",
+      )
+      expect((await w.git(["config", "--local", "--get", "--default=SENTINEL", "user.name"])).trim()).toBe("yrd")
+      expect(run.stderr()).toContain("materialized submodule")
+    })
+  })
 })

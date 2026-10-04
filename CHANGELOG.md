@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `yrd env open` pins the caller's declared seat identity into every submodule it materialized, not only the
+  environment root. A submodule is its own repository, so the root's `config.worktree` never reached it and a
+  commit there fell through to the shared `~/.gitconfig` identity — this fleet's operator — attributing the
+  seat's own commits to the operator (27403).
+
 - Dead declaration readers `hintsIn`, `parseTarget`, and `declarationHere` are removed; `.yrd.yml` `target:` key is refused with remedy pointing to `--queue` or the origin head (26256).
 
 - Queue-authored missing-branch cancellations now send a `cancelled` notice with a durable receipt. `cancelled` is a supported notify ending and joins the defaults; explicit drop and withdraw stay silent (25541).

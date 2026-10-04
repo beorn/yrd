@@ -15,6 +15,7 @@ import { freshWorktree, type FreshWorktree, type Worktree } from "./worktree.ts"
 import { populateReferenceStores } from "./reference.ts"
 import { DeriveFailed, deriveInWorktree, type Derived, type DeriveSpec } from "./derive.ts"
 import { requireFrozenGitSuper, withGitConfig } from "./git-super-selection.ts"
+import { detectReverted, type RevertGuardReport } from "./revert-guard.ts"
 
 /** `descents` records git-super's two-direction ancestry checks of nested pins (24320). */
 export type Verification =
@@ -25,6 +26,11 @@ export type Verification =
       candidate: string
       /** Present when the target's `derive:` changed something: the composed merge before it, and what it did. */
       derived?: Derived & Readonly<{ composed: string }>
+      /**
+       * #27363: what the compose put back, one component store down, and how complete that
+       * proof is. Always present on a verified candidate: absence is not "clean".
+       */
+      reverted?: RevertGuardReport
       gitlinks: readonly SettledGitlink[]
       descents?: readonly SuperMergeDescent[]
       steps?: readonly SuperMergeStep[]
@@ -282,9 +288,39 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
       source: worktree.path,
     })
   }
-  await worktree.remove()
   const candidate = result.commit
   if (candidate === undefined) throw new Error(`git-super merge of ${options.head} lost its commit after derivation`)
+  // #27363: the guard reads the FINAL candidate's component stores, so it runs while the compose
+  // worktree still holds them. It never throws into the compose: a guard that cannot prove coverage
+  // reports that gap as incomplete, never a silent clean.
+  let reverted: RevertGuardReport
+  try {
+    reverted = await timed("revert-guard", () =>
+      detectReverted({
+        candidate,
+        git: options.git,
+        head: options.head,
+        root: worktree.path,
+        targetHead: options.targetHead,
+      }),
+    )
+  } catch (error) {
+    reverted = {
+      base: { state: "none" },
+      count: 0,
+      coverage: "incomplete",
+      gaps: [
+        {
+          depth: 0,
+          path: ".",
+          reason: `revert guard could not run: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
+      paths: [],
+      swallowed: [],
+    }
+  }
+  await worktree.remove()
   return {
     state: "verified",
     verifying: {
@@ -294,6 +330,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
       ...(result.steps === undefined ? {} : { steps: result.steps }),
       state: "verified",
       candidate,
+      reverted,
       ...(derived === undefined ? {} : { derived }),
     },
   }
