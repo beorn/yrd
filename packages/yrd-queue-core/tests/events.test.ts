@@ -2057,6 +2057,52 @@ describe("the queue-format boundary", () => {
     expect(events[1]?.links).toEqual([commit])
   })
 
+  it("records one notify-floors snapshot, dedups a replay, and refuses a malformed one loudly", async () => {
+    const { store, location } = remoteMemStore("yrd-event-notify-floors")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const endingId = "a".repeat(40)
+    const notBefore = new Date("2026-09-22T14:00:00.000Z")
+
+    const written = await writeQueueEvent(location, "lab", {
+      type: "notify-floors",
+      by: "yrd-run",
+      at: new Date("2026-09-22T14:01:00.000Z"),
+      floors: { recorder: { notBefore, present: [endingId] } },
+    })
+    expect((await readEventQueue(location, "lab")).notifyFloors).toEqual({
+      recorder: { notBefore, present: new Set([endingId]) },
+    })
+    // A byte-identical rewrite folds to the same tip: one snapshot, not a second event.
+    expect(
+      await writeQueueEvent(location, "lab", {
+        type: "notify-floors",
+        by: "yrd-run",
+        at: new Date("2026-09-22T14:02:00.000Z"),
+        floors: { recorder: { notBefore, present: [endingId] } },
+      }),
+    ).toBe(written)
+
+    // A malformed snapshot must fail loud rather than read as "no floors".
+    const chain = await openEvents({ ...location, ref: queueRef("lab"), writer: "yrd-run" })
+    const tip = (await readEventQueue(location, "lab")).tip
+    await chain.append(
+      [
+        {
+          type: "notify-floors",
+          props: [
+            ["Queue", tip],
+            ["Time", "2026-09-22T14:03:00.000Z"],
+            ["Floors", "{not json"],
+          ],
+        },
+      ],
+      { expect: tip },
+    )
+    await expect(readEventQueue(location, "lab")).rejects.toThrow(/notify-floors.*unreadable Floors/)
+  })
+
   it("refuses to classify empty when listing the queue prefix fails (26398)", async () => {
     const { location } = remoteMemStore("yrd-listing-failure")
     const broken = {

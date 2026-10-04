@@ -76,6 +76,7 @@ export const EVENT_TRAILERS = {
   result: "Result",
   key: "Key",
   run: "Run",
+  floors: "Floors",
 } as const
 const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 /** Only the run path that atomically publishes the target may write merged with this producer. */
@@ -854,6 +855,17 @@ export function decide(events: readonly Event[], input: EventInput): readonly Ev
   return [input]
 }
 
+/**
+ * One notify entry's high-water mark (27198): endings stamped at or after
+ * `notBefore`, and not named by `present`, are still owed a notice. `present` is
+ * the tie set of ending ids already stamped exactly at `notBefore`, so a
+ * same-millisecond boundary is deterministic.
+ */
+export type NotifyFloor = Readonly<{ notBefore: Date; present: ReadonlySet<string> }>
+
+/** One `notify-floors` snapshot, as written: the per-name instants and their tie sets. */
+export type NotifyFloorsSnapshot = Readonly<Record<string, Readonly<{ notBefore: Date; present: readonly string[] }>>>
+
 export type QueueLocation = Readonly<{
   repo: string
   remote: string
@@ -908,6 +920,8 @@ type EventQueueProjection = Readonly<{
     projectedCrossing: string | null
     projectionReason?: string
   }>
+  /** The latest `notify-floors` snapshot, replaced wholesale; absent until a run records one. */
+  notifyFloors?: Readonly<Record<string, NotifyFloor>>
 }>
 
 const validatedQueue = Symbol("validated event queue")
@@ -1148,6 +1162,7 @@ export type WriteQueueEvent =
   | Readonly<{ type: "resumed"; reason: string; by: string; at: Date }>
   | Readonly<{ type: "observed"; commit: string; branch?: string; by: string; at: Date }>
   | Readonly<{ type: "notified"; notice: NoticeWrite; by: string; at: Date }>
+  | Readonly<{ type: "notify-floors"; floors: NotifyFloorsSnapshot; by: string; at: Date }>
 
 const STUCK_RELEASE_PREFIX = "yrd-stuck-release:"
 
@@ -1174,6 +1189,13 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
     }
     if (write.type === "observed") existing = current.observed[write.commit]?.id
     if (write.type === "notified") existing = current.notices[write.notice.key]?.id
+    if (write.type === "notify-floors") {
+      // A CAS retry folds the chain again; a snapshot already at this exact tip is the same write, not a second one.
+      const encoded = encodeNotifyFloors(write.floors)
+      if (current.notifyFloors !== undefined && encodeNotifyFloors(current.notifyFloors) === encoded) {
+        existing = current.tip
+      }
+    }
     if (existing !== undefined) return []
     const details: [string, string][] = []
     let keeps: string[] | undefined
@@ -1189,6 +1211,8 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
         [EVENT_TRAILERS.key, write.notice.key],
       )
       if (write.notice.reason !== undefined) details.push([EVENT_TRAILERS.reason, write.notice.reason])
+    } else if (write.type === "notify-floors") {
+      details.push([EVENT_TRAILERS.floors, encodeNotifyFloors(write.floors)])
     } else {
       details.push([EVENT_TRAILERS.reason, write.reason])
       if (current.opsCutover !== undefined) {
@@ -1397,6 +1421,7 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
   let release: { id: string; reason: string } | undefined
   let opsCutover: string | undefined
   let ops: OpsState | undefined
+  let notifyFloors: EventQueueProjection["notifyFloors"]
   const observed: Record<string, { id: string; branch?: string }> = {}
   const notices: Record<
     string,
@@ -1565,6 +1590,13 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
       case "started":
       case "stopped":
         break
+      case "notify-floors": {
+        if (event.writer !== QUEUE_RUN_WRITER) {
+          throw new Error(`${ref}: notify-floors event ${event.id} needs writer ${QUEUE_RUN_WRITER}`)
+        }
+        notifyFloors = readNotifyFloorsEvent(event, ref)
+        break
+      }
       case "observed": {
         if (event.writer !== QUEUE_RUN_WRITER) {
           throw new Error(`${ref}: observed event ${event.id} needs writer ${QUEUE_RUN_WRITER}`)
@@ -1623,7 +1655,66 @@ function projectEventQueue(events: readonly QueueEventShape[], ref: string, repo
     ...(pause === undefined ? {} : { pause }),
     ...(opsCutover === undefined ? {} : { opsCutover }),
     ...(ops === undefined ? {} : { ops }),
+    ...(notifyFloors === undefined ? {} : { notifyFloors }),
   }
+}
+
+/** A notify entry's name, as the declaration spells it: no whitespace and no `:`, which the `Key:` trailer separates on. */
+const NOTIFIER_NAME = /^[^\s:]+$/u
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Decode one `notify-floors` snapshot. Malformed JSON, an unreadable name,
+ * a non-round-tripping instant or a bad tie set raises `QueueEventShapeUnreadable`
+ * — never a silent empty floor (27198).
+ */
+function readNotifyFloorsEvent(event: QueueEventShape, ref: string): NonNullable<EventQueueProjection["notifyFloors"]> {
+  function unreadable(message: string, cause?: unknown): never {
+    throw new QueueEventShapeUnreadable(`${ref}: notify-floors event ${event.id} ${message}`, {
+      ref,
+      eventId: event.id,
+      eventType: event.type,
+      ...(cause === undefined ? {} : { cause }),
+    })
+  }
+  const raw = requiredProp(event, EVENT_TRAILERS.floors)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (cause) {
+    unreadable("has unreadable Floors: JSON", cause)
+  }
+  if (!isJsonRecord(parsed)) unreadable("Floors: must be a JSON object of per-entry floors")
+  const floors: Record<string, NotifyFloor> = {}
+  for (const [name, value] of Object.entries(parsed)) {
+    if (!NOTIFIER_NAME.test(name)) unreadable(`Floors: names an unreadable notify entry ${JSON.stringify(name)}`)
+    if (!isJsonRecord(value)) unreadable(`Floors: entry ${name} must be an object`)
+    const { notBefore, present } = value
+    if (typeof notBefore !== "string" || new Date(notBefore).toISOString() !== notBefore) {
+      unreadable(`Floors: entry ${name} needs notBefore as a round-tripping ISO instant`)
+    }
+    if (!Array.isArray(present) || present.some((id) => typeof id !== "string" || id === "")) {
+      unreadable(`Floors: entry ${name} needs present as a list of ending ids`)
+    }
+    floors[name] = { notBefore: new Date(notBefore as string), present: new Set(present as string[]) }
+  }
+  return floors
+}
+
+/** One deterministic encoding for a snapshot, so a replayed write is byte-identical and dedups. */
+export function encodeNotifyFloors(
+  floors: Readonly<Record<string, Readonly<{ notBefore: Date; present: readonly string[] | ReadonlySet<string> }>>>,
+): string {
+  const ordered: Record<string, { notBefore: string; present: readonly string[] }> = {}
+  for (const name of Object.keys(floors).sort()) {
+    const floor = floors[name]
+    if (floor === undefined) continue
+    ordered[name] = { notBefore: floor.notBefore.toISOString(), present: [...floor.present] }
+  }
+  return JSON.stringify(ordered)
 }
 
 function readOpsEvent(event: QueueEventShape, ref: string): OpsState {

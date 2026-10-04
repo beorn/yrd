@@ -170,7 +170,9 @@ type World = Readonly<{
  * `declaredLater`, main carries one commit from before the declaration: the
  * old queue's history, which the E5 reading must never judge.
  */
-async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<World> {
+async function world(
+  plan: Readonly<{ declaredLater?: boolean; notifyNames?: readonly string[] }> = {},
+): Promise<World> {
   // The workdir must be a real filesystem the runner can lstat; the OS
   // temp dir is fine for a test, the plan's rule about tmpfs is for real runs.
   const root = mkdtempSync(join(tmpdir(), "yrd-core-run-"))
@@ -179,6 +181,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
   const work = join(root, "work")
   const workdir = join(root, "queue")
   const notifyLog = join(root, "notify.log")
+  const notifier = join(root, "notify.sh")
   const checkLog = join(root, "check.log")
   // Written by the check BEFORE it sleeps, so a case that has to act while a
   // check is running waits on the check's own word instead of a fixed delay.
@@ -197,7 +200,10 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
   }
   // The target declares the queue, as every real target does: the merged
   // tree's declaration is a built-in check at merge (ruling D2).
-  writeFileSync(join(work, ".yrd.yml"), "{}\n")
+  const declaredNotify = (plan.notifyNames ?? ["recorder"])
+    .map((name) => `  - ${name}:\n      run: ${JSON.stringify(notifier)}\n`)
+    .join("")
+  writeFileSync(join(work, ".yrd.yml"), `notify:\n${declaredNotify}`)
   await git(["add", "target.txt", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", plan.declaredLater === true ? "declare the queue" : "base"])
   await git(["push", "--quiet", "origin", "main"])
@@ -235,7 +241,6 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     ].join("\n"),
   )
   chmodSync(setupScript, 0o755)
-  const notifier = join(root, "notify.sh")
   writeFileSync(notifier, `#!/bin/sh\ncat >> "${notifyLog}"\n`)
   chmodSync(notifier, 0o755)
   mkdirSync(workdir, { recursive: true })
@@ -389,7 +394,7 @@ it("runs a check-free event change through one atomic merge", async () => {
  * @level l3 @consumer queue operator and notifier
  */
 it("keeps nonempty queue and notify parents after their worktrees close", async () => {
-  const w = await world()
+  const w = await world({ notifyNames: ["marker"] })
   await createWorldEventQueue(w)
   await submitCommit(w, "task/parent-content", "one.txt")
   const options = {
@@ -466,7 +471,7 @@ it("merges a healthy event change beside one malformed change chain", async () =
  * @level l3 @consumer event queue submitter (@i/10-yrd/25815)
  */
 it("notifies the submitter when an event change fails before any check", async () => {
-  const w = await world()
+  const w = await world({ notifyNames: ["submitter"] })
   await createWorldEventQueue(w)
   await w.git(["checkout", "--quiet", "-b", "task/precheck-refused", "main"])
   writeFileSync(join(w.work, "target.txt"), "change side\n")
@@ -563,7 +568,7 @@ it("gives distinct IDs to stuck, drop, resubmit, stuck at one head", async () =>
  * @level l3 @consumer event queue operator and merge runner
  */
 it("expires an event override on the round's clock and tells its operator", async () => {
-  const w = await world()
+  const w = await world({ notifyNames: ["pager"] })
   await createWorldEventQueue(w)
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await submitCommit(w, "task/override-clock", "clock.txt")
@@ -1278,7 +1283,7 @@ it("restores target-owned scripts before an event check runs", async () => {
   const outcome = await queueRun({
     ...base,
     notify: [],
-    checks: [{ ...base.checks[0]!, run: "grep -qx '{}' .yrd.yml", scripts: [".yrd.yml"] }],
+    checks: [{ ...base.checks[0]!, run: "grep -q 'notify:' .yrd.yml", scripts: [".yrd.yml"] }],
   })
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/script-overlay"] })
@@ -1475,18 +1480,117 @@ it("delivers an event ending and settles its recipient on the branch chain", asy
   expect(readdirSync(join(w.workdir, "worktrees"))).toEqual([])
 })
 
-/** @failure Migration replayed a pre-switch merge as a fresh notification every round.
+/** @failure 27198: a run compared only receipts, so a newly declared entry was owed every past ending.
  * @level l0 @consumer queue notifier
  */
-it("counts migrated endings as told and fresh endings by their receipt", () => {
+it("counts migrated endings as told and weighs fresh endings against their notify floor", () => {
   const id = "a".repeat(40)
-  const fresh = { id, props: [] }
-  const migrated = { id, props: [["Migrated-From", `refs/yrd/main/task/old@${"b".repeat(40)}`] as const] }
+  const other = "c".repeat(40)
+  const at = new Date("2026-10-04T00:00:00.000Z")
+  const ending = (endingId: string, time: Date) => ({ id: endingId, props: [["Time", time.toISOString()]] as const })
+  const floor = (notBefore: Date, present: readonly string[] = []) => ({ notBefore, present: new Set(present) })
+  const migrated = {
+    id,
+    props: [
+      ["Time", at.toISOString()],
+      ["Migrated-From", `refs/yrd/main/task/old@${"b".repeat(40)}`],
+    ] as const,
+  }
   const delivered = { [`${id}:recorder`]: { for: id, to: "recorder", result: "delivered" as const } }
 
-  expect(eventNoticeOwed(migrated, undefined, "recorder")).toBe(false)
-  expect(eventNoticeOwed(fresh, undefined, "recorder")).toBe(true)
-  expect(eventNoticeOwed(fresh, delivered, "recorder")).toBe(false)
+  // A migrated ending was already told by the old queue, whatever its instant.
+  expect(eventNoticeOwed(migrated, undefined, "recorder", floor(at))).toBe(false)
+  // Floor−1ms is past; floor exactly, id absent from the tie set, is new; floor+1ms is new.
+  expect(eventNoticeOwed(ending(id, new Date(at.getTime() - 1)), undefined, "recorder", floor(at))).toBe(false)
+  expect(eventNoticeOwed(ending(id, at), undefined, "recorder", floor(at))).toBe(true)
+  expect(eventNoticeOwed(ending(id, new Date(at.getTime() + 1)), undefined, "recorder", floor(at))).toBe(true)
+  // An id named by the tie set was already stamped at the mint, so it is old.
+  expect(eventNoticeOwed(ending(other, at), undefined, "recorder", floor(at, [other]))).toBe(false)
+  // A receipt still closes the ending the floor would otherwise open.
+  expect(eventNoticeOwed(ending(id, new Date(at.getTime() + 1)), delivered, "recorder", floor(at))).toBe(false)
+})
+
+/** @failure 27198: a declaration adding a notify entry in the SAME change as the snapshot replayed every past ending.
+ * @level l3 @consumer queue operator and declaration author
+ */
+it("refuses the first notify snapshot when the declared names differ from the creation declaration", async () => {
+  const w = await world({ notifyNames: ["recorder"] })
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/first-snapshot", "one.txt")
+  const base = await w.options({ exit: 0 })
+
+  await expect(
+    queueRun({
+      ...base,
+      checks: [],
+      notify: [
+        { name: "recorder", on: ["merged"], run: w.notifier },
+        { name: "latecomer", on: ["merged"], run: w.notifier },
+      ],
+    }),
+  ).rejects.toThrow(/reviewed migration baseline/u)
+
+  // The refusal happens before any delivery or merge, so nothing ran and nothing landed.
+  expect(existsSync(w.notifyLog)).toBe(false)
+  expect(
+    await readStatus(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", "task/first-snapshot"),
+  ).toMatchObject({ status: "queued" })
+})
+
+/** @failure 27198: the migration snapshot DROPPED a genuinely undelivered past ending instead of preserving it.
+ * @level l3 @consumer notified recipient
+ */
+it("preserves an undelivered past ending on the first snapshot and never re-sends it", async () => {
+  const w = await world({ notifyNames: ["recorder"] })
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/undelivered", "one.txt")
+
+  // First round records the ending with nobody declared: no notice is delivered,
+  // so the ending is genuinely owed when the entry appears.
+  const silent = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(silent).toMatchObject({ exitCode: 0, merged: ["task/undelivered"] })
+  expect(existsSync(w.notifyLog)).toBe(false)
+
+  const recorder = { name: "recorder", on: ["merged" as const], run: w.notifier }
+  const migrated = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [recorder] })
+  expect(migrated).toMatchObject({ exitCode: 0, merged: [] })
+  // The migration mints at the queue's created instant, so the owed ending is delivered once.
+  expect(readFileSync(w.notifyLog, "utf8").trim().split("\n")).toHaveLength(1)
+  expect(Object.values((await readStatus(store, "main", "task/undelivered")).notices ?? {})).toMatchObject([
+    { to: "recorder", result: "delivered" },
+  ])
+
+  // A later round with the same declaration is a no-op: no snapshot, no re-send.
+  const again = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [recorder] })
+  expect(again).toMatchObject({ exitCode: 0, merged: [] })
+  expect(readFileSync(w.notifyLog, "utf8").trim().split("\n")).toHaveLength(1)
+})
+
+/** @failure 27198: a later-added notify entry was owed every ending the first snapshot had already passed.
+ * @level l3 @consumer notified recipient
+ */
+it("mints a later-added notify entry at now instead of backfilling the passed endings", async () => {
+  const w = await world({ notifyNames: ["recorder"] })
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/before-latecomer", "one.txt")
+  const recorder = { name: "recorder", on: ["merged" as const], run: w.notifier }
+  const first = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [recorder] })
+  expect(first).toMatchObject({ exitCode: 0, merged: ["task/before-latecomer"] })
+
+  const latecomerLog = join(dirname(w.notifyLog), "latecomer.jsonl")
+  const latecomer = { name: "latecomer", on: ["merged" as const], run: `cat >> ${latecomerLog}` }
+  await submitCommit(w, "task/after-latecomer", "two.txt")
+  const second = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [recorder, latecomer] })
+  expect(second).toMatchObject({ exitCode: 0, merged: ["task/after-latecomer"] })
+
+  // Exactly the new ending is delivered to the added entry; the passed one is never replayed.
+  const lines = readFileSync(latecomerLog, "utf8").trim().split("\n")
+  expect(lines).toHaveLength(1)
+  expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({
+    record: "merged",
+    change: expect.stringContaining("task/after-latecomer"),
+  })
 })
 
 /** @failure Migration replayed a pre-switch merge as a fresh notification every round.
@@ -1543,7 +1647,7 @@ it("records a final notice for a stuck event while leaving the line stopped", as
  * @level l3 @consumer queue operator and notified recipient
  */
 it("settles refused and finally failed event recipients once", async () => {
-  const w = await world()
+  const w = await world({ notifyNames: ["refuser", "unreachable"] })
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/notice-final", "one.txt")
@@ -1578,7 +1682,10 @@ it("settles refused and finally failed event recipients once", async () => {
 it("repairs an ending whose event notice was not yet recorded", async () => {
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
-  await createWorldEventQueue(w)
+  // The queue is created BEFORE the backdated ending, so the migrate floor lets
+  // that ending through: a floor recorded at `created` only suppresses endings
+  // that predate the queue itself.
+  await createWorldEventQueue(w, w.target, new Date(Date.now() - 120_000))
   await submitCommit(w, "task/notice-repair", "one.txt")
   const opened = await readStatus(store, "main", "task/notice-repair")
   if (opened.tip === undefined) throw new Error("submitted event has no tip")
@@ -1630,7 +1737,7 @@ it("refuses event teardown until an executor exists", async () => {
  * @level l3 @consumer queue submitter and supervisor
  */
 it("retains a deferred check, notifies both recipients once, and leaves it for the long tier", async () => {
-  const w = await world()
+  const w = await world({ notifyNames: ["submitter", "supervisor"] })
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/deferred-event", "one.txt")
@@ -2809,7 +2916,10 @@ it("bounds the direct-notice retry and settles it in the next round", async () =
   await createWorldEventQueue(w)
   const direct = await pushAroundQueue(w, "direct-notice-retry.txt")
   const base = { ...(await w.options({ exit: 0 })), checks: [] }
-  expect((await queueRun({ ...base, notify: [] })).directMerges).toEqual([direct])
+  // The floor is recorded without delivering: the entry wants no ending, so the
+  // next run (under the conflict hook) has no first-snapshot write left to do.
+  const recorder = { name: "recorder", on: [] as const, run: w.notifier }
+  expect((await queueRun({ ...base, notify: [recorder] })).directMerges).toEqual([direct])
   const observed = (await readEventQueue(store, "main")).observed[direct]
   if (observed === undefined) throw new Error("fixture did not record the direct merge")
   const ref = queueRef("main")
@@ -2821,7 +2931,7 @@ it("bounds the direct-notice retry and settles it in the next round", async () =
   })
   const options = {
     ...base,
-    notify: [{ name: "recorder", on: ["merged-direct"], run: w.notifier }],
+    notify: [{ name: "recorder", on: ["merged-direct" as const], run: w.notifier }],
     retryBudgetMs: 1,
   } satisfies QueueRunOptions
 
@@ -2845,7 +2955,7 @@ it("bounds the direct-notice retry and settles it in the next round", async () =
 }, 60_000)
 
 it("retains a failed direct-merge delivery with a reason and does not retry it next round", async () => {
-  const w = await world()
+  const w = await world({ notifyNames: ["rejecting"] })
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   const direct = await pushAroundQueue(w, "direct-failed-notice.txt")

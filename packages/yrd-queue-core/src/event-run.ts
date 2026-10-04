@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname, join } from "node:path"
 import { Conflict, PublicationRejected, RetriesExhausted, openEvents } from "./git.ts"
-import { readEventAt } from "./event-read.ts"
+import { readEventAt, readEventChain } from "./event-read.ts"
 
 import {
   appendChangeEvent,
@@ -20,9 +20,12 @@ import {
   readEventQueue,
   readEventOps,
   readStatus,
+  QUEUE_RUN_WRITER,
   writeQueueEvent,
   type EventCheck,
   type EventChange,
+  type EventQueue,
+  type NotifyFloor,
 } from "./events.ts"
 import { eventRows } from "./event-table.ts"
 import { assertPlainEventQueueRun } from "./event-config.ts"
@@ -86,6 +89,34 @@ function endingTime(event: Event, context: string): string {
   }
   return time
 }
+
+/** Exact set equality between a declared name set and a recorded name list. */
+function sameNameSet(declared: ReadonlySet<string>, recorded: readonly string[]): boolean {
+  return declared.size === recorded.length && recorded.every((name) => declared.has(name))
+}
+
+/**
+ * Every ending id already stamped exactly at `instant` (27198): branch endings
+ * from the change histories AND the queue's own `observed` direct-merge events.
+ * This is the tie set a freshly added notify entry mints with, so an ending at
+ * the boundary is judged by whether it existed at the mint or arrived after it.
+ */
+function stampedEndingIds(
+  instant: Date,
+  histories: ReadonlyMap<string, Readonly<{ events: readonly Event[] }>>,
+  queueEvents: readonly Event[],
+): ReadonlySet<string> {
+  const iso = instant.toISOString()
+  const stamped = (event: Event): boolean => event.props.find(([key]) => key === EVENT_TRAILERS.time)?.[1] === iso
+  const ids = new Set<string>()
+  for (const event of queueEvents) {
+    if (event.type === "observed" && stamped(event)) ids.add(event.id)
+  }
+  for (const history of histories.values()) {
+    for (const event of history.events) if (stamped(event)) ids.add(event.id)
+  }
+  return ids
+}
 import { repairMissingBranchHeads } from "./remote.ts"
 import { isActive } from "./override.ts"
 import { QueuePaused, stuckCures } from "./pause.ts"
@@ -103,7 +134,7 @@ export class QueueRunEventRetryExhausted extends Error {
   override readonly name = "QueueRunEventRetryExhausted"
 
   constructor(
-    readonly site: "notified" | "expire-overrides" | "observed" | "stuck-release",
+    readonly site: "notified" | "expire-overrides" | "observed" | "stuck-release" | "notify-floors",
     readonly ref: string,
     readonly marker: string,
     readonly count: number,
@@ -147,13 +178,30 @@ function noticeReason(reason: string): string {
   return written
 }
 
-/** A migrated ending was already told by the old queue; fresh endings need their own receipt. */
+/**
+ * Whether one entry is still owed a notice for an ending (27198).
+ *
+ * A migrated ending was already told by the old queue. A fresh ending needs its
+ * own receipt, AND must clear the entry's high-water mark: an ending stamped at
+ * or after `notBefore`, and not named by `present` (the ids already stamped
+ * exactly at `notBefore`), is owed. `present` resolves the same-millisecond tie:
+ * an ending that already existed at the mint instant is OLD, one recorded after
+ * it — even in the same millisecond — is NEW.
+ */
 export function eventNoticeOwed(
   ending: Pick<Event, "id" | "props">,
   notices: EventChange["notices"],
   recipient: string,
+  floor: Readonly<{ notBefore: Date; present: ReadonlySet<string> }>,
 ): boolean {
-  return !ending.props.some(([key]) => key === "Migrated-From") && notices?.[`${ending.id}:${recipient}`] === undefined
+  if (ending.props.some(([key]) => key === "Migrated-From")) return false
+  if (notices?.[`${ending.id}:${recipient}`] !== undefined) return false
+  if (floor.present.has(ending.id)) return false
+  const time = ending.props.find(([key]) => key === EVENT_TRAILERS.time)?.[1]
+  if (time === undefined || !Number.isFinite(Date.parse(time))) {
+    throw new Error(`ending event ${ending.id} has no valid Time: to weigh against its notify floor`)
+  }
+  return Date.parse(time) >= floor.notBefore.getTime()
 }
 
 type SettledNotice = Readonly<{ result: "delivered" | "refused" | "failed"; reason?: string }>
@@ -505,6 +553,18 @@ export async function eventQueueRun(
     ...(branches.length === 0 ? {} : { branches: [...branches] }),
     ...(stopped === undefined ? {} : { stopped }),
   })
+  // The run records one `notify-floors` snapshot before any delivery; every name it
+  // declares then has a floor. A missing floor is a loud error, never a silent skip.
+  let notifyFloors: EventQueue["notifyFloors"]
+  const floorFor = (name: string): NotifyFloor => {
+    const floor = notifyFloors?.[name]
+    if (floor === undefined) {
+      throw new Error(
+        `event queue ${url}#${queue}: notify entry ${name} has no recorded notify-floors high-water mark; a run records one before it delivers any ending`,
+      )
+    }
+    return floor
+  }
   const tell = async (
     branch: string,
     kind: "merged" | "failed" | "stuck" | "deferred" | "cancelled",
@@ -564,7 +624,7 @@ export async function eventQueueRun(
     // Existing endings and merged notices use the actual event.
     for (const entry of options.notify ?? []) {
       if (!entry.on.includes(kind)) continue
-      if (!eventNoticeOwed(ending, change.notices, entry.name)) continue
+      if (!eventNoticeOwed(ending, change.notices, entry.name, floorFor(entry.name))) continue
       const key = `${eventId}:${entry.name}`
       const final = await settleEventNotice(
         { options, git, target, log, url, queue },
@@ -649,7 +709,7 @@ export async function eventQueueRun(
         throw new Error(`event queue ${url}#${queue}: direct notice lost observed ${commit} at ${eventId}`)
       }
       const key = `${eventId}:${entry.name}`
-      if (state.notices[key] !== undefined) continue
+      if (!eventNoticeOwed(observed, state.notices, entry.name, floorFor(entry.name))) continue
       const final = await settleEventNotice(
         { options, git, target, log, url, queue },
         entry,
@@ -735,8 +795,62 @@ export async function eventQueueRun(
   }
   operational = await readEventOps(store, git, queue, target)
   let queueState = operational.queue
-  for (const [commit, observed] of Object.entries(queueState.observed)) await tellDirect(commit, observed.id)
   const { histories, invalid } = await listChangeHistories(store, queue)
+  // 27198: ONE queue-level `notify-floors` snapshot per run, before any ending
+  // delivery. The first snapshot is a migration: it mints every declared name at
+  // the queue's created instant, and refuses loudly unless the declared name set
+  // EQUALS the creation declaration's, so a name added later is never mistaken
+  // for one that has legitimate pending debt. A later snapshot keeps a retained
+  // name's floor, mints an added name at NOW (with the ending ids already stamped
+  // there), and drops an absent name.
+  if ((options.notify?.length ?? 0) > 0) {
+    const declaredNames = new Set((options.notify ?? []).map((entry) => entry.name))
+    const known = queueState.notifyFloors
+    if (!sameNameSet(declaredNames, known === undefined ? [] : Object.keys(known))) {
+      const ref = queueRef(queue)
+      const chainEvents = await readEventChain(await openEvents({ ...store, ref }))
+      const now = new Date(options.now?.() ?? Date.now())
+      const floors: Record<string, Readonly<{ notBefore: Date; present: readonly string[] }>> = {}
+      if (known === undefined) {
+        const creation = await readConfig(git, queueState.declaration, options.target)
+        const creationNames = (creation?.notify ?? []).map((entry) => entry.name)
+        if (!sameNameSet(declaredNames, creationNames)) {
+          throw new Error(
+            `event queue ${url}#${queue}: cannot record the first notify-floors snapshot — declared notify entries ` +
+              `(${[...declaredNames].sort().join(", ") || "none"}) differ from the queue's creation declaration ` +
+              `(${[...creationNames].sort().join(", ") || "none"}); an explicit, reviewed migration baseline is required`,
+          )
+        }
+        const created = chainEvents.find((event) => event.id === queueState.created)
+        if (created === undefined) {
+          throw new Error(`event queue ${url}#${queue}: created event ${queueState.created} is missing from ${ref}`)
+        }
+        const createdAt = new Date(endingTime(created, `${ref} created`))
+        for (const name of declaredNames) floors[name] = { notBefore: createdAt, present: [] }
+      } else {
+        const present = stampedEndingIds(now, histories, chainEvents)
+        for (const name of declaredNames) {
+          const prior = known[name]
+          floors[name] =
+            prior === undefined
+              ? { notBefore: now, present: [...present] }
+              : { notBefore: prior.notBefore, present: [...prior.present] }
+        }
+      }
+      await runTransaction("notify-floors", queueState.tip, () =>
+        writeQueueEvent(store, queue, {
+          type: "notify-floors",
+          by: QUEUE_RUN_WRITER,
+          at: now,
+          floors,
+        }),
+      )
+      operational = await readEventOps(store, git, queue, target)
+      queueState = operational.queue
+    }
+    notifyFloors = queueState.notifyFloors
+  }
+  for (const [commit, observed] of Object.entries(queueState.observed)) await tellDirect(commit, observed.id)
   for (const [branch, defect] of invalid) {
     log.write({
       kind: "observation",
@@ -769,7 +883,8 @@ export async function eventQueueRun(
       }
       if (
         (options.notify ?? []).some(
-          (entry) => entry.on.includes(latest.kind) && eventNoticeOwed(ending, change.notices, entry.name),
+          (entry) =>
+            entry.on.includes(latest.kind) && eventNoticeOwed(ending, change.notices, entry.name, floorFor(entry.name)),
         )
       ) {
         await tell(branch, latest.kind, latest.id, ending)

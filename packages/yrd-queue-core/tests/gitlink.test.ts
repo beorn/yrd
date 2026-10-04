@@ -91,7 +91,7 @@ type World = Readonly<{
  * A submodule whose main is `one` then `three`, with a branch `feature` at
  * `two` off `one`; a root whose main records the submodule at `three`.
  */
-async function world(): Promise<World> {
+async function world(plan: Readonly<{ notifyNames?: readonly string[] }> = {}): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-core-gitlink-"))
   roots.push(root)
   // A submodule at a local path: git refuses file transport for submodule
@@ -143,7 +143,10 @@ async function world(): Promise<World> {
   await identity(git)
   await git(["remote", "set-url", "origin", "https://git-super.test/owned/root.git"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), "{}\n")
+  // Declare the notify names the case will run: 27198's first-snapshot guard
+  // compares a run's declared names with the queue's creation declaration.
+  const named = (plan.notifyNames ?? []).map((name) => `  - ${name}:\n      run: "true"\n`).join("")
+  writeFileSync(join(work, ".yrd.yml"), named === "" ? "{}\n" : `notify:\n${named}`)
   await git(["submodule", "add", "--quiet", "https://git-super.test/owned/submodule.git", "submodule"])
   await git(["add", ".yrd.yml", ".gitmodules", "submodule"])
   await git(["commit", "--quiet", "-m", "base, with the submodule at its main"])
@@ -443,7 +446,7 @@ it("does not publish a pin unchanged at one of several criss-cross merge bases",
  * @level l3 @consumer the submitter of a change with a diverged component pin
  */
 it("sends one failed notice for a gitlink that cannot compose", async () => {
-  const w = await world()
+  const w = await world({ notifyNames: ["submitter"] })
   await createWorldEventQueue(w)
   const ahead = await aheadOfSubmodule(w, "submitted-feature")
   const head = await submitGitlink(w, "task/diverged-pin", ahead)
