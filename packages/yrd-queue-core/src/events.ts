@@ -1688,18 +1688,28 @@ function readNotifyFloorsEvent(event: QueueEventShape, ref: string): NonNullable
     unreadable("has unreadable Floors: JSON", cause)
   }
   if (!isJsonRecord(parsed)) unreadable("Floors: must be a JSON object of per-entry floors")
-  const floors: Record<string, NotifyFloor> = {}
+  // A null-prototype record so a notify name that happens to be `__proto__`
+  // is an ordinary own key, never a silent prototype change that drops it.
+  const floors = Object.create(null) as Record<string, NotifyFloor>
   for (const [name, value] of Object.entries(parsed)) {
     if (!NOTIFIER_NAME.test(name)) unreadable(`Floors: names an unreadable notify entry ${JSON.stringify(name)}`)
     if (!isJsonRecord(value)) unreadable(`Floors: entry ${name} must be an object`)
     const { notBefore, present } = value
-    if (typeof notBefore !== "string" || new Date(notBefore).toISOString() !== notBefore) {
+    if (typeof notBefore !== "string") {
       unreadable(`Floors: entry ${name} needs notBefore as a round-tripping ISO instant`)
     }
-    if (!Array.isArray(present) || present.some((id) => typeof id !== "string" || id === "")) {
-      unreadable(`Floors: entry ${name} needs present as a list of ending ids`)
+    const instant = new Date(notBefore)
+    if (Number.isNaN(instant.getTime()) || instant.toISOString() !== notBefore) {
+      unreadable(`Floors: entry ${name} needs notBefore as a round-tripping ISO instant`)
     }
-    floors[name] = { notBefore: new Date(notBefore as string), present: new Set(present as string[]) }
+    if (!Array.isArray(present) || present.some((id) => typeof id !== "string" || !COMMIT_OID.test(id))) {
+      unreadable(`Floors: entry ${name} needs present as a list of canonical ending ids`)
+    }
+    const endingIds = present as string[]
+    if (new Set(endingIds).size !== endingIds.length) {
+      unreadable(`Floors: entry ${name} repeats an ending id in present`)
+    }
+    floors[name] = { notBefore: instant, present: new Set(endingIds) }
   }
   return floors
 }
@@ -1708,7 +1718,7 @@ function readNotifyFloorsEvent(event: QueueEventShape, ref: string): NonNullable
 export function encodeNotifyFloors(
   floors: Readonly<Record<string, Readonly<{ notBefore: Date; present: readonly string[] | ReadonlySet<string> }>>>,
 ): string {
-  const ordered: Record<string, { notBefore: string; present: readonly string[] }> = {}
+  const ordered = Object.create(null) as Record<string, { notBefore: string; present: readonly string[] }>
   for (const name of Object.keys(floors).sort()) {
     const floor = floors[name]
     if (floor === undefined) continue

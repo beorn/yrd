@@ -1593,6 +1593,33 @@ it("mints a later-added notify entry at now instead of backfilling the passed en
   })
 })
 
+/** @failure 27198: removing the LAST notify entry skipped the snapshot, so re-adding it reused the stale floor and replayed the endings from the gap.
+ * @level l3 @consumer queue operator and notified recipient
+ */
+it("records an empty notify-floors snapshot when the last entry is removed, so a re-added entry mints at now", async () => {
+  const w = await world({ notifyNames: ["recorder"] })
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const createdAt = new Date(Date.now() - 3_600_000)
+  await createWorldEventQueue(w, w.target, createdAt)
+  await submitCommit(w, "task/floor-reset", "one.txt")
+  const base = await w.options({ exit: 0 })
+  const recorder = { name: "recorder", on: ["merged" as const], run: w.notifier }
+
+  const first = await queueRun({ ...base, checks: [], notify: [recorder] })
+  expect(first.merged).toEqual(["task/floor-reset"])
+  expect((await readEventQueue(store, "main")).notifyFloors?.recorder?.notBefore.getTime()).toBe(createdAt.getTime())
+
+  // The operator removes the LAST entry: the run must WRITE the empty snapshot, not skip the write.
+  await queueRun({ ...base, targetSha: await remoteTarget(w), checks: [], notify: [] })
+  expect((await readEventQueue(store, "main")).notifyFloors).toEqual({})
+
+  // Re-adding mints the entry at now, so an ending recorded during the gap is not owed.
+  await submitCommit(w, "task/floor-readd", "two.txt")
+  await queueRun({ ...base, targetSha: await remoteTarget(w), checks: [], notify: [recorder] })
+  const floors = (await readEventQueue(store, "main")).notifyFloors
+  expect(floors?.recorder?.notBefore.getTime()).toBeGreaterThan(createdAt.getTime())
+})
+
 /** @failure Migration replayed a pre-switch merge as a fresh notification every round.
  * @level l3 @consumer submitter and queue operator
  */

@@ -803,14 +803,19 @@ export async function eventQueueRun(
   // for one that has legitimate pending debt. A later snapshot keeps a retained
   // name's floor, mints an added name at NOW (with the ending ids already stamped
   // there), and drops an absent name.
-  if ((options.notify?.length ?? 0) > 0) {
-    const declaredNames = new Set((options.notify ?? []).map((entry) => entry.name))
-    const known = queueState.notifyFloors
-    if (!sameNameSet(declaredNames, known === undefined ? [] : Object.keys(known))) {
+  // A run entered with NO notify option at all (not the queue's declaration,
+  // which is always a list) neither mints nor wipes a floor; a run whose
+  // declaration removed the LAST entry still enters, so its empty set is
+  // recorded rather than silently skipping the write.
+  const declaredNames = new Set((options.notify ?? []).map((entry) => entry.name))
+  const known = queueState.notifyFloors
+  const recordedNames = known === undefined ? [] : Object.keys(known)
+  if (options.notify !== undefined && (declaredNames.size > 0 || recordedNames.length > 0)) {
+    if (!sameNameSet(declaredNames, recordedNames)) {
       const ref = queueRef(queue)
       const chainEvents = await readEventChain(await openEvents({ ...store, ref }))
       const now = new Date(options.now?.() ?? Date.now())
-      const floors: Record<string, Readonly<{ notBefore: Date; present: readonly string[] }>> = {}
+      const floors = Object.create(null) as Record<string, Readonly<{ notBefore: Date; present: readonly string[] }>>
       if (known === undefined) {
         const creation = await readConfig(git, queueState.declaration, options.target)
         const creationNames = (creation?.notify ?? []).map((entry) => entry.name)
