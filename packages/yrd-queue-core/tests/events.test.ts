@@ -2057,6 +2057,108 @@ describe("the queue-format boundary", () => {
     expect(events[1]?.links).toEqual([commit])
   })
 
+  it("records one notify-floors snapshot, dedups a replay, and refuses a malformed one loudly", async () => {
+    const { store, location } = remoteMemStore("yrd-event-notify-floors")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const endingId = "a".repeat(40)
+    const notBefore = new Date("2026-09-22T14:00:00.000Z")
+
+    const written = await writeQueueEvent(location, "lab", {
+      type: "notify-floors",
+      by: "yrd-run",
+      at: new Date("2026-09-22T14:01:00.000Z"),
+      floors: { recorder: { notBefore, present: [endingId] } },
+    })
+    expect((await readEventQueue(location, "lab")).notifyFloors).toEqual({
+      recorder: { notBefore, present: new Set([endingId]) },
+    })
+    // A byte-identical rewrite folds to the same tip: one snapshot, not a second event.
+    expect(
+      await writeQueueEvent(location, "lab", {
+        type: "notify-floors",
+        by: "yrd-run",
+        at: new Date("2026-09-22T14:02:00.000Z"),
+        floors: { recorder: { notBefore, present: [endingId] } },
+      }),
+    ).toBe(written)
+
+    // A malformed snapshot must fail loud rather than read as "no floors".
+    const chain = await openEvents({ ...location, ref: queueRef("lab"), writer: "yrd-run" })
+    const tip = (await readEventQueue(location, "lab")).tip
+    await chain.append(
+      [
+        {
+          type: "notify-floors",
+          props: [
+            ["Queue", tip],
+            ["Time", "2026-09-22T14:03:00.000Z"],
+            ["Floors", "{not json"],
+          ],
+        },
+      ],
+      { expect: tip },
+    )
+    await expect(readEventQueue(location, "lab")).rejects.toThrow(/notify-floors.*unreadable Floors/)
+  })
+
+  /** @failure 27198: a malformed notify-floors instant threw a raw RangeError, and a non-canonical or repeated present id read as an empty set.
+   * @level l0 @consumer queue reader
+   */
+  it("refuses a notify-floors snapshot with a bad instant, a non-canonical id, or a repeat", async () => {
+    const ending = "a".repeat(40)
+    const bad: readonly string[] = [
+      '{"recorder":{"notBefore":"not-a-date","present":[]}}',
+      '{"recorder":{"notBefore":"2026-09-22T14:00:00.000Z","present":["zz"]}}',
+      `{"recorder":{"notBefore":"2026-09-22T14:00:00.000Z","present":["${ending}","${ending}"]}}`,
+    ]
+    for (const [index, floors] of bad.entries()) {
+      const { store, location } = remoteMemStore(`yrd-event-notify-floors-bad-${String(index)}`)
+      const target = await open({ ...store, ref: "refs/heads/lab" })
+      const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+      await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+      const chain = await openEvents({ ...location, ref: queueRef("lab"), writer: "yrd-run" })
+      const tip = (await readEventQueue(location, "lab")).tip
+      await chain.append(
+        [
+          {
+            type: "notify-floors",
+            props: [
+              ["Queue", tip],
+              ["Time", "2026-09-22T14:03:00.000Z"],
+              ["Floors", floors],
+            ],
+          },
+        ],
+        { expect: tip },
+      )
+      await expect(readEventQueue(location, "lab")).rejects.toThrow(/notify-floors event/)
+    }
+  })
+
+  /** @failure 27198: a `__proto__` notify name silently changed the floors record's prototype and dropped the entry.
+   * @level l0 @consumer queue reader
+   */
+  it("keeps a __proto__ notify name as a real floors entry", async () => {
+    const { store, location } = remoteMemStore("yrd-event-notify-floors-proto")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const ending = "a".repeat(40)
+    const floors = Object.create(null) as Record<string, { notBefore: Date; present: readonly string[] }>
+    floors["__proto__"] = { notBefore: new Date("2026-09-22T14:00:00.000Z"), present: [ending] }
+    await writeQueueEvent(location, "lab", {
+      type: "notify-floors",
+      by: "yrd-run",
+      at: new Date("2026-09-22T14:01:00.000Z"),
+      floors,
+    })
+    const read = (await readEventQueue(location, "lab")).notifyFloors
+    expect(Object.keys(read ?? {})).toEqual(["__proto__"])
+    expect(read?.["__proto__"]?.present.has(ending)).toBe(true)
+  })
+
   it("refuses to classify empty when listing the queue prefix fails (26398)", async () => {
     const { location } = remoteMemStore("yrd-listing-failure")
     const broken = {
