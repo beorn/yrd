@@ -806,12 +806,18 @@ export async function eventQueueRun(
   // A run entered with NO notify option at all (not the queue's declaration,
   // which is always a list) neither mints nor wipes a floor; a run whose
   // declaration removed the LAST entry still enters, so its empty set is
-  // recorded rather than silently skipping the write.
+  // recorded rather than silently skipping the write. The FIRST migration
+  // (known === undefined) therefore enters even for an explicit EMPTY
+  // declaration: the creation declaration must be read either way - to REFUSE a
+  // mismatch loudly, or to record the valid empty baseline - never skipped
+  // because both name sets happen to be empty. With floors already recorded a
+  // steady-state run enters only when the declared set CHANGED, so an identical
+  // snapshot is not re-written every run.
   const declaredNames = new Set((options.notify ?? []).map((entry) => entry.name))
   const known = queueState.notifyFloors
   const recordedNames = known === undefined ? [] : Object.keys(known)
-  if (options.notify !== undefined && (declaredNames.size > 0 || recordedNames.length > 0)) {
-    if (!sameNameSet(declaredNames, recordedNames)) {
+  if (options.notify !== undefined) {
+    if (known === undefined || !sameNameSet(declaredNames, recordedNames)) {
       const ref = queueRef(queue)
       const chainEvents = await readEventChain(await openEvents({ ...store, ref }))
       const now = new Date(options.now?.() ?? Date.now())

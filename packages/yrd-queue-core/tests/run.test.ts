@@ -203,7 +203,9 @@ async function world(
   const declaredNotify = (plan.notifyNames ?? ["recorder"])
     .map((name) => `  - ${name}:\n      run: ${JSON.stringify(notifier)}\n`)
     .join("")
-  writeFileSync(join(work, ".yrd.yml"), `notify:\n${declaredNotify}`)
+  // An EMPTY declaration must still read as a list: `notify:` alone parses as null and the
+  // config reader refuses it, so the empty list is written explicitly.
+  writeFileSync(join(work, ".yrd.yml"), declaredNotify === "" ? "notify: []\n" : `notify:\n${declaredNotify}`)
   await git(["add", "target.txt", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", plan.declaredLater === true ? "declare the queue" : "base"])
   await git(["push", "--quiet", "origin", "main"])
@@ -355,7 +357,7 @@ it("runs a check-free event change through one atomic merge", async () => {
   const w = await world()
   await createWorldEventQueue(w)
   const head = await submitCommit(w, "task/event-run", "one.txt")
-  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
 
   const outcome = await queueRun(options)
 
@@ -427,7 +429,7 @@ it("keeps nonempty queue and notify parents after their worktrees close", async 
 it("leaves an idle event round unnumbered and the next index value at one (26193)", async () => {
   const w = await world()
   await createWorldEventQueue(w)
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(outcome).toMatchObject({ exitCode: 0, merged: [], failed: [], stuck: [] })
   expect(logRecords(outcome).some((record) => record.kind === "run-number")).toBe(false)
   expect(await lookupRunIndex(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", 1)).toEqual({
@@ -451,7 +453,7 @@ it("merges a healthy event change beside one malformed change chain", async () =
     await openEvents({ ...store, ref: brokenRef })
   ).append([changeInput("failed", { queueTip, at: new Date(), reason: "missing opening" })], { expect: null })
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/healthy"] })
   expect(await readStatus(store, "main", "task/healthy")).toMatchObject({ status: "merged", commit: head })
@@ -614,7 +616,7 @@ it("publishes a named merge-fenced queue event with the target and merged change
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   const cutover = (await readEventQueue(store, "main")).tip
   const head = await submitCommit(w, "task/ops-fence", "fenced.txt")
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/ops-fence"] })
   const change = await readStatus(store, "main", "task/ops-fence")
   const queue = await readEventQueue(store, "main")
@@ -683,7 +685,7 @@ it("closes the round's journal with every remote call it made, counted from git'
   await submitCommit(w, "task/event-counted", "counted.txt")
   const before = process.env.GIT_TRACE2_EVENT
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-counted"] })
   expect(process.env.GIT_TRACE2_EVENT).toBe(before)
@@ -786,7 +788,7 @@ it("skips a just-opened event branch absent from the remote during its grace win
   const head = await submitCommit(w, "task/grace", "grace.txt")
   await w.git(["push", "--quiet", "origin", ":refs/heads/task/grace"])
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(outcome).toMatchObject({ exitCode: 0, merged: [] })
   expect(await readStatus(store, "main", "task/grace")).toMatchObject({ status: "queued", commit: head })
   const journal = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
@@ -825,7 +827,7 @@ it("keeps a live event change when its ref is omitted from the broad listing", a
   const outcome = await queueRun({
     ...(await w.options({ exit: 0 })),
     checks: [],
-    notify: [],
+    notify: undefined,
     selection: { ...selectionFor(w.git), executable: wrapper },
   })
 
@@ -861,7 +863,7 @@ it("leaves an event change open when confirmation of its missing branch fails", 
   const outcome = await queueRun({
     ...(await w.options({ exit: 0 })),
     checks: [],
-    notify: [],
+    notify: undefined,
     selection: { ...selectionFor(w.git), executable: wrapper },
   })
   expect(outcome).toMatchObject({ exitCode: 0, merged: [] })
@@ -896,7 +898,7 @@ it("stops an event queue at a stuck change", async () => {
     reason: "repair needed",
   })
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/a"], merged: [] })
   expect(await remoteTarget(w)).toBe(w.target)
@@ -920,11 +922,11 @@ it("retries a stuck event change after an operator resumes the queue", async () 
     reason: "repair needed",
   })
   await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "repair", at: new Date() })
-  const held = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const held = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(held).toMatchObject({ exitCode: 0, merged: [], stopped: { ring: "pause" } })
   await writeQueueEvent(store, "main", { type: "resumed", by: "operator", reason: "repaired", at: new Date() })
 
-  const resumed = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const resumed = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
   expect(resumed).toMatchObject({ exitCode: 0, merged: ["task/stuck-first"], stuck: [] })
   expect((await readStatus(store, "main", "task/stuck-first")).status).toBe("merged")
@@ -947,7 +949,7 @@ it("reverifies an unfinished event phase in a later round", async () => {
     commit: head,
   })
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/reverify"] })
   expect((await readStatus(store, "main", "task/reverify")).candidate).toBe(await remoteTarget(w))
@@ -962,7 +964,7 @@ it("runs a configured event change's default merge check before merging", async 
   await createWorldEventQueue(w)
   await submitCommit(w, "task/configured-event", "one.txt")
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/configured-event"], failed: [], stuck: [] })
   expect(await remoteTarget(w)).not.toBe(w.target)
@@ -1006,7 +1008,7 @@ it("cites only measured check logs in a mixed event run (26089)", async () => {
       { name: "verify", run: "echo measured" },
       { name: "off-merge", run: "true" },
     ],
-    notify: [],
+    notify: undefined,
   })
 
   expect(outcome.merged).toEqual(["task/mixed-checks"])
@@ -1032,7 +1034,7 @@ it("records a missing event check log as stuck instead of retrying it (26089)", 
   const outcome = await queueRun({
     ...(await w.options({ exit: 0 })),
     checks: [{ name: "verify", run: `find "${join(w.workdir, "checks")}" -name verify.log -delete` }],
-    notify: [],
+    notify: undefined,
   })
 
   expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/lost-check-log"], merged: [] })
@@ -1088,7 +1090,7 @@ it("bills a candidate-only setup failure to the change and retains its result", 
   await submitCommit(w, "task/setup-event", "one.txt")
   const base = await w.options({ exit: 0 })
 
-  const outcome = await queueRun({ ...base, notify: [], checks: [], setup: "test ! -f one.txt" })
+  const outcome = await queueRun({ ...base, notify: undefined, checks: [], setup: "test ! -f one.txt" })
 
   expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/setup-event"], stuck: [] })
   expect((await readStatus(store, "main", "task/setup-event")).status).toBe("failed")
@@ -1109,7 +1111,7 @@ it("stops the event line when setup fails on the settled base too", async () => 
   await submitCommit(w, "task/base-setup-event", "one.txt")
   const base = await w.options({ exit: 0 })
 
-  const outcome = await queueRun({ ...base, notify: [], checks: [], setup: "false" })
+  const outcome = await queueRun({ ...base, notify: undefined, checks: [], setup: "false" })
 
   expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/base-setup-event"], failed: [] })
   expect((await readStatus(store, "main", "task/base-setup-event")).status).toBe("stuck")
@@ -1188,7 +1190,7 @@ it("retries a remote-class event setup failure after base attribution", async ()
   await submitCommit(w, "task/setup-retry-event", "one.txt")
   const fault = faultySetup(w, UNREACHABLE_SETUP, { once: true })
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0, setup: fault.command })), notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0, setup: fault.command })), notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/setup-retry-event"], stuck: [] })
   expect(logRecords(outcome)).toEqual(
@@ -1213,7 +1215,7 @@ it("retains both setup attempts when a remote-class outage stops the event line"
   await submitCommit(w, "task/setup-stuck-retry", "one.txt")
   const fault = faultySetup(w, UNREACHABLE_SETUP)
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0, setup: fault.command })), notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0, setup: fault.command })), notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/setup-stuck-retry"] })
   const events = await (await openEvents({ ...store, ref: changesRef("main", "task/setup-stuck-retry") })).events()
@@ -1236,7 +1238,7 @@ it("runs an event program-root check through the shared protected executor", asy
   const base = await w.options({ exit: 0 })
   const options = {
     ...base,
-    notify: [],
+    notify: undefined,
     checks: [
       {
         ...base.checks[0]!,
@@ -1282,7 +1284,7 @@ it("restores target-owned scripts before an event check runs", async () => {
   const base = await w.options({ exit: 0 })
   const outcome = await queueRun({
     ...base,
-    notify: [],
+    notify: undefined,
     checks: [{ ...base.checks[0]!, run: "grep -q 'notify:' .yrd.yml", scripts: [".yrd.yml"] }],
   })
 
@@ -1537,6 +1539,41 @@ it("refuses the first notify snapshot when the declared names differ from the cr
   ).toMatchObject({ status: "queued" })
 })
 
+/** @failure 27198: a legacy queue (no recorded floors) whose current declaration EMPTIES notify skipped the migration
+ * branch entirely because both name sets were empty, so a creation declaration that HAD names was never read and the
+ * required loud mismatch refusal never fired (review-adhoc verdict 1ba23b17 D1).
+ * @level l3 @consumer queue operator and declaration author
+ */
+it("refuses an empty first snapshot when the creation declaration named entries", async () => {
+  const w = await world({ notifyNames: ["recorder"] })
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/empty-first", "one.txt")
+  const base = await w.options({ exit: 0 })
+
+  await expect(queueRun({ ...base, checks: [], notify: [] })).rejects.toThrow(/reviewed migration baseline/u)
+
+  // The refusal happens before any delivery or merge, so nothing ran and nothing landed.
+  expect(existsSync(w.notifyLog)).toBe(false)
+  expect(
+    await readStatus(createEventStore(w.work, "origin", gitIn(w.work).selection), "main", "task/empty-first"),
+  ).toMatchObject({ status: "queued" })
+})
+
+/** @failure 27198: a queue whose creation declaration was ALSO empty skipped the migration, so the valid EMPTY first
+ * snapshot was never recorded; a name added later (change 2) was then judged against a missing baseline.
+ * @level l3 @consumer queue operator and declaration author
+ */
+it("records a valid empty first snapshot when the creation declaration was also empty", async () => {
+  const w = await world({ notifyNames: [] })
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+
+  const run = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(run.exitCode).toBe(0)
+  // The empty snapshot IS the recorded baseline: defined and empty, not absent.
+  expect((await readEventQueue(store, "main")).notifyFloors).toEqual({})
+})
+
 /** @failure 27198: the migration snapshot DROPPED a genuinely undelivered past ending instead of preserving it.
  * @level l3 @consumer notified recipient
  */
@@ -1546,9 +1583,11 @@ it("preserves an undelivered past ending on the first snapshot and never re-send
   await createWorldEventQueue(w)
   await submitCommit(w, "task/undelivered", "one.txt")
 
-  // First round records the ending with nobody declared: no notice is delivered,
-  // so the ending is genuinely owed when the entry appears.
-  const silent = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  // First round is entered with NO notify option at all: it neither mints nor wipes a
+  // floor and delivers nothing, so the ending is genuinely undelivered when the entry
+  // appears. (An explicit empty declaration is NOT this state - D1' refuses it against a
+  // creation declaration with names; see the refusal test above.)
+  const silent = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(silent).toMatchObject({ exitCode: 0, merged: ["task/undelivered"] })
   expect(existsSync(w.notifyLog)).toBe(false)
 
@@ -1755,7 +1794,7 @@ it("repairs an ending whose event notice was not yet recorded", async () => {
 it("refuses event teardown until an executor exists", async () => {
   const w = await world()
   await createWorldEventQueue(w)
-  await expect(queueRun({ ...(await w.options({ exit: 0 })), notify: [], teardown: "true" })).rejects.toThrow(
+  await expect(queueRun({ ...(await w.options({ exit: 0 })), notify: undefined, teardown: "true" })).rejects.toThrow(
     /cannot run an event queue with teardown: this declaration feature has no event runner executor; remove teardown from \.yrd\.yml to run on an event queue/u,
   )
 })
@@ -1829,10 +1868,10 @@ it("resumes a deferred event in the long tier with its declared phase retained",
       run: 'if [ "$YRD_CHECK_TIER" = long ]; then exit 0; fi; echo \'YRD-CHECK-RESULT {"result":"deferred","reason":"outside normal window","projectedMs":60000,"boundMs":1000}\'; exit 3',
     },
   ]
-  const first = await queueRun({ ...base, notify: [], checks })
+  const first = await queueRun({ ...base, notify: undefined, checks })
   expect(first).toMatchObject({ exitCode: 0, deferred: ["task/long-event"] })
 
-  const resumed = await queueRun({ ...base, notify: [], checks, tier: "long" })
+  const resumed = await queueRun({ ...base, notify: undefined, checks, tier: "long" })
 
   expect(resumed).toMatchObject({ exitCode: 0, merged: ["task/long-event"] })
   expect((await readStatus(store, "main", "task/long-event")).deferred).toBeUndefined()
@@ -1854,7 +1893,7 @@ it("records a queued deferral when the stop window closes before a check", async
   const base = await w.options({ exit: 0 })
   let tick = 0
 
-  const outcome = await queueRun({ ...base, notify: [], stopAtMs: 1, now: () => (tick++ === 0 ? 0 : 2) })
+  const outcome = await queueRun({ ...base, notify: undefined, stopAtMs: 1, now: () => (tick++ === 0 ? 0 : 2) })
 
   expect(outcome).toMatchObject({ exitCode: 0, deferred: ["task/window-event"], merged: [] })
   expect((await readStatus(store, "main", "task/window-event")).deferred).toMatchObject({
@@ -1878,7 +1917,7 @@ it("retries one remote-class event check failure before merging", async () => {
   const base = await w.options({ exit: 0 })
   const run = `if [ ! -f '${marker}' ]; then : > '${marker}'; echo 'fatal: unable to access https://example.test/: The requested URL returned error: 502' >&2; exit 3; fi; exit 0`
 
-  const outcome = await queueRun({ ...base, notify: [], checks: [{ ...base.checks[0]!, run }] })
+  const outcome = await queueRun({ ...base, notify: undefined, checks: [{ ...base.checks[0]!, run }] })
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/retry-event"] })
   expect(logRecords(outcome)).toEqual(
@@ -1904,7 +1943,7 @@ it("stops after two remote-class event check failures with both attempts retaine
   const base = await w.options({ exit: 0 })
   const run = "echo 'fatal: unable to access https://example.test/: The requested URL returned error: 502' >&2; exit 3"
 
-  const outcome = await queueRun({ ...base, notify: [], checks: [{ ...base.checks[0]!, run }] })
+  const outcome = await queueRun({ ...base, notify: undefined, checks: [{ ...base.checks[0]!, run }] })
 
   expect(outcome).toMatchObject({ exitCode: 2, stuck: ["task/retry-stuck-event"] })
   const events = await (await openEvents({ ...store, ref: changesRef("main", "task/retry-stuck-event") })).events()
@@ -1929,7 +1968,7 @@ it("keeps a local post-append error loud after an event ending lands", async () 
   await expect(
     queueRun({
       ...options,
-      notify: [],
+      notify: undefined,
       render: (record) => {
         if (record.kind === "change" && record.decision === "failed") throw new Error("local post-append witness")
       },
@@ -1972,7 +2011,7 @@ it("ends a failed configured event check and continues with the next change", as
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 1 })), notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 1 })), notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/a"], merged: ["task/b"], stuck: [] })
   expect(await remoteTarget(w)).not.toBe(w.target)
@@ -2012,7 +2051,7 @@ it("records a typed merge-publication refusal and judges the next event change",
       refs: [ref, "refs/heads/main"],
     })
   })
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   if (refusedBranch === undefined || refusedRef === undefined) throw new Error("fixture did not reach publication")
   expect(refusedPublishes).toBe(1)
   const next = branches.find((name) => name !== refusedBranch)
@@ -2048,7 +2087,7 @@ it("keeps an unlanded merge publication retryable and judges the next change", a
     if (refusedBranch !== undefined) throw new Error("injected transport failure before atomic push")
   })
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   if (refusedBranch === undefined) throw new Error("fixture did not reach merge publication")
   const next = branches.find((name) => name !== refusedBranch)
   if (next === undefined) throw new Error("fixture has no next change")
@@ -2085,7 +2124,7 @@ it("stops a rejected merge once when the remote accepts the stuck event", async 
     if (updates.some((update) => update.ref === "refs/heads/main")) mergePublishes++
   })
 
-  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
   const first = await queueRun(options)
   expect(first).toMatchObject({ exitCode: 2, stuck: [branch], merged: [] })
   expect((await readStatus(store, "main", branch)).status).toBe("stuck")
@@ -2130,7 +2169,7 @@ it("remembers a rejected merge when the remote also refuses its stuck event", as
     }
   })
 
-  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
   const first = await queueRun(options)
   expect(first).toMatchObject({ exitCode: 2, stuck: [branch], merged: [] })
   expect((await readStatus(store, "main", branch)).status).toBe("merging")
@@ -2174,7 +2213,7 @@ it("keeps the real rejection type when a rival moves the event chain", async () 
     )
   })
 
-  await expect(queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })).rejects.toBeInstanceOf(
+  await expect(queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })).rejects.toBeInstanceOf(
     gitomic.PublicationRejected,
   )
   expect(injected).toBe(true)
@@ -2199,7 +2238,7 @@ it("reconciles a merge Conflict with no named refs and judges the next change", 
     throw new gitomic.Conflict("injected publication outcome unknown with no named refs")
   })
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(refused).toBe(true)
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/after-unknown-conflict"] })
   expect((await readStatus(store, "main", "task/unknown-conflict")).status).toBe("merging")
@@ -2240,7 +2279,7 @@ it("recognizes the exact staged merge event after an accepted push loses its ack
     },
   )
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(injected).toBe(true)
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/transport-landed"] })
   expect((await readStatus(store, "main", "task/transport-landed")).status).toBe("merged")
@@ -2272,7 +2311,7 @@ it("stops one change after three consecutive not-landed publication rounds", asy
     refused++
     throw new Error("injected transport outage before atomic push")
   })
-  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
   for (const count of [1, 2, 3]) {
     const outcome = await queueRun(options)
     expect(logRecords(outcome)).toContainEqual(
@@ -2316,7 +2355,7 @@ it("names a missing change chain after publication and judges the next row", asy
       return new Map()
     },
   )
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(omitted).toBe(true)
   expect(outcome.merged).toContain("task/missing-next")
   expect(logRecords(outcome)).toContainEqual(
@@ -2352,7 +2391,7 @@ it("fails a round with the unreadable remote ref named after publication", async
       return undefined
     },
   )
-  await expect(queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })).rejects.toThrow(
+  await expect(queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })).rejects.toThrow(
     /refs\/yrd\/main\/changes\/task\/read-failed could not be read: injected remote reread outage/u,
   )
 })
@@ -2379,7 +2418,7 @@ it("keeps a final first-round refusal and retries the next round's indexed merge
       refs: [ref, "refs/heads/main"],
     })
   })
-  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
   const first = await queueRun(options)
   firstRound = false
   expect(refused).toBeGreaterThan(0)
@@ -2407,7 +2446,7 @@ it("ends a queue-owned configured event check stuck and holds the next change", 
   await submitCommit(w, "task/a", "one.txt")
   await submitCommit(w, "task/b", "two.txt")
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 2 })), notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 2 })), notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/a"] })
   expect(await remoteTarget(w)).toBe(w.target)
@@ -2427,7 +2466,7 @@ it("discards a dropped event check once and continues with the next change", asy
 
   // The check holds until the drop has landed, then runs its 0.25s: the drop is always mid-check.
   const hold = `${w.startedLog}.release`
-  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25, hold })), notify: [] })
+  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25, hold })), notify: undefined })
   await checkRunning(w)
   await drop(store, { queue: "main", branch: "task/a", by: "operator" })
   writeFileSync(hold, "")
@@ -2451,7 +2490,7 @@ it("discards a resubmitted event check once and continues with the next change",
 
   // The check holds until the resubmit has landed, then runs its 0.25s: always mid-check.
   const hold = `${w.startedLog}.release`
-  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25, hold })), notify: [] })
+  const running = queueRun({ ...(await w.options({ exit: 0, sleep: 0.25, hold })), notify: undefined })
   await checkRunning(w)
   await w.git(["checkout", "--quiet", "task/a"])
   writeFileSync(join(w.work, "resubmitted.txt"), "new head\n")
@@ -2506,7 +2545,7 @@ it("merges only the newest head when a resubmit lands after compose", async () =
     return outcome
   })
 
-  const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   await composed
 
   // The author resubmits the SAME branch at a changed head while the round is
@@ -2536,7 +2575,7 @@ it("merges only the newest head when a resubmit lands after compose", async () =
   expect(await readStatus(store, "main", "task/a")).toMatchObject({ status: "queued", commit: next })
 
   // The next round lands it, at the newest head only.
-  const finished = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const finished = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(finished).toMatchObject({ exitCode: 0, merged: ["task/a"] })
   expect(await readStatus(store, "main", "task/a")).toMatchObject({ status: "merged", commit: next })
   await w.git(["fetch", "--quiet", "origin", "main"])
@@ -2572,7 +2611,7 @@ it("re-reads a pause that wins the event merge lease and keeps the service round
     return outcome
   })
 
-  const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   await composing
   await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "hold", at: new Date() })
   release()
@@ -2619,7 +2658,7 @@ it.each(["resume", "override"] as const)(
       return outcome
     })
 
-    const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+    const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
     await composing
     if (kind === "resume") {
       await writeQueueEvent(store, "main", { type: "paused", by: "operator", reason: "brief hold", at: new Date() })
@@ -2656,7 +2695,7 @@ it.each(["resume", "override"] as const)(
     expect(await remoteTarget(w)).toBe(w.target)
     expect((await readStatus(store, "main", `task/${kind}-event`)).status).not.toBe("merged")
     if (kind === "resume") {
-      const retry = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+      const retry = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
       expect(retry).toMatchObject({ exitCode: 0, merged: ["task/resume-event"] })
     }
   },
@@ -2689,7 +2728,7 @@ it("discards a dropped event judgement and continues the round", async () => {
     return outcome
   })
 
-  const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   await composing
   await drop(store, { queue: "main", branch: "task/a", by: "operator" })
   release()
@@ -2744,7 +2783,7 @@ it("fails a local-only component event without moving root main", async () => {
     expect: null,
   })
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/component"], merged: [] })
   expect(await remoteTarget(w)).toBe(target)
   expect((await readStatus(store, "main", "task/component")).status).toBe("failed")
@@ -2761,7 +2800,7 @@ it("reports a direct merge after the declaration and still merges the queued cha
   const secondDirect = await editDeclarationAroundQueue(w, "# edited around the queue\n{}\n")
   await submitCommit(w, "task/after-direct", "one.txt")
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 0, directMerges: [direct, secondDirect], merged: ["task/after-direct"] })
   expect(logRecords(outcome).filter((row) => row.kind === "merged-direct")).toMatchObject([
@@ -2770,7 +2809,7 @@ it("reports a direct merge after the declaration and still merges the queued cha
   ])
   expect((await readStatus(store, "main", "task/after-direct")).status).toBe("merged")
   expect(await w.git(["rev-parse", `${await remoteTarget(w)}^1`])).toMatch(new RegExp(secondDirect))
-  const later = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const later = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(later.directMerges).toEqual([])
 })
 
@@ -2782,7 +2821,7 @@ it("observes a direct-only commit once on the queue chain", async () => {
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   const direct = await pushAroundQueue(w, "direct-only.txt")
-  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
 
   const first = await queueRun(options)
   const second = await queueRun(options)
@@ -2826,7 +2865,7 @@ it("bounds the queue observation retry and leaves it for the next round", async 
     // The second observation refuses without rival progress after the first landed.
     throw new gitomic.Conflict(`lease lost on ${ref}`, { refs: [ref] })
   })
-  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [], retryBudgetMs: 1 }
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined, retryBudgetMs: 1 }
 
   let exhausted: unknown
   try {
@@ -3015,14 +3054,14 @@ it("accounts for its earlier merged event when scanning a later round", async ()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/first", "one.txt")
-  const first = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const first = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
   expect(first.merged).toEqual(["task/first"])
 
   await w.git(["checkout", "--quiet", "main"])
   await w.git(["pull", "--ff-only", "origin", "main"])
   const direct = await pushAroundQueue(w, "later-direct.txt")
   await submitCommit(w, "task/second", "two.txt")
-  const second = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const second = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
   expect(second).toMatchObject({ exitCode: 0, directMerges: [direct], merged: ["task/second"] })
   expect(logRecords(second).filter((row) => row.kind === "merged-direct")).toMatchObject([{ commit: direct }])
@@ -3064,7 +3103,7 @@ it("uses an existing observed merged event as the direct boundary", async () => 
     commit: head,
   })
 
-  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
   expect(outcome).toMatchObject({ exitCode: 0, directMerges: [], merged: [] })
   expect(logRecords(outcome).filter((row) => row.kind === "merged-direct")).toEqual([])
@@ -3082,7 +3121,7 @@ it("observes a submitted head on the target, then uses its merged event as the d
   await w.git(["checkout", "--quiet", "main"])
   await w.git(["merge", "--ff-only", "task/observed-by-run"])
   await w.git(["push", "--quiet", "origin", "main"])
-  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
 
   const observed = await queueRun(options)
 
@@ -3104,7 +3143,7 @@ it("keeps the direct merge commit when an observed submitted head landed by no-f
   await w.git(["merge", "--quiet", "--no-ff", "-m", "merge submitted head around the queue", "task/observed-no-ff"])
   const merge = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["push", "--quiet", "origin", "main"])
-  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: [] }
+  const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
 
   const observed = await queueRun(options)
 
@@ -3126,7 +3165,7 @@ it("names an observed merge after a failed candidate in its notice", async () =>
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
   await submitCommit(w, "task/observed-after-failure", "one.txt")
-  const failed = await queueRun({ ...(await w.options({ exit: 1 })), notify: [] })
+  const failed = await queueRun({ ...(await w.options({ exit: 1 })), notify: undefined })
   expect(failed.failed).toEqual(["task/observed-after-failure"])
   const candidate = (await readStatus(store, "main", "task/observed-after-failure")).candidate
   expect(candidate).toMatch(/^[0-9a-f]{40}$/u)
@@ -3472,7 +3511,7 @@ describe("event queue setup and journal", () => {
       ...opts,
       checks: [{ name: "real-check", run: "exit 1" }],
       noCheck: true,
-      notify: [],
+      notify: undefined,
     })
     expect(outcome.merged).toEqual(["task/nocheck-event"])
     expect((await readStatus(store, "main", "task/nocheck-event")).reason).toContain("real-check (no-check mode)")
@@ -3492,7 +3531,7 @@ describe("event queue setup and journal", () => {
     const outcomeTrue = await queueRun({
       ...optsTrue,
       checks: [{ name: "c1", run: "true" }],
-      notify: [],
+      notify: undefined,
     })
     expect(outcomeTrue.merged).toEqual(["task/one"])
     expect(existsSync(setupLog)).toBe(false)
@@ -3506,7 +3545,7 @@ describe("event queue setup and journal", () => {
         { name: "c1", run: "true" },
         { name: "c2", run: ":" },
       ],
-      notify: [],
+      notify: undefined,
     })
     expect(outcomeReal.merged).toEqual(["task/two"])
     expect(existsSync(setupLog)).toBe(true)
@@ -3521,7 +3560,7 @@ describe("event queue setup and journal", () => {
     const outcome = await queueRun({
       ...opts,
       checks: [{ name: "c1", run: ":" }],
-      notify: [],
+      notify: undefined,
     })
     expect(outcome.merged).toEqual(["task/event-step"])
     const journal = readdirSync(join(w.workdir, "logs")).find((name) => name.endsWith(".jsonl"))
@@ -3587,7 +3626,7 @@ describe("event queue setup and journal", () => {
       await w.git(["push", "--quiet", "origin", "task/moved"])
       await w.git(["checkout", "--quiet", "main"])
 
-      const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+      const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
       expect(await branchOnOrigin(w, "task/moved")).toBe(later)
       expect(outcome.branches).toEqual([
@@ -3608,7 +3647,7 @@ describe("event queue setup and journal", () => {
       await w.git(["push", "--quiet", "origin", "main"])
       await w.git(["push", "--quiet", "origin", ":refs/heads/task/gone"])
 
-      const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+      const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
 
       expect(outcome.branches).toEqual([`kept task/gone (merged at ${head.slice(0, 12)}): already gone`])
       expect(logRecords(outcome).filter((row) => row.kind === "branch-kept")).toEqual([
