@@ -273,6 +273,145 @@ describe("revert guard (27363)", () => {
   }, 120_000)
 })
 
+describe("revert guard review regressions (27363)", () => {
+  it("bounds: an exhausted history window is named incomplete, never clean", async () => {
+    const w = await cappedWorld()
+    const root = await w.checkoutAt(w.candidate)
+    const capped = await detectReverted({
+      bounds: { depth: 3, pathCap: 500, window: 1 },
+      candidate: w.candidate,
+      git: gitIn(root, undefined, undefined, { env }),
+      head: w.head,
+      root,
+      targetHead: w.target,
+    })
+    expect(capped.coverage).toBe("incomplete")
+    expect(capped.gaps.some((gap) => gap.reason.includes("window"))).toBe(true)
+    expect(revertGuardAction(capped, "refuse")).toBe("stick")
+    // The full window finds the restore the cap hid: the cap, not the change, was the finding.
+    const full = await detect(w, w.candidate, w.head)
+    expect(full.paths.map((row) => row.path)).toContain("vendor/dep/a.txt")
+  })
+
+  it("mode: a mode-only restore of a target advance is a hit, not clean", async () => {
+    const w = await modeWorld()
+    const report = await detect(w, w.candidate, w.head)
+    expect(report.base.state).toBe("single")
+    expect(report.coverage).toBe("complete")
+    expect(report.paths.map((row) => row.path)).toContain("vendor/dep/a.txt")
+  })
+
+  it("base: an ambiguous base carries no per-path claim", async () => {
+    const w = await ambiguousWorld()
+    const report = await detect(w, w.candidate, w.head)
+    expect(report.base.state).toBe("ambiguous")
+    expect(report.coverage).toBe("incomplete")
+    expect(report.gaps.some((gap) => gap.reason.includes("ambiguous"))).toBe(true)
+    expect(report.paths).toEqual([])
+    expect(report.swallowed).toEqual([])
+    expect(revertGuardAction(report, "refuse")).toBe("stick")
+  })
+})
+
+type RegressionWorld = Readonly<{
+  root: string
+  target: string
+  head: string
+  candidate: string
+  checkoutAt: (commit: string) => Promise<string>
+}>
+
+let regressionCheckouts = 0
+
+async function regressionCheckout(root: string, product: string, sha: string): Promise<string> {
+  regressionCheckouts += 1
+  const dir = join(root, "checkout-" + sha.slice(0, 12) + "-" + String(regressionCheckouts))
+  await gitIn(product, undefined, undefined, { env })(["worktree", "add", "--quiet", "--detach", dir, sha])
+  await gitIn(dir, undefined, undefined, { env })(["submodule", "update", "--init", "--recursive", "--quiet"])
+  return dir
+}
+
+/** Target A -> B -> C; the candidate restores A, which only a walk past the window can see. */
+async function cappedWorld(): Promise<RegressionWorld> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-revert-capped-"))
+  roots.push(root)
+  const dep = join(root, "dep")
+  mkdirSync(dep)
+  await gitIn(dep, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(dep, { "a.txt": "one\n" }, "A")
+  await commit(dep, { "a.txt": "two\n" }, "B")
+  const targetPin = await commit(dep, { "a.txt": "three\n" }, "C")
+  const candidatePin = await commit(dep, { "a.txt": "one\n" }, "restore A")
+  const product = join(root, "product")
+  mkdirSync(product)
+  await gitIn(product, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(product, { "readme.txt": "product\n" }, "product base")
+  const target = await pin(product, "vendor/dep", dep, targetPin, "target pins C")
+  const head = await pin(product, "vendor/dep", dep, targetPin, "head pins C")
+  const candidate = await pin(product, "vendor/dep", dep, candidatePin, "candidate restores A")
+  return { candidate, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
+}
+
+/** The target advances a path's MODE with the blob unchanged; the candidate puts the mode back. */
+async function modeWorld(): Promise<RegressionWorld> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-revert-mode-"))
+  roots.push(root)
+  const dep = join(root, "dep")
+  mkdirSync(dep)
+  const depGit = gitIn(dep, undefined, undefined, { env })
+  await depGit(["init", "--quiet", "--initial-branch=main"])
+  writeFileSync(join(dep, "a.txt"), "same\n")
+  await depGit(["add", "a.txt"])
+  await depGit([...author, "commit", "--quiet", "--message", "base"])
+  await depGit(["update-index", "--chmod=+x", "a.txt"])
+  await depGit([...author, "commit", "--quiet", "--message", "mode advance"])
+  const targetPin = (await depGit(["rev-parse", "HEAD"])).trim()
+  await depGit(["update-index", "--chmod=-x", "a.txt"])
+  await depGit([...author, "commit", "--quiet", "--message", "mode restore"])
+  const candidatePin = (await depGit(["rev-parse", "HEAD"])).trim()
+  const product = join(root, "product")
+  mkdirSync(product)
+  await gitIn(product, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(product, { "readme.txt": "product\n" }, "product base")
+  const target = await pin(product, "vendor/dep", dep, targetPin, "target pins the mode advance")
+  const head = await pin(product, "vendor/dep", dep, targetPin, "head pins the mode advance")
+  const candidate = await pin(product, "vendor/dep", dep, candidatePin, "candidate restores the mode")
+  return { candidate, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
+}
+
+/** A criss-cross history gives the root tree two merge bases, so no path may be claimed. */
+async function ambiguousWorld(): Promise<RegressionWorld> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-revert-ambiguous-"))
+  roots.push(root)
+  const dep = join(root, "dep")
+  mkdirSync(dep)
+  await gitIn(dep, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(dep, { "a.txt": "base\n" }, "base")
+  const c1 = await commit(dep, { "a.txt": "target\n" }, "target advance")
+  const c2 = await commit(dep, { "a.txt": "base\n" }, "stale restore")
+  const product = join(root, "product")
+  mkdirSync(product)
+  const pg = gitIn(product, undefined, undefined, { env })
+  await pg(["init", "--quiet", "--initial-branch=main"])
+  await commit(product, { "readme.txt": "product\n" }, "product base")
+  const root0 = await pin(product, "vendor/dep", dep, c1, "target pins the advance")
+  await pg(["checkout", "--quiet", "-b", "left"])
+  await commit(product, { "left.txt": "l\n" }, "left")
+  const left0 = (await pg(["rev-parse", "HEAD"])).trim()
+  await pg(["checkout", "--quiet", "-b", "right", root0])
+  await commit(product, { "right.txt": "r\n" }, "right")
+  const right0 = (await pg(["rev-parse", "HEAD"])).trim()
+  await pg(["checkout", "--quiet", "left"])
+  await pg([...author, "merge", "--no-ff", "--quiet", "-m", "left merges right", right0])
+  const target = (await pg(["rev-parse", "HEAD"])).trim()
+  await pg(["checkout", "--quiet", "right"])
+  await pg([...author, "merge", "--no-ff", "--quiet", "-m", "right merges left", left0])
+  const head = (await pg(["rev-parse", "HEAD"])).trim()
+  await pg(["checkout", "--quiet", "-b", "stale", root0])
+  const candidate = await pin(product, "vendor/dep", dep, c2, "candidate restores the stale value")
+  return { candidate, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
+}
+
 type ComposeWorld = Readonly<{
   root: string
   repo: string

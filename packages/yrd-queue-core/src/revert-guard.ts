@@ -8,13 +8,14 @@
  * move was a genuine FAST-FORWARD, so no ancestry check can see it; the revert is
  * CONTENT, one component store down.
  *
- * Two signals, both tree-entry OID+mode, both ancestry-blind:
+ * Two signals, both tree-entry OID+mode:
  *  - S2 (reverted path): the candidate sets a path to a value the TARGET's own
  *    first-parent history held before the target's own change to that path.
  *  - S3 (swallowed composition): a component pin the compose moved (or reused) has a
  *    tree IDENTICAL to the target's while the incoming pin's tree DIFFERS — the
  *    correction was composed away. A commit-OID difference with equal trees is NOT
- *    this signal.
+ *    this signal, and a pin the target already contains is kept-ahead, not swallowed:
+ *    S3 discriminates by ancestry (isAncestor), so it is not ancestry-blind.
  *
  * A deliberate revert of a target change is indistinguishable from the incident, so
  * observation is always on and refusal is opt-in (`revert-guard: refuse`). Bounds
@@ -156,13 +157,16 @@ export async function detectReverted(options: RevertGuardOptions): Promise<Rever
     report,
     target: options.targetHead,
   })
+  // A base that is not exactly one cannot judge a path: the plan's rule is one
+  // ambiguous-base gap with NO per-path claim, so no claim rides on an unpicked base.
+  const judged = base.state === "single"
   return {
     base,
-    count: report.paths.length,
+    count: judged ? report.paths.length : 0,
     coverage: report.gaps.length === 0 ? "complete" : "incomplete",
     gaps: report.gaps,
-    paths: report.paths,
-    swallowed: report.swallowed,
+    paths: judged ? report.paths : [],
+    swallowed: judged ? report.swallowed : [],
   }
 }
 
@@ -251,7 +255,7 @@ async function walk(level: Level): Promise<void> {
 
   for (const row of toCandidate) {
     if (row.oldMode === GITLINK || row.newMode === GITLINK) continue
-    if (row.newSha === row.oldSha) continue
+    if (row.newSha === row.oldSha && row.newMode === row.oldMode) continue
     await assessPath(level, row)
   }
 }
@@ -267,9 +271,9 @@ async function assessPath(level: Level, row: RawRow): Promise<void> {
     return
   }
   level.budget.remaining -= 1
-  let commits: readonly string[]
+  let viewed: readonly string[]
   try {
-    commits = await firstParentTouching(level.git, level.target, level.bounds.window, row.path)
+    viewed = await firstParentTouching(level.git, level.target, level.bounds.window + 1, row.path)
   } catch (error) {
     level.report.gaps.push({
       depth: level.depth,
@@ -278,10 +282,13 @@ async function assessPath(level: Level, row: RawRow): Promise<void> {
     })
     return
   }
-  for (const commit of commits) {
+  // One extra commit was requested, so an exhausted window is observable below.
+  const capped = viewed.length > level.bounds.window
+  for (const commit of viewed.slice(0, level.bounds.window)) {
     const previous = await entryAt(level.git, `${commit}^`, row.path)
     if (previous === undefined) continue
-    if (previous.oid === row.newSha && row.newSha !== row.oldSha) {
+    // OID+mode, matching the entry contract: a mode-only put-back is the same revert.
+    if (previous.oid === row.newSha && previous.mode === row.newMode) {
       level.report.paths.push({
         base: previous.oid,
         candidate: row.newSha,
@@ -291,6 +298,14 @@ async function assessPath(level: Level, row: RawRow): Promise<void> {
       })
       return
     }
+  }
+  // A capped NEGATIVE proof is not a clean one: name it so refusal fails closed.
+  if (capped) {
+    level.report.gaps.push({
+      depth: level.depth,
+      path: full,
+      reason: "target history window W=" + String(level.bounds.window) + " exhausted",
+    })
   }
 }
 
