@@ -70,6 +70,58 @@ function declareGit(root: string, value: string, file?: string): void {
 }
 
 describe("the git runner", () => {
+  // Exact host preparation pins must survive both runner and supervised CLI dispatch.
+  // Existing object-context reads do not carry or reject owner/ref evidence.
+  it("carries prepared owner pins through native and supervised merge dispatch", async () => {
+    const root = temporaryRoot("owner-pins")
+    const env = { ...gitRunner.gitEnvironment(process.env), PATH: `${dirname(gitSuperBin)}:${process.env.PATH}` }
+    const native = gitIn(root, undefined, undefined, { env })
+    await native(["init", "--quiet"])
+    await native(["config", "user.name", "fixture"])
+    await native(["config", "user.email", "fixture@yrd.test"])
+    await native(["commit", "--quiet", "--allow-empty", "-m", "baseline"])
+    const base = (await native(["rev-parse", "HEAD"])).trim()
+    writeFileSync(join(root, "feature.txt"), "host association\n")
+    await native(["add", "feature.txt"])
+    await native(["commit", "--quiet", "-m", "candidate"])
+    const feature = (await native(["rev-parse", "HEAD"])).trim()
+    await native(["checkout", "--quiet", "--detach", base])
+    const gitDirectory = (await native(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    const retained = [base, feature].map((oid) => ({ ref: `refs/yrd/pins/${oid}`, oid }))
+    for (const pin of retained) await native(["update-ref", pin.ref, pin.oid])
+    const objectOwners = [{ objects: join(gitDirectory, "objects"), gitDirectory, retained }]
+    const selected = gitIn(root, undefined, undefined, { env, objectOwners })
+    const captured = JSON.stringify(objectOwners)
+    retained[0]!.oid = feature
+    expect(JSON.stringify(selected.at(root).objectOwners)).toBe(captured)
+    const argv = ["merge", feature, "-m", "prepared merge", "--no-fetch", "--unbounded-local-main"]
+    const broken = JSON.parse(captured) as typeof objectOwners
+    broken[0]!.retained[0]!.oid = feature
+    const refused = await gitSuperExecution(
+      { git: gitIn(root, undefined, undefined, { env, objectOwners: broken }) },
+      root,
+      argv,
+    )
+    expect(refused.exitCode).not.toBe(0)
+    expect((await native(["rev-parse", "HEAD"])).trim()).toBe(base)
+    const direct = await gitSuperExecution({ git: selected }, root, argv)
+    expect(direct.exitCode, direct.stderr || direct.stdout).toBe(0)
+    await native(["checkout", "--quiet", "--detach", base])
+    await using supervised = createProcess({ cwd: root, env })
+    const supervisedRefusal = await gitSuperExecution(
+      { process: supervised, env, gitOptions: { objectOwners: broken } },
+      root,
+      argv,
+    )
+    expect(supervisedRefusal.exitCode).not.toBe(0)
+    expect((await native(["rev-parse", "HEAD"])).trim()).toBe(base)
+    const child = await gitSuperExecution(
+      { process: supervised, env, gitOptions: { objectOwners: selected.objectOwners } },
+      root,
+      argv,
+    )
+    expect(child.exitCode, child.stderr || child.stdout).toBe(0)
+  })
   // @failure: explicit public object selection is lost by descendants or Gitomic; ambient objects leak in.
   // @level l2; @consumer contained submit; @testonly none
   // Native blobs live outside either checkout, so executable/option identity alone cannot pass this row.
