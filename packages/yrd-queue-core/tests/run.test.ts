@@ -2407,7 +2407,11 @@ it("merges only the newest head when a resubmit lands after compose", async () =
   expect(await readStatus(store, "main", "task/a")).toMatchObject({ status: "merged", commit: next })
   await w.git(["fetch", "--quiet", "origin", "main"])
   const onTarget = spawnSync("git", ["merge-base", "--is-ancestor", first, "origin/main"], { cwd: w.work })
-  expect(onTarget.status, `the superseded head ${first.slice(0, 12)} reached main`).not.toBe(0)
+  expect(
+    onTarget.status,
+    `git merge-base --is-ancestor must exit 1 (not an ancestor), never 0/128; got ${onTarget.status}: ` +
+      `${(onTarget.stderr ?? "").toString().trim()} — the superseded head ${first.slice(0, 12)} may have reached main`,
+  ).toBe(1)
 })
 
 /** @failure A pause published during composition killed the service on a normal queue-tip lease race.
