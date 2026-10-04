@@ -7,6 +7,7 @@
  *           (commondir) worktree dies ENOENT lstat '<gitdir>/.git' (27392).
  * @level    l1 (pure — the store is replaced; the argument is the subject)
  * @consumer freshWorktree.remove -> removeWorktree -> pruneWorktrees
+ * @testonly none
  */
 
 import { describe, expect, it, vi } from "vitest"
