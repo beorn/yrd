@@ -656,8 +656,8 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       if (reason.trim() === "") throw new Error(`event ${event.id} admission-warning has empty Reason:`)
       const warningKind = prop(event, EVENT_TRAILERS.warningKind)
       // 27363: a second admitted kind beside the policy warning. `reverted-paths`
-      // names the compose revert detector's durable finding (submit AND queue
-      // append it); anything else is still refused by name.
+      // names the compose revert detector's durable finding; an old reader must
+      // admit it before any writer emits it, and anything else is still refused.
       if (warningKind !== undefined && warningKind !== "policy-warning" && warningKind !== "reverted-paths") {
         throw new Error(`event ${event.id} admission-warning has unknown Warning-Kind: ${warningKind}`)
       }

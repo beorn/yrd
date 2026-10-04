@@ -1352,6 +1352,41 @@ describe("the queue-format boundary", () => {
     ).rejects.toThrow(/Warning-Kind/)
   })
 
+  it("folds the reverted-paths admission kind and keeps folding an old-shape record (27363)", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    // 27363: the revert detector writes this kind. A reader that predates it must
+    // fold the record, not refuse it as an unknown Warning-Kind.
+    const reverted = evolve(
+      opened,
+      event(
+        "admission-warning",
+        B,
+        [
+          ["Commit", A],
+          ["Reason", "1 reverted/swallowed path(s): child/a.txt"],
+          ["Warning-Kind", "reverted-paths"],
+        ],
+        [A],
+      ),
+    )
+    expect(reverted.diagnostic).toContain("admission reverted paths")
+
+    // Old shape, unchanged: an admission warning with no Warning-Kind still folds.
+    const old = evolve(
+      opened,
+      event(
+        "admission-warning",
+        B,
+        [
+          ["Commit", A],
+          ["Reason", "no kind on the old shape"],
+        ],
+        [A],
+      ),
+    )
+    expect(old.diagnostic).toContain("admission could not judge")
+  })
+
   it("refuses a stuck event if a queue resume raced its causal queue tip", async () => {
     const { store, location, beforeNextPublish } = remoteMemStore("yrd-event-stuck-resume-race")
     const target = await open({ ...store, ref: "refs/heads/lab" })
