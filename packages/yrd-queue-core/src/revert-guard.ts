@@ -22,7 +22,7 @@
  * proof INCOMPLETE, named, and never silently clean.
  */
 import { join } from "node:path"
-import { GitExit, mergeBases, runnerFor, type Git } from "./git.ts"
+import { GitExit, isAncestor, mergeBases, runnerFor, type Git } from "./git.ts"
 
 /** One interior path the candidate put back to a value the target's own history held before its advance. */
 export type RevertedPath = Readonly<{
@@ -206,7 +206,12 @@ async function walk(level: Level): Promise<void> {
         const targetTree = await treeOf(childGit, pins.target)
         const candidateTree = await treeOf(childGit, pins.candidate)
         const incomingTree = await treeOf(childGit, pins.incoming)
-        if (candidateTree === targetTree && incomingTree !== targetTree) {
+        // Only a difference the target does NOT already contain is swallowed. An incoming pin
+        // that is an ANCESTOR of the target pin is the ordinary `kept-ahead` case: its tree
+        // differs, but the compose correctly left the newer target pin in place (measured at
+        // submit on 2026-10-04: km/ag/vendor/terminfo.dev are behind every stale-base branch).
+        const incomingBehind = await isAncestor(childGit, pins.incoming, pins.target)
+        if (!incomingBehind && candidateTree === targetTree && incomingTree !== targetTree) {
           level.report.swallowed.push({
             candidate: pins.candidate,
             incoming: pins.incoming,

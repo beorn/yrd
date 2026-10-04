@@ -114,6 +114,7 @@ async function detect(
   w: Readonly<{ checkoutAt: (commit: string) => Promise<string>; target: string }>,
   candidate: string,
   head: string,
+  targetHead: string = w.target,
 ): Promise<Awaited<ReturnType<typeof detectReverted>>> {
   const root = await w.checkoutAt(candidate)
   return detectReverted({
@@ -121,7 +122,7 @@ async function detect(
     git: gitIn(root, undefined, undefined, { env }),
     head,
     root,
-    targetHead: w.target,
+    targetHead,
   })
 }
 
@@ -154,6 +155,14 @@ describe("revert guard (27363)", () => {
   it("negative: a normal merge of a genuinely advancing pin is clean", async () => {
     const w = await world()
     const report = await detect(w, w.candidateNormal, w.candidateNormal)
+    expect(report.coverage).toBe("complete")
+    expect(report.paths).toEqual([])
+    expect(report.swallowed).toEqual([])
+  })
+
+  it("negative: an incoming pin behind the target is kept-ahead, never swallowed", async () => {
+    const w = await world()
+    const report = await detect(w, w.head, w.target, w.head)
     expect(report.coverage).toBe("complete")
     expect(report.paths).toEqual([])
     expect(report.swallowed).toEqual([])
