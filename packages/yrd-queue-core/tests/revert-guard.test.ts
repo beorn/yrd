@@ -16,7 +16,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { detectReverted, revertedPathsFinding, revertGuardAction, type RevertGuardReport } from "../src/revert-guard.ts"
+import {
+  detectReverted,
+  revertedPathsFinding,
+  revertedPathsReason,
+  revertGuardAction,
+  type RevertGuardReport,
+} from "../src/revert-guard.ts"
 import { verifyCandidate } from "../src/verifying.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
@@ -221,6 +227,21 @@ describe("revert guard (27363)", () => {
     })
     expect(gap?.coverage).toBe("incomplete")
     expect(gap?.reason).toContain("ambiguous")
+  })
+
+  it("durable: a capped gap keeps its component path and depth, not only the reason", () => {
+    const capped: RevertGuardReport = {
+      base: { base: "a".repeat(40), state: "single" },
+      count: 0,
+      coverage: "incomplete",
+      gaps: [{ depth: 0, path: "a.txt", reason: "target history window W=50 exhausted" }],
+      paths: [],
+      swallowed: [],
+    }
+    const reason = revertedPathsReason(capped)
+    expect(reason).toContain("a.txt@d0")
+    expect(reason).toContain('"gaps"')
+    expect(revertedPathsFinding(capped)?.reason).toContain("a.txt@d0")
   })
 
   it("policy: a hit warns by default and sticks only under refuse, and a gap never goes clean", () => {

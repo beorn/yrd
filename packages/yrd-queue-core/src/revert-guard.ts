@@ -385,16 +385,27 @@ export function revertedPathsFinding(
 /** A compact, machine-readable `Reason:` for the durable `reverted-paths` warning. */
 export function revertedPathsReason(report: RevertGuardReport): string {
   const paths = [...report.paths.map((row) => row.path), ...report.swallowed.map((row) => row.path)]
+  const gaps = report.gaps.slice(0, 32).map((gap) => ({
+    depth: gap.depth,
+    reason: gap.reason,
+    ...(gap.path === "" ? {} : { path: gap.path }),
+  }))
   const payload = JSON.stringify({
     count: report.paths.length,
     coverage: report.coverage,
     paths: report.paths.slice(0, 32).map((row) => row.path),
     swallowed: report.swallowed.slice(0, 32).map((row) => row.path),
+    ...(gaps.length === 0 ? {} : { gaps }),
     ...(report.base.state === "single" ? {} : { base: report.base.state }),
   })
   const named = paths.slice(0, 8).join(", ")
-  const gaps = report.gaps.length === 0 ? "" : `; gaps: ${report.gaps.map((gap) => gap.reason).join(", ")}`
-  return `${String(paths.length)} reverted/swallowed path(s)${named === "" ? "" : `: ${named}`}; ${payload}${gaps}`
+  const gapText =
+    report.gaps.length === 0
+      ? ""
+      : `; gaps: ${report.gaps
+          .map((gap) => (gap.path === "" ? gap.reason : `${gap.reason} [${gap.path}@d${String(gap.depth)}]`))
+          .join(", ")}`
+  return `${String(paths.length)} reverted/swallowed path(s)${named === "" ? "" : `: ${named}`}; ${payload}${gapText}`
 }
 
 /** What the guard asks of a compose: nothing, a durable warning, or the named stick before CAS. */
