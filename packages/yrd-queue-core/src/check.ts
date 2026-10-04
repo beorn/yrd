@@ -87,6 +87,8 @@ export const STEP_BOUNDS_MS = {
   beforeMerge: 30 * 60 * 1000,
   derive: 30 * 60 * 1000,
   "derive-again": 30 * 60 * 1000,
+  // #27363: the compose revert guard's bounded walk (P_max 500, depth 3, window 50).
+  "revert-guard": 5 * 60 * 1000,
   prepare: 30 * 60 * 1000,
   remove: 30 * 60 * 1000,
   publish: 30 * 60 * 1000,
@@ -102,6 +104,7 @@ export const STEP_STATES = {
   beforeMerge: "provisioning",
   derive: "provisioning",
   "derive-again": "provisioning",
+  "revert-guard": "provisioning",
   prepare: "provisioning",
   remove: "deprovisioning",
   publish: "merging",

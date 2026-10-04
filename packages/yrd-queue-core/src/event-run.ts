@@ -49,6 +49,7 @@ import {
 } from "./program-root.ts"
 import { queueRefPrefix, runIndexRef } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
+import { revertedPathsFinding, revertGuardAction } from "./revert-guard.ts"
 import { publishCheckedChildren } from "./publication.ts"
 import { prepareWorktree, SETUP, SetupFailed } from "./worktree.ts"
 import { DERIVE, DeriveFailed } from "./derive.ts"
@@ -1600,8 +1601,9 @@ export async function eventQueueRun(
         continue
       }
       const candidate = verified.verifying.candidate
+      let candidateConfig: Awaited<ReturnType<typeof readConfig>>
       try {
-        await readConfig(git, candidate, options.target)
+        candidateConfig = await readConfig(git, candidate, options.target)
       } catch (error) {
         if (!(error instanceof InvalidQueueConfig)) throw error
         const reason =
@@ -1617,6 +1619,35 @@ export async function eventQueueRun(
         log.write({ kind: "change", branch, head, decision: "failed", reason })
         failed.push(branch)
         continue
+      }
+      // #27363: the compose revert detector's durable finding, and — under an explicit
+      // `revert-guard: refuse` — the named stick BEFORE the merge CAS. A hit or an
+      // incomplete/ambiguous proof sticks the change by name; the run never errors.
+      const revertFinding = revertedPathsFinding(verified.verifying.reverted)
+      const revertAction = revertGuardAction(verified.verifying.reverted, candidateConfig?.revertGuard ?? "observe")
+      if (revertFinding !== undefined) {
+        tip = await appendOwnedChange(store, queue, branch, tip, {
+          type: "admission-warning",
+          at: new Date(),
+          commit: head,
+          reason: revertFinding.reason,
+          warningKind: "reverted-paths",
+          title: `admission reverted paths ${short(branch, head)}`,
+        })
+        log.write({ kind: "observation", subject: "revert-guard", reason: revertFinding.reason })
+        if (revertAction === "stick") {
+          const reason = `revert-guard stopped the compose: ${revertFinding.reason}`
+          const ended = await appendOwnedChange(store, queue, branch, tip, { type: "stuck", at: new Date(), reason })
+          await writeStuckStop(branch, head, ended, reason)
+          await tell(branch, "stuck", ended)
+          writeStuck(branch, head, {
+            code: "yrd-revert-guard-refused",
+            subject: reason,
+            via: `revert-guard in the compose of ${short(branch, head)}`,
+            next: "read the reverted-paths admission warning, repair the compose or lift the change, then resume the queue",
+          })
+          return result(2, observedMerged, failed, [branch])
+        }
       }
       const raises = (await readRootChanges(git, candidate))?.changes ?? []
       tip = await appendOwnedChange(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })

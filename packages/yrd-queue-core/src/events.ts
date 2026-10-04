@@ -1818,6 +1818,8 @@ type ChangeWrite = Readonly<{
   notice?: NoticeWrite
   run?: string
   writer?: string
+  /** #27363: the admitted `admission-warning` kinds; every other event refuses it. */
+  warningKind?: "policy-warning" | "reverted-paths"
   /** A target or branch ref moved in the same CAS publish as this event. */
   also?: readonly AlsoRef[]
   /** Stage dependent refs after the change event has its exact oid, before one atomic publish. */
@@ -1985,6 +1987,7 @@ async function appendDecision(
     ...(write.base === undefined ? {} : { base: write.base }),
     ...(write.config === undefined ? {} : { config: write.config }),
     ...(write.retry === undefined ? {} : { retry: write.retry }),
+    ...(write.warningKind === undefined ? {} : { warningKind: write.warningKind }),
     ...(write.deferred === undefined ? {} : { deferred: write.deferred }),
     ...(write.notice === undefined ? {} : { notice: write.notice }),
     ...(write.run === undefined ? {} : { run: write.run }),
