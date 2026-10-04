@@ -2341,6 +2341,75 @@ it("discards a resubmitted event check once and continues with the next change",
   expect(logRecords(outcome).filter((row) => row.kind === "discarded" && row.branch === "task/a")).toHaveLength(1)
 })
 
+/** @failure A new-head resubmit landing after the stale round COMPOSED a head but before it
+ *           recorded those events let the round publish the superseded predecessor head.
+ * @level l3 @consumer queue operator and submitter (@i/10-yrd/27363)
+ */
+it("merges only the newest head when a resubmit lands after compose", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  const first = await submitCommit(w, "task/a", "one.txt")
+
+  const verify = verifying.verifyCandidate
+  let entered!: () => void
+  const composed = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  let release!: () => void
+  const continueRun = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  // Hold only the ROUND's compose: the resubmit below composes through this
+  // same verifier, and holding that one too would deadlock the test.
+  let holding = true
+  using _held = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
+    if (!holding) return verify(options)
+    holding = false
+    const outcome = await verify(options)
+    entered()
+    await continueRun
+    return outcome
+  })
+
+  const running = queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  await composed
+
+  // The author resubmits the SAME branch at a changed head while the round is
+  // holding the composed predecessor — the 2026-10-03 #26941 sequence. The
+  // changed head is a fresh line off main (as the corrected head was), so the
+  // superseded head's content is absent from it rather than merely older.
+  await w.git(["checkout", "--quiet", "--detach", "main"])
+  writeFileSync(join(w.work, "resubmitted.txt"), "new head\n")
+  await w.git(["add", "resubmitted.txt"])
+  await w.git(["commit", "--quiet", "-m", "resubmit task/a"])
+  const next = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["branch", "--force", "task/a", "HEAD"])
+  await w.git(["checkout", "--quiet", "main"])
+  expect(next).not.toBe(first)
+  const resubmitted = await submit(w.git, "origin", {
+    branch: "task/a",
+    target: { remote: "origin", branch: "main" },
+    submitter: "@dev/2",
+  })
+  expect(resubmitted).toMatchObject({ head: next, retry: false })
+  release()
+
+  const outcome = await running
+  // The resubmission moved the chain while this round judged the change, so the
+  // round keeps its hands off it: nothing of the superseded head lands.
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [], failed: [], stuck: [] })
+  expect(await readStatus(store, "main", "task/a")).toMatchObject({ status: "queued", commit: next })
+
+  // The next round lands it, at the newest head only.
+  const finished = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: [] })
+  expect(finished).toMatchObject({ exitCode: 0, merged: ["task/a"] })
+  expect(await readStatus(store, "main", "task/a")).toMatchObject({ status: "merged", commit: next })
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  const onTarget = spawnSync("git", ["merge-base", "--is-ancestor", first, "origin/main"], { cwd: w.work })
+  expect(onTarget.status, `the superseded head ${first.slice(0, 12)} reached main`).not.toBe(0)
+})
+
 /** @failure A pause published during composition killed the service on a normal queue-tip lease race.
  * @level l3 @consumer queue operator
  */
