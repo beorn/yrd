@@ -1,0 +1,32 @@
+{
+  "schema": "vendor-kit/source-siblings/v1",
+  "siblings": [
+    {
+      "name": "silvery",
+      "repository": "beorn/silvery",
+      "commit": "b956cf1ea635e8572179aaae1f4cc38f465a53bd",
+      "pack": true
+    },
+    {
+      "name": "@silvery/ansi",
+      "repository": "beorn/silvery",
+      "commit": "b956cf1ea635e8572179aaae1f4cc38f465a53bd",
+      "pack": true,
+      "directory": "packages/ansi"
+    },
+    {
+      "name": "@silvery/commander",
+      "repository": "beorn/silvery",
+      "commit": "b956cf1ea635e8572179aaae1f4cc38f465a53bd",
+      "pack": true,
+      "directory": "packages/commander"
+    },
+    {
+      "name": "@silvery/scope",
+      "repository": "beorn/silvery",
+      "commit": "b956cf1ea635e8572179aaae1f4cc38f465a53bd",
+      "pack": true,
+      "directory": "packages/scope"
+    }
+  ]
+}
