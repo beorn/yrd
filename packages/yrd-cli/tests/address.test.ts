@@ -10,7 +10,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
-import { formatQueueAddress, parseQueueAddress, parseRunAddress, queueDirectory, queueRoot } from "../src/address.ts"
+import {
+  formatQueueAddress,
+  legacyQueueDirectory,
+  parseQueueAddress,
+  parseRunAddress,
+  queueDirectory,
+  queueRoot,
+} from "../src/address.ts"
 
 describe("a queue's canonical address", () => {
   it("maps the decided human @ spelling onto the same stored queue key (26193)", () => {
@@ -170,6 +177,19 @@ describe("a queue's canonical address", () => {
     const root = queueRoot("/state/yrd", address)
     expect(root).toBe(join("/state/yrd", "forge.example", "team", "re~po~main"))
     expect(root.slice(root.lastIndexOf("~") + 1)).toBe("main")
+  })
+
+  it("spells the pre-27065 legacy root only so the cutover refusal can name it (27065)", () => {
+    const workdir = "/state/yrd"
+    expect(legacyQueueDirectory(workdir, parseQueueAddress("beorn/hh#main"))).toBe(
+      join(workdir, "github.com", "beorn", "hh%23main", "repo"),
+    )
+    expect(legacyQueueDirectory(workdir, parseQueueAddress("beorn/hh#release/1.x"))).toBe(
+      join(workdir, "github.com", "beorn", "hh%23release%2F1.x", "repo"),
+    )
+    expect(legacyQueueDirectory(workdir, parseQueueAddress("/tmp/remote.git#main"))).toBe(
+      join(workdir, "local", "tmp", "remote.git%23main", "repo"),
+    )
   })
 
   it("imports a module from the env path a %23 name produced today (27065 regression)", async () => {

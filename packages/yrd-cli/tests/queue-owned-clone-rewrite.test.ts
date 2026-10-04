@@ -8,7 +8,7 @@
  * @consumer every command that resolves a queue location for a hosted address
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -162,4 +162,20 @@ describe("resolveQueueLocation behind a transport rewrite", () => {
       "second queue",
     )
   }, 60_000)
+})
+
+describe("the 27065 cutover refusal", () => {
+  it("refuses to create a tilde root beside a legacy percent-escaped one, and creates nothing", async () => {
+    const { env, outside, root } = await fixture()
+    // The clone the pre-27065 builder would have written for this address.
+    const legacy = join(root, "state", "yrd", "yrd-owned-clone.invalid", "org", "product%23main", "repo")
+    mkdirSync(legacy, { recursive: true })
+    const fresh = join(root, "state", "yrd", "yrd-owned-clone.invalid", "org", "product~main")
+
+    await expect(resolveQueueLocation(outside, address, env)).rejects.toThrow(/refusing to create a second queue root/u)
+
+    // No second root: the new tilde path was never created.
+    expect(existsSync(fresh)).toBe(false)
+    expect(existsSync(legacy)).toBe(true)
+  })
 })
