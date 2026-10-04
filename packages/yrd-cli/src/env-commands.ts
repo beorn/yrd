@@ -167,6 +167,10 @@ async function pinDeclaredIdentity(path: string, git: GitRunner, io: YrdCliIO): 
         `outside this worktree`,
     )
   }
+  io.stderr(
+    `${path}: pinned seat identity ${identity.name} <${identity.email}> to worktree config; ` +
+      `do not run bare git config user.* in linked worktrees\n`,
+  )
 }
 
 /**

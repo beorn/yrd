@@ -914,6 +914,9 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
         "env-open@yrd.test",
       )
       expect(run.stderr()).not.toContain("not pinning")
+      expect(run.stderr()).toContain(
+        "pinned seat identity @dev/luna6-fixture <dev-luna6-fixture@main.hh.invalid> to worktree config; do not run bare git config user.*",
+      )
     })
   })
 
