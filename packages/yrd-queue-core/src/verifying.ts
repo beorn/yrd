@@ -311,7 +311,11 @@ async function superMerge(
     {
       ...options,
       git: options.process === undefined ? options.git : undefined,
-      ...(options.process === undefined ? {} : { gitOptions: { objects: runnerFor(options.git).objects } }),
+      ...(options.process === undefined
+        ? {}
+        : {
+            gitOptions: { objects: runnerFor(options.git).objects, objectOwners: runnerFor(options.git).objectOwners },
+          }),
     },
     cwd,
     [
@@ -351,15 +355,21 @@ export async function gitSuperExecution(
   argv: readonly string[],
 ): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
   const objects = options.git === undefined ? options.gitOptions?.objects : runnerFor(options.git).objects
+  const objectOwners =
+    argv[0] === "merge"
+      ? options.git === undefined
+        ? options.gitOptions?.objectOwners
+        : runnerFor(options.git).objectOwners
+      : undefined
   const gitArgs = [
     ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
     "super",
     "--json",
+    ...(objects === undefined && objectOwners === undefined ? [] : ["--repo", cwd]),
+    ...(objectOwners === undefined ? [] : ["--object-owners-json", JSON.stringify(objectOwners)]),
     ...(objects === undefined
       ? []
       : [
-          "--repo",
-          cwd,
           "--object-directory",
           objects.directory,
           ...(objects.alternates ?? []).flatMap((path) => ["--alternate-object-directory", path]),

@@ -113,6 +113,21 @@ async function queueClone(root: string, product: string): Promise<string> {
 }
 
 describe("populateReferenceStores", () => {
+  it("refuses a mismatched root object view before pin publication without an observer", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-reference-root-owner-"))
+    roots.push(root)
+    const repo = join(root, "reference")
+    const baseline = await repository(repo, "root.txt")
+    const directory = join(root, "other-objects")
+    mkdirSync(directory)
+    const selected = gitIn(repo, undefined, undefined, {
+      objects: { directory, alternates: [join(repo, ".git/objects")] },
+    })
+    await expect(populateReferenceStores({ repo, gitIn: () => selected })).rejects.toThrow(
+      "does not belong to selected common owner",
+    )
+    await expect(gitIn(repo)(["rev-parse", "--verify", `refs/yrd/pins/${baseline}`])).rejects.toThrow()
+  })
   it("gives every gitlink a real store with its own origin refs, nested ones included", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-reference-populate-"))
     roots.push(root)
@@ -122,7 +137,28 @@ describe("populateReferenceStores", () => {
     // under it at all, which every compose then read as fifteen cold fetches.
     expect(existsSync(join(repo, "vendor/dep"))).toBe(false)
 
-    const created = await populateReferenceStores({ gitIn: (cwd) => gitIn(cwd), repo })
+    const acquired: ReferenceAcquisition[] = []
+    const created = await populateReferenceStores({
+      gitIn: (cwd) => gitIn(cwd),
+      repo,
+      acquired: (pin) => void acquired.push(pin),
+    })
+
+    const rootHead = (await gitIn(repo)(["rev-parse", "HEAD"])).trim()
+    expect((await gitIn(repo)(["rev-parse", `refs/yrd/pins/${rootHead}`])).trim()).toBe(rootHead)
+    expect(acquired.map(({ path }) => path)).toEqual([".", "vendor/dep", "vendor/dep/apps/nested"])
+    for (const pin of acquired) {
+      const owner = pin.objectOwner
+      expect(owner).toBeDefined()
+      const storeGit = gitIn(join(repo, pin.path))
+      expect(owner.gitDirectory).toBe(
+        realpathSync((await storeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()),
+      )
+      expect(owner.objects).toBe(join(owner.gitDirectory, "objects"))
+      expect(owner.retained).toEqual([{ ref: `refs/yrd/pins/${pin.sha}`, oid: pin.sha }])
+      expect((await storeGit(["rev-parse", "--verify", owner.retained[0]!.ref])).trim()).toBe(pin.sha)
+      expect((await storeGit(["cat-file", "-t", pin.sha])).trim()).toBe("commit")
+    }
 
     expect(created.map(({ path }) => path)).toEqual(["vendor/dep", "vendor/dep/apps/nested"])
     for (const { path } of created) {
@@ -199,6 +235,8 @@ describe("populateReferenceStores", () => {
     await expect(storeGit(["cat-file", "-e", `${raised}^{commit}`])).rejects.toThrow()
 
     await populateReferenceStores({ commit: head, gitIn: (cwd) => gitIn(cwd), repo })
+
+    expect((await gitIn(repo)(["rev-parse", `refs/yrd/pins/${head}`])).trim()).toBe(head)
 
     expect(await storeGit(["for-each-ref", "--format=%(refname)", "refs/yrd/pins"])).toContain(raised)
     // The remote-tracking ref still names the OLD commit, so nothing but the
@@ -279,6 +317,7 @@ describe("populateReferenceStores", () => {
     expect(await storeGit(["cat-file", "-t", candidate])).toContain("commit")
     expect(await storeGit(["for-each-ref", "--format=%(refname)", "refs/yrd/pins"])).toContain(candidate)
     expect(acquired).toContainEqual({
+      objectOwner: expect.objectContaining({ retained: [{ ref: `refs/yrd/pins/${candidate}`, oid: candidate }] }),
       localMiss: expect.objectContaining({
         localSource: join(source, "vendor/dep"),
         reason: expect.any(String),

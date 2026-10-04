@@ -23,6 +23,7 @@ import { createProcess, resolveExecutable, type Process, type ProcessRequest, ty
 import { createShellBackend, type GitomicBackend } from "gitomic"
 import type { Event } from "gitomic/events"
 import { GIT_REPOSITORY_LOCAL_ENV_VARS } from "removely"
+import type { PrivateGitProjection } from "git-super"
 export { chainsUnder, listRefs, openEvents } from "gitomic/events"
 export type { AlsoRef, Event, EventInput } from "gitomic/events"
 export type { CommitMeta, GitomicBackend, Oid } from "gitomic"
@@ -123,6 +124,8 @@ export type GitInvocationOptions = Readonly<{
   env?: NodeJS.ProcessEnv
   /** Host-owned public stores, asserted physically closed before constructing the runner. */
   objects?: GitObjectContext
+  /** Exact associations emitted by host preparation; never decoded from a submitted request. */
+  objectOwners?: PrivateGitProjection["objectOwners"]
   signal?: AbortSignal
   timeoutMs?: number
   openOutput?: (invocation: Pick<GitInvocation, "args" | "cwd" | "selection">) => GitOutputSink
@@ -133,6 +136,7 @@ export type GitRunner = Git &
   Readonly<{
     selection: GitSelection
     objects: GitObjectContext | undefined
+    objectOwners: PrivateGitProjection["objectOwners"]
     at(cwd: string): GitRunner
     backend: GitomicBackend
     /** Bounded evidence for the latest settled call, including successful stderr.
@@ -274,6 +278,18 @@ export function gitIn(
 ): GitRunner {
   if (selection === undefined) throw new Error(`yrd: gitIn in ${cwd} requires a resolved Git selection`)
   const source = { ...(options.env ?? globalThis.process.env) }
+  const objectOwners =
+    options.objectOwners === undefined
+      ? undefined
+      : Object.freeze(
+          options.objectOwners.map((owner) =>
+            Object.freeze({
+              objects: owner.objects,
+              gitDirectory: owner.gitDirectory,
+              retained: Object.freeze(owner.retained.map((pin) => Object.freeze({ ref: pin.ref, oid: pin.oid }))),
+            }),
+          ),
+        )
   const objects =
     options.objects === undefined
       ? undefined
@@ -354,7 +370,8 @@ export function gitIn(
           ? undefined
           : Object.freeze({ directory: objects.directory, alternates: Object.freeze([...(objects.alternates ?? [])]) }),
     },
-    at: { value: (path: string) => gitIn(path, runner, selection, { ...options, env: source, objects }) },
+    objectOwners: { value: objectOwners },
+    at: { value: (path: string) => gitIn(path, runner, selection, { ...options, env: source, objects, objectOwners }) },
     backend: { get: () => (backend ??= createLegacyBackend(selection.executable, source, objects)) },
     lastInvocation: { get: () => lastInvocation },
     observe: {
