@@ -125,6 +125,81 @@ function declaredSeatIdentity(): Readonly<{ email: string; name: string }> | und
 }
 
 /**
+ * Every submodule the environment materialized, as paths relative to `root`,
+ * read level by level from each present `.gitmodules` and kept only when the
+ * checkout is really there (`<path>/.git` exists). Nested submodules are
+ * included. A declared-but-unmaterialized submodule (a `private = true` one,
+ * or one the base never carried) is left exactly as `yrd env open` left it.
+ */
+async function materializedSubmodulePaths(root: string, git: GitRunner): Promise<string[]> {
+  const found: string[] = []
+  const walk = async (rel: string): Promise<void> => {
+    const dir = rel === "" ? root : join(root, rel)
+    if (!existsSync(join(dir, ".gitmodules"))) return
+    const at = rel === "" ? git : git.at(dir)
+    const rows = (await at(["config", "--file", ".gitmodules", "--get-regexp", "^submodule\\..*\\.path$"])).trim()
+    if (rows === "") return
+    for (const row of rows.split("\n")) {
+      const sub = row.split(/\s+/u).slice(1).join(" ")
+      const next = rel === "" ? sub : `${rel}/${sub}`
+      if (!existsSync(join(root, next, ".git"))) continue
+      found.push(next)
+      await walk(next)
+    }
+  }
+  await walk("")
+  return found
+}
+
+/**
+ * Pin the caller's declared identity into every submodule the environment
+ * materialized. A submodule is its own repository, so the root's worktree
+ * config never reaches it and a commit there fell through to the shared
+ * `~/.gitconfig` identity — in this fleet the operator's, so a seat's commits
+ * were attributed to the operator (#27403). The write is the submodule's OWN
+ * local config; for a submodule of a linked worktree that file lives under the
+ * worktree's git dir, so it cannot reach another worktree. A submodule that is
+ * itself a linked worktree would store the write in the config every worktree
+ * of that submodule inherits, so it is refused loudly.
+ */
+async function pinSubmoduleIdentities(
+  root: string,
+  git: GitRunner,
+  identity: Readonly<{ email: string; name: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const pinned: string[] = []
+  for (const rel of await materializedSubmodulePaths(root, git)) {
+    const sub = git.at(join(root, rel))
+    const gitDir = (await sub(["rev-parse", "--absolute-git-dir"])).trim()
+    const commonDir = (await sub(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    if (gitDir !== commonDir) {
+      throw new Error(
+        `yrd env open: submodule ${rel} in ${root} is itself a linked worktree (git dir ${gitDir}, common dir ` +
+          `${commonDir}); pinning an identity there would land in the config every worktree of that submodule ` +
+          `inherits, so it is refused`,
+      )
+    }
+    await sub(["config", "--local", "user.name", identity.name])
+    await sub(["config", "--local", "user.email", identity.email])
+    const pinnedName = (await sub(["config", "--get", "user.name"])).trim()
+    if (pinnedName !== identity.name) {
+      throw new Error(
+        `yrd env open: pinning ${identity.name} in submodule ${rel} of ${root} did not take ` +
+          `(user.name reads '${pinnedName}')`,
+      )
+    }
+    pinned.push(rel)
+  }
+  if (pinned.length > 0) {
+    io.stderr(
+      `${root}: pinned seat identity ${identity.name} <${identity.email}> into ${pinned.length} materialized ` +
+        `submodule(s) (${pinned.join(", ")}); a commit there names the seat\n`,
+    )
+  }
+}
+
+/**
  * Pin the caller's declared identity into the environment's OWN worktree
  * config, so a commit made there names the seat and not whichever seat last
  * wrote the shared config (#27299).
@@ -138,7 +213,9 @@ function declaredSeatIdentity(): Readonly<{ email: string; name: string }> | und
  * that would poison every co-resident worktree (@dev/review2, 2026-10-03) — and
  * the shared config is never written from here; the caller's exported
  * `GIT_AUTHOR_*` still names every commit. The write is verified against the
- * shared file and refused loudly if it ever landed there.
+ * shared file and refused loudly if it ever landed there. Submodules the
+ * environment materialized are pinned by {@link pinSubmoduleIdentities}, from
+ * this same declared identity.
  */
 async function pinDeclaredIdentity(path: string, git: GitRunner, io: YrdCliIO): Promise<void> {
   const identity = declaredSeatIdentity()
@@ -171,6 +248,7 @@ async function pinDeclaredIdentity(path: string, git: GitRunner, io: YrdCliIO): 
     `${path}: pinned seat identity ${identity.name} <${identity.email}> to worktree config; ` +
       `do not run bare git config user.* in linked worktrees\n`,
   )
+  await pinSubmoduleIdentities(path, git, identity, io)
 }
 
 /**
