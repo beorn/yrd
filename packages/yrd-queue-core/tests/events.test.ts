@@ -10,7 +10,7 @@ import { createMemBackend } from "gitomic/mem"
 import { Conflict, open } from "gitomic"
 import type { GitomicBackend } from "gitomic"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import { readEventChains } from "../src/event-read.ts"
+import { readEventChain, readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
 import { classifyQueueRef, pauseRef, runIndexRef } from "../src/refs.ts"
 import { activateRunIndex, lookupRunIndex } from "../src/run-index.ts"
@@ -2362,6 +2362,24 @@ describe("the queue-format boundary", () => {
     const listed = await readEventChains(ref.slice(0, -branch.length), location)
     expect(listed.get(ref)).toHaveLength(1025)
     expect(listed.get(ref)?.[0]?.id).toBe(first)
+  })
+
+  it("reads a change chain beyond one page from a fixed acquired tip", async () => {
+    const { store, location } = remoteMemStore("yrd-long-fixed-tip")
+    const branch = "task/long-tip"
+    const ref = changesRef("lab", branch)
+    const chain = await openEvents({ ...store, ref })
+    const written = await chain.append(
+      Array.from({ length: 1025 }, () => input("marker")),
+      { expect: null },
+    )
+    const first = written.events[0]?.id
+    const tip = await chain.head()
+    if (first === undefined || tip === null) throw new Error("fixture did not write the chain")
+    const read = await readEventChain(chain, tip)
+    expect(read).toHaveLength(1025)
+    expect(read[0]?.id).toBe(first)
+    expect(read.at(-1)?.id).toBe(tip)
   })
 
   it("omits event-chain pressure when no write cap remains, and succeeds on 1025-event chains (#26760)", async () => {
