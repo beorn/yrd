@@ -69,7 +69,14 @@ type SubmitOptions = Readonly<{
   queue?: string
   gitlink?: string[]
 }>
-type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string; maintenance?: string }>
+type PauseOptions = Readonly<{
+  json?: boolean
+  notify?: string
+  submitter?: string
+  queue?: string
+  reason?: string
+  maintenance?: string
+}>
 type MergeOptions = Readonly<{
   json?: boolean
   submitter?: string
@@ -97,6 +104,10 @@ const queueHealthCommand = async (workdir: string, io: YrdCliIO): Promise<YrdCli
 
 const NOTIFY_HELP = "deprecated alias for --submitter; both flags must name the same submitter"
 const SUBMITTER_HELP = `the submitter and result recipient; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
+// 27262: on withdraw/drop the actor and the coordination recipient are two
+// fields. `--submitter` sets only `By:`; `--notify` sets `Recipient:` and sends
+// no notice, so this help must not reuse the "result recipient" wording.
+const WITHDRAW_SUBMITTER_HELP = `the actor who ends the change, recorded as By:; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP =
   "the issue, checked against the branch's first Refs/Resolves binding; unbound legacy name fallback is reported"
 const DRY_RUN_HELP = "preview admission and push nothing; fetches the queue tip into refs/gitomic/fetched/"
@@ -213,7 +224,8 @@ function buildProgram(
   const withdrawOptions = <T extends { option: (flags: string, description: string) => T }>(command: T): T =>
     command
       .option("--json", "emit stable JSON")
-      .option("--notify <seat>", "name who withdrew the change")
+      .option("--submitter <agent>", WITHDRAW_SUBMITTER_HELP)
+      .option("--notify <seat>", "the coordination seat recorded as Recipient:; no notice is sent (27262)")
       .option("--queue <value>", QUEUE_HELP)
       .option("--reason <text>", "why the change leaves the line, written on the record")
   const queueEnd = async (branch: string, options: PauseOptions, command: "withdraw" | "drop"): Promise<void> => {
@@ -224,7 +236,8 @@ function buildProgram(
         io,
         {
           branch,
-          by: resolveSubmitter(options.notify, env),
+          by: resolveSubmitter(options.submitter, env),
+          ...(options.notify === undefined ? {} : { recipient: options.notify }),
           command,
           ...(options.reason === undefined ? {} : { reason: options.reason }),
         },
@@ -1188,14 +1201,12 @@ function buildProgram(
       .description(`${SWEEP_CANDIDATES_DESCRIPTION} (the same as ${name} queue sweep-candidates)`),
   ).action(async (options) => queueSweepCandidates(options as SweepCandidatesOptions))
 
-  program
-    .command("drop <branch>")
-    .description("end an event change and delete its branch in one leased publish")
-    .option("--json", "emit stable JSON")
-    .option("--notify <seat>", "name who dropped the change")
-    .option("--queue <value>", QUEUE_HELP)
-    .option("--reason <text>", "operator note kept in the ending event")
-    .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
+  // One option table with withdraw (24824 §1): the actor and the coordination
+  // recipient are separate facts on BOTH endings, so drop must not carry its own
+  // table that names neither --submitter (@dev/11 27262 HOLD fba7572b).
+  withdrawOptions(
+    program.command("drop <branch>").description("end an event change and delete its branch in one leased publish"),
+  ).action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
 
   program
     .command("ignore <branch>")

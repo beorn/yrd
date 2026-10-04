@@ -22,6 +22,7 @@ const QUEUE_KEYS = {
   admission: "supported",
   blob: "supported",
   notify: "supported",
+  revertGuard: "supported",
   setup: "supported",
   derive: "supported",
   teardown: "refused",

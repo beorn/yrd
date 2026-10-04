@@ -378,24 +378,25 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     mkdirSync(bin)
     const compositions = join(w.root, "compositions.jsonl")
     const wrapper = join(bin, "git-super")
+    const previousBin = process.env.YRD_GIT_SUPER_BIN
+    expect(previousBin).toBeDefined()
     writeFileSync(
       wrapper,
       [
-        "#!/usr/bin/env bun",
+        `#!${process.execPath}`,
         'import { appendFileSync } from "node:fs"',
         'import { spawnSync } from "node:child_process"',
         "const args = process.argv.slice(2)",
         'if (args[0] === "--json" && args[1] === "merge")',
         `  appendFileSync(${JSON.stringify(compositions)}, JSON.stringify({ head: args[2] }) + "\\n")`,
-        `const ran = spawnSync(${JSON.stringify(join(import.meta.dirname, "../../../node_modules/.bin/git-super"))}, args, { stdio: "inherit" })`,
+        `const ran = spawnSync(${JSON.stringify(previousBin)}, args, { stdio: "inherit" })`,
         "if (ran.error) throw ran.error",
         "process.exit(ran.status ?? 1)",
         "",
       ].join("\n"),
     )
     chmodSync(wrapper, 0o755)
-    const previousPath = process.env.PATH
-    process.env.PATH = `${bin}:${previousPath ?? ""}`
+    process.env.YRD_GIT_SUPER_BIN = wrapper
     let ran: Awaited<ReturnType<typeof yrd>>
     try {
       ran = await yrd(
@@ -409,8 +410,8 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
         "@dev/2",
       )
     } finally {
-      if (previousPath === undefined) delete process.env.PATH
-      else process.env.PATH = previousPath
+      if (previousBin === undefined) delete process.env.YRD_GIT_SUPER_BIN
+      else process.env.YRD_GIT_SUPER_BIN = previousBin
     }
     expect(ran.exitCode, ran.report).toBe(0)
     await assertCarrier(w, branch, [{ path: one.path, sha: one.held }])
@@ -965,5 +966,122 @@ describe("ordinary submit with a local-only component pin", () => {
     expect(ran.stderr, ran.report).toContain(pinRef)
     expect(await gitIn(join(w.root, "one.git"))(["for-each-ref", "--format=%(objectname)", pinRef])).toBe("")
     expect(await refs(w.remote)).not.toContain("refs/heads/task/rejected-local-pin")
+  }, 90_000)
+
+  /** @failure Dry-run and candidate outputs show the target's component pin or omit component details,
+   *          so authors read their own change as lost (27323).
+   * @level l2 @consumer yrd submit --dry-run on a component-moving change
+   */
+  it("prints author head and landing pin for component-moving dry-run (27323)", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const git = gitIn(w.work)
+    const wt = join(w.root, "dev-wt-27323")
+    await git(["worktree", "add", "-b", "task/27323-dry-run", wt, "main"])
+    await identity(wt)
+    const wtGit = gitIn(wt)
+    await wtGit(["submodule", "update", "--init"])
+    const child = gitIn(join(wt, one.path))
+    await child(["fetch", "--quiet", one.work, one.unheld])
+    await child(["checkout", "--quiet", one.unheld])
+    await wtGit(["add", one.path])
+    await wtGit(["commit", "--quiet", "-m", "move component one\n\nRefs: 27323"])
+
+    // 1. Text mode dry-run output
+    const ran = await yrd(wt, "submit", "task/27323-dry-run", "--dry-run", "--issue", "27323", "--submitter", "@dev/1")
+    expect(ran.exitCode, ran.report).toBe(0)
+    expect(ran.stdout, ran.report).toContain(
+      `component ${one.path}: author head ${one.unheld.slice(0, 12)}, landing pin ${one.unheld.slice(0, 12)} (lands directly)`,
+    )
+
+    // 2. JSON mode dry-run output
+    const ranJson = await yrd(
+      wt,
+      "submit",
+      "task/27323-dry-run",
+      "--dry-run",
+      "--issue",
+      "27323",
+      "--submitter",
+      "@dev/1",
+      "--json",
+    )
+    expect(ranJson.exitCode, ranJson.report).toBe(0)
+    const receipt = JSON.parse(ranJson.stdout) as {
+      dryRun: boolean
+      verifying: {
+        gitlinks: { path: string; state: string; authorHead: string; landingPin: string }[]
+      }
+    }
+    expect(receipt.dryRun).toBe(true)
+    const row = receipt.verifying.gitlinks.find((r) => r.path === one.path)
+    expect(row).toBeDefined()
+    expect(row).toMatchObject({
+      path: one.path,
+      state: "kept-ahead",
+      authorHead: one.unheld,
+      landingPin: one.unheld,
+    })
+  }, 90_000)
+
+  it("prints author head and landing pin with land merge note when component merges (27323)", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const rootGit = gitIn(w.work)
+    const rootChild = gitIn(join(w.work, one.path))
+    await rootChild(["fetch", "--quiet", one.work, one.held])
+    await rootChild(["checkout", "--quiet", one.held])
+    await rootGit(["add", one.path])
+    await rootGit(["commit", "--quiet", "-m", "advance root to held one"])
+    await rootGit(["push", "--quiet", "origin", "main"])
+
+    const wt = join(w.root, "dev-wt-merge-27323")
+    await rootGit(["worktree", "add", "-b", "task/27323-merged", wt, w.base])
+    await identity(wt)
+    const wtGit = gitIn(wt)
+    await wtGit(["submodule", "update", "--init"])
+    const child = gitIn(join(wt, one.path))
+    writeFileSync(join(wt, one.path, "alt.txt"), "alt-content\n")
+    await child(["add", "alt.txt"])
+    await child(["commit", "--quiet", "-m", "alt commit on one"])
+    const altHead = (await child(["rev-parse", "HEAD"])).trim()
+    await wtGit(["add", one.path])
+    await wtGit(["commit", "--quiet", "-m", "pin alt commit on root\n\nRefs: 27323"])
+
+    // 1. Text mode dry-run output
+    const ran = await yrd(wt, "submit", "task/27323-merged", "--dry-run", "--issue", "27323", "--submitter", "@dev/1")
+    expect(ran.exitCode, ran.report).toBe(0)
+    expect(ran.stdout, ran.report).toContain(`component ${one.path}: author head ${altHead.slice(0, 12)}, landing pin `)
+    expect(ran.stdout, ran.report).toContain("(component merge happens at land)")
+
+    // 2. JSON mode dry-run output
+    const ranJson = await yrd(
+      wt,
+      "submit",
+      "task/27323-merged",
+      "--dry-run",
+      "--issue",
+      "27323",
+      "--submitter",
+      "@dev/1",
+      "--json",
+    )
+    expect(ranJson.exitCode, ranJson.report).toBe(0)
+    const receipt = JSON.parse(ranJson.stdout) as {
+      dryRun: boolean
+      verifying: {
+        gitlinks: { path: string; state: string; authorHead: string; landingPin: string }[]
+      }
+    }
+    expect(receipt.dryRun).toBe(true)
+    const row = receipt.verifying.gitlinks.find((r) => r.path === one.path)
+    expect(row).toBeDefined()
+    expect(row).toMatchObject({
+      path: one.path,
+      state: "merged",
+      authorHead: altHead,
+    })
+    expect(row?.landingPin).toBeDefined()
+    expect(row?.landingPin).not.toBe(altHead)
   }, 90_000)
 })

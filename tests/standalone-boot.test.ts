@@ -15,7 +15,7 @@
  * public dependency.
  */
 import { existsSync } from "node:fs"
-import { copyFile, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -65,6 +65,39 @@ describe("standalone CLI boot", () => {
       })
       const [importStderr, importExit] = await Promise.all([new Response(imported.stderr).text(), imported.exited])
       expect(importExit, importStderr).toBe(0)
+
+      // 27306: successful package import alone can mask the enclosing Yrd HEAD
+      // being mistaken for the installed archive's pinned Git Super identity.
+      await mkdir(join(root, "tests", "support"), { recursive: true })
+      await copyFile(
+        join(REPO_ROOT, "tests", "support", "git-super-bin.ts"),
+        join(root, "tests", "support", "git-super-bin.ts"),
+      )
+      const init = Bun.spawn(["git", "init", root], { stdout: "ignore", stderr: "pipe" })
+      const [initStderr, initExit] = await Promise.all([new Response(init.stderr).text(), init.exited])
+      expect(initExit, initStderr).toBe(0)
+      const selected = Bun.spawn(
+        [
+          "bun",
+          "-e",
+          'const selected = await import("./tests/support/git-super-bin.ts"); console.log(JSON.stringify({bin: selected.gitSuperBin, sha: selected.gitSuperSha}))',
+        ],
+        { cwd: root, stdout: "pipe", stderr: "pipe" },
+      )
+      const [selectionStdout, selectionStderr, selectionExit] = await Promise.all([
+        new Response(selected.stdout).text(),
+        new Response(selected.stderr).text(),
+        selected.exited,
+      ])
+      expect(selectionExit, selectionStderr).toBe(0)
+      const selection = JSON.parse(selectionStdout) as { bin: string; sha: string }
+      const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as {
+        overrides: Record<string, string>
+      }
+      const declared = manifest.overrides["git-super"]
+      if (declared === undefined) throw new Error("standalone fixture requires its declared git-super override")
+      expect(selection.sha).toBe(declared.split("#")[1])
+      expect(selection.bin.startsWith(join(root, "node_modules") + "/")).toBe(true)
     } finally {
       await rm(root, { recursive: true, force: true })
     }

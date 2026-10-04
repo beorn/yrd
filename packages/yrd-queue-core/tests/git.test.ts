@@ -27,7 +27,8 @@ import * as gitRunner from "../src/git.ts"
 import { openLog, readRunLog } from "../src/log.ts"
 import { gitSuperExecution, verifyCandidate } from "../src/verifying.ts"
 import { freshWorktree } from "../src/worktree.ts"
-import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
+import { gitSuperBin, gitSuperSha } from "../../../tests/support/git-super-bin.ts"
+import { YRD_GIT_SUPER_BIN, YRD_GIT_SUPER_SHA } from "../src/git-super-selection.ts"
 
 if (false) {
   // @ts-expect-error a production runner cannot omit its selected Git executable
@@ -74,7 +75,12 @@ describe("the git runner", () => {
   // Existing object-context reads do not carry or reject owner/ref evidence.
   it("carries prepared owner pins through native and supervised merge dispatch", async () => {
     const root = temporaryRoot("owner-pins")
-    const env = { ...gitRunner.gitEnvironment(process.env), PATH: `${dirname(gitSuperBin)}:${process.env.PATH}` }
+    const env = {
+      ...gitRunner.gitEnvironment(process.env),
+      PATH: `${dirname(gitSuperBin)}:${process.env.PATH}`,
+      [YRD_GIT_SUPER_BIN]: join(gitSuperBin, "git-super"),
+      [YRD_GIT_SUPER_SHA]: gitSuperSha,
+    }
     const native = gitIn(root, undefined, undefined, { env })
     await native(["init", "--quiet"])
     await native(["config", "user.name", "fixture"])

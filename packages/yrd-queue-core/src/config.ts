@@ -118,6 +118,13 @@ export type QueueConfig = Readonly<{
   target: Target
   /** Ref deletion is halted; the only accepted retention policy is never. */
   archiveAfter: "never"
+  /**
+   * The compose revert detector's switch (27363, @cto 32105469). `refuse` is
+   * the ONE accepted word: a signature hit or an incomplete/ambiguous proof
+   * sticks the named change before CAS. ABSENT is `observe` — a durable warning,
+   * never a stuck change.
+   */
+  revertGuard: "observe" | "refuse"
   /** Whole-branch Bun.Glob patterns that suppress unsubmitted drafts. */
   ignore: readonly string[]
   /** Target-owned command that resolves a raw issue reference to its canonical identity. */
@@ -212,6 +219,7 @@ export function parseConfig(
   const admission = readAdmission(declared.admission)
   return {
     archiveAfter: readArchiveAfter(declared["archive-after"]),
+    revertGuard: readRevertGuard(declared["revert-guard"]),
     blob,
     checks: readChecks(declared.checks),
     health: readHealth(declared.health),
@@ -235,6 +243,21 @@ function readArchiveAfter(value: unknown): "never" {
   }
   throw new Error(
     `yrd-archive-after-invalid: .yrd.yml archive-after: the only accepted value is never; received ${JSON.stringify(value)}`,
+  )
+}
+
+/**
+ * `revert-guard` (27363, @cto 32105469): the compose revert detector's one
+ * public switch. `refuse` is the SINGLE accepted word and an absent key means
+ * observe-only — the same single-value shape as `archive-after: never`, and the
+ * value is never inferred from a bad one. A mapping, a boolean or any other
+ * word refuses loud with the accepted value.
+ */
+function readRevertGuard(value: unknown): "observe" | "refuse" {
+  if (value === undefined) return "observe"
+  if (value === "refuse") return "refuse"
+  throw new Error(
+    `yrd-revert-guard-invalid: .yrd.yml revert-guard: the only accepted value is refuse; received ${JSON.stringify(value)}`,
   )
 }
 
@@ -417,6 +440,7 @@ const TOP_KEYS = [
   "setup",
   "teardown",
   "notify",
+  "revert-guard",
 ] as const
 
 function readAdmission(value: unknown): QueueConfig["admission"] {

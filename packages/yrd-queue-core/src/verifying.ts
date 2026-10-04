@@ -14,6 +14,8 @@ import {
 import { freshWorktree, type FreshWorktree, type Worktree } from "./worktree.ts"
 import { populateReferenceStores } from "./reference.ts"
 import { DeriveFailed, deriveInWorktree, type Derived, type DeriveSpec } from "./derive.ts"
+import { requireFrozenGitSuper, withGitConfig } from "./git-super-selection.ts"
+import { detectReverted, type RevertGuardReport } from "./revert-guard.ts"
 
 /** `descents` records git-super's two-direction ancestry checks of nested pins (24320). */
 export type Verification =
@@ -24,6 +26,11 @@ export type Verification =
       candidate: string
       /** Present when the target's `derive:` changed something: the composed merge before it, and what it did. */
       derived?: Derived & Readonly<{ composed: string }>
+      /**
+       * #27363: what the compose put back, one component store down, and how complete that
+       * proof is. Always present on a verified candidate: absence is not "clean".
+       */
+      reverted?: RevertGuardReport
       gitlinks: readonly SettledGitlink[]
       descents?: readonly SuperMergeDescent[]
       steps?: readonly SuperMergeStep[]
@@ -281,9 +288,39 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
       source: worktree.path,
     })
   }
-  await worktree.remove()
   const candidate = result.commit
   if (candidate === undefined) throw new Error(`git-super merge of ${options.head} lost its commit after derivation`)
+  // #27363: the guard reads the FINAL candidate's component stores, so it runs while the compose
+  // worktree still holds them. It never throws into the compose: a guard that cannot prove coverage
+  // reports that gap as incomplete, never a silent clean.
+  let reverted: RevertGuardReport
+  try {
+    reverted = await timed("revert-guard", () =>
+      detectReverted({
+        candidate,
+        git: options.git,
+        head: options.head,
+        root: worktree.path,
+        targetHead: options.targetHead,
+      }),
+    )
+  } catch (error) {
+    reverted = {
+      base: { state: "none" },
+      count: 0,
+      coverage: "incomplete",
+      gaps: [
+        {
+          depth: 0,
+          path: ".",
+          reason: `revert guard could not run: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
+      paths: [],
+      swallowed: [],
+    }
+  }
+  await worktree.remove()
   return {
     state: "verified",
     verifying: {
@@ -293,6 +330,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
       ...(result.steps === undefined ? {} : { steps: result.steps }),
       state: "verified",
       candidate,
+      reverted,
       ...(derived === undefined ? {} : { derived }),
     },
   }
@@ -361,10 +399,7 @@ export async function gitSuperExecution(
         ? options.gitOptions?.objectOwners
         : runnerFor(options.git).objectOwners
       : undefined
-  const gitArgs = [
-    ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
-    "super",
-    "--json",
+  const objectArgs = [
     ...(objects === undefined && objectOwners === undefined ? [] : ["--repo", cwd]),
     ...(objectOwners === undefined ? [] : ["--object-owners-json", JSON.stringify(objectOwners)]),
     ...(objects === undefined
@@ -374,6 +409,12 @@ export async function gitSuperExecution(
           objects.directory,
           ...(objects.alternates ?? []).flatMap((path) => ["--alternate-object-directory", path]),
         ]),
+  ]
+  const gitArgs = [
+    ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
+    "super",
+    "--json",
+    ...objectArgs,
     ...argv,
   ]
   if (options.git !== undefined) {
@@ -393,23 +434,29 @@ export async function gitSuperExecution(
       return evidence.result
     }
   }
+  // No GitRunner here: run the launcher-frozen absolute binary directly (27098).
+  // `core.hooksPath` is re-homed from `-c` to GIT_CONFIG_* because the binary has
+  // no git in front of it to parse the prefix; its own git children honour it.
+  const source = options.env ?? options.gitOptions?.env ?? globalThis.process.env
+  const frozen = requireFrozenGitSuper(source, `git-super ${argv[0] ?? "command"}`)
+  const childEnv = withGitConfig(
+    gitEnvironment(source, options.gitOptions?.objects),
+    options.hooksPath === undefined ? [] : [`core.hooksPath=${options.hooksPath}`],
+  )
   const owned = options.process === undefined
-  const runner =
-    options.process ??
-    createProcess({ cwd, env: gitEnvironment(options.env ?? globalThis.process.env, options.gitOptions?.objects) })
+  const runner = options.process ?? createProcess({ cwd, env: childEnv })
   const invocation = {
-    args: Object.freeze(gitArgs),
+    args: Object.freeze(["--json", ...objectArgs, ...argv]),
     cwd,
-    selection: { executable: "git", contract: "native", scope: "default", origin: "native git" } as const,
+    selection: {
+      executable: frozen.bin,
+      contract: "native",
+      scope: "default",
+      origin: "frozen git-super@" + frozen.sha.slice(0, 12),
+    } as const,
   }
   try {
-    const evidence = await invokeGit(
-      runner,
-      invocation,
-      options.gitOptions ?? {},
-      gitEnvironment(options.env ?? options.gitOptions?.env ?? globalThis.process.env, options.gitOptions?.objects),
-      undefined,
-    )
+    const evidence = await invokeGit(runner, invocation, options.gitOptions ?? {}, childEnv, undefined)
     const published = publishGitInvocation(options.gitOptions, evidence, true)
     if (published.failure !== undefined) {
       throw new Error(`git-super ${argv[0] ?? "command"} did not settle normally: ${published.failure}`)

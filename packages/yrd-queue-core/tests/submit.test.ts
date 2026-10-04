@@ -32,6 +32,7 @@ import {
 } from "../src/index.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runnerFor } from "../src/git.ts"
+import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -653,6 +654,32 @@ describe("event submit", () => {
     await expect(issueOf(w.git, "task/conflict", head, w.target)).rejects.toThrow(`fix trailer at ${head}`)
   })
 
+  /**
+   * @failure A Refs trailer linking a follow-up issue refuses the whole branch as
+   *          conflicting bindings, and the refusal named neither the trailer that
+   *          binds nor the line that keeps the link without binding it (27300).
+   * @level   l2 (real git history through issueOf)
+   * @consumer a submitter who links a follow-up issue beside the issue being submitted
+   */
+  it.each(["Refs", "Resolves"])(
+    "conflicting issue bindings names the %s trailer and the Follow-up: form that does not bind (27300)",
+    async (key) => {
+      const w = await world()
+      await branchWithCommit(w, "task/conflict", "change.txt")
+      await w.git(["checkout", "--quiet", "task/conflict"])
+      await w.git(["commit", "--quiet", "--allow-empty", "-m", "first\n\nRefs: @ag/hab/25488-first"])
+      await w.git(["commit", "--quiet", "--allow-empty", "-m", `second\n\n${key}: @ag/hab/25489-follow-up`])
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      const error = await issueOf(w.git, "task/conflict", head, w.target).then(
+        () => new Error("issueOf resolved despite conflicting issue bindings"),
+        (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause))),
+      )
+      expect(error.message).toContain(`fix trailer at ${head}`)
+      expect(error.message).toContain(`${key} trailer`)
+      expect(error.message).toContain("Follow-up: @ag/hab/25489-follow-up")
+    },
+  )
+
   it("normalizes issue reference forms (25719)", () => {
     expect(normalizeIssueReference("/hh/pm/@ag/hab/25488-foo.md")).toBe("@ag/hab/25488-foo")
     expect(normalizeIssueReference("./@ag/hab/25488-foo.md")).toBe("@ag/hab/25488-foo")
@@ -1078,10 +1105,11 @@ describe("event submit", () => {
     const targetHead = (await w.git(["rev-parse", "refs/heads/main"])).trim()
     await using real = createProcess({ cwd: w.work })
     const recordedArgvs: (readonly string[])[] = []
+    const executable = join(gitSuperBin, "git-super")
     const recording: Process = {
       ...real,
       async run(request) {
-        if (request.argv.includes("super") && request.argv.includes("merge")) {
+        if (request.argv[0] === executable && request.argv.includes("merge")) {
           recordedArgvs.push(request.argv)
         }
         return real.run(request)
@@ -1106,10 +1134,9 @@ describe("event submit", () => {
       rmSync(scratch, { recursive: true, force: true })
     }
     expect(recordedArgvs).toEqual([
-      ["git", "super", "--json", "merge", head, "-m", "verify candidate with noFetch", "--no-fetch"],
+      [executable, "--json", "merge", head, "-m", "verify candidate with noFetch", "--no-fetch"],
       [
-        "git",
-        "super",
+        executable,
         "--json",
         "merge",
         head,

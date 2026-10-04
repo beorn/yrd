@@ -252,7 +252,9 @@ async function planQuarantine(options: Options): Promise<{ plan: AdoptionPlan; s
   const ops = await readEventOps(store, git, options.queue, targetHead)
   const prefix = sourcePrefix(options.queue)
   const [sources, targets] = await Promise.all([
-    chainsUnder(prefix, store),
+    // `classify` inspects historical events, so the default 50 events per chain would be
+    // unsafe here: read every quarantine chain to its root (27354).
+    chainsUnder(prefix, { ...store, complete: true }),
     listRefs(`${queueRefPrefix(options.queue)}/changes/`, store),
   ])
   if (sources.size === 0) throw new Error(`${options.remote}: no quarantine refs under ${prefix}`)

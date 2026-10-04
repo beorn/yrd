@@ -175,6 +175,7 @@ describe("yrd env open prepares the retained environment", () => {
       const run = await command(w.work, [process.execPath, cli, "env", "open", selected, "--json"], {
         ...process.env,
         PATH: bin,
+        YRD_GIT_SUPER_BIN: join(bin, "git-super"),
       })
       if (mode === "plain") {
         expect(run, run.stderr).toMatchObject({ exit: 0 })

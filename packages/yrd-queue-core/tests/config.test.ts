@@ -49,6 +49,7 @@ describe("the queue declaration grammar", () => {
         "derive: bun tools/derive.ts",
         "teardown: bun run clean",
         "archive-after: never",
+        "revert-guard: refuse",
         "ignore: [draft/*, 'scratch/**']",
         "checks:",
         "  - verify:",
@@ -115,6 +116,7 @@ describe("the queue declaration grammar", () => {
       ],
       setup: "bun install --frozen-lockfile",
       derive: "bun tools/derive.ts",
+      revertGuard: "refuse",
       target: TARGET,
       teardown: "bun run clean",
     })
@@ -125,6 +127,7 @@ describe("the queue declaration grammar", () => {
       health: { declared: false, stallAfterMs: 45 * 60_000 },
       ignore: [],
       notify: [],
+      revertGuard: "observe",
       setup: undefined,
       target: TARGET,
       teardown: undefined,
@@ -171,6 +174,24 @@ describe("the queue declaration grammar", () => {
       /yrd-health-stall-after-below-floor: \.yrd\.yml health\.stallAfter 5m is below the round budget of 10m/u,
     ],
     ["scalar ignore", "ignore: draft/*\n", /yrd-ignore-pattern-invalid: \.yrd\.yml ignore: must be a list/u],
+    // 27363 (@cto 32105469): revert-guard is a SCALAR top-level key; refuse is
+    // the one accepted word and absent means observe. A mapping, a boolean, or
+    // any other word refuses loud with the known list.
+    [
+      "an explicit observe",
+      "revert-guard: observe\n",
+      /yrd-revert-guard-invalid: \.yrd\.yml revert-guard: the only accepted value is refuse; received "observe"/u,
+    ],
+    [
+      "a boolean revert-guard",
+      "revert-guard: true\n",
+      /yrd-revert-guard-invalid: \.yrd\.yml revert-guard: the only accepted value is refuse; received true/u,
+    ],
+    [
+      "a mapping revert-guard",
+      "revert-guard:\n  mode: refuse\n",
+      /yrd-revert-guard-invalid: \.yrd\.yml revert-guard: the only accepted value is refuse/u,
+    ],
     ["empty pattern", "ignore: ['']\n", /yrd-ignore-pattern-invalid: \.yrd\.yml ignore entry 0: pattern is empty/u],
     [
       "negated pattern",
@@ -189,6 +210,11 @@ describe("the queue declaration grammar", () => {
     ],
   ] as const)("refuses %s", (_name, text, problem) => {
     expect(() => parseConfig(text, SOURCE)).toThrow(problem)
+  })
+
+  it("reads the scalar revert-guard and defaults to observe when absent", () => {
+    expect(parseConfig("revert-guard: refuse\n", SOURCE).revertGuard).toBe("refuse")
+    expect(parseConfig("{}\n", SOURCE).revertGuard).toBe("observe")
   })
 
   // 27187: a read that never RUNS the declaration (submit, list) hears the names of

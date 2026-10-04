@@ -10,7 +10,7 @@ import { createMemBackend } from "gitomic/mem"
 import { Conflict, open } from "gitomic"
 import type { GitomicBackend } from "gitomic"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import { readEventChains } from "../src/event-read.ts"
+import { readEventChain, readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
 import { classifyQueueRef, pauseRef, runIndexRef } from "../src/refs.ts"
 import { activateRunIndex, lookupRunIndex } from "../src/run-index.ts"
@@ -372,6 +372,41 @@ describe("ADR-0016 event fold", () => {
     )
     expect(evolve(opened, migrated).reason).toBe("unrecorded")
     expect(() => evolve(opened, event("cancelled", B, [["Reason", "unrecorded"]]))).toThrow(/cancelled needs Reason/)
+  })
+
+  it("accepts a reverted-paths admission-warning and refuses an unknown Warning-Kind (27363)", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const reverted = evolve(
+      opened,
+      event(
+        "admission-warning",
+        B,
+        [
+          ["Commit", A],
+          ["Reason", "km: 9 reverted path(s) (coverage complete)"],
+          ["Warning-Kind", "reverted-paths"],
+        ],
+        [A],
+      ),
+    )
+    expect(reverted.diagnostic).toMatch(/admission reverted paths/u)
+
+    // An unknown kind is still refused BY NAME (a throw, not a diagnostic).
+    expect(() =>
+      evolve(
+        opened,
+        event(
+          "admission-warning",
+          B,
+          [
+            ["Commit", A],
+            ["Reason", "x"],
+            ["Warning-Kind", "banana"],
+          ],
+          [A],
+        ),
+      ),
+    ).toThrow(/unknown Warning-Kind: banana/u)
   })
 
   it("keeps the approved change-event vocabulary exact", () => {
@@ -1277,6 +1312,79 @@ describe("the queue-format boundary", () => {
     })
     expect((await readStatus(location, "lab", "task/42")).status).toBe("merged")
     expect(await target.head()).toBe(composed)
+  })
+
+  it("appends a reverted-paths admission warning and keeps its Warning-Kind through appendChangeEvent (27363)", async () => {
+    const { store, location } = remoteMemStore("yrd-event-reverted-paths")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const queueTip = await seedEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/42" })
+    const head = (await branch.transact(async (map) => map.set("work.txt", "one"), "work")).oid
+    const ref = changesRef("lab", "task/42")
+    const chain = await openEvents({ ...store, ref })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      { expect: null },
+    )
+    if (opened.head === null) throw new Error("fixture opened event has no tip")
+    const warning = await appendChangeEvent(location, "lab", "task/42", opened.head, {
+      type: "admission-warning",
+      at: new Date("2026-09-22T14:02:00.000Z"),
+      commit: head,
+      reason:
+        '1 reverted/swallowed path(s): child/a.txt; {"count":1,"coverage":"complete","paths":["child/a.txt"],"swallowed":[]}',
+      warningKind: "reverted-paths",
+    })
+    const stored = (await chain.events()).find((row) => row.id === warning)
+    // appendDecision builds the event from ChangeWrite; a dropped Warning-Kind would
+    // silently read as "could not judge" instead of the revert detector's finding.
+    expect(stored).toMatchObject({ type: "admission-warning" })
+    expect(stored?.props.find(([key]) => key === "Warning-Kind")?.[1]).toBe("reverted-paths")
+    await expect(
+      appendChangeEvent(location, "lab", "task/42", warning, {
+        type: "admission-warning",
+        at: new Date("2026-09-22T14:03:00.000Z"),
+        commit: head,
+        reason: "bad kind",
+        warningKind: "not-a-kind" as never,
+      }),
+    ).rejects.toThrow(/Warning-Kind/)
+  })
+
+  it("folds the reverted-paths admission kind and keeps folding an old-shape record (27363)", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    // 27363: the revert detector writes this kind. A reader that predates it must
+    // fold the record, not refuse it as an unknown Warning-Kind.
+    const reverted = evolve(
+      opened,
+      event(
+        "admission-warning",
+        B,
+        [
+          ["Commit", A],
+          ["Reason", "1 reverted/swallowed path(s): child/a.txt"],
+          ["Warning-Kind", "reverted-paths"],
+        ],
+        [A],
+      ),
+    )
+    expect(reverted.diagnostic).toContain("admission reverted paths")
+
+    // Old shape, unchanged: an admission warning with no Warning-Kind still folds.
+    const old = evolve(
+      opened,
+      event(
+        "admission-warning",
+        B,
+        [
+          ["Commit", A],
+          ["Reason", "no kind on the old shape"],
+        ],
+        [A],
+      ),
+    )
+    expect(old.diagnostic).toContain("admission could not judge")
   })
 
   it("refuses a stuck event if a queue resume raced its causal queue tip", async () => {
@@ -2364,6 +2472,24 @@ describe("the queue-format boundary", () => {
     expect(listed.get(ref)?.[0]?.id).toBe(first)
   })
 
+  it("reads a change chain beyond one page from a fixed acquired tip", async () => {
+    const { store, location } = remoteMemStore("yrd-long-fixed-tip")
+    const branch = "task/long-tip"
+    const ref = changesRef("lab", branch)
+    const chain = await openEvents({ ...store, ref })
+    const written = await chain.append(
+      Array.from({ length: 1025 }, () => input("marker")),
+      { expect: null },
+    )
+    const first = written.events[0]?.id
+    const tip = await chain.head()
+    if (first === undefined || tip === null) throw new Error("fixture did not write the chain")
+    const read = await readEventChain(chain, tip)
+    expect(read).toHaveLength(1025)
+    expect(read[0]?.id).toBe(first)
+    expect(read.at(-1)?.id).toBe(tip)
+  })
+
   it("omits event-chain pressure when no write cap remains, and succeeds on 1025-event chains (#26760)", async () => {
     const { store, location } = remoteMemStore("yrd-chain-over-1024")
     const target = await open({ ...store, ref: "refs/heads/lab" })
@@ -2510,5 +2636,88 @@ describe("the queue-format boundary", () => {
     await queue.append([{ type: "created" }], { expect: null })
     expect(await queueFormat(location, "lab")).toBe("event")
     await expect(listChanges(location, "lab")).rejects.toThrow(/created.*Commit/)
+  })
+})
+
+describe("a cancellation names its actor and its coordination recipient (27262)", () => {
+  const at = new Date("2026-10-03T12:00:00.000Z")
+
+  it("writes Recipient: only on cancelled, beside the actor in By:", () => {
+    const cancelled = changeInput("cancelled", {
+      queueTip: A,
+      at,
+      commit: B,
+      by: "@dev/actor",
+      recipient: "@dev/recipient",
+      reason: "withdrawn",
+    })
+    expect(cancelled.props).toContainEqual(["By", "@dev/actor"])
+    expect(cancelled.props).toContainEqual(["Recipient", "@dev/recipient"])
+  })
+
+  it("refuses an empty Recipient: at write and at replay", () => {
+    expect(() =>
+      changeInput("cancelled", { queueTip: A, at, commit: B, by: "@dev/actor", recipient: "   ", reason: "withdrawn" }),
+    ).toThrow(/Recipient: cannot be empty/)
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    expect(() =>
+      evolve(
+        opened,
+        event("cancelled", B, [
+          ["Reason", "withdrawn"],
+          ["Recipient", "  "],
+        ]),
+      ),
+    ).toThrow(/empty Recipient/)
+  })
+
+  it("refuses Recipient: on any event but cancelled, at write and at replay", () => {
+    expect(() =>
+      changeInput("opened", { queueTip: A, at, commit: B, by: "@dev/actor", recipient: "@dev/recipient" }),
+    ).toThrow(/Recipient: belongs on cancelled/)
+    expect(() =>
+      evolve(
+        initial,
+        event(
+          "opened",
+          A,
+          [
+            ["Commit", A],
+            ["Recipient", "@dev/recipient"],
+          ],
+          [A],
+        ),
+      ),
+    ).toThrow(/carries Recipient: on opened/)
+  })
+
+  it("refuses a repeated Recipient: at replay", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    expect(() =>
+      evolve(
+        opened,
+        event("cancelled", B, [
+          ["Reason", "withdrawn"],
+          ["Recipient", "@dev/one"],
+          ["Recipient", "@dev/two"],
+        ]),
+      ),
+    ).toThrow(/repeats Recipient:/)
+  })
+
+  it("accepts one seat as both actor and recipient, and accepts an absent Recipient:", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const same = evolve(
+      opened,
+      event("cancelled", B, [
+        ["Reason", "withdrawn"],
+        ["By", "@dev/same"],
+        ["Recipient", "@dev/same"],
+      ]),
+    )
+    expect(same.status).toBe("cancelled")
+    const absent = evolve(opened, event("cancelled", B, [["Reason", "resubmitted"]]))
+    expect(absent.status).toBe("cancelled")
+    expect(absent.reason).toBe("resubmitted")
   })
 })

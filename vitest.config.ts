@@ -1,7 +1,9 @@
 import { cpus } from "node:os"
 import { defineConfig } from "vitest/config"
 import { pinYrdTestStateHome } from "./tests/support/state-home.ts"
+import { gitSuperBin, gitSuperSha } from "./tests/support/git-super-bin.ts"
 import { resolveVitestMaxWorkers } from "./vitest-workers.ts"
+import { join } from "node:path"
 
 // Before any worker: XDG_STATE_HOME and the bun install cache point at a
 // throwaway root (25256), so a fixture that sets no yrd.workdir cannot send its
@@ -14,6 +16,12 @@ pinYrdTestStateHome()
 export default defineConfig({
   test: {
     include: ["packages/*/tests/**/*.test.{ts,tsx}", "tests/**/*.test.{ts,tsx}"],
+    // 27098: the queue runs the git-super it froze to its physical landing root,
+    // never an ambient `git super`. These tests compose through that same binary.
+    env: {
+      YRD_GIT_SUPER_BIN: join(gitSuperBin, "git-super"),
+      YRD_GIT_SUPER_SHA: gitSuperSha,
+    },
     // Removes the pinned state root after the run (the pin itself is above).
     globalSetup: ["./tests/support/state-home.ts"],
     // Capped by default, exactly like the root, km and ag configs; the host is

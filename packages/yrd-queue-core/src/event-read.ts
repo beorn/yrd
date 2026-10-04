@@ -1,47 +1,26 @@
 /** Yrd's one policy for reading Gitomic event chains. */
 import { chainsUnder, type Event, type Oid, openEvents } from "./git.ts"
 
+/** The wave size a complete read pages at, one git process per wave. */
 export const EVENT_READ_LIMIT = 1024
 
 type Chain = Awaited<ReturnType<typeof openEvents>>
-type ChainStore = Omit<Parameters<typeof chainsUnder>[1], "limit">
-
-/** Assemble chronological pages until the first event proves genesis was reached. */
-async function completeChain(chain: Chain, recent: readonly Event[], label: string): Promise<Event[]> {
-  let history = [...recent]
-  const seen = new Set<string>()
-  while (history[0]?.parent !== null && history.length > 0) {
-    const cursor = history[0]?.parent
-    if (cursor === undefined || seen.has(cursor)) throw new Error(`${label}: event paging did not advance at ${cursor}`)
-    seen.add(cursor)
-    const older = await chain.events({ at: cursor, limit: EVENT_READ_LIMIT })
-    if (older.length === 0 || older.at(-1)?.id !== cursor) {
-      throw new Error(`${label}: event paging could not read parent ${cursor}`)
-    }
-    history = [...older, ...history]
-  }
-  return history
-}
+type ChainStore = Omit<Parameters<typeof chainsUnder>[1], "limit" | "complete">
 
 /** Read a complete chain from one fixed tip, including events older than one page. */
 export async function readEventChain(chain: Chain, acquiredTip?: Oid): Promise<Event[]> {
   const tip = acquiredTip ?? (await chain.head())
   if (tip === null) return []
-  const recent = await chain.events({ at: tip, limit: EVENT_READ_LIMIT })
-  if (recent.length === 0 || recent.at(-1)?.id !== tip) {
+  const events = await chain.events({ at: tip, limit: EVENT_READ_LIMIT, complete: true })
+  if (events.length === 0 || events.at(-1)?.id !== tip) {
     throw new Error(`event chain at ${tip}: tip was not readable`)
   }
-  return completeChain(chain, recent, `event chain at ${tip}`)
+  return events
 }
 
-/** Keep Gitomic's batched first page, then page only chains that need history. */
+/** Every chain under a prefix, each read to its root in the one shared complete walk. */
 export async function readEventChains(prefix: string, store: ChainStore): Promise<ReadonlyMap<string, Event[]>> {
-  const recent = await chainsUnder(prefix, { ...store, limit: EVENT_READ_LIMIT })
-  const complete = new Map<string, Event[]>()
-  for (const [ref, page] of recent) {
-    complete.set(ref, await completeChain(await openEvents({ ...store, ref }), page, `${ref} in ${store.repo}`))
-  }
-  return complete
+  return chainsUnder(prefix, { ...store, limit: EVENT_READ_LIMIT, complete: true })
 }
 
 /** Resolve a receipt from its exact commit, independent of the chain's length. */

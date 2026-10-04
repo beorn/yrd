@@ -53,13 +53,22 @@ import {
 } from "./events.ts"
 import { classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
 import { verifyCandidate, type Verification, type SettledGitlink } from "./verifying.ts"
+import { revertedPathsFinding } from "./revert-guard.ts"
 import { gitlinksAt } from "./reference.ts"
 import { withRemoteSeam } from "./remote-calls.ts"
 
 /** Outward submission evidence observes the candidate rather than relabelling the producer's claims. */
 export type SubmitGitlink = Readonly<
   Omit<SettledGitlink, "state"> &
-    ({ state: "not-run" } | { state: Exclude<SettledGitlink["state"], "not-run">; recorded: string })
+    (
+      | { state: "not-run" }
+      | {
+          state: Exclude<SettledGitlink["state"], "not-run">
+          recorded: string
+          authorHead: string
+          landingPin: string
+        }
+    )
 >
 
 export type SubmitVerification =
@@ -87,7 +96,9 @@ async function submissionReceipt(git: Git, verifying: Verification): Promise<Sub
         `submission receipt ${row.path} state ${row.state}: producer ${expected}, candidate tree ${recorded ?? "absent"} at ${verifying.candidate}`,
       )
     }
-    return { ...row, recorded }
+    const authorHead = row.state === "merged" && row.composition?.pin ? row.composition.pin : row.from
+    const landingPin = row.state === "raised" ? row.to : row.from
+    return { ...row, recorded, authorHead, landingPin }
   })
   return { ...verifying, gitlinks }
 }
@@ -145,6 +156,17 @@ export type Submitted = Readonly<{
   admission: AdmissionOutcome
   /** Present only when this submit appended a new warning event; its caller sends one notification. */
   admissionWarning?: Readonly<{ event: string; reason: string; at: string }>
+  /**
+   * Present only when this submit appended a `reverted-paths` warning (#27363): the compose put a
+   * target advance back, or could not prove it did not. Durable in the change chain either way.
+   */
+  revertWarning?: Readonly<{
+    event: string
+    reason: string
+    count: number
+    coverage: "complete" | "incomplete"
+    at: string
+  }>
   /** The stop the line stood under when this was accepted: the change waits behind it. */
   stop?: PauseRecord
 }>
@@ -797,27 +819,60 @@ async function submitEvent(
         : undefined
     const warningKind = inspected.admission.kind === "warn" ? "policy-warning" : undefined
     const warningAt = new Date()
-    const warning =
-      warningReason !== undefined
-        ? changeInput("admission-warning", {
-            queueTip: ops.queue.tip,
-            at: warningAt,
-            commit: head,
-            reason: warningReason,
-            ...(warningKind === undefined ? {} : { warningKind }),
-            title: `admission ${warningKind === undefined ? "could not judge" : "policy warning"} ${request.branch}@${head.slice(0, 12)}`,
-          })
-        : undefined
+    // #27363: the compose revert detector reports through its OWN durable admission-warning,
+    // beside the admission policy warning and never folded into it.
+    const revertFinding = revertedPathsFinding(
+      inspected.verifying.state === "verified" ? inspected.verifying.reverted : undefined,
+    )
+    type PendingWarning = Readonly<{
+      input: ReturnType<typeof changeInput>
+      kind: "policy-warning" | "reverted-paths" | undefined
+      reason: string
+    }>
+    const warningInputs: readonly PendingWarning[] = [
+      ...(warningReason === undefined
+        ? []
+        : [
+            {
+              input: changeInput("admission-warning", {
+                at: warningAt,
+                commit: head,
+                queueTip: ops.queue.tip,
+                reason: warningReason,
+                ...(warningKind === undefined ? {} : { warningKind }),
+                title: `admission ${warningKind === undefined ? "could not judge" : "policy warning"} ${request.branch}@${head.slice(0, 12)}`,
+              }),
+              kind: warningKind as PendingWarning["kind"],
+              reason: warningReason,
+            },
+          ]),
+      ...(revertFinding === undefined
+        ? []
+        : [
+            {
+              input: changeInput("admission-warning", {
+                at: warningAt,
+                commit: head,
+                queueTip: ops.queue.tip,
+                reason: revertFinding.reason,
+                title: `admission reverted paths ${request.branch}@${head.slice(0, 12)}`,
+                warningKind: "reverted-paths" as const,
+              }),
+              kind: "reverted-paths" as const,
+              reason: revertFinding.reason,
+            },
+          ]),
+    ]
     let retry = false
     let retryOpened: string | undefined
-    let warningWritten = false
+    let written: readonly PendingWarning[] = []
     // Lease the authoritative queue tip beside this change. A new maintenance
     // event between the read and publish makes the whole atomic push fail.
     let result
     try {
       result = await chain.transact(
         (events) => {
-          warningWritten = false
+          written = []
           let current
           try {
             current = events.length === 0 ? initial : project(events, ref, root)
@@ -836,21 +891,22 @@ async function submitEvent(
               current.status === "stuck")
           if (retry) {
             retryOpened = events.findLast((event) => event.type === "opened")?.id
-            if (warning === undefined) return []
+            if (warningInputs.length === 0) return []
             const currentSegment = events.slice(events.findLastIndex((event) => event.type === "opened"))
-            const repeated = currentSegment.some(
-              (event) =>
-                event.type === "admission-warning" &&
-                event.props.some(([key, value]) => key === "Commit" && value === head) &&
-                event.props.some(([key, value]) => key === "Reason" && value === warningReason) &&
-                event.props.find(([key]) => key === "Warning-Kind")?.[1] === warningKind,
+            written = warningInputs.filter(
+              (warning) =>
+                !currentSegment.some(
+                  (event) =>
+                    event.type === "admission-warning" &&
+                    event.props.some(([key, value]) => key === "Commit" && value === head) &&
+                    event.props.some(([key, value]) => key === "Reason" && value === warning.reason) &&
+                    event.props.find(([key]) => key === "Warning-Kind")?.[1] === warning.kind,
+                ),
             )
-            if (repeated) return []
-            warningWritten = true
-            return [warning]
+            return written.map((warning) => warning.input)
           }
-          warningWritten = warning !== undefined
-          return [...decide(events, input), ...(warning === undefined ? [] : [warning])]
+          written = warningInputs
+          return [...decide(events, input), ...warningInputs.map((warning) => warning.input)]
         },
         `submit ${request.branch}`,
         {
@@ -875,12 +931,17 @@ async function submitEvent(
     }
     const opened = retryOpened ?? result.events.findLast((event) => event.type === "opened")?.id
     if (opened === undefined) throw new Error(`${ref} in ${root}: submit published no opened event`)
-    const warningEvent = warningWritten
-      ? result.events.findLast((event) => event.type === "admission-warning")?.id
-      : undefined
-    if (warningWritten && warningEvent === undefined) {
-      throw new Error(`${ref} in ${root}: submit published no admission-warning event`)
-    }
+    const appended = result.events.filter(
+      (event) =>
+        event.type === "admission-warning" && event.props.some(([key, value]) => key === "Commit" && value === head),
+    )
+    const warningEvents = written.map((warning, index) => {
+      const event = appended[appended.length - written.length + index]?.id
+      if (event === undefined) throw new Error(`${ref} in ${root}: submit published no admission-warning event`)
+      return { event, kind: warning.kind, reason: warning.reason }
+    })
+    const policyWarning = warningEvents.find((warning) => warning.kind !== "reverted-paths")
+    const revertWarning = warningEvents.find((warning) => warning.kind === "reverted-paths")
     if (retry) {
       const latest = await readEventOps(store, git, request.target.branch, inspected.targetHead)
       refuseMaintenance(latest.stop, remote, request.target.branch, published)
@@ -894,12 +955,23 @@ async function submitEvent(
       published,
       verifying: inspected.verifying,
       admission: inspected.admission,
-      ...(warningEvent !== undefined && warningReason !== undefined
+      ...(policyWarning !== undefined
         ? {
             admissionWarning: {
-              event: warningEvent,
-              reason: warningReason,
+              event: policyWarning.event,
+              reason: policyWarning.reason,
               at: warningAt.toISOString(),
+            },
+          }
+        : {}),
+      ...(revertWarning !== undefined
+        ? {
+            revertWarning: {
+              at: warningAt.toISOString(),
+              coverage: revertFinding?.coverage ?? "complete",
+              count: revertFinding?.count ?? 0,
+              event: revertWarning.event,
+              reason: revertWarning.reason,
             },
           }
         : {}),
@@ -944,7 +1016,7 @@ export async function issueOf(
       "--reverse",
       "--topo-order",
       "-z",
-      "--format=%H%x00%(trailers:key=Resolves,key=Refs,valueonly,separator=%x1e)%x00%B",
+      "--format=%H%x00%(trailers:key=Resolves,key=Refs,valueonly,separator=%x1e)%x00%B%x00%(trailers:key=Resolves,key=Refs,separator=%x1e)",
       `${base}..${head}`,
       `^${targetHead}`,
       "--",
@@ -979,35 +1051,47 @@ export async function issueOf(
   if (records.pop() !== "") {
     throw new Error(`incomplete issue binding history for ${branch} at ${head} against target ${targetHead}`)
   }
-  for (let index = 0; index < records.length; index += 3) {
+  for (let index = 0; index < records.length; index += 4) {
     const commit = records[index]
     const values = records[index + 1]
     const body = records[index + 2]
-    if (commit === undefined || values === undefined || body === undefined) {
+    const keyed = records[index + 3]
+    if (commit === undefined || values === undefined || body === undefined || keyed === undefined) {
       throw new Error(`incomplete issue binding history for ${branch} at ${head} against target ${targetHead}`)
     }
-    const candidateIssues: string[] = []
+    // The second trailer block keeps each key beside its value, so a refusal can
+    // name the trailer that bound the second issue instead of guessing (27300).
+    const trailerNames = new Map<string, string>()
+    for (const entry of keyed.split("\u001e")) {
+      const named = /^[ \t]*([A-Za-z][A-Za-z-]*)[ \t]*:[ \t]*(\S.*)$/u.exec(entry)
+      if (named !== null && named[1] !== undefined && named[2] !== undefined) {
+        trailerNames.set(named[2].trim(), named[1])
+      }
+    }
+    const candidates: { issue: string; trailer: string | undefined }[] = []
+    const consider = (issue: string, trailer: string | undefined): void => {
+      if (issue !== "" && !candidates.some((candidate) => candidate.issue === issue)) {
+        candidates.push({ issue, trailer })
+      }
+    }
     for (const value of values.split("\u001e")) {
       const issue = value.trim()
-      if (issue !== "" && !candidateIssues.includes(issue)) {
-        candidateIssues.push(issue)
-      }
+      consider(issue, trailerNames.get(issue))
     }
     // Also parse trailer-shaped lines like "Refs <issue>" or "Refs: <issue>" or "Resolves <issue>"
     // from commit body to accept trailers without colon (27041).
     // Never inspect the subject line, and require a single-token issue value to avoid binding prose lines.
     const nonSubjectLines = body.split(/\r?\n/).slice(1)
-    const trailerRegex = /^[ \t]*(?:refs|resolves)[ \t]*:?[ \t]+(\S+)[ \t]*$/i
+    const trailerRegex = /^[ \t]*(refs|resolves)[ \t]*:?[ \t]+(\S+)[ \t]*$/i
     for (const line of nonSubjectLines) {
       const match = trailerRegex.exec(line)
       if (match !== null) {
-        const issue = match[1]?.trim() ?? ""
-        if (issue !== "" && !candidateIssues.includes(issue)) {
-          candidateIssues.push(issue)
-        }
+        const keyword = match[1]?.toLowerCase() ?? ""
+        consider(match[2]?.trim() ?? "", keyword === "refs" ? "Refs" : "Resolves")
       }
     }
-    for (const issue of candidateIssues) {
+    for (const candidate of candidates) {
+      const issue = candidate.issue
       if (/[\u0000-\u001f\u007f]/u.test(issue)) {
         throw new Error(
           `invalid issue binding in ${branch} at ${commit}: expected a single-line value without control characters`,
@@ -1016,8 +1100,12 @@ export async function issueOf(
       const canonicalIssue = await canonical(issue)
       if (binding === undefined) binding = { issue: canonicalIssue, source: "binding", commit }
       else if (binding.issue !== canonicalIssue) {
+        const trailer = candidate.trailer ?? "Refs/Resolves"
         throw new Error(
-          `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${canonicalIssue} at ${commit}; fix trailer at ${commit}`,
+          `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${canonicalIssue} at ${commit}; ` +
+            `the second binding is a ${trailer} trailer, and a Refs or Resolves trailer always binds; ` +
+            `keep a follow-up link without binding it with a "Follow-up: ${canonicalIssue}" line, ` +
+            `then fix trailer at ${commit}`,
         )
       }
     }
