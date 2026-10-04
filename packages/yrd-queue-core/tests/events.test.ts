@@ -1314,6 +1314,44 @@ describe("the queue-format boundary", () => {
     expect(await target.head()).toBe(composed)
   })
 
+  it("appends a reverted-paths admission warning and keeps its Warning-Kind through appendChangeEvent (27363)", async () => {
+    const { store, location } = remoteMemStore("yrd-event-reverted-paths")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const targetCommit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    const queueTip = await seedEventQueue(location, "lab", targetCommit, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = await open({ ...store, ref: "refs/heads/task/42" })
+    const head = (await branch.transact(async (map) => map.set("work.txt", "one"), "work")).oid
+    const ref = changesRef("lab", "task/42")
+    const chain = await openEvents({ ...store, ref })
+    const opened = await chain.append(
+      [changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "@dev/2" })],
+      { expect: null },
+    )
+    if (opened.head === null) throw new Error("fixture opened event has no tip")
+    const warning = await appendChangeEvent(location, "lab", "task/42", opened.head, {
+      type: "admission-warning",
+      at: new Date("2026-09-22T14:02:00.000Z"),
+      commit: head,
+      reason:
+        '1 reverted/swallowed path(s): child/a.txt; {"count":1,"coverage":"complete","paths":["child/a.txt"],"swallowed":[]}',
+      warningKind: "reverted-paths",
+    })
+    const stored = (await chain.events()).find((row) => row.id === warning)
+    // appendDecision builds the event from ChangeWrite; a dropped Warning-Kind would
+    // silently read as "could not judge" instead of the revert detector's finding.
+    expect(stored).toMatchObject({ type: "admission-warning" })
+    expect(stored?.props.find(([key]) => key === "Warning-Kind")?.[1]).toBe("reverted-paths")
+    await expect(
+      appendChangeEvent(location, "lab", "task/42", warning, {
+        type: "admission-warning",
+        at: new Date("2026-09-22T14:03:00.000Z"),
+        commit: head,
+        reason: "bad kind",
+        warningKind: "not-a-kind" as never,
+      }),
+    ).rejects.toThrow(/Warning-Kind/)
+  })
+
   it("refuses a stuck event if a queue resume raced its causal queue tip", async () => {
     const { store, location, beforeNextPublish } = remoteMemStore("yrd-event-stuck-resume-race")
     const target = await open({ ...store, ref: "refs/heads/lab" })
