@@ -14,7 +14,14 @@ import {
   type ReferenceStore,
   type YrdQueueRunnerDeclaration,
 } from "@yrd/queue-core"
-import { hasHumanQueueBranch, parseQueueAddress, queueDirectory, queueRoot, type QueueAddress } from "./address.ts"
+import {
+  hasHumanQueueBranch,
+  legacyQueueDirectory,
+  parseQueueAddress,
+  queueDirectory,
+  queueRoot,
+  type QueueAddress,
+} from "./address.ts"
 import { repositoryHere } from "./declaration.ts"
 
 export type QueueLocation = Readonly<{
@@ -143,6 +150,15 @@ async function ensureOwnedClone(
 ): Promise<Readonly<{ repo: string; referenceStores: readonly ReferenceStore[] }>> {
   const repo = queueDirectory(root, address)
   if (!existsSync(repo)) {
+    // 27065: a legacy percent-escaped root beside an absent tilde root is a stopped-line cutover, never a
+    // silent second tree. Creating the new root here would leave two live queues for one address.
+    const legacy = legacyQueueDirectory(root, address)
+    if (existsSync(legacy)) {
+      throw new Error(
+        `queue root ${repo} is absent but the legacy ${legacy} exists; refusing to create a second queue root. ` +
+          `Move ${legacy} to ${queueRoot(root, address)} in one stopped-line cutover (27065), then retry ${address.canonical}`,
+      )
+    }
     mkdirSync(dirname(repo), { recursive: true })
     await gitIn(dirname(repo), undefined, selection, { env })([
       "clone",

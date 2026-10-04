@@ -188,15 +188,41 @@ export function parseRunAddress(operand: string): RunAddress {
   return Object.freeze({ canonical: `${formatQueueAddress(queue)}#${number}`, number, queue })
 }
 
-/** Physical paths encode the address separator: URL-based module loaders treat a literal # as a fragment. */
+/**
+ * The physical path uses a literal tilde as the address separator. A literal hash is a URL fragment, but a
+ * percent-escape is DECODED back to that hash by module loaders (Vitest, koffi, isomorphic-git, unstorage),
+ * which then cannot resolve the real directory (27065). A tilde is RFC 3986 unreserved, so no URL consumer
+ * decodes it, and Git refnames cannot contain it, so a queue component never carries one: the LAST literal
+ * tilde in the directory name is always the boundary. The canonical address, the encoded queue component
+ * and the Git ref namespace are unchanged.
+ */
 export function queueRoot(workdir: string, address: QueueAddress): string {
   const queue = encodeQueueComponent(address.queue)
-  if (address.kind === "remote") return join(workdir, address.host, `${address.path}%23${queue}`)
+  if (address.kind === "remote") return join(workdir, address.host, `${address.path}~${queue}`)
   const path = address.repository.startsWith(sep) ? address.repository.slice(sep.length) : address.repository
-  return join(workdir, "local", `${path}%23${queue}`)
+  return join(workdir, "local", `${path}~${queue}`)
 }
 
 /** The queue-owned clone. */
 export function queueDirectory(workdir: string, address: QueueAddress): string {
   return join(queueRoot(workdir, address), "repo")
+}
+
+/**
+ * The physical path the pre-27065 builder wrote: the same layout with a percent-escaped hash as the
+ * separator. It exists ONLY so the queue can refuse to create a second root beside a legacy one: a
+ * percent-escape is decoded back to a hash by URL-based module loaders, so nothing may read or write a
+ * queue here after the cutover (@cto 524fdc93, b7bbd050).
+ */
+export function legacyQueueDirectory(workdir: string, address: QueueAddress): string {
+  const queue = encodeQueueComponent(address.queue)
+  const root =
+    address.kind === "remote"
+      ? join(workdir, address.host, `${address.path}%23${queue}`)
+      : join(
+          workdir,
+          "local",
+          `${address.repository.startsWith(sep) ? address.repository.slice(sep.length) : address.repository}%23${queue}`,
+        )
+  return join(root, "repo")
 }
