@@ -54,7 +54,7 @@ describe("ownedQueueClone (hh 25626)", () => {
 
     const owned = await ownedQueueClone(clone, env)
 
-    expect(owned).toBe(join(state, "yrd", "github.com", "beorn", "hh-dev%23main", "repo"))
+    expect(owned).toBe(join(state, "yrd", "github.com", "beorn", "hh-dev~main", "repo"))
     // The same address and workdir the queue's own resolver answers (its reader path clones nothing).
     const location = await resolveQueueLocation(clone, undefined, env, "reader")
     expect(owned).toBe(join(location.workdir, "repo"))
@@ -66,7 +66,7 @@ describe("ownedQueueClone (hh 25626)", () => {
     git(clone, "config", "yrd.workdir", workdir)
 
     await expect(ownedQueueClone(clone, offlineEnv())).resolves.toBe(
-      join(workdir, "github.com", "beorn", "hh-dev%23main", "repo"),
+      join(workdir, "github.com", "beorn", "hh-dev~main", "repo"),
     )
   })
 

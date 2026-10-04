@@ -10,7 +10,7 @@ describe("workdirOf (25716 row 9)", () => {
     const env = { XDG_STATE_HOME: "/custom/state" }
     const workdir = await workdirOf(git, { address, env })
     expect(workdir).toBe(queueRoot("/custom/state/yrd", address))
-    expect(workdir).toBe(join("/custom/state/yrd", "github.com", "beorn", "hh%23main"))
+    expect(workdir).toBe(join("/custom/state/yrd", "github.com", "beorn", "hh~main"))
   })
 
   it("resolves address via originHead and remoteUrl when address is omitted", async () => {

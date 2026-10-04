@@ -1880,7 +1880,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       repo,
       "relative-state",
       "local",
-      `${join(dirname(repo), "remote.git").slice(1)}%23release%2F1.x`,
+      `${join(dirname(repo), "remote.git").slice(1)}~release%2F1.x`,
       "repo",
     )
     expect(existsSync(owned)).toBe(true)

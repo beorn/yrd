@@ -188,12 +188,19 @@ export function parseRunAddress(operand: string): RunAddress {
   return Object.freeze({ canonical: `${formatQueueAddress(queue)}#${number}`, number, queue })
 }
 
-/** Physical paths encode the address separator: URL-based module loaders treat a literal # as a fragment. */
+/**
+ * The physical path uses a literal tilde as the address separator. A literal hash is a URL fragment, but a
+ * percent-escape is DECODED back to that hash by module loaders (Vitest, koffi, isomorphic-git, unstorage),
+ * which then cannot resolve the real directory (27065). A tilde is RFC 3986 unreserved, so no URL consumer
+ * decodes it, and Git refnames cannot contain it, so a queue component never carries one: the LAST literal
+ * tilde in the directory name is always the boundary. The canonical address, the encoded queue component
+ * and the Git ref namespace are unchanged.
+ */
 export function queueRoot(workdir: string, address: QueueAddress): string {
   const queue = encodeQueueComponent(address.queue)
-  if (address.kind === "remote") return join(workdir, address.host, `${address.path}%23${queue}`)
+  if (address.kind === "remote") return join(workdir, address.host, `${address.path}~${queue}`)
   const path = address.repository.startsWith(sep) ? address.repository.slice(sep.length) : address.repository
-  return join(workdir, "local", `${path}%23${queue}`)
+  return join(workdir, "local", `${path}~${queue}`)
 }
 
 /** The queue-owned clone. */
