@@ -17,6 +17,7 @@ import {
 import {
   hasHumanQueueBranch,
   legacyQueueDirectory,
+  legacyQueueRoot,
   parseQueueAddress,
   queueDirectory,
   queueRoot,
@@ -156,7 +157,8 @@ async function ensureOwnedClone(
     if (existsSync(legacy)) {
       throw new Error(
         `queue root ${repo} is absent but the legacy ${legacy} exists; refusing to create a second queue root. ` +
-          `Move ${legacy} to ${queueRoot(root, address)} in one stopped-line cutover (27065), then retry ${address.canonical}`,
+          `Move ${legacyQueueRoot(root, address)} to ${queueRoot(root, address)} in one stopped-line cutover (27065), ` +
+          `then retry ${address.canonical}`,
       )
     }
     mkdirSync(dirname(repo), { recursive: true })

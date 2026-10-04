@@ -209,20 +209,23 @@ export function queueDirectory(workdir: string, address: QueueAddress): string {
 }
 
 /**
- * The physical path the pre-27065 builder wrote: the same layout with a percent-escaped hash as the
+ * The physical root the pre-27065 builder wrote: the same layout with a percent-escaped hash as the
  * separator. It exists ONLY so the queue can refuse to create a second root beside a legacy one: a
  * percent-escape is decoded back to a hash by URL-based module loaders, so nothing may read or write a
  * queue here after the cutover (@cto 524fdc93, b7bbd050).
  */
-export function legacyQueueDirectory(workdir: string, address: QueueAddress): string {
+export function legacyQueueRoot(workdir: string, address: QueueAddress): string {
   const queue = encodeQueueComponent(address.queue)
-  const root =
-    address.kind === "remote"
-      ? join(workdir, address.host, `${address.path}%23${queue}`)
-      : join(
-          workdir,
-          "local",
-          `${address.repository.startsWith(sep) ? address.repository.slice(sep.length) : address.repository}%23${queue}`,
-        )
-  return join(root, "repo")
+  return address.kind === "remote"
+    ? join(workdir, address.host, `${address.path}%23${queue}`)
+    : join(
+        workdir,
+        "local",
+        `${address.repository.startsWith(sep) ? address.repository.slice(sep.length) : address.repository}%23${queue}`,
+      )
+}
+
+/** The queue-owned clone the pre-27065 builder wrote. */
+export function legacyQueueDirectory(workdir: string, address: QueueAddress): string {
+  return join(legacyQueueRoot(workdir, address), "repo")
 }
