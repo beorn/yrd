@@ -27,9 +27,10 @@
  */
 
 import { transportFaultIn } from "./setup-transport.ts"
-import { accessSync, constants, existsSync } from "node:fs"
+import { accessSync, constants, existsSync, realpathSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { ensureCommitObject } from "git-super/objects"
+import type { PrivateGitProjection } from "git-super"
 import { GitExit, seamProcess, type Git } from "./git.ts"
 
 /** One store this run created, as the caller records it. */
@@ -75,7 +76,11 @@ export type PopulateReference = Readonly<{
   populated?: (store: ReferenceStore) => void
 }>
 
-export type ReferenceAcquisition = Readonly<{ path: string; sha: string }> &
+export type ReferenceAcquisition = Readonly<{
+  path: string
+  sha: string
+  objectOwner: NonNullable<PrivateGitProjection["objectOwners"]>[number]
+}> &
   (
     | Readonly<{ source: "present" }>
     | Readonly<{ source: "local"; localSource: string }>
@@ -227,10 +232,19 @@ export async function readComponentMain(
 
 export async function populateReferenceStores(options: PopulateReference): Promise<readonly ReferenceStore[]> {
   const root = resolve(options.repo)
+  const rootGit = options.gitIn(root)
+  const baseline = (await rootGit(["rev-parse", "--verify", `${options.commit ?? "HEAD"}^{commit}`])).trim()
+  const rootObjectOwner = await retainedOwner(rootGit, baseline, true)
+  options.acquired?.({
+    path: ".",
+    sha: baseline,
+    source: "present",
+    objectOwner: rootObjectOwner,
+  })
   const excluded = options.excludedSubmodules ?? []
   const created: ReferenceStore[] = []
   const levels: Array<Readonly<{ dir: string; prefix: string; commit: string }>> = [
-    { dir: root, prefix: "", commit: options.commit ?? "HEAD" },
+    { dir: root, prefix: "", commit: baseline },
   ]
   while (levels.length > 0) {
     const level = levels.shift()
@@ -344,15 +358,17 @@ export async function populateReferenceStores(options: PopulateReference): Promi
           await unresolved(`${store} still lacks ${sha} after one fetch from origin`)
         }
       }
+      const objectOwner = await retainedOwner(storeGit, sha)
       options.acquired?.(
         present
-          ? { path: named, sha, source: "present" }
+          ? { path: named, sha, source: "present", objectOwner }
           : local
-            ? { localSource, path: named, sha, source: "local" }
+            ? { localSource, path: named, sha, source: "local", objectOwner }
             : {
                 path: named,
                 sha,
                 source: "remote",
+                objectOwner,
                 ...(localSource === undefined || miss === undefined
                   ? {}
                   : { localMiss: { localSource, reason: miss } }),
@@ -362,6 +378,28 @@ export async function populateReferenceStores(options: PopulateReference): Promi
     }
   }
   return created
+}
+
+/** Preserve the selected repository's native common owner and exact prepared pin. */
+async function retainedOwner(
+  git: Git,
+  sha: string,
+  publish = false,
+): Promise<NonNullable<PrivateGitProjection["objectOwners"]>[number]> {
+  const gitDirectory = realpathSync((await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim())
+  const objects = realpathSync((await git(["rev-parse", "--path-format=absolute", "--git-path", "objects"])).trim())
+  if (objects !== join(gitDirectory, "objects")) {
+    throw new Error(
+      `reference preparation object store ${objects} does not belong to selected common owner ${gitDirectory}`,
+    )
+  }
+  const ref = pinRef(sha)
+  if (publish) await git(["update-ref", ref, sha])
+  const value = (await git(["rev-parse", "--verify", ref])).trim()
+  if (value !== sha || (await git(["cat-file", "-t", sha])).trim() !== "commit") {
+    throw new Error(`reference preparation pin ${ref} in ${gitDirectory} does not retain selected commit ${sha}`)
+  }
+  return Object.freeze({ objects, gitDirectory, retained: Object.freeze([Object.freeze({ ref, oid: sha })]) })
 }
 
 /** Missing/unreadable cache entries are misses; a broken repository or object is an error. */

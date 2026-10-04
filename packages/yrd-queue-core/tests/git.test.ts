@@ -27,7 +27,8 @@ import * as gitRunner from "../src/git.ts"
 import { openLog, readRunLog } from "../src/log.ts"
 import { gitSuperExecution, verifyCandidate } from "../src/verifying.ts"
 import { freshWorktree } from "../src/worktree.ts"
-import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
+import { gitSuperBin, gitSuperSha } from "../../../tests/support/git-super-bin.ts"
+import { YRD_GIT_SUPER_BIN, YRD_GIT_SUPER_SHA } from "../src/git-super-selection.ts"
 
 if (false) {
   // @ts-expect-error a production runner cannot omit its selected Git executable
@@ -70,6 +71,63 @@ function declareGit(root: string, value: string, file?: string): void {
 }
 
 describe("the git runner", () => {
+  // Exact host preparation pins must survive both runner and supervised CLI dispatch.
+  // Existing object-context reads do not carry or reject owner/ref evidence.
+  it("carries prepared owner pins through native and supervised merge dispatch", async () => {
+    const root = temporaryRoot("owner-pins")
+    const env = {
+      ...gitRunner.gitEnvironment(process.env),
+      PATH: `${dirname(gitSuperBin)}:${process.env.PATH}`,
+      [YRD_GIT_SUPER_BIN]: join(gitSuperBin, "git-super"),
+      [YRD_GIT_SUPER_SHA]: gitSuperSha,
+    }
+    const native = gitIn(root, undefined, undefined, { env })
+    await native(["init", "--quiet"])
+    await native(["config", "user.name", "fixture"])
+    await native(["config", "user.email", "fixture@yrd.test"])
+    await native(["commit", "--quiet", "--allow-empty", "-m", "baseline"])
+    const base = (await native(["rev-parse", "HEAD"])).trim()
+    writeFileSync(join(root, "feature.txt"), "host association\n")
+    await native(["add", "feature.txt"])
+    await native(["commit", "--quiet", "-m", "candidate"])
+    const feature = (await native(["rev-parse", "HEAD"])).trim()
+    await native(["checkout", "--quiet", "--detach", base])
+    const gitDirectory = (await native(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    const retained = [base, feature].map((oid) => ({ ref: `refs/yrd/pins/${oid}`, oid }))
+    for (const pin of retained) await native(["update-ref", pin.ref, pin.oid])
+    const objectOwners = [{ objects: join(gitDirectory, "objects"), gitDirectory, retained }]
+    const selected = gitIn(root, undefined, undefined, { env, objectOwners })
+    const captured = JSON.stringify(objectOwners)
+    retained[0]!.oid = feature
+    expect(JSON.stringify(selected.at(root).objectOwners)).toBe(captured)
+    const argv = ["merge", feature, "-m", "prepared merge", "--no-fetch", "--unbounded-local-main"]
+    const broken = JSON.parse(captured) as typeof objectOwners
+    broken[0]!.retained[0]!.oid = feature
+    const refused = await gitSuperExecution(
+      { git: gitIn(root, undefined, undefined, { env, objectOwners: broken }) },
+      root,
+      argv,
+    )
+    expect(refused.exitCode).not.toBe(0)
+    expect((await native(["rev-parse", "HEAD"])).trim()).toBe(base)
+    const direct = await gitSuperExecution({ git: selected }, root, argv)
+    expect(direct.exitCode, direct.stderr || direct.stdout).toBe(0)
+    await native(["checkout", "--quiet", "--detach", base])
+    await using supervised = createProcess({ cwd: root, env })
+    const supervisedRefusal = await gitSuperExecution(
+      { process: supervised, env, gitOptions: { objectOwners: broken } },
+      root,
+      argv,
+    )
+    expect(supervisedRefusal.exitCode).not.toBe(0)
+    expect((await native(["rev-parse", "HEAD"])).trim()).toBe(base)
+    const child = await gitSuperExecution(
+      { process: supervised, env, gitOptions: { objectOwners: selected.objectOwners } },
+      root,
+      argv,
+    )
+    expect(child.exitCode, child.stderr || child.stdout).toBe(0)
+  })
   // @failure: explicit public object selection is lost by descendants or Gitomic; ambient objects leak in.
   // @level l2; @consumer contained submit; @testonly none
   // Native blobs live outside either checkout, so executable/option identity alone cannot pass this row.
@@ -165,6 +223,10 @@ describe("the git runner", () => {
     await child(["commit", "--quiet", "-m", "public feature"])
     const feature = (await child(["rev-parse", "HEAD"])).trim()
     await child(["checkout", "--quiet", "--detach", base])
+    for (const owner of [child, nested]) {
+      const common = (await owner(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+      mkdirSync(join(common, "objects"), { recursive: true })
+    }
     const composed = await gitSuperExecution({ git }, childRoot, [
       "merge",
       feature,
@@ -173,9 +235,15 @@ describe("the git runner", () => {
       "--no-fetch",
       "--unbounded-local-main",
     ])
-    expect(composed.exitCode, composed.stderr || composed.stdout).toBe(0)
-    expect(JSON.parse(composed.stdout)).toMatchObject({ state: "updated", partial: false })
-    expect(await child(["show", "HEAD:feature.txt"])).toBe("public feature\n")
+    expect(composed.exitCode, composed.stderr || composed.stdout).not.toBe(0)
+    const refused = JSON.parse(composed.stdout)
+    expect(refused).toMatchObject({
+      state: "failed",
+      partial: false,
+      detail: { message: expect.stringContaining("merge owner object view differs from association") },
+    })
+    expect((await child(["rev-parse", "HEAD"])).trim()).toBe(base)
+    expect(await child(["show", `${feature}:feature.txt`])).toBe("public feature\n")
     // The queue supplies an existing Process. Direct gitSuperExecution above
     // cannot catch that supervised path dropping the selected object context.
     const supervisedEnv = {
@@ -196,7 +264,13 @@ describe("the git runner", () => {
       noFetch: true,
       unboundedLocalMain: true,
     })
-    expect(verified.state, JSON.stringify(verified.verifying)).toBe("verified")
+    expect(verified.state, JSON.stringify(verified.verifying)).toBe("failed")
+    if (verified.state !== "failed") throw new Error("unowned writer object view unexpectedly verified")
+    const nestedCommon = (await nested(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    expect(verified.verifying.detail?.message).toContain(
+      `unapproved alternate object store: ${join(nestedCommon, "objects")}`,
+    )
+    await verified.failedWorktree.remove()
     expect(existsSync(supervisedPath)).toBe(false)
     // Creation takes a separate Git-super child; composition alone cannot prove its carrier.
     const worktreePath = join(root, "candidate-worktree")
