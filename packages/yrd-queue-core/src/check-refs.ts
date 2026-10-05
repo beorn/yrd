@@ -50,16 +50,10 @@ export async function removeCheckRef(git: Git, ref: string, expectedSha?: string
   try {
     await git(args)
     return true
-  } catch {
-    // If deleting with expected sha fails (e.g. concurrent update), retry without sha
-    try {
-      await git(["update-ref", "-d", ref])
-      return true
-    } catch (err) {
-      // silent-fallback-allow: ref was concurrently removed by another process or unlinked
-      console.warn(`yrd: failed to remove check ref ${ref}: ${String(err)}`)
-      return false
-    }
+  } catch (err) {
+    // silent-fallback-allow: ref was concurrently removed by another process or unlinked
+    console.warn(`yrd: failed to remove check ref ${ref}: ${String(err)}`)
+    return false
   }
 }
 

@@ -10,7 +10,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import {
   CHECK_REF_NAMESPACE,
   BRANCH_CHECK_REF_NAMESPACE,
@@ -109,6 +109,54 @@ describe("createCheckRef and removeCheckRef", () => {
     const { git } = await createFixture()
     const removed = await removeCheckRef(git, "refs/yrd-check/nonexistent")
     expect(removed).toBe(false)
+  })
+
+  it("returns false and does not remove ref when expectedSha does not match", async () => {
+    const { git, createCommit } = await createFixture()
+    const sha1 = await createCommit("c1")
+    const sha2 = await createCommit("c2")
+    const ref = await createCheckRef(git, "test-mismatch", sha2)
+    const removed = await removeCheckRef(git, ref, sha1)
+    expect(removed).toBe(false)
+    expect((await git(["rev-parse", ref])).trim()).toBe(sha2)
+  })
+
+  it("preserves check ref when concurrently replaced during cleanup (CAS ownership loss reproduction)", async () => {
+    const { git, createCommit } = await createFixture()
+    const sha1 = await createCommit("c1")
+    const sha2 = await createCommit("c2")
+
+    const ref = await createCheckRef(git, "test-concurrent", sha1)
+    expect((await git(["rev-parse", ref])).trim()).toBe(sha1)
+
+    // Intercept git execution so that right before update-ref -d with sha1 executes,
+    // a concurrent process updates ref to sha2 in the actual git repository.
+    let simulatedRaceOccurred = false
+    const racingGit: Git = async (args) => {
+      if (args[0] === "update-ref" && args[1] === "-d" && args.includes(sha1)) {
+        simulatedRaceOccurred = true
+        // Concurrent update in native git
+        await git(["update-ref", ref, sha2])
+      }
+      return git(args)
+    }
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const removed = await removeCheckRef(racingGit, ref, sha1)
+      expect(simulatedRaceOccurred).toBe(true)
+
+      // Expected-SHA check is preserved: removeCheckRef returns false,
+      // and ref remains intact pointing to sha2.
+      expect(removed).toBe(false)
+      const currentSha = (await git(["rev-parse", ref])).trim()
+      expect(currentSha).toBe(sha2)
+
+      // Retains error diagnostic
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`yrd: failed to remove check ref ${ref}`))
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 
