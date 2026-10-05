@@ -211,6 +211,13 @@ describe("sweepCheckRefs", () => {
     await git(["update-ref", "refs/yrd-check/task/27488", sha2])
     await git(["update-ref", "refs/heads/yrd-check/luna2-27463", sha1])
 
+    // Queue authority and ordinary branches must survive the local cleanup.
+    const protectedRefs = ["refs/heads/main", "refs/yrd/main/changes/protected"]
+    for (const ref of protectedRefs) {
+      await git(["update-ref", ref, sha2])
+      await expect(removeCheckRef(git, ref, sha2)).rejects.toThrow(`cannot remove non-check ref: ${ref}`)
+    }
+
     const before = await git(["for-each-ref", "--format=%(refname)", "refs/yrd-check", "refs/heads/yrd-check"])
     const beforeList = before.trim().split("\n").sort()
     expect(beforeList).toEqual([
@@ -228,5 +235,8 @@ describe("sweepCheckRefs", () => {
 
     const after = await git(["for-each-ref", "--format=%(refname)", "refs/yrd-check", "refs/heads/yrd-check"])
     expect(after.trim()).toBe("")
+    for (const ref of protectedRefs) {
+      expect((await git(["rev-parse", ref])).trim()).toBe(sha2)
+    }
   })
 })

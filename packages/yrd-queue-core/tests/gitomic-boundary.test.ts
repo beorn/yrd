@@ -63,6 +63,11 @@ describe("the Yrd Gitomic boundary", () => {
       // scans and prunes candidate mirror refs (refs/heads/yrd/candidates/* and refs/yrd/candidates/*),
       // which are not queue refs and use --force-with-lease CAS deletions.
       "candidate-refs.ts": ["ls-remote", "push", "push", "ls-remote", "push", "push"],
+      // Local check cleanup (27514, 27540) owns only refs/yrd-check/* and
+      // refs/heads/yrd-check/*, with expected-SHA deletion. The native sweep
+      // control preserves ordinary and queue-change refs; queue event-chain
+      // reads and writes remain inside the Gitomic boundary.
+      "check-refs.ts": ["for-each-ref", "update-ref", "for-each-ref"],
       // The host mirror's own `fetch --prune` (25570 row 1): it refreshes a store of hosted repositories and reads
       // or writes no queue ref.
       "mirror.ts": ["fetch"],
