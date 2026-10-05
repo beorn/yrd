@@ -378,4 +378,57 @@ describe("yrd check uses the protected program without publishing", () => {
       expect(rows.some((row) => row.kind === "judged" && row.same === false)).toBe(true)
     }
   })
+
+  describe("temporary check ref cleanup (#27514)", () => {
+    it("cleans up temporary refs under refs/yrd-check/* upon successful check run", async () => {
+      const w = await world()
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      // Pre-seed an existing leftover ref from an interrupted run
+      await w.git(["update-ref", "refs/yrd-check/leftover", head])
+      await w.git(["update-ref", "refs/heads/yrd-check/stale-branch", head])
+
+      const { exit, out } = await check(w)
+      expect(exit).toBe(0)
+      expect(out).toContain("no-marker pass")
+
+      // Both seeded leftovers and any check ref created during check execution must be removed
+      const checkRefs = await w.git(["for-each-ref", "refs/yrd-check"])
+      expect(checkRefs.trim()).toBe("")
+      const branchCheckRefs = await w.git(["for-each-ref", "refs/heads/yrd-check"])
+      expect(branchCheckRefs.trim()).toBe("")
+    })
+
+    it("cleans up temporary refs under refs/yrd-check/* upon failing check run", async () => {
+      const w = await world()
+      // Commit an error to make check fail
+      writeFileSync(join(w.work, "marker.txt"), "committed\n")
+      await w.git(["add", "marker.txt"])
+      await w.git(["commit", "--quiet", "-m", "committed marker fails check"])
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["update-ref", "refs/yrd-check/leftover-fail", head])
+
+      const { exit, out } = await check(w)
+      expect(exit).toBe(1)
+      expect(out).toContain("no-marker fail")
+
+      const checkRefs = await w.git(["for-each-ref", "refs/yrd-check"])
+      expect(checkRefs.trim()).toBe("")
+      const branchCheckRefs = await w.git(["for-each-ref", "refs/heads/yrd-check"])
+      expect(branchCheckRefs.trim()).toBe("")
+    })
+
+    it("cleans up temporary refs on setup/execution error", async () => {
+      const w = await protectedWorld("exit 1")
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      await w.git(["update-ref", "refs/yrd-check/leftover-error", head])
+
+      const run = capture(w.work)
+      await expect(
+        coreQueueCommand(w.work, run.io, { command: "check", names: ["protected"] }, { workdir: w.workdir }),
+      ).rejects.toThrow(/setup fail/u)
+
+      const checkRefs = await w.git(["for-each-ref", "refs/yrd-check"])
+      expect(checkRefs.trim()).toBe("")
+    })
+  })
 })

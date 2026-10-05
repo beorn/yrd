@@ -103,6 +103,7 @@ import {
   withdraw,
   NothingToWithdraw,
   sweepCandidateRefs,
+  sweepCheckRefs,
   liftLine,
   OverrideRefused,
   overrideFacts,
@@ -3249,88 +3250,97 @@ export async function coreQueueCommand(
         onInvocation: journal.writeGitInvocation,
       }
       const checkGit = gitIn(repo, undefined, selection, gitOptions)
-      const tree = await checkedTree(repo, captured.oid, undefined, selection, gitOptions)
-      if (tree.candidate !== head) throw new Error(`check subject moved: expected ${head}, read ${tree.candidate}`)
-      const branch = (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
-      const logDir = join(workdir, "checks", changeName({ branch, head }), run, "check")
-      // The worktrees root of this run, claimed before anything is made in it:
-      // a queue run reaps the worktrees of runs that are no longer alive, and
-      // reads a directory with no pid file as one of them (worktree.ts).
-      const worktrees = join(workdir, "worktrees", run)
-      mkdirSync(worktrees, { recursive: true })
-      claimWorktrees(worktrees)
-      // Prepared exactly as a queue run prepares one: materialized, the
-      // declaration's setup run once, and told the same three values.
-      let prepared: Awaited<ReturnType<typeof prepareWorktree>> | undefined
-      const results: CheckResult[] = []
       try {
-        for (const spec of specs) {
-          let result: CheckResult
-          if (spec.programRoot === true) {
-            result = await programRootCheck({
-              git: checkGit,
-              repo,
-              targetSha: captured.oid,
-              tree,
-              spec,
-              branch,
-              head,
-              phase: "check",
-              root: join(worktrees, "program", "check", head.slice(0, 12), spec.name),
-              logDir,
-              tmpdir: join(workdir, "tmp"),
-              log: journal,
-              env: options.env,
-              selection,
-              gitOptions,
-              populateReference: options.populateReference,
-              plumbing: options.log?.child("worktree"),
-              setup: config.setup,
-            })
-          } else {
-            // Legacy checks keep their existing shared HEAD tree and shell semantics.
-            // An opted-in-only invocation must not prepare an unused third root.
-            prepared ??= await prepareWorktree(checkGit, repo, head, join(worktrees, "check", head.slice(0, 12)), {
-              env: options.env,
-              populateReference: options.populateReference,
-              selection,
-              gitOptions,
-              plumbing: options.log?.child("worktree"),
-              targetSha: captured.oid,
-              ...(config.setup === undefined
-                ? {}
-                : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
-            })
-            result = await runCheck({
-              cwd: prepared.path,
-              env: options.env,
-              logDir,
-              spec,
-              tmpdir: join(workdir, "tmp"),
-              tree: prepared.tree,
-            })
-          }
-          results.push(result)
-          if (result.result !== "pass") break
-        }
-      } finally {
+        const tree = await checkedTree(repo, captured.oid, undefined, selection, gitOptions)
+        if (tree.candidate !== head) throw new Error(`check subject moved: expected ${head}, read ${tree.candidate}`)
+        const branch = (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
+        const logDir = join(workdir, "checks", changeName({ branch, head }), run, "check")
+        // The worktrees root of this run, claimed before anything is made in it:
+        // a queue run reaps the worktrees of runs that are no longer alive, and
+        // reads a directory with no pid file as one of them (worktree.ts).
+        const worktrees = join(workdir, "worktrees", run)
+        mkdirSync(worktrees, { recursive: true })
+        claimWorktrees(worktrees)
+        // Prepared exactly as a queue run prepares one: materialized, the
+        // declaration's setup run once, and told the same three values.
+        let prepared: Awaited<ReturnType<typeof prepareWorktree>> | undefined
+        const results: CheckResult[] = []
         try {
-          if (prepared !== undefined) await prepared.remove()
+          for (const spec of specs) {
+            let result: CheckResult
+            if (spec.programRoot === true) {
+              result = await programRootCheck({
+                git: checkGit,
+                repo,
+                targetSha: captured.oid,
+                tree,
+                spec,
+                branch,
+                head,
+                phase: "check",
+                root: join(worktrees, "program", "check", head.slice(0, 12), spec.name),
+                logDir,
+                tmpdir: join(workdir, "tmp"),
+                log: journal,
+                env: options.env,
+                selection,
+                gitOptions,
+                populateReference: options.populateReference,
+                plumbing: options.log?.child("worktree"),
+                setup: config.setup,
+              })
+            } else {
+              // Legacy checks keep their existing shared HEAD tree and shell semantics.
+              // An opted-in-only invocation must not prepare an unused third root.
+              prepared ??= await prepareWorktree(checkGit, repo, head, join(worktrees, "check", head.slice(0, 12)), {
+                env: options.env,
+                populateReference: options.populateReference,
+                selection,
+                gitOptions,
+                plumbing: options.log?.child("worktree"),
+                targetSha: captured.oid,
+                ...(config.setup === undefined
+                  ? {}
+                  : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
+              })
+              result = await runCheck({
+                cwd: prepared.path,
+                env: options.env,
+                logDir,
+                spec,
+                tmpdir: join(workdir, "tmp"),
+                tree: prepared.tree,
+              })
+            }
+            results.push(result)
+            if (result.result !== "pass") break
+          }
         } finally {
-          rmSync(worktrees, { force: true, recursive: true })
+          try {
+            if (prepared !== undefined) await prepared.remove()
+          } finally {
+            rmSync(worktrees, { force: true, recursive: true })
+          }
         }
+        emit(
+          io,
+          options.json,
+          {
+            checks: results,
+            command: "check",
+            head,
+            ...(dirty === "" ? {} : { uncommitted: dirty.split("\n").length }),
+          },
+          `${results.map((result) => `${result.name} ${result.result} exit=${String(result.exit)} ${String(result.durationMs)} ms (log ${result.log})${result.why === undefined ? "" : `: ${result.why}`}`).join("\n")}${unjudged}`,
+        )
+        return results.some((result) => result.result === "stuck")
+          ? 2
+          : results.some((result) => result.result === "fail")
+            ? 1
+            : 0
+      } finally {
+        await sweepCheckRefs(checkGit).catch(() => [])
       }
-      emit(
-        io,
-        options.json,
-        { checks: results, command: "check", head, ...(dirty === "" ? {} : { uncommitted: dirty.split("\n").length }) },
-        `${results.map((result) => `${result.name} ${result.result} exit=${String(result.exit)} ${String(result.durationMs)} ms (log ${result.log})${result.why === undefined ? "" : `: ${result.why}`}`).join("\n")}${unjudged}`,
-      )
-      return results.some((result) => result.result === "stuck")
-        ? 2
-        : results.some((result) => result.result === "fail")
-          ? 1
-          : 0
     }
     case "stats": {
       // The same reading `queue list` prints, then the numbers (@i/10-yrd/24164):

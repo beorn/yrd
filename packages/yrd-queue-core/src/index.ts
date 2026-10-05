@@ -321,5 +321,13 @@ export type {
   SweepCandidateRefsOptions,
 } from "./candidate-refs.ts"
 
+export {
+  CHECK_REF_NAMESPACE,
+  BRANCH_CHECK_REF_NAMESPACE,
+  isCheckRef,
+  removeCheckRef,
+  sweepCheckRefs,
+} from "./check-refs.ts"
+
 export { yrdQueueRunnerDeclarations } from "./runner-declarations.ts"
 export type { YrdQueueRunnerDeclaration } from "./runner-declarations.ts"
