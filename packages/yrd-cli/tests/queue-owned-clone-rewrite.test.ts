@@ -8,7 +8,7 @@
  * @consumer every command that resolves a queue location for a hosted address
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -162,4 +162,27 @@ describe("resolveQueueLocation behind a transport rewrite", () => {
       "second queue",
     )
   }, 60_000)
+})
+
+describe("the 27065 cutover refusal", () => {
+  it("refuses to create a tilde root beside a legacy percent-escaped one, and creates nothing", async () => {
+    const { env, outside, root } = await fixture()
+    // The clone the pre-27065 builder would have written for this address.
+    const legacyRoot = join(root, "state", "yrd", "yrd-owned-clone.invalid", "org", "product%23main")
+    const legacy = join(legacyRoot, "repo")
+    mkdirSync(legacy, { recursive: true })
+    const fresh = join(root, "state", "yrd", "yrd-owned-clone.invalid", "org", "product~main")
+
+    const failure = await resolveQueueLocation(outside, address, env).catch((error: unknown) => error)
+    if (!(failure instanceof Error)) throw new Error(`expected the cutover refusal, got ${String(failure)}`)
+    expect(failure.message).toMatch(/refusing to create a second queue root/u)
+    // The instruction must name the FULL root move: source and destination are both roots. Naming the
+    // legacy repo as the source and the tilde root as the destination is a different directory level, and
+    // following it puts the clone AT the root so the retry clones a second time inside it (@dev/11, 27065).
+    expect(failure.message).toContain(`Move ${legacyRoot} to ${fresh}`)
+
+    // No second root: the new tilde path was never created.
+    expect(existsSync(fresh)).toBe(false)
+    expect(existsSync(legacy)).toBe(true)
+  })
 })

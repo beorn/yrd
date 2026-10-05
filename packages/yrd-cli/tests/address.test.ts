@@ -5,9 +5,19 @@
  * @level l1 (pure address and path boundary)
  * @consumer Queue-owner commands invoked outside a clone.
  */
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
-import { formatQueueAddress, parseQueueAddress, parseRunAddress, queueDirectory, queueRoot } from "../src/address.ts"
+import {
+  formatQueueAddress,
+  legacyQueueDirectory,
+  parseQueueAddress,
+  parseRunAddress,
+  queueDirectory,
+  queueRoot,
+} from "../src/address.ts"
 
 describe("a queue's canonical address", () => {
   it("maps the decided human @ spelling onto the same stored queue key (26193)", () => {
@@ -53,7 +63,7 @@ describe("a queue's canonical address", () => {
       canonical: "github.com/beorn/hh@release%232026#3",
       queue: { canonical: address.canonical },
     })
-    expect(queueRoot("/state/yrd", address)).toBe("/state/yrd/github.com/beorn/hh%23release%232026")
+    expect(queueRoot("/state/yrd", address)).toBe("/state/yrd/github.com/beorn/hh~release%232026")
   })
 
   it("keeps a versioned short-path remote distinct from a GitHub owner/repo shorthand (26201)", () => {
@@ -122,7 +132,7 @@ describe("a queue's canonical address", () => {
       transport: `https://forge.example:${port}/team/repo.git`,
     })
     expect(queueDirectory("/state/yrd", address)).toBe(
-      join("/state/yrd", `forge.example:${port}`, "team", "repo%23main", "repo"),
+      join("/state/yrd", `forge.example:${port}`, "team", "repo~main", "repo"),
     )
     expect(queueDirectory("/state/yrd", address)).not.toBe(
       queueDirectory("/state/yrd", parseQueueAddress("forge.example/team/repo#main")),
@@ -138,17 +148,66 @@ describe("a queue's canonical address", () => {
     expect(() => parseQueueAddress(operand)).toThrow("backslashes, tabs or newlines")
   })
 
-  it("encodes the physical separator and queue without changing the canonical address", () => {
+  it("uses the tilde physical separator without changing the canonical address or the queue component (27065)", () => {
     const workdir = "/state/yrd"
     const main = parseQueueAddress("beorn/hh#main")
     const release = parseQueueAddress("beorn/hh#release/1.x")
     const percent = parseQueueAddress("beorn/hh#release%2F1.x")
 
-    expect(queueRoot(workdir, main)).toBe(join(workdir, "github.com", "beorn", "hh%23main"))
-    expect(queueDirectory(workdir, main)).toBe(join(workdir, "github.com", "beorn", "hh%23main", "repo"))
-    expect(queueDirectory(workdir, release)).toBe(join(workdir, "github.com", "beorn", "hh%23release%2F1.x", "repo"))
-    expect(queueDirectory(workdir, percent)).toBe(join(workdir, "github.com", "beorn", "hh%23release%252F1.x", "repo"))
+    expect(queueRoot(workdir, main)).toBe(join(workdir, "github.com", "beorn", "hh~main"))
+    expect(queueDirectory(workdir, main)).toBe(join(workdir, "github.com", "beorn", "hh~main", "repo"))
+    expect(queueDirectory(workdir, release)).toBe(join(workdir, "github.com", "beorn", "hh~release%2F1.x", "repo"))
+    expect(queueDirectory(workdir, percent)).toBe(join(workdir, "github.com", "beorn", "hh~release%252F1.x", "repo"))
     expect(queueDirectory(workdir, release)).not.toBe(queueDirectory(workdir, main))
+  })
+
+  it("names the workdir from the repo that produced %23 today with no percent or hash byte (27065)", () => {
+    const address = parseQueueAddress("beorn/hh-dev#main")
+    const root = queueRoot("/hh/var/yrd-workdir", address)
+    expect(root).toBe("/hh/var/yrd-workdir/github.com/beorn/hh-dev~main")
+    // The failing class: module loaders percent-decode 0x25 0x32 0x33 back to a hash and then cannot resolve.
+    expect(root).not.toContain("%23")
+    expect(root).not.toContain("#")
+    // A queue component never carries a tilde (git refnames forbid it), so the LAST tilde is the boundary.
+    expect(root.slice(root.lastIndexOf("~") + 1)).toBe("main")
+  })
+
+  it("keeps a repository path with its own tilde unambiguous: the LAST tilde is the boundary (27065)", () => {
+    const address = parseQueueAddress("forge.example/team/re~po#main")
+    const root = queueRoot("/state/yrd", address)
+    expect(root).toBe(join("/state/yrd", "forge.example", "team", "re~po~main"))
+    expect(root.slice(root.lastIndexOf("~") + 1)).toBe("main")
+  })
+
+  it("spells the pre-27065 legacy root only so the cutover refusal can name it (27065)", () => {
+    const workdir = "/state/yrd"
+    expect(legacyQueueDirectory(workdir, parseQueueAddress("beorn/hh#main"))).toBe(
+      join(workdir, "github.com", "beorn", "hh%23main", "repo"),
+    )
+    expect(legacyQueueDirectory(workdir, parseQueueAddress("beorn/hh#release/1.x"))).toBe(
+      join(workdir, "github.com", "beorn", "hh%23release%2F1.x", "repo"),
+    )
+    expect(legacyQueueDirectory(workdir, parseQueueAddress("/tmp/remote.git#main"))).toBe(
+      join(workdir, "local", "tmp", "remote.git%23main", "repo"),
+    )
+  })
+
+  it("imports a module from the env path a %23 name produced today (27065 regression)", async () => {
+    const base = mkdtempSync(join(tmpdir(), "yrd-27065-"))
+    const address = parseQueueAddress("github.com/beorn/hh-dev#main")
+    const root = queueRoot(base, address)
+    const envDir = join(root, "environments", "26964-qualified-composition")
+    mkdirSync(envDir, { recursive: true })
+    // The exact failure: Vitest/koffi decode `%23` to `#` and look under a path that does not exist.
+    expect(envDir).not.toContain("%")
+    expect(envDir).not.toContain("#")
+    const probe = join(envDir, "probe.mjs")
+    writeFileSync(probe, "export const loaded = true\n")
+    const href = pathToFileURL(probe).href
+    // A loader that reads the URL pathname and decodes it must still land on the real directory.
+    expect(decodeURIComponent(new URL(href).pathname)).toBe(probe)
+    const loaded = (await import(href)) as { loaded: boolean }
+    expect(loaded.loaded).toBe(true)
   })
 
   it("accepts an absolute local repository path for tests", () => {
@@ -160,7 +219,7 @@ describe("a queue's canonical address", () => {
       repository: "/tmp/remote.git",
       transport: "/tmp/remote.git",
     })
-    expect(queueDirectory("/state/yrd", address)).toBe("/state/yrd/local/tmp/remote.git%23main/repo")
+    expect(queueDirectory("/state/yrd", address)).toBe("/state/yrd/local/tmp/remote.git~main/repo")
   })
 
   it.each(["beorn/hh", "beorn/hh#", "#main", "beorn/hh#main#other", "https:///forge.example:8443/team/repo.git#main"])(
