@@ -5340,4 +5340,100 @@ describe("yrd queue run --tier long", () => {
       census.mockRestore()
     }
   }, 120_000)
+
+  /**
+   * @failure A restart forgets the sweep and re-evaluates the registry head
+   *          forever, so under landing churn the tail starves; or a corrupt
+   *          resume hint is ignored silently.
+   * @level l2
+   * @consumer the operator whose backlog must be swept even while the landing
+   *           moves vendor/yrd under the running service
+   * @testonly none
+   */
+  it("a restarted sweep resumes from its hint, and a corrupt hint restarts at 0 by name", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \x27{"id":"%s","status":"open"}\x27 "$1"\n')
+    await redeclare(w, "setup: \x27:\x27\nissueResolver: [\x27bash\x27, \x27" + resolver + "\x27]\n")
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const environments = join(workdir, "environments")
+    mkdirSync(environments, { recursive: true })
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const paths: string[] = []
+    for (let index = 0; index < 16; index++) {
+      // Zero-padded: `git worktree list` sorts by path, so the registry order
+      // must equal creation order for the slice assertions below.
+      const path = join(environments, "27601-hint-" + String(index).padStart(2, "0"))
+      await w.git(["worktree", "add", "--quiet", "--detach", path, head])
+      paths.push(path)
+    }
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const runIds = (): Set<string> => new Set(allCleanupRows(workdir).map((row) => String(row.run)))
+    // Only environment rows count: the sweep also logs cursor rows whose `path`
+    // is the resume-hint file, and those are not environments evaluated.
+    const envPrefix = environments + "/"
+    const evaluatedSince = (before: Set<string>): string[] =>
+      allCleanupRows(workdir)
+        .filter((row) => typeof row.path === "string" && row.path.startsWith(envPrefix) && !before.has(String(row.run)))
+        .map((row) => String(row.path))
+    const oneRound = async (): Promise<void> => {
+      const stop = new AbortController()
+      let rounds = 0
+      const run = capture(w.work)
+      try {
+        expect(
+          await coreQueueCommand(
+            w.work,
+            run.io,
+            {
+              command: "up",
+              intervalSeconds: 0,
+              stop: stop.signal,
+              afterRound: () => {
+                rounds++
+                if (rounds === 1) stop.abort()
+              },
+            },
+            { json: true, workdir },
+          ),
+          run.stderr(),
+        ).toBe(0)
+      } finally {
+        stop.abort()
+      }
+    }
+    const hint = join(workdir, "state", "yrd", "environment-cleanup.json")
+    try {
+      let before = runIds()
+      await oneRound()
+      expect(new Set(evaluatedSince(before)), "the first round evaluates the head of the registry").toEqual(
+        new Set(paths.slice(0, 8)),
+      )
+      expect(existsSync(hint), "the round writes its resume hint").toBe(true)
+      // A RESTART is a new command invocation: fresh cleanup state, same workdir.
+      before = runIds()
+      await oneRound()
+      expect(new Set(evaluatedSince(before)), "the restarted sweep resumes after the last completed round").toEqual(
+        new Set(paths.slice(8)),
+      )
+      // A corrupt hint is named with its path and starts at index 0.
+      writeFileSync(hint, "{ not json")
+      before = runIds()
+      await oneRound()
+      expect(new Set(evaluatedSince(before)), "a corrupt hint restarts at index 0").toEqual(new Set(paths.slice(0, 8)))
+      expect(
+        allCleanupRows(workdir).some(
+          (row) => row.result === "cursor-reset" && typeof row.path === "string" && row.path.includes(hint),
+        ),
+        "the corrupt hint is named with its path",
+      ).toBe(true)
+    } finally {
+      census.mockRestore()
+    }
+  }, 120_000)
 })

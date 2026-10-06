@@ -104,6 +104,11 @@ it("cleanup provenance excludes inherited history and refuses incomplete or unkn
   // addendum). Its trailers are read from that commit, never its ancestry.
   writeFileSync(path, creation + entry(head, ""))
   expect((await environmentProvenance(w.work, w.git)).commits).toEqual([head])
+  // `git branch -m` writes this message as a delete/create pair. It creates no
+  // commit, and BOTH names join the branch set so a renamed branch still finds
+  // the change chain stored under its old name (ruling 27723 post-adoption).
+  writeFileSync(path, creation + entry(head, "Branch: renamed refs/heads/task/a to refs/heads/task/b"))
+  expect(await environmentProvenance(w.work, w.git)).toEqual({ commits: [], branches: ["task/a", "task/b"] })
   // Newer Yrd names that same binding move with -m; the prefix stays CREATING.
   writeFileSync(path, creation + entry(head, "yrd env open: bind 27723"))
   expect((await environmentProvenance(w.work, w.git)).commits).toEqual([head])
