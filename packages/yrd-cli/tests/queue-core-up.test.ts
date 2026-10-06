@@ -417,7 +417,7 @@ describe("yrd queue up, the service", () => {
    * @consumer the operator whose unnamed detached environment has no authored issue bindings
    * @testonly none
    */
-  it.each(["complete", "incomplete", "busy"] as const)(
+  it.each(["complete", "incomplete", "busy", "cleared-denial", "uncleared-denial"] as const)(
     "closes an unnamed retained backlog environment on its first idle round (%s)",
     async (coverage) => {
       const w = await world()
@@ -436,12 +436,40 @@ describe("yrd queue up, the service", () => {
       expect(existsSync(environment.path)).toBe(true)
       // The host may deny unrelated processes' CWDs. The projection is this
       // external capability boundary; queue, registry and retained removal stay real.
-      const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue({
+      let projection: removely.ProcessCwdProjection = {
         complete: coverage !== "incomplete",
         unreadable: [],
         mechanism: "proc",
         rows: coverage === "busy" ? [{ pid: process.pid, cwd: environment.path }] : [],
-      })
+      }
+      if (coverage === "cleared-denial" || coverage === "uncleared-denial") {
+        // A denied same-UID cwd read, exactly as removely's census records it:
+        // identity evidence (uid, comm, argv, denial code) and no readable row.
+        // The caller must clear it with removely's own identity predicate, never
+        // by trusting the argv an entry happens to carry. The UID is real, so
+        // clearedByIdentity sees the same identity the production caller holds.
+        const uid = process.getuid?.()
+        if (uid === undefined) throw new Error("this queue case needs a real unix uid")
+        projection = {
+          complete: false,
+          mechanism: "proc",
+          rows: [],
+          unreadable: [
+            {
+              pid: 4242,
+              uid,
+              comm: "bun",
+              denied: ["process"],
+              issues: [{ source: "process", resource: "cwd", reason: "denied", code: "EACCES" }],
+              argv:
+                coverage === "cleared-denial"
+                  ? ["/usr/lib/systemd/systemd", "--user"]
+                  : ["bun", "private-argument-must-not-be-reported"],
+            },
+          ],
+        }
+      }
+      const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue(projection)
       try {
         const inventory = await environmentInventory(w.work, w.git, workdir)
         expect(
@@ -473,12 +501,18 @@ describe("yrd queue up, the service", () => {
           run.stderr(),
         ).toBe(0)
         expect(rounds, run.stdout() + run.stderr()).toBe(1)
-        expect(existsSync(environment.path), run.stderr()).toBe(coverage !== "complete")
+        const allowsClose = coverage === "complete" || coverage === "cleared-denial"
+        expect(existsSync(environment.path), run.stderr()).toBe(!allowsClose)
         const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
-        if (coverage === "complete") expect(registration).not.toContain(environment.path)
+        if (allowsClose) expect(registration).not.toContain(environment.path)
         else {
           expect(registration).toContain(environment.path)
-          expect(run.stderr()).toContain(coverage === "busy" ? "has CWD" : "census proc incomplete")
+          if (coverage === "busy") expect(run.stderr()).toContain("has CWD")
+          else if (coverage === "uncleared-denial") {
+            expect(run.stderr()).toContain("pid 4242 bun")
+            expect(run.stderr()).toContain("EACCES")
+            expect(run.stderr()).not.toContain("private-argument-must-not-be-reported")
+          } else expect(run.stderr()).toContain("census proc incomplete")
         }
       } finally {
         census.mockRestore()

@@ -3,7 +3,7 @@ import { join, relative, resolve, sep } from "node:path"
 import { gitIn, listChangeHistories, type GitRunner, type QueueConfig, type QueueRunOutcome } from "@yrd/queue-core"
 import { createLocalGitProcess } from "git-super/process"
 import { createLocalGitWorktreeStore } from "git-super/worktree"
-import { inspectProcessCwds, type ProcessCwdProjection } from "removely"
+import { clearedByIdentity, inspectProcessCwds, type ProcessCwdProjection, type UnreadableProcess } from "removely"
 import { closeEnvironment, environmentInventory } from "./env-commands.ts"
 import { environmentIssues } from "./env-cleanup-provenance.ts"
 import { issueLookup, type ResolvedIssue } from "./issue-resolver.ts"
@@ -25,6 +25,13 @@ type CachedEnvironment = {
 export function createEnvironmentCleanup() {
   const cache = new Map<string, CachedEnvironment>()
   return (input: Parameters<typeof cleanupEnvironments>[0]) => cleanupEnvironments(input, cache)
+}
+
+/** Names a denied row by pid, command and denial code — never its argv. */
+function unreadableLabel(entry: UnreadableProcess): string {
+  const codes = [...new Set(entry.issues.flatMap((issue) => (issue.code === undefined ? [] : [issue.code])))]
+  const suffix = codes.length === 0 ? "" : ` (${codes.join(", ")})`
+  return `pid ${entry.pid} ${entry.comm ?? "(no comm)"}${suffix}`
 }
 
 /** A missing required index/reflog is uncertainty, never an unchanged identity. */
@@ -77,10 +84,19 @@ async function cleanupEnvironments(
   }
   const census = async (): Promise<ProcessCwdProjection> => {
     const snapshot = await inspectProcessCwds({ deadlineMs: 2_000 })
-    if (!snapshot.complete || snapshot.unreadable.length > 0) {
+    // A denied same-UID read is cleared only by removely's own identity
+    // predicate. Anything it cannot clear could be a holder, so the run keeps
+    // the environment and names the pid, command and denial it could not rule out.
+    const uncleared = snapshot.unreadable.filter((entry) => clearedByIdentity(entry) === undefined)
+    if (uncleared.length > 0) {
       throw new Error(
-        `same-UID process CWD census ${snapshot.mechanism} incomplete: ${JSON.stringify(snapshot.unreadable)}`,
+        `same-UID process CWD census ${snapshot.mechanism} could not read ${uncleared
+          .map((entry) => unreadableLabel(entry))
+          .join(", ")}; a holder among them cannot be ruled out`,
       )
+    }
+    if (!snapshot.complete && snapshot.unreadable.length === 0) {
+      throw new Error(`same-UID process CWD census ${snapshot.mechanism} incomplete: no readable coverage`)
     }
     return snapshot
   }
