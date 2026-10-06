@@ -27,6 +27,13 @@
       "commit": "b956cf1ea635e8572179aaae1f4cc38f465a53bd",
       "pack": true,
       "directory": "packages/scope"
+    },
+    {
+      "name": "removely",
+      "repository": "beorn/bearly",
+      "commit": "6992e44c7f15d9fce758e4bdf71b26e3c425bb88",
+      "directory": "packages/removely",
+      "pack": true
     }
   ]
 }
