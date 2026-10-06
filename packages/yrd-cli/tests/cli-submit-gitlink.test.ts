@@ -366,6 +366,55 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     expect(await refs(w.remote)).toBe(before)
   }, 60_000)
 
+  /** @failure A dry run reports a composition whose recorded component pin no
+   *          store holds, so the queue later names an object it can never read
+   *          (27747): the receipt must refuse and name the pin, the store and
+   *          the cure instead of claiming a verified candidate.
+   * @level   l2 (the public CLI, real remotes and real submodule stores)
+   * @consumer seats whose held submission waits on a readable candidate
+   */
+  it("refuses a dry run whose composed candidate holds a component pin no store holds", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const child = gitIn(one.work)
+    // The component main moves on, and the change pins a SIBLING of it that is
+    // pushed and checked out, so every pre-existing moved-gitlink guard is
+    // satisfied. Their divergence is what makes git-super compose a two-parent
+    // child — the one pin no authored tree ever held.
+    writeFileSync(join(one.work, "main-only.txt"), "main\n")
+    await child(["add", "."])
+    await child(["commit", "--quiet", "-m", "one: main moves"])
+    const main = (await child(["rev-parse", "HEAD"])).trim()
+    await child(["push", "--quiet", "origin", "main"])
+    await child(["push", "--quiet", "origin", main + ":refs/git-super/pins/" + main])
+    await child(["checkout", "--quiet", "-b", "side", one.held])
+    // Disjoint files, so the submodule's own merge is CLEAN: a conflicting
+    // divergence is already refused by the compose and would prove nothing.
+    writeFileSync(join(one.work, "side-only.txt"), "side\n")
+    await child(["add", "."])
+    await child(["commit", "--quiet", "-m", "one: side moves"])
+    const side = (await child(["rev-parse", "HEAD"])).trim()
+    await child(["push", "--quiet", "origin", "side"])
+    await child(["push", "--quiet", "origin", side + ":refs/git-super/pins/" + side])
+    const branch = "task/pin-merged-child"
+    const git = gitIn(w.work)
+    await git(["checkout", "--quiet", "-b", branch, "main"])
+    const checkout = gitIn(join(w.work, one.path))
+    await checkout(["fetch", "--quiet", "origin", "side"])
+    await checkout(["checkout", "--quiet", side])
+    await git(["update-index", "--add", "--cacheinfo", "160000," + side + "," + one.path])
+    await git(["commit", "--quiet", "-m", "pin a diverged child\n\nRefs: 25804"])
+    const before = await refs(w.remote)
+    const ran = await yrd(w.work, "submit", branch, "--issue", "25804", "--dry-run", "--json")
+    expect(ran.exitCode, ran.report).toBe(2)
+    expect(ran.stderr, ran.report).toContain("is not in the store this row names")
+    expect(ran.stderr, ran.report).toContain(one.path)
+    expect(ran.stderr, ran.report).toContain("state merged")
+    expect(ran.stderr, ran.report).toContain("the queue-owned clone")
+    expect(ran.stdout, ran.report).not.toContain('"state":"merged"')
+    expect(await refs(w.remote)).toBe(before)
+  }, 120_000)
+
   it("opens a single held pin with exactly one gitlink hunk on the captured main parent", async () => {
     const w = await world()
     const one = w.components[0]!
@@ -1024,7 +1073,13 @@ describe("ordinary submit with a local-only component pin", () => {
     })
   }, 90_000)
 
-  it("prints author head and landing pin with land merge note when component merges (27323)", async () => {
+  /** @failure A dry run that composes a component child reports a composition the
+   *          candidate does not hold, so it names an object no store retains
+   *          (27747). 27323's real requirement survives: the author still reads
+   *          which head they pinned, and why the run refused.
+   * @level   l2 @consumer yrd submit --dry-run on a component-moving change
+   */
+  it("refuses and still names the author head when a composed child is unretained (27323, 27747)", async () => {
     const w = await world()
     const one = w.components[0]!
     const rootGit = gitIn(w.work)
@@ -1048,13 +1103,14 @@ describe("ordinary submit with a local-only component pin", () => {
     await wtGit(["add", one.path])
     await wtGit(["commit", "--quiet", "-m", "pin alt commit on root\n\nRefs: 27323"])
 
-    // 1. Text mode dry-run output
+    // 1. Text mode dry-run: the refusal names the author's head and the cure.
     const ran = await yrd(wt, "submit", "task/27323-merged", "--dry-run", "--issue", "27323", "--submitter", "@dev/1")
-    expect(ran.exitCode, ran.report).toBe(0)
-    expect(ran.stdout, ran.report).toContain(`component ${one.path}: author head ${altHead.slice(0, 12)}, landing pin `)
-    expect(ran.stdout, ran.report).toContain("(component merge happens at land)")
+    expect(ran.exitCode, ran.report).toBe(2)
+    expect(ran.stderr, ran.report).toContain(`state merged`)
+    expect(ran.stderr, ran.report).toContain(altHead)
+    expect(ran.stderr, ran.report).toContain("the queue-owned clone")
 
-    // 2. JSON mode dry-run output
+    // 2. JSON mode dry-run: no candidate is reported as verified at all.
     const ranJson = await yrd(
       wt,
       "submit",
@@ -1066,22 +1122,7 @@ describe("ordinary submit with a local-only component pin", () => {
       "@dev/1",
       "--json",
     )
-    expect(ranJson.exitCode, ranJson.report).toBe(0)
-    const receipt = JSON.parse(ranJson.stdout) as {
-      dryRun: boolean
-      verifying: {
-        gitlinks: { path: string; state: string; authorHead: string; landingPin: string }[]
-      }
-    }
-    expect(receipt.dryRun).toBe(true)
-    const row = receipt.verifying.gitlinks.find((r) => r.path === one.path)
-    expect(row).toBeDefined()
-    expect(row).toMatchObject({
-      path: one.path,
-      state: "merged",
-      authorHead: altHead,
-    })
-    expect(row?.landingPin).toBeDefined()
-    expect(row?.landingPin).not.toBe(altHead)
+    expect(ranJson.exitCode, ranJson.report).toBe(2)
+    expect(ranJson.stdout, ranJson.report).not.toContain('"state":"merged"')
   }, 90_000)
 })
