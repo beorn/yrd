@@ -20,9 +20,11 @@ import { tmpdir } from "node:os"
 import { dirname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
-import { type Git } from "@yrd/queue-core"
+import { createEventStore } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { closeEnvironment } from "../src/env-commands.ts"
+import { environmentIssues, environmentProvenance } from "../src/env-cleanup-provenance.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
@@ -57,7 +59,70 @@ async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ 
   return JSON.parse(run.stdout()) as { path: string; head: string }
 }
 
-type World = Readonly<{ git: Git; work: string }>
+type World = Readonly<{ git: ReturnType<typeof gitIn>; work: string }>
+
+it("cleanup unions every creating OID and canonical branch binding without inherited Refs", async () => {
+  const w = await world(":")
+  await w.git(["commit", "--quiet", "--allow-empty", "-m", "inherited target binding", "-m", "Refs: 999"])
+  const path = join(dirname(w.work), "retained")
+  const branch = "task/@i/10-yrd/27723-scope"
+  await w.git(["worktree", "add", "--quiet", "-b", branch, path, "HEAD"])
+  const tree = gitIn(path)
+  for (const issue of ["111", "112"]) {
+    await tree(["commit", "--quiet", "--allow-empty", "-m", `own binding ${issue}`, "-m", `Refs: ${issue}`])
+  }
+  const issues = await environmentIssues(
+    path,
+    tree,
+    "retained",
+    branch,
+    w.git,
+    "main",
+    createEventStore(w.work, "origin", w.git.selection),
+    { histories: new Map(), invalid: new Map() },
+    async (raw) => raw,
+  )
+  expect(new Set(issues.issues)).toEqual(new Set(["111", "112", "@i/10-yrd/27723-scope"]))
+})
+
+it("cleanup provenance excludes inherited history and refuses incomplete or unknown HEAD evidence", async () => {
+  const w = await world(":")
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  const log = (await w.git(["rev-parse", "--git-path", "logs/HEAD"])).trim()
+  const path = join(w.work, log)
+  const entry = (old: string, message: string) => `${old} ${head} yrd <env-open@yrd.test> 1 +0000\t${message}\n`
+  const creation = entry("0".repeat(40), "")
+  writeFileSync(path, creation + entry(head, "checkout: moving from task/27723 to main"))
+  expect(await environmentProvenance(w.work, w.git, "main")).toEqual({
+    commits: [],
+    branches: ["main", "task/27723"],
+  })
+  writeFileSync(path, creation + entry(head, "commit (amend): own binding") + entry(head, "reset: moving to HEAD"))
+  expect((await environmentProvenance(w.work, w.git)).commits).toEqual([head])
+  for (const message of [
+    "commit: own",
+    "commit (merge): own",
+    "commit (initial): own",
+    "rebase (pick): own",
+    "rebase -i (reword): own",
+    "pull --rebase (edit): own",
+    "rebase (squash): own",
+    "rebase (fixup): own",
+    "rebase (continue): own",
+    "cherry-pick: own",
+    "revert: own",
+    "am: own",
+    "merge topic: Merge made by the 'ort' strategy.",
+    "pull: Merge made by the 'ort' strategy.",
+  ]) {
+    writeFileSync(path, creation + entry(head, message))
+    expect((await environmentProvenance(w.work, w.git)).commits, message).toEqual([head])
+  }
+  writeFileSync(path, entry(head, "commit: truncated beginning"))
+  await expect(environmentProvenance(w.work, w.git)).rejects.toThrow(/creation evidence/u)
+  writeFileSync(path, creation + entry(head, "future-command: unknown"))
+  await expect(environmentProvenance(w.work, w.git)).rejects.toThrow(/future-command/u)
+})
 
 async function command(
   cwd: string,
@@ -490,31 +555,59 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     if (kind === "dirty") expect(readFileSync(join(path, "teardown-left.txt"), "utf8")).toBe("changed")
   })
 
-  it("closes a lender environment with live borrowers and leaves the borrower clean (25908)", async () => {
-    const w = await world(":")
-    await addMaterializedDependency(w)
-    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const { path: lender } = await openEnvironment(w.work, selected)
+  /**
+   * @failure Automatic close can discard GitSuper's borrowed KEEP result or fail to forward its no-rehome policy.
+   * @level l2
+   * @consumer Yrd automatic cleanup and manual environment close
+   */
+  it.each([{ noRehome: false }, { noRehome: true }])(
+    "closes or keeps a lender environment with live borrowers (noRehome=$noRehome)",
+    async ({ noRehome }) => {
+      const w = await world(":")
+      await addMaterializedDependency(w)
+      const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+      const { path: lender } = await openEnvironment(w.work, selected)
 
-    const openBorrower = capture(lender)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "borrower", "--json"], openBorrower.io),
-      openBorrower.stderr(),
-    ).toBe(0)
-    const { path: borrower } = JSON.parse(openBorrower.stdout()) as { path: string }
+      const openBorrower = capture(lender)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "borrower", "--json"], openBorrower.io),
+        openBorrower.stderr(),
+      ).toBe(0)
+      const { path: borrower } = JSON.parse(openBorrower.stdout()) as { path: string }
 
-    const closed = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "close", lender, "--json"], closed.io), closed.stderr()).toBe(0)
-    expect(JSON.parse(closed.stdout())).toEqual({ closed: lender })
-    expect(existsSync(lender)).toBe(false)
+      const lenderGitDir = (
+        await command(join(lender, "vendor/dependency"), ["git", "rev-parse", "--absolute-git-dir"])
+      ).stdout.trim()
+      const borrowerGitDir = (
+        await command(join(borrower, "vendor/dependency"), ["git", "rev-parse", "--absolute-git-dir"])
+      ).stdout.trim()
+      const altFile = join(borrowerGitDir, "objects", "info", "alternates")
+      const existingAlt = existsSync(altFile) ? readFileSync(altFile, "utf8") : ""
+      const loan = `${join(lenderGitDir, "objects")}\n${existingAlt}`
+      writeFileSync(altFile, loan)
 
-    const fsckSub = await command(join(borrower, "vendor/dependency"), ["git", "fsck", "--full"])
-    expect(fsckSub.exit).toBe(0)
-    expect(fsckSub.stderr).toBe("")
+      const closed = capture(w.work)
+      if (noRehome) {
+        const options = { json: true, noRehome }
+        expect(await closeEnvironment(lender, options, closed.io), closed.stderr()).toBe(0)
+        expect(JSON.parse(closed.stdout())).toEqual({ kept: lender, reason: "borrowed", borrowers: [borrower] })
+        expect(existsSync(lender)).toBe(true)
+        expect(readFileSync(altFile, "utf8")).toBe(loan)
+        expect(await w.git(["worktree", "list", "--porcelain"])).toContain(lender)
+        return
+      }
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", lender, "--json"], closed.io), closed.stderr()).toBe(0)
+      expect(JSON.parse(closed.stdout())).toEqual({ closed: lender })
+      expect(existsSync(lender)).toBe(false)
 
-    const closeBorrower = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "close", borrower, "--json"], closeBorrower.io)).toBe(0)
-  })
+      const fsckSub = await command(join(borrower, "vendor/dependency"), ["git", "fsck", "--full"])
+      expect(fsckSub.exit).toBe(0)
+      expect(fsckSub.stderr).toBe("")
+
+      const closeBorrower = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", borrower, "--json"], closeBorrower.io)).toBe(0)
+    },
+  )
 
   it("closes a packed lender environment with a unique commit and leaves the borrower clean (25908 cure)", async () => {
     const w = await world(":")
