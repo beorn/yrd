@@ -35,6 +35,7 @@
       "name": "@yrd/cli",
       "version": "0.0.1",
       "dependencies": {
+        "@bearly/durable-file": "0.1.0",
         "@bearly/flock": "^0.1.1",
         "@silvery/ansi": "^0.25.0",
         "@silvery/commander": "^0.25.0",
@@ -87,6 +88,8 @@
   },
   "packages": {
     "@bearly/cli-process": ["@bearly/cli-process@0.1.0", "", {}, "sha512-rMue1/wZy0eO3mTTOqhiB48E54z1uDggW6qItP/BH9mJvFz//tJ8b1FrPv0TELwbd5oUIHz3QUt3x0AcrudLVA=="],
+
+    "@bearly/durable-file": ["@bearly/durable-file@0.1.0", "", {}, "sha512-mHCRg+rzye+/1OxHbZREcqUjtnABJRvChOjDNBiiC8uvcfstTywxGNsLgH3i48iVoey/ofT3pe9oNyJDTJfzAA=="],
 
     "@bearly/flock": ["@bearly/flock@0.1.1", "", {}, "sha512-YT4E+eanXhIDIHpHqi971KX36IjcfakkAHsSo81B8Fb8mVNwyIKeb6tXTHoOgHJr/p6fjy59iu4QWeqdu9BQbA=="],
 
