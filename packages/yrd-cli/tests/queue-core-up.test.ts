@@ -253,6 +253,31 @@ async function redeclare(w: World, text: string): Promise<void> {
   await w.git(["push", "--quiet", "origin", "main"])
 }
 
+/**
+ * A real, pushed submodule on the target's main, so an environment's dependency
+ * object store exists and can lend objects to a sibling's store.
+ */
+async function addMaterializedDependency(w: World): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-submodule-"))
+  roots.push(root)
+  const seed = gitIn(root)
+  const remote = join(root, "remote.git")
+  const work = join(root, "work")
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, work])
+  const git = gitIn(work)
+  await git(["config", "user.email", "queue@yrd.test"])
+  await git(["config", "user.name", "yrd"])
+  await git(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(work, "READY"), "materialized\n")
+  await git(["add", "READY"])
+  await git(["commit", "--quiet", "-m", "seed materialized dependency"])
+  await git(["push", "--quiet", "origin", "main"])
+  await w.git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", remote, "vendor/dependency"])
+  await w.git(["commit", "--quiet", "-m", "add materialized dependency"])
+  await w.git(["push", "--quiet", "origin", "main"])
+}
+
 type GitlinkWorld = World &
   Readonly<{
     /** The submodule's commit the root records at start. */
@@ -601,6 +626,100 @@ describe("yrd queue up, the service", () => {
       expect(stderr).toContain("closure unproven")
       expect(stderr).toContain("is not on target")
       expect(stderr).toContain(`borrowed by ${borrower}`)
+    } finally {
+      stop.abort()
+      factory.mockRestore()
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure Cleanup stops at its own preflight: when a live borrower appears
+   *          only after that preflight snapshot, the native close returns a
+   *          `kept: borrowed` result and cleanup reads it as a removal — or
+   *          rejects it as unproven — instead of keeping the lender.
+   * @level l2
+   * @consumer the operator whose lender environment is closed out from under a
+   *           sibling that still borrows its dependency object store
+   * @testonly none
+   */
+  it("keeps the lender when only the close recheck finds its borrower", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await addMaterializedDependency(w)
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"closed"}\' "$1"\n')
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const openedLender = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "27601-lender", "--json"], openedLender.io),
+      openedLender.stderr(),
+    ).toBe(0)
+    const lender = (JSON.parse(openedLender.stdout()) as { path: string }).path
+    const openedBorrower = capture(w.work)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", selected, "--bay", "borrower-held", "--hold", "parked sibling", "--json"],
+        openedBorrower.io,
+      ),
+      openedBorrower.stderr(),
+    ).toBe(0)
+    const borrower = (JSON.parse(openedBorrower.stdout()) as { path: string }).path
+    // A live loan: the borrower's dependency object store declares the lender's
+    // objects as an alternate. The caller's preflight below is masked to stand
+    // for the borrower arriving after its snapshot; the native close rechecks
+    // under its own mutation lock and must find it.
+    const lenderObjects = join(
+      (await gitIn(join(lender, "vendor/dependency"))(["rev-parse", "--absolute-git-dir"])).trim(),
+      "objects",
+    )
+    const borrowerGitDir = (
+      await gitIn(join(borrower, "vendor/dependency"))(["rev-parse", "--absolute-git-dir"])
+    ).trim()
+    const altFile = join(borrowerGitDir, "objects", "info", "alternates")
+    const existing = existsSync(altFile) ? readFileSync(altFile, "utf8") : ""
+    writeFileSync(altFile, `${lenderObjects}\n${existing}`)
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const native = gitSuperWorktree.createLocalGitWorktreeStore
+    const factory = vi.spyOn(gitSuperWorktree, "createLocalGitWorktreeStore").mockImplementation((options) => {
+      const store = native(options)
+      return {
+        ...store,
+        async inspectRemoval(path: string, inspectOptions?: Readonly<{ excludedSubmodules?: readonly string[] }>) {
+          const inspection = await store.inspectRemoval(path, inspectOptions)
+          return path === lender ? { ...inspection, borrowers: [] } : inspection
+        },
+      }
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      const stderr = run.stderr()
+      const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
+      expect(existsSync(lender), stderr).toBe(true)
+      expect(registration, stderr).toContain(lender)
+      expect(existsSync(borrower), stderr).toBe(true)
+      expect(registration, stderr).toContain(borrower)
+      // The keep is the close's own rechecked result, never the masked preflight.
+      expect(stderr).toContain(`"kept":"${lender}"`)
+      expect(stderr).toContain('"reason":"borrowed"')
+      expect(stderr).toContain(`"borrowers":["${borrower}"]`)
+      expect(readFileSync(altFile, "utf8")).toContain(lenderObjects)
     } finally {
       stop.abort()
       factory.mockRestore()
