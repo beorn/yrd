@@ -343,6 +343,41 @@ async function submitGitlink(w: GitlinkWorld, branch: string, sha: string): Prom
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
+  /**
+   * @failure An idle first service round leaves eligible retained backlog environments behind.
+   * @level l2
+   * @consumer the operator whose unnamed detached environment has no authored issue bindings
+   * @testonly none
+   */
+  it("closes an unnamed retained backlog environment on its first idle round", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "unnamed-retained", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    expect(existsSync(environment.path)).toBe(true)
+    const stop = new AbortController()
+    const run = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+        { json: true, workdir: w.workdir },
+      ),
+      run.stderr(),
+    ).toBe(0)
+    expect(existsSync(environment.path)).toBe(false)
+    expect(await w.git(["worktree", "list", "--porcelain", "-z"])).not.toContain(environment.path)
+  })
+
   /** @failure A candidate could run a round before acquiring its claim, or ignore shutdown while waiting. @level l2 */
   it("waits for an unproven local claim without a round and aborts without replacing it", async () => {
     const w = await world()
