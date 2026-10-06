@@ -290,6 +290,16 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
     const parents = (await w.git(["show", "-s", "--format=%P", candidate])).trim().split(" ")
     expect(parents).toEqual([w.target, w.head])
     expect(derived.composed).not.toBe(candidate)
+    // The re-parent composes nothing (@cto ec79133a): the candidate carries the recompose's tree unchanged, and only
+    // its parents differ from the recompose's [composed, carrier].
+    expect(derived.recomposed).not.toBe(candidate)
+    expect((await w.git(["rev-parse", `${candidate}^{tree}`])).trim()).toBe(
+      (await w.git(["rev-parse", `${derived.recomposed}^{tree}`])).trim(),
+    )
+    expect((await w.git(["show", "-s", "--format=%P", derived.recomposed])).trim().split(" ")).toEqual([
+      derived.composed,
+      derived.carrier,
+    ])
     expect((await w.git(["rev-parse", `${derived.carrier}:lib`])).trim()).toBe(
       (await w.git(["rev-parse", `${candidate}:lib`])).trim(),
     )

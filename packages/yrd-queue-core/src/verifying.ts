@@ -24,8 +24,11 @@ export type Verification =
       head: string
       targetHead: string
       candidate: string
-      /** Present when the target's `derive:` changed something: the composed merge before it, and what it did. */
-      derived?: Derived & Readonly<{ composed: string }>
+      /**
+       * Present when the target's `derive:` changed something: the composed merge before it, the recompose whose
+       * tree the candidate carries unchanged, and what it did.
+       */
+      derived?: Derived & Readonly<{ composed: string; recomposed: string }>
       /**
        * #27363: what the compose put back, one component store down, and how complete that
        * proof is. Always present on a verified candidate: absence is not "clean".
@@ -121,7 +124,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
     await worktree.remove()
     throw new Error(`git-super merge of ${options.head} reported updated without a commit`)
   }
-  let derived: (Derived & Readonly<{ composed: string }>) | undefined
+  let derived: (Derived & Readonly<{ composed: string; recomposed: string }>) | undefined
   if (options.derive !== undefined) {
     const composed = result.commit
     let outcome: Derived | undefined
@@ -198,7 +201,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
           again.ran,
         )
       }
-      derived = { ...outcome, composed }
+      derived = { ...outcome, composed, recomposed: recomposed.commit as string }
       // THE DERIVED CANDIDATE LANDS LIKE A PLAIN COMPOSE. The recompose merged the carrier INTO the first compose,
       // so its first parent was that compose; the land reads the candidate's first parent as the target it
       // compares-and-swaps onto (event-run.ts, `targetExpect: parent`) and a derived candidate could never land —
@@ -230,6 +233,17 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
           frozen,
         )
       ).trim()
+      // The re-parent composes nothing (@cto ec79133a): it is admitted as raw plumbing only while its tree is the
+      // recomposed tree git-super built, so a different tree is stopped by name, never landed.
+      const landableTree = (await inWorktree(["rev-parse", `${landable}^{tree}`])).trim()
+      if (landableTree !== tree) {
+        await worktree.remove()
+        throw new DeriveFailed(
+          recomposed.commit as string,
+          `the re-parented candidate ${landable.slice(0, 12)} carries tree ${landableTree.slice(0, 12)}, not the recomposed tree ${tree.slice(0, 12)}; the re-parent must compose nothing`,
+          outcome.ran,
+        )
+      }
       // Same tree, so the checkout moves only HEAD; the worktree is a detached, throwaway compose tree.
       await inWorktree(["checkout", "--quiet", "--detach", landable])
       result = {
