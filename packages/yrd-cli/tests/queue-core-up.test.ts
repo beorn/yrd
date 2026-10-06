@@ -365,16 +365,26 @@ describe("yrd queue up, the service", () => {
     expect(existsSync(environment.path)).toBe(true)
     const stop = new AbortController()
     const run = capture(w.work)
+    let rounds = 0
     expect(
       await coreQueueCommand(
         w.work,
         run.io,
-        { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterRound: () => {
+            rounds++
+            stop.abort()
+          },
+        },
         { json: true, workdir: w.workdir },
       ),
       run.stderr(),
     ).toBe(0)
-    expect(existsSync(environment.path)).toBe(false)
+    expect(rounds, run.stdout() + run.stderr()).toBe(1)
+    expect(existsSync(environment.path), run.stderr()).toBe(false)
     expect(await w.git(["worktree", "list", "--porcelain", "-z"])).not.toContain(environment.path)
   })
 
