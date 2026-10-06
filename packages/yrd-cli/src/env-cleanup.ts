@@ -1,5 +1,6 @@
-import { appendFileSync, statSync } from "node:fs"
-import { join, relative, resolve, sep } from "node:path"
+import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs"
+import { dirname, join, relative, resolve, sep } from "node:path"
+import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   gitIn,
   listChangeHistories,
@@ -45,10 +46,24 @@ type CachedEnvironment = {
  */
 const ENVIRONMENT_BATCH = 8
 
-/** The command invocation owns these facts; a restart makes a complete first pass. */
+/**
+ * Resume state for the sweep. The cursor is a HINT read from the run's own
+ * state dir, never authority: every row is re-evaluated by the rule, so a
+ * missing, unreadable or stale hint costs time and nothing else (ruling 27723
+ * durable cursor, 2026-10-06). Without it, a landing that moves vendor/yrd
+ * restarts the service and restarts the sweep, so under landing churn the tail
+ * of the registry — the backlog this change exists to retire — starves.
+ */
+type CleanupProgress = { cursor: number; hint: string | undefined; loaded: boolean }
+
+/** Where the hint lives: the run's existing state dir, not a new config key. */
+function cursorHintPath(workdir: string): string {
+  return join(workdir, "state", "yrd", "environment-cleanup.json")
+}
+
 export function createEnvironmentCleanup() {
   const cache = new Map<string, CachedEnvironment>()
-  const progress = { cursor: 0 }
+  const progress: CleanupProgress = { cursor: 0, hint: undefined, loaded: false }
   return (input: Parameters<typeof cleanupEnvironments>[0]) => cleanupEnvironments(input, cache, progress)
 }
 
@@ -85,7 +100,7 @@ async function cleanupEnvironments(
     resolveIssue: ((raw: string) => Promise<string>) | undefined
   }>,
   cache: Map<string, CachedEnvironment>,
-  progress: { cursor: number },
+  progress: CleanupProgress,
 ): Promise<void> {
   const { repo, git, config, workdir, outcome, io } = input
   // The author environments live in the worktree registry of the repository
@@ -213,9 +228,11 @@ async function cleanupEnvironments(
   }
   const lookup = issueLookup(config, repo, input.env)
   const statuses = new Map<string, Promise<ResolvedIssue>>()
+  let lookups = 0
   const requireClosed = async (id: string, entry: CachedEnvironment, fresh = false): Promise<void> => {
     let pending = fresh ? undefined : statuses.get(id)
     if (pending === undefined) {
+      lookups++
       pending = (async () => {
         if (lookup === undefined) {
           throw new Error(`issue ${id}: target declaration has no issueResolver; closure unproven`)
@@ -232,6 +249,40 @@ async function cleanupEnvironments(
     }
     if (issue.id !== id || issue.status !== "closed") {
       throw new Error(`issue ${id}: configured lookup returned ${status}; closure unproven`)
+    }
+  }
+  const startedAt = Date.now()
+  // The hint is read once per process, before the first offset. A hint that
+  // cannot be trusted starts the sweep at index 0 and is NAMED, never silently
+  // ignored (ruling 27723). A plain first run has no file: that is not a fault,
+  // so it is named on stderr only and adds no row to a bare run.
+  const hintPath = cursorHintPath(workdir)
+  if (!progress.loaded) {
+    progress.loaded = true
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(hintPath, "utf8"))
+      const hint =
+        typeof parsed === "object" && parsed !== null && "cursorEnv" in parsed
+          ? (parsed as { cursorEnv?: unknown }).cursorEnv
+          : undefined
+      if (typeof hint !== "string") throw new Error("no cursorEnv string")
+      const index = inventory.rows.findIndex((row) => row.name === hint)
+      if (index < 0) {
+        record(
+          hintPath,
+          "cursor-reset",
+          "resume hint names " + JSON.stringify(hint) + ", no longer a registered environment",
+        )
+        progress.cursor = 0
+      } else progress.cursor = index
+    } catch (cause) {
+      const missing = (cause as NodeJS.ErrnoException).code === "ENOENT"
+      progress.cursor = 0
+      const reason = missing
+        ? "absent (first run), starting at index 0"
+        : "unreadable (" + String(cause) + "), starting at index 0"
+      io.stderr("yrd: environment cleanup resume hint " + hintPath + ": " + reason + "\n")
+      if (!missing) record(hintPath, "cursor-reset", String(cause))
     }
   }
   // Resume where the last round ran out of budget, so a row that keeps failing
@@ -392,6 +443,22 @@ async function cleanupEnvironments(
     }
   }
   progress.cursor = stoppedAt < 0 ? 0 : (offset + stoppedAt) % inventory.rows.length
+  // The hint is written in the same step as the round row that reports what the
+  // round did, so a restart resumes at the next environment (ruling 27723).
+  const cursorEnv = inventory.rows[progress.cursor]?.name
+  progress.hint = cursorEnv
+  if (cursorEnv !== undefined) {
+    try {
+      mkdirSync(dirname(hintPath), { recursive: true })
+      atomicWriteFileSync(
+        hintPath,
+        JSON.stringify({ cursorEnv, runId: outcome.run, at: new Date().toISOString() }) + "\n",
+      )
+    } catch (cause) {
+      // A hint we cannot write is named, never silent; the sweep itself stands.
+      record(hintPath, "cursor-write-failed", String(cause))
+    }
+  }
   appendFileSync(
     outcome.log,
     `${JSON.stringify({
@@ -405,6 +472,8 @@ async function cleanupEnvironments(
       charged,
       deferred: inventory.rows.length - charged,
       remaining: inventory.rows.length - closed,
+      ms: Date.now() - startedAt,
+      lookups,
       ...(censusReceipt === undefined ? {} : { census: censusReceipt }),
     })}\n`,
   )
