@@ -24,6 +24,7 @@ import { type Git } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
+import { environmentProvenance } from "../src/env-cleanup-provenance.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
@@ -59,6 +60,45 @@ async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ 
 }
 
 type World = Readonly<{ git: Git; work: string }>
+
+it("cleanup provenance excludes inherited history and refuses incomplete or unknown HEAD evidence", async () => {
+  const w = await world(":")
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  const log = (await w.git(["rev-parse", "--git-path", "logs/HEAD"])).trim()
+  const path = join(w.work, log)
+  const entry = (old: string, message: string) => `${old} ${head} yrd <env-open@yrd.test> 1 +0000\t${message}\n`
+  const creation = entry("0".repeat(40), "")
+  writeFileSync(path, creation + entry(head, "checkout: moving from task/27723 to main"))
+  expect(await environmentProvenance(w.work, w.git, "main")).toEqual({
+    commits: [],
+    branches: ["main", "task/27723"],
+  })
+  writeFileSync(path, creation + entry(head, "commit (amend): own binding") + entry(head, "reset: moving to HEAD"))
+  expect((await environmentProvenance(w.work, w.git)).commits).toEqual([head])
+  for (const message of [
+    "commit: own",
+    "commit (merge): own",
+    "commit (initial): own",
+    "rebase (pick): own",
+    "rebase -i (reword): own",
+    "pull --rebase (edit): own",
+    "rebase (squash): own",
+    "rebase (fixup): own",
+    "rebase (continue): own",
+    "cherry-pick: own",
+    "revert: own",
+    "am: own",
+    "merge topic: Merge made by the 'ort' strategy.",
+    "pull: Merge made by the 'ort' strategy.",
+  ]) {
+    writeFileSync(path, creation + entry(head, message))
+    expect((await environmentProvenance(w.work, w.git)).commits, message).toEqual([head])
+  }
+  writeFileSync(path, entry(head, "commit: truncated beginning"))
+  await expect(environmentProvenance(w.work, w.git)).rejects.toThrow(/creation evidence/u)
+  writeFileSync(path, creation + entry(head, "future-command: unknown"))
+  await expect(environmentProvenance(w.work, w.git)).rejects.toThrow(/future-command/u)
+})
 
 async function command(
   cwd: string,
