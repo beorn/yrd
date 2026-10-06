@@ -45,7 +45,7 @@
         "gitomic": "^0.4.0",
         "loggily": "^0.11.0",
         "react": "^19.2.0",
-        "removely": "0.3.0",
+        "removely": "0.4.0",
         "silvery": "^0.25.0",
       },
       "devDependencies": {
@@ -65,7 +65,7 @@
         "zod": "4.6.5",
       },
       "devDependencies": {
-        "removely": "^0.3.0",
+        "removely": "^0.4.0",
       },
     },
     "packages/yrd-queue-core": {
@@ -76,7 +76,7 @@
         "@yrd/process": "workspace:*",
         "git-super": "0.4.0",
         "gitomic": "^0.4.0",
-        "removely": "^0.3.0",
+        "removely": "^0.4.0",
       },
     },
   },
@@ -91,6 +91,8 @@
     "@bearly/flock": ["@bearly/flock@0.1.1", "", {}, "sha512-YT4E+eanXhIDIHpHqi971KX36IjcfakkAHsSo81B8Fb8mVNwyIKeb6tXTHoOgHJr/p6fjy59iu4QWeqdu9BQbA=="],
 
     "@bearly/pacing": ["@bearly/pacing@0.1.0", "", {}, "sha512-t5c9YUrcZjETONe+DvjjnRtfqlNzPexR3CgFFe7sdqeWlMCVQ8e41qHl/ACHwm42wpRERRrn9dHRuZFLl9I7cg=="],
+
+    "@bearly/process-sources": ["@bearly/process-sources@0.1.0", "", {}, "sha512-FV53KkJdGgfq2/K1iuR7aFK7oqKTdQDzxLDhAHyD3UnWQ6TfDzVdtzmHaNsasgSxgO2HGbv1Ah4i4QEnS4f1Zw=="],
 
     "@chenglou/pretext": ["@chenglou/pretext@0.0.8", "", {}, "sha512-yqm2GMxnPI7VHcHwe84P8ZF0JK/2d2DMKPqMN+s95jQhwDMYYXKVFVJUMEaVWckQStdsjdLav/0Vu+d9YbtGxA=="],
 
@@ -470,7 +472,7 @@
 
     "regex-utilities": ["regex-utilities@2.3.0", "", {}, "sha512-8VhliFJAWRaUiVvREIiW2NXXTmHs4vMNnSzuJVhscgmGav3g9VDxLrQndI3dZZVVdp0ZO/5v0xmX516/7M9cng=="],
 
-    "removely": ["removely@0.3.0", "", { "bin": { "removely": "dist/cli.mjs" } }, "sha512-sjEgr6cgk8LiYcMMXOctcpxHBiW3lKNsTVy6gunWPqryVUI+5OozVnu64ZjRa/2IoSIfYfRovXm8JDdBaZdUcQ=="],
+    "removely": ["removely@0.4.0", "", { "dependencies": { "@bearly/process-sources": "^0.1.0" }, "bin": { "removely": "dist/cli.mjs" } }, "sha512-SI7c/u4zwvgKX1VEFADGnF13eZ2lO2PBzJJoRwQhXvO0e5wLWDIJQXtbtt3bT05d01IcJwn8lOeoqG0Xv2InFw=="],
 
     "rolldown": ["rolldown@1.1.5", "", { "dependencies": { "@oxc-project/types": "=0.139.0", "@rolldown/pluginutils": "^1.0.0" }, "optionalDependencies": { "@rolldown/binding-android-arm64": "1.1.5", "@rolldown/binding-darwin-arm64": "1.1.5", "@rolldown/binding-darwin-x64": "1.1.5", "@rolldown/binding-freebsd-x64": "1.1.5", "@rolldown/binding-linux-arm-gnueabihf": "1.1.5", "@rolldown/binding-linux-arm64-gnu": "1.1.5", "@rolldown/binding-linux-arm64-musl": "1.1.5", "@rolldown/binding-linux-ppc64-gnu": "1.1.5", "@rolldown/binding-linux-s390x-gnu": "1.1.5", "@rolldown/binding-linux-x64-gnu": "1.1.5", "@rolldown/binding-linux-x64-musl": "1.1.5", "@rolldown/binding-openharmony-arm64": "1.1.5", "@rolldown/binding-wasm32-wasi": "1.1.5", "@rolldown/binding-win32-arm64-msvc": "1.1.5", "@rolldown/binding-win32-x64-msvc": "1.1.5" }, "bin": { "rolldown": "./bin/cli.mjs" } }, "sha512-t9z29cJjXf/vxQ8dyhCSpt6H6aSwHTk8cT5I3iy6SMXuFpk5mB6PL6XfC8PCwrPTx93udwKUm9HRteAlTGBLiA=="],
 
