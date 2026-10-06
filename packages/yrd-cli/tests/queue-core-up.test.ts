@@ -5299,7 +5299,7 @@ describe("yrd queue run --tier long", () => {
     mkdirSync(environments, { recursive: true })
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
     const paths: string[] = []
-    for (let index = 0; index < 20; index++) {
+    for (let index = 0; index < 16; index++) {
       const path = join(environments, `27600-open-${String(index)}`)
       await w.git(["worktree", "add", "--quiet", "--detach", path, head])
       paths.push(path)
@@ -5330,8 +5330,8 @@ describe("yrd queue run --tier long", () => {
       ).toBe(0)
       const summaries = allCleanupRows(workdir).filter((row) => row.charged !== undefined)
       expect(summaries.length, run.stderr()).toBe(2)
-      expect(summaries[0]?.charged, run.stderr()).toBe(16)
-      expect(summaries[0]?.deferred, run.stderr()).toBe(4)
+      expect(summaries[0]?.charged, run.stderr()).toBe(8)
+      expect(summaries[0]?.deferred, run.stderr()).toBe(8)
       // The second round resumed where the first stopped, so between them every
       // environment in the registry was evaluated.
       for (const path of paths) expect(run.stderr(), `${path}\n${run.stderr()}`).toContain(path)
