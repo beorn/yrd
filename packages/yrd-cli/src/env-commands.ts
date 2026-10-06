@@ -382,7 +382,17 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
             `Bind work to ${binding.issue}\n\nRefs: ${binding.issue}`,
           ])
         ).trim()
-        await environmentGit(["update-ref", `refs/heads/${branch}`, bound, headSha])
+        // A self-describing reflog message: git writes it verbatim into HEAD's
+        // reflog, so a reader can tell the binding commit from any other move.
+        // The provenance classifier treats this prefix as creating (27723).
+        await environmentGit([
+          "update-ref",
+          "-m",
+          `yrd env open: bind ${binding.issue}`,
+          `refs/heads/${branch}`,
+          bound,
+          headSha,
+        ])
         headSha = bound
       }
       const currentHead = (await environmentGit(["rev-parse", "HEAD"])).trim()
