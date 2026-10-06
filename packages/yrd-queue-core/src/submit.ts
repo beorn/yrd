@@ -1004,23 +1004,11 @@ export async function issueOf(
       `issue for ${branch} must be a nonempty single-line value without surrounding whitespace or control characters`,
     )
   }
-  let history: string
+  let base: string
   try {
-    const base = await mergeBase(git, head, targetHead)
-    if (base === undefined) throw new Error("no merge base")
-    // NUL separates each commit, its trailer block, and its body. Git supplies trailer
-    // parsing; record separators distinguish values within that block. The body allows
-    // fallback extraction for trailers without a colon (e.g. "Refs 26335", 27041).
-    history = await git([
-      "log",
-      "--reverse",
-      "--topo-order",
-      "-z",
-      "--format=%H%x00%(trailers:key=Resolves,key=Refs,valueonly,separator=%x1e)%x00%B%x00%(trailers:key=Resolves,key=Refs,separator=%x1e)",
-      `${base}..${head}`,
-      `^${targetHead}`,
-      "--",
-    ])
+    const found = await mergeBase(git, head, targetHead)
+    if (found === undefined) throw new Error("no merge base")
+    base = found
   } catch (cause) {
     throw new Error(
       `cannot read issue binding for ${branch} at ${head} against target ${targetHead}: ${String(cause)}`,
@@ -1028,28 +1016,61 @@ export async function issueOf(
     )
   }
   let binding: IssueResolution | undefined
-  const canonical = async (raw: string): Promise<string> => {
-    const normalized = normalizeIssueReference(raw)
-    if (resolveIssue === undefined) return normalized
-    let resolved: string
-    try {
-      resolved = await resolveIssue(normalized)
-    } catch (cause) {
-      throw new Error(`cannot resolve issue ${JSON.stringify(raw)} for ${branch}: ${String(cause)}`, { cause })
+  for await (const candidate of issueBindingsOf(git, [`${base}..${head}`, `^${targetHead}`], branch, resolveIssue)) {
+    const { issue, commit } = candidate
+    if (binding === undefined) binding = { issue, source: "binding", commit }
+    else if (binding.issue !== issue) {
+      const trailer = candidate.trailer ?? "Refs/Resolves"
+      throw new Error(
+        `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${issue} at ${commit}; ` +
+          `the second binding is a ${trailer} trailer, and a Refs or Resolves trailer always binds; ` +
+          `keep a follow-up link without binding it with a "Follow-up: ${issue}" line, ` +
+          `then fix trailer at ${commit}`,
+      )
     }
-    if (
-      typeof resolved !== "string" ||
-      resolved.trim() === "" ||
-      resolved !== resolved.trim() ||
-      /[\u0000-\u001f\u007f]/u.test(resolved)
-    ) {
-      throw new Error(`issue resolver returned no single-line canonical issue for ${JSON.stringify(raw)} on ${branch}`)
+  }
+  if (binding !== undefined) {
+    const canonicalDeclared = declared === undefined ? undefined : await canonicalIssue(declared, branch, resolveIssue)
+    if (canonicalDeclared !== undefined && canonicalDeclared !== binding.issue) {
+      throw new Error(
+        `declared issue ${canonicalDeclared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; fix trailer at ${binding.commit}`,
+      )
     }
-    return normalizeIssueReference(resolved)
+    return binding
+  }
+  if (declared !== undefined) return { issue: await canonicalIssue(declared, branch, resolveIssue), source: "declared" }
+  const legacy = /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+  return legacy === undefined
+    ? undefined
+    : { issue: await canonicalIssue(legacy, branch, resolveIssue), source: "legacy-branch" }
+}
+
+/** Read all explicit bindings through the submit decoder, preserving Git's commit order. */
+export async function* issueBindingsOf(
+  git: Git,
+  revisions: readonly string[],
+  branch: string,
+  resolveIssue?: IssueResolver,
+): AsyncGenerator<Readonly<{ issue: string; commit: string; trailer?: string }>, void> {
+  // NUL separates each commit, Git trailer values, body and keyed trailers.
+  // The body fallback accepts colonless Refs/Resolves while excluding subjects.
+  let history: string
+  try {
+    history = await git([
+      "log",
+      "--reverse",
+      "--topo-order",
+      "-z",
+      "--format=%H%x00%(trailers:key=Resolves,key=Refs,valueonly,separator=%x1e)%x00%B%x00%(trailers:key=Resolves,key=Refs,separator=%x1e)",
+      ...revisions,
+      "--",
+    ])
+  } catch (cause) {
+    throw new Error(`cannot read issue binding for ${branch} in ${revisions.join(" ")}: ${String(cause)}`, { cause })
   }
   const records = history.split("\0")
   if (records.pop() !== "") {
-    throw new Error(`incomplete issue binding history for ${branch} at ${head} against target ${targetHead}`)
+    throw new Error(`incomplete issue binding history for ${branch} in ${revisions.join(" ")}`)
   }
   for (let index = 0; index < records.length; index += 4) {
     const commit = records[index]
@@ -1057,7 +1078,7 @@ export async function issueOf(
     const body = records[index + 2]
     const keyed = records[index + 3]
     if (commit === undefined || values === undefined || body === undefined || keyed === undefined) {
-      throw new Error(`incomplete issue binding history for ${branch} at ${head} against target ${targetHead}`)
+      throw new Error(`incomplete issue binding history for ${branch} in ${revisions.join(" ")}`)
     }
     // The second trailer block keeps each key beside its value, so a refusal can
     // name the trailer that bound the second issue instead of guessing (27300).
@@ -1097,31 +1118,33 @@ export async function issueOf(
           `invalid issue binding in ${branch} at ${commit}: expected a single-line value without control characters`,
         )
       }
-      const canonicalIssue = await canonical(issue)
-      if (binding === undefined) binding = { issue: canonicalIssue, source: "binding", commit }
-      else if (binding.issue !== canonicalIssue) {
-        const trailer = candidate.trailer ?? "Refs/Resolves"
-        throw new Error(
-          `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${canonicalIssue} at ${commit}; ` +
-            `the second binding is a ${trailer} trailer, and a Refs or Resolves trailer always binds; ` +
-            `keep a follow-up link without binding it with a "Follow-up: ${canonicalIssue}" line, ` +
-            `then fix trailer at ${commit}`,
-        )
+      yield {
+        issue: await canonicalIssue(issue, branch, resolveIssue),
+        commit,
+        ...(candidate.trailer === undefined ? {} : { trailer: candidate.trailer }),
       }
     }
   }
-  if (binding !== undefined) {
-    const canonicalDeclared = declared === undefined ? undefined : await canonical(declared)
-    if (canonicalDeclared !== undefined && canonicalDeclared !== binding.issue) {
-      throw new Error(
-        `declared issue ${canonicalDeclared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}; fix trailer at ${binding.commit}`,
-      )
-    }
-    return binding
+}
+
+async function canonicalIssue(raw: string, branch: string, resolveIssue?: IssueResolver): Promise<string> {
+  const normalized = normalizeIssueReference(raw)
+  if (resolveIssue === undefined) return normalized
+  let resolved: string
+  try {
+    resolved = await resolveIssue(normalized)
+  } catch (cause) {
+    throw new Error(`cannot resolve issue ${JSON.stringify(raw)} for ${branch}: ${String(cause)}`, { cause })
   }
-  if (declared !== undefined) return { issue: await canonical(declared), source: "declared" }
-  const legacy = /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
-  return legacy === undefined ? undefined : { issue: await canonical(legacy), source: "legacy-branch" }
+  if (
+    typeof resolved !== "string" ||
+    resolved.trim() === "" ||
+    resolved !== resolved.trim() ||
+    /[\u0000-\u001f\u007f]/u.test(resolved)
+  ) {
+    throw new Error(`issue resolver returned no single-line canonical issue for ${JSON.stringify(raw)} on ${branch}`)
+  }
+  return normalizeIssueReference(resolved)
 }
 
 /**

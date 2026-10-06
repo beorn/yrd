@@ -38,6 +38,8 @@ import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as gitomic from "gitomic"
+import * as removely from "removely"
+import * as gitSuperWorktree from "git-super/worktree"
 import { openEvents } from "gitomic/events"
 import {
   appendChangeEvent,
@@ -77,6 +79,8 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand, endingCode } from "../src/queue-core-commands.ts"
+import { environmentInventory } from "../src/env-commands.ts"
+import { workdirOf } from "../src/workdir.ts"
 import { changesSuffix } from "../src/watch-list.tsx"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import { readRunnerFacts } from "../src/watch-runner.ts"
@@ -87,6 +91,8 @@ import { installSelectedGit } from "./support/selected-git.ts"
 // A mutable facade, so a test can catch each health document at the rename
 // that publishes it. Every call passes through to the real filesystem.
 vi.mock("node:fs", async (original) => ({ ...(await original<typeof import("node:fs")>()) }))
+vi.mock("removely", async (original) => ({ ...(await original<typeof import("removely")>()) }))
+vi.mock("git-super/worktree", async (original) => ({ ...(await original<typeof import("git-super/worktree")>()) }))
 
 // A submodule at a local path: git refuses file transport for submodule clones
 // unless every git in the chain is told. Every git runner below and the
@@ -247,6 +253,31 @@ async function redeclare(w: World, text: string): Promise<void> {
   await w.git(["push", "--quiet", "origin", "main"])
 }
 
+/**
+ * A real, pushed submodule on the target's main, so an environment's dependency
+ * object store exists and can lend objects to a sibling's store.
+ */
+async function addMaterializedDependency(w: World): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-submodule-"))
+  roots.push(root)
+  const seed = gitIn(root)
+  const remote = join(root, "remote.git")
+  const work = join(root, "work")
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, work])
+  const git = gitIn(work)
+  await git(["config", "user.email", "queue@yrd.test"])
+  await git(["config", "user.name", "yrd"])
+  await git(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(work, "READY"), "materialized\n")
+  await git(["add", "READY"])
+  await git(["commit", "--quiet", "-m", "seed materialized dependency"])
+  await git(["push", "--quiet", "origin", "main"])
+  await w.git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", remote, "vendor/dependency"])
+  await w.git(["commit", "--quiet", "-m", "add materialized dependency"])
+  await w.git(["push", "--quiet", "origin", "main"])
+}
+
 type GitlinkWorld = World &
   Readonly<{
     /** The submodule's commit the root records at start. */
@@ -343,6 +374,533 @@ async function submitGitlink(w: GitlinkWorld, branch: string, sha: string): Prom
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
+  it("reuses a dirty environment verdict until its index changes", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "cached-retained", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    writeFileSync(join(environment.path, "dirty.txt"), "work to preserve\n")
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const native = gitSuperWorktree.createLocalGitWorktreeStore
+    let inspections = 0
+    const factory = vi.spyOn(gitSuperWorktree, "createLocalGitWorktreeStore").mockImplementation((options) => {
+      const store = native(options)
+      return {
+        ...store,
+        async inspectRemoval(...args) {
+          inspections++
+          return store.inspectRemoval(...args)
+        },
+      }
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    let rounds = 0
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async () => {
+              rounds++
+              if (rounds === 2) {
+                expect(inspections, "unchanged idle pass repeated the recursive removal inspection").toBe(1)
+                await gitIn(environment.path)(["add", "dirty.txt"])
+              }
+              if (rounds === 3) stop.abort()
+            },
+          },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(rounds).toBe(3)
+      expect(inspections).toBe(2)
+      expect(existsSync(environment.path)).toBe(true)
+    } finally {
+      stop.abort()
+      factory.mockRestore()
+      census.mockRestore()
+    }
+  })
+  /**
+   * @failure An idle first service round leaves eligible retained backlog environments behind.
+   * @level l2
+   * @consumer the operator whose unnamed detached environment has no authored issue bindings
+   * @testonly none
+   */
+  it.each(["complete", "incomplete", "busy", "cleared-denial", "uncleared-denial"] as const)(
+    "closes an unnamed retained backlog environment on its first idle round (%s)",
+    async (coverage) => {
+      const w = await world()
+      await w.git(["config", "yrd.workdir", w.workdir])
+      await redeclare(w, "setup: ':'\n")
+      await w.git(["fetch", "--quiet", "origin", "main"])
+      await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+      const workdir = await workdirOf(w.git, { cwd: w.work })
+      const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+      const opened = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "unnamed-retained", "--json"], opened.io),
+        opened.stderr(),
+      ).toBe(0)
+      const environment = JSON.parse(opened.stdout()) as { path: string }
+      expect(existsSync(environment.path)).toBe(true)
+      // The host may deny unrelated processes' CWDs. The projection is this
+      // external capability boundary; queue, registry and retained removal stay real.
+      let projection: removely.ProcessCwdProjection = {
+        complete: coverage !== "incomplete",
+        unreadable: [],
+        mechanism: "proc",
+        rows: coverage === "busy" ? [{ pid: process.pid, cwd: environment.path }] : [],
+      }
+      if (coverage === "cleared-denial" || coverage === "uncleared-denial") {
+        // A denied same-UID cwd read, exactly as removely's census records it:
+        // identity evidence (uid, comm, argv, denial code) and no readable row.
+        // The caller must clear it with removely's own identity predicate, never
+        // by trusting the argv an entry happens to carry. The UID is real, so
+        // clearedByIdentity sees the same identity the production caller holds.
+        const uid = process.getuid?.()
+        if (uid === undefined) throw new Error("this queue case needs a real unix uid")
+        projection = {
+          complete: false,
+          mechanism: "proc",
+          rows: [],
+          unreadable: [
+            {
+              pid: 4242,
+              uid,
+              comm: "bun",
+              denied: ["process"],
+              issues: [{ source: "process", resource: "cwd", reason: "denied", code: "EACCES" }],
+              argv:
+                coverage === "cleared-denial"
+                  ? ["/usr/lib/systemd/systemd", "--user"]
+                  : ["bun", "private-argument-must-not-be-reported"],
+            },
+          ],
+        }
+      }
+      const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue(projection)
+      try {
+        const inventory = await environmentInventory(w.work, w.git, workdir)
+        expect(
+          inventory.rows.map((row) => row.path),
+          JSON.stringify({
+            environment,
+            inventory,
+            registered: await w.git(["worktree", "list", "--porcelain", "-z"]),
+          }),
+        ).toContain(environment.path)
+        const stop = new AbortController()
+        const run = capture(w.work)
+        let rounds = 0
+        expect(
+          await coreQueueCommand(
+            w.work,
+            run.io,
+            {
+              command: "up",
+              intervalSeconds: 0,
+              stop: stop.signal,
+              afterRound: () => {
+                rounds++
+                stop.abort()
+              },
+            },
+            { json: true, workdir },
+          ),
+          run.stderr(),
+        ).toBe(0)
+        expect(rounds, run.stdout() + run.stderr()).toBe(1)
+        const allowsClose = coverage === "complete" || coverage === "cleared-denial"
+        expect(existsSync(environment.path), run.stderr()).toBe(!allowsClose)
+        const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
+        if (allowsClose) expect(registration).not.toContain(environment.path)
+        else {
+          expect(registration).toContain(environment.path)
+          if (coverage === "busy") expect(run.stderr()).toContain("has CWD")
+          else if (coverage === "uncleared-denial") {
+            expect(run.stderr()).toContain("pid 4242 bun")
+            expect(run.stderr()).toContain("EACCES")
+            expect(run.stderr()).not.toContain("private-argument-must-not-be-reported")
+          } else expect(run.stderr()).toContain("census proc incomplete")
+        }
+      } finally {
+        census.mockRestore()
+      }
+    },
+  )
+
+  /**
+   * @failure A named, merged environment whose issue is closed is left behind,
+   *          or an environment the queue must not close is removed anyway: a
+   *          held one, one whose named issue is still open, one whose commit is
+   *          not yet on main, or one whose submodule stores another tree borrows.
+   * @level l2
+   * @consumer the operator whose closed-issue environment is retired while their
+   *           held or in-flight one must survive an idle queue round
+   * @testonly none
+   */
+  it("closes a merged, closed-issue environment and keeps each ineligible class with its reason", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    // The target-owned resolver proves closure: a closed status lets the queue
+    // retire the environment, an open status is a KEEP.
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(
+      resolver,
+      '#!/usr/bin/env bash\ncase "$1" in 27601) status=closed ;; *) status=open ;; esac\nprintf \'{"id":"%s","status":"%s"}\' "$1" "$status"\n',
+    )
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const open = async (bay: string, extra: readonly string[] = []): Promise<string> => {
+      const run = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", bay, "--json", ...extra], run.io),
+        run.stderr(),
+      ).toBe(0)
+      const environment = JSON.parse(run.stdout()) as { path: string }
+      expect(existsSync(environment.path)).toBe(true)
+      return environment.path
+    }
+    const held = await open("held-retained", ["--hold", "operator asked"])
+    const closedIssue = await open("27601-closed")
+    const issueOpen = await open("27600-open")
+    const unmerged = await open("unmerged-retained")
+    await gitIn(unmerged)(["commit", "--quiet", "--allow-empty", "-m", "not on main yet"])
+    const borrowed = await open("borrowed-retained")
+    const borrower = "sibling-retained-environment"
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const native = gitSuperWorktree.createLocalGitWorktreeStore
+    const factory = vi.spyOn(gitSuperWorktree, "createLocalGitWorktreeStore").mockImplementation((options) => {
+      const store = native(options)
+      return {
+        ...store,
+        async inspectRemoval(path: string, inspectOptions?: Readonly<{ excludedSubmodules?: readonly string[] }>) {
+          const inspection = await store.inspectRemoval(path, inspectOptions)
+          return path === borrowed ? { ...inspection, borrowers: [borrower] } : inspection
+        },
+      }
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      const stderr = run.stderr()
+      const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
+      expect(existsSync(closedIssue), stderr).toBe(false)
+      expect(registration, stderr).not.toContain(closedIssue)
+      for (const path of [held, issueOpen, unmerged, borrowed]) {
+        expect(existsSync(path), stderr).toBe(true)
+        expect(registration, stderr).toContain(path)
+      }
+      expect(stderr).toContain("held: operator asked")
+      expect(stderr).toContain("issue 27600")
+      expect(stderr).toContain("closure unproven")
+      expect(stderr).toContain("is not on target")
+      expect(stderr).toContain(`borrowed by ${borrower}`)
+    } finally {
+      stop.abort()
+      factory.mockRestore()
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure Cleanup stops at its own preflight: when a live borrower appears
+   *          only after that preflight snapshot, the native close returns a
+   *          `kept: borrowed` result and cleanup reads it as a removal — or
+   *          rejects it as unproven — instead of keeping the lender.
+   * @level l2
+   * @consumer the operator whose lender environment is closed out from under a
+   *           sibling that still borrows its dependency object store
+   * @testonly none
+   */
+  it("keeps the lender when only the close recheck finds its borrower", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await addMaterializedDependency(w)
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"closed"}\' "$1"\n')
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const openedLender = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "27601-lender", "--json"], openedLender.io),
+      openedLender.stderr(),
+    ).toBe(0)
+    const lender = (JSON.parse(openedLender.stdout()) as { path: string }).path
+    const openedBorrower = capture(w.work)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "env", "open", selected, "--bay", "borrower-held", "--hold", "parked sibling", "--json"],
+        openedBorrower.io,
+      ),
+      openedBorrower.stderr(),
+    ).toBe(0)
+    const borrower = (JSON.parse(openedBorrower.stdout()) as { path: string }).path
+    // A live loan: the borrower's dependency object store declares the lender's
+    // objects as an alternate. The caller's preflight below is masked to stand
+    // for the borrower arriving after its snapshot; the native close rechecks
+    // under its own mutation lock and must find it.
+    const lenderObjects = join(
+      (await gitIn(join(lender, "vendor/dependency"))(["rev-parse", "--absolute-git-dir"])).trim(),
+      "objects",
+    )
+    const borrowerGitDir = (
+      await gitIn(join(borrower, "vendor/dependency"))(["rev-parse", "--absolute-git-dir"])
+    ).trim()
+    const altFile = join(borrowerGitDir, "objects", "info", "alternates")
+    const existing = existsSync(altFile) ? readFileSync(altFile, "utf8") : ""
+    writeFileSync(altFile, `${lenderObjects}\n${existing}`)
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const native = gitSuperWorktree.createLocalGitWorktreeStore
+    const factory = vi.spyOn(gitSuperWorktree, "createLocalGitWorktreeStore").mockImplementation((options) => {
+      const store = native(options)
+      return {
+        ...store,
+        async inspectRemoval(path: string, inspectOptions?: Readonly<{ excludedSubmodules?: readonly string[] }>) {
+          const inspection = await store.inspectRemoval(path, inspectOptions)
+          return path === lender ? { ...inspection, borrowers: [] } : inspection
+        },
+      }
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      const stderr = run.stderr()
+      const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
+      expect(existsSync(lender), stderr).toBe(true)
+      expect(registration, stderr).toContain(lender)
+      expect(existsSync(borrower), stderr).toBe(true)
+      expect(registration, stderr).toContain(borrower)
+      // The keep is the close's own rechecked result, never the masked preflight.
+      expect(stderr).toContain(`"kept":"${lender}"`)
+      expect(stderr).toContain('"reason":"borrowed"')
+      expect(stderr).toContain(`"borrowers":["${borrower}"]`)
+      expect(readFileSync(altFile, "utf8")).toContain(lenderObjects)
+    } finally {
+      stop.abort()
+      factory.mockRestore()
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure A component commit's `Refs` trailer is read as the environment's
+   *          own binding: an environment that root history binds to nothing is
+   *          kept — or has its issue status consulted — on component-only
+   *          evidence the ruling says must be counted, not widened.
+   * @level l2
+   * @consumer the operator whose environment is held open by an issue named
+   *           only inside a submodule, whose closure root history never records
+   * @testonly none
+   */
+  it("counts a component-only binding as no binding and closes the environment", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await addMaterializedDependency(w)
+    // The component's own commit names issue 27601; no root commit ever does, so
+    // root-only binding must leave the environment unbound.
+    const dependencyGit = gitIn(join(w.work, "vendor/dependency"))
+    await dependencyGit(["commit", "--quiet", "--allow-empty", "-m", "component-only binding", "-m", "Refs: 27601"])
+    await dependencyGit(["push", "--quiet", "origin", "main"])
+    await w.git(["add", "vendor/dependency"])
+    await w.git(["commit", "--quiet", "-m", "record the moved component"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    // The fixture's whole point: the component names 27601 and no root commit does.
+    expect((await dependencyGit(["log", "-1", "--format=%B"])).trim()).toContain("Refs: 27601")
+    expect(await w.git(["log", "--format=%B"])).not.toContain("27601")
+    // The resolver reports 27601 open, so an environment that did count the
+    // component binding would be kept with `closure unproven`.
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "component-only", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = (JSON.parse(opened.stdout()) as { path: string }).path
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      const stderr = run.stderr()
+      expect(existsSync(environment), stderr).toBe(false)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"]), stderr).not.toContain(environment)
+      expect(stderr).not.toContain("27601")
+    } finally {
+      stop.abort()
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure An environment whose per-worktree HEAD reflog lost its creation
+   *          evidence — expired or truncated — reads as bound to no issue and is
+   *          retired, discarding the work its own commits recorded.
+   * @level l2
+   * @consumer the operator whose long-lived or reflog-rewritten environment must
+   *           survive an idle queue round, named by reason
+   * @testonly none
+   */
+  it("keeps an environment whose HEAD reflog lost its creation evidence", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "truncated-retained", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    // Expiry/truncation: the reflog still has entries, but no all-zero creation
+    // line, so Git can no longer prove which commits this environment created.
+    const environmentGit = gitIn(environment.path)
+    const reflog = resolve(environment.path, (await environmentGit(["rev-parse", "--git-path", "logs/HEAD"])).trim())
+    const head = (await environmentGit(["rev-parse", "HEAD"])).trim()
+    writeFileSync(reflog, `${"a".repeat(40)} ${head} yrd <env@yrd.test> 1 +0000\tcommit: own binding\n`)
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(existsSync(environment.path), run.stderr()).toBe(true)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toContain(environment.path)
+      expect(run.stderr()).toContain("creation evidence")
+    } finally {
+      stop.abort()
+      census.mockRestore()
+    }
+  })
+
+  /**
+   * @failure An environment that held an issue-bound branch and was later
+   *          detached is treated as bound to no issue, and the idle round
+   *          retires it while that issue is still open.
+   * @level l2
+   * @consumer the operator whose reused or branch-then-detached environment
+   *           still owes an open issue
+   * @testonly none
+   */
+  it("keeps a branch-then-detached environment bound through its reflog branch", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "branchthen-retained", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    // The environment's own name carries no issue; only the branch it held does.
+    // It moved to an issue-bound branch and was then detached, so the reflog is
+    // the sole surviving record that it ever held task/27601-branchthen.
+    const environmentGit = gitIn(environment.path)
+    await environmentGit(["checkout", "--quiet", "-b", "task/27601-branchthen"])
+    await environmentGit(["checkout", "--quiet", "--detach"])
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(existsSync(environment.path), run.stderr()).toBe(true)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toContain(environment.path)
+      expect(run.stderr()).toContain("issue 27601")
+      expect(run.stderr()).toContain("closure unproven")
+    } finally {
+      stop.abort()
+      census.mockRestore()
+    }
+  })
+
   /** @failure A candidate could run a round before acquiring its claim, or ignore shutdown while waiting. @level l2 */
   it("waits for an unproven local claim without a round and aborts without replacing it", async () => {
     const w = await world()
