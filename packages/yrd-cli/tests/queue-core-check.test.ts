@@ -16,7 +16,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { readJournals, type Git, type LogRecord } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
@@ -48,7 +48,7 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stdout(): string }> {
 
 type World = Readonly<{ git: Git; work: string; workdir: string }>
 
-async function world(declare = true): Promise<World> {
+async function world(declare = true, declaration = DECLARATION): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-check-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -60,7 +60,7 @@ async function world(declare = true): Promise<World> {
   await git(["config", "user.email", "queue@yrd.test"])
   await git(["config", "user.name", "yrd"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), DECLARATION)
+  writeFileSync(join(work, ".yrd.yml"), declaration)
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue and one check"])
   await git(["push", "--quiet", "origin", "main"])
@@ -430,5 +430,36 @@ describe("yrd check uses the protected program without publishing", () => {
       const checkRefs = await w.git(["for-each-ref", "refs/yrd-check"])
       expect(checkRefs.trim()).toBe("")
     })
+  })
+})
+
+describe("one generic temp root (27721)", () => {
+  it("narrows the manual check child to a supplied TMPDIR, and keeps <workdir>/tmp when none is supplied", async () => {
+    const probe = join(mkdtempSync(join(tmpdir(), "yrd-cli-tmp-root-")), "seen.txt")
+    roots.push(dirname(probe))
+    const w = await world(true, `checks:\n  - {tmpdir-probe: {run: 'printf %s "$TMPDIR" > ${JSON.stringify(probe)}'}}\n`)
+    const supplied = join(w.workdir, "declared-tmp")
+    const seen = probe
+    const suppliedRun = capture(w.work)
+    const suppliedExit = await coreQueueCommand(
+      w.work,
+      suppliedRun.io,
+      { command: "check", names: ["tmpdir-probe"] },
+      { workdir: w.workdir, env: { ...process.env, TMPDIR: supplied } },
+    )
+    expect(suppliedExit).toBe(0)
+    expect(readFileSync(seen, "utf8")).toBe(supplied)
+
+    const bare = { ...process.env }
+    delete bare.TMPDIR
+    const bareRun = capture(w.work)
+    const bareExit = await coreQueueCommand(
+      w.work,
+      bareRun.io,
+      { command: "check", names: ["tmpdir-probe"] },
+      { workdir: w.workdir, env: bare },
+    )
+    expect(bareExit).toBe(0)
+    expect(readFileSync(seen, "utf8")).toBe(join(w.workdir, "tmp"))
   })
 })
