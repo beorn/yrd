@@ -82,12 +82,23 @@ async function cleanupEnvironments(
     kept++
     record(path, "kept", why)
   }
+  /** The service's own coverage receipt; the CWD ruling requires rows, unreadable and uncleared from this process. */
+  let censusReceipt:
+    | Readonly<{ mechanism: string; complete: boolean; rows: number; unreadable: number; uncleared: number }>
+    | undefined
   const census = async (): Promise<ProcessCwdProjection> => {
     const snapshot = await inspectProcessCwds({ deadlineMs: 2_000 })
     // A denied same-UID read is cleared only by removely's own identity
     // predicate. Anything it cannot clear could be a holder, so the run keeps
     // the environment and names the pid, command and denial it could not rule out.
     const uncleared = snapshot.unreadable.filter((entry) => clearedByIdentity(entry) === undefined)
+    censusReceipt = {
+      mechanism: snapshot.mechanism,
+      complete: snapshot.complete,
+      rows: snapshot.rows.length,
+      unreadable: snapshot.unreadable.length,
+      uncleared: uncleared.length,
+    }
     if (uncleared.length > 0) {
       throw new Error(
         `same-UID process CWD census ${snapshot.mechanism} could not read ${uncleared
@@ -139,7 +150,7 @@ async function cleanupEnvironments(
     for (const row of inventory.rows) preserve(row.path, String(cause))
     appendFileSync(
       outcome.log,
-      `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", closed, kept, remaining: inventory.rows.length - closed })}\n`,
+      `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", closed, kept, remaining: inventory.rows.length - closed, ...(censusReceipt === undefined ? {} : { census: censusReceipt }) })}\n`,
     )
     return
   }
@@ -312,6 +323,6 @@ async function cleanupEnvironments(
   }
   appendFileSync(
     outcome.log,
-    `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", closed, kept, remaining: inventory.rows.length - closed })}\n`,
+    `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", closed, kept, remaining: inventory.rows.length - closed, ...(censusReceipt === undefined ? {} : { census: censusReceipt }) })}\n`,
   )
 }
