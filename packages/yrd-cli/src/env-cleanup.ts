@@ -34,10 +34,16 @@ type CachedEnvironment = {
  * environments, so the first pass over the fleet's whole registry is sliced
  * across rounds instead of exceeding the 27723 cost bar (30 s, 400 spawns) in
  * one of them: the registry holds hundreds of rows, and each costs several Git
- * calls. `cursor` is where the next round resumes, so progress is guaranteed
- * even when a row keeps failing its cheap checks.
+ * calls plus an issue-status lookup. `cursor` is where the next round resumes,
+ * so progress is guaranteed even when a row keeps failing its cheap checks.
+ *
+ * Measured 2026-10-06 against the delivered fleet registry: a 16-row round took
+ * 28.8 s and 29.4 s (two in a row), because the issue-status lookup costs ~2 s
+ * per distinct issue — too close to the 30 s bar to be safe. At 8 rows the same
+ * work is ~14 s, and the git spawns stay far below 400 (an instrumented read of
+ * this path measured 4 per row).
  */
-const ENVIRONMENT_BATCH = 16
+const ENVIRONMENT_BATCH = 8
 
 /** The command invocation owns these facts; a restart makes a complete first pass. */
 export function createEnvironmentCleanup() {
