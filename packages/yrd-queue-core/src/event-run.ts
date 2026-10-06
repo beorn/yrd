@@ -230,6 +230,7 @@ async function settleEventNotice(
           repo: options.repo,
           targetSha: target,
           workdir: options.workdir,
+          tempRoot: options.tempRoot,
           notify: [entry],
           setup: options.setup,
           env: options.env,
@@ -765,6 +766,7 @@ export async function eventQueueRun(
             repo: options.repo,
             targetSha: target,
             workdir: options.workdir,
+            tempRoot: options.tempRoot,
             notify: options.notify ?? [],
             ...(options.setup === undefined ? {} : { setup: options.setup }),
             ...(options.env === undefined ? {} : { env: options.env }),
@@ -1664,7 +1666,7 @@ export async function eventQueueRun(
                 derive: {
                   run: options.derive,
                   logDir: join(options.workdir, "checks", `${branch}@${head}`, log.id, "compose"),
-                  tmpdir: join(options.workdir, "tmp"),
+                  tmpdir: options.tempRoot,
                 },
               }),
           message: [
@@ -1949,7 +1951,7 @@ export async function eventQueueRun(
             `attempt-${String(attempt)}`,
             phase,
           )
-          const tmpdir = join(options.workdir, "tmp")
+          const tmpdir = options.tempRoot
           const setupAbout = { branch, head, name: SETUP, phase }
           let worktree
           try {
@@ -2190,7 +2192,7 @@ export async function eventQueueRun(
             `attempt-${String(stopped.attempt)}`,
             "base",
           )
-          const baseTmpdir = join(options.workdir, "tmp")
+          const baseTmpdir = options.tempRoot
           let baseFailure: CheckResult | undefined
           let baseProblem: string | undefined
           let baseWorktree

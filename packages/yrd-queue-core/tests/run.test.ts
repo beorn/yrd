@@ -280,6 +280,7 @@ async function world(
       ...(check.setup === undefined ? {} : { setup: check.setup }),
       target: { branch: "main", remote: "origin" },
       targetSha: await remoteTarget({ git }),
+      tempRoot: join(workdir, "tmp"),
       workdir,
     }),
     remote,

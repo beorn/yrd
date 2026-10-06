@@ -166,6 +166,7 @@ async function world(plan: Readonly<{ notifyNames?: readonly string[] }> = {}): 
         repo: work,
         target: { branch: "main", remote: "origin" },
         targetSha: await remoteTip(git, "refs/heads/main"),
+        tempRoot: join(workdir, "tmp"),
         workdir,
       }
     },

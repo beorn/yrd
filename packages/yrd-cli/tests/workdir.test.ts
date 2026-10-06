@@ -1,7 +1,7 @@
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { parseQueueAddress, queueRoot } from "../src/address.ts"
-import { workdirOf } from "../src/workdir.ts"
+import { queueTempRoot, workdirOf } from "../src/workdir.ts"
 
 describe("workdirOf (25716 row 9)", () => {
   it("resolves to the queue root under hostWorkdir for the given address", async () => {
@@ -40,5 +40,28 @@ describe("workdirOf (25716 row 9)", () => {
       return ""
     }
     await expect(workdirOf(unreachable, { env })).rejects.toThrow(/Could not resolve host/)
+  })
+})
+
+describe("queueTempRoot (27721: one generic temp root from the supplied TMPDIR)", () => {
+  it("keeps today's <workdir>/tmp when the environment supplies no TMPDIR", () => {
+    expect(queueTempRoot("/custom/state/yrd/q", {})).toBe(join("/custom/state/yrd/q", "tmp"))
+    expect(queueTempRoot("/custom/state/yrd/q", { TMPDIR: "" })).toBe(join("/custom/state/yrd/q", "tmp"))
+  })
+
+  it("adopts an ordinary supplied TMPDIR verbatim, so a managed disk root can narrow the check child", () => {
+    expect(queueTempRoot("/custom/state/yrd/q", { TMPDIR: "/hh/var/s/km-vitest-3001" })).toBe(
+      "/hh/var/s/km-vitest-3001",
+    )
+  })
+
+  it("fails loud, naming the queried value, rather than silently falling back to <workdir>/tmp", () => {
+    const where = "/custom/state/yrd/q"
+    expect(() => queueTempRoot(where, { TMPDIR: "relative/tmp" })).toThrow(
+      /TMPDIR.*relative\/tmp/u,
+    )
+    expect(() => queueTempRoot(where, { TMPDIR: "/custom/state/yrd/../elsewhere" })).toThrow(
+      /TMPDIR.*\/custom\/state\/yrd\/\.\.\/elsewhere/u,
+    )
   })
 })

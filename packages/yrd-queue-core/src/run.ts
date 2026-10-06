@@ -56,8 +56,14 @@ export type QueueRunOptions = Readonly<{
   teardown?: string
   /** The blob the checks were read from, recorded on every checked record. */
   configBlob: string
-  /** The queue workdir: its logs, its worktrees and its temp root; on the root filesystem. */
+  /** The queue workdir: its logs, its worktrees and its durable stores; on the root filesystem. */
   workdir: string
+  /**
+   * The one generic temp root the round narrows every check child to (27721). Resolved ONCE by the command
+   * entry from an ordinary supplied `TMPDIR`, and `<workdir>/tmp` when none was supplied; the queue core
+   * carries it and never re-derives it, so no caller can quietly reintroduce a `<workdir>/tmp` fallback.
+   */
+  tempRoot: string
   /** Receives every log record as it is written, for the human rendering. */
   render?: (record: LogRecord) => void
   /** The logger the worktree plumbing narrates to; pass one only at trace. */

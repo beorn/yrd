@@ -186,6 +186,8 @@ export type OutsideRound = Readonly<{
   /** The target commit the entry runs at: its tree, and its `setup:` first. */
   targetSha: string
   workdir: string
+  /** The one generic temp root this notice's setup narrows to (27721); `<workdir>/tmp` when the environment supplied none. */
+  tempRoot: string
   notify: readonly Notifier[]
   setup?: string
   env?: NodeJS.ProcessEnv
@@ -236,7 +238,7 @@ export async function dispatchNotifications(
               setup: {
                 run: context.setup,
                 logDir: join(context.workdir, "checks", "notify", stamp),
-                tmpdir: join(context.workdir, "tmp", "notify", stamp),
+                tmpdir: join(context.tempRoot, "notify", stamp),
               },
             }),
       })

@@ -259,6 +259,7 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
       targetSha: w.target,
       configBlob: config.blob,
       workdir: join(w.root, "queue"),
+      tempRoot: join(w.root, "queue", "tmp"),
       git: w.git,
       env: w.env,
       process: recording,

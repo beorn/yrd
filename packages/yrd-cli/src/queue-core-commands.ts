@@ -206,7 +206,7 @@ import { SERVICE } from "./queue-health.ts"
 const START_SERVICE_COMMAND = `hab up ${SERVICE}`
 const CHECK_SERVICE_COMMAND = `hab ps ${SERVICE}`
 
-import { workdirOf } from "./workdir.ts"
+import { queueTempRoot, workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
 
 function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution | undefined) {
@@ -713,6 +713,9 @@ export async function coreQueueCommand(
   const resolveIssue = issueResolver(config, repo, env)
   const workdir = options.workdir ?? (await workdirOf(git))
   mkdirSync(workdir, { recursive: true })
+  // One generic temp root, resolved here and carried down (27721). The queue core never re-derives it: a
+  // supplied TMPDIR is adopted verbatim, and an absent one keeps today's `<workdir>/tmp`.
+  const tempRoot = queueTempRoot(workdir, env ?? process.env)
   const admission = config.admission
   const admit =
     admission === undefined
@@ -778,6 +781,7 @@ export async function coreQueueCommand(
         repo,
         declared,
         workdir,
+        tempRoot,
         selection,
         options.env,
         options.log,
@@ -875,6 +879,7 @@ export async function coreQueueCommand(
           repo,
           targetSha: captured.oid,
           workdir,
+          tempRoot,
           notify: config.notify,
           setup: config.setup,
           env: env ?? process.env,
@@ -1306,6 +1311,7 @@ export async function coreQueueCommand(
             repo,
             targetSha: captured.oid,
             workdir,
+            tempRoot,
             ...(options.env === undefined ? {} : { env: options.env }),
             ...(options.populateReference === undefined ? {} : { populateReference: options.populateReference }),
           },
@@ -3280,7 +3286,7 @@ export async function coreQueueCommand(
                 phase: "check",
                 root: join(worktrees, "program", "check", head.slice(0, 12), spec.name),
                 logDir,
-                tmpdir: join(workdir, "tmp"),
+                tmpdir: tempRoot,
                 log: journal,
                 env: options.env,
                 selection,
@@ -3301,14 +3307,14 @@ export async function coreQueueCommand(
                 targetSha: captured.oid,
                 ...(config.setup === undefined
                   ? {}
-                  : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
+                  : { setup: { logDir, run: config.setup, tmpdir: tempRoot } }),
               })
               result = await runCheck({
                 cwd: prepared.path,
                 env: options.env,
                 logDir,
                 spec,
-                tmpdir: join(workdir, "tmp"),
+                tmpdir: tempRoot,
                 tree: prepared.tree,
               })
             }
@@ -3690,6 +3696,7 @@ async function tellOverride(
     repo: string
     targetSha: string
     workdir: string
+    tempRoot: string
     env?: NodeJS.ProcessEnv
     populateReference?: boolean
   }>,
@@ -3708,6 +3715,7 @@ async function tellOverride(
         repo: context.repo,
         targetSha: context.targetSha,
         workdir: context.workdir,
+        tempRoot: context.tempRoot,
         ...(config.setup === undefined ? {} : { setup: config.setup }),
         ...(context.env === undefined ? {} : { env: context.env }),
         ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
@@ -3745,6 +3753,7 @@ function runOptions(
   repo: string,
   declared: Readonly<{ config: QueueConfig; oid: string }>,
   workdir: string,
+  tempRoot: string,
   selection: GitSelection,
   env?: NodeJS.ProcessEnv,
   log?: ConditionalLogger,
@@ -3771,6 +3780,7 @@ function runOptions(
     teardown: config.teardown,
     target: config.target,
     targetSha: oid,
+    tempRoot,
     workdir,
   }
 }
