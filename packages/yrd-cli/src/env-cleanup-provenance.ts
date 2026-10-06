@@ -39,11 +39,13 @@ export async function environmentProvenance(
     }
     const message = entry.message
     // A message-less NON-FIRST entry is CREATING (ruling 27723 addendum,
-    // 2026-10-06): it is Yrd's own `env open --issue` binding update-ref, which
-    // git mirrors into HEAD's reflog with no -m. Its trailers — read from the
-    // entry's own commit, never its ancestry — name the bound issue. The
-    // creation proof stays the zero-old-id FIRST entry above.
-    if (message === "") {
+    // 2026-10-06): older Yrd wrote its `env open --issue` binding update-ref
+    // with no -m, so git mirrored it into HEAD's reflog bare. Newer Yrd names
+    // it (`yrd env open: bind <issue>`), and that prefix is the same creating
+    // move. Either way the trailers — read from the entry's own commit, never
+    // its ancestry — name the bound issue. The creation proof stays the
+    // zero-old-id FIRST entry above.
+    if (message === "" || /^yrd env open: bind\b/u.test(message)) {
       commits.add(entry.newOid)
       continue
     }

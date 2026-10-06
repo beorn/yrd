@@ -104,6 +104,9 @@ it("cleanup provenance excludes inherited history and refuses incomplete or unkn
   // addendum). Its trailers are read from that commit, never its ancestry.
   writeFileSync(path, creation + entry(head, ""))
   expect((await environmentProvenance(w.work, w.git)).commits).toEqual([head])
+  // Newer Yrd names that same binding move with -m; the prefix stays CREATING.
+  writeFileSync(path, creation + entry(head, "yrd env open: bind 27723"))
+  expect((await environmentProvenance(w.work, w.git)).commits).toEqual([head])
   // `rebase: fast-forward` is a non-creating move, like merge/pull's.
   for (const message of ["rebase: fast-forward", "merge: Fast-forward", "pull: Fast-forward"]) {
     writeFileSync(path, creation + entry(head, message))
