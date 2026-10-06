@@ -3659,3 +3659,26 @@ describe("event queue setup and journal", () => {
     })
   })
 })
+
+describe("one generic temp root (27721)", () => {
+  it("narrows the check child's TMPDIR to the round's tempRoot, never <workdir>/tmp", async () => {
+    // The entry resolves one tempRoot and the core carries it; a check that
+    // reported <workdir>/tmp here would mean some selection still spelled its
+    // own fallback, which is the silent retarget the ruling refuses.
+    const w = await world()
+    await submitCommit(w, "task/tmp-probe", "one.txt")
+    const tempRoot = join(dirname(w.workdir), "declared-tmp")
+    const seen = join(dirname(w.workdir), "check-tmpdir.txt")
+    const base = await w.options({ exit: 0 })
+    const outcome = await queueRun({
+      ...base,
+      notify: undefined,
+      tempRoot,
+      checks: [{ name: "tmpdir-probe", on: ["merge"], run: `printf %s "$TMPDIR" > ${JSON.stringify(seen)}` }],
+    })
+
+    expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/tmp-probe"] })
+    expect(readFileSync(seen, "utf8")).toBe(tempRoot)
+    expect(existsSync(join(w.workdir, "tmp"))).toBe(false)
+  })
+})

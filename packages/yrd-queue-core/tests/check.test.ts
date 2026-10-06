@@ -218,6 +218,38 @@ describe("a queue-owned program root", () => {
     expect(requests[1]?.env?.HH_HEAVY_QUEUE_CALLER).toBe("1")
   })
 
+  /** @failure A managed test parent could reach a check child WITHOUT the check declaring it, or be
+   * dropped even though it did declare it. BASE_ENV must not carry it, and the declared passthrough
+   * must deliver it verbatim (27721).
+   * @level l1 @consumer the Yrd check environment allowlist and the managed test parent
+   */
+  it("carries HAB_TEST_TMP_PARENT only through a declared passthrough, never BASE_ENV", async () => {
+    const requests: ProcessRequest[] = []
+    const process: Process = {
+      run: (request) => {
+        requests.push(request)
+        return Promise.resolve({ durationMs: 1, exitCode: 0, signal: null, stderr: "", stdout: "", timedOut: false })
+      },
+      close: () => Promise.resolve(),
+      [Symbol.asyncDispose]: () => Promise.resolve(),
+    }
+    const managed = { HAB_TEST_TMP_PARENT: "/hh/var/s/km-vitest-3001" }
+    await runCheck({
+      ...place("managed-parent-undeclared"),
+      env: managed,
+      process,
+      spec: { name: "undeclared", run: "unused" },
+    })
+    await runCheck({
+      ...place("managed-parent-declared"),
+      env: managed,
+      process,
+      spec: { environmentPassthrough: ["HAB_TEST_TMP_PARENT"], name: "declared", run: "unused" },
+    })
+    expect(requests[0]?.env?.HAB_TEST_TMP_PARENT).toBeUndefined()
+    expect(requests[1]?.env?.HAB_TEST_TMP_PARENT).toBe("/hh/var/s/km-vitest-3001")
+  })
+
   /** @failure A declared passthrough could turn a candidate check into a narrowed base check.
    * @level l1 @consumer queue check runner and affected-tests scope gate
    */
