@@ -520,6 +520,86 @@ describe("yrd queue up, the service", () => {
     },
   )
 
+  /**
+   * @failure An environment the queue must not close is removed anyway: a held
+   *          one, one whose named issue is still open, one whose commit is not
+   *          yet on main, or one whose submodule stores another tree borrows.
+   * @level l2
+   * @consumer the operator whose held or in-flight environment must survive an
+   *           idle queue round
+   * @testonly none
+   */
+  it("keeps a held, borrowed, unmerged or issue-open environment with its reason", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    // The target-owned resolver proves closure, so an open status is a KEEP.
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const open = async (bay: string, extra: readonly string[] = []): Promise<string> => {
+      const run = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", bay, "--json", ...extra], run.io),
+        run.stderr(),
+      ).toBe(0)
+      const environment = JSON.parse(run.stdout()) as { path: string }
+      expect(existsSync(environment.path)).toBe(true)
+      return environment.path
+    }
+    const held = await open("held-retained", ["--hold", "operator asked"])
+    const issueOpen = await open("27600-open")
+    const unmerged = await open("unmerged-retained")
+    await gitIn(unmerged)(["commit", "--quiet", "--allow-empty", "-m", "not on main yet"])
+    const borrowed = await open("borrowed-retained")
+    const borrower = "sibling-retained-environment"
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const native = gitSuperWorktree.createLocalGitWorktreeStore
+    const factory = vi.spyOn(gitSuperWorktree, "createLocalGitWorktreeStore").mockImplementation((options) => {
+      const store = native(options)
+      return {
+        ...store,
+        async inspectRemoval(path: string, inspectOptions?: Readonly<{ excludedSubmodules?: readonly string[] }>) {
+          const inspection = await store.inspectRemoval(path, inspectOptions)
+          return path === borrowed ? { ...inspection, borrowers: [borrower] } : inspection
+        },
+      }
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      const stderr = run.stderr()
+      const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
+      for (const path of [held, issueOpen, unmerged, borrowed]) {
+        expect(existsSync(path), stderr).toBe(true)
+        expect(registration, stderr).toContain(path)
+      }
+      expect(stderr).toContain("held: operator asked")
+      expect(stderr).toContain("issue 27600")
+      expect(stderr).toContain("closure unproven")
+      expect(stderr).toContain("is not on target")
+      expect(stderr).toContain(`borrowed by ${borrower}`)
+    } finally {
+      stop.abort()
+      factory.mockRestore()
+      census.mockRestore()
+    }
+  }, 120_000)
+
   /** @failure A candidate could run a round before acquiring its claim, or ignore shutdown while waiting. @level l2 */
   it("waits for an unproven local claim without a round and aborts without replacing it", async () => {
     const w = await world()
