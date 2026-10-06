@@ -427,14 +427,13 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   return 0
 }
 
-/** `yrd env list` — the environments this repository holds, as git holds them. */
-export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const root = requireRepository(io)
-  const selection = await resolveGitSelection(root)
-  const baysRoot = baysRootOf()
-  await using process = createProcess({ cwd: root })
-  const git = gitIn(root, process, selection)
-  const roots = [baysRoot, legacyBaysRoot(root), join(resolve(root, await workdirOf(git)), "environments")]
+/** The registered inventory shared by listing and automatic environment closure. */
+export async function environmentInventory(
+  root: string,
+  git: Git,
+  workdir: string,
+): Promise<Readonly<{ roots: readonly string[]; rows: readonly EnvRow[] }>> {
+  const roots = [baysRootOf(), legacyBaysRoot(root), join(resolve(root, workdir), "environments")]
   const prefixes = roots.map((path) => `${existsSync(path) ? realpathSync(path) : resolve(path)}/`)
   const rows: EnvRow[] = (await registeredWorktrees(git))
     .filter(({ path }) => prefixes.some((prefix) => path.startsWith(prefix)))
@@ -445,6 +444,16 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
       ...(head === undefined ? {} : { head }),
       ...(branch === undefined ? {} : { branch }),
     }))
+  return { roots, rows }
+}
+
+/** `yrd env list` — the environments this repository holds, as git holds them. */
+export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+  const root = requireRepository(io)
+  const selection = await resolveGitSelection(root)
+  await using process = createProcess({ cwd: root })
+  const git = gitIn(root, process, selection)
+  const { roots, rows } = await environmentInventory(root, git, await workdirOf(git))
   if (options.json === true) {
     io.stdout(`${JSON.stringify({ environments: rows })}\n`)
     return 0

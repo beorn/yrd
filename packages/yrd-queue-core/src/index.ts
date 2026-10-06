@@ -188,6 +188,7 @@ export {
   freshnessLine,
   submit,
   issueOf,
+  issueBindingsOf,
   normalizeIssueReference,
 } from "./submit.ts"
 export { pinCarrierName, preparePinCarrier } from "./pin-carrier.ts"
