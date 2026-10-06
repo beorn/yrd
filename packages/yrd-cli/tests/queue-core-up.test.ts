@@ -728,6 +728,71 @@ describe("yrd queue up, the service", () => {
   }, 120_000)
 
   /**
+   * @failure A component commit's `Refs` trailer is read as the environment's
+   *          own binding: an environment that root history binds to nothing is
+   *          kept — or has its issue status consulted — on component-only
+   *          evidence the ruling says must be counted, not widened.
+   * @level l2
+   * @consumer the operator whose environment is held open by an issue named
+   *           only inside a submodule, whose closure root history never records
+   * @testonly none
+   */
+  it("counts a component-only binding as no binding and closes the environment", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await addMaterializedDependency(w)
+    // The component's own commit names issue 27601; no root commit ever does, so
+    // root-only binding must leave the environment unbound.
+    const dependencyGit = gitIn(join(w.work, "vendor/dependency"))
+    await dependencyGit(["commit", "--quiet", "--allow-empty", "-m", "component-only binding", "-m", "Refs: 27601"])
+    await dependencyGit(["push", "--quiet", "origin", "main"])
+    await w.git(["add", "vendor/dependency"])
+    await w.git(["commit", "--quiet", "-m", "record the moved component"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    // The fixture's whole point: the component names 27601 and no root commit does.
+    expect((await dependencyGit(["log", "-1", "--format=%B"])).trim()).toContain("Refs: 27601")
+    expect(await w.git(["log", "--format=%B"])).not.toContain("27601")
+    // The resolver reports 27601 open, so an environment that did count the
+    // component binding would be kept with `closure unproven`.
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "component-only", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = (JSON.parse(opened.stdout()) as { path: string }).path
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      const stderr = run.stderr()
+      expect(existsSync(environment), stderr).toBe(false)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"]), stderr).not.toContain(environment)
+      expect(stderr).not.toContain("27601")
+    } finally {
+      stop.abort()
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
    * @failure An environment whose per-worktree HEAD reflog lost its creation
    *          evidence — expired or truncated — reads as bound to no issue and is
    *          retired, discarding the work its own commits recorded.
