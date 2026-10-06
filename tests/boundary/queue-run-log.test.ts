@@ -430,6 +430,19 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
         }),
         expect.objectContaining({ kind: "observation", subject: "branch-list-omissions", count: 0, branches: [] }),
         expect.objectContaining({ kind: "observation", subject: "line", waiting: 0 }),
+        // Environment cleanup reports even an empty registry: it names the registry it read and
+        // the roots it looked under, so "found none" differs from "never ran" (27723, @cto 2026-10-06).
+        expect.objectContaining({
+          kind: "observation",
+          scope: "environment-cleanup",
+          registry: repo,
+          result: "none",
+          closed: 0,
+          kept: 0,
+          deferred: 0,
+          remaining: 0,
+          why: expect.stringMatching(/^no registered environments under /u),
+        }),
       ])
       expect(theOne(records, "queue"), run.report).toMatchObject({ queue: `${origin}#main` })
       const invocations = ofKind(records, "git")
