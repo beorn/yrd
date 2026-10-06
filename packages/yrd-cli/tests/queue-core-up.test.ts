@@ -521,20 +521,25 @@ describe("yrd queue up, the service", () => {
   )
 
   /**
-   * @failure An environment the queue must not close is removed anyway: a held
-   *          one, one whose named issue is still open, one whose commit is not
-   *          yet on main, or one whose submodule stores another tree borrows.
+   * @failure A named, merged environment whose issue is closed is left behind,
+   *          or an environment the queue must not close is removed anyway: a
+   *          held one, one whose named issue is still open, one whose commit is
+   *          not yet on main, or one whose submodule stores another tree borrows.
    * @level l2
-   * @consumer the operator whose held or in-flight environment must survive an
-   *           idle queue round
+   * @consumer the operator whose closed-issue environment is retired while their
+   *           held or in-flight one must survive an idle queue round
    * @testonly none
    */
-  it("keeps a held, borrowed, unmerged or issue-open environment with its reason", async () => {
+  it("closes a merged, closed-issue environment and keeps each ineligible class with its reason", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
-    // The target-owned resolver proves closure, so an open status is a KEEP.
+    // The target-owned resolver proves closure: a closed status lets the queue
+    // retire the environment, an open status is a KEEP.
     const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
+    writeFileSync(
+      resolver,
+      '#!/usr/bin/env bash\ncase "$1" in 27601) status=closed ;; *) status=open ;; esac\nprintf \'{"id":"%s","status":"%s"}\' "$1" "$status"\n',
+    )
     await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
     await w.git(["fetch", "--quiet", "origin", "main"])
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
@@ -551,6 +556,7 @@ describe("yrd queue up, the service", () => {
       return environment.path
     }
     const held = await open("held-retained", ["--hold", "operator asked"])
+    const closedIssue = await open("27601-closed")
     const issueOpen = await open("27600-open")
     const unmerged = await open("unmerged-retained")
     await gitIn(unmerged)(["commit", "--quiet", "--allow-empty", "-m", "not on main yet"])
@@ -584,6 +590,8 @@ describe("yrd queue up, the service", () => {
       ).toBe(0)
       const stderr = run.stderr()
       const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
+      expect(existsSync(closedIssue), stderr).toBe(false)
+      expect(registration, stderr).not.toContain(closedIssue)
       for (const path of [held, issueOpen, unmerged, borrowed]) {
         expect(existsSync(path), stderr).toBe(true)
         expect(registration, stderr).toContain(path)
