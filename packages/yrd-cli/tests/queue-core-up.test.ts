@@ -608,6 +608,59 @@ describe("yrd queue up, the service", () => {
     }
   }, 120_000)
 
+  /**
+   * @failure An environment whose per-worktree HEAD reflog lost its creation
+   *          evidence — expired or truncated — reads as bound to no issue and is
+   *          retired, discarding the work its own commits recorded.
+   * @level l2
+   * @consumer the operator whose long-lived or reflog-rewritten environment must
+   *           survive an idle queue round, named by reason
+   * @testonly none
+   */
+  it("keeps an environment whose HEAD reflog lost its creation evidence", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "truncated-retained", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    // Expiry/truncation: the reflog still has entries, but no all-zero creation
+    // line, so Git can no longer prove which commits this environment created.
+    const environmentGit = gitIn(environment.path)
+    const reflog = resolve(environment.path, (await environmentGit(["rev-parse", "--git-path", "logs/HEAD"])).trim())
+    const head = (await environmentGit(["rev-parse", "HEAD"])).trim()
+    writeFileSync(reflog, `${"a".repeat(40)} ${head} yrd <env@yrd.test> 1 +0000\tcommit: own binding\n`)
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(existsSync(environment.path), run.stderr()).toBe(true)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toContain(environment.path)
+      expect(run.stderr()).toContain("creation evidence")
+    } finally {
+      stop.abort()
+      census.mockRestore()
+    }
+  })
+
   /** @failure A candidate could run a round before acquiring its claim, or ignore shutdown while waiting. @level l2 */
   it("waits for an unproven local claim without a round and aborts without replacing it", async () => {
     const w = await world()
