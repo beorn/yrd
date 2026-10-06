@@ -55,6 +55,16 @@ export async function environmentProvenance(
       branch(checkout[2])
       continue
     }
+    // `git branch -m` mirrors the rename into HEAD's reflog as two entries with
+    // this message. It creates no commit, and BOTH names must join the branch
+    // set: the change chain for a renamed branch is stored under whichever name
+    // it held when it was submitted (ruling 27723 post-adoption, 2026-10-06,
+    // specimens dev10-25886-hermes-arming and luna1-27199-readyfix).
+    const renamed = /^Branch: renamed (.+) to (.+)$/u.exec(message)
+    if (renamed?.[1] !== undefined && renamed[2] !== undefined) {
+      for (const ref of [renamed[1], renamed[2]]) branch(ref.replace(/^refs\/heads\//u, ""))
+      continue
+    }
     const finish = /^(?:rebase|rebase -i|pull --rebase) \(finish\): returning to refs\/heads\/(.+)$/u.exec(message)
     if (finish?.[1] !== undefined) {
       branch(finish[1])
