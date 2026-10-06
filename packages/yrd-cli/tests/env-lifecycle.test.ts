@@ -395,6 +395,43 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     }
   })
 
+  /**
+   * @failure `yrd env close` read the retained environment's own `.yrd.yml` through the strict
+   *          parser, so an environment opened through a newer Yrd — the documented cure for
+   *          `env open` — refused to close from a week-old slot with only `unknown key ...`,
+   *          the same old-reader gap 27187 closed for `submit`.
+   * @level   l2 (real bare remote, the declaration at the retained commit, real worktree)
+   * @consumer every seat closing an environment whose declaration its checkout postdates
+   * @testonly none
+   */
+  it("closes an environment whose declaration carries a top-level key this Yrd does not know, warning once", async () => {
+    const w = await world(":")
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openEnvironment(w.work, selected)
+    // Close reads the retained commit, so the newer key is committed in the environment itself.
+    const declared = join(path, ".yrd.yml")
+    writeFileSync(declared, `${readFileSync(declared, "utf8")}futurekey: from a newer queue\n`)
+    await gitIn(path)(["add", ".yrd.yml"])
+    await gitIn(path)([
+      "-c",
+      "user.email=env-open@yrd.test",
+      "-c",
+      "user.name=yrd",
+      "commit",
+      "--quiet",
+      "-m",
+      "declare a key this Yrd does not know",
+    ])
+    const closed = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+
+    expect(closed.stderr()).toContain("futurekey:")
+    expect(closed.stderr()).toMatch(/this environment's Yrd does not know/iu)
+    expect(closed.stderr().match(/futurekey:/gu)).toHaveLength(1)
+    expect(existsSync(path)).toBe(false)
+  })
+
   it.each(["unknown", "outside", "symlink-outside", "dirty-tracked", "dirty-untracked", "locked"])(
     "refuses %s before running teardown or removing data",
     async (kind) => {

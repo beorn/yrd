@@ -252,6 +252,25 @@ async function pinDeclaredIdentity(path: string, git: GitRunner, io: YrdCliIO): 
 }
 
 /**
+ * A top-level declaration key this checkout's Yrd postdates reads as a warning
+ * for `env open` and `env close`, never a refusal (27796). Both run only the
+ * `setup:`/`teardown:` they know, so a mechanism newer than this parser is one
+ * the QUEUE owns; refusing it stranded every environment on a week-old slot
+ * (27187 fixed only `submit`, and the documented cure — open through main's
+ * runtime — left the environment's own declaration unreadable to `env close`).
+ * The queue's own round (up/run/merge/check) still reads strictly, because
+ * running a declaration it cannot read in full is the silent error.
+ */
+function warnNewerDeclarationKeys(at: string, command: string, keys: readonly string[], io: YrdCliIO): void {
+  const one = keys.length === 1
+  io.stderr(
+    `yrd: the declaration at ${at} has ${one ? "a key" : "keys"} this environment's Yrd does not know: ` +
+      `${keys.map((key) => `${key}:`).join(", ")}. The queue runs ${one ? "it" : "them"}; ${command} does not, ` +
+      `so it proceeds without ${one ? "it" : "them"}. Update this environment's Yrd to the one the target pins to silence this.\n`,
+  )
+}
+
+/**
  * `yrd env open` — open an environment for one branch and keep it. Prints its
  * path on stdout, which is what a caller `cd`s into.
  */
@@ -299,7 +318,12 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       `yrd env open: commit ${commit} is not a commit object in ${root}; fetch that commit before opening it`,
     )
   }
-  const config = await readConfig(git, base, { remote: "origin", branch: target })
+  const config = await readConfig(
+    git,
+    base,
+    { remote: "origin", branch: target },
+    { newerKeys: (keys) => warnNewerDeclarationKeys(`${target} (${base.slice(0, 12)})`, "env open", keys, io) },
+  )
   const resolveIssue = config === undefined ? undefined : issueResolver(config, root)
   // 27147: a submodule the base declares `private = true` is left empty and uninitialized; a detached
   // environment's freshWorktree reads the declaration itself.
@@ -528,7 +552,12 @@ export async function closeEnvironment(
     )
   }
   await requireClean(treeGit, path)
-  const config = await readConfig(treeGit, commit, { branch: "HEAD", remote: "origin" })
+  const config = await readConfig(
+    treeGit,
+    commit,
+    { branch: "HEAD", remote: "origin" },
+    { newerKeys: (keys) => warnNewerDeclarationKeys(path, "env close", keys, io) },
+  )
   if (config?.teardown !== undefined) {
     const artifacts = join(workdir, "logs", "environments", basename(path), runId())
     const result = await runCheck({
