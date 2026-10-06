@@ -155,6 +155,24 @@ function records(run: Capture): readonly Record<string, unknown>[] {
     .map((line) => JSON.parse(line) as Record<string, unknown>)
 }
 
+/** Every environment-cleanup observation row under one fixture root, wherever its run log landed. */
+function cleanupRows(root: string, depth = 0): readonly Record<string, unknown>[] {
+  if (depth > 12) return []
+  const rows: Record<string, unknown>[] = []
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name)
+    if (entry.isDirectory()) rows.push(...cleanupRows(path, depth + 1))
+    else if (entry.name.endsWith(".jsonl")) {
+      for (const line of readFileSync(path, "utf8").split("\n")) {
+        if (!line.startsWith("{")) continue
+        const row = JSON.parse(line) as Record<string, unknown>
+        if (row.scope === "environment-cleanup" && row.census !== undefined) rows.push(row)
+      }
+    }
+  }
+  return rows
+}
+
 /** A logger that keeps every row it is handed, so a test can read what the service said and at what level. */
 function logRows(): Readonly<{
   log: ConditionalLogger
@@ -539,6 +557,18 @@ describe("yrd queue up, the service", () => {
             expect(run.stderr()).not.toContain("private-argument-must-not-be-reported")
           } else expect(run.stderr()).toContain("census proc incomplete")
         }
+        // The run record carries the service's own coverage receipt: rows,
+        // unreadable rows, uncleared rows and completeness as this process read
+        // them, which is the CWD ruling's acceptance evidence.
+        const records = cleanupRows(w.workdir)
+        expect(records.length, run.stderr()).toBeGreaterThan(0)
+        expect(records.at(-1)?.census, run.stderr()).toEqual({
+          mechanism: "proc",
+          complete: projection.complete,
+          rows: projection.rows.length,
+          unreadable: projection.unreadable.length,
+          uncleared: coverage === "uncleared-denial" ? 1 : 0,
+        })
       } finally {
         census.mockRestore()
       }
