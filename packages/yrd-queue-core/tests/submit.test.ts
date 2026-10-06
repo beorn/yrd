@@ -15,6 +15,7 @@ import {
   createEventStore,
   inspectSubmit,
   issueOf,
+  issueBindingsOf,
   normalizeIssueReference,
   listChangeHistories,
   lookupRunIndex,
@@ -652,6 +653,12 @@ describe("event submit", () => {
     await w.git(["commit", "--quiet", "--allow-empty", "-m", "second\n\nRefs: @ag/hab/25489-second"])
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
     await expect(issueOf(w.git, "task/conflict", head, w.target)).rejects.toThrow(`fix trailer at ${head}`)
+    // Automatic environment closure must inspect both bindings while submit still refuses the conflict.
+    const bindings = []
+    for await (const binding of issueBindingsOf(w.git, [`${w.target}..${head}`], "task/conflict")) {
+      bindings.push(binding)
+    }
+    expect(bindings.map(({ issue }) => issue)).toEqual(["@ag/hab/25488-first", "@ag/hab/25489-second"])
   })
 
   /**
