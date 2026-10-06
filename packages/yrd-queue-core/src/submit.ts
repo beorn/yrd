@@ -54,7 +54,7 @@ import {
 import { classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
 import { verifyCandidate, type Verification, type SettledGitlink } from "./verifying.ts"
 import { revertedPathsFinding } from "./revert-guard.ts"
-import { gitlinksAt } from "./reference.ts"
+import { gitlinksAt, holdsCommit } from "./reference.ts"
 import { withRemoteSeam } from "./remote-calls.ts"
 
 /** Outward submission evidence observes the candidate rather than relabelling the producer's claims. */
@@ -87,8 +87,12 @@ async function submissionReceipt(git: Git, verifying: Verification): Promise<Sub
       )
     ).map((row) => [row.path, row.sha]),
   )
-  const gitlinks = verifying.gitlinks.map((row): SubmitGitlink => {
-    if (row.state === "not-run") return { ...row, state: "not-run" }
+  const gitlinks: SubmitGitlink[] = []
+  for (const row of verifying.gitlinks) {
+    if (row.state === "not-run") {
+      gitlinks.push({ ...row, state: "not-run" })
+      continue
+    }
     const recorded = observed.get(row.path)
     const expected = row.state === "raised" ? row.to : row.from
     if (recorded !== expected) {
@@ -98,9 +102,52 @@ async function submissionReceipt(git: Git, verifying: Verification): Promise<Sub
     }
     const authorHead = row.state === "merged" && row.composition?.pin ? row.composition.pin : row.from
     const landingPin = row.state === "raised" ? row.to : row.from
-    return { ...row, recorded, authorHead, landingPin }
-  })
+    await requireComposedChildIsHeld(git, row, recorded, verifying.candidate)
+    gitlinks.push({ ...row, recorded, authorHead, landingPin })
+  }
   return { ...verifying, gitlinks }
+}
+
+/**
+ * THE ONE PIN ON A ROW THE QUEUE AUTHORED ITSELF (27747).
+ *
+ * A `merged` row whose composition did not fast-forward carries, in `from`,
+ * the two-parent child git-super COMPOSED — not a pin any authored tree held.
+ * `recorded` is what the candidate tree names, and git-super wrote that child
+ * into the submodule store of the tree it was handed, borrowed from the
+ * reference: in a submit preview that store is scratch. So the candidate can
+ * name a component pin no durable store holds, and a receipt calling that
+ * verified claims a composition the candidate itself cannot read back.
+ * MEASURED 2026-10-06: candidate 2d311854 recorded ag 2e6ea138, an object in NO
+ * store, reported verified; dev/2's held 27787 dry run hit the same shape.
+ * Refuse, and name the pin, the store this row names and the cure.
+ *
+ * Every OTHER pin this receipt names is the AUTHOR's own — the change's pin,
+ * which the 26754/27323 preview deliberately does not push, so custody there is
+ * the author's and belongs to the publication step. A composition that
+ * fast-forwarded (`composition.pin` is the change's own pin) authored nothing,
+ * so it is skipped the same way.
+ */
+async function requireComposedChildIsHeld(
+  git: Git,
+  row: SettledGitlink,
+  recorded: string | undefined,
+  candidate: string,
+): Promise<void> {
+  if (row.state !== "merged" || row.composition === undefined || row.composition.pin === row.from) return
+  if (recorded === undefined) return
+  const store =
+    row.store ??
+    join((await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(), "modules", row.path)
+  const storeGit: Git = (args, input) => git(["-C", store, ...args], input)
+  if (await holdsCommit(storeGit, recorded)) return
+  throw new Error(
+    `submission receipt ${row.path} state merged: the composed child ${recorded} the candidate ${candidate} records is not ` +
+      `in the store this row names, ${store} (the change's own head, ${row.composition.pin}, is unaffected); ` +
+      `the compose wrote that child where no other reader keeps it. ` +
+      `Compose it where it is retained (the queue-owned clone), or put the child in the component's declared ` +
+      `remote so this store can be populated, then submit again`,
+  )
 }
 
 export type SubmitRequest = Readonly<{
