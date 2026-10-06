@@ -99,6 +99,16 @@ it("cleanup provenance excludes inherited history and refuses incomplete or unkn
   })
   writeFileSync(path, creation + entry(head, "commit (amend): own binding") + entry(head, "reset: moving to HEAD"))
   expect((await environmentProvenance(w.work, w.git)).commits).toEqual([head])
+  // A message-less NON-FIRST entry is CREATING: it is `env open`'s binding
+  // update-ref, which git mirrors into HEAD's reflog with no -m (27723
+  // addendum). Its trailers are read from that commit, never its ancestry.
+  writeFileSync(path, creation + entry(head, ""))
+  expect((await environmentProvenance(w.work, w.git)).commits).toEqual([head])
+  // `rebase: fast-forward` is a non-creating move, like merge/pull's.
+  for (const message of ["rebase: fast-forward", "merge: Fast-forward", "pull: Fast-forward"]) {
+    writeFileSync(path, creation + entry(head, message))
+    expect((await environmentProvenance(w.work, w.git)).commits, message).toEqual([])
+  }
   for (const message of [
     "commit: own",
     "commit (merge): own",
