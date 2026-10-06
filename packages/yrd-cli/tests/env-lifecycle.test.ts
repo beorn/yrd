@@ -82,7 +82,7 @@ it("cleanup unions every creating OID and canonical branch binding without inher
     { histories: new Map(), invalid: new Map() },
     async (raw) => raw,
   )
-  expect(new Set(issues)).toEqual(new Set(["111", "112", "@i/10-yrd/27723-scope"]))
+  expect(new Set(issues.issues)).toEqual(new Set(["111", "112", "@i/10-yrd/27723-scope"]))
 })
 
 it("cleanup provenance excludes inherited history and refuses incomplete or unknown HEAD evidence", async () => {

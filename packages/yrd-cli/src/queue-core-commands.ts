@@ -33,7 +33,7 @@ import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import { issueResolver } from "./issue-resolver.ts"
-import { cleanupEnvironments } from "./env-cleanup.ts"
+import { createEnvironmentCleanup } from "./env-cleanup.ts"
 import { runAdmission } from "./admission.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
@@ -713,6 +713,7 @@ export async function coreQueueCommand(
   }
   const resolveIssue = issueResolver(config, repo, env)
   const workdir = options.workdir ?? (await workdirOf(git))
+  const cleanupEnvironments = createEnvironmentCleanup()
   mkdirSync(workdir, { recursive: true })
   const admission = config.admission
   const admit =

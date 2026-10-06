@@ -1,16 +1,46 @@
-import { appendFileSync } from "node:fs"
-import { relative, sep } from "node:path"
+import { appendFileSync, statSync } from "node:fs"
+import { join, relative, resolve, sep } from "node:path"
 import { gitIn, listChangeHistories, type GitRunner, type QueueConfig, type QueueRunOutcome } from "@yrd/queue-core"
 import { createLocalGitProcess } from "git-super/process"
 import { createLocalGitWorktreeStore } from "git-super/worktree"
 import { inspectProcessCwds, type ProcessCwdProjection } from "removely"
 import { closeEnvironment, environmentInventory } from "./env-commands.ts"
 import { environmentIssues } from "./env-cleanup-provenance.ts"
-import { issueLookup } from "./issue-resolver.ts"
+import { issueLookup, type ResolvedIssue } from "./issue-resolver.ts"
 import type { YrdCliIO } from "./types.ts"
 
+type CachedEnvironment = {
+  paths: { path: string; optional: boolean }[]
+  branches: readonly string[]
+  issues?: readonly string[]
+  bindingKey?: string
+  expensiveKey?: string
+  verdict?: string
+  hold?: string | null
+  busy?: string
+  statuses: Map<string, string>
+}
+
+/** The command invocation owns these facts; a restart makes a complete first pass. */
+export function createEnvironmentCleanup() {
+  const cache = new Map<string, CachedEnvironment>()
+  return (input: Parameters<typeof cleanupEnvironments>[0]) => cleanupEnvironments(input, cache)
+}
+
+/** A missing required index/reflog is uncertainty, never an unchanged identity. */
+function identity(file: Readonly<{ path: string; optional: boolean }>): string {
+  try {
+    const stat = statSync(file.path, { bigint: true })
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code
+    if (file.optional && (code === "ENOENT" || code === "ENOTDIR")) return "absent optional path"
+    throw new Error(`cannot inspect cleanup input ${file.path}: ${String(cause)}`, { cause })
+  }
+}
+
 /** One completed round applies the same predicate to current and backlog environments. */
-export async function cleanupEnvironments(
+async function cleanupEnvironments(
   input: Readonly<{
     repo: string
     git: GitRunner
@@ -21,6 +51,7 @@ export async function cleanupEnvironments(
     env?: NodeJS.ProcessEnv
     resolveIssue: ((raw: string) => Promise<string>) | undefined
   }>,
+  cache: Map<string, CachedEnvironment>,
 ): Promise<void> {
   const { repo, git, config, workdir, outcome, io } = input
   const inventory = await environmentInventory(repo, git, workdir)
@@ -97,55 +128,135 @@ export async function cleanupEnvironments(
     return
   }
   const lookup = issueLookup(config, repo, input.env)
-  const statuses = new Map<string, Promise<void>>()
-  const requireClosed = async (id: string, fresh = false): Promise<void> => {
-    if (!fresh && statuses.has(id)) return statuses.get(id)
-    const pending = (async () => {
-      if (lookup === undefined) {
-        throw new Error(`issue ${id}: target declaration has no issueResolver; closure unproven`)
-      }
-      const issue = await lookup(id)
-      if (issue.id !== id || issue.status !== "closed") {
-        throw new Error(`issue ${id}: configured lookup returned ${JSON.stringify(issue)}; closure unproven`)
-      }
-    })()
+  const statuses = new Map<string, Promise<ResolvedIssue>>()
+  const requireClosed = async (id: string, entry: CachedEnvironment, fresh = false): Promise<void> => {
+    let pending = fresh ? undefined : statuses.get(id)
+    if (pending === undefined) {
+      pending = (async () => {
+        if (lookup === undefined) {
+          throw new Error(`issue ${id}: target declaration has no issueResolver; closure unproven`)
+        }
+        return lookup(id)
+      })()
+    }
     if (!fresh) statuses.set(id, pending)
-    return pending
+    const issue = await pending
+    const status = JSON.stringify(issue)
+    if (entry.statuses.get(id) !== status) {
+      entry.expensiveKey = undefined
+      entry.statuses.set(id, status)
+    }
+    if (issue.id !== id || issue.status !== "closed") {
+      throw new Error(`issue ${id}: configured lookup returned ${status}; closure unproven`)
+    }
   }
   for (const row of inventory.rows) {
     try {
+      let entry = cache.get(row.path)
+      if (entry === undefined) {
+        entry = { paths: [], branches: [], statuses: new Map() }
+        cache.set(row.path, entry)
+      }
+      const holder = busy(row.path, snapshot)
+      if (entry.hold !== row.hold || entry.busy !== holder) entry.expensiveKey = undefined
+      entry.hold = row.hold
+      entry.busy = holder
       if (row.hold !== null) throw new Error(`held${row.hold === "" ? "" : `: ${row.hold}`}`)
       const treeGit = gitIn(row.path, undefined, git.selection, { env: input.env })
-      const head = (await treeGit(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
-      const issues = await environmentIssues(
-        row.path,
-        treeGit,
-        row.name,
-        row.branch,
-        git,
-        config.target.branch,
-        { repo, remote: config.target.remote, selection: git.selection, backend: git.backend },
-        histories,
-        input.resolveIssue ??
-          (async (raw) => {
-            if (lookup === undefined) throw new Error(`issue ${raw}: target declaration has no issueResolver`)
-            return (await lookup(raw)).id
-          }),
-      )
-      for (const issue of issues) await requireClosed(issue)
-      const holder = busy(row.path, snapshot)
-      if (holder !== undefined) throw new Error(holder)
-      await ancestor(row.path, head, outcome.target)
-      const inspection = await createLocalGitWorktreeStore({ repo, env: input.env }).inspectRemoval(row.path)
-      if (inspection.records.length > 0) throw new Error(`dirty root/components: ${inspection.records.join("; ")}`)
-      if (inspection.notCompared.length > 0) {
-        throw new Error(`repository coverage unproven: ${JSON.stringify(inspection.notCompared)}`)
+      const head = row.head
+      if (head === undefined) throw new Error(`registered environment ${row.path} has no HEAD`)
+      if (entry.paths.length === 0) {
+        for (const resource of ["index", "logs/HEAD"]) {
+          const path = (await treeGit(["rev-parse", "--git-path", resource])).trim()
+          if (path === "") throw new Error(`environment ${row.path}: Git returned no ${resource} path`)
+          entry.paths.push({ path: resolve(row.path, path), optional: false })
+        }
       }
-      if (inspection.borrowers.length > 0) throw new Error(`borrowed by ${inspection.borrowers.join(", ")}`)
-      for (const component of inspection.consultedRepositories) {
-        if (component.path === ".") continue
-        if (component.to === undefined) throw new Error(`materialized component ${component.root} has no HEAD`)
-        await ancestor(component.root, component.to, `refs/remotes/origin/${config.target.branch}`)
+      const ownLog = entry.paths[1]
+      if (ownLog === undefined) throw new Error(`environment ${row.path}: HEAD reflog identity absent`)
+      const bindingKey = (): string =>
+        JSON.stringify([
+          head,
+          row.branch,
+          config.blob,
+          identity(ownLog),
+          [...new Set([...(row.branch === undefined ? [] : [row.branch]), ...entry.branches])].map((branch) => [
+            branch,
+            histories.histories.get(branch)?.events.at(-1)?.id,
+            histories.invalid.get(branch)?.tip,
+          ]),
+        ])
+      if (entry.issues === undefined || entry.bindingKey !== bindingKey()) {
+        const bindings = await environmentIssues(
+          row.path,
+          treeGit,
+          row.name,
+          row.branch,
+          git,
+          config.target.branch,
+          { repo, remote: config.target.remote, selection: git.selection, backend: git.backend },
+          histories,
+          input.resolveIssue ??
+            (async (raw) => {
+              if (lookup === undefined) throw new Error(`issue ${raw}: target declaration has no issueResolver`)
+              return (await lookup(raw)).id
+            }),
+        )
+        entry.issues = bindings.issues
+        entry.branches = bindings.branches
+        entry.bindingKey = bindingKey()
+        entry.expensiveKey = undefined
+      }
+      const issues = entry.issues
+      for (const issue of issues) await requireClosed(issue, entry)
+      if (holder !== undefined) throw new Error(holder)
+      const expensiveKey = (): string =>
+        JSON.stringify([
+          head,
+          row.branch,
+          config.blob,
+          outcome.target,
+          entry.bindingKey,
+          entry.paths.map((file) => [file.path, identity(file)]),
+        ])
+      if (entry.expensiveKey === expensiveKey()) {
+        if (entry.verdict !== undefined) throw new Error(entry.verdict)
+      } else {
+        try {
+          await ancestor(row.path, head, outcome.target)
+          const inspection = await createLocalGitWorktreeStore({ repo, env: input.env }).inspectRemoval(row.path)
+          for (const component of inspection.consultedRepositories) {
+            if (component.path === ".") continue
+            for (const resource of ["index", `refs/remotes/origin/${config.target.branch}`, "packed-refs"]) {
+              const path = (await treeGit.at(component.root)(["rev-parse", "--git-path", resource])).trim()
+              if (path === "") throw new Error(`component ${component.root}: Git returned no ${resource} path`)
+              const absolute = resolve(component.root, path)
+              if (!entry.paths.some((file) => file.path === absolute)) {
+                entry.paths.push({ path: absolute, optional: resource !== "index" })
+              }
+            }
+          }
+          for (const component of inspection.uninitializedSubmodules) {
+            const path = join(row.path, component, ".git")
+            if (!entry.paths.some((file) => file.path === path)) entry.paths.push({ path, optional: true })
+          }
+          if (inspection.records.length > 0) throw new Error(`dirty root/components: ${inspection.records.join("; ")}`)
+          if (inspection.notCompared.length > 0) {
+            throw new Error(`repository coverage unproven: ${JSON.stringify(inspection.notCompared)}`)
+          }
+          if (inspection.borrowers.length > 0) throw new Error(`borrowed by ${inspection.borrowers.join(", ")}`)
+          for (const component of inspection.consultedRepositories) {
+            if (component.path === ".") continue
+            if (component.to === undefined) throw new Error(`materialized component ${component.root} has no HEAD`)
+            await ancestor(component.root, component.to, `refs/remotes/origin/${config.target.branch}`)
+          }
+          entry.verdict = undefined
+          entry.expensiveKey = expensiveKey()
+        } catch (cause) {
+          entry.verdict = String(cause)
+          entry.expensiveKey = expensiveKey()
+          throw cause
+        }
       }
       // One close per round lets the queue judge a waiting merge before another removal.
       if (closed > 0 || outcome.checkedWaiting > 0) {
@@ -153,7 +264,7 @@ export async function cleanupEnvironments(
       }
       const freshHolder = busy(row.path, await census())
       if (freshHolder !== undefined) throw new Error(freshHolder)
-      for (const issue of issues) await requireClosed(issue, true)
+      for (const issue of issues) await requireClosed(issue, entry, true)
       const current = (await environmentInventory(repo, git, workdir)).rows.find((entry) => entry.path === row.path)
       if (current === undefined || current.hold !== null || current.head !== head) {
         throw new Error("registration, hold or HEAD changed before close")
@@ -175,6 +286,7 @@ export async function cleanupEnvironments(
       if (typeof result !== "object" || result === null) throw new Error(`malformed close result ${output}`)
       if ("closed" in result && result.closed === row.path) {
         closed++
+        cache.delete(row.path)
         record(row.path, "closed", "native retained removal proof accepted")
       } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim())
       else throw new Error(`unproven close result ${output}`)

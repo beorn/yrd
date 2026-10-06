@@ -39,6 +39,7 @@ import { afterAll, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as gitomic from "gitomic"
 import * as removely from "removely"
+import * as gitSuperWorktree from "git-super/worktree"
 import { openEvents } from "gitomic/events"
 import {
   appendChangeEvent,
@@ -91,6 +92,7 @@ import { installSelectedGit } from "./support/selected-git.ts"
 // that publishes it. Every call passes through to the real filesystem.
 vi.mock("node:fs", async (original) => ({ ...(await original<typeof import("node:fs")>()) }))
 vi.mock("removely", async (original) => ({ ...(await original<typeof import("removely")>()) }))
+vi.mock("git-super/worktree", async (original) => ({ ...(await original<typeof import("git-super/worktree")>()) }))
 
 // A submodule at a local path: git refuses file transport for submodule clones
 // unless every git in the chain is told. Every git runner below and the
@@ -347,6 +349,68 @@ async function submitGitlink(w: GitlinkWorld, branch: string, sha: string): Prom
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
+  it("reuses a dirty environment verdict until its index changes", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "cached-retained", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    writeFileSync(join(environment.path, "dirty.txt"), "work to preserve\n")
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const native = gitSuperWorktree.createLocalGitWorktreeStore
+    let inspections = 0
+    const factory = vi.spyOn(gitSuperWorktree, "createLocalGitWorktreeStore").mockImplementation((options) => {
+      const store = native(options)
+      return {
+        ...store,
+        async inspectRemoval(...args) {
+          inspections++
+          return store.inspectRemoval(...args)
+        },
+      }
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    let rounds = 0
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: async () => {
+              rounds++
+              if (rounds === 2) {
+                expect(inspections, "unchanged idle pass repeated the recursive removal inspection").toBe(1)
+                await gitIn(environment.path)(["add", "dirty.txt"])
+              }
+              if (rounds === 3) stop.abort()
+            },
+          },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(rounds).toBe(3)
+      expect(inspections).toBe(2)
+      expect(existsSync(environment.path)).toBe(true)
+    } finally {
+      stop.abort()
+      factory.mockRestore()
+      census.mockRestore()
+    }
+  })
   /**
    * @failure An idle first service round leaves eligible retained backlog environments behind.
    * @level l2

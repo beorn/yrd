@@ -78,7 +78,7 @@ export async function environmentIssues(
   store: Parameters<typeof listChangeHistories>[0],
   histories: Awaited<ReturnType<typeof listChangeHistories>>,
   resolveIssue: (raw: string) => Promise<string>,
-): Promise<readonly string[]> {
+): Promise<Readonly<{ issues: readonly string[]; branches: readonly string[] }>> {
   const provenance = await environmentProvenance(cwd, git, currentBranch)
   const issues = new Set<string>()
   const add = async (raw: string): Promise<void> => {
@@ -141,5 +141,5 @@ export async function environmentIssues(
       }
     }
   }
-  return [...issues]
+  return { issues: [...issues], branches: provenance.branches }
 }
