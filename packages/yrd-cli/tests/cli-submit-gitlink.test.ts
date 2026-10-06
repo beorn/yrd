@@ -366,6 +366,74 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     expect(await refs(w.remote)).toBe(before)
   }, 60_000)
 
+  /** @failure A dry run reports a composition whose recorded component pin no
+   *          store holds, so the queue later names an object it can never read
+   *          (27747): the receipt must SAY the child is not retained — the pin,
+   *          the store it looked in and the cure — instead of reporting a bare
+   *          verified candidate. It is not refused: a refusal fires for every
+   *          change whose component main advanced, which is the ordinary case.
+   * @level   l2 (the public CLI, real remotes and real submodule stores)
+   * @consumer seats whose held submission waits on a readable candidate
+   */
+  it("reports the composed child no store holds instead of claiming it retained (27747)", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const child = gitIn(one.work)
+    // The component main moves on, and the change pins a SIBLING of it that is
+    // pushed and checked out, so every pre-existing moved-gitlink guard is
+    // satisfied. Their divergence is what makes git-super compose a two-parent
+    // child — the one pin no authored tree ever held.
+    writeFileSync(join(one.work, "main-only.txt"), "main\n")
+    await child(["add", "."])
+    await child(["commit", "--quiet", "-m", "one: main moves"])
+    const main = (await child(["rev-parse", "HEAD"])).trim()
+    await child(["push", "--quiet", "origin", "main"])
+    await child(["push", "--quiet", "origin", main + ":refs/git-super/pins/" + main])
+    await child(["checkout", "--quiet", "-b", "side", one.held])
+    // Disjoint files, so the submodule's own merge is CLEAN: a conflicting
+    // divergence is already refused by the compose and would prove nothing.
+    writeFileSync(join(one.work, "side-only.txt"), "side\n")
+    await child(["add", "."])
+    await child(["commit", "--quiet", "-m", "one: side moves"])
+    const side = (await child(["rev-parse", "HEAD"])).trim()
+    await child(["push", "--quiet", "origin", "side"])
+    await child(["push", "--quiet", "origin", side + ":refs/git-super/pins/" + side])
+    const branch = "task/pin-merged-child"
+    const git = gitIn(w.work)
+    await git(["checkout", "--quiet", "-b", branch, "main"])
+    // The pin is published to the component remote and deliberately NOT fetched
+    // into the root's own checkout, so no store under this tree holds it — the
+    // "absent locally" shape 27747 was filed for.
+    await git(["update-index", "--add", "--cacheinfo", "160000," + side + "," + one.path])
+    await git(["commit", "--quiet", "-m", "pin a diverged child\n\nRefs: 25804"])
+    const before = await refs(w.remote)
+    const ran = await yrd(w.work, "submit", branch, "--issue", "25804", "--dry-run", "--json")
+    expect(ran.exitCode, ran.report).toBe(0)
+    const receipt = JSON.parse(ran.stdout) as {
+      verifying: {
+        gitlinks: {
+          path: string
+          state: string
+          from: string
+          custody?: { pin: string; state: string; store: string; cure: string }
+        }[]
+      }
+    }
+    const row = receipt.verifying.gitlinks.find((candidate) => candidate.path === one.path)
+    expect(row).toBeDefined()
+    expect(row).toMatchObject({ path: one.path, state: "merged" })
+    // The composed child is the one pin no store holds, and the receipt names it
+    // rather than reporting a bare verified candidate.
+    expect(row?.custody).toMatchObject({ pin: row?.from, state: "composed-not-retained" })
+    expect(row?.custody?.cure, ran.report).toContain("queue-owned clone")
+    // The proof, not the prose: the store the row names really does not hold the
+    // composed child it lands, so without this report the row is a silent claim.
+    const store = row?.custody?.store ?? ""
+    expect(store).not.toBe("")
+    await expect(gitIn(store)(["cat-file", "-e", String(row?.from) + "^{commit}"])).rejects.toThrow()
+    expect(await refs(w.remote)).toBe(before)
+  }, 120_000)
+
   it("opens a single held pin with exactly one gitlink hunk on the captured main parent", async () => {
     const w = await world()
     const one = w.components[0]!
@@ -1024,7 +1092,12 @@ describe("ordinary submit with a local-only component pin", () => {
     })
   }, 90_000)
 
-  it("prints author head and landing pin with land merge note when component merges (27323)", async () => {
+  /** @failure A dry run that composes a component child names an object no store
+   *          retains (27747) while still reporting the author's head and landing
+   *          pin (27323); the receipt must carry BOTH facts, not drop either.
+   * @level   l2 @consumer yrd submit --dry-run on a component-moving change
+   */
+  it("prints author head and landing pin and marks the composed child unretained (27323, 27747)", async () => {
     const w = await world()
     const one = w.components[0]!
     const rootGit = gitIn(w.work)
@@ -1070,7 +1143,13 @@ describe("ordinary submit with a local-only component pin", () => {
     const receipt = JSON.parse(ranJson.stdout) as {
       dryRun: boolean
       verifying: {
-        gitlinks: { path: string; state: string; authorHead: string; landingPin: string }[]
+        gitlinks: {
+          path: string
+          state: string
+          authorHead: string
+          landingPin: string
+          custody?: { pin: string; state: string; store: string; cure: string }
+        }[]
       }
     }
     expect(receipt.dryRun).toBe(true)
@@ -1083,5 +1162,9 @@ describe("ordinary submit with a local-only component pin", () => {
     })
     expect(row?.landingPin).toBeDefined()
     expect(row?.landingPin).not.toBe(altHead)
+    // 27747: the landing pin is a QUEUE-COMPOSED child this preview does not
+    // retain, and the receipt says so rather than reporting it as retained.
+    expect(row?.custody).toMatchObject({ pin: row?.landingPin, state: "composed-not-retained" })
+    expect(row?.custody?.cure, ranJson.report).toContain("queue-owned clone")
   }, 90_000)
 })
