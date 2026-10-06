@@ -11,6 +11,6 @@
     "@yrd/process": "workspace:*",
     "git-super": "0.4.0",
     "gitomic": "^0.4.0",
-    "removely": "^0.4.0"
+    "removely": "0.4.0"
   }
 }

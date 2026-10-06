@@ -65,7 +65,7 @@
         "zod": "4.6.5",
       },
       "devDependencies": {
-        "removely": "^0.4.0",
+        "removely": "0.4.0",
       },
     },
     "packages/yrd-queue-core": {
@@ -76,7 +76,7 @@
         "@yrd/process": "workspace:*",
         "git-super": "0.4.0",
         "gitomic": "^0.4.0",
-        "removely": "^0.4.0",
+        "removely": "0.4.0",
       },
     },
   },
