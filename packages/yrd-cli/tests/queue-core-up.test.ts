@@ -661,6 +661,62 @@ describe("yrd queue up, the service", () => {
     }
   })
 
+  /**
+   * @failure An environment that held an issue-bound branch and was later
+   *          detached is treated as bound to no issue, and the idle round
+   *          retires it while that issue is still open.
+   * @level l2
+   * @consumer the operator whose reused or branch-then-detached environment
+   *           still owes an open issue
+   * @testonly none
+   */
+  it("keeps a branch-then-detached environment bound through its reflog branch", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "branchthen-retained", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    // The environment's own name carries no issue; only the branch it held does.
+    // It moved to an issue-bound branch and was then detached, so the reflog is
+    // the sole surviving record that it ever held task/27601-branchthen.
+    const environmentGit = gitIn(environment.path)
+    await environmentGit(["checkout", "--quiet", "-b", "task/27601-branchthen"])
+    await environmentGit(["checkout", "--quiet", "--detach"])
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(existsSync(environment.path), run.stderr()).toBe(true)
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toContain(environment.path)
+      expect(run.stderr()).toContain("issue 27601")
+      expect(run.stderr()).toContain("closure unproven")
+    } finally {
+      stop.abort()
+      census.mockRestore()
+    }
+  })
+
   /** @failure A candidate could run a round before acquiring its claim, or ignore shutdown while waiting. @level l2 */
   it("waits for an unproven local claim without a round and aborts without replacing it", async () => {
     const w = await world()
