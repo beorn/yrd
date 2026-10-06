@@ -821,7 +821,7 @@ export async function coreQueueCommand(
       // silent-fallback-allow: stuck() emitted the full run failure; undefined only makes the command exit 2.
       return undefined
     }
-    await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, resolveIssue })
+    await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
     emit(io, options.json, outcome, describeRun(outcome))
     // Naming the branch is `describeRun`'s; naming what fixes it is this
     // round's own log, which the ending that stuck it already wrote in full

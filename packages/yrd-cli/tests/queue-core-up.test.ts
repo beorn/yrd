@@ -156,21 +156,26 @@ function records(run: Capture): readonly Record<string, unknown>[] {
 }
 
 /** Every environment-cleanup observation row under one fixture root, wherever its run log landed. */
-function cleanupRows(root: string, depth = 0): readonly Record<string, unknown>[] {
+function allCleanupRows(root: string, depth = 0): readonly Record<string, unknown>[] {
   if (depth > 12) return []
   const rows: Record<string, unknown>[] = []
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     const path = join(root, entry.name)
-    if (entry.isDirectory()) rows.push(...cleanupRows(path, depth + 1))
+    if (entry.isDirectory()) rows.push(...allCleanupRows(path, depth + 1))
     else if (entry.name.endsWith(".jsonl")) {
       for (const line of readFileSync(path, "utf8").split("\n")) {
         if (!line.startsWith("{")) continue
         const row = JSON.parse(line) as Record<string, unknown>
-        if (row.scope === "environment-cleanup" && row.census !== undefined) rows.push(row)
+        if (row.scope === "environment-cleanup") rows.push(row)
       }
     }
   }
   return rows
+}
+
+/** The rows that carry the service's own CWD census receipt. */
+function cleanupRows(root: string): readonly Record<string, unknown>[] {
+  return allCleanupRows(root).filter((row) => row.census !== undefined)
 }
 
 /** A logger that keeps every row it is handed, so a test can read what the service said and at what level. */
@@ -5208,4 +5213,131 @@ describe("yrd queue run --tier long", () => {
     expect(olderRow?.state).toBe("failed")
     expect(youngerRow?.state).toBe("merged")
   })
+
+  /**
+   * @failure The round reads the worktree registry of the queue-owned clone it
+   *          was handed instead of the repository the command stands in, so the
+   *          author environments registered in the fleet's repository are
+   *          invisible and the queue never closes them (27723 @cto scope
+   *          ruling, 2026-10-06: the owning root is the command's own
+   *          repository, never a hard-coded path).
+   * @level l2
+   * @consumer the operator whose fleet environments are registered in the
+   *           shared main while the service stands in its own landing
+   * @testonly none
+   */
+  it("closes an environment registered in the repository the command stands in, not the round's own clone", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"closed"}\' "$1"\n')
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    // A second working repository of the SAME remote: the fleet's registry, as
+    // the service's landing is a worktree of the shared main's repository.
+    const sibling = join(dirname(w.work), "sibling")
+    await gitIn(w.work)(["clone", "--quiet", join(dirname(w.work), "remote.git"), sibling])
+    const siblingGit = gitIn(sibling)
+    await siblingGit(["config", "user.email", "queue@yrd.test"])
+    await siblingGit(["config", "user.name", "yrd"])
+    await siblingGit(["config", "yrd.workdir", w.workdir])
+    const selected = (await siblingGit(["rev-parse", "HEAD"])).trim()
+    const opened = capture(sibling)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "27601-closed", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = (JSON.parse(opened.stdout()) as { path: string }).path
+    // Only the repository the command stands in holds this environment.
+    expect(await w.git(["worktree", "list", "--porcelain", "-z"])).not.toContain(environment)
+    expect(await siblingGit(["worktree", "list", "--porcelain", "-z"])).toContain(environment)
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    const run = capture(sibling)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(existsSync(environment), run.stderr()).toBe(false)
+      expect(await siblingGit(["worktree", "list", "--porcelain", "-z"]), run.stderr()).not.toContain(environment)
+      expect(allCleanupRows(workdir).find((row) => row.registry !== undefined)?.registry, run.stderr()).toBe(sibling)
+    } finally {
+      stop.abort()
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure One round evaluates the whole registry at once — hundreds of
+   *          environments, far past the 27723 cost bar (30 s, 400 spawns) — or
+   *          the slice never resumes, so the backlog starves behind the batch.
+   * @level l2
+   * @consumer the operator whose queue must stay live while it works the
+   *           fleet's backlog over several rounds
+   * @testonly none
+   */
+  it("slices the first pass across rounds and resumes where it stopped", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const environments = join(workdir, "environments")
+    mkdirSync(environments, { recursive: true })
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const paths: string[] = []
+    for (let index = 0; index < 20; index++) {
+      const path = join(environments, `27600-open-${String(index)}`)
+      await w.git(["worktree", "add", "--quiet", "--detach", path, head])
+      paths.push(path)
+    }
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    let rounds = 0
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: () => {
+              rounds++
+              if (rounds === 2) stop.abort()
+            },
+          },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      const summaries = allCleanupRows(workdir).filter((row) => row.charged !== undefined)
+      expect(summaries.length, run.stderr()).toBe(2)
+      expect(summaries[0]?.charged, run.stderr()).toBe(16)
+      expect(summaries[0]?.deferred, run.stderr()).toBe(4)
+      // The second round resumed where the first stopped, so between them every
+      // environment in the registry was evaluated.
+      for (const path of paths) expect(run.stderr(), `${path}\n${run.stderr()}`).toContain(path)
+    } finally {
+      stop.abort()
+      census.mockRestore()
+    }
+  }, 120_000)
 })

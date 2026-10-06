@@ -1,11 +1,19 @@
 import { appendFileSync, statSync } from "node:fs"
 import { join, relative, resolve, sep } from "node:path"
-import { gitIn, listChangeHistories, type GitRunner, type QueueConfig, type QueueRunOutcome } from "@yrd/queue-core"
+import {
+  gitIn,
+  listChangeHistories,
+  type GitRunner,
+  type GitSelection,
+  type QueueConfig,
+  type QueueRunOutcome,
+} from "@yrd/queue-core"
 import { createLocalGitProcess } from "git-super/process"
 import { createLocalGitWorktreeStore } from "git-super/worktree"
 import { clearedByIdentity, inspectProcessCwds, type ProcessCwdProjection, type UnreadableProcess } from "removely"
 import { closeEnvironment, environmentInventory } from "./env-commands.ts"
 import { environmentIssues } from "./env-cleanup-provenance.ts"
+import { repositoryHere } from "./declaration.ts"
 import { issueLookup, type ResolvedIssue } from "./issue-resolver.ts"
 import type { YrdCliIO } from "./types.ts"
 
@@ -21,10 +29,21 @@ type CachedEnvironment = {
   statuses: Map<string, string>
 }
 
+/**
+ * A round charged the spawn-producing evaluation of at most this many
+ * environments, so the first pass over the fleet's whole registry is sliced
+ * across rounds instead of exceeding the 27723 cost bar (30 s, 400 spawns) in
+ * one of them: the registry holds hundreds of rows, and each costs several Git
+ * calls. `cursor` is where the next round resumes, so progress is guaranteed
+ * even when a row keeps failing its cheap checks.
+ */
+const ENVIRONMENT_BATCH = 16
+
 /** The command invocation owns these facts; a restart makes a complete first pass. */
 export function createEnvironmentCleanup() {
   const cache = new Map<string, CachedEnvironment>()
-  return (input: Parameters<typeof cleanupEnvironments>[0]) => cleanupEnvironments(input, cache)
+  const progress = { cursor: 0 }
+  return (input: Parameters<typeof cleanupEnvironments>[0]) => cleanupEnvironments(input, cache, progress)
 }
 
 /** Names a denied row by pid, command and denial code — never its argv. */
@@ -56,13 +75,44 @@ async function cleanupEnvironments(
     outcome: QueueRunOutcome
     io: YrdCliIO
     env?: NodeJS.ProcessEnv
+    selection: GitSelection
     resolveIssue: ((raw: string) => Promise<string>) | undefined
   }>,
   cache: Map<string, CachedEnvironment>,
+  progress: { cursor: number },
 ): Promise<void> {
   const { repo, git, config, workdir, outcome, io } = input
-  const inventory = await environmentInventory(repo, git, workdir)
-  if (inventory.rows.length === 0) return
+  // The author environments live in the worktree registry of the repository
+  // this command STANDS IN — the declaration's own repository — never the
+  // queue-owned clone the round reads its authority from (27723 @cto ruling
+  // 2026-10-06: `yrd env open` registers an author environment in the
+  // repository it runs in, and the fleet's are registered in /hh/dev). The
+  // service stands in its landing, whose common dir is /hh/dev/.git, so the
+  // same registry is read without naming any path.
+  const registry = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
+  const registryGit = registry === repo ? git : gitIn(registry, undefined, input.selection, { env: input.env })
+  const inventory = await environmentInventory(registry, registryGit, workdir)
+  if (inventory.rows.length === 0) {
+    // An empty registry is a fact about WHERE the round looked, never a silent
+    // no-op: name the repository whose registry was read and the roots excluded.
+    appendFileSync(
+      outcome.log,
+      `${JSON.stringify({
+        kind: "observation",
+        run: outcome.run,
+        at: new Date().toISOString(),
+        scope: "environment-cleanup",
+        registry,
+        closed: 0,
+        kept: 0,
+        remaining: 0,
+        deferred: 0,
+        result: "none",
+        why: `no registered environments under ${inventory.roots.join(" or ")}`,
+      })}\n`,
+    )
+    return
+  }
   let closed = 0
   let kept = 0
   const record = (path: string, result: string, why: string): void => {
@@ -71,6 +121,7 @@ async function cleanupEnvironments(
       run: outcome.run,
       at: new Date().toISOString(),
       scope: "environment-cleanup",
+      registry,
       path,
       result,
       why,
@@ -150,7 +201,7 @@ async function cleanupEnvironments(
     for (const row of inventory.rows) preserve(row.path, String(cause))
     appendFileSync(
       outcome.log,
-      `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", closed, kept, remaining: inventory.rows.length - closed, ...(censusReceipt === undefined ? {} : { census: censusReceipt }) })}\n`,
+      `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", registry, closed, kept, deferred: 0, remaining: inventory.rows.length - closed, ...(censusReceipt === undefined ? {} : { census: censusReceipt }) })}\n`,
     )
     return
   }
@@ -177,7 +228,13 @@ async function cleanupEnvironments(
       throw new Error(`issue ${id}: configured lookup returned ${status}; closure unproven`)
     }
   }
-  for (const row of inventory.rows) {
+  // Resume where the last round ran out of budget, so a row that keeps failing
+  // a cheap check cannot starve the tail of the registry.
+  const offset = inventory.rows.length === 0 ? 0 : progress.cursor % inventory.rows.length
+  const ordered = [...inventory.rows.slice(offset), ...inventory.rows.slice(0, offset)]
+  let charged = 0
+  let stoppedAt = -1
+  for (const [index, row] of ordered.entries()) {
     try {
       let entry = cache.get(row.path)
       if (entry === undefined) {
@@ -189,6 +246,11 @@ async function cleanupEnvironments(
       entry.hold = row.hold
       entry.busy = holder
       if (row.hold !== null) throw new Error(`held${row.hold === "" ? "" : `: ${row.hold}`}`)
+      if (charged >= ENVIRONMENT_BATCH) {
+        stoppedAt = index
+        break
+      }
+      charged++
       const treeGit = gitIn(row.path, undefined, git.selection, { env: input.env })
       const head = row.head
       if (head === undefined) throw new Error(`registered environment ${row.path} has no HEAD`)
@@ -292,7 +354,9 @@ async function cleanupEnvironments(
       const freshHolder = busy(row.path, await census())
       if (freshHolder !== undefined) throw new Error(freshHolder)
       for (const issue of issues) await requireClosed(issue, entry, true)
-      const current = (await environmentInventory(repo, git, workdir)).rows.find((entry) => entry.path === row.path)
+      const current = (await environmentInventory(registry, registryGit, workdir)).rows.find(
+        (entry) => entry.path === row.path,
+      )
       if (current === undefined || current.hold !== null || current.head !== head) {
         throw new Error("registration, hold or HEAD changed before close")
       }
@@ -302,7 +366,7 @@ async function cleanupEnvironments(
         { json: true, noRehome: true },
         {
           ...io,
-          cwd: repo,
+          cwd: registry,
           stdout: (text) => {
             output += text
           },
@@ -321,8 +385,21 @@ async function cleanupEnvironments(
       preserve(row.path, String(cause))
     }
   }
+  progress.cursor = stoppedAt < 0 ? 0 : (offset + stoppedAt) % inventory.rows.length
   appendFileSync(
     outcome.log,
-    `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", closed, kept, remaining: inventory.rows.length - closed, ...(censusReceipt === undefined ? {} : { census: censusReceipt }) })}\n`,
+    `${JSON.stringify({
+      kind: "observation",
+      run: outcome.run,
+      at: new Date().toISOString(),
+      scope: "environment-cleanup",
+      registry,
+      closed,
+      kept,
+      charged,
+      deferred: inventory.rows.length - charged,
+      remaining: inventory.rows.length - closed,
+      ...(censusReceipt === undefined ? {} : { census: censusReceipt }),
+    })}\n`,
   )
 }
