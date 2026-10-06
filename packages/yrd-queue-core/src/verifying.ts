@@ -509,6 +509,15 @@ export type SettledGitlink = Readonly<{
   state: "raised" | "kept-ahead" | "kept-behind" | "as-written" | "left-off-main" | "merged" | "not-run"
   /** Present on a `merged` row and on no other. */
   composition?: SettledComposition
+  /**
+   * The module store this gitlink's objects belong to, as an absolute path, as
+   * git-super reported it. A candidate's pin is only durable if THAT store
+   * holds it: a compose runs in the tree it was handed, so the store it wrote
+   * through can be scratch, and a receipt that names the child anyway claims a
+   * composition the candidate does not hold (27747). Absent on an older
+   * git-super, and then the receipt derives the store from the root.
+   */
+  store?: string
 }>
 
 /**
@@ -583,6 +592,9 @@ export function readSuperMergeResult(value: unknown): SuperMergeResult {
       )
     ) {
       throw new Error(`git-super merge gitlink ${String(index)} is incomplete`)
+    }
+    if (entry.store !== undefined && (typeof entry.store !== "string" || entry.store === "")) {
+      throw new Error(`git-super merge gitlink ${String(index)} has a non-string store`)
     }
     // A `merged` row without its composition is a producer defect, not an older
     // git-super: the word and the evidence were added together, and the journal

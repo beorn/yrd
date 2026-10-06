@@ -54,10 +54,25 @@ import {
 import { classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
 import { verifyCandidate, type Verification, type SettledGitlink } from "./verifying.ts"
 import { revertedPathsFinding } from "./revert-guard.ts"
-import { gitlinksAt } from "./reference.ts"
+import { gitlinksAt, holdsCommit } from "./reference.ts"
 import { withRemoteSeam } from "./remote-calls.ts"
 
 /** Outward submission evidence observes the candidate rather than relabelling the producer's claims. */
+/**
+ * Why a composed child is not yet retained, and the cure (27747). Present only
+ * on a row the queue composed itself: a `merged` row whose child no durable
+ * store holds yet. The queue recomposes the child at land, so a preview naming
+ * it is telling the truth only if it also says the child is not retained.
+ */
+export type SubmitCustody = Readonly<{
+  /** The two-parent child the compose authored, which no store holds yet. */
+  pin: string
+  state: "composed-not-retained"
+  /** The store this row names, which would have to hold `pin` for the claim to stand. */
+  store: string
+  cure: string
+}>
+
 export type SubmitGitlink = Readonly<
   Omit<SettledGitlink, "state"> &
     (
@@ -67,6 +82,8 @@ export type SubmitGitlink = Readonly<
           recorded: string
           authorHead: string
           landingPin: string
+          /** Present when the compose authored the pin and no store holds it yet. */
+          custody?: SubmitCustody
         }
     )
 >
@@ -75,7 +92,7 @@ export type SubmitVerification =
   | Readonly<Omit<Extract<Verification, { state: "verified" }>, "gitlinks"> & { gitlinks: readonly SubmitGitlink[] }>
   | Extract<Verification, { state: "failed" }>
 
-async function submissionReceipt(git: Git, verifying: Verification): Promise<SubmitVerification> {
+async function submissionReceipt(git: Git, root: string, verifying: Verification): Promise<SubmitVerification> {
   if (verifying.state !== "verified") return verifying
   const settled = verifying.gitlinks.filter((row) => row.state !== "not-run")
   const observed = new Map(
@@ -87,8 +104,12 @@ async function submissionReceipt(git: Git, verifying: Verification): Promise<Sub
       )
     ).map((row) => [row.path, row.sha]),
   )
-  const gitlinks = verifying.gitlinks.map((row): SubmitGitlink => {
-    if (row.state === "not-run") return { ...row, state: "not-run" }
+  const gitlinks: SubmitGitlink[] = []
+  for (const row of verifying.gitlinks) {
+    if (row.state === "not-run") {
+      gitlinks.push({ ...row, state: "not-run" })
+      continue
+    }
     const recorded = observed.get(row.path)
     const expected = row.state === "raised" ? row.to : row.from
     if (recorded !== expected) {
@@ -98,9 +119,77 @@ async function submissionReceipt(git: Git, verifying: Verification): Promise<Sub
     }
     const authorHead = row.state === "merged" && row.composition?.pin ? row.composition.pin : row.from
     const landingPin = row.state === "raised" ? row.to : row.from
-    return { ...row, recorded, authorHead, landingPin }
-  })
+    const custody = await composedChildCustody(git, root, row, recorded, verifying.candidate)
+    gitlinks.push({ ...row, recorded, authorHead, landingPin, ...(custody === undefined ? {} : { custody }) })
+  }
   return { ...verifying, gitlinks }
+}
+
+/**
+ * THE ONE PIN ON A ROW THE QUEUE AUTHORED ITSELF (27747).
+ *
+ * A `merged` row whose composition did not fast-forward carries, in `from`,
+ * the two-parent child git-super COMPOSED — not a pin any authored tree held.
+ * `recorded` is what the candidate tree names, and git-super wrote that child
+ * into the submodule store of the tree it was handed, borrowed from the
+ * reference: in a submit preview that store is scratch. So the candidate can
+ * name a component pin no durable store holds, and a receipt that says only
+ * "verified" claims a composition the candidate itself cannot read back.
+ * MEASURED 2026-10-06: candidate 2d311854 recorded ag 2e6ea138, an object in NO
+ * store, reported verified; dev/2's held 27787 dry run hit the same shape; and
+ * an ordinary change to vendor/yrd whose component main had advanced hit it too.
+ *
+ * The child is a PREVIEW artifact by construction — nothing publishes it and
+ * the queue recomposes it at land — so NAMING it is honest exactly when the row
+ * also says it is not retained. Report that as `custody`, and say in the same
+ * breath whether the change's own pin is readable in the change's own checkout,
+ * because that reading is what decides whether a reader can resolve the change
+ * at all.
+ *
+ * REFUSING WAS MEASURED AND REJECTED HERE (2026-10-06). A refusal on "the store
+ * this row names does not hold the composed child" fires for every change whose
+ * component main advanced — it refused this submission's own vendor/yrd move —
+ * so it would stop the queue's intake rather than fix the lie. The lie is the
+ * SILENCE, and a row that reports `composed-not-retained` is not silent.
+ *
+ * Every OTHER pin this receipt names is the AUTHOR's own — the change's pin,
+ * which the 26754/27323 preview deliberately does not push, so custody there is
+ * the author's and belongs to the publication step. A composition that
+ * fast-forwarded (`composition.pin` is the change's own pin) authored nothing,
+ * so it is skipped the same way.
+ */
+async function composedChildCustody(
+  git: Git,
+  root: string,
+  row: SettledGitlink,
+  recorded: string | undefined,
+  candidate: string,
+): Promise<SubmitCustody | undefined> {
+  if (row.state !== "merged" || row.composition === undefined || row.composition.pin === row.from) return undefined
+  if (recorded === undefined) return undefined
+  const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+  const store = row.store ?? join(common, "modules", row.path)
+  const storeGit: Git = (args, input) => git(["-C", store, ...args], input)
+  if (await holdsCommit(storeGit, recorded)) return undefined
+  const ownPin = row.composition.pin
+  const ownStore = join(root, row.path)
+  const ownGit: Git = (args, input) => git(["-C", ownStore, ...args], input)
+  // The change's own pin reading is a SEPARATE fact from the child's custody,
+  // and it is the one that decides whether a reader can resolve the change at
+  // all, so the report carries it rather than folding it into one apology.
+  const ownHolds = await holdsCommit(ownGit, ownPin)
+  return {
+    cure: ownHolds
+      ? `the child is preview-only under candidate ${candidate}: nothing publishes it and the queue recomposes it at land. ` +
+        `To make it durable here, compose where it is retained (the queue-owned clone), or publish ${recorded} to ` +
+        `${row.path}'s declared remote so ${store} can be populated`
+      : `the child is preview-only under candidate ${candidate}, and the change's own head ${ownPin} is absent from the ` +
+        `change's own checkout ${ownStore} as well: fetch that pin into the checkout or publish it before relying on this ` +
+        `preview. The queue recomposes the child at land`,
+    pin: recorded,
+    state: "composed-not-retained",
+    store,
+  }
 }
 
 export type SubmitRequest = Readonly<{
@@ -550,8 +639,8 @@ export async function inspectSubmitAtHead(
 ): Promise<SubmitInspection> {
   const admitted = await admitSubmitAtHead(git, remote, request, head)
   const verifying = await composeSubmit(git, request, admitted)
-  const { root: _root, bases: _bases, operational: _operational, ...inspection } = admitted
-  return { ...inspection, verifying: await submissionReceipt(git, verifying) }
+  const { root, bases: _bases, operational: _operational, ...inspection } = admitted
+  return { ...inspection, verifying: await submissionReceipt(git, root, verifying) }
 }
 
 async function admitSubmitAtHead(
@@ -755,7 +844,7 @@ export async function prepareSubmit(git: Git, remote: string, request: SubmitReq
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   const { branch: _branch, published, ...admitted } = await prepareSubmit(git, remote, request)
   const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted))
-  const receipt = await submissionReceipt(git, verifying)
+  const receipt = await submissionReceipt(git, admitted.root, verifying)
   const { root, bases: _bases, operational, ...inspection } = admitted
   return withRemoteSeam("submitEvent", () =>
     submitEvent(git, remote, request, root, { ...inspection, verifying: receipt }, operational, published),
