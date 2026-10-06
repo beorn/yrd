@@ -23,6 +23,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { type Git } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { closeEnvironment } from "../src/env-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
@@ -453,31 +454,59 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     if (kind === "dirty") expect(readFileSync(join(path, "teardown-left.txt"), "utf8")).toBe("changed")
   })
 
-  it("closes a lender environment with live borrowers and leaves the borrower clean (25908)", async () => {
-    const w = await world(":")
-    await addMaterializedDependency(w)
-    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const { path: lender } = await openEnvironment(w.work, selected)
+  /**
+   * @failure Automatic close can discard GitSuper's borrowed KEEP result or fail to forward its no-rehome policy.
+   * @level l2
+   * @consumer Yrd automatic cleanup and manual environment close
+   */
+  it.each([{ noRehome: false }, { noRehome: true }])(
+    "closes or keeps a lender environment with live borrowers (noRehome=$noRehome)",
+    async ({ noRehome }) => {
+      const w = await world(":")
+      await addMaterializedDependency(w)
+      const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+      const { path: lender } = await openEnvironment(w.work, selected)
 
-    const openBorrower = capture(lender)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "borrower", "--json"], openBorrower.io),
-      openBorrower.stderr(),
-    ).toBe(0)
-    const { path: borrower } = JSON.parse(openBorrower.stdout()) as { path: string }
+      const openBorrower = capture(lender)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "borrower", "--json"], openBorrower.io),
+        openBorrower.stderr(),
+      ).toBe(0)
+      const { path: borrower } = JSON.parse(openBorrower.stdout()) as { path: string }
 
-    const closed = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "close", lender, "--json"], closed.io), closed.stderr()).toBe(0)
-    expect(JSON.parse(closed.stdout())).toEqual({ closed: lender })
-    expect(existsSync(lender)).toBe(false)
+      const lenderGitDir = (
+        await command(join(lender, "vendor/dependency"), ["git", "rev-parse", "--absolute-git-dir"])
+      ).stdout.trim()
+      const borrowerGitDir = (
+        await command(join(borrower, "vendor/dependency"), ["git", "rev-parse", "--absolute-git-dir"])
+      ).stdout.trim()
+      const altFile = join(borrowerGitDir, "objects", "info", "alternates")
+      const existingAlt = existsSync(altFile) ? readFileSync(altFile, "utf8") : ""
+      const loan = `${join(lenderGitDir, "objects")}\n${existingAlt}`
+      writeFileSync(altFile, loan)
 
-    const fsckSub = await command(join(borrower, "vendor/dependency"), ["git", "fsck", "--full"])
-    expect(fsckSub.exit).toBe(0)
-    expect(fsckSub.stderr).toBe("")
+      const closed = capture(w.work)
+      if (noRehome) {
+        const options = { json: true, noRehome }
+        expect(await closeEnvironment(lender, options, closed.io), closed.stderr()).toBe(0)
+        expect(JSON.parse(closed.stdout())).toEqual({ kept: lender, reason: "borrowed", borrowers: [borrower] })
+        expect(existsSync(lender)).toBe(true)
+        expect(readFileSync(altFile, "utf8")).toBe(loan)
+        expect(await w.git(["worktree", "list", "--porcelain"])).toContain(lender)
+        return
+      }
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", lender, "--json"], closed.io), closed.stderr()).toBe(0)
+      expect(JSON.parse(closed.stdout())).toEqual({ closed: lender })
+      expect(existsSync(lender)).toBe(false)
 
-    const closeBorrower = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "close", borrower, "--json"], closeBorrower.io)).toBe(0)
-  })
+      const fsckSub = await command(join(borrower, "vendor/dependency"), ["git", "fsck", "--full"])
+      expect(fsckSub.exit).toBe(0)
+      expect(fsckSub.stderr).toBe("")
+
+      const closeBorrower = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", borrower, "--json"], closeBorrower.io)).toBe(0)
+    },
+  )
 
   it("closes a packed lender environment with a unique commit and leaves the borrower clean (25908 cure)", async () => {
     const w = await world(":")

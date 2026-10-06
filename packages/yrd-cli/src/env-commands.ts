@@ -47,7 +47,7 @@ import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 
 export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string; hold?: string }>
-export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string }>
+export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
 export type EnvListOptions = Readonly<{ json?: boolean }>
 
 /** One environment as git holds it: a worktree under the bays root. */
@@ -557,19 +557,53 @@ export async function closeEnvironment(
     await requireClean(treeGit, path)
   }
   const modules = await treeGit(["ls-tree", commit, "--", ".gitmodules"])
-  if (modules.trim() !== "" || options.retain !== undefined) {
+  if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true) {
     const retain =
       options.retain === undefined
         ? join(workdir, "retained-modules")
         : resolve(io.cwd ?? globalThis.process.cwd(), options.retain)
     let removed: unknown
     try {
-      removed = JSON.parse(await git(["super", "--json", "worktree", "remove", path, "--retain", retain]))
+      removed = JSON.parse(
+        await git([
+          "super",
+          "--json",
+          "worktree",
+          "remove",
+          path,
+          "--retain",
+          retain,
+          ...(options.noRehome === true ? ["--no-rehome"] : []),
+        ]),
+      )
     } catch (error) {
       throw new Error(
         `environment ${path} could not close through git super worktree remove: ${error instanceof Error ? error.message : String(error)}; inspect its registration and retention directory ${retain} before retrying; no plain-git fallback was attempted`,
         { cause: error },
       )
+    }
+    if (
+      options.noRehome === true &&
+      typeof removed === "object" &&
+      removed !== null &&
+      "state" in removed &&
+      removed.state === "unchanged" &&
+      "path" in removed &&
+      removed.path === path &&
+      "reason" in removed &&
+      removed.reason === "borrowed" &&
+      "borrowers" in removed &&
+      Array.isArray(removed.borrowers) &&
+      removed.borrowers.length > 0 &&
+      removed.borrowers.every((borrower): borrower is string => typeof borrower === "string" && borrower !== "")
+    ) {
+      const kept = { kept: path, reason: "borrowed", borrowers: removed.borrowers }
+      io.stdout(
+        options.json === true
+          ? `${JSON.stringify(kept)}\n`
+          : `kept environment ${path}: borrowed by ${removed.borrowers.join(", ")}\n`,
+      )
+      return 0
     }
     if (
       typeof removed !== "object" ||
