@@ -33,6 +33,7 @@ import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import { issueResolver } from "./issue-resolver.ts"
+import { createEnvironmentCleanup } from "./env-cleanup.ts"
 import { runAdmission } from "./admission.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
@@ -712,6 +713,7 @@ export async function coreQueueCommand(
   }
   const resolveIssue = issueResolver(config, repo, env)
   const workdir = options.workdir ?? (await workdirOf(git))
+  const cleanupEnvironments = createEnvironmentCleanup()
   mkdirSync(workdir, { recursive: true })
   // One generic temp root, resolved here and carried down (27721). The queue core never re-derives it: a
   // supplied TMPDIR is adopted verbatim, and an absent one keeps today's `<workdir>/tmp`.
@@ -823,6 +825,7 @@ export async function coreQueueCommand(
       // silent-fallback-allow: stuck() emitted the full run failure; undefined only makes the command exit 2.
       return undefined
     }
+    await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, resolveIssue })
     emit(io, options.json, outcome, describeRun(outcome))
     // Naming the branch is `describeRun`'s; naming what fixes it is this
     // round's own log, which the ending that stuck it already wrote in full

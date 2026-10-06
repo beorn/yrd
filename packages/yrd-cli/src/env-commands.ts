@@ -47,7 +47,7 @@ import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 
 export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string; hold?: string }>
-export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string }>
+export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
 export type EnvListOptions = Readonly<{ json?: boolean }>
 
 /** One environment as git holds it: a worktree under the bays root. */
@@ -252,6 +252,25 @@ async function pinDeclaredIdentity(path: string, git: GitRunner, io: YrdCliIO): 
 }
 
 /**
+ * A top-level declaration key this checkout's Yrd postdates reads as a warning
+ * for `env open` and `env close`, never a refusal (27796). Both run only the
+ * `setup:`/`teardown:` they know, so a mechanism newer than this parser is one
+ * the QUEUE owns; refusing it stranded every environment on a week-old slot
+ * (27187 fixed only `submit`, and the documented cure — open through main's
+ * runtime — left the environment's own declaration unreadable to `env close`).
+ * The queue's own round (up/run/merge/check) still reads strictly, because
+ * running a declaration it cannot read in full is the silent error.
+ */
+function warnNewerDeclarationKeys(at: string, command: string, keys: readonly string[], io: YrdCliIO): void {
+  const one = keys.length === 1
+  io.stderr(
+    `yrd: the declaration at ${at} has ${one ? "a key" : "keys"} this environment's Yrd does not know: ` +
+      `${keys.map((key) => `${key}:`).join(", ")}. The queue runs ${one ? "it" : "them"}; ${command} does not, ` +
+      `so it proceeds without ${one ? "it" : "them"}. Update this environment's Yrd to the one the target pins to silence this.\n`,
+  )
+}
+
+/**
  * `yrd env open` — open an environment for one branch and keep it. Prints its
  * path on stdout, which is what a caller `cd`s into.
  */
@@ -299,7 +318,12 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       `yrd env open: commit ${commit} is not a commit object in ${root}; fetch that commit before opening it`,
     )
   }
-  const config = await readConfig(git, base, { remote: "origin", branch: target })
+  const config = await readConfig(
+    git,
+    base,
+    { remote: "origin", branch: target },
+    { newerKeys: (keys) => warnNewerDeclarationKeys(`${target} (${base.slice(0, 12)})`, "env open", keys, io) },
+  )
   const resolveIssue = config === undefined ? undefined : issueResolver(config, root)
   // 27147: a submodule the base declares `private = true` is left empty and uninitialized; a detached
   // environment's freshWorktree reads the declaration itself.
@@ -427,14 +451,13 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   return 0
 }
 
-/** `yrd env list` — the environments this repository holds, as git holds them. */
-export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const root = requireRepository(io)
-  const selection = await resolveGitSelection(root)
-  const baysRoot = baysRootOf()
-  await using process = createProcess({ cwd: root })
-  const git = gitIn(root, process, selection)
-  const roots = [baysRoot, legacyBaysRoot(root), join(resolve(root, await workdirOf(git)), "environments")]
+/** The registered inventory shared by listing and automatic environment closure. */
+export async function environmentInventory(
+  root: string,
+  git: Git,
+  workdir: string,
+): Promise<Readonly<{ roots: readonly string[]; rows: readonly EnvRow[] }>> {
+  const roots = [baysRootOf(), legacyBaysRoot(root), join(resolve(root, workdir), "environments")]
   const prefixes = roots.map((path) => `${existsSync(path) ? realpathSync(path) : resolve(path)}/`)
   const rows: EnvRow[] = (await registeredWorktrees(git))
     .filter(({ path }) => prefixes.some((prefix) => path.startsWith(prefix)))
@@ -445,6 +468,16 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
       ...(head === undefined ? {} : { head }),
       ...(branch === undefined ? {} : { branch }),
     }))
+  return { roots, rows }
+}
+
+/** `yrd env list` — the environments this repository holds, as git holds them. */
+export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+  const root = requireRepository(io)
+  const selection = await resolveGitSelection(root)
+  await using process = createProcess({ cwd: root })
+  const git = gitIn(root, process, selection)
+  const { roots, rows } = await environmentInventory(root, git, await workdirOf(git))
   if (options.json === true) {
     io.stdout(`${JSON.stringify({ environments: rows })}\n`)
     return 0
@@ -528,7 +561,12 @@ export async function closeEnvironment(
     )
   }
   await requireClean(treeGit, path)
-  const config = await readConfig(treeGit, commit, { branch: "HEAD", remote: "origin" })
+  const config = await readConfig(
+    treeGit,
+    commit,
+    { branch: "HEAD", remote: "origin" },
+    { newerKeys: (keys) => warnNewerDeclarationKeys(path, "env close", keys, io) },
+  )
   if (config?.teardown !== undefined) {
     const artifacts = join(workdir, "logs", "environments", basename(path), runId())
     const result = await runCheck({
@@ -548,19 +586,53 @@ export async function closeEnvironment(
     await requireClean(treeGit, path)
   }
   const modules = await treeGit(["ls-tree", commit, "--", ".gitmodules"])
-  if (modules.trim() !== "" || options.retain !== undefined) {
+  if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true) {
     const retain =
       options.retain === undefined
         ? join(workdir, "retained-modules")
         : resolve(io.cwd ?? globalThis.process.cwd(), options.retain)
     let removed: unknown
     try {
-      removed = JSON.parse(await git(["super", "--json", "worktree", "remove", path, "--retain", retain]))
+      removed = JSON.parse(
+        await git([
+          "super",
+          "--json",
+          "worktree",
+          "remove",
+          path,
+          "--retain",
+          retain,
+          ...(options.noRehome === true ? ["--no-rehome"] : []),
+        ]),
+      )
     } catch (error) {
       throw new Error(
         `environment ${path} could not close through git super worktree remove: ${error instanceof Error ? error.message : String(error)}; inspect its registration and retention directory ${retain} before retrying; no plain-git fallback was attempted`,
         { cause: error },
       )
+    }
+    if (
+      options.noRehome === true &&
+      typeof removed === "object" &&
+      removed !== null &&
+      "state" in removed &&
+      removed.state === "unchanged" &&
+      "path" in removed &&
+      removed.path === path &&
+      "reason" in removed &&
+      removed.reason === "borrowed" &&
+      "borrowers" in removed &&
+      Array.isArray(removed.borrowers) &&
+      removed.borrowers.length > 0 &&
+      removed.borrowers.every((borrower): borrower is string => typeof borrower === "string" && borrower !== "")
+    ) {
+      const kept = { kept: path, reason: "borrowed", borrowers: removed.borrowers }
+      io.stdout(
+        options.json === true
+          ? `${JSON.stringify(kept)}\n`
+          : `kept environment ${path}: borrowed by ${removed.borrowers.join(", ")}\n`,
+      )
+      return 0
     }
     if (
       typeof removed !== "object" ||

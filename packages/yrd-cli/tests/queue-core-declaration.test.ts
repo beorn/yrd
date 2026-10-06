@@ -46,7 +46,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { openEvents } from "gitomic/events"
 import { assertEventListingFence, coreQueueCommand, openEventDetail } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
-import { issueResolver } from "../src/issue-resolver.ts"
+import { issueLookup, issueResolver } from "../src/issue-resolver.ts"
 import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
@@ -270,6 +270,31 @@ it("refreshes local status after an event queue write in the same workdir (25626
 })
 
 describe("a queue is the selected origin branch carrying config", () => {
+  /**
+   * @failure Cleanup can mistake a cached canonical identity for an issue's current closure status.
+   * @level l1
+   * @consumer Yrd issue bindings and automatic author environment cleanup
+   */
+  it("refreshes issue status while the canonical identity cache remains stable", async () => {
+    const command = ["sh", "-c", 'printf "%s\\n" "$1" >> resolver-calls; cat issue-state.json', "resolver"]
+    const repo = await world(`issueResolver: ${JSON.stringify(command)}\n`)
+    const git = gitIn(repo)
+    const config = await readConfig(git, "HEAD", { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture lost target declaration")
+    const lookup = issueLookup(config, repo)
+    const canonical = issueResolver(config, repo)
+    if (lookup === undefined || canonical === undefined) throw new Error("fixture lost target issue resolver")
+    const id = "@km/storage/26050-full"
+    writeFileSync(join(repo, "issue-state.json"), JSON.stringify({ id, status: "open" }))
+    expect(await lookup("26050")).toEqual({ id, status: "open" })
+    expect(await canonical("26050")).toBe(id)
+    writeFileSync(join(repo, "issue-state.json"), JSON.stringify({ id, status: "closed" }))
+    expect(await canonical("26050")).toBe(id)
+    expect(readFileSync(join(repo, "resolver-calls"), "utf8").trim().split("\n")).toHaveLength(2)
+    expect(await lookup(id)).toEqual({ id, status: "closed" })
+    expect(readFileSync(join(repo, "resolver-calls"), "utf8").trim().split("\n")).toHaveLength(3)
+  })
+
   it("refuses an option-shaped raw issue before invoking the target resolver", async () => {
     const command = ["sh", "-c", 'touch resolver-ran; printf \'{"id":"@km/storage/26050-full"}\\n\'', "resolver"]
     const repo = await world(`issueResolver: ${JSON.stringify(command)}\n`)

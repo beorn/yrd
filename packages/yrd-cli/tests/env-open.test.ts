@@ -156,6 +156,31 @@ describe("yrd env open prepares the retained environment", () => {
     },
   )
 
+  /**
+   * @failure `yrd env open` read the target's declaration through the strict parser, so a top-level key a
+   *          newer queue declares refused every environment on a week-old checkout (27796; 27187 fixed
+   *          only `submit`), and the refusal named neither the cause nor the cure.
+   * @level   l2 (real bare remote, declaration at the target, real retained worktree)
+   * @consumer every seat opening an environment from a checkout older than the target's declaration
+   * @testonly none
+   */
+  it("opens when the declaration carries a top-level key this Yrd does not know, warning once", async () => {
+    const w = await world(":")
+    const declared = readFileSync(join(w.work, ".yrd.yml"), "utf8")
+    writeFileSync(join(w.work, ".yrd.yml"), `${declared}futurekey: from a newer queue\n`)
+    await w.git(["add", ".yrd.yml"])
+    await w.git(["commit", "--quiet", "-m", "declare a key this Yrd does not know"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "newer-key"], run.io)).toBe(0)
+
+    expect(run.stderr()).toContain("futurekey:")
+    expect(run.stderr()).toMatch(/this environment's Yrd does not know/iu)
+    expect(run.stderr().match(/futurekey:/gu)).toHaveLength(1)
+    expect(existsSync(join(w.work, ".bays", "newer-key"))).toBe(true)
+  })
+
   // A bead nested under another opens task/<parent>/<leaf> beside task/<parent>, and git stores a branch as a path,
   // so the raw refusal named neither cause nor way out (@dev/fixer, 25850 beside 25843, 2026-09-25).
   it("refuses a branch beneath an existing branch and names --bay", async () => {
