@@ -20,11 +20,11 @@ import { tmpdir } from "node:os"
 import { dirname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
-import { type Git } from "@yrd/queue-core"
+import { createEventStore } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
-import { environmentProvenance } from "../src/env-cleanup-provenance.ts"
+import { environmentIssues, environmentProvenance } from "../src/env-cleanup-provenance.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
@@ -59,7 +59,31 @@ async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ 
   return JSON.parse(run.stdout()) as { path: string; head: string }
 }
 
-type World = Readonly<{ git: Git; work: string }>
+type World = Readonly<{ git: ReturnType<typeof gitIn>; work: string }>
+
+it("cleanup unions every creating OID and canonical branch binding without inherited Refs", async () => {
+  const w = await world(":")
+  await w.git(["commit", "--quiet", "--allow-empty", "-m", "inherited target binding", "-m", "Refs: 999"])
+  const path = join(dirname(w.work), "retained")
+  const branch = "task/@i/10-yrd/27723-scope"
+  await w.git(["worktree", "add", "--quiet", "-b", branch, path, "HEAD"])
+  const tree = gitIn(path)
+  for (const issue of ["111", "112"]) {
+    await tree(["commit", "--quiet", "--allow-empty", "-m", `own binding ${issue}`, "-m", `Refs: ${issue}`])
+  }
+  const issues = await environmentIssues(
+    path,
+    tree,
+    "retained",
+    branch,
+    w.git,
+    "main",
+    createEventStore(w.work, "origin", w.git.selection),
+    { histories: new Map(), invalid: new Map() },
+    async (raw) => raw,
+  )
+  expect(new Set(issues)).toEqual(new Set(["111", "112", "@i/10-yrd/27723-scope"]))
+})
 
 it("cleanup provenance excludes inherited history and refuses incomplete or unknown HEAD evidence", async () => {
   const w = await world(":")

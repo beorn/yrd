@@ -85,8 +85,12 @@ export async function environmentIssues(
     issues.add(normalizeIssueReference(await resolveIssue(normalizeIssueReference(raw))))
   }
   for (const label of [name, ...provenance.branches]) {
-    for (const match of label.matchAll(/(?:^|\/)(\d+)(?:-|$)/gu)) {
-      if (match[1] !== undefined) await add(match[1])
+    const normalized = normalizeIssueReference(label)
+    if (normalized.startsWith("@")) await add(normalized)
+    else {
+      const leaf = label.split("/").at(-1) ?? label
+      const issue = /^(\d+)(?:-|$)/u.exec(leaf)?.[1]
+      if (issue !== undefined) await add(issue)
     }
   }
   // --no-walk reads these OIDs themselves. Multiple ^! ranges would subtract

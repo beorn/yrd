@@ -38,6 +38,7 @@ import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as gitomic from "gitomic"
+import * as removely from "removely"
 import { openEvents } from "gitomic/events"
 import {
   appendChangeEvent,
@@ -77,6 +78,8 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand, endingCode } from "../src/queue-core-commands.ts"
+import { environmentInventory } from "../src/env-commands.ts"
+import { workdirOf } from "../src/workdir.ts"
 import { changesSuffix } from "../src/watch-list.tsx"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import { readRunnerFacts } from "../src/watch-runner.ts"
@@ -87,6 +90,7 @@ import { installSelectedGit } from "./support/selected-git.ts"
 // A mutable facade, so a test can catch each health document at the rename
 // that publishes it. Every call passes through to the real filesystem.
 vi.mock("node:fs", async (original) => ({ ...(await original<typeof import("node:fs")>()) }))
+vi.mock("removely", async (original) => ({ ...(await original<typeof import("removely")>()) }))
 
 // A submodule at a local path: git refuses file transport for submodule clones
 // unless every git in the chain is told. Every git runner below and the
@@ -349,44 +353,74 @@ describe("yrd queue up, the service", () => {
    * @consumer the operator whose unnamed detached environment has no authored issue bindings
    * @testonly none
    */
-  it("closes an unnamed retained backlog environment on its first idle round", async () => {
-    const w = await world()
-    await w.git(["config", "yrd.workdir", w.workdir])
-    await redeclare(w, "setup: ':'\n")
-    await w.git(["fetch", "--quiet", "origin", "main"])
-    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
-    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const opened = capture(w.work)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "unnamed-retained", "--json"], opened.io),
-      opened.stderr(),
-    ).toBe(0)
-    const environment = JSON.parse(opened.stdout()) as { path: string }
-    expect(existsSync(environment.path)).toBe(true)
-    const stop = new AbortController()
-    const run = capture(w.work)
-    let rounds = 0
-    expect(
-      await coreQueueCommand(
-        w.work,
-        run.io,
-        {
-          command: "up",
-          intervalSeconds: 0,
-          stop: stop.signal,
-          afterRound: () => {
-            rounds++
-            stop.abort()
-          },
-        },
-        { json: true, workdir: w.workdir },
-      ),
-      run.stderr(),
-    ).toBe(0)
-    expect(rounds, run.stdout() + run.stderr()).toBe(1)
-    expect(existsSync(environment.path), run.stderr()).toBe(false)
-    expect(await w.git(["worktree", "list", "--porcelain", "-z"])).not.toContain(environment.path)
-  })
+  it.each(["complete", "incomplete", "busy"] as const)(
+    "closes an unnamed retained backlog environment on its first idle round (%s)",
+    async (coverage) => {
+      const w = await world()
+      await w.git(["config", "yrd.workdir", w.workdir])
+      await redeclare(w, "setup: ':'\n")
+      await w.git(["fetch", "--quiet", "origin", "main"])
+      await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+      const workdir = await workdirOf(w.git, { cwd: w.work })
+      const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+      const opened = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "unnamed-retained", "--json"], opened.io),
+        opened.stderr(),
+      ).toBe(0)
+      const environment = JSON.parse(opened.stdout()) as { path: string }
+      expect(existsSync(environment.path)).toBe(true)
+      // The host may deny unrelated processes' CWDs. The projection is this
+      // external capability boundary; queue, registry and retained removal stay real.
+      const census = vi.spyOn(removely, "inspectProcessCwds").mockResolvedValue({
+        complete: coverage !== "incomplete",
+        unreadable: [],
+        mechanism: "proc",
+        rows: coverage === "busy" ? [{ pid: process.pid, cwd: environment.path }] : [],
+      })
+      try {
+        const inventory = await environmentInventory(w.work, w.git, workdir)
+        expect(
+          inventory.rows.map((row) => row.path),
+          JSON.stringify({
+            environment,
+            inventory,
+            registered: await w.git(["worktree", "list", "--porcelain", "-z"]),
+          }),
+        ).toContain(environment.path)
+        const stop = new AbortController()
+        const run = capture(w.work)
+        let rounds = 0
+        expect(
+          await coreQueueCommand(
+            w.work,
+            run.io,
+            {
+              command: "up",
+              intervalSeconds: 0,
+              stop: stop.signal,
+              afterRound: () => {
+                rounds++
+                stop.abort()
+              },
+            },
+            { json: true, workdir },
+          ),
+          run.stderr(),
+        ).toBe(0)
+        expect(rounds, run.stdout() + run.stderr()).toBe(1)
+        expect(existsSync(environment.path), run.stderr()).toBe(coverage !== "complete")
+        const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
+        if (coverage === "complete") expect(registration).not.toContain(environment.path)
+        else {
+          expect(registration).toContain(environment.path)
+          expect(run.stderr()).toContain(coverage === "busy" ? "has CWD" : "census proc incomplete")
+        }
+      } finally {
+        census.mockRestore()
+      }
+    },
+  )
 
   /** @failure A candidate could run a round before acquiring its claim, or ignore shutdown while waiting. @level l2 */
   it("waits for an unproven local claim without a round and aborts without replacing it", async () => {
