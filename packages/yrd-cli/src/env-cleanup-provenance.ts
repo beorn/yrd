@@ -38,6 +38,15 @@ export async function environmentProvenance(
       continue
     }
     const message = entry.message
+    // A message-less NON-FIRST entry is CREATING (ruling 27723 addendum,
+    // 2026-10-06): it is Yrd's own `env open --issue` binding update-ref, which
+    // git mirrors into HEAD's reflog with no -m. Its trailers — read from the
+    // entry's own commit, never its ancestry — name the bound issue. The
+    // creation proof stays the zero-old-id FIRST entry above.
+    if (message === "") {
+      commits.add(entry.newOid)
+      continue
+    }
     const checkout = /^checkout: moving from (.+) to (.+)$/u.exec(message)
     if (checkout?.[1] !== undefined && checkout[2] !== undefined) {
       branch(checkout[1])
@@ -50,7 +59,11 @@ export async function environmentProvenance(
       continue
     }
     if (/^(?:reset:|(?:rebase|rebase -i|pull --rebase) \((?:start|finish|abort)\):)/u.test(message)) continue
-    if (/^(?:merge|pull)(?::| ).*Fast-forward/u.test(message)) continue
+    // `rebase: fast-forward` (git spells it lower-case) is the same
+    // non-creating move as merge/pull's (ruling 27723 addendum). Only these
+    // prefixes reach it, so a commit whose subject ends in "Fast-forward"
+    // still reads as `commit:` and stays creating.
+    if (/^(?:merge|pull|rebase)(?::| ).*fast-forward/iu.test(message)) continue
     if (
       /^(?:commit(?: \((?:amend|merge|initial)\))?|cherry-pick|revert|am):/u.test(message) ||
       /^(?:rebase|rebase -i|pull --rebase) \((?:pick|reword|edit|squash|fixup|continue)\):/u.test(message) ||
