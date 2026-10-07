@@ -277,6 +277,8 @@ export type { TransportFault } from "./setup-transport.ts"
 export { runtimeGitlinkPath } from "./runtime-gitlink.ts"
 export type { RuntimeGitlinkDecision, RuntimeGitlinkOff, RuntimeGitlinkPath } from "./runtime-gitlink.ts"
 
+export { YRD_RUNTIME_COMPONENTS, YRD_RUNTIME_OWN_COMPONENT } from "./runtime-components.ts"
+
 export { programRootCheck } from "./program-root.ts"
 
 export {
