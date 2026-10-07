@@ -1822,10 +1822,7 @@ export async function queueFormat(store: QueueReadStore, queue: string): Promise
 export async function readStatus(store: QueueLocation, queue: string, branch: string): Promise<EventChange> {
   await readEventQueue(store, queue)
   const ref = changesRef(queue, branch)
-  const { histories, invalid } = await readBranchHistory(store, queue, branch)
-  const defect = invalid.get(branch)
-  if (defect !== undefined) throw new Error(`${defect.ref}@${defect.tip}: ${defect.error}`)
-  const history = histories.get(branch)
+  const { history } = await readBranchHistory(store, queue, branch)
   if (history === undefined) throw new Error(`missing event chain ${ref} in ${store.repo}`)
   return history.state
 }
@@ -1900,19 +1897,8 @@ async function readSelectedHistory(
   branch: string,
   selectedTip: string,
 ): Promise<Readonly<{ ref: string; events: readonly Event[] }>> {
-  const hot = changesRef(queue, branch)
-  const cold = `${archivedChangesPrefix(queue)}${branch}`
-  const chains = await readEventChains([hot, cold], store)
-  const { histories, invalid } = projectChangeHistories(
-    chains,
-    [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)],
-    store.repo,
-  )
-  const defect = invalid.get(branch)
-  if (defect !== undefined) throw new Error(`${defect.ref}@${defect.tip}: ${defect.error}`)
-  const history = histories.get(branch)
-  if (history === undefined) throw new Error(`missing event chain ${hot} or ${cold} in ${store.repo}`)
-  const ref = chains.has(hot) ? hot : cold
+  const { ref, history } = await readBranchHistory(store, queue, branch)
+  if (history === undefined) throw new Error(`missing event chain for ${queue}/${branch} in ${store.repo}`)
   const { events, state } = history
   if (state.tip !== selectedTip) {
     throw new Conflict(`${ref} moved after the selected reading: expected ${selectedTip}, read ${state.tip}`, {
@@ -2288,11 +2274,20 @@ type ChangeHistories = Readonly<{
   invalid: ReadonlyMap<string, InvalidChangeHistory>
 }>
 
-/** Detail reads acquire only the selected branch's events, using the same hot/cold inventory as list. */
-async function readBranchHistory(store: QueueReadStore, queue: string, branch: string): Promise<ChangeHistories> {
+/** Internal detail/admission selection; not exported from the package entry. */
+export async function readBranchHistory(
+  store: QueueReadStore,
+  queue: string,
+  branch: string,
+): Promise<Readonly<{ ref: string; history: ChangeHistory | undefined }>> {
   const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
-  const chains = await readEventChains([changesRef(queue, branch), `${archivedChangesPrefix(queue)}${branch}`], store)
-  return projectChangeHistories(chains, prefixes, store.repo)
+  const hot = changesRef(queue, branch)
+  const cold = `${archivedChangesPrefix(queue)}${branch}`
+  const chains = await readEventChains([hot, cold], store)
+  const { histories, invalid } = projectChangeHistories(chains, prefixes, store.repo)
+  const defect = invalid.get(branch)
+  if (defect !== undefined) throw new Error(`${defect.ref}@${defect.tip}: ${defect.error}`)
+  return { ref: chains.has(cold) ? cold : hot, history: histories.get(branch) }
 }
 
 function projectChangeHistories(

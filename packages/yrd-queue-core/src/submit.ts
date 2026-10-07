@@ -34,7 +34,6 @@ import {
   runnerFor,
   type Event,
 } from "./git.ts"
-import { readEventChain } from "./event-read.ts"
 import { readConfig, targetName, type Target } from "./config.ts"
 import { gitlinkRows, isAncestor, mergeBase, mergeBases, readRemoteCommit, seamProcess, type Git } from "./git.ts"
 import { type PauseRecord } from "./pause.ts"
@@ -49,10 +48,11 @@ import {
   project,
   queueFormat,
   queueRef,
+  readBranchHistory,
   readEventOps,
   readEventOpsWithRefs,
 } from "./events.ts"
-import { classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
+import { archivedChangesPrefix, classifyQueueRef, pauseRef, queueRefPrefix } from "./refs.ts"
 import { verifyCandidate, type Verification, type SettledGitlink } from "./verifying.ts"
 import { revertedPathsFinding } from "./revert-guard.ts"
 import { gitlinksAt, holdsCommit } from "./reference.ts"
@@ -672,10 +672,9 @@ async function admitSubmitAtHead(
     const root = (await git(["rev-parse", "--show-toplevel"])).trim()
     const store = createEventStore(root, remote, selectionFor(git), runnerFor(git).backend)
     if ((await queueFormat(store, request.target.branch)) === "event") {
-      const ref = changesRef(request.target.branch, request.branch)
-      const chain = await openEvents({ ...store, ref })
-      if ((await chain.head()) !== null) {
-        refuseMergedSubmit(await readEventChain(chain), ref, root, request.branch, head)
+      const { ref, history } = await readBranchHistory(store, request.target.branch, request.branch)
+      if (history !== undefined) {
+        refuseMergedSubmit(history.events, ref, root, request.branch, head)
       }
     }
     throw new Error(
@@ -914,6 +913,7 @@ async function submitEvent(
   const head = inspected.head
   const store = createEventStore(root, remote, selectionFor(git), runnerFor(git).backend)
   const ref = changesRef(request.target.branch, request.branch)
+  const coldRef = `${archivedChangesPrefix(request.target.branch)}${request.branch}`
   const branchRef = `refs/heads/${request.branch}`
   const chain = await openEvents({ ...store, ref, writer: request.submitter })
   let afterConflict: SubmitOps | undefined
@@ -944,6 +944,8 @@ async function submitEvent(
             )
     const { ops } = operational
     refuseMaintenance(ops.stop, remote, request.target.branch, published)
+    const selected = await readBranchHistory(store, request.target.branch, request.branch)
+    const archived = selected.ref === coldRef ? selected.history?.events : undefined
     const branchAt = (await listRefs(branchRef, store)).get(branchRef) ?? null
     const input = changeInput("opened", {
       queueTip: ops.queue.tip,
@@ -1008,56 +1010,79 @@ async function submitEvent(
     let written: readonly PendingWarning[] = []
     // Lease the authoritative queue tip beside this change. A new maintenance
     // event between the read and publish makes the whole atomic push fail.
+    const decideSubmit = (events: readonly Event[]) => {
+      // A chain selected hot may move to cold while transact refreshes. Never replay it as a new branch.
+      if (selected.ref === ref && selected.history !== undefined && events.length === 0) {
+        throw new Conflict(`${ref} moved after submit selected its history; retry submit`, { refs: [ref] })
+      }
+      written = []
+      let current
+      try {
+        current = events.length === 0 ? initial : project(events, ref, root)
+      } catch (error) {
+        throw new Error(
+          `${ref}@${events.at(-1)?.id ?? "absent"}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        )
+      }
+      refuseMergedSubmit(events, ref, root, request.branch, head)
+      retry =
+        current.commit === head &&
+        (current.status === "queued" ||
+          current.status === "verifying" ||
+          current.status === "checking" ||
+          current.status === "stuck")
+      if (retry) {
+        retryOpened = events.findLast((event) => event.type === "opened")?.id
+        if (warningInputs.length === 0) return []
+        const currentSegment = events.slice(events.findLastIndex((event) => event.type === "opened"))
+        written = warningInputs.filter(
+          (warning) =>
+            !currentSegment.some(
+              (event) =>
+                event.type === "admission-warning" &&
+                event.props.some(([key, value]) => key === "Commit" && value === head) &&
+                event.props.some(([key, value]) => key === "Reason" && value === warning.reason) &&
+                event.props.find(([key]) => key === "Warning-Kind")?.[1] === warning.kind,
+            ),
+        )
+        return written.map((warning) => warning.input)
+      }
+      written = warningInputs
+      return [...decide(events, input), ...warningInputs.map((warning) => warning.input)]
+    }
+    const also = [
+      { ref: branchRef, expect: branchAt, oid: head },
+      { ref: queueRef(request.target.branch), expect: ops.queue.tip, oid: ops.queue.tip },
+    ]
     let result
     try {
-      result = await chain.transact(
-        (events) => {
-          written = []
-          let current
-          try {
-            current = events.length === 0 ? initial : project(events, ref, root)
-          } catch (error) {
-            throw new Error(
-              `${ref}@${events.at(-1)?.id ?? "absent"}: ${error instanceof Error ? error.message : String(error)}`,
-              { cause: error },
-            )
-          }
-          refuseMergedSubmit(events, ref, root, request.branch, head)
-          retry =
-            current.commit === head &&
-            (current.status === "queued" ||
-              current.status === "verifying" ||
-              current.status === "checking" ||
-              current.status === "stuck")
-          if (retry) {
-            retryOpened = events.findLast((event) => event.type === "opened")?.id
-            if (warningInputs.length === 0) return []
-            const currentSegment = events.slice(events.findLastIndex((event) => event.type === "opened"))
-            written = warningInputs.filter(
-              (warning) =>
-                !currentSegment.some(
-                  (event) =>
-                    event.type === "admission-warning" &&
-                    event.props.some(([key, value]) => key === "Commit" && value === head) &&
-                    event.props.some(([key, value]) => key === "Reason" && value === warning.reason) &&
-                    event.props.find(([key]) => key === "Warning-Kind")?.[1] === warning.kind,
-                ),
-            )
-            return written.map((warning) => warning.input)
-          }
-          written = warningInputs
-          return [...decide(events, input), ...warningInputs.map((warning) => warning.input)]
-        },
-        `submit ${request.branch}`,
-        {
-          also: [
-            { ref: branchRef, expect: branchAt, oid: head },
-            { ref: queueRef(request.target.branch), expect: ops.queue.tip, oid: ops.queue.tip },
+      if (archived === undefined) {
+        result = await chain.transact(decideSubmit, `submit ${request.branch}`, { also })
+      } else {
+        const tip = archived.at(-1)?.id
+        if (tip === undefined) throw new Error(`${coldRef}: archived history has no tip`)
+        if (store.backend.publish === undefined) {
+          throw new TypeError(`${coldRef}: backend cannot publish atomic custody`)
+        }
+        const staged = await chain.stage(decideSubmit(archived), { expect: tip })
+        await store.backend.publish(
+          root,
+          [
+            { ref, expect: "0".repeat(staged.head.length), oid: staged.head },
+            { ref: coldRef, expect: tip, oid: null },
+            ...also.map((update) => ({ ...update, expect: update.expect ?? "0".repeat(staged.head.length) })),
           ],
-        },
-      )
+          remote,
+        )
+        result = { head: staged.head, events: staged.events, retries: 0 }
+      }
     } catch (error) {
-      if (!(error instanceof Conflict) || !error.refs.some((ref) => ref === queueRef(request.target.branch))) {
+      if (
+        !(error instanceof Conflict) ||
+        error.refs.length === 0 ||
+        error.refs.some((lost) => lost !== queueRef(request.target.branch))
+      ) {
         throw error
       }
       if (attempt === 0) {
