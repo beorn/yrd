@@ -127,7 +127,9 @@ export async function anchorPreviewCustody(options: PreviewCustodyOptions): Prom
       try {
         retired.push(...(await retireRoots(rootGit, clonePrefix, prefix, options)))
       } catch (error) {
-        options.leftover?.(`retirement in ${clonePrefix} failed: ${error instanceof Error ? error.message : String(error)}`)
+        options.leftover?.(
+          `retirement in ${clonePrefix} failed: ${error instanceof Error ? error.message : String(error)}`,
+        )
       }
       try {
         const stores = new Set(await closureStores(options.gitIn, main, options.candidate, options.excludedSubmodules))
@@ -138,7 +140,9 @@ export async function anchorPreviewCustody(options: PreviewCustodyOptions): Prom
         }
         await sweepOrphans(rootGit, options.gitIn, clonePrefix, stores, options.leftover)
       } catch (error) {
-        options.leftover?.(`the orphan sweep after ${anchor} failed: ${error instanceof Error ? error.message : String(error)}`)
+        options.leftover?.(
+          `the orphan sweep after ${anchor} failed: ${error instanceof Error ? error.message : String(error)}`,
+        )
       }
       return { anchor, retired: retired.map((ref) => ref.name), superseded: prior.map((ref) => ref.name) }
     },

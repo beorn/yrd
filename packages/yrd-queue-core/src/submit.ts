@@ -806,7 +806,12 @@ async function admitSubmitAtHead(
  * or cancelled as dropped, withdrawn or deleted. A failed or resubmitted change is still live. A branch whose history
  * is invalid is never evidence of retirement: it is named and left out.
  */
-async function endedSubjects(git: Git, root: string, remote: string, request: SubmitRequest): Promise<ReadonlySet<string>> {
+async function endedSubjects(
+  git: Git,
+  root: string,
+  remote: string,
+  request: SubmitRequest,
+): Promise<ReadonlySet<string>> {
   const store = createEventStore(root, remote, selectionFor(git), runnerFor(git).backend)
   if ((await queueFormat(store, request.target.branch)) !== "event") return new Set()
   const { histories, invalid } = await listChangeHistories(store, request.target.branch)
@@ -849,7 +854,8 @@ async function composeSubmit(
       },
       previewCustody: {
         subject: request.branch,
-        leftover: (why) => console.warn(`yrd: preview custody left an orphan anchor; the next submit sweeps it: ${why}`),
+        leftover: (why) =>
+          console.warn(`yrd: preview custody left an orphan anchor; the next submit sweeps it: ${why}`),
         retired: ended,
       },
     })

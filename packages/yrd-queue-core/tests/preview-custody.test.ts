@@ -244,7 +244,11 @@ describe("anchorPreviewCustody (27510)", () => {
     const second = await candidate(product, "second")
     await custody(product, second.root, "task/a")
 
-    const retired = await retirePreviewSubject({ git: gitIn(product), gitIn: (cwd) => gitIn(cwd), subject: "task/closing" })
+    const retired = await retirePreviewSubject({
+      git: gitIn(product),
+      gitIn: (cwd) => gitIn(cwd),
+      subject: "task/closing",
+    })
 
     const live = anchor(product, "task/a", second.root)
     expect(retired).toEqual([anchor(product, "task/closing", first.root)])

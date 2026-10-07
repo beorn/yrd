@@ -1125,7 +1125,10 @@ describe("ordinary submit with a local-only component pin", () => {
     const common = (await wtGit(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
     const pins = async (repository: string): Promise<string> =>
       gitIn(repository)(["for-each-ref", "--format=%(refname)", "refs/git-super/pins/", "refs/yrd/pins/"])
-    const pinsBefore = { origin: await pins(join(w.root, "one.git")), store: await pins(join(common, "modules", one.path)) }
+    const pinsBefore = {
+      origin: await pins(join(w.root, "one.git")),
+      store: await pins(join(common, "modules", one.path)),
+    }
 
     // 1. Text mode dry-run output
     const ran = await yrd(wt, "submit", "task/27323-merged", "--dry-run", "--issue", "27323", "--submitter", "@dev/1")
@@ -1191,8 +1194,9 @@ describe("ordinary submit with a local-only component pin", () => {
     const rootAnchor = (await wtGit(["for-each-ref", "--format=%(refname)", anchor])).trim()
     expect(rootAnchor, `the root store has no ${anchor}`).toBe(anchor)
     expect((await wtGit(["rev-parse", `${anchor}:${one.path}`])).trim()).toBe(row!.landingPin)
-    expect({ origin: await pins(join(w.root, "one.git")), store: await pins(join(common, "modules", one.path)) }).toEqual(
-      pinsBefore,
-    )
+    expect({
+      origin: await pins(join(w.root, "one.git")),
+      store: await pins(join(common, "modules", one.path)),
+    }).toEqual(pinsBefore)
   }, 90_000)
 })
