@@ -90,6 +90,113 @@ function store(w: World) {
   return createEventStore(w.work, "origin", selectionFor(w.git))
 }
 describe("event submit", () => {
+  /** @failure 27957: cold custody must preserve merged-head refusal and lineage when a new head reopens.
+   * @level l2 @consumer yrd queue submit
+   * Existing reopen coverage keeps history hot and cannot detect a cold branch being treated as new.
+   */
+  it("refuses a cold merged head and atomically reopens its history at a new head", async () => {
+    const w = await world()
+    const branch = "task/cold-reopen"
+    const first = await branchWithCommit(w, branch, "one.txt")
+    const location = store(w)
+    const hot = changesRef("main", branch)
+    const cold = `refs/yrd-archive/main/${branch}`
+    const queueTip = (await events.readEventQueue(location, "main")).tip
+    const chain = await openEvents({ ...location, ref: hot })
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const prior = await chain.append(
+      [
+        events.changeInput("opened", { queueTip, at, commit: first, by: "@dev/6" }),
+        events.changeInput("merged", { queueTip, at, commit: first }),
+      ],
+      { expect: null },
+    )
+    if (prior.head === null || location.backend.publish === undefined) throw new Error("cold fixture lacks custody")
+    const priorTip = prior.head
+    const request = { branch, submitter: "@dev/6", target: { branch: "main", remote: "origin" } }
+    // @failure 27957: moving hot custody after selection must not let transact replay an empty new branch.
+    // Static cold histories cannot exercise the read-to-transaction boundary.
+    const backend = runnerFor(w.git).backend
+    const fetch = backend.fetchRefs
+    const list = backend.listRefs
+    const publishFixture = location.backend.publish
+    if (fetch === undefined || list === undefined) throw new Error("cold fixture lacks ref reads")
+    let moved = false
+    let selectedHot = false
+    {
+      using listing = vi.spyOn(backend, "listRefs").mockImplementation(async (...args) => {
+        if (selectedHot && !moved && args[1] === hot) {
+          moved = true
+          await publishFixture(
+            w.work,
+            [
+              { ref: cold, expect: "0".repeat(40), oid: priorTip },
+              { ref: hot, expect: priorTip, oid: null },
+            ],
+            "origin",
+          )
+        }
+        return list(...args)
+      })
+      using moving = vi.spyOn(backend, "fetchRefs").mockImplementation(async (...args) => {
+        const fetched = await fetch(...args)
+        if (Array.isArray(args[1]) && args[1].includes(hot) && args[1].includes(cold) && fetched.has(hot)) {
+          selectedHot = true
+        }
+        return fetched
+      })
+      await expect(submit(w.git, "origin", request)).rejects.toThrow("moved after submit selected its history")
+      expect(moving).toHaveBeenCalled()
+      expect(listing).toHaveBeenCalled()
+    }
+    expect(moved).toBe(true)
+    await expect(submit(w.git, "origin", request)).rejects.toThrow("already merged")
+    expect(await remoteRefs(w)).toContain(cold)
+    expect(await remoteRefs(w)).not.toContain(hot)
+
+    // A real landing also advances the target; its early ancestry refusal must still name the retained merge.
+    await w.git(["merge", "--quiet", "--ff-only", first])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await expect(submit(w.git, "origin", request)).rejects.toThrow("already merged")
+
+    await w.git(["checkout", "--quiet", branch])
+    writeFileSync(join(w.work, "two.txt"), "two\n")
+    await w.git(["add", "two.txt"])
+    await w.git(["commit", "--quiet", "-m", "two"])
+    const second = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    // @failure 27957: a cold side-lease loss remains final even if the queue fence also loses.
+    // Hot-only queue-race tests cannot prove that a rejected custody transition is never replayed.
+    const publish = backend.publish
+    if (publish === undefined) throw new Error("cold fixture lacks submit publisher")
+    let custodyAttempts = 0
+    {
+      using rejected = vi.spyOn(backend, "publish").mockImplementation(async (...args) => {
+        if (args[1].some((update) => update.ref === cold && update.oid === null)) {
+          custodyAttempts++
+          throw new Conflict("cold and queue leases moved", { refs: [cold, queueRef("main")] })
+        }
+        return publish(...args)
+      })
+      await expect(submit(w.git, "origin", request)).rejects.toThrow("cold and queue leases moved")
+      expect(rejected).toHaveBeenCalled()
+    }
+    expect(custodyAttempts).toBe(1)
+    expect(await remoteRefs(w)).not.toContain(`refs/heads/${branch}`)
+    expect(await remoteRefs(w)).not.toContain(hot)
+    expect(await readStatus(location, "main", branch)).toMatchObject({ status: "merged", tip: prior.head })
+    expect(await submit(w.git, "origin", request)).toMatchObject({ head: second, retry: false })
+    const refs = await remoteRefs(w)
+    expect(refs).toContain(hot)
+    expect(refs).not.toContain(cold)
+    const history = (await listChangeHistories(location, "main")).histories.get(branch)
+    expect(history?.events.slice(0, prior.events.length).map((event) => event.id)).toEqual(
+      prior.events.map((event) => event.id),
+    )
+    expect(history?.events.map((event) => event.type)).toEqual(["opened", "merged", "opened"])
+    expect(history?.state).toMatchObject({ status: "queued", commit: second })
+  })
+
   it("creates the event queue on first submit to an empty remote (26398)", async () => {
     resetQueueFormatCache()
     const w = await world(false)

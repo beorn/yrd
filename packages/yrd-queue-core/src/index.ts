@@ -21,6 +21,7 @@
  */
 
 export {
+  archivedChangesPrefix,
   changeName,
   classifyQueueRef,
   changesRef,
@@ -71,6 +72,7 @@ export {
   adoptedChange,
   appendChangeEvent,
   appendNumberedChangeEvent,
+  archiveQueue,
   appendNumberedPublishedMerge,
   changeInput,
   createEventQueue,

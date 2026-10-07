@@ -21,6 +21,8 @@ import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import {
   CHANGE_STATUSES,
+  archivedChangesPrefix,
+  readChangeEvents,
   MIRROR_REFRESHED_AT,
   assertPlainEventQueueConfig,
   changeInput,
@@ -163,11 +165,146 @@ async function createQueue(repo: string, queue: string, commit: string, at: Date
   return createEventQueue(createEventStore(repo, remote, git.selection), queue, commit, config, at)
 }
 
+it("archives through the CLI and retains event and payload objects after fresh clone and GC (27957)", async () => {
+  const repo = await world('checks:\n  - verify: {run: "true"}\n')
+  const git = gitIn(repo)
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  const at = new Date("2020-01-01T00:00:00.000Z")
+  const queueTip = await createQueue(repo, "main", target, at)
+  // The payload has no branch at origin: only the event's keeps edge can retain it.
+  writeFileSync(join(repo, "payload.txt"), "retained only by change history\n")
+  await git(["add", "payload.txt"])
+  await git(["commit", "--quiet", "-m", "unreferenced payload"])
+  const payload = (await git(["rev-parse", "HEAD"])).trim()
+  const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
+  const blob = (await git(["rev-parse", "HEAD:payload.txt"])).trim()
+  const branch = "task/archive-proof"
+  const hot = changesRef("main", branch)
+  const cold = `${archivedChangesPrefix("main")}${branch}`
+  const location = createEventStore(repo, "origin", git.selection)
+  const written = await (
+    await openEvents({ ...location, ref: hot })
+  ).append(
+    [
+      changeInput("opened", { queueTip, at, commit: payload, by: "@dev/6" }),
+      changeInput("merged", { queueTip, at, commit: payload }),
+    ],
+    { expect: null },
+  )
+  if (written.head === null) throw new Error("fixture event head missing")
+  const original = await readChangeEvents(location, "main", branch, written.head)
+  const before = await git(["ls-remote", "origin"])
+  const preview = capture(repo)
+  const args = [
+    "bun",
+    "yrd",
+    "queue",
+    "archive",
+    "--queue",
+    "main",
+    "--notify",
+    "@dev/6",
+    "--json",
+    "--min-age",
+    "30",
+    "--state",
+    "merged",
+    "--limit",
+    "1",
+  ]
+  expect(await runYrdProcess([...args, "--dry-run"], preview.io), preview.stderr()).toBe(0)
+  expect(JSON.parse(preview.stdout())).toMatchObject({
+    examined: 1,
+    protected: 0,
+    recent: 0,
+    eligible: 1,
+    bounds: { minAgeDays: 30, states: ["merged"], limit: 1 },
+    candidates: [{ branch, ref: hot, coldRef: cold }],
+    archived: [],
+  })
+  expect(await git(["ls-remote", "origin"])).toBe(before)
+  for (const [flag, value] of [
+    ["--min-age", "6"],
+    ["--limit", "0"],
+    ["--state", "other"],
+  ] as const) {
+    const refused = capture(repo)
+    expect(await runYrdProcess([...args, flag, value], refused.io), refused.stderr()).toBe(2)
+    expect(refused.stderr()).toContain(flag)
+    expect(await git(["ls-remote", "origin"])).toBe(before)
+  }
+  const execute = capture(repo)
+  expect(await runYrdProcess(args, execute.io), execute.stderr()).toBe(0)
+  expect(JSON.parse(execute.stdout())).toMatchObject({
+    archived: [expect.any(String)],
+    eligible: 1,
+    bounds: { minAgeDays: 30, states: ["merged"], limit: 1 },
+    candidates: [{ branch, ref: hot, tip: written.head, coldRef: cold }],
+  })
+  expect(await git(["ls-remote", "origin", hot])).toBe("")
+  const root = dirname(repo)
+  const remote = join(root, "remote.git")
+  await gitIn(remote)(["reflog", "expire", "--expire=now", "--all"])
+  await gitIn(remote)(["gc", "--prune=now"])
+  const fresh = join(root, "fresh")
+  await gitIn(root)(["clone", "--quiet", "--no-local", remote, fresh])
+  const reader = gitIn(fresh)
+  await reader(["fetch", "--quiet", "origin", `+${cold}:${cold}`, `+${queueRef("main")}:${queueRef("main")}`])
+  await reader(["reflog", "expire", "--expire=now", "--all"])
+  await reader(["gc", "--prune=now"])
+  for (const oid of [...original.map((event) => event.id), payload, tree, blob]) {
+    expect((await reader(["cat-file", "-t", oid])).trim()).toMatch(/^(commit|tree|blob)$/u)
+  }
+  const archivedTip = (await reader(["rev-parse", cold])).trim()
+  const retained = await readChangeEvents(
+    createEventStore(fresh, "origin", reader.selection),
+    "main",
+    branch,
+    archivedTip,
+  )
+  expect(retained.slice(0, -1).map((event) => event.id)).toEqual(original.map((event) => event.id))
+  expect(retained.at(-1)).toMatchObject({ type: "archived", parent: original.at(-1)?.id })
+  const listed = capture(fresh)
+  expect(
+    await coreQueueCommand(fresh, listed.io, { command: "list", all: true }, { queue: "main", json: true }),
+    listed.stderr(),
+  ).toBe(0)
+  expect(JSON.parse(listed.stdout())).toMatchObject({ changes: [{ branch, state: "merged", merge: payload }] })
+  const repeat = capture(repo)
+  expect(await runYrdProcess([...args, "--dry-run"], repeat.io), repeat.stderr()).toBe(0)
+  expect(JSON.parse(repeat.stdout())).toMatchObject({ queue: "main", examined: 0, candidates: [], archived: [] })
+})
+
 it("reads a fresh queue-owned store without remote Git calls and refreshes once on a miss (25626)", async () => {
   const repo = await world('checks:\n  - verify: {run: "true"}\n')
   const git = gitIn(repo)
   const target = (await git(["rev-parse", "HEAD"])).trim()
-  await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+  const at = new Date("2026-09-22T14:00:00.000Z")
+  const queueTip = await createQueue(repo, "main", target, at)
+  // @failure 27957: a local status mirror must fetch cold histories as well as hot events.
+  // The original empty queue proved refresh frequency but could not detect archived rows disappearing.
+  const location = createEventStore(repo, "origin", git.selection)
+  const branch = "task/retained"
+  const hot = changesRef("main", branch)
+  const cold = `refs/yrd-archive/main/${branch}`
+  const written = await (
+    await openEvents({ ...location, ref: hot })
+  ).append(
+    [
+      changeInput("opened", { queueTip, at, commit: target, by: "@dev/6" }),
+      changeInput("merged", { queueTip, at, commit: target }),
+    ],
+    { expect: null },
+  )
+  if (written.head === null || location.backend.publish === undefined) throw new Error("fixture lacks cold custody")
+  await location.backend.publish(
+    repo,
+    [
+      { ref: cold, expect: "0".repeat(40), oid: written.head },
+      { ref: hot, expect: written.head, oid: null },
+    ],
+    "origin",
+  )
   const root = dirname(repo)
   const remote = join(root, "remote.git")
   const owned = join(root, "owned")
@@ -186,13 +323,18 @@ it("reads a fresh queue-owned store without remote Git calls and refreshes once 
   try {
     process.env.GIT_TRACE2_EVENT = firstTrace
     const first = capture(repo)
-    expect(await coreQueueCommand(repo, first.io, { command: "list" }, options), first.stderr()).toBe(0)
-    expect(JSON.parse(first.stdout())).toMatchObject({ source: "local", asOf: expect.any(String) })
+    expect(await coreQueueCommand(repo, first.io, { command: "list", all: true }, options), first.stderr()).toBe(0)
+    expect(JSON.parse(first.stdout())).toMatchObject({
+      source: "local",
+      asOf: expect.any(String),
+      changes: [{ branch, state: "merged", merge: target }],
+    })
     expect(readRemoteCalls(firstTrace).verbs.fetch).toBe(1)
 
     process.env.GIT_TRACE2_EVENT = warmTrace
     const warm = capture(repo)
-    expect(await coreQueueCommand(repo, warm.io, { command: "list" }, options), warm.stderr()).toBe(0)
+    expect(await coreQueueCommand(repo, warm.io, { command: "list", all: true }, options), warm.stderr()).toBe(0)
+    expect(JSON.parse(warm.stdout())).toMatchObject({ changes: [{ branch, state: "merged", merge: target }] })
     const shown = capture(repo)
     expect(
       await coreQueueCommand(repo, shown.io, { command: "show", branch: "task/absent" }, options),

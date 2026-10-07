@@ -3,7 +3,8 @@
 Yrd is a merge queue that lives inside a Git repository. A queue runs on a branch, `main` for most repositories. A change is another branch, submitted to that queue.
 
 - **Submit a branch, get a result.** You commit your changes on a branch and submit it. The queue checks it in a fresh checkout, merges it into the queue branch, and tells you what happened.
-- **No server, no database, no web page.** Everything the queue knows is a commit on a ref in the repository, under `refs/yrd/<encoded-queue>/`. Any clone that fetches those refs reads the whole state with plain `git log`.
+- **No server, no database, no web page.** Queue events live under `refs/yrd/<encoded-queue>/`; archived histories live under `refs/yrd-archive/<encoded-queue>/`.
+  Fetch both namespaces to read the complete retained history with plain `git log`.
 - **One process, one machine.** By rule it is the only writer of the queue branch. A direct merge is detected and reported, not prevented.
 - **Superprojects.** Yrd also queues a repository of repositories held together by submodules, which no other merge queue we know of does. See [Superprojects](#superprojects).
 
@@ -197,7 +198,9 @@ A key the queue does not read is refused, never ignored. Queue identity is not c
 
 ## Where things are
 
-Each queue owns `refs/yrd/<encoded-queue>/<branch>@<sha>` and `refs/yrd/<encoded-queue>/pause`, on the remote and in clones that fetch them. Encoding keeps the queue branch in one component: `release/stable` becomes `release%2Fstable`.
+Each branch history lives at `refs/yrd/<encoded-queue>/changes/<branch>`, or at `refs/yrd-archive/<encoded-queue>/<branch>` after archiving.
+The queue authority is `refs/yrd/<encoded-queue>/queue`; its operational pause ref is `refs/yrd/<encoded-queue>/pause`.
+These refs live on the selected remote and in clones that fetch them. Queue encoding keeps `release/stable` in one component as `release%2Fstable`.
 
 For queue-owner and reader commands, the host root is `git config yrd.workdir`, otherwise `$XDG_STATE_HOME/yrd` (default `~/.local/state/yrd`). Under it, the queue directory is `<host>/<repository-path>~<encoded-queue>`; an absolute local repository uses `local/<absolute-path-without-leading-slash>~<encoded-queue>` instead. Detached retained environments live under `<git-common-dir>/yrd/environments` or the configured `yrd.workdir`; standalone branch environments remain under `.bays`. Both are listed and closed through the same Git registry. Each queue address gets its own clone and artifacts:
 
@@ -263,7 +266,40 @@ The submodule plumbing is [git-super](https://github.com/beorn/git-super), Git c
 
 ## Records
 
-A change's history is its own ref, `refs/yrd/<encoded-queue>/<branch>@<sha>`, one commit per record: opened, then checked, then merged or failed or stuck or withdrawn, then sent. Each record is a one-line sentence plus trailers, the `Key: value` lines at the end of a commit message: which change (`Change:`), then per kind who submitted it and for which issue, which config judged it, which check failed and why, which merge commit merged it and which queue run made it, and which notify entries ran and whether they delivered. The ref namespace identifies the queue; there is no `Target:` trailer. The queue read uses each change's tip and its head's ancestry on the queue branch. Detail reads expand only selected changes' record histories to recover earlier check evidence; notification receipts come from the current ending's captured range. A change's state is never stored; it is worked out from the records and from history. A change whose head is already in the queue branch's history is merged whatever its records say, and gets its merged record on the next run.
+A branch's event chain retains its successive submitted heads at the history ref described in [Where things are](#where-things-are).
+Each event is a commit with typed trailers recording the change and its result. The queue derives state from these events rather than storing a mutable status row.
+List, detail and full-history reads discover both hot and cold histories. Duplicate hot and cold custody is an error.
+
+### Archive ended histories
+
+Preview the exact eligible refs before moving them:
+
+```console
+$ yrd queue archive --queue main --min-age 30 --state merged --limit 200 --dry-run --json --notify alice
+$ yrd queue archive --queue main --min-age 30 --state merged --limit 200 --json --notify alice
+```
+
+Only merged or cancelled histories qualify, at least seven days after their latest ending. Ignored histories and every other state remain hot.
+`--min-age` sets a whole-day minimum of at least seven (default seven); `--state` selects merged or cancelled (default both).
+`--limit` is a positive transfer count; omitting it leaves the pass unbounded.
+Preview and execution share one selector: filter by state and age, sort by ending oldest first with a ref tie-break, then apply the limit.
+JSON names the applied `bounds`, the `eligible` count before the cap, and every selected hot ref, tip and cold destination in `candidates` for both modes.
+This is a manual operation. It does not run from the queue loop; `.yrd.yml` still accepts only `archive-after: never`.
+An archive moves a ref outside the hot namespace. It preserves history and does not reduce the repository's total ref count.
+
+For each history, the command stages an `archived` event whose first parent is the selected hot tip.
+The event records that ref and tip, ending state and time, age, actor and archive time; it leaves the ending state and time unchanged.
+One atomic remote update creates the absent cold ref and deletes the exact selected hot tip; the server checks those two leases.
+Git checks the unchanged queue tip against the push's ref advertisement on the client; it is not checked inside the server's atomic transaction.
+A conflict stops the pass without a mutating retry. A remote without atomic push support refuses the update.
+
+After each update, one remote reading must find the exact new cold tip and no hot ref before the next transfer starts.
+JSON output includes `readbacks` with both refs, previous and cold tips, and verification time.
+An unreadable or mismatched reading stops with `archive-custody-readback` and exit 2; the error retains earlier verified readings and the published count.
+The operator running the command must alert the queue owner with that error and ref pair before continuing.
+
+A new submitted head continues the archived event chain and atomically returns it to hot custody.
+Resubmitting the same merged head remains refused. Late notification records append to the selected cold history without creating another hot chain.
 
 Every check writes one line in the queue run's log when it starts and one when it ends. The end line carries the exit code, the duration and the path of the check's own log:
 

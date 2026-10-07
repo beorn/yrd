@@ -37,6 +37,8 @@ import { createEnvironmentCleanup } from "./env-cleanup.ts"
 import { runAdmission } from "./admission.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
+  archivedChangesPrefix,
+  archiveQueue,
   assertPlainEventQueueConfig,
   changeName,
   checksOf,
@@ -379,6 +381,14 @@ export type CoreQueueCommand =
   | Readonly<{ command: "unignore"; branch: string; by: string }>
   | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
   | Readonly<{
+      command: "archive"
+      dryRun: boolean
+      by: string
+      minAgeDays?: number
+      state?: "merged" | "cancelled"
+      limit?: number
+    }>
+  | Readonly<{
       command: "sweep-candidates"
       remote?: string
       dryRun?: boolean
@@ -507,6 +517,7 @@ export type CoreQueueCommand =
 /** What each command is called when it has to say it needs a queue. */
 const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   check: "check",
+  archive: "queue archive",
   drop: "drop",
   ignore: "ignore",
   ls: "queue ls",
@@ -654,12 +665,13 @@ export async function coreQueueCommand(
     if (actual !== localStatus.transport) {
       throw new Error(`queue status store ${repo} has ${remote} ${actual}, expected ${localStatus.transport}`)
     }
-    // The event prefix and all heads include the target, every chain and every draft.
+    // Hot and cold event prefixes plus all heads include the target, every chain and every draft.
     // A 60 s window is below ADR-0022's 120 s age disclosure, matches watch's
     // process cache, and is shorter than the measured queue round cadence.
     const refspecs = [
       `+refs/heads/${queue}:refs/heads/${queue}`,
       `+${queueRefPrefix(queue)}/*:${queueRefPrefix(queue)}/*`,
+      `+${archivedChangesPrefix(queue)}*:${archivedChangesPrefix(queue)}*`,
       "+refs/heads/*:refs/heads/*",
     ]
     const refreshed = await refreshMirror({
@@ -800,6 +812,7 @@ export async function coreQueueCommand(
     request.command === "unignore" ||
     request.command === "merge" ||
     (request.command === "submit" && request.dryRun !== true) ||
+    (request.command === "archive" && !request.dryRun) ||
     (request.command === "override" && request.action !== "list")
   await using _invalidateAfterWriter = {
     async [Symbol.asyncDispose](): Promise<void> {
@@ -1428,6 +1441,27 @@ export async function coreQueueCommand(
         }
         throw error
       }
+    }
+    case "archive": {
+      const result = await archiveQueue(createEventStore(repo, config.target.remote, selection), config.target.branch, {
+        dryRun: request.dryRun,
+        by: request.by,
+        at: new Date(),
+        minAgeDays: request.minAgeDays,
+        state: request.state,
+        limit: request.limit,
+      })
+      emit(
+        io,
+        options.json === true,
+        result,
+        `${result.queue}: examined ${result.examined} hot histories; protected ${result.protected}, recent ${result.recent}; ${result.eligible} eligible before cap; ${request.dryRun ? "would archive" : "archived"} ${request.dryRun ? result.candidates.length : result.archived.length}\n` +
+          `bounds: age >= ${result.bounds.minAgeDays} days; states ${result.bounds.states.join(", ")}; limit ${result.bounds.limit ?? "unbounded"}\n` +
+          result.candidates
+            .map((row) => `${row.ref}@${row.tip} ${row.state} age ${row.ageMs}ms -> ${row.coldRef}`)
+            .join("\n"),
+      )
+      return 0
     }
     case "sweep-candidates": {
       const remote = request.remote ?? config.target.remote
@@ -3078,7 +3112,7 @@ export async function coreQueueCommand(
             ? undefined
             : `${String(documentRows.length)} of ${String(listed.filter((item) => item.row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
               (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
-        const baseScope = `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
+        const baseScope = `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
         const ignoreScope =
           config.ignore.length === 0
             ? undefined
@@ -3668,7 +3702,7 @@ export async function coreQueueCommand(
       const filtered = filterLsRows(unfiltered, request.terms ?? [])
 
       const queue = queueName(config.target, await remoteUrl(git, config.target.remote))
-      const baseScope = `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
+      const baseScope = `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
       const ignoreScope =
         config.ignore.length === 0
           ? undefined
@@ -3769,8 +3803,8 @@ export async function coreQueueCommand(
         const histories = [...changeHistories, ...directHistories]
         const scope =
           request.all === true
-            ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
-            : `Read ${changesRef(config.target.branch, request.branch as string)} at ${config.target.remote}; draft branches are outside this reading.`
+            ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
+            : `Read ${changesRef(config.target.branch, request.branch as string)} and ${archivedChangesPrefix(config.target.branch)}${request.branch as string} at ${config.target.remote}; draft branches are outside this reading.`
         const views = new Map<string, Readonly<{ checks: readonly CheckView[]; note?: string }>>()
         for (const history of histories) {
           const run = reading.journals.runs.get(journalKey(history.branch, history.head))?.[0]
@@ -5002,6 +5036,7 @@ export async function readEventListing(
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
   const runnerRefName = `${queueRefPrefix(config.target.branch)}/runner`
   const changePrefix = `${queuePrefix}changes/`
+  const coldPrefix = archivedChangesPrefix(config.target.branch)
   const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}`
   const cache = eventListingCaches.get(cacheKey)
   const nowMs =
@@ -5026,7 +5061,8 @@ export async function readEventListing(
           ...new Set([
             "refs/heads/",
             changePrefix,
-            ...[...qRefs.keys()].filter((ref) => !ref.startsWith(changePrefix)),
+            coldPrefix,
+            ...[...qRefs.keys()].filter((ref) => !ref.startsWith(changePrefix) && !ref.startsWith(coldPrefix)),
           ]),
         ],
         refs: [...qRefs, ...bRefs].map(([ref, oid]) => ({ ref, oid })),
@@ -5034,7 +5070,9 @@ export async function readEventListing(
     })
 
   // 1. Fetch event refs first
-  const listedRefs = await listRefs(queuePrefix, store)
+  const listedRefs = new Map(
+    [...(await listRefs("refs/", store))].filter(([ref]) => ref.startsWith(queuePrefix) || ref.startsWith(coldPrefix)),
+  )
   const runnerTip = listedRefs.get(runnerRefName)
   // A heartbeat moves on its own cadence. It must not invalidate change-state
   // caching or make an otherwise stable Git observation fence fail.
@@ -5291,17 +5329,21 @@ export function assertEventListingFence(
   const expected = new Map<string, string>([[queueRef(name), queue.tip]])
   for (const [branch, change] of changes) {
     if (change.tip === undefined) throw new Error(`event change ${branch} has no selected chain tip`)
-    expected.set(changesRef(name, branch), change.tip)
+    const hot = changesRef(name, branch)
+    const cold = `${archivedChangesPrefix(name)}${branch}`
+    if (advertised.has(hot) && advertised.has(cold)) throw new Error(`${branch} has both hot and cold histories`)
+    expected.set(advertised.has(cold) ? cold : hot, change.tip)
   }
   for (const defect of invalid.values()) expected.set(defect.ref, defect.tip)
   const changePrefix = `${queueRefPrefix(name)}/changes/`
+  const coldPrefix = archivedChangesPrefix(name)
   for (const [ref, tip] of expected) {
     if (advertised.get(ref) !== tip) {
       throw new EventListingMoved(ref, tip, advertised.get(ref))
     }
   }
   for (const [ref, tip] of advertised) {
-    if (ref.startsWith(changePrefix) && !expected.has(ref)) {
+    if ((ref.startsWith(changePrefix) || ref.startsWith(coldPrefix)) && !expected.has(ref)) {
       throw new EventListingMoved(ref, undefined, tip)
     }
   }

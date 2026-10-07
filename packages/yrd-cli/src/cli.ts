@@ -596,6 +596,48 @@ function buildProgram(
         ),
       )
     })
+  queue
+    .command("archive")
+    .description("move merged and cancelled histories ended at least seven days ago to cold custody")
+    .option("--dry-run", "list exact eligible refs without writing")
+    .option("--min-age <days>", "minimum whole days after the latest ending (at least 7; default: 7)", int)
+    .option("--state <state>", "restrict to merged or cancelled histories (default: both)")
+    .option("--limit <count>", "maximum transfers after filtering and oldest-first ordering", int)
+    .option("--json", "emit stable JSON")
+    .option("--notify <seat>", "name who archived the histories")
+    .option("--queue <value>", QUEUE_HELP)
+    .action(async (options) => {
+      const declared = options as PauseOptions & {
+        dryRun?: boolean
+        minAge?: number
+        state?: "merged" | "cancelled"
+        limit?: number
+      }
+      const location = await resolveQueueLocation(cwd(), declared.queue, env)
+      setExit(
+        await coreQueueCommand(
+          location.repo,
+          io,
+          {
+            command: "archive",
+            dryRun: declared.dryRun === true,
+            by: resolveSubmitter(declared.notify, env),
+            minAgeDays: declared.minAge,
+            state: declared.state,
+            limit: declared.limit,
+          },
+          {
+            json: declared.json,
+            env,
+            log: log(),
+            selection: location.selection,
+            populateReference: location.owned,
+            queue: location.queue,
+            workdir: location.workdir,
+          },
+        ),
+      )
+    })
   withdrawOptions(queue.command("withdraw <branch>").description(WITHDRAW_DESCRIPTION))
     .addHelpSection("On withdraw:", WITHDRAW_HELP)
     .action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "withdraw"))

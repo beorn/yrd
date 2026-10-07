@@ -20,6 +20,7 @@ import {
   CHANGE_EVENT_TYPES,
   QUEUE_RUN_WRITER,
   adoptedChange,
+  archiveQueue,
   appendChangeEvent,
   changeInput,
   changesRef,
@@ -425,6 +426,7 @@ describe("ADR-0016 event fold", () => {
       "unignored",
       "notified",
       "adopted",
+      "archived",
     ])
   })
 
@@ -1009,6 +1011,267 @@ describe("ADR-0016 event fold", () => {
 })
 
 describe("the queue-format boundary", () => {
+  /** @failure 27957: archive only old merged/cancelled chains, preserving protected states and neutral audit history.
+   * @level l1 @consumer yrd queue archive dry-run and manual publication
+   * Existing cold-reader fixtures move refs by hand and do not exercise eligibility or the production transfer.
+   */
+  it("archives only old safe endings with an exact audit and preserves every protected ref", async () => {
+    const { store, location, beforeNextPublish } = remoteMemStore("yrd-archive-policy")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set("work", "kept payload"), "work")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const now = new Date("2026-10-07T12:00:00.000Z")
+    const queueTip = await seedEventQueue(location, "lab", head, at)
+    const tips = new Map<string, string>()
+    for (const state of [
+      "merged",
+      "cancelled",
+      "failed",
+      "queued",
+      "verifying",
+      "checking",
+      "merging",
+      "stuck",
+      "ignored",
+      "recent",
+    ] as const) {
+      const chain = await openEvents({ ...store, ref: changesRef("lab", `task/${state}`) })
+      const inputs = [changeInput("opened", { queueTip, at, commit: head, by: "@dev/6" })]
+      if (state === "checking" || state === "merging") {
+        inputs.push(changeInput("verifying", { queueTip, at, commit: head }))
+      }
+      if (state === "merging") inputs.push(changeInput("checking", { queueTip, at }))
+      if (state !== "queued") {
+        inputs.push(
+          changeInput(state === "recent" ? "merged" : state, {
+            queueTip,
+            at: state === "recent" ? now : at,
+            commit: head,
+            by: "@dev/6",
+            reason: state === "cancelled" ? "withdrawn" : state,
+          }),
+        )
+      }
+      const result = await chain.append(inputs, { expect: null })
+      if (result.head === null) throw new Error("fixture lost branch tip")
+      tips.set(`task/${state}`, result.head)
+    }
+    const before = await listRefs("refs/", location)
+    const request = { dryRun: true, at: now, by: "@dev/6" }
+    const preview = await archiveQueue(location, "lab", request)
+    expect(preview).toMatchObject({ examined: 10, protected: 7, recent: 1, archived: [] })
+    expect(preview.candidates.map((row) => row.branch)).toEqual(["task/cancelled", "task/merged"])
+    expect(await listRefs("refs/", location)).toEqual(before)
+    // @failure 27957: an intervening late notice must lose the exact archive lease, never be dropped by a retry.
+    // It changes the tip without changing endedAt, so the next explicit pass must still select the old ending.
+    const cancelled = await readStatus(location, "lab", "task/cancelled")
+    if (cancelled.tip === undefined || cancelled.ending === undefined) throw new Error("fixture lost cancelled ending")
+    const cancelledTip = cancelled.tip
+    const ending = cancelled.ending.id
+    beforeNextPublish(async () => {
+      await appendChangeEvent(location, "lab", "task/cancelled", cancelledTip, {
+        type: "notified",
+        at: now,
+        notice: { for: ending, to: "operator", key: `${ending}:operator`, result: "delivered" },
+      })
+    })
+    await expect(archiveQueue(location, "lab", { ...request, dryRun: false })).rejects.toBeInstanceOf(Conflict)
+    expect((await listRefs("refs/yrd-archive/", location)).size).toBe(0)
+    const notified = await readStatus(location, "lab", "task/cancelled")
+    expect(notified).toMatchObject({ endedAt: at, ending: { id: ending } })
+    if (notified.tip === undefined) throw new Error("fixture lost notified tip")
+    tips.set("task/cancelled", notified.tip)
+    const applied = await archiveQueue(location, "lab", { ...request, dryRun: false })
+    expect(applied.archived).toHaveLength(2)
+    expect(applied.readbacks).toHaveLength(2)
+    for (const receipt of applied.readbacks) {
+      expect(receipt).toMatchObject({ hotTip: null, coldTip: expect.any(String), readAt: expect.any(String) })
+      expect(receipt.coldTip).toBe((await listRefs(receipt.coldRef, location)).get(receipt.coldRef))
+      expect(receipt.previousTip).toBe(tips.get(receipt.branch))
+    }
+    for (const [branch, tip] of tips) {
+      if (branch !== "task/merged" && branch !== "task/cancelled") {
+        expect((await listRefs(changesRef("lab", branch), location)).get(changesRef("lab", branch))).toBe(tip)
+        continue
+      }
+      expect((await listRefs(changesRef("lab", branch), location)).size).toBe(0)
+      const state = await readStatus(location, "lab", branch)
+      expect(state).toMatchObject({ status: branch.slice(5), commit: head, endedAt: at })
+      const history = await readChangeEvents(location, "lab", branch, state.tip ?? "missing")
+      expect(history.at(-1)).toMatchObject({
+        type: "archived",
+        parent: tip,
+        props: expect.arrayContaining([
+          ["Archive-Ref", changesRef("lab", branch)],
+          ["Archive-Tip", tip],
+          ["Archive-State", branch.slice(5)],
+          ["Archive-EndedAt", at.toISOString()],
+          ["Archive-AgeMs", String(now.getTime() - at.getTime())],
+          ["Time", now.toISOString()],
+        ]),
+      })
+    }
+    expect(await archiveQueue(location, "lab", request)).toMatchObject({
+      examined: 8,
+      candidates: [],
+      protected: 7,
+      recent: 1,
+    })
+    // @failure 27957: the first live pass must filter safe endings, then sort oldest first, then cap.
+    // The default-policy rows above cannot detect a cap applied before state/age filtering or sorting.
+    for (const [name, state, days] of [
+      ["a-younger", "merged", 30],
+      ["z-oldest", "merged", 50],
+      ["m-tie-old", "merged", 40],
+      ["n-tie-old", "merged", 40],
+      ["c-cancelled", "cancelled", 60],
+      ["b-recent", "merged", 20],
+    ] as const) {
+      const ending = new Date(now.getTime() - days * 86_400_000)
+      const chain = await openEvents({ ...store, ref: changesRef("lab", `task/${name}`) })
+      await chain.append(
+        [
+          changeInput("opened", { queueTip, at: ending, commit: head, by: "@dev/6" }),
+          changeInput(state, { queueTip, at: ending, commit: head, reason: "withdrawn" }),
+        ],
+        { expect: null },
+      )
+    }
+    const bounded = { ...request, minAgeDays: 30, state: "merged" as const, limit: 2 }
+    const boundedPreview = await archiveQueue(location, "lab", bounded)
+    expect(boundedPreview).toMatchObject({
+      bounds: { minAgeDays: 30, states: ["merged"], limit: 2 },
+      retentionMs: 30 * 86_400_000,
+      eligible: 4,
+      archived: [],
+    })
+    expect(boundedPreview.candidates.map((row) => row.branch)).toEqual(["task/z-oldest", "task/m-tie-old"])
+    const beforeBounds = await listRefs("refs/", location)
+    for (const [bounds, refusal] of [
+      [{ minAgeDays: 6 }, /--min-age/],
+      [{ minAgeDays: 7.5 }, /--min-age/],
+      [{ limit: 0 }, /--limit/],
+      [{ limit: 1.5 }, /--limit/],
+      [{ state: "other" as "merged" }, /--state/],
+    ] as const) {
+      await expect(archiveQueue(location, "lab", { ...request, ...bounds, dryRun: false })).rejects.toThrow(refusal)
+    }
+    expect(await listRefs("refs/", location)).toEqual(beforeBounds)
+    const boundedApplied = await archiveQueue(location, "lab", { ...bounded, dryRun: false })
+    expect(boundedApplied.candidates).toEqual(boundedPreview.candidates)
+    expect(boundedApplied).toMatchObject({ eligible: 4, bounds: boundedPreview.bounds })
+    expect(boundedApplied.archived).toHaveLength(2)
+    expect(boundedApplied.readbacks.map((row) => row.ref)).toEqual(boundedPreview.candidates.map((row) => row.ref))
+    for (const name of ["a-younger", "n-tie-old", "c-cancelled", "b-recent"]) {
+      expect((await listRefs(changesRef("lab", `task/${name}`), location)).size).toBe(1)
+    }
+  })
+
+  /** @failure 27957: queue/cold contention must abort without overwrite or retry; later failure names partial custody.
+   * @level l1 @consumer manual yrd queue archive
+   * The hot-tip race cannot detect omitted queue/absent-cold leases or a misleading all-or-nothing error.
+   * Uses the existing backend fixture; no production seam is added.
+   */
+  it.each([
+    "cold-first",
+    "queue-first",
+    "queue-second",
+    "transport-second",
+    "readback-missing",
+    "readback-moved",
+    "readback-hot",
+    "readback-error",
+  ] as const)("stops archive custody on %s and reports the committed prefix", async (race) => {
+    const { store, location, beforeNextPublish } = remoteMemStore(`archive-${race}`)
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set("work", "retained"), "work")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const now = new Date("2026-10-07T12:00:00.000Z")
+    const queueTip = await seedEventQueue(location, "lab", head, at)
+    const tips = new Map<string, string>()
+    for (const branch of ["task/a", "task/b"]) {
+      const result = await (
+        await openEvents({ ...store, ref: changesRef("lab", branch) })
+      ).append(
+        [
+          changeInput("opened", { queueTip, at, commit: head, by: "@dev/6" }),
+          changeInput("merged", { queueTip, at, commit: head }),
+        ],
+        { expect: null },
+      )
+      if (result.head === null) throw new Error("fixture lost merged tip")
+      tips.set(branch, result.head)
+    }
+    const coldA = "refs/yrd-archive/lab/task/a"
+    const coldB = "refs/yrd-archive/lab/task/b"
+    const originalRefReader = location.backend.listRefs
+    let rivalQueueTip = queueTip
+    const contend = async () => {
+      if (race === "cold-first") {
+        if (location.backend.publish === undefined) throw new Error("fixture lacks publisher")
+        await location.backend.publish(location.repo, [{ ref: coldA, expect: "0".repeat(40), oid: head }], "origin")
+      } else if (race === "transport-second") {
+        throw new Error("fixture archive transport refused")
+      } else {
+        rivalQueueTip = await writeQueueEvent(location, "lab", {
+          type: "observed",
+          commit: head,
+          by: QUEUE_RUN_WRITER,
+          at: now,
+        })
+      }
+    }
+    const readback = race.startsWith("readback-")
+    const transferred = race.endsWith("second") || readback ? 1 : 0
+    if (readback) {
+      const list = location.backend.listRefs
+      if (list === undefined) throw new Error("fixture lacks ref reader")
+      location.backend.listRefs = async (repo, selection, remote) => {
+        const actual = await list(repo, selection, remote)
+        if (selection !== "refs/" || !actual.has(coldA)) return actual
+        if (race === "readback-error") throw new Error("fixture origin readback unavailable")
+        const observed = new Map(actual)
+        if (race === "readback-missing") observed.delete(coldA)
+        if (race === "readback-moved") observed.set(coldA, head)
+        if (race === "readback-hot") observed.set(changesRef("lab", "task/a"), tips.get("task/a")!)
+        return observed
+      }
+    } else if (transferred === 1) {
+      beforeNextPublish(async () => {
+        beforeNextPublish(contend)
+      })
+    } else beforeNextPublish(contend)
+    let refusal: unknown
+    try {
+      await archiveQueue(location, "lab", { dryRun: false, by: "@dev/6", at: now })
+    } catch (error) {
+      refusal = error
+    }
+    location.backend.listRefs = originalRefReader
+    expect(refusal, String(refusal)).toBeInstanceOf(race === "transport-second" || readback ? Error : Conflict)
+    const failedRef = changesRef("lab", transferred === 1 && !readback ? "task/b" : "task/a")
+    expect(String(refusal)).toContain(`archive stopped at ${failedRef} after ${transferred}/2 transfers`)
+    if (readback) expect(String(refusal)).toContain("archive-custody-readback")
+    if (transferred === 1 && !readback) {
+      expect(String(refusal)).toContain(`"coldRef":"${coldA}"`)
+      expect(String(refusal)).toContain(`"previousTip":"${tips.get("task/a")}"`)
+      expect(String(refusal)).toContain('"readAt":')
+    }
+    const refs = await listRefs("refs/", location)
+    expect(refs.get(queueRef("lab"))).toBe(rivalQueueTip)
+    expect(refs.get(changesRef("lab", "task/b"))).toBe(tips.get("task/b"))
+    expect(refs.has(coldB)).toBe(false)
+    if (transferred === 0) {
+      expect(refs.get(changesRef("lab", "task/a"))).toBe(tips.get("task/a"))
+      expect(refs.get(coldA)).toBe(race === "cold-first" ? head : undefined)
+    } else {
+      expect(refs.has(changesRef("lab", "task/a"))).toBe(false)
+      const retained = await readStatus(location, "lab", "task/a")
+      expect(retained).toMatchObject({ status: "merged", commit: head, endedAt: at })
+      expect(refs.get(coldA)).toBe(retained.tip)
+    }
+  })
+
   it("drops a branch in the same publish as an ending that keeps its last commit", async () => {
     const { store, location } = remoteMemStore("yrd-event-drop")
     const target = await open({ ...store, ref: "refs/heads/lab" })
@@ -1173,7 +1436,7 @@ describe("the queue-format boundary", () => {
     })
   })
 
-  it("only deletes the branch name of a merged change", async () => {
+  it.each(["hot", "cold"] as const)("only deletes the branch name of a %s merged change", async (custody) => {
     const { store, location } = remoteMemStore("yrd-event-drop-merged")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
@@ -1189,8 +1452,19 @@ describe("the queue-format boundary", () => {
       [changeInput("merged", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: head })],
       { expect: opened.head },
     )
+    // @failure 27957: an owner drop must keep archived merge history and never create a new cancelled hot chain.
+    // The original hot-only case cannot detect a cold merge being treated as an unseen branch.
+    const ref = custody === "hot" ? changesRef("lab", "task/merged") : "refs/yrd-archive/lab/task/merged"
+    if (custody === "cold") {
+      if (store.backend.publish === undefined || merged.head === null) throw new Error("fixture lacks cold custody")
+      await store.backend.publish(store.repo, [
+        { ref, expect: "0".repeat(40), oid: merged.head },
+        { ref: changesRef("lab", "task/merged"), expect: merged.head, oid: null },
+      ])
+    }
     await drop(location, { queue: "lab", branch: "task/merged", by: "@dev/2" })
-    expect(await chain.head()).toBe(merged.head)
+    expect((await listRefs(ref, store)).get(ref)).toBe(merged.head)
+    if (custody === "cold") expect(await chain.head()).toBeNull()
     expect((await listRefs("refs/heads/task/merged", store)).size).toBe(0)
     expect((await readStatus(location, "lab", "task/merged")).status).toBe("merged")
   })
@@ -2204,6 +2478,114 @@ describe("the queue-format boundary", () => {
     await branch.append(reports, { expect: await branch.head() })
     expect((await listChanges(location, "lab")).get("task/42")?.status).toBe("queued")
     expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
+  })
+
+  /** @failure 27957: moving an ended chain outside the hot prefix hides its merge and history from list/detail.
+   * @level l1 @consumer yrd list, queue show and selected change history
+   * Existing history tests retain every chain under changes/ and cannot detect cold-custody disappearance.
+   */
+  it("keeps a cold merged branch discoverable with its original events and merge evidence", async () => {
+    const { store, location } = remoteMemStore("yrd-cold-change-history")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set("work.txt", "retained payload"), "work")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const queueTip = await seedEventQueue(location, "lab", head, at)
+    const branch = "task/retained"
+    const hotRef = changesRef("lab", branch)
+    const coldRef = `refs/yrd-archive/lab/${branch}`
+    const chain = await openEvents({ ...store, ref: hotRef })
+    const written = await chain.append(
+      [
+        changeInput("opened", { queueTip, at, commit: head, by: "@dev/6" }),
+        changeInput("merged", { queueTip, at, commit: head }),
+      ],
+      { expect: null },
+    )
+    let tip = written.events.at(-1)!.id
+    // @failure 27957: the archival audit is state-neutral, including the original ending age/notices.
+    // Unknown-event tolerance adds a diagnostic and cannot supply the required audit contract.
+    const beforeArchive = await readStatus(location, "lab", branch)
+    // A reader validates audit consistency independently of the writer's retention policy.
+    for (const archivedAt of [new Date("2026-10-07T12:00:00.000Z"), new Date(at.getTime() + 86_400_000)]) {
+      expect(
+        evolve(
+          beforeArchive,
+          event("archived", B, [
+            ["Queue", queueTip],
+            ["Time", archivedAt.toISOString()],
+            ["Archive-Ref", hotRef],
+            ["Archive-Tip", tip],
+            ["Archive-State", "merged"],
+            ["Archive-EndedAt", at.toISOString()],
+            ["Archive-AgeMs", String(archivedAt.getTime() - at.getTime())],
+          ]),
+        ),
+      ).toEqual({ ...beforeArchive, tip: B })
+    }
+    expect((await listChanges(location, "lab")).get(branch)).toMatchObject({ status: "merged", merge: head })
+    await store.backend.publish!(
+      store.repo,
+      [
+        { ref: coldRef, expect: "0".repeat(40), oid: tip },
+        { ref: hotRef, expect: tip, oid: null },
+      ],
+      "origin",
+    )
+    expect((await listRefs(hotRef, location)).size).toBe(0)
+    expect((await listRefs(coldRef, location)).get(coldRef)).toBe(tip)
+    expect((await listChanges(location, "lab")).get(branch)).toMatchObject({ status: "merged", merge: head, tip })
+    expect((await readEventQueueWithChanges(location, "lab")).histories.get(branch)?.state.merge).toBe(head)
+    expect(await readStatus(location, "lab", branch)).toMatchObject({ status: "merged", merge: head, tip })
+    expect((await readChangeEvents(location, "lab", branch, tip)).map((row) => row.id)).toEqual(
+      written.events.map((row) => row.id),
+    )
+    // @failure 27957: a late notification must append to cold custody without recreating its hot ref.
+    // Existing notification cases only write to hot chains; preserve the original ending/time here.
+    const ending = tip
+    const key = `${ending}:operator`
+    tip = await appendChangeEvent(location, "lab", branch, tip, {
+      type: "notified",
+      at: new Date("2026-10-07T12:00:00.000Z"),
+      notice: { for: ending, to: "operator", key, result: "delivered" },
+    })
+    expect((await listRefs(hotRef, location)).size).toBe(0)
+    expect((await listRefs(coldRef, location)).get(coldRef)).toBe(tip)
+    expect(await readStatus(location, "lab", branch)).toMatchObject({
+      status: "merged",
+      merge: head,
+      endedAt: at,
+      ending: { id: ending },
+      notices: { [key]: { for: ending, result: "delivered" } },
+    })
+    // A custody move after advertisement must report a changed reading, never an empty successful list.
+    // Existing static-history coverage cannot exercise the advertisement/acquisition boundary.
+    const fetch = location.backend.fetchRefs
+    if (fetch === undefined) throw new Error("fixture backend lacks remote acquisition")
+    let moved = false
+    const moving = {
+      ...location,
+      backend: {
+        ...location.backend,
+        fetchRefs: async (...args: Parameters<typeof fetch>) => {
+          const requested = args[1]
+          if (!moved && Array.isArray(requested) && requested.includes(coldRef)) {
+            moved = true
+            await store.backend.publish!(
+              store.repo,
+              [
+                { ref: hotRef, expect: "0".repeat(40), oid: tip },
+                { ref: coldRef, expect: tip, oid: null },
+              ],
+              "origin",
+            )
+          }
+          return fetch(...args)
+        },
+      },
+    }
+    await expect(listChanges(moving, "lab")).rejects.toThrow(Conflict)
+    expect(moved).toBe(true)
+    expect((await listChanges(location, "lab")).get(branch)).toMatchObject({ status: "merged", merge: head, tip })
   })
 
   it("reuses only a validated queue read from the same location", async () => {
