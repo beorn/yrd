@@ -111,7 +111,9 @@ describe("the Yrd Gitomic boundary", () => {
     // for refs/git-super/pins (27091); queue refs still belong to the Gitomic boundary.
     // This census catches raw ref calls outside that approved seam, which event journeys cannot detect.
     expect(refCommands(gitlinkPublication ?? ""), "gitlink retention publication").toEqual(["fetch", "fetch"])
-    expect(gitlinkPublication).toContain("await pushRefUpdates({")
+    // f9be2a8286 retries a GitHub 5xx publish: the sanctioned call is the same pushRefUpdates through seamProcess,
+    // awaited through retryTransientPush, and still the only ref writer here.
+    expect(gitlinkPublication).toMatch(/await retryTransientPush\(\s*\(\)\s*=>\s*pushRefUpdates\(\{/u)
     expect(gitlinkPublication).toContain("git: seamProcess(first.child, checkout)")
     expect(refCommands(queueSubmission ?? ""), "queue submission").toEqual([])
 
