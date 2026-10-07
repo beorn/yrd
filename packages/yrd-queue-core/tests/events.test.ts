@@ -2227,7 +2227,7 @@ describe("the queue-format boundary", () => {
       ],
       { expect: null },
     )
-    const tip = written.events.at(-1)!.id
+    let tip = written.events.at(-1)!.id
     expect((await listChanges(location, "lab")).get(branch)).toMatchObject({ status: "merged", merge: head })
     await store.backend.publish!(
       store.repo,
@@ -2245,6 +2245,24 @@ describe("the queue-format boundary", () => {
     expect((await readChangeEvents(location, "lab", branch, tip)).map((row) => row.id)).toEqual(
       written.events.map((row) => row.id),
     )
+    // @failure 27957: a late notification must append to cold custody without recreating its hot ref.
+    // Existing notification cases only write to hot chains; preserve the original ending/time here.
+    const ending = tip
+    const key = `${ending}:operator`
+    tip = await appendChangeEvent(location, "lab", branch, tip, {
+      type: "notified",
+      at: new Date("2026-10-07T12:00:00.000Z"),
+      notice: { for: ending, to: "operator", key, result: "delivered" },
+    })
+    expect((await listRefs(hotRef, location)).size).toBe(0)
+    expect((await listRefs(coldRef, location)).get(coldRef)).toBe(tip)
+    expect(await readStatus(location, "lab", branch)).toMatchObject({
+      status: "merged",
+      merge: head,
+      endedAt: at,
+      ending: { id: ending },
+      notices: { [key]: { for: ending, result: "delivered" } },
+    })
     // A custody move after advertisement must report a changed reading, never an empty successful list.
     // Existing static-history coverage cannot exercise the advertisement/acquisition boundary.
     const fetch = location.backend.fetchRefs

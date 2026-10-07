@@ -1890,20 +1890,36 @@ export async function readChangeEvents(
   branch: string,
   selectedTip: string,
 ): Promise<readonly Event[]> {
-  const ref = changesRef(queue, branch)
-  const { histories, invalid } = await readBranchHistory(store, queue, branch)
+  return (await readSelectedHistory(store, queue, branch, selectedTip)).events
+}
+
+/** Keep a selected snapshot's custody ref with its events for exact-lease writes. */
+async function readSelectedHistory(
+  store: QueueLocation,
+  queue: string,
+  branch: string,
+  selectedTip: string,
+): Promise<Readonly<{ ref: string; events: readonly Event[] }>> {
+  const hot = changesRef(queue, branch)
+  const cold = `${archivedChangesPrefix(queue)}${branch}`
+  const chains = await readEventChains([hot, cold], store)
+  const { histories, invalid } = projectChangeHistories(
+    chains,
+    [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)],
+    store.repo,
+  )
   const defect = invalid.get(branch)
   if (defect !== undefined) throw new Error(`${defect.ref}@${defect.tip}: ${defect.error}`)
   const history = histories.get(branch)
-  if (history === undefined) throw new Error(`missing event chain ${ref} in ${store.repo}`)
-  const events = history.events
-  const state = project(events, ref, store.repo)
+  if (history === undefined) throw new Error(`missing event chain ${hot} or ${cold} in ${store.repo}`)
+  const ref = chains.has(hot) ? hot : cold
+  const { events, state } = history
   if (state.tip !== selectedTip) {
     throw new Conflict(`${ref} moved after the selected reading: expected ${selectedTip}, read ${state.tip}`, {
       refs: [ref],
     })
   }
-  return events
+  return { ref, events }
 }
 
 /** Write one run decision against the row it judged; a rival tip discards that judgement. */
@@ -2079,7 +2095,7 @@ async function appendDecision(
 ): Promise<Readonly<{ event: string; number?: number }>> {
   const indexRead = numbered === undefined ? undefined : queueReadWithRunIndex(store, queue)
   const queueTip = (await readEventQueue(indexRead?.store ?? store, queue)).tip
-  const history = await readChangeEvents(store, queue, branch, selectedTip)
+  const { ref, events: history } = await readSelectedHistory(store, queue, branch, selectedTip)
   const input = changeInput(write.type, {
     queueTip,
     at: write.at,
@@ -2101,7 +2117,6 @@ async function appendDecision(
   if (planned.length !== 1) {
     throw new Error(`${changesRef(queue, branch)}: a run decision wrote ${planned.length} events`)
   }
-  const ref = changesRef(queue, branch)
   // A stuck event's Queue: must still be the queue tip when it is published.
   // Otherwise a concurrent resume could appear after that tip but before stuck.
   const also =
