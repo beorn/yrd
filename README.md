@@ -275,11 +275,15 @@ List, detail and full-history reads discover both hot and cold histories. Duplic
 Preview the exact eligible refs before moving them:
 
 ```console
-$ yrd queue archive --queue main --dry-run --json --notify alice
-$ yrd queue archive --queue main --json --notify alice
+$ yrd queue archive --queue main --min-age 30 --state merged --limit 200 --dry-run --json --notify alice
+$ yrd queue archive --queue main --min-age 30 --state merged --limit 200 --json --notify alice
 ```
 
 Only merged or cancelled histories qualify, at least seven days after their latest ending. Ignored histories and every other state remain hot.
+`--min-age` sets a whole-day minimum of at least seven (default seven); `--state` selects merged or cancelled (default both).
+`--limit` is a positive transfer count; omitting it leaves the pass unbounded.
+Preview and execution share one selector: filter by state and age, sort by ending oldest first with a ref tie-break, then apply the limit.
+JSON names the applied `bounds`, the `eligible` count before the cap, and every selected hot ref, tip and cold destination in `candidates` for both modes.
 This is a manual operation. It does not run from the queue loop; `.yrd.yml` still accepts only `archive-after: never`.
 An archive moves a ref outside the hot namespace. It preserves history and does not reduce the repository's total ref count.
 

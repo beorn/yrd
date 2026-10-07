@@ -380,7 +380,14 @@ export type CoreQueueCommand =
   | Readonly<{ command: "ignore"; branch: string; by: string; reason: string }>
   | Readonly<{ command: "unignore"; branch: string; by: string }>
   | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
-  | Readonly<{ command: "archive"; dryRun: boolean; by: string }>
+  | Readonly<{
+      command: "archive"
+      dryRun: boolean
+      by: string
+      minAgeDays?: number
+      state?: "merged" | "cancelled"
+      limit?: number
+    }>
   | Readonly<{
       command: "sweep-candidates"
       remote?: string
@@ -1440,12 +1447,16 @@ export async function coreQueueCommand(
         dryRun: request.dryRun,
         by: request.by,
         at: new Date(),
+        minAgeDays: request.minAgeDays,
+        state: request.state,
+        limit: request.limit,
       })
       emit(
         io,
         options.json === true,
         result,
-        `${result.queue}: examined ${result.examined} hot histories; protected ${result.protected}, recent ${result.recent}; ${request.dryRun ? "would archive" : "archived"} ${request.dryRun ? result.candidates.length : result.archived.length}\n` +
+        `${result.queue}: examined ${result.examined} hot histories; protected ${result.protected}, recent ${result.recent}; ${result.eligible} eligible before cap; ${request.dryRun ? "would archive" : "archived"} ${request.dryRun ? result.candidates.length : result.archived.length}\n` +
+          `bounds: age >= ${result.bounds.minAgeDays} days; states ${result.bounds.states.join(", ")}; limit ${result.bounds.limit ?? "unbounded"}\n` +
           result.candidates
             .map((row) => `${row.ref}@${row.tip} ${row.state} age ${row.ageMs}ms -> ${row.coldRef}`)
             .join("\n"),

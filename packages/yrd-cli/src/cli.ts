@@ -600,11 +600,19 @@ function buildProgram(
     .command("archive")
     .description("move merged and cancelled histories ended at least seven days ago to cold custody")
     .option("--dry-run", "list exact eligible refs without writing")
+    .option("--min-age <days>", "minimum whole days after the latest ending (at least 7; default: 7)", int)
+    .option("--state <state>", "restrict to merged or cancelled histories (default: both)")
+    .option("--limit <count>", "maximum transfers after filtering and oldest-first ordering", int)
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who archived the histories")
     .option("--queue <value>", QUEUE_HELP)
     .action(async (options) => {
-      const declared = options as PauseOptions & { dryRun?: boolean }
+      const declared = options as PauseOptions & {
+        dryRun?: boolean
+        minAge?: number
+        state?: "merged" | "cancelled"
+        limit?: number
+      }
       const location = await resolveQueueLocation(cwd(), declared.queue, env)
       setExit(
         await coreQueueCommand(
@@ -614,6 +622,9 @@ function buildProgram(
             command: "archive",
             dryRun: declared.dryRun === true,
             by: resolveSubmitter(declared.notify, env),
+            minAgeDays: declared.minAge,
+            state: declared.state,
+            limit: declared.limit,
           },
           {
             json: declared.json,

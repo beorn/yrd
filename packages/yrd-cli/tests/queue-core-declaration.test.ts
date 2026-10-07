@@ -195,19 +195,52 @@ it("archives through the CLI and retains event and payload objects after fresh c
   const original = await readChangeEvents(location, "main", branch, written.head)
   const before = await git(["ls-remote", "origin"])
   const preview = capture(repo)
-  const args = ["bun", "yrd", "queue", "archive", "--queue", "main", "--notify", "@dev/6", "--json"]
+  const args = [
+    "bun",
+    "yrd",
+    "queue",
+    "archive",
+    "--queue",
+    "main",
+    "--notify",
+    "@dev/6",
+    "--json",
+    "--min-age",
+    "30",
+    "--state",
+    "merged",
+    "--limit",
+    "1",
+  ]
   expect(await runYrdProcess([...args, "--dry-run"], preview.io), preview.stderr()).toBe(0)
   expect(JSON.parse(preview.stdout())).toMatchObject({
     examined: 1,
     protected: 0,
     recent: 0,
+    eligible: 1,
+    bounds: { minAgeDays: 30, states: ["merged"], limit: 1 },
     candidates: [{ branch, ref: hot, coldRef: cold }],
     archived: [],
   })
   expect(await git(["ls-remote", "origin"])).toBe(before)
+  for (const [flag, value] of [
+    ["--min-age", "6"],
+    ["--limit", "0"],
+    ["--state", "other"],
+  ] as const) {
+    const refused = capture(repo)
+    expect(await runYrdProcess([...args, flag, value], refused.io), refused.stderr()).toBe(2)
+    expect(refused.stderr()).toContain(flag)
+    expect(await git(["ls-remote", "origin"])).toBe(before)
+  }
   const execute = capture(repo)
   expect(await runYrdProcess(args, execute.io), execute.stderr()).toBe(0)
-  expect(JSON.parse(execute.stdout())).toMatchObject({ archived: [expect.any(String)] })
+  expect(JSON.parse(execute.stdout())).toMatchObject({
+    archived: [expect.any(String)],
+    eligible: 1,
+    bounds: { minAgeDays: 30, states: ["merged"], limit: 1 },
+    candidates: [{ branch, ref: hot, tip: written.head, coldRef: cold }],
+  })
   expect(await git(["ls-remote", "origin", hot])).toBe("")
   const root = dirname(repo)
   const remote = join(root, "remote.git")

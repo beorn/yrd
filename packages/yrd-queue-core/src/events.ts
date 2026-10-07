@@ -141,7 +141,7 @@ export const CHANGE_EVENT_TYPES = [
   "adopted",
   "archived",
 ] as const
-const ARCHIVE_AGE_MS = 7 * 24 * 60 * 60 * 1000
+const ARCHIVE_MIN_AGE_DAYS = 7
 export type ChangeEventType = (typeof CHANGE_EVENT_TYPES)[number]
 
 function assertChangeEventType(type: string): asserts type is ChangeEventType {
@@ -2306,12 +2306,21 @@ type ArchiveCandidate = Readonly<{
 export async function archiveQueue(
   store: QueueLocation,
   queue: string,
-  request: Readonly<{ dryRun: boolean; at: Date; by: string }>,
+  request: Readonly<{
+    dryRun: boolean
+    at: Date
+    by: string
+    minAgeDays?: number
+    state?: "merged" | "cancelled"
+    limit?: number
+  }>,
 ): Promise<
   Readonly<{
     queue: string
     at: string
     retentionMs: number
+    bounds: Readonly<{ minAgeDays: number; states: readonly ("merged" | "cancelled")[]; limit: number | null }>
+    eligible: number
     examined: number
     protected: number
     recent: number
@@ -2330,6 +2339,22 @@ export async function archiveQueue(
 > {
   if (typeof request.dryRun !== "boolean") throw new TypeError("archive needs an explicit dryRun boolean")
   if (Number.isNaN(request.at.getTime()) || request.by.trim() === "") throw new TypeError("archive needs Time and By")
+  const minAgeDays = request.minAgeDays === undefined ? ARCHIVE_MIN_AGE_DAYS : request.minAgeDays
+  const retentionMs = minAgeDays * 86_400_000
+  if (!Number.isSafeInteger(minAgeDays) || minAgeDays < ARCHIVE_MIN_AGE_DAYS || !Number.isSafeInteger(retentionMs)) {
+    throw new TypeError(
+      `archive --min-age must be an integer of at least ${ARCHIVE_MIN_AGE_DAYS} days within the supported duration range`,
+    )
+  }
+  if (request.limit !== undefined && (!Number.isSafeInteger(request.limit) || request.limit <= 0)) {
+    throw new TypeError("archive --limit must be a positive integer")
+  }
+  if (request.state !== undefined && request.state !== "merged" && request.state !== "cancelled") {
+    throw new TypeError("archive --state must be merged or cancelled")
+  }
+  const states: readonly ("merged" | "cancelled")[] =
+    request.state === undefined ? ["merged", "cancelled"] : [request.state]
+  const limit = request.limit === undefined ? null : request.limit
   const hotPrefix = `${queueRefPrefix(queue)}/changes/`
   const coldPrefix = archivedChangesPrefix(queue)
   const [authority, chains] = await Promise.all([
@@ -2355,9 +2380,10 @@ export async function archiveQueue(
       protectedCount++
       continue
     }
+    if (!states.includes(state.status)) continue
     if (state.endedAt === undefined) throw new Error(`${ref}: ended ${state.status} has no ending time`)
     const ageMs = request.at.getTime() - state.endedAt.getTime()
-    if (ageMs < ARCHIVE_AGE_MS) {
+    if (ageMs < retentionMs) {
       recent++
       continue
     }
@@ -2371,7 +2397,9 @@ export async function archiveQueue(
       coldRef: `${coldPrefix}${branch}`,
     })
   }
-  candidates.sort((a, b) => a.ref.localeCompare(b.ref))
+  candidates.sort((a, b) => a.endedAt.localeCompare(b.endedAt) || a.ref.localeCompare(b.ref))
+  const eligible = candidates.length
+  if (limit !== null) candidates.splice(limit)
   const archived: string[] = []
   const readbacks: {
     branch: string
@@ -2451,7 +2479,9 @@ export async function archiveQueue(
   return {
     queue,
     at: request.at.toISOString(),
-    retentionMs: ARCHIVE_AGE_MS,
+    retentionMs,
+    bounds: { minAgeDays, states, limit },
+    eligible,
     examined,
     protected: protectedCount,
     recent,

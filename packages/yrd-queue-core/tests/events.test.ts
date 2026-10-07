@@ -1117,6 +1117,54 @@ describe("the queue-format boundary", () => {
       protected: 7,
       recent: 1,
     })
+    // @failure 27957: the first live pass must filter safe endings, then sort oldest first, then cap.
+    // The default-policy rows above cannot detect a cap applied before state/age filtering or sorting.
+    for (const [name, state, days] of [
+      ["a-younger", "merged", 30],
+      ["z-oldest", "merged", 50],
+      ["m-tie-old", "merged", 40],
+      ["n-tie-old", "merged", 40],
+      ["c-cancelled", "cancelled", 60],
+      ["b-recent", "merged", 20],
+    ] as const) {
+      const ending = new Date(now.getTime() - days * 86_400_000)
+      const chain = await openEvents({ ...store, ref: changesRef("lab", `task/${name}`) })
+      await chain.append(
+        [
+          changeInput("opened", { queueTip, at: ending, commit: head, by: "@dev/6" }),
+          changeInput(state, { queueTip, at: ending, commit: head, reason: "withdrawn" }),
+        ],
+        { expect: null },
+      )
+    }
+    const bounded = { ...request, minAgeDays: 30, state: "merged" as const, limit: 2 }
+    const boundedPreview = await archiveQueue(location, "lab", bounded)
+    expect(boundedPreview).toMatchObject({
+      bounds: { minAgeDays: 30, states: ["merged"], limit: 2 },
+      retentionMs: 30 * 86_400_000,
+      eligible: 4,
+      archived: [],
+    })
+    expect(boundedPreview.candidates.map((row) => row.branch)).toEqual(["task/z-oldest", "task/m-tie-old"])
+    const beforeBounds = await listRefs("refs/", location)
+    for (const [bounds, refusal] of [
+      [{ minAgeDays: 6 }, /--min-age/],
+      [{ minAgeDays: 7.5 }, /--min-age/],
+      [{ limit: 0 }, /--limit/],
+      [{ limit: 1.5 }, /--limit/],
+      [{ state: "other" as "merged" }, /--state/],
+    ] as const) {
+      await expect(archiveQueue(location, "lab", { ...request, ...bounds, dryRun: false })).rejects.toThrow(refusal)
+    }
+    expect(await listRefs("refs/", location)).toEqual(beforeBounds)
+    const boundedApplied = await archiveQueue(location, "lab", { ...bounded, dryRun: false })
+    expect(boundedApplied.candidates).toEqual(boundedPreview.candidates)
+    expect(boundedApplied).toMatchObject({ eligible: 4, bounds: boundedPreview.bounds })
+    expect(boundedApplied.archived).toHaveLength(2)
+    expect(boundedApplied.readbacks.map((row) => row.ref)).toEqual(boundedPreview.candidates.map((row) => row.ref))
+    for (const name of ["a-younger", "n-tie-old", "c-cancelled", "b-recent"]) {
+      expect((await listRefs(changesRef("lab", `task/${name}`), location)).size).toBe(1)
+    }
   })
 
   /** @failure 27957: queue/cold contention must abort without overwrite or retry; later failure names partial custody.
