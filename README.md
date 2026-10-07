@@ -280,7 +280,7 @@ $ yrd queue archive --queue main --json --notify alice
 ```
 
 Only merged or cancelled histories qualify, at least seven days after their latest ending. Ignored histories and every other state remain hot.
-This is a manual operation. It does not run from the queue loop; `retention.archive-after` still accepts only `never`.
+This is a manual operation. It does not run from the queue loop; `.yrd.yml` still accepts only `archive-after: never`.
 An archive moves a ref outside the hot namespace. It preserves history and does not reduce the repository's total ref count.
 
 For each history, the command stages an `archived` event whose first parent is the selected hot tip.
