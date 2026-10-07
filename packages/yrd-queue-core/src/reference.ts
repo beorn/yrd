@@ -238,31 +238,16 @@ export async function readComponentMain(
 
 export async function populateReferenceStores(options: PopulateReference): Promise<readonly ReferenceStore[]> {
   const root = resolve(options.repo)
-  const excluded = options.excludedSubmodules ?? []
   const created: ReferenceStore[] = []
-  const levels: Array<Readonly<{ dir: string; prefix: string; commit: string }>> = [
-    { dir: root, prefix: "", commit: options.commit ?? "HEAD" },
-  ]
-  while (levels.length > 0) {
-    const level = levels.shift()
-    if (level === undefined) break
-    const git = options.gitIn(level.dir)
-    const urls = await declaredSubmodules(git, level.commit)
-    const included = [...urls.keys()].filter((path) => {
-      const named = level.prefix === "" ? path : join(level.prefix, path)
-      return !excluded.some((root) => named === root || named.startsWith(`${root}/`))
-    })
-    if (included.length === 0) continue
-    const gitlinks = await gitlinksAt(git, level.commit, included)
-    for (const { path, sha } of gitlinks) {
-      const named = level.prefix === "" ? path : join(level.prefix, path)
-      const url = urls.get(path)
+  await walkRecordedClosure(
+    { commit: options.commit ?? "HEAD", excluded: options.excludedSubmodules ?? [], gitIn: options.gitIn, root },
+    async ({ dir, named, recordedIn, sha, store, url }) => {
+      const git = options.gitIn(dir)
       if (url === undefined) {
         // The tree carries a gitlink its own `.gitmodules` does not declare, so
         // there is no remote to clone from and no guess worth making.
-        throw new ReferenceUnpopulated(root, named, `${level.commit}:.gitmodules declares no url for it`)
+        throw new ReferenceUnpopulated(root, named, `${recordedIn}:.gitmodules declares no url for it`)
       }
-      const store = join(level.dir, path)
       const existing = await isRepositoryAt(options.gitIn, store)
       const present = existing && (await holdsCommit(options.gitIn(store), sha))
       const localSource = options.source === undefined ? undefined : resolve(options.source, named)
@@ -379,10 +364,63 @@ export async function populateReferenceStores(options: PopulateReference): Promi
                   : { localMiss: { localSource, reason: miss } }),
               },
       )
-      levels.push({ commit: sha, dir: store, prefix: named })
+      // Populated or proven present: its own gitlinks are read from it next.
+      return true
+    },
+  )
+  return created
+}
+
+/** One gitlink of a recorded closure: the commit and store that record it, and the store it lives in (27510). */
+export type RecordedGitlink = Readonly<{
+  /** The store whose commit records this gitlink. */
+  dir: string
+  /** The recording commit. */
+  recordedIn: string
+  /** Its path in the recording commit's tree. */
+  path: string
+  /** Its root-relative path. */
+  named: string
+  sha: string
+  /** The url the recording commit's `.gitmodules` declares for it, if any. */
+  url: string | undefined
+  /** The store it lives in: `dir` joined with `path`. */
+  store: string
+}>
+
+/**
+ * Walk the recorded submodule closure of `commit` in the store at `root`, breadth first, leaving out `excluded` roots
+ * and everything under them. The one closure walk (27510): reference population and preview custody's store list
+ * both visit through it.
+ *
+ * `visit` answers whether to read the gitlink's own gitlinks. Those are read only when its level is dequeued, after
+ * its visit returned, so a visit that populates a store is read from the store it just populated, and a visit that
+ * declines (a store that is not a repository holds nothing to read) is never read at all.
+ */
+export async function walkRecordedClosure(
+  options: Readonly<{ gitIn: (cwd: string) => Git; root: string; commit: string; excluded: readonly string[] }>,
+  visit: (link: RecordedGitlink) => Promise<boolean>,
+): Promise<void> {
+  const levels: Array<Readonly<{ dir: string; prefix: string; commit: string }>> = [
+    { dir: options.root, prefix: "", commit: options.commit },
+  ]
+  while (levels.length > 0) {
+    const level = levels.shift()
+    if (level === undefined) break
+    const git = options.gitIn(level.dir)
+    const urls = await declaredSubmodules(git, level.commit)
+    const included = [...urls.keys()].filter((path) => {
+      const named = level.prefix === "" ? path : join(level.prefix, path)
+      return !options.excluded.some((root) => named === root || named.startsWith(`${root}/`))
+    })
+    if (included.length === 0) continue
+    for (const { path, sha } of await gitlinksAt(git, level.commit, included)) {
+      const named = level.prefix === "" ? path : join(level.prefix, path)
+      const store = join(level.dir, path)
+      const link = { dir: level.dir, named, path, recordedIn: level.commit, sha, store, url: urls.get(path) }
+      if (await visit(link)) levels.push({ commit: sha, dir: store, prefix: named })
     }
   }
-  return created
 }
 
 /**

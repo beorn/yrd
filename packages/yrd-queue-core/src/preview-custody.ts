@@ -8,9 +8,10 @@
  * receipt was superseded (the subject prefix lists its successor) or retired (the prefix is empty).
  *
  * One supersession per subject, root first: create the new component anchors and then the new root (expected
- * absence), delete the old ROOT (expected OID, the commit point), then the old components. A failure before the
- * commit point removes only what this attempt created, new root first, and leaves the prior custody readable; a
- * failure after it keeps the new custody, and the old components are orphans that every later attempt sweeps.
+ * absence), delete the old ROOT (expected OID; the first deletion is the commit point), then the old components. A
+ * failure before the commit point removes only what this attempt created, new root first, and leaves the prior custody
+ * readable; a failure after it keeps the new custody and is named, and what it left behind (a prior root, orphaned
+ * components) the next attempt deletes.
  */
 import { createHash } from "node:crypto"
 import { realpathSync } from "node:fs"
@@ -20,11 +21,10 @@ import { refAt, type Git } from "./git.ts"
 import { encodeQueueComponent } from "./refs.ts"
 import {
   createRef,
-  declaredSubmodules,
-  gitlinksAt,
   isRepositoryAt,
   populateReferenceStores,
   ReferenceUnpopulated,
+  walkRecordedClosure,
   type PreviewAnchor,
 } from "./reference.ts"
 
@@ -60,7 +60,7 @@ export const PREVIEW_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 export type PreviewCustody = Readonly<{
   /** The root anchor, `refs/yrd/preview/<clone>/<subject>/<candidate-root>`. */
   anchor: string
-  /** The prior root anchors this attempt superseded. */
+  /** The prior root anchors this attempt deleted. One it could not delete past the commit point is named instead. */
   superseded: readonly string[]
   /** Other subjects' root anchors this attempt retired: ended changes and anchors past the seven-day backstop. */
   retired: readonly string[]
@@ -113,11 +113,26 @@ export async function anchorPreviewCustody(options: PreviewCustodyOptions): Prom
         } else if (held !== options.candidate) {
           throw new ReferenceUnpopulated(main, undefined, `${main} already holds ${anchor} at ${held}`)
         }
-        // The commit point: the prior candidate stops being readable only here.
-        for (const old of prior) await rootGit(["update-ref", "-d", old.name, old.oid])
       } catch (error) {
         await removeAttempt(rootGit, anchor, options.candidate, rootCreated, created, options.gitIn)
         throw error
+      }
+      // The commit point is the FIRST prior root deleted: that prior candidate stops being readable there, so this
+      // one must stand from then on. A failure before it rolls this attempt back; any failure after it is named.
+      const superseded: string[] = []
+      for (const old of prior) {
+        try {
+          await rootGit(["update-ref", "-d", old.name, old.oid])
+          superseded.push(old.name)
+        } catch (error) {
+          if (superseded.length === 0) {
+            await removeAttempt(rootGit, anchor, options.candidate, rootCreated, created, options.gitIn)
+            throw error
+          }
+          options.leftover?.(
+            `${old.name} outlived its supersession by ${anchor}; the next attempt deletes it: ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
       }
       // Past the commit point nothing restores the prior candidate or undoes this one: a retirement or sweep that
       // fails is named, and its orphans wait for the next attempt's sweep.
@@ -143,7 +158,7 @@ export async function anchorPreviewCustody(options: PreviewCustodyOptions): Prom
           `the orphan sweep after ${anchor} failed: ${error instanceof Error ? error.message : String(error)}`,
         )
       }
-      return { anchor, retired: retired.map((ref) => ref.name), superseded: prior.map((ref) => ref.name) }
+      return { anchor, retired: retired.map((ref) => ref.name), superseded }
     },
     { holder: `yrd preview custody ${options.subject}` },
   )
@@ -253,7 +268,11 @@ async function removeAttempt(
   for (const made of created) await gitIn(made.store)(["update-ref", "-d", anchor, made.sha])
 }
 
-/** Every component store a candidate's recorded closure lives in, as main-worktree checkout paths. */
+/**
+ * Every component store of a candidate's recorded closure that is a repository, as main-worktree checkout paths. A
+ * path that is not one (a private or uninitialized submodule) holds no anchor, and neither does anything beneath it,
+ * so the walk neither lists it nor reads it: git would answer from the enclosing repository instead.
+ */
 async function closureStores(
   gitIn: (cwd: string) => Git,
   main: string,
@@ -261,27 +280,15 @@ async function closureStores(
   excluded: readonly string[],
 ): Promise<readonly string[]> {
   const stores: string[] = []
-  const levels: Array<Readonly<{ dir: string; prefix: string; commit: string }>> = [{ dir: main, prefix: "", commit }]
-  while (levels.length > 0) {
-    const level = levels.shift()
-    if (level === undefined) break
-    const git = gitIn(level.dir)
-    const urls = await declaredSubmodules(git, level.commit)
-    const included = [...urls.keys()].filter((path) => {
-      const named = level.prefix === "" ? path : join(level.prefix, path)
-      return !excluded.some((root) => named === root || named.startsWith(`${root}/`))
-    })
-    for (const { path, sha } of await gitlinksAt(git, level.commit, included)) {
-      const store = join(level.dir, path)
-      stores.push(store)
-      levels.push({ commit: sha, dir: store, prefix: level.prefix === "" ? path : join(level.prefix, path) })
-    }
-  }
+  await walkRecordedClosure({ commit, excluded, gitIn, root: main }, async ({ store }) => {
+    if (!(await isRepositoryAt(gitIn, store))) return false
+    stores.push(store)
+    return true
+  })
   return stores
 }
 
-/** A component anchor whose root anchor is gone is an orphan, deleted at its expected OID. A store path that is not a
- * repository (a private or uninitialized submodule) holds no anchor and is skipped. */
+/** A component anchor whose root anchor is gone is an orphan, deleted at its expected OID. */
 async function sweepOrphans(
   rootGit: Git,
   gitIn: (cwd: string) => Git,
@@ -290,7 +297,6 @@ async function sweepOrphans(
   leftover: PreviewCustodyOptions["leftover"],
 ): Promise<void> {
   for (const store of stores) {
-    if (!(await isRepositoryAt(gitIn, store))) continue
     const storeGit = gitIn(store)
     for (const ref of await refsUnder(storeGit, clonePrefix)) {
       if ((await refAt(rootGit, ref.name)) !== undefined) continue

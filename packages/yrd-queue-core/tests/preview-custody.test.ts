@@ -18,6 +18,7 @@ import {
   previewSubjectPrefix,
   retirePreviewSubject,
 } from "../src/preview-custody.ts"
+import type { Git } from "../src/git.ts"
 import { ReferenceUnpopulated } from "../src/reference.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
@@ -78,6 +79,32 @@ async function anchorsIn(store: string, prefix = "refs/yrd/preview/"): Promise<R
 
 function anchor(product: string, subject: string, root: string): string {
   return `${previewSubjectPrefix(previewCloneKey(join(product, ".git")), subject)}${root}`
+}
+
+/** A gitIn whose `nth` deletion of a ref under `prefix` fails, as a held lock or a full disk would. */
+function failingDeletion(prefix: string, nth: number): (cwd: string) => Git {
+  let deletions = 0
+  return (cwd) => {
+    const git = gitIn(cwd)
+    return async (args, input) => {
+      if (args[0] === "update-ref" && args[1] === "-d" && args[2]?.startsWith(prefix) === true && ++deletions === nth) {
+        throw new Error(`injected: update-ref -d ${args[2]} refused`)
+      }
+      return git(args, input)
+    }
+  }
+}
+
+/** Two prior roots under one subject: `first` through custody, `second` written beside it as a lost race leaves it. */
+async function twoPriors(product: string) {
+  const first = await candidate(product, "first")
+  await custody(product, first.root)
+  const second = await candidate(product, "second")
+  await gitIn(product)(["update-ref", "--create-reflog", anchor(product, "task/a", second.root), second.root])
+  // Deletion order is for-each-ref's: by name.
+  const [earlier, later] = [first.root, second.root].map((root) => anchor(product, "task/a", root)).sort()
+  if (earlier === undefined || later === undefined) throw new Error("two priors expected")
+  return { earlier, later }
 }
 
 function custody(
@@ -161,6 +188,39 @@ describe("anchorPreviewCustody (27510)", () => {
 
     await expect(attempt).rejects.toBeInstanceOf(ReferenceUnpopulated)
     await expect(attempt).rejects.toThrow(/vendor\/missing/u)
+    expect(await anchorsIn(product)).toEqual(before.root)
+    expect(await anchorsIn(join(product, "vendor/dep"))).toEqual(before.dep)
+  }, 60_000)
+
+  it("stands past the commit point: a later prior's failed deletion keeps the new custody and names the leftover", async () => {
+    const product = await author_clone()
+    const priors = await twoPriors(product)
+    const third = await candidate(product, "third")
+    const named: string[] = []
+
+    const kept = await custody(product, third.root, "task/a", {
+      gitIn: failingDeletion(anchor(product, "task/a", ""), 2),
+      leftover: (why) => void named.push(why),
+    })
+
+    const live = anchor(product, "task/a", third.root)
+    expect(kept.superseded).toEqual([priors.earlier])
+    const held = await anchorsIn(product)
+    expect(held[live]).toBe(third.root)
+    expect(Object.keys(held).sort()).toEqual([live, priors.later].sort())
+    expect((await anchorsIn(join(product, "vendor/dep")))[live]).toBe(third.dep)
+    expect(named.join("\n")).toContain(`${priors.later} outlived its supersession by ${live}`)
+  }, 60_000)
+
+  it("rolls back before the commit point: a failed first prior deletion leaves the priors and none of its own", async () => {
+    const product = await author_clone()
+    await twoPriors(product)
+    const before = { dep: await anchorsIn(join(product, "vendor/dep")), root: await anchorsIn(product) }
+    const third = await candidate(product, "third")
+
+    const attempt = custody(product, third.root, "task/a", { gitIn: failingDeletion(anchor(product, "task/a", ""), 1) })
+
+    await expect(attempt).rejects.toThrow(/injected: update-ref -d/u)
     expect(await anchorsIn(product)).toEqual(before.root)
     expect(await anchorsIn(join(product, "vendor/dep"))).toEqual(before.dep)
   }, 60_000)
@@ -255,6 +315,26 @@ describe("anchorPreviewCustody (27510)", () => {
     expect(await anchorsIn(product)).toEqual({ [live]: second.root })
     expect(Object.keys(await anchorsIn(join(product, "vendor/dep")))).toEqual([live])
     expect(Object.keys(await anchorsIn(join(product, "vendor/dep/apps/nested")))).toEqual([live])
+  }, 60_000)
+
+  it("retires a subject on env close past a component this clone never initialized, reading nothing there", async () => {
+    const product = await author_clone()
+    const git = gitIn(product)
+    const dep = (await gitIn(join(product, "vendor/dep"))(["rev-parse", "HEAD"])).trim()
+    // A private component: the candidate records it, custody leaves it out, and env close does not know to.
+    await git(["config", "--file", ".gitmodules", "submodule.vendor/private.path", "vendor/private"])
+    await git(["config", "--file", ".gitmodules", "submodule.vendor/private.url", join(product, "..", "dep")])
+    await git(["add", ".gitmodules"])
+    await git(["update-index", "--add", "--cacheinfo", `160000,${dep},vendor/private`])
+    await git([...author, "commit", "--quiet", "--message", "record a private component"])
+    const recorded = (await git(["rev-parse", "HEAD"])).trim()
+    await custody(product, recorded, "task/closing", { excludedSubmodules: ["vendor/private"] })
+
+    const retired = await retirePreviewSubject({ git, gitIn: (cwd) => gitIn(cwd), subject: "task/closing" })
+
+    expect(retired).toEqual([anchor(product, "task/closing", recorded)])
+    expect(await anchorsIn(product)).toEqual({})
+    expect(await anchorsIn(join(product, "vendor/dep"))).toEqual({})
   }, 60_000)
 
   /**

@@ -813,7 +813,15 @@ async function endedSubjects(
   request: SubmitRequest,
 ): Promise<ReadonlySet<string>> {
   const store = createEventStore(root, remote, selectionFor(git), runnerFor(git).backend)
-  if ((await queueFormat(store, request.target.branch)) !== "event") return new Set()
+  const format = await queueFormat(store, request.target.branch)
+  // An empty queue has ended no change. One in another format cannot say which have: its retirement is the backstop.
+  if (format === "empty") return new Set()
+  if (format !== "event") {
+    console.warn(
+      `yrd: preview custody cannot read which changes ended from ${request.target.branch}'s ${format} queue; their anchors retire at the seven-day backstop`,
+    )
+    return new Set()
+  }
   const { histories, invalid } = await listChangeHistories(store, request.target.branch)
   for (const [branch, defect] of invalid) {
     console.warn(`yrd: preview custody keeps ${branch}'s anchors: its change history is unreadable: ${defect.error}`)
