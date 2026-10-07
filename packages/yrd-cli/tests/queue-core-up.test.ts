@@ -396,6 +396,102 @@ async function submitGitlink(w: GitlinkWorld, branch: string, sha: string): Prom
 
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
+type GitlinkVectorWorld = GitlinkWorld &
+  Readonly<{
+    /** The declared in-process component's root-relative path. */
+    componentPath: string
+    /** The component commit the root records at start. */
+    c: string
+    /** The component's next commit on its own main; the root does not record it yet. */
+    d: string
+  }>
+
+/**
+ * The dependency-only promotion, on the LOOP's side (27886, @cto ruling 3(a)):
+ * the runtime's own gitlink at `submodule` stays put while a DECLARED in-process
+ * component at `vendor/bearly` moves. The one-path exit this replaces never
+ * armed here at all; the vector exit must, and its wait must follow the
+ * COMPONENT's checkout — never the own path's.
+ */
+async function gitlinkVectorWorld(): Promise<GitlinkVectorWorld> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-gitlink-vector-"))
+  roots.push(root)
+  const seed = gitIn(root)
+
+  /** A submodule whose main gets its first commit now; `b` is minted after the root records `a`. */
+  const seedSubmodule = async (
+    name: string,
+    withCliSource: boolean,
+  ): Promise<{ a: string; b: string; bare: string; work: string }> => {
+    const bare = join(root, `${name}.git`)
+    const work = join(root, `${name}-work`)
+    await seed(["init", "--quiet", "--bare", "--initial-branch=main", bare])
+    await seed(["clone", "--quiet", bare, work])
+    const cg = gitIn(work)
+    await identity(cg)
+    await cg(["checkout", "--quiet", "-b", "main"])
+    if (withCliSource) {
+      cpSync(resolve(import.meta.dirname, "../src"), join(work, "packages/yrd-cli/src"), { recursive: true })
+    }
+    writeFileSync(join(work, "lib.txt"), "a\n")
+    await cg(["add", "lib.txt", ...(withCliSource ? ["packages"] : [])])
+    await cg(["commit", "--quiet", "-m", "a"])
+    const a = (await cg(["rev-parse", "HEAD"])).trim()
+    await cg(["push", "--quiet", "origin", "main"])
+    return { a, b: "", bare, work }
+  }
+
+  const own = await seedSubmodule("submodule", true)
+  const component = await seedSubmodule("bearly", false)
+
+  const remote = join(root, "remote.git")
+  const work = join(root, "work")
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, work])
+  const git = gitIn(work)
+  await identity(git)
+  await git(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(work, ".yrd.yml"), DECLARATION)
+  await git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", own.bare, "submodule"])
+  await git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", component.bare, "vendor/bearly"])
+  await git(["add", ".yrd.yml", ".gitmodules", "submodule", "vendor/bearly"])
+  await git(["commit", "--quiet", "-m", "main: submodule at a, vendor/bearly at a"])
+  await git(["push", "--quiet", "origin", "main"])
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  const config = await readConfig(git, target, { branch: "main", remote: "origin" })
+  if (config === undefined) throw new Error("the gitlink vector fixture target lost its declaration")
+  await createEventQueue(createEventStore(work, "origin", git.selection), "main", target, config, new Date())
+
+  // NOW each submodule's main moves on to `b`; the root still records `a` for both.
+  const advance = async (sub: { work: string }): Promise<string> => {
+    const cg = gitIn(sub.work)
+    writeFileSync(join(sub.work, "lib.txt"), "b\n")
+    await cg(["commit", "--quiet", "-am", "b"])
+    const b = (await cg(["rev-parse", "HEAD"])).trim()
+    await cg(["push", "--quiet", "origin", "main"])
+    return b
+  }
+  const ownB = await advance(own)
+  const componentB = await advance(component)
+
+  const workdir = join(root, "queue")
+  mkdirSync(workdir, { recursive: true })
+  const cli = join(work, "submodule/packages/yrd-cli")
+  symlinkSync(resolve(import.meta.dirname, "../node_modules"), join(cli, "node_modules"), "dir")
+  const { coreQueueCommand: command } = await import(join(cli, "src/queue-core-commands.ts"))
+  return {
+    a: own.a,
+    b: ownB,
+    c: component.a,
+    componentPath: "vendor/bearly",
+    command,
+    d: componentB,
+    git,
+    work,
+    workdir,
+  }
+}
+
 describe("yrd queue up, the service", () => {
   it("reuses a dirty environment verdict until its index changes", async () => {
     const w = await world()
@@ -1939,6 +2035,64 @@ describe("yrd queue up, the service", () => {
     // The target really moved the gitlink: the exit reports the world, not the request.
     expect((await w.git(["ls-tree", "origin/main", "--", "submodule"])).trim()).toBe(`160000 commit ${w.b}\tsubmodule`)
   })
+
+  /**
+   * @failure  A DEPENDENCY-ONLY promotion was invisible to the relaunch exit.
+   *           The exit armed on the runtime's own gitlink alone, so a landing
+   *           that moved only `vendor/bearly` never tripped it: the loop kept
+   *           running code whose dependency had already moved under it, and the
+   *           supervisor never got the exit-0 relaunch it waits for. Ruling
+   *           3(a) makes the exit (and its bounded wait) a vector.
+   * @level    l2 (a real remote, two submodules, the real CLI)
+   * @consumer hab, whose supervised yrd must actually move onto a promoted landing
+   */
+  it("exits 0 when only a DECLARED component moved, waiting on the COMPONENT's checkout", async () => {
+    const w = await gitlinkVectorWorld()
+    // The target records the component's next commit; the runtime's own path is untouched.
+    await w.git(["update-index", "--cacheinfo", "160000", w.d, "vendor/bearly"])
+    await w.git(["commit", "--quiet", "-m", "target records vendor/bearly at d"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const service = w.command(
+      w.work,
+      run.io,
+      { command: "up", intervalSeconds: 0, stop: stop.signal, relaunchWaitCapMs: 50 },
+      { json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(() => expect(run.stdout()).toContain("waiting-for-checkout"), { timeout: 8000 })
+      const health = JSON.parse(readFileSync(join(w.workdir, "service-health.json"), "utf8")) as {
+        facts?: Record<string, unknown>
+      }
+      // The wait followed the COMPONENT, not the runtime's own path: the whole
+      // difference ruling 3(a) makes, and the fact the old exit could not state.
+      expect(health.facts?.waitingForCheckout).toBe(w.componentPath)
+      expect(health.facts?.waitingTarget).toBe(w.d)
+      expect(health.facts?.waitingCheckout).toBe(join(w.work, w.componentPath))
+      expect(health.facts?.waitingComponents).toEqual([expect.objectContaining({ path: w.componentPath, target: w.d })])
+      // The component's checkout lands; the loop exits 0 for the supervisor.
+      const component = gitIn(join(w.work, w.componentPath))
+      await component(["fetch", "--quiet", "origin", "main"])
+      await component(["checkout", "--quiet", w.d])
+      const exit = await service
+      expect(exit, run.stdout()).toBe(0)
+      const written = records(run)
+      expect(written.at(-1)).toMatchObject({
+        exitCode: 0,
+        gitlink: w.componentPath,
+        reason: "gitlink-moved",
+        to: w.d,
+      })
+      // The target really moved the component; the exit reports the world.
+      expect((await w.git(["ls-tree", "origin/main", "--", w.componentPath])).trim()).toBe(
+        `160000 commit ${w.d}\t${w.componentPath}`,
+      )
+    } finally {
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 30_000)
 
   /**
    * @failure  THE PRODUCTION CONFIGURATION, and no test had it. Every gitlink
