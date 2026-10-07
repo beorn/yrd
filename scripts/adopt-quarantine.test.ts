@@ -11,7 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, expect, it } from "vitest"
-import { openEvents } from "gitomic/events"
+import { openEvents } from "../packages/yrd-queue-core/src/git.ts"
 import {
   changeInput,
   createEventQueue,

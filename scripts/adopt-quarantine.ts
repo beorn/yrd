@@ -3,7 +3,6 @@
  * This script creates live event refs. It never deletes a quarantine ref.
  */
 import { isAbsolute } from "node:path"
-import { chainsUnder } from "gitomic/events"
 import {
   changeInput,
   changesRef,
@@ -17,7 +16,7 @@ import {
   type Event,
   type QueueLocation,
 } from "../packages/yrd-queue-core/src/index.ts"
-import { openEvents, resolveGitSelection } from "../packages/yrd-queue-core/src/git.ts"
+import { chainsUnder, openEvents, resolveGitSelection } from "../packages/yrd-queue-core/src/git.ts"
 import { project } from "../packages/yrd-queue-core/src/events.ts"
 import { refuseMaintenance } from "../packages/yrd-queue-core/src/submit.ts"
 
