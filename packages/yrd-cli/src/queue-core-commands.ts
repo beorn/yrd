@@ -3026,15 +3026,13 @@ export async function coreQueueCommand(
             break
           } catch (error) {
             if (!(error instanceof EventListingMoved)) throw error
-            const current = await (await openEvents({ ...selectedStore, ref: error.ref, writer: "yrd" })).head()
+            const chain = await openEvents({ ...selectedStore, ref: error.ref, writer: "yrd" })
+            const current = await chain.head()
             const evidence = `read ${error.read ?? "absent"}, observed ${error.observed ?? "absent"}, current ${current ?? "absent"}`
             if (current === null) throw new Error(`${error.ref} disappeared during event list: ${evidence}`)
-            const isAncestor = selectedStore.backend.isAncestor
-            if (isAncestor === undefined) {
-              throw new Error(`${error.ref} moved during event list but its backend cannot check ancestry: ${evidence}`)
-            }
+            const lineage = new Set((await chain.events({ at: current, complete: true })).map((event) => event.id))
             for (const tip of [error.read, error.observed]) {
-              if (tip !== undefined && tip !== current && !(await isAncestor(repo, tip, current))) {
+              if (tip !== undefined && tip !== current && !lineage.has(tip)) {
                 throw new Error(`${error.ref} diverged during event list: ${evidence}`)
               }
             }

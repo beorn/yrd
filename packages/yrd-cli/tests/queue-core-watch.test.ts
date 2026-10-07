@@ -268,40 +268,52 @@ describe("yrd watch, the ending's exit code", () => {
    * Existing fence and stale-pane tests never advance a real remote ref between reads.
    * The selected Git executable only schedules the real ref update; it fabricates no Git result or event.
    */
-  it.each(["advance", "disappear", "diverge"] as const)("handles %s during its event listing", async (movement) => {
-    const w = await world()
-    const branch = "task/advancing"
-    await change(w, branch, true)
-    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
-    const queue = await readEventQueue(store, "main")
-    const ref = changesRef("main", branch)
-    const chain = await openEvents({ ...store, ref, writer: "yrd" })
-    const before = await chain.head()
-    if (before === null) throw new Error("submitted fixture change has no event tip")
-    const commit = (await w.git(["rev-parse", branch])).trim()
-    await chain.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit })], { expect: before })
-    const after = await chain.head()
-    if (after === null) throw new Error("merged fixture change has no event tip")
-    const remote = join(dirname(w.work), "remote.git")
-    await w.git(["--git-dir", remote, "update-ref", ref, before, after])
-    let divergent = commit
-    if (movement === "diverge") {
-      const unrelated = await openEvents({ ...store, ref: "refs/yrd/test/divergent", writer: "yrd" })
-      await unrelated.append([changeInput("opened", { queueTip: queue.tip, at: new Date(), commit, by: "yrd" })], {
-        expect: null,
-      })
-      const tip = await unrelated.head()
-      if (tip === null) throw new Error("divergent fixture chain has no event tip")
-      divergent = tip
-    }
-    const update =
-      movement === "disappear" ? ["-d", ref, before] : [ref, movement === "advance" ? after : divergent, before]
+  it.each(["advance", "disappear", "diverge", "diverge-kept"] as const)(
+    "handles %s during its event listing",
+    async (movement) => {
+      const w = await world()
+      const branch = "task/advancing"
+      await change(w, branch, true)
+      const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+      const queue = await readEventQueue(store, "main")
+      const ref = changesRef("main", branch)
+      const chain = await openEvents({ ...store, ref, writer: "yrd" })
+      const before = await chain.head()
+      if (before === null) throw new Error("submitted fixture change has no event tip")
+      const commit = (await w.git(["rev-parse", branch])).trim()
+      await chain.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit })], { expect: before })
+      const after = await chain.head()
+      if (after === null) throw new Error("merged fixture change has no event tip")
+      const remote = join(dirname(w.work), "remote.git")
+      await w.git(["--git-dir", remote, "update-ref", ref, before, after])
+      let divergent = commit
+      if (movement === "diverge" || movement === "diverge-kept") {
+        const unrelated = await openEvents({ ...store, ref: "refs/yrd/test/divergent", writer: "yrd" })
+        await unrelated.append(
+          [
+            changeInput("opened", {
+              queueTip: queue.tip,
+              at: new Date(),
+              commit: movement === "diverge-kept" ? before : commit,
+              by: "yrd",
+            }),
+          ],
+          {
+            expect: null,
+          },
+        )
+        const tip = await unrelated.head()
+        if (tip === null) throw new Error("divergent fixture chain has no event tip")
+        divergent = tip
+      }
+      const update =
+        movement === "disappear" ? ["-d", ref, before] : [ref, movement === "advance" ? after : divergent, before]
 
-    const marker = join(w.workdir, "advanced")
-    const executable = join(w.workdir, "advancing-git.ts")
-    writeFileSync(
-      executable,
-      `#!${process.execPath}
+      const marker = join(w.workdir, "advanced")
+      const executable = join(w.workdir, "advancing-git.ts")
+      writeFileSync(
+        executable,
+        `#!${process.execPath}
 import { existsSync, writeFileSync } from "node:fs"
 const args = process.argv.slice(2)
 const result = Bun.spawnSync(["git", ...args], { stdin: "inherit", stdout: "pipe", stderr: "pipe" })
@@ -314,38 +326,41 @@ process.stdout.write(result.stdout)
 process.stderr.write(result.stderr)
 process.exit(result.exitCode)
 `,
-    )
-    chmodSync(executable, 0o755)
-    const run = capture(w.work)
-    const watched = coreQueueCommand(
-      w.work,
-      run.io,
-      { command: "list", terms: [branch], watch: true },
-      {
-        json: true,
-        workdir: w.workdir,
-        selection: { executable, contract: "native", scope: "default", origin: "real-Git race fixture" },
-      },
-    )
-    if (movement !== "advance") {
-      await expect(watched).rejects.toThrow(
-        new RegExp(
-          `${movement === "disappear" ? "disappeared" : "diverged"} during event list: .*${before}.*${movement === "disappear" ? "absent" : divergent}`,
-        ),
       )
+      chmodSync(executable, 0o755)
+      const run = capture(w.work)
+      const stop = new AbortController()
+      const deadline = setTimeout(() => stop.abort(), 5_000)
+      const watched = coreQueueCommand(
+        w.work,
+        run.io,
+        { command: "list", terms: [branch], watch: true, stop: stop.signal, intervalSeconds: 1 },
+        {
+          json: true,
+          workdir: w.workdir,
+          selection: { executable, contract: "native", scope: "default", origin: "real-Git race fixture" },
+        },
+      ).finally(() => clearTimeout(deadline))
+      if (movement !== "advance") {
+        await expect(watched).rejects.toThrow(
+          new RegExp(
+            `${movement === "disappear" ? "disappeared" : "diverged"} during event list: .*${before}.*${movement === "disappear" ? "absent" : divergent}`,
+          ),
+        )
+        expect(readFileSync(marker, "utf8")).toBe("advanced")
+        return
+      }
+      await expect(watched).resolves.toBe(0)
       expect(readFileSync(marker, "utf8")).toBe("advanced")
-      return
-    }
-    await expect(watched).resolves.toBe(0)
-    expect(readFileSync(marker, "utf8")).toBe("advanced")
-    expect(run.stderr()).toContain("advanced during event list")
-    const rounds = run
-      .stdout()
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line))
-    expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
-  })
+      expect(run.stderr()).toContain("advanced during event list")
+      const rounds = run
+        .stdout()
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line))
+      expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+    },
+  )
 
   // The producer owns its protocol; ordinary Git calls still use the real
   // selected executable. These defects cross run creation and the watch lifecycle.
