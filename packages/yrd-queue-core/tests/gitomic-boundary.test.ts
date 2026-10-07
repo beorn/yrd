@@ -74,11 +74,26 @@ describe("the Yrd Gitomic boundary", () => {
       // The gitlink carrier (fae9be0590, 25823): an object-only fetch of the component pin it carries, proving the queue
       // can fetch it, and a read of the local refs/heads/<branch> it would create. Neither reads or writes a queue ref.
       "pin-carrier.ts": ["fetch", "for-each-ref"],
+      // Preview custody (27510, @cto eb147b05, a130eadf): refs/yrd/preview/<clone>/<subject>/<candidate-root> in the
+      // AUTHOR's own root and component stores, never a queue ref. Every delete is at its expected OID: the superseded
+      // prior root, a failed attempt's own anchors (root, components), a retired root, a retired subject's root and an
+      // orphaned component anchor; then the one listing of a prefix.
+      "preview-custody.ts": [
+        "update-ref",
+        "update-ref",
+        "update-ref",
+        "update-ref",
+        "update-ref",
+        "update-ref",
+        "for-each-ref",
+      ],
       "publication.ts": ["push"],
       // The reference store owner: (27176, first) the derive step's fresh read of a component's main into the store's
       // refs/remotes/origin/main — a component ref, not a queue ref, read where its store lives rather than from
-      // derive.ts — then the pin ref it keeps, the object-only fetch of a pin, and the remote-answers probe.
-      "reference.ts": ["fetch", "update-ref", "fetch", "ls-remote"],
+      // derive.ts — then the pin ref it keeps, the object-only fetch of a pin, preview custody's create-only anchor
+      // (`createRef`, 27510: `update-ref --stdin create`, so an existing anchor is never moved), and the
+      // remote-answers probe.
+      "reference.ts": ["fetch", "update-ref", "fetch", "update-ref", "ls-remote"],
       "settled-base.ts": ["fetch"],
       // Submit's two object-only fetches: collect an absent component pin (27091)
       // and model moved gitlinks during compose verification (26754).

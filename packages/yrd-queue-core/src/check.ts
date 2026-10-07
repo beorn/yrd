@@ -89,6 +89,9 @@ export const STEP_BOUNDS_MS = {
   "derive-again": 30 * 60 * 1000,
   // #27363: the compose revert guard's bounded walk (P_max 500, depth 3, window 50).
   "revert-guard": 5 * 60 * 1000,
+  // #27510: a submit preview's custody swap: the clone's mutation-lock wait, then create-only anchors in existing
+  // stores. The queue's own run never times it.
+  "preview-custody": 30 * 60 * 1000,
   prepare: 30 * 60 * 1000,
   remove: 30 * 60 * 1000,
   publish: 30 * 60 * 1000,
@@ -105,6 +108,7 @@ export const STEP_STATES = {
   derive: "provisioning",
   "derive-again": "provisioning",
   "revert-guard": "provisioning",
+  "preview-custody": "provisioning",
   prepare: "provisioning",
   remove: "deprovisioning",
   publish: "merging",
