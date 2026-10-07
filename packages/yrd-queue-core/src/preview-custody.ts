@@ -183,11 +183,19 @@ export async function retirePreviewSubject(
     async () => {
       const roots = await refsUnder(rootGit, previewSubjectPrefix(clone, options.subject))
       for (const root of roots) await rootGit(["update-ref", "-d", root.name, root.oid])
-      const stores = new Set<string>()
-      for (const root of roots) {
-        for (const store of await closureStores(options.gitIn, main, root.oid, [])) stores.add(store)
+      // The deleted roots are the commit point: the retirement stands from here. A sweep that fails is named, never
+      // thrown, so `yrd env close` still removes its environment, and the next attempt's sweep finishes the cleanup.
+      try {
+        const stores = new Set<string>()
+        for (const root of roots) {
+          for (const store of await closureStores(options.gitIn, main, root.oid, [])) stores.add(store)
+        }
+        await sweepOrphans(rootGit, options.gitIn, `${PREVIEW_REF_ROOT}/${clone}/`, stores, options.leftover)
+      } catch (error) {
+        options.leftover?.(
+          `the orphan sweep after retiring ${options.subject} failed: ${error instanceof Error ? error.message : String(error)}`,
+        )
       }
-      await sweepOrphans(rootGit, options.gitIn, `${PREVIEW_REF_ROOT}/${clone}/`, stores, options.leftover)
       return roots.map((root) => root.name)
     },
     { holder: `yrd preview retirement ${options.subject}` },

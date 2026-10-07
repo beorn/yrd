@@ -1,4 +1,5 @@
 /**
+ * @reach fs-walk <fixture-only: temporary repositories, bare remotes and retained worktrees>
  * @failure A fresh environment ignored its commit's setup or ran it before
  *          dependencies existed; closing an unsafe environment discarded work.
  * @level   l2 (real bare remote and real retained Git worktree)
@@ -20,7 +21,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
-import { createEventStore } from "@yrd/queue-core"
+import { createEventStore, previewCloneKey, previewSubjectPrefix } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
@@ -422,6 +423,41 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
     expect(JSON.parse(closed.stdout())).toEqual({ closed: physical })
     expect(existsSync(path)).toBe(false)
+  })
+
+  it("closes its environment when the preview sweep fails after the subject's roots are retired (27510)", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openEnvironment(w.work, selected)
+    await gitIn(path)(["switch", "--quiet", "-c", "task/closing"])
+    // A custody root recording a component commit its store does not hold: the sweep's closure read fails.
+    const missing = "1".repeat(40)
+    const vendor = (await w.git(["ls-tree", `${selected}:vendor`])).replace(
+      /^160000 commit \S+\tdependency$/mu,
+      `160000 commit ${missing}\tdependency`,
+    )
+    expect(vendor).toContain(missing)
+    const vendorTree = (await w.git(["mktree", "--missing"], vendor)).trim()
+    const top = (await w.git(["ls-tree", selected])).replace(
+      /^040000 tree \S+\tvendor$/mu,
+      `040000 tree ${vendorTree}\tvendor`,
+    )
+    expect(top).toContain(vendorTree)
+    const tree = (await w.git(["mktree"], top)).trim()
+    const recorded = (
+      await w.git(["commit-tree", tree, "-p", selected, "-m", "custody root with a missing component"])
+    ).trim()
+    const root = `${previewSubjectPrefix(previewCloneKey(join(w.work, ".git")), "task/closing")}${recorded}`
+    await w.git(["update-ref", "--create-reflog", root, recorded])
+
+    const closed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+
+    expect(existsSync(path)).toBe(false)
+    expect((await w.git(["for-each-ref", "refs/yrd/preview/"])).trim()).toBe("")
+    expect(closed.stderr()).toContain("yrd: env close left a preview anchor")
+    expect(closed.stderr()).toContain("the orphan sweep after retiring task/closing failed")
   })
 
   it("lists and closes newline-containing paths from a nested caller using the same Git registry", async () => {
