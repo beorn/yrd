@@ -368,14 +368,15 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
 
   /** @failure A dry run reports a composition whose recorded component pin no
    *          store holds, so the queue later names an object it can never read
-   *          (27747): the receipt must SAY the child is not retained — the pin,
-   *          the store it looked in and the cure — instead of reporting a bare
-   *          verified candidate. It is not refused: a refusal fires for every
-   *          change whose component main advanced, which is the ordinary case.
+   *          (27747). 27510 keeps it: the preview anchors the child in the store
+   *          the row names before the receipt observes custody, so the retained
+   *          row carries no custody and the child reads through its anchor. It is
+   *          not refused: a refusal fires for every change whose component main
+   *          advanced, which is the ordinary case.
    * @level   l2 (the public CLI, real remotes and real submodule stores)
    * @consumer seats whose held submission waits on a readable candidate
    */
-  it("reports the composed child no store holds instead of claiming it retained (27747)", async () => {
+  it("keeps the composed child no store held readable through its preview anchor (27747, 27510)", async () => {
     const w = await world()
     const one = w.components[0]!
     const child = gitIn(one.work)
@@ -415,6 +416,7 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
           path: string
           state: string
           from: string
+          store?: string
           custody?: { pin: string; state: string; store: string; cure: string }
         }[]
       }
@@ -422,15 +424,13 @@ describe("yrd submit --gitlink builds a queue-owned carrier", () => {
     const row = receipt.verifying.gitlinks.find((candidate) => candidate.path === one.path)
     expect(row).toBeDefined()
     expect(row).toMatchObject({ path: one.path, state: "merged" })
-    // The composed child is the one pin no store holds, and the receipt names it
-    // rather than reporting a bare verified candidate.
-    expect(row?.custody).toMatchObject({ pin: row?.from, state: "composed-not-retained" })
-    expect(row?.custody?.cure, ran.report).toContain("queue-owned clone")
-    // The proof, not the prose: the store the row names really does not hold the
-    // composed child it lands, so without this report the row is a silent claim.
-    const store = row?.custody?.store ?? ""
-    expect(store).not.toBe("")
-    await expect(gitIn(store)(["cat-file", "-e", String(row?.from) + "^{commit}"])).rejects.toThrow()
+    // The composed child is anchored in the store the row names before the receipt
+    // observes custody, so the retained row carries none (@cto 2e3bb32f).
+    expect(row?.custody, ran.report).toBeUndefined()
+    // The proof, not the prose: that store holds the child at a preview anchor.
+    expect(row?.store, ran.report).toBeDefined()
+    const anchors = await gitIn(row!.store!)(["for-each-ref", "--format=%(objectname)", "refs/yrd/preview/"])
+    expect(anchors.trim().split("\n"), ran.report).toContain(row?.from)
     expect(await refs(w.remote)).toBe(before)
   }, 120_000)
 
@@ -1093,11 +1093,12 @@ describe("ordinary submit with a local-only component pin", () => {
   }, 90_000)
 
   /** @failure A dry run that composes a component child names an object no store
-   *          retains (27747) while still reporting the author's head and landing
-   *          pin (27323); the receipt must carry BOTH facts, not drop either.
+   *          retains (27747, 27510) while still reporting the author's head and
+   *          landing pin (27323); the child must stay readable through its
+   *          preview anchor after the preview exits.
    * @level   l2 @consumer yrd submit --dry-run on a component-moving change
    */
-  it("prints author head and landing pin and marks the composed child unretained (27323, 27747)", async () => {
+  it("prints author head and landing pin and anchors the composed child for review (27323, 27747, 27510)", async () => {
     const w = await world()
     const one = w.components[0]!
     const rootGit = gitIn(w.work)
@@ -1120,6 +1121,14 @@ describe("ordinary submit with a local-only component pin", () => {
     const altHead = (await child(["rev-parse", "HEAD"])).trim()
     await wtGit(["add", one.path])
     await wtGit(["commit", "--quiet", "-m", "pin alt commit on root\n\nRefs: 27323"])
+    // 27510 AC3: a preview grows no permanent pin, in the author's module store or at the component's origin.
+    const common = (await wtGit(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    const pins = async (repository: string): Promise<string> =>
+      gitIn(repository)(["for-each-ref", "--format=%(refname)", "refs/git-super/pins/", "refs/yrd/pins/"])
+    const pinsBefore = {
+      origin: await pins(join(w.root, "one.git")),
+      store: await pins(join(common, "modules", one.path)),
+    }
 
     // 1. Text mode dry-run output
     const ran = await yrd(wt, "submit", "task/27323-merged", "--dry-run", "--issue", "27323", "--submitter", "@dev/1")
@@ -1148,6 +1157,7 @@ describe("ordinary submit with a local-only component pin", () => {
           state: string
           authorHead: string
           landingPin: string
+          store?: string
           custody?: { pin: string; state: string; store: string; cure: string }
         }[]
       }
@@ -1162,9 +1172,31 @@ describe("ordinary submit with a local-only component pin", () => {
     })
     expect(row?.landingPin).toBeDefined()
     expect(row?.landingPin).not.toBe(altHead)
-    // 27747: the landing pin is a QUEUE-COMPOSED child this preview does not
-    // retain, and the receipt says so rather than reporting it as retained.
-    expect(row?.custody).toMatchObject({ pin: row?.landingPin, state: "composed-not-retained" })
-    expect(row?.custody?.cure, ranJson.report).toContain("queue-owned clone")
+    // 27747's custody row exists only while the store it names lacks the composed child; 27510 anchors that child
+    // in that store before the receipt observes custody, so the retained row carries none (@cto 2e3bb32f).
+    expect(row?.custody, ranJson.report).toBeUndefined()
+
+    // 27510 AC1: after the preview exits and its scratch is gone, the recorded child is read through its custody
+    // anchor in THE store the row names (row.store, git-super's durable module store under the common dir; a linked
+    // worktree's own checkout store is a different one): resolve refs/yrd/preview/<clone>/<subject>/<candidate-root>.
+    expect(row?.store, ranJson.report).toBeDefined()
+    const store = gitIn(row!.store!)
+    const anchors = (await store(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/preview/"]))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+    const anchored = anchors.find((line) => line.endsWith(` ${row!.landingPin}`))
+    expect(anchored, `anchors in ${row!.store}:\n${anchors.join("\n")}`).toBeDefined()
+    const anchor = anchored!.split(" ")[0]!
+    expect((await store(["rev-parse", "--verify", `${anchor}^{commit}`])).trim()).toBe(row!.landingPin)
+    expect(await store(["show", `${anchor}:alt.txt`])).toBe("alt-content\n")
+    // The same-named root anchor holds the candidate root, whose gitlink records that child.
+    const rootAnchor = (await wtGit(["for-each-ref", "--format=%(refname)", anchor])).trim()
+    expect(rootAnchor, `the root store has no ${anchor}`).toBe(anchor)
+    expect((await wtGit(["rev-parse", `${anchor}:${one.path}`])).trim()).toBe(row!.landingPin)
+    expect({
+      origin: await pins(join(w.root, "one.git")),
+      store: await pins(join(common, "modules", one.path)),
+    }).toEqual(pinsBefore)
   }, 90_000)
 })

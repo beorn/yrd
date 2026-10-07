@@ -13,6 +13,7 @@ import {
 } from "./git.ts"
 import { freshWorktree, type FreshWorktree, type Worktree } from "./worktree.ts"
 import { populateReferenceStores } from "./reference.ts"
+import { anchorPreviewCustody } from "./preview-custody.ts"
 import { DeriveFailed, deriveInWorktree, type Derived, type DeriveSpec } from "./derive.ts"
 import { requireFrozenGitSuper, withGitConfig } from "./git-super-selection.ts"
 import { detectReverted, type RevertGuardReport } from "./revert-guard.ts"
@@ -82,6 +83,12 @@ export type VerificationOptions = Readonly<{
    * candidate that leaves is still one two-parent merge with its own frozen publication intent.
    */
   derive?: DeriveSpec
+  /**
+   * Preview custody (27510): submit and its preview keep the verified candidate's closure readable after this
+   * worktree is gone, through create-only anchors in the author's existing stores (preview-custody.ts). Written before
+   * the worktree is removed, so the receipt observes the store's final state.
+   */
+  previewCustody?: Readonly<{ subject: string; leftover?: (why: string) => void; retired?: ReadonlySet<string> }>
 }>
 
 /** Shared by submit admission and both queue phases; only git-super composes gitlinks. */
@@ -304,6 +311,33 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
   }
   const candidate = result.commit
   if (candidate === undefined) throw new Error(`git-super merge of ${options.head} lost its commit after derivation`)
+  if (options.previewCustody !== undefined) {
+    const custody = options.previewCustody
+    const selection =
+      options.worktree?.selection ??
+      (await resolveGitSelection(options.repo, { process: options.worktree?.process, env: options.worktree?.env }))
+    try {
+      await timed("preview-custody", () =>
+        anchorPreviewCustody({
+          candidate,
+          excludedSubmodules: worktree.excludedSubmodules,
+          git: options.git,
+          gitIn: (cwd) =>
+            gitIn(cwd, options.worktree?.process, selection, {
+              ...(options.worktree?.env === undefined ? {} : { env: options.worktree.env }),
+              ...options.worktree?.gitOptions,
+            }),
+          ...(custody.leftover === undefined ? {} : { leftover: custody.leftover }),
+          ...(custody.retired === undefined ? {} : { retired: custody.retired }),
+          source: worktree.path,
+          subject: custody.subject,
+        }),
+      )
+    } catch (error) {
+      await worktree.remove()
+      throw error
+    }
+  }
   // #27363: the guard reads the FINAL candidate's component stores, so it runs while the compose
   // worktree still holds them. It never throws into the compose: a guard that cannot prove coverage
   // reports that gap as incomplete, never a silent clean.
@@ -351,7 +385,10 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
 }
 
 async function superMerge(
-  options: Pick<VerificationOptions, "git" | "process" | "env" | "hooksPath" | "noFetch" | "unboundedLocalMain">,
+  options: Pick<
+    VerificationOptions,
+    "git" | "process" | "env" | "hooksPath" | "noFetch" | "unboundedLocalMain" | "previewCustody"
+  >,
   cwd: string,
   commit: string,
   message: string,
@@ -373,9 +410,17 @@ async function superMerge(
       message,
       ...(options.noFetch ? ["--no-fetch"] : []),
       ...(options.unboundedLocalMain ? ["--unbounded-local-main"] : []),
+      // A preview keeps its own custody (27510): the merge writes no pin and pushes no composed child.
+      ...(options.previewCustody === undefined ? [] : ["--no-retain-pins"]),
       ...excludedSubmodules.flatMap((path) => ["--exclude-submodule", path]),
     ],
   )
+  if (options.previewCustody !== undefined && /unknown option '--no-retain-pins'/u.test(execution.stderr)) {
+    throw new Error(
+      `the selected git-super predates --no-retain-pins, so a preview cannot keep its own custody (27510); ` +
+        `select a git-super that supports it rather than composing with permanent pins: ${execution.stderr.trim()}`,
+    )
+  }
   let parsed: unknown
   try {
     parsed = JSON.parse(execution.stdout)

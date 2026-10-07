@@ -45,6 +45,7 @@ import {
   createEventQueue,
   decide,
   initial,
+  listChangeHistories,
   project,
   queueFormat,
   queueRef,
@@ -458,7 +459,8 @@ export async function publishMovedGitlinks(
  * clone, which lacks the author's fresh local component commits.
  *
  * This models the publish by fetching moved gitlinks directly from the author's local
- * component checkouts into the candidate worktree's submodule checkouts under refs/git-super/pins/<sha>.
+ * component checkouts into the candidate worktree's submodule checkouts, by sha and with no ref: preview custody
+ * anchors what the compose keeps (27510).
  */
 export async function modelMovedGitlinks(
   git: Git,
@@ -527,7 +529,8 @@ export async function modelMovedGitlinks(
             "--no-recurse-submodules",
             "--no-write-fetch-head",
             sourceCheckout,
-            `${row.sha}:refs/git-super/pins/${row.sha}`,
+            // No ref (27510): the compose reads the object in this process, and preview custody anchors what it keeps.
+            row.sha,
           ])
         } catch (cause) {
           throw new Error(`could not resolve local component commit ${row.sha} for ${path} from ${sourceCheckout}`, {
@@ -638,7 +641,8 @@ export async function inspectSubmitAtHead(
   head: string,
 ): Promise<SubmitInspection> {
   const admitted = await admitSubmitAtHead(git, remote, request, head)
-  const verifying = await composeSubmit(git, request, admitted)
+  const ended = await withRemoteSeam("previewRetirement", () => endedSubjects(git, admitted.root, remote, request))
+  const verifying = await composeSubmit(git, request, admitted, ended)
   const { root, bases: _bases, operational: _operational, ...inspection } = admitted
   return { ...inspection, verifying: await submissionReceipt(git, root, verifying) }
 }
@@ -797,7 +801,47 @@ async function admitSubmitAtHead(
   }
 }
 
-async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitAdmission): Promise<Verification> {
+/**
+ * The branches whose change has ended for good, read from the queue's own branch fold (27510 retirement): landed,
+ * or cancelled as dropped, withdrawn or deleted. A failed or resubmitted change is still live. A branch whose history
+ * is invalid is never evidence of retirement: it is named and left out.
+ */
+async function endedSubjects(
+  git: Git,
+  root: string,
+  remote: string,
+  request: SubmitRequest,
+): Promise<ReadonlySet<string>> {
+  const store = createEventStore(root, remote, selectionFor(git), runnerFor(git).backend)
+  const format = await queueFormat(store, request.target.branch)
+  // An empty queue has ended no change. One in another format cannot say which have: its retirement is the backstop.
+  if (format === "empty") return new Set()
+  if (format !== "event") {
+    console.warn(
+      `yrd: preview custody cannot read which changes ended from ${request.target.branch}'s ${format} queue; their anchors retire at the seven-day backstop`,
+    )
+    return new Set()
+  }
+  const { histories, invalid } = await listChangeHistories(store, request.target.branch)
+  for (const [branch, defect] of invalid) {
+    console.warn(`yrd: preview custody keeps ${branch}'s anchors: its change history is unreadable: ${defect.error}`)
+  }
+  const ended = new Set<string>()
+  for (const [branch, history] of histories) {
+    const { reason, status } = history.state
+    if (status === "merged" || (status === "cancelled" && ["dropped", "withdrawn", "deleted"].includes(reason ?? ""))) {
+      ended.add(branch)
+    }
+  }
+  return ended
+}
+
+async function composeSubmit(
+  git: Git,
+  request: SubmitRequest,
+  admitted: SubmitAdmission,
+  ended: ReadonlySet<string>,
+): Promise<Verification> {
   const scratch = mkdtempSync(join(tmpdir(), "yrd-submit-verifying-"))
   const hooksPath = join(scratch, "hooks-disabled")
   mkdirSync(hooksPath)
@@ -815,6 +859,12 @@ async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitA
       unboundedLocalMain: true,
       beforeMerge: async (candidate) => {
         await modelMovedGitlinks(git, admitted.root, admitted.bases, admitted.head, candidate)
+      },
+      previewCustody: {
+        subject: request.branch,
+        leftover: (why) =>
+          console.warn(`yrd: preview custody left an orphan anchor; the next submit sweeps it: ${why}`),
+        retired: ended,
       },
     })
     verifying = composed.verifying
@@ -843,7 +893,8 @@ export async function prepareSubmit(git: Git, remote: string, request: SubmitReq
 
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   const { branch: _branch, published, ...admitted } = await prepareSubmit(git, remote, request)
-  const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted))
+  const ended = await withRemoteSeam("previewRetirement", () => endedSubjects(git, admitted.root, remote, request))
+  const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted, ended))
   const receipt = await submissionReceipt(git, admitted.root, verifying)
   const { root, bases: _bases, operational, ...inspection } = admitted
   return withRemoteSeam("submitEvent", () =>
