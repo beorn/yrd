@@ -22,6 +22,7 @@ import {
   runnerRef,
   changesRef,
   changeInput,
+  archivedChangesPrefix,
 } from "@yrd/queue-core"
 import { open } from "gitomic"
 import { createMemBackend } from "gitomic/mem"
@@ -207,6 +208,13 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
       [changeInput("opened", { queueTip, commit: commit2, at: new Date("2026-09-24T12:00:00.000Z"), by: "@dev/7" })],
       { expect: null },
     )
+    // 27957: an archived history lives under refs/yrd-archive/main/, outside refs/yrd/main/. The listing must
+    // still discover it, so this row seeds one cold chain beside the hot one.
+    const coldEvents = await openEvents({ ...store, ref: `${archivedChangesPrefix("main")}task/cold`, writer: "yrd" })
+    await coldEvents.append(
+      [changeInput("opened", { queueTip, commit: commit2, at: new Date("2026-09-17T12:00:00.000Z"), by: "@dev/7" })],
+      { expect: null },
+    )
 
     const mockGit: any = Object.assign(
       async (args: readonly string[]) => {
@@ -237,13 +245,15 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     const listingStore = createEventStore("/repo", "origin", mockSelection, proxyBackend)
 
     // Call 1 at t=0s: initial reading
-    // Should list event refs (refs/yrd/main/) and full heads (refs/heads/)
+    // Should take ONE advertisement for hot and cold event refs (27957: refs/, filtered to refs/yrd/main/ and
+    // refs/yrd-archive/main/) and list full heads (refs/heads/), and discover both the hot and the cold history.
     const r1 = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, {
       now: 1000,
     })
     expect(r1).toBeDefined()
-    expect(listRefsCalls).toContain("refs/yrd/main/")
+    expect(listRefsCalls).toContain("refs/")
     expect(listRefsCalls).toContain("refs/heads/")
+    expect([...r1.changes.keys()].sort()).toEqual(["task/cold", "task/one"])
 
     // Call 2 at t=10s: unchanged event refs (< 60s)
     // Should ONLY list event refs, and NOT list refs/heads/, and REUSE the reading!
@@ -253,7 +263,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     })
     expect(r2).toBeDefined()
     expect(r2.all).toBe(r1.all) // Reused!
-    expect(listRefsCalls).toEqual(["refs/yrd/main/"]) // Only checked event refs! No refs/heads/!
+    expect(listRefsCalls).toEqual(["refs/"]) // Only the one event-ref advertisement! No refs/heads/ listing!
 
     // A status beat is a new queue-owned ref, but no change or admission fact.
     // Its creation and movement must retain the cached change reading and be
@@ -264,13 +274,13 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     const r2a = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, { now: 20_000 })
     expect(r2a.all).toBe(r1.all)
     expect(r2a.runnerTip).toBeDefined()
-    expect(listRefsCalls).toEqual(["refs/yrd/main/"])
+    expect(listRefsCalls).toEqual(["refs/"])
     await status.transact(async (map) => map.set("beat", "two"), "beat two")
     listRefsCalls.length = 0
     const r2b = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, { now: 21_000 })
     expect(r2b.all).toBe(r1.all)
     expect(r2b.runnerTip).not.toBe(r2a.runnerTip)
-    expect(listRefsCalls).toEqual(["refs/yrd/main/"])
+    expect(listRefsCalls).toEqual(["refs/"])
     const fence = mockGit.observe.mock.calls.at(-1)?.[0]?.fence
     expect(fence.prefixes).not.toContain("refs/yrd/main/")
     expect(fence.prefixes).not.toContain(runnerRef("main"))
@@ -288,7 +298,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
       now: 31000, // 30s later
     })
     expect(r3).toBeDefined()
-    expect(listRefsCalls).toContain("refs/yrd/main/")
+    expect(listRefsCalls).toContain("refs/")
     expect(listRefsCalls).toContain("refs/heads/") // Full head listing ran because event refs changed!
 
     // Call 4 at t=50s: event refs unchanged (< 60s since call 3's head listing at t=30s)
@@ -298,7 +308,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
       now: 51000, // 20s after call 3
     })
     expect(r4.all).toBe(r3.all) // Reused!
-    expect(listRefsCalls).toEqual(["refs/yrd/main/"])
+    expect(listRefsCalls).toEqual(["refs/"])
 
     // Call 5 at t=95s: event refs unchanged, BUT 65s have elapsed since call 3's head listing (t=30s to 95s is 65s > 60s)
     // Head listing due! Must list refs/heads/!
@@ -307,7 +317,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
       now: 96000, // 65s after call 3
     })
     expect(r5).toBeDefined()
-    expect(listRefsCalls).toContain("refs/yrd/main/")
+    expect(listRefsCalls).toContain("refs/")
     expect(listRefsCalls).toContain("refs/heads/") // Full head listing ran because >= 60s elapsed!
   })
 

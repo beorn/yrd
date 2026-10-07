@@ -317,7 +317,7 @@ describe("yrd watch, the ending's exit code", () => {
 import { existsSync, writeFileSync } from "node:fs"
 const args = process.argv.slice(2)
 const result = Bun.spawnSync(["git", ...args], { stdin: "inherit", stdout: "pipe", stderr: "pipe" })
-if (result.exitCode === 0 && args.includes("ls-remote") && args.includes("refs/yrd/main/*") && !existsSync(${JSON.stringify(marker)})) {
+if (result.exitCode === 0 && args.includes("ls-remote") && args.includes("refs/*") && !existsSync(${JSON.stringify(marker)})) {
   const moved = Bun.spawnSync(["git", "--git-dir", ${JSON.stringify(remote)}, "update-ref", ...${JSON.stringify(update)}], { stdout: "pipe", stderr: "pipe" })
   if (moved.exitCode !== 0) throw new Error(new TextDecoder().decode(moved.stderr))
   writeFileSync(${JSON.stringify(marker)}, "advanced")

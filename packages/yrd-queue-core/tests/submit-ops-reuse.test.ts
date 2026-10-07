@@ -160,7 +160,9 @@ describe("submit reuses a fenced admission observation", () => {
     }
     expect(calls.seams.inspectSubmit?.ssh_children, JSON.stringify(calls.seams)).toBe(2)
     expect(calls.seams.submitEvent).toMatchObject({ "ls-remote": 3, push: 1 })
-    expect(calls.seams.submitEvent?.fetch ?? 0).toBe(0)
+    // 27957: the one fetch is submit's exact hot+cold custody read. A branch with no hot history may have an
+    // archived one under refs/yrd-archive/main/, which submit must reopen, and the hot-only listing cannot show it.
+    expect(calls.seams.submitEvent?.fetch ?? 0).toBe(1)
     expect(calls.seams.unattributed).toBeUndefined()
     expect(calls.unreadable).toBe(0)
   })
@@ -244,9 +246,10 @@ describe("submit reuses a fenced admission observation", () => {
     }
     expect(mutated).toBe(true)
     const publication = calls.seams.submitEvent
+    // 27957: 9, not 8: the one added call is submit's exact hot+cold custody read for a branch with no hot history.
     const remoteCalls = (publication?.["ls-remote"] ?? 0) + (publication?.fetch ?? 0) + (publication?.push ?? 0)
     expect(publication?.push).toBe(1)
-    expect(remoteCalls, JSON.stringify(publication)).toBeLessThanOrEqual(8)
+    expect(remoteCalls, JSON.stringify(publication)).toBeLessThanOrEqual(9)
     expect(calls.unreadable).toBe(0)
   })
 
