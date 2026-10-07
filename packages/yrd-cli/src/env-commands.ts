@@ -69,8 +69,8 @@ function requireRepository(io: YrdCliIO): string {
   return root
 }
 
-function baysRootOf(): string {
-  return worktreeHomeRoot()
+function baysRootOf(repo: string): string {
+  return worktreeHomeRoot({ repo })
 }
 
 function legacyBaysRoot(repo: string): string {
@@ -345,7 +345,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       )
     }
     const existing = (await registeredWorktrees(git)).find(
-      (entry) => entry.branch === branch && resolve(entry.path) === resolve(baysRootOf(), name),
+      (entry) => entry.branch === branch && resolve(entry.path) === resolve(baysRootOf(root), name),
     )
     if (existing !== undefined) {
       const treeGit = gitIn(existing.path, process, selection)
@@ -373,7 +373,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
         `environment ${existing.path} is clean and merged into requested base ${base}; to continue: yrd env close ${quote(existing.path)} && ${reopen}`,
       )
     }
-    const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(), process })
+    const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
     const excludedSubmodules = await declaredPrivateSubmodules(git, resolve(root), base)
     const result = await workspace.provision({ bay: name, name, branch, base, excludedSubmodules })
     if (result.conclusion !== "success") {
@@ -497,7 +497,7 @@ export async function environmentInventory(
   git: Git,
   workdir: string,
 ): Promise<Readonly<{ roots: readonly string[]; rows: readonly EnvRow[] }>> {
-  const roots = [baysRootOf(), legacyBaysRoot(root), join(resolve(root, workdir), "environments")]
+  const roots = [baysRootOf(root), legacyBaysRoot(root), join(resolve(root, workdir), "environments")]
   const prefixes = roots.map((path) => `${existsSync(path) ? realpathSync(path) : resolve(path)}/`)
   const rows: EnvRow[] = (await registeredWorktrees(git))
     .filter(({ path }) => prefixes.some((prefix) => path.startsWith(prefix)))
@@ -551,7 +551,7 @@ export async function closeEnvironment(
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process, selection)
   const workdir = resolve(root, await workdirOf(git))
-  const roots = [baysRootOf(), legacyBaysRoot(root), join(workdir, "environments")]
+  const roots = [baysRootOf(root), legacyBaysRoot(root), join(workdir, "environments")]
   const requested = resolve(io.cwd ?? globalThis.process.cwd(), operand)
   let path: string
   try {

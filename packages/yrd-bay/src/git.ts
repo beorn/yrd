@@ -60,7 +60,7 @@ function safeBayPath(root: string, bay: string): string {
 
 export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<BayWorkspace> {
   const repo = resolve(options.repo)
-  const baysRoot = resolve(options.baysRoot ?? worktreeHomeRoot())
+  const baysRoot = resolve(options.baysRoot ?? worktreeHomeRoot({ repo }))
   const transport = adaptProcessGit(options.process, { timeoutMs: GIT_TIMEOUT_MS })
   const worktrees = createGitWorktreeStore({ ...options, gitProcess: transport })
   const { git } = worktrees

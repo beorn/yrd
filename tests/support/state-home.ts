@@ -39,6 +39,11 @@ export function pinYrdTestStateHome(env: NodeJS.ProcessEnv = process.env): strin
   env[ROOT_VARIABLE] = root
   env.XDG_STATE_HOME = join(root, "state")
   env.BUN_INSTALL_CACHE_DIR = join(root, "bun-install-cache")
+  // The worktree pool home, pinned beside XDG_STATE_HOME for the same reason:
+  // an UNDECLARED temp repo otherwise resolves to git-super's default
+  // (/hh/var/wt) and a test would create worktrees inside the live pool
+  // (@cto 0590fb81, P1 pool-path). Workers inherit this before they exist.
+  env.HH_WORKTREE_HOME = join(root, "worktrees")
   return root
 }
 
