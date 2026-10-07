@@ -1093,11 +1093,12 @@ describe("ordinary submit with a local-only component pin", () => {
   }, 90_000)
 
   /** @failure A dry run that composes a component child names an object no store
-   *          retains (27747) while still reporting the author's head and landing
-   *          pin (27323); the receipt must carry BOTH facts, not drop either.
+   *          retains (27747, 27510) while still reporting the author's head and
+   *          landing pin (27323); the child must stay readable through its
+   *          preview anchor after the preview exits.
    * @level   l2 @consumer yrd submit --dry-run on a component-moving change
    */
-  it("prints author head and landing pin and marks the composed child unretained (27323, 27747)", async () => {
+  it("prints author head and landing pin and anchors the composed child for review (27323, 27747, 27510)", async () => {
     const w = await world()
     const one = w.components[0]!
     const rootGit = gitIn(w.work)
@@ -1162,10 +1163,9 @@ describe("ordinary submit with a local-only component pin", () => {
     })
     expect(row?.landingPin).toBeDefined()
     expect(row?.landingPin).not.toBe(altHead)
-    // 27747: the landing pin is a QUEUE-COMPOSED child this preview does not
-    // retain, and the receipt says so rather than reporting it as retained.
-    expect(row?.custody).toMatchObject({ pin: row?.landingPin, state: "composed-not-retained" })
-    expect(row?.custody?.cure, ranJson.report).toContain("queue-owned clone")
+    // 27747's custody row exists only while the store it names lacks the composed child; 27510 anchors that child
+    // in that store before the receipt observes custody, so the retained row carries none (@cto 2e3bb32f).
+    expect(row?.custody, ranJson.report).toBeUndefined()
 
     // 27510 AC1: after the preview exits and its scratch is gone, the recorded child is read through its custody
     // anchor in the author's own store: resolve refs/yrd/preview/<clone>/<subject>/<candidate-root>, then show it.
