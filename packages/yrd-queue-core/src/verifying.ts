@@ -359,6 +359,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
       coverage: "incomplete",
       gaps: [
         {
+          kind: "unjudged",
           depth: 0,
           path: ".",
           reason: `revert guard could not run: ${error instanceof Error ? error.message : String(error)}`,

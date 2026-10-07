@@ -19,8 +19,10 @@
  *
  * A deliberate revert of a target change is indistinguishable from the incident, so
  * observation is always on and refusal is opt-in (`revert-guard: refuse`). Bounds
- * (path cap, depth, history window) and a merge base that is not exactly one make the
- * proof INCOMPLETE, named, and never silently clean.
+ * that make the guard SKIP work (path cap, depth) and a merge base that is not exactly
+ * one make the proof INCOMPLETE, named, and never silently clean. A search that ran to
+ * its declared history window `W` is complete relative to that declaration: it is
+ * recorded, and it neither makes coverage incomplete nor warns by itself (#28000).
  */
 import { join } from "node:path"
 import { GitExit, isAncestor, mergeBases, runnerFor, type Git } from "./git.ts"
@@ -49,8 +51,22 @@ export type SwallowedComposition = Readonly<{
   candidate: string
 }>
 
-/** Named proof the guard could not complete, so `coverage` is `incomplete` and never silently clean. */
+/**
+ * A named limit on the guard's proof, typed by WHAT IT COSTS (#28000).
+ *
+ * `unjudged` — the guard could not run its proof at all (unreadable history or trees, a base it could not pick,
+ * or a declared cap that made it skip work). This is the only kind that makes `coverage` `incomplete` and the
+ * only one that raises a warning on its own, because it is the only one where nobody judged the change.
+ *
+ * `bounded` — the guard RAN its proof and its declared search depth (`bounds.window`) ended the walk with
+ * nothing found. That is the proof the guard defines, run to its own declared bound: complete relative to that
+ * declaration, not a failure to judge. It is still recorded (naming the bound reached), but it never makes
+ * coverage incomplete and never warns by itself — a warning that fires on every change touching an established
+ * path carries no signal, and the fact it was carrying ("the search is bounded at W") is a constant of the
+ * guard, not a fact about the change.
+ */
 export type RevertGuardGap = Readonly<{
+  kind: "unjudged" | "bounded"
   path: string
   depth: number
   reason: string
@@ -141,9 +157,14 @@ export async function detectReverted(options: RevertGuardOptions): Promise<Rever
         ? { state: "none" }
         : { count: bases.length, state: "ambiguous" }
   if (base.state === "none") {
-    report.gaps.push({ depth: 0, path: "", reason: "no merge base between the target and the change" })
+    report.gaps.push({
+      kind: "unjudged",
+      depth: 0,
+      path: "",
+      reason: "no merge base between the target and the change",
+    })
   } else if (base.state === "ambiguous") {
-    report.gaps.push({ depth: 0, path: "", reason: `base: ambiguous (${String(base.count)})` })
+    report.gaps.push({ kind: "unjudged", depth: 0, path: "", reason: `base: ambiguous (${String(base.count)})` })
   }
   await walk({
     budget: { remaining: bounds.pathCap },
@@ -163,7 +184,7 @@ export async function detectReverted(options: RevertGuardOptions): Promise<Rever
   return {
     base,
     count: judged ? report.paths.length : 0,
-    coverage: report.gaps.length === 0 ? "complete" : "incomplete",
+    coverage: report.gaps.some((gap) => gap.kind === "unjudged") ? "incomplete" : "complete",
     gaps: report.gaps,
     paths: judged ? report.paths : [],
     swallowed: judged ? report.swallowed : [],
@@ -178,6 +199,7 @@ async function walk(level: Level): Promise<void> {
     toIncoming = await rawDiff(level.git, level.target, level.incoming)
   } catch (error) {
     level.report.gaps.push({
+      kind: "unjudged",
       depth: level.depth,
       path: level.prefix === "" ? "." : level.prefix,
       reason: `component tree unreadable: ${detail(error)}`,
@@ -225,6 +247,7 @@ async function walk(level: Level): Promise<void> {
         }
       } catch (error) {
         level.report.gaps.push({
+          kind: "unjudged",
           depth: level.depth,
           path: full,
           reason: `component trees unreadable: ${detail(error)}`,
@@ -235,6 +258,7 @@ async function walk(level: Level): Promise<void> {
     if (pins.candidate === pins.target) continue
     if (level.depth + 1 > level.bounds.depth) {
       level.report.gaps.push({
+        kind: "unjudged",
         depth: level.depth + 1,
         path: full,
         reason: `depth cap D=${String(level.bounds.depth)}`,
@@ -264,6 +288,7 @@ async function assessPath(level: Level, row: RawRow): Promise<void> {
   const full = level.prefix + row.path
   if (level.budget.remaining <= 0) {
     level.report.gaps.push({
+      kind: "unjudged",
       depth: level.depth,
       path: full,
       reason: `path cap P_max=${String(level.bounds.pathCap)}`,
@@ -276,6 +301,7 @@ async function assessPath(level: Level, row: RawRow): Promise<void> {
     viewed = await firstParentTouching(level.git, level.target, level.bounds.window + 1, row.path)
   } catch (error) {
     level.report.gaps.push({
+      kind: "unjudged",
       depth: level.depth,
       path: full,
       reason: `target history unreadable: ${detail(error)}`,
@@ -302,6 +328,7 @@ async function assessPath(level: Level, row: RawRow): Promise<void> {
   // A capped NEGATIVE proof is not a clean one: name it so refusal fails closed.
   if (capped) {
     level.report.gaps.push({
+      kind: "bounded",
       depth: level.depth,
       path: full,
       reason: "target history window W=" + String(level.bounds.window) + " exhausted",
@@ -370,8 +397,11 @@ async function firstParentTouching(git: Git, target: string, window: number, pat
 
 /**
  * The durable-warning finding for a report, or undefined when there is nothing to say.
- * A `complete` report with no hit is the ONLY silent case; an incomplete or ambiguous
- * proof always names itself.
+ * A `complete` report with no hit is the ONLY silent case, and a report is `complete` when
+ * every gap is `bounded` (#28000) — so a search that reached its declared window `W` warns
+ * nobody, which is what makes the warning mean "nobody could judge this change". A hit, or
+ * any `unjudged` gap (unreadable tree/history, an unpicked base, a cap that skipped work),
+ * always names itself.
  */
 export function revertedPathsFinding(
   report: RevertGuardReport | undefined,
@@ -386,6 +416,7 @@ export function revertedPathsFinding(
 export function revertedPathsReason(report: RevertGuardReport): string {
   const paths = [...report.paths.map((row) => row.path), ...report.swallowed.map((row) => row.path)]
   const gaps = report.gaps.slice(0, 32).map((gap) => ({
+    kind: gap.kind,
     depth: gap.depth,
     reason: gap.reason,
     ...(gap.path === "" ? {} : { path: gap.path }),
@@ -421,6 +452,11 @@ export function revertGuardAction(
   mode: "observe" | "refuse",
 ): RevertGuardAction {
   const finding = revertedPathsFinding(report)
-  if (finding === undefined) return "clean"
-  return mode === "refuse" ? "stick" : "warn"
+  if (finding !== undefined) return mode === "refuse" ? "stick" : "warn"
+  // #28000: a search that only reached its declared window does not WARN — a warning that fires on every change
+  // touching an established path carries no signal, so `observe` must mean "nobody could judge this change".
+  // Refusal never loosens for it, though: a bounded search can hide a revert (the window-cap regression test
+  // demonstrates exactly that), so `refuse` still sticks when any gap — bounded or unjudged — is on the report.
+  if (mode === "refuse" && report?.gaps.some((gap) => gap.kind === "bounded")) return "stick"
+  return "clean"
 }

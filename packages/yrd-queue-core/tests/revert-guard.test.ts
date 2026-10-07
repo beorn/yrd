@@ -234,7 +234,7 @@ describe("revert guard (27363)", () => {
       base: { base: "a".repeat(40), state: "single" },
       count: 0,
       coverage: "incomplete",
-      gaps: [{ depth: 0, path: "a.txt", reason: "target history window W=50 exhausted" }],
+      gaps: [{ kind: "bounded", depth: 0, path: "a.txt", reason: "target history window W=50 exhausted" }],
       paths: [],
       swallowed: [],
     }
@@ -295,7 +295,7 @@ describe("revert guard (27363)", () => {
 })
 
 describe("revert guard review regressions (27363)", () => {
-  it("bounds: an exhausted history window is named incomplete, never clean", async () => {
+  it("bounds (#28000): a reached history window is recorded, warns nobody, and refusal still sticks", async () => {
     const w = await cappedWorld()
     const root = await w.checkoutAt(w.candidate)
     const capped = await detectReverted({
@@ -306,8 +306,15 @@ describe("revert guard review regressions (27363)", () => {
       root,
       targetHead: w.target,
     })
-    expect(capped.coverage).toBe("incomplete")
-    expect(capped.gaps.some((gap) => gap.reason.includes("window"))).toBe(true)
+    // The declared bound was reached: it is RECORDED and typed as a bound, never as a failure to judge, because
+    // the guard RAN its proof and this is the proof it declares (#28000).
+    expect(capped.coverage).toBe("complete")
+    expect(capped.gaps.some((gap) => gap.kind === "bounded" && gap.reason.includes("window"))).toBe(true)
+    // `observe` must mean "nobody could judge this change": a bounded search warns nobody (0 reverted paths plus a
+    // warning on every change touching an established path is a warning with no signal).
+    expect(revertedPathsFinding(capped)).toBeUndefined()
+    expect(revertGuardAction(capped, "observe")).toBe("clean")
+    // Refusal never loosens for it: the cap CAN hide a real revert, as the full run below proves.
     expect(revertGuardAction(capped, "refuse")).toBe("stick")
     // The full window finds the restore the cap hid: the cap, not the change, was the finding.
     const full = await detect(w, w.candidate, w.head)
@@ -330,6 +337,9 @@ describe("revert guard review regressions (27363)", () => {
     expect(report.gaps.some((gap) => gap.reason.includes("ambiguous"))).toBe(true)
     expect(report.paths).toEqual([])
     expect(report.swallowed).toEqual([])
+    // An `unjudged` gap — a base the guard could not pick — is still a warning in BOTH modes: nobody judged it.
+    expect(revertedPathsFinding(report)).toBeDefined()
+    expect(revertGuardAction(report, "observe")).toBe("warn")
     expect(revertGuardAction(report, "refuse")).toBe("stick")
   })
 })
