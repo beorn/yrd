@@ -1149,6 +1149,7 @@ describe("ordinary submit with a local-only component pin", () => {
           state: string
           authorHead: string
           landingPin: string
+          store?: string
           custody?: { pin: string; state: string; store: string; cure: string }
         }[]
       }
@@ -1168,16 +1169,19 @@ describe("ordinary submit with a local-only component pin", () => {
     expect(row?.custody, ranJson.report).toBeUndefined()
 
     // 27510 AC1: after the preview exits and its scratch is gone, the recorded child is read through its custody
-    // anchor in the author's own store: resolve refs/yrd/preview/<clone>/<subject>/<candidate-root>, then show it.
-    const anchors = (await child(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/preview/"]))
+    // anchor in THE store the row names (row.store, git-super's durable module store under the common dir; a linked
+    // worktree's own checkout store is a different one): resolve refs/yrd/preview/<clone>/<subject>/<candidate-root>.
+    expect(row?.store, ranJson.report).toBeDefined()
+    const store = gitIn(row!.store!)
+    const anchors = (await store(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/preview/"]))
       .trim()
       .split("\n")
       .filter(Boolean)
     const anchored = anchors.find((line) => line.endsWith(` ${row!.landingPin}`))
-    expect(anchored, `anchors in the author's ${one.path} store:\n${anchors.join("\n")}`).toBeDefined()
+    expect(anchored, `anchors in ${row!.store}:\n${anchors.join("\n")}`).toBeDefined()
     const anchor = anchored!.split(" ")[0]!
-    expect((await child(["rev-parse", "--verify", `${anchor}^{commit}`])).trim()).toBe(row!.landingPin)
-    expect(await child(["show", `${anchor}:alt.txt`])).toBe("alt-content\n")
+    expect((await store(["rev-parse", "--verify", `${anchor}^{commit}`])).trim()).toBe(row!.landingPin)
+    expect(await store(["show", `${anchor}:alt.txt`])).toBe("alt-content\n")
     // The same-named root anchor holds the candidate root, whose gitlink records that child.
     const rootAnchor = (await wtGit(["for-each-ref", "--format=%(refname)", anchor])).trim()
     expect(rootAnchor, `the root store has no ${anchor}`).toBe(anchor)
