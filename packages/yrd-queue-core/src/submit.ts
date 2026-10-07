@@ -459,7 +459,8 @@ export async function publishMovedGitlinks(
  * clone, which lacks the author's fresh local component commits.
  *
  * This models the publish by fetching moved gitlinks directly from the author's local
- * component checkouts into the candidate worktree's submodule checkouts under refs/git-super/pins/<sha>.
+ * component checkouts into the candidate worktree's submodule checkouts, by sha and with no ref: preview custody
+ * anchors what the compose keeps (27510).
  */
 export async function modelMovedGitlinks(
   git: Git,
@@ -528,7 +529,8 @@ export async function modelMovedGitlinks(
             "--no-recurse-submodules",
             "--no-write-fetch-head",
             sourceCheckout,
-            `${row.sha}:refs/git-super/pins/${row.sha}`,
+            // No ref (27510): the compose reads the object in this process, and preview custody anchors what it keeps.
+            row.sha,
           ])
         } catch (cause) {
           throw new Error(`could not resolve local component commit ${row.sha} for ${path} from ${sourceCheckout}`, {

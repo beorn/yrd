@@ -385,7 +385,10 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
 }
 
 async function superMerge(
-  options: Pick<VerificationOptions, "git" | "process" | "env" | "hooksPath" | "noFetch" | "unboundedLocalMain">,
+  options: Pick<
+    VerificationOptions,
+    "git" | "process" | "env" | "hooksPath" | "noFetch" | "unboundedLocalMain" | "previewCustody"
+  >,
   cwd: string,
   commit: string,
   message: string,
@@ -407,9 +410,17 @@ async function superMerge(
       message,
       ...(options.noFetch ? ["--no-fetch"] : []),
       ...(options.unboundedLocalMain ? ["--unbounded-local-main"] : []),
+      // A preview keeps its own custody (27510): the merge writes no pin and pushes no composed child.
+      ...(options.previewCustody === undefined ? [] : ["--no-retain-pins"]),
       ...excludedSubmodules.flatMap((path) => ["--exclude-submodule", path]),
     ],
   )
+  if (options.previewCustody !== undefined && /unknown option '--no-retain-pins'/u.test(execution.stderr)) {
+    throw new Error(
+      `the selected git-super predates --no-retain-pins, so a preview cannot keep its own custody (27510); ` +
+        `select a git-super that supports it rather than composing with permanent pins: ${execution.stderr.trim()}`,
+    )
+  }
   let parsed: unknown
   try {
     parsed = JSON.parse(execution.stdout)
