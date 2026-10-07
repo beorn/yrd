@@ -1189,7 +1189,9 @@ describe("ordinary submit with a local-only component pin", () => {
     expect(anchored, `anchors in ${row!.store}:\n${anchors.join("\n")}`).toBeDefined()
     const anchor = anchored!.split(" ")[0]!
     expect((await store(["rev-parse", "--verify", `${anchor}^{commit}`])).trim()).toBe(row!.landingPin)
+    // Both sides of the composed merge, as @dev/3's RED (yrd 7d0df639) asked: the author's alt.txt and the target's one.txt.
     expect(await store(["show", `${anchor}:alt.txt`])).toBe("alt-content\n")
+    expect(await store(["show", `${anchor}:one.txt`])).toBe("held\n")
     // The same-named root anchor holds the candidate root, whose gitlink records that child.
     const rootAnchor = (await wtGit(["for-each-ref", "--format=%(refname)", anchor])).trim()
     expect(rootAnchor, `the root store has no ${anchor}`).toBe(anchor)
