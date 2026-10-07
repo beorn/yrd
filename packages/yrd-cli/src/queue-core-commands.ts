@@ -3101,7 +3101,7 @@ export async function coreQueueCommand(
             ? undefined
             : `${String(documentRows.length)} of ${String(listed.filter((item) => item.row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
               (documentRows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
-        const baseScope = `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
+        const baseScope = `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
         const ignoreScope =
           config.ignore.length === 0
             ? undefined
@@ -3691,7 +3691,7 @@ export async function coreQueueCommand(
       const filtered = filterLsRows(unfiltered, request.terms ?? [])
 
       const queue = queueName(config.target, await remoteUrl(git, config.target.remote))
-      const baseScope = `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
+      const baseScope = `Read event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, branch heads at ${config.target.remote}, and direct target commits after the queue declaration.`
       const ignoreScope =
         config.ignore.length === 0
           ? undefined
@@ -3792,8 +3792,8 @@ export async function coreQueueCommand(
         const histories = [...changeHistories, ...directHistories]
         const scope =
           request.all === true
-            ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
-            : `Read ${changesRef(config.target.branch, request.branch as string)} at ${config.target.remote}; draft branches are outside this reading.`
+            ? `Read all event change chains in ${queueRefPrefix(config.target.branch)}/changes/ and ${archivedChangesPrefix(config.target.branch)}, and direct target commits at ${config.target.remote}; draft branches are outside this reading.`
+            : `Read ${changesRef(config.target.branch, request.branch as string)} and ${archivedChangesPrefix(config.target.branch)}${request.branch as string} at ${config.target.remote}; draft branches are outside this reading.`
         const views = new Map<string, Readonly<{ checks: readonly CheckView[]; note?: string }>>()
         for (const history of histories) {
           const run = reading.journals.runs.get(journalKey(history.branch, history.head))?.[0]
