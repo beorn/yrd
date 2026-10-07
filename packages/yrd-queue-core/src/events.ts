@@ -2318,6 +2318,15 @@ export async function archiveQueue(
     recent: number
     candidates: readonly ArchiveCandidate[]
     archived: readonly string[]
+    readbacks: readonly Readonly<{
+      branch: string
+      ref: string
+      previousTip: string
+      coldRef: string
+      coldTip: string
+      hotTip: null
+      readAt: string
+    }>[]
   }>
 > {
   if (typeof request.dryRun !== "boolean") throw new TypeError("archive needs an explicit dryRun boolean")
@@ -2365,8 +2374,19 @@ export async function archiveQueue(
   }
   candidates.sort((a, b) => a.ref.localeCompare(b.ref))
   const archived: string[] = []
+  const readbacks: {
+    branch: string
+    ref: string
+    previousTip: string
+    coldRef: string
+    coldTip: string
+    hotTip: null
+    readAt: string
+  }[] = []
   if (!request.dryRun) {
     const publish = store.backend.publish
+    const readRefs = store.backend.listRefs
+    if (readRefs === undefined) throw new TypeError(`${queue}: backend cannot read back archive custody`)
     if (publish === undefined) throw new TypeError(`${queue}: backend cannot publish atomic archive custody`)
     for (const candidate of candidates) {
       const history = histories.get(candidate.branch)
@@ -2396,12 +2416,37 @@ export async function archiveQueue(
           ],
           store.remote,
         )
+        archived.push(staged.head)
+        let observed: ReadonlyMap<string, string>
+        try {
+          observed = await readRefs(store.repo, "refs/", store.remote)
+        } catch (cause) {
+          throw new Error(
+            `archive-custody-readback: ${candidate.coldRef} and ${candidate.ref} at ${store.remote} could not be read (${String(cause)}); published ${staged.head}, previous ${candidate.tip}; stop and page the queue owner`,
+            { cause },
+          )
+        }
+        const coldTip = observed.get(candidate.coldRef)
+        const hotTip = observed.get(candidate.ref)
+        if (coldTip !== staged.head || hotTip !== undefined) {
+          throw new Error(
+            `archive-custody-readback: ${candidate.coldRef} expected ${staged.head}, read ${coldTip ?? "absent"}; ${candidate.ref} expected absent, read ${hotTip ?? "absent"}; previous ${candidate.tip}; stop and page the queue owner`,
+          )
+        }
+        readbacks.push({
+          branch: candidate.branch,
+          ref: candidate.ref,
+          previousTip: candidate.tip,
+          coldRef: candidate.coldRef,
+          coldTip,
+          hotTip: null,
+          readAt: new Date().toISOString(),
+        })
       } catch (cause) {
-        const message = `${queue}: archive stopped at ${candidate.ref} after ${archived.length}/${candidates.length} transfers: ${String(cause)}`
+        const message = `${queue}: archive stopped at ${candidate.ref} after ${archived.length}/${candidates.length} transfers: ${String(cause)}; custody-readbacks=${JSON.stringify(readbacks)}`
         if (cause instanceof Conflict) throw new Conflict(message, { refs: cause.refs, cause })
         throw new Error(message, { cause })
       }
-      archived.push(staged.head)
     }
   }
   return {
@@ -2413,6 +2458,7 @@ export async function archiveQueue(
     recent,
     candidates,
     archived,
+    readbacks,
   }
 }
 export type InvalidChangeHistory = Readonly<{ ref: string; tip: string; error: string; events: readonly Event[] }>
