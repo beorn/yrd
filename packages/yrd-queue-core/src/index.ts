@@ -21,6 +21,7 @@
  */
 
 export {
+  archivedChangesPrefix,
   changeName,
   classifyQueueRef,
   changesRef,

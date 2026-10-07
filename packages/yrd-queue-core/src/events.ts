@@ -2177,11 +2177,14 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
     throw new Error(`drop needs an event queue at ${store.remote}#${queue}; expected ${queueRef(queue)}`)
   }
   const queueTip = (await readEventQueue(store, queue)).tip
-  const ref = changesRef(queue, branch)
+  const { ref, history: selected } = await readBranchHistory(store, queue, branch)
   const chain = await openEvents({ ...store, ref, writer: request.by })
-  const selectedTip = await chain.head()
-  const history = selectedTip === null ? [] : await readEventChain(chain)
-  const state = selectedTip === null ? initial : project(history, ref, store.repo)
+  const selectedTip = selected?.state.tip ?? null
+  if (selected !== undefined && selectedTip === null) {
+    throw new Error(`${ref} in ${store.repo}: selected history has no tip`)
+  }
+  const history = selected?.events ?? []
+  const state = selected?.state ?? initial
   const branchRef = `refs/heads/${branch}`
   const fetchRefs = store.backend.fetchRefs
   if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs for dropped branch commit")

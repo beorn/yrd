@@ -167,7 +167,32 @@ it("reads a fresh queue-owned store without remote Git calls and refreshes once 
   const repo = await world('checks:\n  - verify: {run: "true"}\n')
   const git = gitIn(repo)
   const target = (await git(["rev-parse", "HEAD"])).trim()
-  await createQueue(repo, "main", target, new Date("2026-09-22T14:00:00.000Z"))
+  const at = new Date("2026-09-22T14:00:00.000Z")
+  const queueTip = await createQueue(repo, "main", target, at)
+  // @failure 27957: a local status mirror must fetch cold histories as well as hot events.
+  // The original empty queue proved refresh frequency but could not detect archived rows disappearing.
+  const location = createEventStore(repo, "origin", git.selection)
+  const branch = "task/retained"
+  const hot = changesRef("main", branch)
+  const cold = `refs/yrd-archive/main/${branch}`
+  const written = await (
+    await openEvents({ ...location, ref: hot })
+  ).append(
+    [
+      changeInput("opened", { queueTip, at, commit: target, by: "@dev/6" }),
+      changeInput("merged", { queueTip, at, commit: target }),
+    ],
+    { expect: null },
+  )
+  if (written.head === null || location.backend.publish === undefined) throw new Error("fixture lacks cold custody")
+  await location.backend.publish(
+    repo,
+    [
+      { ref: cold, expect: "0".repeat(40), oid: written.head },
+      { ref: hot, expect: written.head, oid: null },
+    ],
+    "origin",
+  )
   const root = dirname(repo)
   const remote = join(root, "remote.git")
   const owned = join(root, "owned")
@@ -186,13 +211,18 @@ it("reads a fresh queue-owned store without remote Git calls and refreshes once 
   try {
     process.env.GIT_TRACE2_EVENT = firstTrace
     const first = capture(repo)
-    expect(await coreQueueCommand(repo, first.io, { command: "list" }, options), first.stderr()).toBe(0)
-    expect(JSON.parse(first.stdout())).toMatchObject({ source: "local", asOf: expect.any(String) })
+    expect(await coreQueueCommand(repo, first.io, { command: "list", all: true }, options), first.stderr()).toBe(0)
+    expect(JSON.parse(first.stdout())).toMatchObject({
+      source: "local",
+      asOf: expect.any(String),
+      changes: [{ branch, state: "merged", merge: target }],
+    })
     expect(readRemoteCalls(firstTrace).verbs.fetch).toBe(1)
 
     process.env.GIT_TRACE2_EVENT = warmTrace
     const warm = capture(repo)
-    expect(await coreQueueCommand(repo, warm.io, { command: "list" }, options), warm.stderr()).toBe(0)
+    expect(await coreQueueCommand(repo, warm.io, { command: "list", all: true }, options), warm.stderr()).toBe(0)
+    expect(JSON.parse(warm.stdout())).toMatchObject({ changes: [{ branch, state: "merged", merge: target }] })
     const shown = capture(repo)
     expect(
       await coreQueueCommand(repo, shown.io, { command: "show", branch: "task/absent" }, options),

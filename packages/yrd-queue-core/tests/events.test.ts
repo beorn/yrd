@@ -1173,7 +1173,7 @@ describe("the queue-format boundary", () => {
     })
   })
 
-  it("only deletes the branch name of a merged change", async () => {
+  it.each(["hot", "cold"] as const)("only deletes the branch name of a %s merged change", async (custody) => {
     const { store, location } = remoteMemStore("yrd-event-drop-merged")
     const target = await open({ ...store, ref: "refs/heads/lab" })
     const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
@@ -1189,8 +1189,19 @@ describe("the queue-format boundary", () => {
       [changeInput("merged", { queueTip, at: new Date("2026-09-22T14:02:00.000Z"), commit: head })],
       { expect: opened.head },
     )
+    // @failure 27957: an owner drop must keep archived merge history and never create a new cancelled hot chain.
+    // The original hot-only case cannot detect a cold merge being treated as an unseen branch.
+    const ref = custody === "hot" ? changesRef("lab", "task/merged") : "refs/yrd-archive/lab/task/merged"
+    if (custody === "cold") {
+      if (store.backend.publish === undefined || merged.head === null) throw new Error("fixture lacks cold custody")
+      await store.backend.publish(store.repo, [
+        { ref, expect: "0".repeat(40), oid: merged.head },
+        { ref: changesRef("lab", "task/merged"), expect: merged.head, oid: null },
+      ])
+    }
     await drop(location, { queue: "lab", branch: "task/merged", by: "@dev/2" })
-    expect(await chain.head()).toBe(merged.head)
+    expect((await listRefs(ref, store)).get(ref)).toBe(merged.head)
+    if (custody === "cold") expect(await chain.head()).toBeNull()
     expect((await listRefs("refs/heads/task/merged", store)).size).toBe(0)
     expect((await readStatus(location, "lab", "task/merged")).status).toBe("merged")
   })

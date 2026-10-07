@@ -112,15 +112,44 @@ describe("event submit", () => {
       { expect: null },
     )
     if (prior.head === null || location.backend.publish === undefined) throw new Error("cold fixture lacks custody")
-    await location.backend.publish(
-      w.work,
-      [
-        { ref: cold, expect: "0".repeat(40), oid: prior.head },
-        { ref: hot, expect: prior.head, oid: null },
-      ],
-      "origin",
-    )
+    const priorTip = prior.head
     const request = { branch, submitter: "@dev/6", target: { branch: "main", remote: "origin" } }
+    // @failure 27957: moving hot custody after selection must not let transact replay an empty new branch.
+    // Static cold histories cannot exercise the read-to-transaction boundary.
+    const backend = runnerFor(w.git).backend
+    const fetch = backend.fetchRefs
+    const list = backend.listRefs
+    const publishFixture = location.backend.publish
+    if (fetch === undefined || list === undefined) throw new Error("cold fixture lacks ref reads")
+    let moved = false
+    let selectedHot = false
+    {
+      using listing = vi.spyOn(backend, "listRefs").mockImplementation(async (...args) => {
+        if (selectedHot && !moved && args[1] === hot) {
+          moved = true
+          await publishFixture(
+            w.work,
+            [
+              { ref: cold, expect: "0".repeat(40), oid: priorTip },
+              { ref: hot, expect: priorTip, oid: null },
+            ],
+            "origin",
+          )
+        }
+        return list(...args)
+      })
+      using moving = vi.spyOn(backend, "fetchRefs").mockImplementation(async (...args) => {
+        const fetched = await fetch(...args)
+        if (Array.isArray(args[1]) && args[1].includes(hot) && args[1].includes(cold) && fetched.has(hot)) {
+          selectedHot = true
+        }
+        return fetched
+      })
+      await expect(submit(w.git, "origin", request)).rejects.toThrow("moved after submit selected its history")
+      expect(moving).toHaveBeenCalled()
+      expect(listing).toHaveBeenCalled()
+    }
+    expect(moved).toBe(true)
     await expect(submit(w.git, "origin", request)).rejects.toThrow("already merged")
     expect(await remoteRefs(w)).toContain(cold)
     expect(await remoteRefs(w)).not.toContain(hot)
@@ -138,7 +167,6 @@ describe("event submit", () => {
     await w.git(["checkout", "--quiet", "main"])
     // @failure 27957: a cold side-lease loss remains final even if the queue fence also loses.
     // Hot-only queue-race tests cannot prove that a rejected custody transition is never replayed.
-    const backend = runnerFor(w.git).backend
     const publish = backend.publish
     if (publish === undefined) throw new Error("cold fixture lacks submit publisher")
     let custodyAttempts = 0
