@@ -16,6 +16,7 @@ import {
   PREVIEW_MAX_AGE_MS,
   previewCloneKey,
   previewSubjectPrefix,
+  retirePreviewSubject,
 } from "../src/preview-custody.ts"
 import { ReferenceUnpopulated } from "../src/reference.ts"
 
@@ -234,5 +235,21 @@ describe("anchorPreviewCustody (27510)", () => {
     expect(kept.retired).toEqual([])
     expect(Object.keys(await anchorsIn(product))).toContain(ageless)
     expect(named.join("\n")).toContain(`${ageless}'s age is unknown, so it is kept`)
+  }, 60_000)
+
+  it("retires one subject on env close, root then components, and leaves every other subject's custody", async () => {
+    const product = await author_clone()
+    const first = await candidate(product, "first")
+    await custody(product, first.root, "task/closing")
+    const second = await candidate(product, "second")
+    await custody(product, second.root, "task/a")
+
+    const retired = await retirePreviewSubject({ git: gitIn(product), gitIn: (cwd) => gitIn(cwd), subject: "task/closing" })
+
+    const live = anchor(product, "task/a", second.root)
+    expect(retired).toEqual([anchor(product, "task/closing", first.root)])
+    expect(await anchorsIn(product)).toEqual({ [live]: second.root })
+    expect(Object.keys(await anchorsIn(join(product, "vendor/dep")))).toEqual([live])
+    expect(Object.keys(await anchorsIn(join(product, "vendor/dep/apps/nested")))).toEqual([live])
   }, 60_000)
 })

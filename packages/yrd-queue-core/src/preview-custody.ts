@@ -15,13 +15,14 @@
 import { createHash } from "node:crypto"
 import { realpathSync } from "node:fs"
 import { join } from "node:path"
-import { createExclusive, DEFAULT_MUTATION_LOCK_WAIT_MS } from "git-super/exclusive"
+import { createExclusive, DEFAULT_MUTATION_LOCK_WAIT_MS, type Exclusive } from "git-super/exclusive"
 import type { Git } from "./git.ts"
 import { encodeQueueComponent } from "./refs.ts"
 import {
   createRef,
   declaredSubmodules,
   gitlinksAt,
+  isRepositoryAt,
   populateReferenceStores,
   refTarget,
   ReferenceUnpopulated,
@@ -76,15 +77,22 @@ export function previewSubjectPrefix(clone: string, subject: string): string {
   return `${PREVIEW_REF_ROOT}/${clone}/${encodeQueueComponent(subject)}/`
 }
 
+/** This clone's identity, its main worktree and the writer lock its stores share with git-super's mutations. */
+async function previewClone(git: Git): Promise<Readonly<{ clone: string; main: string; lock: Exclusive }>> {
+  const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+  return {
+    clone: previewCloneKey(common),
+    lock: createExclusive(join(common, "yrd-worktree-mutations"), { timeoutMs: DEFAULT_MUTATION_LOCK_WAIT_MS }),
+    main: await mainWorktree(git, common),
+  }
+}
+
 /** Keep the candidate's closure through its anchors, superseding the subject's prior candidate. */
 export async function anchorPreviewCustody(options: PreviewCustodyOptions): Promise<PreviewCustody> {
-  const common = (await options.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
-  const main = await mainWorktree(options.git, common)
-  const clone = previewCloneKey(common)
+  const { clone, lock, main } = await previewClone(options.git)
   const prefix = previewSubjectPrefix(clone, options.subject)
   const anchor = `${prefix}${options.candidate}`
   const rootGit = options.gitIn(main)
-  const lock = createExclusive(join(common, "yrd-worktree-mutations"), { timeoutMs: DEFAULT_MUTATION_LOCK_WAIT_MS })
   return lock.run(
     async () => {
       const prior = (await refsUnder(rootGit, prefix)).filter((ref) => ref.name !== anchor)
@@ -135,6 +143,36 @@ export async function anchorPreviewCustody(options: PreviewCustodyOptions): Prom
       return { anchor, retired: retired.map((ref) => ref.name), superseded: prior.map((ref) => ref.name) }
     },
     { holder: `yrd preview custody ${options.subject}` },
+  )
+}
+
+/**
+ * Retire one subject's custody in this clone, root first, then its component anchors (27510). `yrd env close` retires
+ * the closing environment's own branch: every environment of a clone shares its namespace, so closing one retires
+ * that subject and no other.
+ */
+export async function retirePreviewSubject(
+  options: Readonly<{
+    git: Git
+    gitIn: (cwd: string) => Git
+    subject: string
+    leftover?: (why: string) => void
+  }>,
+): Promise<readonly string[]> {
+  const { clone, lock, main } = await previewClone(options.git)
+  const rootGit = options.gitIn(main)
+  return lock.run(
+    async () => {
+      const roots = await refsUnder(rootGit, previewSubjectPrefix(clone, options.subject))
+      for (const root of roots) await rootGit(["update-ref", "-d", root.name, root.oid])
+      const stores = new Set<string>()
+      for (const root of roots) {
+        for (const store of await closureStores(options.gitIn, main, root.oid, [])) stores.add(store)
+      }
+      await sweepOrphans(rootGit, options.gitIn, `${PREVIEW_REF_ROOT}/${clone}/`, stores, options.leftover)
+      return roots.map((root) => root.name)
+    },
+    { holder: `yrd preview retirement ${options.subject}` },
   )
 }
 
@@ -239,7 +277,8 @@ async function closureStores(
   return stores
 }
 
-/** A component anchor whose root anchor is gone is an orphan, deleted at its expected OID. */
+/** A component anchor whose root anchor is gone is an orphan, deleted at its expected OID. A store path that is not a
+ * repository (a private or uninitialized submodule) holds no anchor and is skipped. */
 async function sweepOrphans(
   rootGit: Git,
   gitIn: (cwd: string) => Git,
@@ -248,6 +287,7 @@ async function sweepOrphans(
   leftover: PreviewCustodyOptions["leftover"],
 ): Promise<void> {
   for (const store of stores) {
+    if (!(await isRepositoryAt(gitIn, store))) continue
     const storeGit = gitIn(store)
     for (const ref of await refsUnder(storeGit, clonePrefix)) {
       if ((await refTarget(rootGit, ref.name)) !== undefined) continue

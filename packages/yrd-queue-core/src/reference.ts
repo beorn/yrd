@@ -589,7 +589,7 @@ function readGitlinks(listed: string): readonly Readonly<{ path: string; sha: st
  * discrimination git-super makes before it borrows, and it has to be, or the
  * two disagree about what a populated reference is.
  */
-async function isRepositoryAt(gitIn: (cwd: string) => Git, path: string): Promise<boolean> {
+export async function isRepositoryAt(gitIn: (cwd: string) => Git, path: string): Promise<boolean> {
   if (!existsSync(path)) return false
   try {
     const toplevel = (await gitIn(path)(["rev-parse", "--path-format=absolute", "--show-toplevel"])).trim()

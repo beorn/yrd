@@ -31,6 +31,7 @@ import {
   readConfig,
   refAt,
   resolveGitSelection,
+  retirePreviewSubject,
   runId,
   runSetup,
   SetupFailed,
@@ -594,6 +595,17 @@ export async function closeEnvironment(
       )
     }
     await requireClean(treeGit, path)
+  }
+  // 27510: closing an environment retires its own branch's preview custody, root first, before removal; a removal that
+  // fails afterwards leaves the retirement standing. A detached environment never submitted, so has none.
+  const subject = registered.branch?.replace(/^refs\/heads\//u, "")
+  if (subject !== undefined && subject !== "") {
+    await retirePreviewSubject({
+      git,
+      gitIn: (cwd) => gitIn(cwd, process, selection),
+      leftover: (why) => io.stderr(`yrd: env close left a preview anchor; the next submit sweeps it: ${why}\n`),
+      subject,
+    })
   }
   const modules = await treeGit(["ls-tree", commit, "--", ".gitmodules"])
   if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true) {
