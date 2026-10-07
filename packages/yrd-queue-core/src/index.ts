@@ -72,6 +72,7 @@ export {
   adoptedChange,
   appendChangeEvent,
   appendNumberedChangeEvent,
+  archiveQueue,
   appendNumberedPublishedMerge,
   changeInput,
   createEventQueue,

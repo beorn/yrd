@@ -139,7 +139,9 @@ export const CHANGE_EVENT_TYPES = [
   "unignored",
   "notified",
   "adopted",
+  "archived",
 ] as const
+const ARCHIVE_AGE_MS = 7 * 24 * 60 * 60 * 1000
 export type ChangeEventType = (typeof CHANGE_EVENT_TYPES)[number]
 
 function assertChangeEventType(type: string): asserts type is ChangeEventType {
@@ -311,6 +313,7 @@ function evidenceProps(type: ChangeEventType, details: ChangeInputDetails): [str
 export function changeInput(type: ChangeEventType, details: ChangeInputDetails): EventInput {
   assertChangeEventType(type)
   if (type === "adopted") throw new TypeError("adopted is historical; the migration writer is retired")
+  if (type === "archived") throw new TypeError("archived needs the exact custody audit; use archiveQueue")
   if (!COMMIT_OID.test(details.queueTip)) throw new TypeError(`Queue: must name a commit oid, got ${details.queueTip}`)
   if (Number.isNaN(details.at.getTime())) throw new TypeError("Time: needs a valid instant")
   if ((type === "opened" || type === "verifying" || type === "merging") && details.commit === undefined) {
@@ -683,6 +686,25 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       return deferChange(state, event, next, at)
     case "notified":
       return settleNotice(state, event)
+    case "archived": {
+      if ((state.status !== "merged" && state.status !== "cancelled") || state.endedAt === undefined) {
+        throw new Error(`event ${event.id} cannot archive ${state.status}`)
+      }
+      const ref = requiredProp(event, "Archive-Ref")
+      const age = positiveMs(event, "Archive-AgeMs")
+      if (
+        !ref.startsWith("refs/yrd/") ||
+        !ref.includes("/changes/") ||
+        requiredProp(event, "Archive-Tip") !== state.tip ||
+        requiredProp(event, "Archive-State") !== state.status ||
+        requiredProp(event, "Archive-EndedAt") !== state.endedAt.toISOString() ||
+        age !== at.getTime() - state.endedAt.getTime() ||
+        age < ARCHIVE_AGE_MS
+      ) {
+        throw new Error(`event ${event.id} has an invalid archive custody audit`)
+      }
+      return { ...state, tip: event.id }
+    }
     case "failed":
     case "cancelled": {
       const reason = prop(event, "Reason")
@@ -2271,6 +2293,128 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
 }
 
 type ChangeHistory = Readonly<{ state: EventChange; events: readonly Event[] }>
+type ArchiveCandidate = Readonly<{
+  branch: string
+  ref: string
+  tip: string
+  state: "merged" | "cancelled"
+  ageMs: number
+  endedAt: string
+  coldRef: string
+}>
+
+/** Manual custody transfer: one state-neutral audit and one exact atomic publish per ended chain. */
+export async function archiveQueue(
+  store: QueueLocation,
+  queue: string,
+  request: Readonly<{ dryRun: boolean; at: Date; by: string }>,
+): Promise<
+  Readonly<{
+    queue: string
+    at: string
+    retentionMs: number
+    examined: number
+    protected: number
+    recent: number
+    candidates: readonly ArchiveCandidate[]
+    archived: readonly string[]
+  }>
+> {
+  if (typeof request.dryRun !== "boolean") throw new TypeError("archive needs an explicit dryRun boolean")
+  if (Number.isNaN(request.at.getTime()) || request.by.trim() === "") throw new TypeError("archive needs Time and By")
+  const hotPrefix = `${queueRefPrefix(queue)}/changes/`
+  const coldPrefix = archivedChangesPrefix(queue)
+  const [authority, chains] = await Promise.all([
+    readEventQueue(store, queue),
+    readEventChains([hotPrefix, coldPrefix], store),
+  ])
+  const { histories, invalid } = projectChangeHistories(chains, [hotPrefix, coldPrefix], store.repo)
+  for (const defect of invalid.values()) {
+    throw new Error(`${defect.ref}@${defect.tip}: ${defect.error}; archive refused`)
+  }
+  const candidates: ArchiveCandidate[] = []
+  let examined = 0,
+    protectedCount = 0,
+    recent = 0
+  for (const ref of chains.keys()) {
+    if (!ref.startsWith(hotPrefix)) continue
+    examined++
+    const branch = ref.slice(hotPrefix.length)
+    const history = histories.get(branch)
+    if (history === undefined || history.state.tip === undefined) throw new Error(`${ref}: archive history has no tip`)
+    const state = history.state
+    if ((state.status !== "merged" && state.status !== "cancelled") || state.ignored !== undefined) {
+      protectedCount++
+      continue
+    }
+    if (state.endedAt === undefined) throw new Error(`${ref}: ended ${state.status} has no ending time`)
+    const ageMs = request.at.getTime() - state.endedAt.getTime()
+    if (ageMs < ARCHIVE_AGE_MS) {
+      recent++
+      continue
+    }
+    candidates.push({
+      branch,
+      ref,
+      tip: history.state.tip,
+      state: state.status,
+      ageMs,
+      endedAt: state.endedAt.toISOString(),
+      coldRef: `${coldPrefix}${branch}`,
+    })
+  }
+  candidates.sort((a, b) => a.ref.localeCompare(b.ref))
+  const archived: string[] = []
+  if (!request.dryRun) {
+    const publish = store.backend.publish
+    if (publish === undefined) throw new TypeError(`${queue}: backend cannot publish atomic archive custody`)
+    for (const candidate of candidates) {
+      const history = histories.get(candidate.branch)
+      if (history === undefined) throw new Error(`${candidate.ref}: selected archive history disappeared`)
+      const input: EventInput = {
+        type: "archived",
+        props: [
+          ["Queue", authority.tip],
+          ["Time", request.at.toISOString()],
+          ["By", request.by],
+          ["Archive-Ref", candidate.ref],
+          ["Archive-Tip", candidate.tip],
+          ["Archive-State", candidate.state],
+          ["Archive-EndedAt", candidate.endedAt],
+          ["Archive-AgeMs", String(candidate.ageMs)],
+        ],
+      }
+      const chain = await openEvents({ ...store, ref: candidate.coldRef, writer: request.by })
+      const staged = await chain.stage(decide(history.events, input), { expect: candidate.tip })
+      try {
+        await publish(
+          store.repo,
+          [
+            { ref: candidate.coldRef, expect: "0".repeat(staged.head.length), oid: staged.head },
+            { ref: candidate.ref, expect: candidate.tip, oid: null },
+            { ref: queueRef(queue), expect: authority.tip, oid: authority.tip },
+          ],
+          store.remote,
+        )
+      } catch (cause) {
+        const message = `${queue}: archive stopped at ${candidate.ref} after ${archived.length}/${candidates.length} transfers: ${String(cause)}`
+        if (cause instanceof Conflict) throw new Conflict(message, { refs: cause.refs, cause })
+        throw new Error(message, { cause })
+      }
+      archived.push(staged.head)
+    }
+  }
+  return {
+    queue,
+    at: request.at.toISOString(),
+    retentionMs: ARCHIVE_AGE_MS,
+    examined,
+    protected: protectedCount,
+    recent,
+    candidates,
+    archived,
+  }
+}
 export type InvalidChangeHistory = Readonly<{ ref: string; tip: string; error: string; events: readonly Event[] }>
 type ChangeHistories = Readonly<{
   histories: ReadonlyMap<string, ChangeHistory>

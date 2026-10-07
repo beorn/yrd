@@ -38,6 +38,7 @@ import { runAdmission } from "./admission.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
   archivedChangesPrefix,
+  archiveQueue,
   assertPlainEventQueueConfig,
   changeName,
   checksOf,
@@ -379,6 +380,7 @@ export type CoreQueueCommand =
   | Readonly<{ command: "ignore"; branch: string; by: string; reason: string }>
   | Readonly<{ command: "unignore"; branch: string; by: string }>
   | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
+  | Readonly<{ command: "archive"; dryRun: boolean; by: string }>
   | Readonly<{
       command: "sweep-candidates"
       remote?: string
@@ -508,6 +510,7 @@ export type CoreQueueCommand =
 /** What each command is called when it has to say it needs a queue. */
 const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   check: "check",
+  archive: "queue archive",
   drop: "drop",
   ignore: "ignore",
   ls: "queue ls",
@@ -1430,6 +1433,23 @@ export async function coreQueueCommand(
         }
         throw error
       }
+    }
+    case "archive": {
+      const result = await archiveQueue(createEventStore(repo, config.target.remote, selection), config.target.branch, {
+        dryRun: request.dryRun,
+        by: request.by,
+        at: new Date(),
+      })
+      emit(
+        io,
+        options.json === true,
+        result,
+        `${result.queue}: examined ${result.examined} hot histories; protected ${result.protected}, recent ${result.recent}; ${request.dryRun ? "would archive" : "archived"} ${request.dryRun ? result.candidates.length : result.archived.length}\n` +
+          result.candidates
+            .map((row) => `${row.ref}@${row.tip} ${row.state} age ${row.ageMs}ms -> ${row.coldRef}`)
+            .join("\n"),
+      )
+      return 0
     }
     case "sweep-candidates": {
       const remote = request.remote ?? config.target.remote
