@@ -45,6 +45,7 @@ import {
   createEventQueue,
   decide,
   initial,
+  listChangeHistories,
   project,
   queueFormat,
   queueRef,
@@ -638,7 +639,8 @@ export async function inspectSubmitAtHead(
   head: string,
 ): Promise<SubmitInspection> {
   const admitted = await admitSubmitAtHead(git, remote, request, head)
-  const verifying = await composeSubmit(git, request, admitted)
+  const ended = await withRemoteSeam("previewRetirement", () => endedSubjects(git, admitted.root, remote, request))
+  const verifying = await composeSubmit(git, request, admitted, ended)
   const { root, bases: _bases, operational: _operational, ...inspection } = admitted
   return { ...inspection, verifying: await submissionReceipt(git, root, verifying) }
 }
@@ -797,7 +799,34 @@ async function admitSubmitAtHead(
   }
 }
 
-async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitAdmission): Promise<Verification> {
+/**
+ * The branches whose change has ended for good, read from the queue's own branch fold (27510 retirement): landed,
+ * or cancelled as dropped, withdrawn or deleted. A failed or resubmitted change is still live. A branch whose history
+ * is invalid is never evidence of retirement: it is named and left out.
+ */
+async function endedSubjects(git: Git, root: string, remote: string, request: SubmitRequest): Promise<ReadonlySet<string>> {
+  const store = createEventStore(root, remote, selectionFor(git), runnerFor(git).backend)
+  if ((await queueFormat(store, request.target.branch)) !== "event") return new Set()
+  const { histories, invalid } = await listChangeHistories(store, request.target.branch)
+  for (const [branch, defect] of invalid) {
+    console.warn(`yrd: preview custody keeps ${branch}'s anchors: its change history is unreadable: ${defect.error}`)
+  }
+  const ended = new Set<string>()
+  for (const [branch, history] of histories) {
+    const { reason, status } = history.state
+    if (status === "merged" || (status === "cancelled" && ["dropped", "withdrawn", "deleted"].includes(reason ?? ""))) {
+      ended.add(branch)
+    }
+  }
+  return ended
+}
+
+async function composeSubmit(
+  git: Git,
+  request: SubmitRequest,
+  admitted: SubmitAdmission,
+  ended: ReadonlySet<string>,
+): Promise<Verification> {
   const scratch = mkdtempSync(join(tmpdir(), "yrd-submit-verifying-"))
   const hooksPath = join(scratch, "hooks-disabled")
   mkdirSync(hooksPath)
@@ -819,6 +848,7 @@ async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitA
       previewCustody: {
         subject: request.branch,
         leftover: (why) => console.warn(`yrd: preview custody left an orphan anchor; the next submit sweeps it: ${why}`),
+        retired: ended,
       },
     })
     verifying = composed.verifying
@@ -847,7 +877,8 @@ export async function prepareSubmit(git: Git, remote: string, request: SubmitReq
 
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   const { branch: _branch, published, ...admitted } = await prepareSubmit(git, remote, request)
-  const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted))
+  const ended = await withRemoteSeam("previewRetirement", () => endedSubjects(git, admitted.root, remote, request))
+  const verifying = await withRemoteSeam("composeSubmit", () => composeSubmit(git, request, admitted, ended))
   const receipt = await submissionReceipt(git, admitted.root, verifying)
   const { root, bases: _bases, operational, ...inspection } = admitted
   return withRemoteSeam("submitEvent", () =>

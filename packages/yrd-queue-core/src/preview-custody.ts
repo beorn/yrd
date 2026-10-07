@@ -45,13 +45,25 @@ export type PreviewCustodyOptions = Readonly<{
   subject: string
   /** Told about leftovers a committed supersession could not delete; the next attempt sweeps them. */
   leftover?: (why: string) => void
+  /**
+   * Subjects whose change has ended for good (landed, dropped, withdrawn or deleted), from the queue's own branch
+   * fold. Their custody is retired in this clone, root first. A subject whose history could not be read is not here.
+   */
+  retired?: ReadonlySet<string>
+  /** The clock the seven-day backstop reads; tests pass a fixed one. */
+  now?: () => number
 }>
+
+/** A root anchor older than this, by its first reflog entry, is retired whatever its subject's state (27510). */
+export const PREVIEW_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 export type PreviewCustody = Readonly<{
   /** The root anchor, `refs/yrd/preview/<clone>/<subject>/<candidate-root>`. */
   anchor: string
   /** The prior root anchors this attempt superseded. */
   superseded: readonly string[]
+  /** Other subjects' root anchors this attempt retired: ended changes and anchors past the seven-day backstop. */
+  retired: readonly string[]
 }>
 
 /** The clone's identity: the full SHA-256 of its canonical absolute git-common-dir. */
@@ -100,23 +112,76 @@ export async function anchorPreviewCustody(options: PreviewCustodyOptions): Prom
         await removeAttempt(rootGit, anchor, options.candidate, rootCreated, created, options.gitIn)
         throw error
       }
-      // Past the commit point nothing restores the prior candidate or undoes this one: a sweep that fails is named,
-      // and its orphans wait for the next attempt's sweep.
+      // Past the commit point nothing restores the prior candidate or undoes this one: a retirement or sweep that
+      // fails is named, and its orphans wait for the next attempt's sweep.
+      const clonePrefix = `${PREVIEW_REF_ROOT}/${clone}/`
+      const retired: Array<Readonly<{ name: string; oid: string }>> = []
+      try {
+        retired.push(...(await retireRoots(rootGit, clonePrefix, prefix, options)))
+      } catch (error) {
+        options.leftover?.(`retirement in ${clonePrefix} failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
       try {
         const stores = new Set(await closureStores(options.gitIn, main, options.candidate, options.excludedSubmodules))
-        for (const old of prior) {
+        for (const old of [...prior, ...retired]) {
           for (const store of await closureStores(options.gitIn, main, old.oid, options.excludedSubmodules)) {
             stores.add(store)
           }
         }
-        await sweepOrphans(rootGit, options.gitIn, `${PREVIEW_REF_ROOT}/${clone}/`, stores, options.leftover)
+        await sweepOrphans(rootGit, options.gitIn, clonePrefix, stores, options.leftover)
       } catch (error) {
         options.leftover?.(`the orphan sweep after ${anchor} failed: ${error instanceof Error ? error.message : String(error)}`)
       }
-      return { anchor, superseded: prior.map((ref) => ref.name) }
+      return { anchor, retired: retired.map((ref) => ref.name), superseded: prior.map((ref) => ref.name) }
     },
     { holder: `yrd preview custody ${options.subject}` },
   )
+}
+
+/**
+ * Delete, root first, every other subject's root anchor in this clone whose change has ended or whose first reflog
+ * entry is older than the backstop. An anchor whose age cannot be read is named and kept: absence of an age is never
+ * an expiry.
+ */
+async function retireRoots(
+  rootGit: Git,
+  clonePrefix: string,
+  ownPrefix: string,
+  options: PreviewCustodyOptions,
+): Promise<readonly Readonly<{ name: string; oid: string }>[]> {
+  const ended = new Set([...(options.retired ?? [])].map((subject) => encodeQueueComponent(subject)))
+  const now = (options.now ?? Date.now)()
+  const retired: Array<Readonly<{ name: string; oid: string }>> = []
+  for (const root of await refsUnder(rootGit, clonePrefix)) {
+    if (root.name.startsWith(ownPrefix)) continue
+    const subject = root.name.slice(clonePrefix.length).split("/")[0] ?? ""
+    let expired = ended.has(subject)
+    if (!expired) {
+      const made = await firstReflogSeconds(rootGit, root.name)
+      if (typeof made === "string") {
+        options.leftover?.(`${root.name}'s age is unknown, so it is kept: ${made}`)
+        continue
+      }
+      expired = now - made * 1000 > PREVIEW_MAX_AGE_MS
+    }
+    if (!expired) continue
+    await rootGit(["update-ref", "-d", root.name, root.oid])
+    retired.push(root)
+  }
+  return retired
+}
+
+/** When `ref`'s reflog began, in Unix seconds; otherwise why it cannot be told (no reflog, or one that reads oddly). */
+async function firstReflogSeconds(git: Git, ref: string): Promise<number | string> {
+  let entries: string
+  try {
+    entries = (await git(["reflog", "show", "--date=unix", "--format=%gd", ref, "--"])).trim()
+  } catch (error) {
+    return `reading its reflog failed: ${error instanceof Error ? error.message : String(error)}`
+  }
+  const oldest = entries.split("\n").at(-1) ?? ""
+  const seconds = /@\{(\d+)\}$/u.exec(oldest)?.[1]
+  return seconds === undefined ? `its oldest reflog entry reads ${JSON.stringify(oldest)}` : Number(seconds)
 }
 
 /** The clone's main worktree, whose checkout paths lead to the common dir's module stores. */

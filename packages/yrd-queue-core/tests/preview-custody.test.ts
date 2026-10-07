@@ -11,7 +11,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import { anchorPreviewCustody, previewCloneKey, previewSubjectPrefix } from "../src/preview-custody.ts"
+import {
+  anchorPreviewCustody,
+  PREVIEW_MAX_AGE_MS,
+  previewCloneKey,
+  previewSubjectPrefix,
+} from "../src/preview-custody.ts"
 import { ReferenceUnpopulated } from "../src/reference.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
@@ -74,7 +79,12 @@ function anchor(product: string, subject: string, root: string): string {
   return `${previewSubjectPrefix(previewCloneKey(join(product, ".git")), subject)}${root}`
 }
 
-function custody(product: string, root: string, subject = "task/a") {
+function custody(
+  product: string,
+  root: string,
+  subject = "task/a",
+  extra: Partial<Parameters<typeof anchorPreviewCustody>[0]> = {},
+) {
   return anchorPreviewCustody({
     candidate: root,
     excludedSubmodules: [],
@@ -82,6 +92,7 @@ function custody(product: string, root: string, subject = "task/a") {
     gitIn: (cwd) => gitIn(cwd),
     source: product,
     subject,
+    ...extra,
   })
 }
 
@@ -94,7 +105,7 @@ describe("anchorPreviewCustody (27510)", () => {
     const kept = await custody(product, first.root)
 
     const name = anchor(product, "task/a", first.root)
-    expect(kept).toEqual({ anchor: name, superseded: [] })
+    expect(kept).toEqual({ anchor: name, retired: [], superseded: [] })
     expect(await anchorsIn(product)).toEqual({ [name]: first.root })
     expect(await anchorsIn(join(product, "vendor/dep"))).toEqual({ [name]: first.dep })
     expect(await anchorsIn(join(product, "vendor/dep/apps/nested"))).toEqual({ [name]: nested })
@@ -123,7 +134,7 @@ describe("anchorPreviewCustody (27510)", () => {
     const name = anchor(product, "task/a", first.root)
     const reflog = await gitIn(product)(["reflog", "show", "--format=%H %gd", name])
 
-    expect(await custody(product, first.root)).toEqual({ anchor: name, superseded: [] })
+    expect(await custody(product, first.root)).toEqual({ anchor: name, retired: [], superseded: [] })
     expect(await gitIn(product)(["reflog", "show", "--format=%H %gd", name])).toBe(reflog)
   }, 60_000)
 
@@ -176,5 +187,52 @@ describe("anchorPreviewCustody (27510)", () => {
     await custody(product, first.root)
 
     expect(Object.keys(await anchorsIn(join(product, "vendor/dep")))).toEqual([anchor(product, "task/a", first.root)])
+  }, 60_000)
+
+  it("retires an ended subject's custody root first, then sweeps its components", async () => {
+    const product = await author_clone()
+    const first = await candidate(product, "first")
+    await custody(product, first.root, "task/landed")
+    const second = await candidate(product, "second")
+
+    const kept = await custody(product, second.root, "task/a", { retired: new Set(["task/landed"]) })
+
+    expect(kept.retired).toEqual([anchor(product, "task/landed", first.root)])
+    const live = anchor(product, "task/a", second.root)
+    expect(await anchorsIn(product)).toEqual({ [live]: second.root })
+    expect(Object.keys(await anchorsIn(join(product, "vendor/dep")))).toEqual([live])
+  }, 60_000)
+
+  it("retires another subject whose anchor's first reflog entry is past seven days, and keeps a younger one", async () => {
+    const product = await author_clone()
+    const first = await candidate(product, "first")
+    await custody(product, first.root, "task/old")
+    const second = await candidate(product, "second")
+    const young = await custody(product, second.root, "task/a", { now: () => Date.now() + PREVIEW_MAX_AGE_MS - 60_000 })
+    expect(young.retired).toEqual([])
+
+    const third = await candidate(product, "third")
+    const aged = await custody(product, third.root, "task/a", { now: () => Date.now() + PREVIEW_MAX_AGE_MS + 60_000 })
+
+    expect(aged.retired).toEqual([anchor(product, "task/old", first.root)])
+  }, 60_000)
+
+  it("keeps, and names, another subject's anchor whose age cannot be read", async () => {
+    const product = await author_clone()
+    const first = await candidate(product, "first")
+    // No --create-reflog: an anchor written outside custody has no first entry to date it.
+    const ageless = anchor(product, "task/ageless", first.root)
+    await gitIn(product)(["update-ref", ageless, first.root])
+    const second = await candidate(product, "second")
+    const named: string[] = []
+
+    const kept = await custody(product, second.root, "task/a", {
+      leftover: (why) => void named.push(why),
+      now: () => Date.now() + 10 * PREVIEW_MAX_AGE_MS,
+    })
+
+    expect(kept.retired).toEqual([])
+    expect(Object.keys(await anchorsIn(product))).toContain(ageless)
+    expect(named.join("\n")).toContain(`${ageless}'s age is unknown, so it is kept`)
   }, 60_000)
 })

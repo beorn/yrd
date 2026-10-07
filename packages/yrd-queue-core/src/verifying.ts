@@ -88,7 +88,7 @@ export type VerificationOptions = Readonly<{
    * worktree is gone, through create-only anchors in the author's existing stores (preview-custody.ts). Written before
    * the worktree is removed, so the receipt observes the store's final state.
    */
-  previewCustody?: Readonly<{ subject: string; leftover?: (why: string) => void }>
+  previewCustody?: Readonly<{ subject: string; leftover?: (why: string) => void; retired?: ReadonlySet<string> }>
 }>
 
 /** Shared by submit admission and both queue phases; only git-super composes gitlinks. */
@@ -328,6 +328,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
               ...options.worktree?.gitOptions,
             }),
           ...(custody.leftover === undefined ? {} : { leftover: custody.leftover }),
+          ...(custody.retired === undefined ? {} : { retired: custody.retired }),
           source: worktree.path,
           subject: custody.subject,
         }),

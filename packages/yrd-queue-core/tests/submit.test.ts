@@ -785,7 +785,12 @@ describe("event submit", () => {
     expect(inspected.head).toBe(head)
     expect(inspected.targetHead).toBe(targetHead)
     expect(inspected.verifying).toMatchObject({ state: "verified", head, targetHead })
-    expect(withoutGitomicRefs(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"]))).toBe(before)
+    // The head is not rewritten; the preview's only ref is its custody anchor at the candidate (27510).
+    const after = withoutGitomicRefs(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])).split("\n")
+    expect(after.filter((line) => !line.startsWith("refs/yrd/preview/")).join("\n")).toBe(before)
+    expect(after.filter((line) => line.startsWith("refs/yrd/preview/"))).toEqual([
+      expect.stringMatching(new RegExp(`/task%2Fstale-clean/${inspected.verifying.candidate} ${inspected.verifying.candidate}$`, "u")),
+    ])
 
     const opened = await submit(w.git, "origin", {
       branch: "task/stale-clean",
