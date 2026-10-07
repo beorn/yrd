@@ -3,6 +3,14 @@ import { mkdirSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname, join } from "node:path"
 import { Conflict, PublicationRejected, RetriesExhausted, openEvents } from "./git.ts"
+import {
+  isTransientPushHold,
+  matchTransientPush5xx,
+  retryTransientPush,
+  TRANSIENT_PUSH_HOLD,
+  type TransientPush5xx,
+  type TransientPushAttempt,
+} from "./transient-push.ts"
 import { readEventAt, readEventChain } from "./event-read.ts"
 
 import {
@@ -1190,11 +1198,17 @@ export async function eventQueueRun(
       next: next === undefined ? stuckCures(branch) : `${next}; ${stuckCures(branch)}`,
     })
   }
+  let transientProbe: string | undefined
   const standing = remaining.find((change) => change.status === "stuck")
   if (standing !== undefined) {
     const retryNamedStuck =
       options.foreground === true && options.only?.branch === standing.branch && options.only.head === standing.commit
-    if (!retryNamedStuck && !(await queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)))) {
+    const retryTransient = isTransientPushHold(standing.reason)
+    if (
+      !retryNamedStuck &&
+      !retryTransient &&
+      !(await queueResumedAfter(store, queue, standing.branch, histories.get(standing.branch)))
+    ) {
       const stuckEvent = histories.get(standing.branch)?.events.findLast((event) => event.type === "stuck")
       if (stuckEvent === undefined) {
         throw new Error(`${changesRef(queue, standing.branch)}: standing stuck has no event`)
@@ -1213,17 +1227,68 @@ export async function eventQueueRun(
       })
       return result(2, observedMerged, [], [standing.branch])
     }
-    log.write({
-      kind: "observation",
-      subject: "queue-resumed",
-      branch: standing.branch,
-      head: standing.commit,
-      reason: "queue resumed",
-    })
+    if (retryTransient) {
+      transientProbe = standing.branch
+      log.write({
+        kind: "observation",
+        subject: "transient-push-probe",
+        branch: standing.branch,
+        head: standing.commit,
+        reason: standing.reason,
+      })
+    } else {
+      log.write({
+        kind: "observation",
+        subject: "queue-resumed",
+        branch: standing.branch,
+        head: standing.commit,
+        reason: "queue resumed",
+      })
+    }
   }
   const line =
     standing === undefined ? remaining : [standing, ...remaining.filter((change) => change.branch !== standing.branch)]
   const failed: string[] = []
+  const holdTransientPublication = async (
+    branch: string,
+    head: string,
+    marker: string,
+    hit: TransientPush5xx,
+    via: string,
+    already: EventChange,
+  ): Promise<QueueRunOutcome> => {
+    const request = hit.requestId === undefined ? "" : `; Request ID: ${hit.requestId}`
+    const oneLine =
+      `${branch}: ${TRANSIENT_PUSH_HOLD} on ${via} at ${marker}: ${hit.line}${request}; ` +
+      "the queue retries this publication on its own cadence"
+    if (already.status === "stuck" && isTransientPushHold(already.reason)) {
+      log.write({
+        kind: "warning",
+        subject: "transient-push-5xx",
+        branch,
+        head,
+        marker,
+        requestId: hit.requestId,
+        line: hit.line,
+        reason: "hold remains; probe still 5xx",
+      })
+      return result(0, observedMerged, failed, [branch])
+    }
+    const ended = await appendOwnedChange(store, queue, branch, marker, {
+      type: "stuck",
+      at: new Date(),
+      reason: oneLine,
+    })
+    await tell(branch, "stuck", ended)
+    writeStuck(branch, head, {
+      code: "yrd-publication-5xx",
+      subject: oneLine,
+      via,
+      next: "nothing: the queue retries this publication on its own cadence; no resume is needed",
+      saw: hit.line,
+    })
+    return result(0, observedMerged, failed, [branch])
+  }
   const publish = async (
     branch: string,
     head: string,
@@ -1311,22 +1376,50 @@ export async function eventQueueRun(
     }
     if (current.since === undefined) throw new Error(`${ref} at ${marker} has no opened time for rejection history`)
     const priorRejection = recentPublicationRejected(dirname(log.path), ref, marker, parent, current.since)
-    if (priorRejection !== undefined) return stopRejectedMerge(priorRejection)
+    if (
+      priorRejection !== undefined &&
+      matchTransientPush5xx([priorRejection.reason, ...priorRejection.remoteReasons].join("\n")) === undefined
+    ) {
+      return stopRejectedMerge(priorRejection)
+    }
+    const noteTransient = (attempt: TransientPushAttempt): void => {
+      log.write({
+        kind: "warning",
+        subject: "transient-push-5xx",
+        branch,
+        head,
+        ref,
+        marker,
+        attempt: attempt.attempt,
+        requestId: attempt.requestId,
+        line: attempt.line,
+        repository: attempt.repository,
+      })
+    }
     let child
     try {
-      child = await timedStep(log, { branch, head, name: "publish", phase: "merge" }, () =>
-        publishCheckedChildren({
-          git,
-          cwd: options.repo,
-          candidate,
-          remote: options.target.remote,
-          branch: queue,
-          marker: { ref: changesRef(queue, branch), tip: marker },
-          process: options.process,
-          env: options.env,
-          hooksPath,
-          gitOptions,
-        }),
+      child = await retryTransientPush(
+        () =>
+          timedStep(log, { branch, head, name: "publish", phase: "merge" }, () =>
+            publishCheckedChildren({
+              git,
+              cwd: options.repo,
+              candidate,
+              remote: options.target.remote,
+              branch: queue,
+              marker: { ref: changesRef(queue, branch), tip: marker },
+              process: options.process,
+              env: options.env,
+              hooksPath,
+              gitOptions,
+            }),
+          ),
+        {
+          repository: options.repo,
+          ref,
+          text: (published) => (published.state === "refused" ? published.evidence : ""),
+          note: noteTransient,
+        },
       )
     } catch (error) {
       const after = await readStatus(store, queue, branch)
@@ -1335,6 +1428,10 @@ export async function eventQueueRun(
       return result(failed.length > 0 ? 1 : 0, observedMerged, failed)
     }
     if (child.state === "refused") {
+      const hit = matchTransientPush5xx(child.evidence)
+      if (hit !== undefined) {
+        return holdTransientPublication(branch, head, marker, hit, "component publication", current)
+      }
       const description =
         `${branch}: frozen component publication for ${candidate} refused: ${child.evidence}; ` +
         "repair the named component remote/ref, then resume the queue"
@@ -1358,24 +1455,28 @@ export async function eventQueueRun(
     let preparedMerge: string | undefined
     let ended: string | undefined
     try {
-      ended = await timedStep(log, { branch, head, name: "merge", phase: "merge" }, () =>
-        appendOwnedMerge(
-          store,
-          queue,
-          branch,
-          marker,
-          {
-            at: new Date(),
-            commit: candidate,
-            targetExpect: parent,
-            queueTip: queueState.tip,
-            run: log.id,
-            ...(reason === undefined ? {} : { reason }),
-          },
-          (oid) => {
-            preparedMerge = oid
-          },
-        ),
+      ended = await retryTransientPush(
+        () =>
+          timedStep(log, { branch, head, name: "merge", phase: "merge" }, () =>
+            appendOwnedMerge(
+              store,
+              queue,
+              branch,
+              marker,
+              {
+                at: new Date(),
+                commit: candidate,
+                targetExpect: parent,
+                queueTip: queueState.tip,
+                run: log.id,
+                ...(reason === undefined ? {} : { reason }),
+              },
+              (oid) => {
+                preparedMerge = oid
+              },
+            ),
+          ),
+        { repository: options.target.remote, ref, note: noteTransient },
       )
     } catch (error) {
       if (error instanceof QueuePaused) {
@@ -1388,6 +1489,10 @@ export async function eventQueueRun(
         })
       }
       if (error instanceof PublicationRejected) {
+        const hit = matchTransientPush5xx([error.message, error.detail, ...error.reasons].join("\n"))
+        if (hit !== undefined) {
+          return holdTransientPublication(branch, head, marker, hit, "merge publication", current)
+        }
         log.write({
           kind: "warning",
           subject: "publication-rejected",
@@ -1616,6 +1721,17 @@ export async function eventQueueRun(
     }
     if (ended === undefined) throw new Error(`${changesRef(queue, branch)}: merged publication returned no event`)
     await timedStep(log, { branch, head, name: "notify", phase: "merge" }, () => tell(branch, "merged", ended))
+    if (transientProbe === branch) {
+      log.write({
+        kind: "observation",
+        subject: "transient-push-hold-cleared",
+        branch,
+        head,
+        ref,
+        marker,
+        reason: "held 5xx publication landed",
+      })
+    }
     log.write({ kind: "merge", branch, head, commit: candidate, ref: changesRef(queue, branch), marker })
     log.write({ kind: "change", branch, head, decision: "merged" })
     await deleteMergedBranch(branch, head)

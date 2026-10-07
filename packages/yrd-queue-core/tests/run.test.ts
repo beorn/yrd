@@ -69,6 +69,7 @@ import { eventNoticeOwed } from "../src/event-run.ts"
 import { settledBaseCommit } from "../src/settled-base.ts"
 import { prepareWorktree, SetupFailed } from "../src/worktree.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
+import { transientPushRetry } from "../src/transient-push.ts"
 
 const roots: string[] = []
 // The real queue child needs GitSuper even when the worker's PATH is sealed.
@@ -2104,6 +2105,202 @@ it("keeps an unlanded merge publication retryable and judges the next change", a
       count: 1,
     }),
   )
+})
+
+const GITHUB_5XX = [
+  "remote: Internal Server Error",
+  "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 500",
+  "remote: Request ID: 8B8E:93E9C:1C9E26:269104:6AC672BE",
+].join("\n")
+
+function stubTransientBackoff(): () => void {
+  const sleep = transientPushRetry.sleep
+  transientPushRetry.sleep = async () => {}
+  return () => {
+    transientPushRetry.sleep = sleep
+  }
+}
+
+function silenceStderr(): () => void {
+  const write = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: unknown, encoding?: unknown, callback?: unknown) => {
+    if (typeof encoding === "function") encoding()
+    if (typeof callback === "function") callback()
+    return true
+  }) as typeof process.stderr.write
+  return () => {
+    process.stderr.write = write
+  }
+}
+
+/** @failure 27995: a GitHub 5xx on merge publication exited 2 and stopped the queue.
+ * @level l3 @consumer queue operator
+ */
+it("retries a 5xx merge publication and lands the change", async () => {
+  const restoreSleep = stubTransientBackoff()
+  const restoreStderr = silenceStderr()
+  try {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createWorldEventQueue(w)
+    const branch = "task/5xx-then-land"
+    await submitCommit(w, branch, "one.txt")
+    let mergePublishes = 0
+    using _publish = beforeGitomicPublish(async (_repo, updates) => {
+      if (!updates.some((update) => update.ref === "refs/heads/main")) return
+      mergePublishes++
+      if (mergePublishes === 1) {
+        throw new gitomic.PublicationRejected(updates, [GITHUB_5XX], GITHUB_5XX)
+      }
+    })
+
+    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+    expect(outcome).toMatchObject({ exitCode: 0, merged: [branch], stuck: [] })
+    expect(mergePublishes).toBe(2)
+    expect((await readStatus(store, "main", branch)).status).toBe("merged")
+    expect(logRecords(outcome)).toContainEqual(
+      expect.objectContaining({
+        kind: "warning",
+        subject: "transient-push-5xx",
+        branch,
+        attempt: 1,
+        requestId: "8B8E:93E9C:1C9E26:269104:6AC672BE",
+      }),
+    )
+  } finally {
+    restoreStderr()
+    restoreSleep()
+  }
+})
+
+/** @failure 27995: three GitHub 5xx in a row exited 2 instead of holding for a later probe.
+ * @level l3 @consumer queue operator
+ */
+it("holds a 5xx merge publication without exit 2, then a later round lands it", async () => {
+  const restoreSleep = stubTransientBackoff()
+  const restoreStderr = silenceStderr()
+  try {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createWorldEventQueue(w)
+    const branch = "task/5xx-hold-then-probe"
+    await submitCommit(w, branch, "one.txt")
+    let mergePublishes = 0
+    using _publish = beforeGitomicPublish(async (_repo, updates) => {
+      if (!updates.some((update) => update.ref === "refs/heads/main")) return
+      mergePublishes++
+      if (mergePublishes <= 3) {
+        throw new gitomic.PublicationRejected(updates, [GITHUB_5XX], GITHUB_5XX)
+      }
+    })
+    const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
+
+    const first = await queueRun(options)
+    expect(first).toMatchObject({ exitCode: 0, stuck: [branch], merged: [] })
+    expect((await readStatus(store, "main", branch)).status).toBe("stuck")
+    expect(mergePublishes).toBe(3)
+    expect(logRecords(first).filter((row) => row.subject === "transient-push-5xx")).toHaveLength(3)
+    expect(logRecords(first).filter((row) => row.kind === "change" && row.decision === "stuck")).toHaveLength(1)
+
+    const second = await queueRun(options)
+    expect(second).toMatchObject({ exitCode: 0, merged: [branch], stuck: [] })
+    expect((await readStatus(store, "main", branch)).status).toBe("merged")
+    expect(mergePublishes).toBe(4)
+    expect(logRecords(second)).toContainEqual(
+      expect.objectContaining({ kind: "observation", subject: "transient-push-probe", branch }),
+    )
+    expect(logRecords(second)).toContainEqual(
+      expect.objectContaining({ kind: "observation", subject: "transient-push-hold-cleared", branch }),
+    )
+  } finally {
+    restoreStderr()
+    restoreSleep()
+  }
+})
+
+/** @failure 27995: a 4xx publish started retrying like a 5xx.
+ * @level l3 @consumer queue operator
+ */
+it("still exits 2 for a 4xx merge publication", async () => {
+  const restoreSleep = stubTransientBackoff()
+  const restoreStderr = silenceStderr()
+  try {
+    const w = await world()
+    await createWorldEventQueue(w)
+    const branch = "task/4xx-no-retry"
+    await submitCommit(w, branch, "one.txt")
+    const fourXx = "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 403"
+    let mergePublishes = 0
+    using _publish = beforeGitomicPublish(async (_repo, updates) => {
+      if (!updates.some((update) => update.ref === "refs/heads/main")) return
+      mergePublishes++
+      throw new gitomic.PublicationRejected(updates, [fourXx], fourXx)
+    })
+
+    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+    expect(outcome).toMatchObject({ exitCode: 2, stuck: [branch], merged: [] })
+    expect(mergePublishes).toBe(1)
+  } finally {
+    restoreStderr()
+    restoreSleep()
+  }
+})
+
+/** @failure 27995: an unrecognized remote refusal was retried as if it were a 5xx.
+ * @level l3 @consumer queue operator
+ */
+it("still exits 2 for an unrecognized merge publication refusal", async () => {
+  const restoreSleep = stubTransientBackoff()
+  const restoreStderr = silenceStderr()
+  try {
+    const w = await world()
+    await createWorldEventQueue(w)
+    const branch = "task/unrecognized-no-retry"
+    await submitCommit(w, branch, "one.txt")
+    const other = "remote: pre-receive hook declined"
+    let mergePublishes = 0
+    using _publish = beforeGitomicPublish(async (_repo, updates) => {
+      if (!updates.some((update) => update.ref === "refs/heads/main")) return
+      mergePublishes++
+      throw new gitomic.PublicationRejected(updates, [other], other)
+    })
+
+    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+    expect(outcome).toMatchObject({ exitCode: 2, stuck: [branch], merged: [] })
+    expect(mergePublishes).toBe(1)
+  } finally {
+    restoreStderr()
+    restoreSleep()
+  }
+})
+
+/** @failure 27995: a later change merged while an unpublished 5xx hold still owned the line.
+ * @level l3 @consumer queue operator and next submitter
+ */
+it("does not merge a later change while a 5xx publication is held", async () => {
+  const restoreSleep = stubTransientBackoff()
+  const restoreStderr = silenceStderr()
+  try {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    await createWorldEventQueue(w)
+    const first = "task/5xx-held-head"
+    const later = "task/5xx-held-later"
+    await submitCommit(w, first, "one.txt")
+    await submitCommit(w, later, "two.txt")
+    using _publish = beforeGitomicPublish(async (_repo, updates) => {
+      if (!updates.some((update) => update.ref === "refs/heads/main")) return
+      throw new gitomic.PublicationRejected(updates, [GITHUB_5XX], GITHUB_5XX)
+    })
+
+    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+    expect(outcome).toMatchObject({ exitCode: 0, stuck: [first], merged: [] })
+    expect((await readStatus(store, "main", first)).status).toBe("stuck")
+    expect((await readStatus(store, "main", later)).status).not.toBe("merged")
+  } finally {
+    restoreStderr()
+    restoreSleep()
+  }
 })
 
 /** @failure A definitive remote rejection was treated as an ambiguous merge and retried on the next round.

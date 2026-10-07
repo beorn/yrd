@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pushRefUpdates } from "git-super/push"
+import { retryTransientPush } from "./transient-push.ts"
 import { refuseMovedPrivateGitlinks } from "./private-submodules.ts"
 import {
   Conflict,
@@ -400,18 +401,36 @@ export async function publishMovedGitlinks(
     const first = group[0]
     if (first === undefined) throw new Error(`empty retention plan for child checkout ${checkout}`)
     let result: Awaited<ReturnType<typeof pushRefUpdates>>
+    const pinRefs = group.map((pin) => pin.ref).join(", ")
     try {
-      result = await pushRefUpdates({
-        root: checkout,
-        git: seamProcess(first.child, checkout),
-        updates: group.map((pin) => ({
+      result = await retryTransientPush(
+        () =>
+          pushRefUpdates({
+            root: checkout,
+            git: seamProcess(first.child, checkout),
+            updates: group.map((pin) => ({
+              repository: checkout,
+              remote: "origin",
+              source: pin.sha,
+              destination: pin.ref,
+              expectedDestination: { state: "missing" },
+            })),
+          }),
+        {
           repository: checkout,
-          remote: "origin",
-          source: pin.sha,
-          destination: pin.ref,
-          expectedDestination: { state: "missing" },
-        })),
-      })
+          ref: pinRefs,
+          text: (pushed) =>
+            [
+              pushed.detail?.message,
+              ...pushed.repositories.flatMap((repository) => [
+                repository.detail?.message,
+                ...repository.refs.map((row) => row.detail?.message),
+              ]),
+            ]
+              .filter((line): line is string => line !== undefined && line !== "")
+              .join("\n"),
+        },
+      )
     } catch (cause) {
       throw Object.assign(
         new Error(

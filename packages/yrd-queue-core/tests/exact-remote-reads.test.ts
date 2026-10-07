@@ -14,6 +14,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { publishCheckedChildren } from "../src/publication.ts"
 import { publishMovedGitlinks, retentionRef } from "../src/submit.ts"
+import { transientPushRetry } from "../src/transient-push.ts"
 
 const roots: string[] = []
 const author = ["-c", "user.email=exact-reads@yrd.test", "-c", "user.name=yrd"] as const
@@ -118,6 +119,57 @@ describe("one remote ref is read by name, never from the whole advertisement", (
     // The first two reads find no pin; post-push and both identical-retry reads advertise only that pin.
     expect(recording.advertisedRefs()).toEqual([ref, ref, ref])
     expect(recording.advertisedRefs()).toHaveLength(3)
+  }, 60_000)
+
+  /** @failure 27995: a GitHub 5xx on pin publish failed the submit with no retry. */
+  it("retries a 5xx pin publish and lands the retention ref", async () => {
+    const sleep = transientPushRetry.sleep
+    transientPushRetry.sleep = async () => {}
+    const write = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: unknown, encoding?: unknown, callback?: unknown) => {
+      if (typeof encoding === "function") encoding()
+      if (typeof callback === "function") callback()
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const recording = await recordingGit()
+      const dependency = await crowdedRemote(recording.root, "dep-5xx", 2)
+      const marker = join(recording.root, "pin-5xx-once")
+      writeFileSync(
+        join(dependency, "hooks", "pre-receive"),
+        [
+          "#!/bin/sh",
+          `if [ ! -f '${marker}' ]; then`,
+          `  : > '${marker}'`,
+          "  echo 'remote: Internal Server Error' >&2",
+          "  echo 'The requested URL returned error: 500' >&2",
+          "  echo 'remote: Request ID: 8B8E:93E9C:1C9E26:269104:6AC672BE' >&2",
+          "  exit 1",
+          "fi",
+          "exit 0",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      )
+      const work = join(recording.root, "work-5xx")
+      mkdirSync(work)
+      const git = gitIn(work)
+      await git(["init", "--quiet", "--initial-branch=main"])
+      await git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", dependency, "vendor/dep"])
+      await git([...author, "commit", "--quiet", "--message", "add vendor/dep"])
+      const from = (await git(["rev-parse", "HEAD"])).trim()
+      const pin = await commitFile(join(work, "vendor/dep"), "moved.txt")
+      await git(["add", "vendor/dep"])
+      await git([...author, "commit", "--quiet", "--message", "move vendor/dep"])
+      const to = (await git(["rev-parse", "HEAD"])).trim()
+
+      const first = await publishMovedGitlinks(git, work, from, to)
+      expect(first.map(({ sha, state }) => ({ sha, state }))).toEqual([{ sha: pin, state: "published" }])
+      expect((await gitIn(dependency)(["rev-parse", retentionRef(pin)])).trim()).toBe(pin)
+    } finally {
+      process.stderr.write = write
+      transientPushRetry.sleep = sleep
+    }
   }, 60_000)
 
   it("the publication marker is read by name: a moved or absent marker still refuses, with no ls-remote", async () => {
