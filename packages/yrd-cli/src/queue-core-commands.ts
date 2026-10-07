@@ -2297,9 +2297,13 @@ export async function coreQueueCommand(
         const targetPin = (path: string): string => targetPins.get(path) as string
         /** A target pin for display in the MOVED set: a retired dependency has none. */
         const pinValue = (path: string): string => targetPins.get(path) ?? "absent"
-        // What the page and the exit name at their head: the runtime's own path
-        // when it moved, else the first moved in the constant's order.
-        const primary = moved.find((component) => component.path === ownPath) ?? (moved[0] as RuntimeComponentPin)
+        // What the page and the exit name at their head: the runtime's own path when it moved, else the first moved
+        // in the constant's order — derived from the CURRENT moved set on every read, never captured once. A
+        // mid-wait re-capture that un-moves the old head and moves another component must name the NEW one, or the
+        // exit emits gitlink=<old path> with from==to and the waiting facts name a path nothing moved (@cto 27886
+        // follow-up, bfc715c5).
+        const primaryComponent = (): RuntimeComponentPin =>
+          moved.find((component) => component.path === ownPath) ?? (moved[0] as RuntimeComponentPin)
         let announced: string | undefined
         // THE WAIT IS BOUNDED NOW (@cto 2026-09-11, on @i/10-yrd/24515). Before
         // the relaunch exit was repaired this loop never ran in production; it
@@ -2390,10 +2394,10 @@ export async function coreQueueCommand(
             // doing nothing, and an INFO line is where the last capability that
             // switched itself off hid for a month.
             log?.warn?.(waiting, {
-              checkout: readingOf(primary.path)?.checkoutPath,
-              gitlink: primary.path,
-              projected: readingOf(primary.path)?.projected,
-              target: targetPin(primary.path),
+              checkout: readingOf(primaryComponent().path)?.checkoutPath,
+              gitlink: primaryComponent().path,
+              projected: readingOf(primaryComponent().path)?.projected,
+              target: targetPin(primaryComponent().path),
             })
             // THE FACT THE OVERDUE PAGE WILL CARRY. `believableHealthDocument`
             // preserves `facts` when it turns a stale document unhealthy, so
@@ -2423,13 +2427,13 @@ export async function coreQueueCommand(
                 checkoutHead: reading?.checkout ?? "unreadable",
               }
             })
-            const primaryReading = readingOf(primary.path)
+            const primaryReading = readingOf(primaryComponent().path)
             waitingFacts = {
               ...relaunchOff,
-              waitingForCheckout: primary.path,
-              waitingTarget: targetPin(primary.path),
+              waitingForCheckout: primaryComponent().path,
+              waitingTarget: targetPin(primaryComponent().path),
               waitingLocalGitlink: primaryReading?.projected ?? "absent",
-              waitingCheckout: primaryReading?.checkoutPath ?? join(superproject, primary.path),
+              waitingCheckout: primaryReading?.checkoutPath ?? join(superproject, primaryComponent().path),
               waitingCheckoutHead: primaryReading?.checkout ?? "unreadable",
               waitingComponents: componentFacts,
               ...(relaunchSource === undefined
@@ -2447,9 +2451,9 @@ export async function coreQueueCommand(
               options.json,
               {
                 reason: "waiting-for-checkout",
-                gitlink: primary.path,
+                gitlink: primaryComponent().path,
                 from: gitlink.sha,
-                to: targetPin(primary.path),
+                to: targetPin(primaryComponent().path),
                 projected: primaryReading?.projected,
                 checkout: primaryReading?.checkout ?? "unreadable",
                 ...(moved.length === 1
@@ -2489,7 +2493,7 @@ export async function coreQueueCommand(
           // exit-0 path below relaunches it. habd respawns that directly and
           // never runs the admission probe, so the gate above is never met.
           if (Date.now() >= alarmDueAt) {
-            const primaryReading = readingOf(primary.path)
+            const primaryReading = readingOf(primaryComponent().path)
             const why =
               `waited ${String(Math.round((Date.now() - waitStartedAt) / 1000))}s for the target to land and it has not: ${detail}. ` +
               `This process runs from ${superproject}${relaunchSource === undefined ? "" : ` and the declared source resolves to ${projectedRoot ?? "unavailable"}`}. ` +
@@ -2498,9 +2502,9 @@ export async function coreQueueCommand(
               `Once it does the service relaunches on its own — no restart, and nothing to delete.`
             log?.warn?.(why, {
               checkout: primaryReading?.checkoutPath,
-              gitlink: primary.path,
+              gitlink: primaryComponent().path,
               projected: primaryReading?.projected,
-              target: targetPin(primary.path),
+              target: targetPin(primaryComponent().path),
             })
             // `running` is TRUE here and that is the whole point: this process is
             // alive and still waiting, which is what makes the page a page rather
@@ -2515,7 +2519,7 @@ export async function coreQueueCommand(
             writeHealth(
               relaunchStalledHealthDocument(
                 SERVICE,
-                { checkout: relaunchSource ?? gitlink.checkout, path: primary.path, sha: targetPin(primary.path) },
+                { checkout: relaunchSource ?? gitlink.checkout, path: primaryComponent().path, sha: targetPin(primaryComponent().path) },
                 why,
                 {
                   ...waitingFacts,
@@ -2534,11 +2538,11 @@ export async function coreQueueCommand(
               {
                 checkout: primaryReading?.checkout ?? "unreadable",
                 from: gitlink.sha,
-                gitlink: primary.path,
+                gitlink: primaryComponent().path,
                 message: why,
                 projected: primaryReading?.projected,
                 reason: "relaunch-wait-stalled",
-                to: targetPin(primary.path),
+                to: targetPin(primaryComponent().path),
               },
               why,
             )
@@ -2565,8 +2569,8 @@ export async function coreQueueCommand(
           if (recaptured !== undefined) return recaptured
           if (moved.length === 0) return undefined
         }
-        const exitFrom = primary.sha
-        const exitTo = targetPin(primary.path)
+        const exitFrom = primaryComponent().sha
+        const exitTo = targetPin(primaryComponent().path)
         const movedLine = moved
           .map(
             (component) =>
@@ -2574,14 +2578,14 @@ export async function coreQueueCommand(
           )
           .join(", ")
         const movedMessage = `gitlink moved from ${exitFrom.slice(0, 12)} to ${exitTo.slice(0, 12)}: exiting for relaunch`
-        log?.info?.(`${movedMessage} [${movedLine}]`, { from: exitFrom, gitlink: primary.path, to: exitTo })
+        log?.info?.(`${movedMessage} [${movedLine}]`, { from: exitFrom, gitlink: primaryComponent().path, to: exitTo })
         emit(
           io,
           options.json,
           {
             exitCode: 0,
             from: exitFrom,
-            gitlink: primary.path,
+            gitlink: primaryComponent().path,
             reason: "gitlink-moved",
             to: exitTo,
             ...(moved.length === 1
