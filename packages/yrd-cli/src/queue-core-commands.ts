@@ -275,6 +275,14 @@ const sourceAtLoad = await (async () => {
     // bundle actually reaches is pinned by runtime-components.test.ts.
     let components: readonly Readonly<{ path: string; sha: string }>[] = []
     let componentsError: string | undefined
+    // CORRECTION 1 (@cto 27886 ruling 3(a), 2026-10-07): the LOADED pin of a declared component is its own
+    // checkout's HEAD at this instant — the same rule the own path above already follows. ls-tree supplies
+    // MEMBERSHIP only. On the mutable undeclared source (24515) the updater can move the superproject's
+    // RECORD before it moves the checkout, so a recorded pin read as "loaded" claims code this process is
+    // NOT running: the next target equals the record, the exit never arms, and the loop keeps running the old
+    // dependency silently. Loaded physical, and WARN where the two disagree.
+    const componentsDrift: { path: string; loaded: string; recorded: string }[] = []
+    const componentsUnreadable: string[] = []
     if (superprojectRoot !== "") {
       const listed = await source.run({
         repo: superprojectRoot,
@@ -285,7 +293,24 @@ const sourceAtLoad = await (async () => {
         // short and gitlinkOf says so where a reader sees it.
         componentsError = `git ls-tree HEAD in ${superprojectRoot}: ${gitFailure(listed, 5000)}`
       } else {
-        components = gitlinks(listed.stdout)
+        const resolved: { path: string; sha: string }[] = []
+        for (const row of gitlinks(listed.stdout)) {
+          const componentHead = await source.run({
+            repo: join(superprojectRoot, row.path),
+            args: ["rev-parse", "--verify", "HEAD^{commit}"],
+          })
+          if (componentHead.code !== 0 || componentHead.timedOut || componentHead.signal || componentHead.failure) {
+            // The checkout cannot be read, so nothing may be claimed about what this process loaded: keep the
+            // recorded pin and say so loudly rather than inventing a loaded value.
+            componentsUnreadable.push(`${row.path}: ${gitFailure(componentHead, 5000)}`)
+            resolved.push({ path: row.path, sha: row.sha })
+            continue
+          }
+          const loaded = componentHead.stdout.trim()
+          if (loaded !== row.sha) componentsDrift.push({ path: row.path, loaded, recorded: row.sha })
+          resolved.push({ path: row.path, sha: loaded })
+        }
+        components = resolved
       }
     }
     return {
@@ -294,6 +319,8 @@ const sourceAtLoad = await (async () => {
       superproject: superprojectRoot,
       components,
       componentsError,
+      componentsDrift,
+      componentsUnreadable,
     }
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) }
@@ -2221,23 +2248,58 @@ export async function coreQueueCommand(
       // absent-gitlink terminal, named for that path.
       const reload = async (targetOid: string): Promise<YrdCliExitCode | undefined> => {
         if (gitlink === undefined) return undefined
-        const targetPins = new Map<string, string | undefined>()
-        for (const component of gitlink.components) {
-          targetPins.set(component.path, await gitlinkAt(git, targetOid, component.path))
-        }
-        const absent = gitlink.components.find((component) => targetPins.get(component.path) === undefined)
-        if (absent !== undefined) {
-          return terminalExit(
-            "gitlink-absent",
-            `runtime gitlink ${absent.path} is absent at captured target ${targetOid}; restore it before restarting this service`,
+        const ownPath = gitlink.path
+        const loadedOf = (path: string): string | undefined =>
+          gitlink.components.find((component) => component.path === path)?.sha
+        // CORRECTIONS 2 + 3 (@cto 27886 ruling 3(a), 2026-10-07). The WHOLE vector is re-classified at every
+        // capture — the entry capture and every mid-wait re-capture — never only the paths that had already
+        // moved. A newer target that newly moves a SECOND component must extend the SAME wait under the same
+        // cap, or the loop exits onto a landing that still holds that component's old copy and burns a relaunch.
+        // Absence is classified too:
+        //   - the own path absent at the target is ALWAYS terminal (a move cannot be observed);
+        //   - a dependency the target no longer records is PART OF THE MOVE when the own path also moved: the
+        //     new runtime's own constant governs it, so await only the paths the target still records;
+        //   - the same dependency when the own path did NOT move is terminal, and says WHAT happened.
+        // `moved` is every component whose target pin differs from its LOADED pin (a retired dependency counts,
+        // so the exit arms); `awaited` is the moved paths the target still records — the paths the wait reads.
+        let targetPins = new Map<string, string | undefined>()
+        let moved: RuntimeComponentPin[] = []
+        let awaited: RuntimeComponentPin[] = []
+        const classify = async (oid: string): Promise<YrdCliExitCode | undefined> => {
+          targetPins = await gitlinkPinsAt(
+            git,
+            oid,
+            gitlink.components.map((component) => component.path),
           )
+          const ownPin = targetPins.get(ownPath)
+          if (ownPin === undefined) {
+            return terminalExit(
+              "gitlink-absent",
+              `runtime gitlink ${ownPath} is absent at captured target ${oid}; restore it before restarting this service`,
+            )
+          }
+          const retired = gitlink.components.filter(
+            (component) => component.path !== ownPath && targetPins.get(component.path) === undefined,
+          )
+          if (retired.length > 0 && ownPin === loadedOf(ownPath)) {
+            return terminalExit(
+              "gitlink-absent",
+              `target ${oid} drops ${retired[0]?.path ?? "a declared component"}, which this unchanged runtime loads`,
+            )
+          }
+          moved = gitlink.components.filter((component) => targetPins.get(component.path) !== component.sha)
+          awaited = moved.filter((component) => targetPins.get(component.path) !== undefined)
+          return undefined
         }
-        const targetPin = (path: string): string => targetPins.get(path) as string
-        const moved = gitlink.components.filter((component) => targetPins.get(component.path) !== component.sha)
+        const entry = await classify(targetOid)
+        if (entry !== undefined) return entry
         if (moved.length === 0) return undefined
+        const targetPin = (path: string): string => targetPins.get(path) as string
+        /** A target pin for display in the MOVED set: a retired dependency has none. */
+        const pinValue = (path: string): string => targetPins.get(path) ?? "absent"
         // What the page and the exit name at their head: the runtime's own path
         // when it moved, else the first moved in the constant's order.
-        const primary = moved.find((component) => component.path === gitlink.path) ?? (moved[0] as RuntimeComponentPin)
+        const primary = moved.find((component) => component.path === ownPath) ?? (moved[0] as RuntimeComponentPin)
         let announced: string | undefined
         // THE WAIT IS BOUNDED NOW (@cto 2026-09-11, on @i/10-yrd/24515). Before
         // the relaunch exit was repaired this loop never ran in production; it
@@ -2265,7 +2327,7 @@ export async function coreQueueCommand(
           const readings: { path: string; projected?: string; checkout: string; checkoutPath: string }[] = []
           if (projectedRoot !== undefined && sourceError === undefined) {
             try {
-              for (const component of moved) {
+              for (const component of awaited) {
                 const checkoutPath = join(projectedRoot, component.path)
                 const projected = await gitlinkAt(
                   gitIn(projectedRoot, undefined, selection, { env: options.env }),
@@ -2295,8 +2357,8 @@ export async function coreQueueCommand(
           // before a relaunch can be trusted to load the target.
           const settled =
             sourceError === undefined &&
-            readings.length === moved.length &&
-            moved.every((component) => {
+            readings.length === awaited.length &&
+            awaited.every((component) => {
               const reading = readingOf(component.path)
               return (
                 reading !== undefined &&
@@ -2307,7 +2369,7 @@ export async function coreQueueCommand(
           if (settled) break
           // Each moved path with its loaded, target and projected pins: a wait
           // that says only "waiting" sends a reader to all of them at once.
-          const detail = moved
+          const detail = awaited
             .map((component) => {
               const reading = readingOf(component.path)
               return (
@@ -2350,7 +2412,7 @@ export async function coreQueueCommand(
             // The legacy single-path keys (waitingForCheckout and friends) name
             // the HEAD path; `waitingComponents` carries every moved path, so a
             // vector wait is readable as a vector without splitting a page.
-            const componentFacts = moved.map((component) => {
+            const componentFacts = awaited.map((component) => {
               const reading = readingOf(component.path)
               return {
                 path: component.path,
@@ -2396,7 +2458,7 @@ export async function coreQueueCommand(
                       moved: moved.map((component) => ({
                         path: component.path,
                         from: component.sha,
-                        to: targetPin(component.path),
+                        to: pinValue(component.path),
                       })),
                     }),
                 message: waiting,
@@ -2495,25 +2557,20 @@ export async function coreQueueCommand(
             return terminalExit("declaration-unreadable", `${targetLabel} no longer carries a .yrd.yml`)
           }
           targetOid = latest.oid
-          for (const component of moved) {
-            const pin = await gitlinkAt(git, targetOid, component.path)
-            // A target that removes a moved path mid-wait is the same terminal
-            // the initial read makes: named, per declared path (ruling 3(a)).
-            if (pin === undefined) {
-              return terminalExit(
-                "gitlink-absent",
-                `runtime gitlink ${component.path} is absent at captured target ${targetOid}; restore it before restarting this service`,
-              )
-            }
-            targetPins.set(component.path, pin)
-          }
+          // CORRECTION 2: the re-capture classifies the WHOLE vector against the new target, not only the paths
+          // that had already moved — a newer target that also moves another component extends THIS wait under the
+          // same cap. A re-capture that un-moves everything (the target returned to what we load) needs no
+          // relaunch at all, so the round runs on the code it already has.
+          const recaptured = await classify(targetOid)
+          if (recaptured !== undefined) return recaptured
+          if (moved.length === 0) return undefined
         }
         const exitFrom = primary.sha
         const exitTo = targetPin(primary.path)
         const movedLine = moved
           .map(
             (component) =>
-              `${component.path} ${component.sha.slice(0, 12)} -> ${targetPin(component.path).slice(0, 12)}`,
+              `${component.path} ${component.sha.slice(0, 12)} -> ${pinValue(component.path).slice(0, 12)}`,
           )
           .join(", ")
         const movedMessage = `gitlink moved from ${exitFrom.slice(0, 12)} to ${exitTo.slice(0, 12)}: exiting for relaunch`
@@ -2533,7 +2590,7 @@ export async function coreQueueCommand(
                   moved: moved.map((component) => ({
                     path: component.path,
                     from: component.sha,
-                    to: targetPin(component.path),
+                    to: pinValue(component.path),
                   })),
                 }),
           },
@@ -3827,6 +3884,19 @@ async function gitlinkOf(
       { runtimeComponents: components.map((component) => component.path) },
     )
   }
+  // CORRECTION 1 (@cto 27886 ruling 3(a)): say where the physical checkout and the superproject's record disagree at
+  // load. The checkout is the loaded pin, so a target equal to the RECORD still arms the wait on the checkout.
+  for (const drift of source.componentsDrift) {
+    log?.warn?.(
+      `runtime component ${drift.path} drifted at module load: its checkout HEAD is ${drift.loaded.slice(0, 12)} but ` +
+        `the superproject records ${drift.recorded.slice(0, 12)}; the LOADED pin is the checkout, so a target equal to ` +
+        `the record still arms the relaunch wait on the checkout`,
+      { runtimeComponent: drift.path, loaded: drift.loaded, recorded: drift.recorded },
+    )
+  }
+  for (const unreadable of source.componentsUnreadable) {
+    log?.warn?.(`runtime component checkout unreadable at module load: ${unreadable}`, { runtimeComponent: unreadable })
+  }
   return {
     kind: "gitlink",
     path,
@@ -3866,6 +3936,21 @@ type RuntimeGitlink = Readonly<{
 /** The gitlink at `path` in `commit`, or undefined when there is none there. */
 async function gitlinkAt(git: Git, commit: string, path: string): Promise<string | undefined> {
   return gitlinks(await git(["ls-tree", "-z", commit, "--", path])).find((row) => row.path === path)?.sha
+}
+
+/**
+ * Every declared path's gitlink at one commit, from ONE `ls-tree -z` listing (@cto 27886 ruling 3(a), nit).
+ * The reload loop re-reads the whole vector at every capture, so a per-path read would fork one git per
+ * component per round; one listing answers the vector. A path the commit does not record maps to undefined.
+ */
+async function gitlinkPinsAt(
+  git: Git,
+  commit: string,
+  paths: readonly string[],
+): Promise<Map<string, string | undefined>> {
+  const pins = new Map<string, string | undefined>(paths.map((path) => [path, undefined]))
+  for (const row of gitlinks(await git(["ls-tree", "-z", commit, "--", ...paths]))) pins.set(row.path, row.sha)
+  return pins
 }
 
 /** The gitlink rows of one `ls-tree -z` listing: mode 160000, a commit at a path. */
