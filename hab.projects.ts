@@ -8,6 +8,10 @@ import {
   yrdQueueRunnerDeclarations,
   type YrdQueueRunnerDeclaration,
 } from "./packages/yrd-queue-core/src/runner-declarations.ts"
+// Imported by FILE, never the barrel: hab's plan evaluation loads this module,
+// and the constant is pure, so reading it never drags the queue's module graph
+// into habd (@cto, 2026-10-07, on 27886).
+import { YRD_RUNTIME_COMPONENTS as YRD_COMPONENTS } from "./packages/yrd-queue-core/src/runtime-components.ts"
 
 export { yrdQueueRunnerDeclarations, type YrdQueueRunnerDeclaration }
 
@@ -71,7 +75,12 @@ export default {
         // The loop exits 0 by itself once the tree its next launch loads holds a new pin (26755), and the
         // supervisor relaunches it from the current landing: a self-exit bounded at 45 minutes (26774, @cto
         // 9e7a89d2). Past that bound hab pages the move as late.
-        landingMigration: { mechanism: "self-exit" as const, bound: "45m" },
+        //
+        // 27886 (@cto 2026-10-07): the pin vector is every root gitlink the runtime loads in process, not its
+        // own alone — a dependency-only promotion (say vendor/bearly) moved the loop never saw, and moved the
+        // source check never saw either, because the entrypoint file's history does not cover it. The same
+        // constant drives the loop's exit and wait and this declaration's source comparison.
+        landingMigration: { mechanism: "self-exit" as const, bound: "45m", additionalComponents: YRD_COMPONENTS },
         // `HabServiceDefinition.owner` is a recognized service key in
         // ag/packages/hab-config. Spreading the registry row's owner here makes
         // every page of this service — the stopped line's and a terminal
