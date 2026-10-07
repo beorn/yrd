@@ -373,6 +373,26 @@ describe("yrd env open prepares the retained environment", () => {
 })
 
 describe("yrd env close preserves anything it cannot safely remove", () => {
+  /**
+   * @failure 25949: successful removal was reported as failure when the caller's cwd was the removed environment.
+   * @level l2 (real CLI subprocess and materialized submodule)
+   * @consumer a caller closing the environment from its own shell
+   */
+  it("closes from inside the removed environment and reports success (25949)", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openEnvironment(w.work, selected)
+    const cli = join(dirname(fileURLToPath(import.meta.url)), "../../../bin/yrd.ts")
+
+    const closed = await command(path, [process.execPath, cli, "env", "close", path, "--json"], process.env)
+
+    expect(closed.exit, closed.stderr).toBe(0)
+    expect(JSON.parse(closed.stdout)).toEqual({ closed: path })
+    expect(existsSync(path)).toBe(false)
+    expect(await w.git(["worktree", "list", "--porcelain"])).not.toContain(path)
+  })
+
   // #27156: existence admission precedes teardown and every child-content read.
   it.each([false, true])("private custody gates close before teardown: initialized=%s", async (initialized) => {
     const w = await world(":", "printf touched > ../private-teardown-ran.txt")
