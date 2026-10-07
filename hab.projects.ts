@@ -14,6 +14,10 @@ import {
 import { YRD_RUNTIME_COMPONENTS as YRD_COMPONENTS } from "./packages/yrd-queue-core/src/runtime-components.ts"
 
 export { yrdQueueRunnerDeclarations, type YrdQueueRunnerDeclaration }
+// 27904: re-exported so the ROOT composes the shared-main landing trigger set from the same measured vector,
+// never a hand-typed copy. The hh declaration fragment cannot import vendor (hab-config purity composes
+// cross-module coupling at the root), and the yrd fragment's own module already imports this by file.
+export { YRD_COMPONENTS as YRD_RUNTIME_COMPONENTS }
 
 export default {
   name: "yrd",
