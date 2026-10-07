@@ -126,8 +126,10 @@ export function roundBoundMs(
   if (!Number.isSafeInteger(candidates) || candidates < 1) {
     throw new TypeError(`round Candidates must be a positive safe integer: ${String(candidates)}`)
   }
+  // A round's own steps only: the line read is once per round, and preview custody is timed by submit's preview alone
+  // (27510), never by a queue round, so neither may loosen a round's Due.
   const baseCandidateSteps = Object.entries(STEP_BOUNDS_MS)
-    .filter(([name]) => name !== "line-read")
+    .filter(([name]) => name !== "line-read" && name !== "preview-custody")
     .reduce((sum, [, bound]) => sum + bound, 0)
   const activeChecks = checks.filter((check) => check.run !== "true")
   const programRootOccurrences = activeChecks
