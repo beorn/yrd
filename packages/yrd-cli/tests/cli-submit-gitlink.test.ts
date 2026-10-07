@@ -1166,5 +1166,21 @@ describe("ordinary submit with a local-only component pin", () => {
     // retain, and the receipt says so rather than reporting it as retained.
     expect(row?.custody).toMatchObject({ pin: row?.landingPin, state: "composed-not-retained" })
     expect(row?.custody?.cure, ranJson.report).toContain("queue-owned clone")
+
+    // 27510 AC1: after the preview exits and its scratch is gone, the recorded child is read through its custody
+    // anchor in the author's own store: resolve refs/yrd/preview/<clone>/<subject>/<candidate-root>, then show it.
+    const anchors = (await child(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/preview/"]))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+    const anchored = anchors.find((line) => line.endsWith(` ${row!.landingPin}`))
+    expect(anchored, `anchors in the author's ${one.path} store:\n${anchors.join("\n")}`).toBeDefined()
+    const anchor = anchored!.split(" ")[0]!
+    expect((await child(["rev-parse", "--verify", `${anchor}^{commit}`])).trim()).toBe(row!.landingPin)
+    expect(await child(["show", `${anchor}:alt.txt`])).toBe("alt-content\n")
+    // The same-named root anchor holds the candidate root, whose gitlink records that child.
+    const rootAnchor = (await wtGit(["for-each-ref", "--format=%(refname)", anchor])).trim()
+    expect(rootAnchor, `the root store has no ${anchor}`).toBe(anchor)
+    expect((await wtGit(["rev-parse", `${anchor}:${one.path}`])).trim()).toBe(row!.landingPin)
   }, 90_000)
 })
