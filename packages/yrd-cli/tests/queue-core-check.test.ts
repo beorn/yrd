@@ -417,6 +417,30 @@ describe("yrd check uses the protected program without publishing", () => {
       expect(branchCheckRefs.trim()).toBe("")
     })
 
+    // @failure the closing sweep cannot list the check refs and says nothing, so refs/yrd-check/* stay behind
+    //   unannounced (27258 AC2: the finally swallowed the rejection as an empty array).
+    it("says so on stderr when the closing sweep cannot list the check refs, and keeps the check's verdict", async () => {
+      const w = await world(true, 'checks:\n  - {break-refs: {run: "sh break-refs.sh"}}\n')
+      // The check itself passes, then leaves the shared ref store unreadable, so only the closing sweep fails.
+      writeFileSync(
+        join(w.work, "break-refs.sh"),
+        'printf "not a ref line\\n" >> "$(git rev-parse --path-format=absolute --git-common-dir)/packed-refs"\n',
+      )
+      await w.git(["add", "break-refs.sh"])
+      await w.git(["commit", "--quiet", "-m", "a check that breaks the ref store after it passes"])
+      let stderr = ""
+      const exit = await coreQueueCommand(
+        w.work,
+        { cwd: w.work, color: false, stdout: () => {}, stderr: (text) => void (stderr += text) },
+        { command: "check", names: ["break-refs"] },
+        { workdir: w.workdir },
+      )
+      expect(exit, stderr).toBe(0)
+      expect(stderr).toMatch(
+        /yrd: check refs were not swept; refs\/yrd-check\/\* may remain until the next yrd check: /u,
+      )
+    })
+
     it("cleans up temporary refs on setup/execution error", async () => {
       const w = await protectedWorld("exit 1")
       const head = (await w.git(["rev-parse", "HEAD"])).trim()
@@ -437,7 +461,10 @@ describe("one generic temp root (27721)", () => {
   it("narrows the manual check child to a supplied TMPDIR, and keeps <workdir>/tmp when none is supplied", async () => {
     const probe = join(mkdtempSync(join(tmpdir(), "yrd-cli-tmp-root-")), "seen.txt")
     roots.push(dirname(probe))
-    const w = await world(true, `checks:\n  - {tmpdir-probe: {run: 'printf %s "$TMPDIR" > ${JSON.stringify(probe)}'}}\n`)
+    const w = await world(
+      true,
+      `checks:\n  - {tmpdir-probe: {run: 'printf %s "$TMPDIR" > ${JSON.stringify(probe)}'}}\n`,
+    )
     const supplied = join(w.workdir, "declared-tmp")
     const seen = probe
     const suppliedRun = capture(w.work)

@@ -3579,7 +3579,13 @@ export async function coreQueueCommand(
             ? 1
             : 0
       } finally {
-        await sweepCheckRefs(checkGit).catch(() => [])
+        // A sweep that cannot run must not replace the check's verdict, so it is reported, never thrown and never
+        // swallowed: the refs it could not list stay behind until the next check's opening sweep (27258 AC2).
+        await sweepCheckRefs(checkGit).catch((error: unknown) => {
+          io.stderr(
+            `yrd: check refs were not swept; refs/yrd-check/* may remain until the next yrd check: ${error instanceof Error ? error.message : String(error)}\n`,
+          )
+        })
       }
     }
     case "stats": {
