@@ -177,7 +177,9 @@ it("plans the exact old refs, moves the valid chain, and repairs the cancelled-o
   expect(events[1]?.content).toContain("old drop body")
   expect(events[0]?.props.find(([key]) => key === "Time")?.[1]).not.toBe("2026-09-24T20:25:00.000Z")
   expect((await listChangeHistories(store, "main")).invalid.size).toBe(0)
-  const listed = yrd(work, "list")
+  // The fixture's drop is dated 2026-09-24: a dated ended change leaves the default seven-day listing, and this row is
+  // about invalid chains blinding the listing, not that window, so it lists every ended change (28006).
+  const listed = yrd(work, "list", "--all")
   expect(listed.changes.filter((row) => row.state === "invalid")).toEqual([])
   expect(listed.changes).toEqual(
     expect.arrayContaining([
