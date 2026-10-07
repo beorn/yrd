@@ -18,7 +18,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import {
   CHANGE_STATUSES,
   MIRROR_REFRESHED_AT,
@@ -914,6 +914,8 @@ describe("a queue is the selected origin branch carrying config", () => {
       good.stderr(),
     ).toBe(0)
     expect(good.stdout()).toContain("task/healthy")
+    // Submit's preview custody names the unreadable chain out loud and keeps its anchors (27510).
+    using custodyWarning = vi.spyOn(console, "warn").mockImplementation(() => {})
     await git(["checkout", "--quiet", "-b", "task/broken"])
     writeFileSync(join(repo, "broken.txt"), "cannot submit over unreadable chain\n")
     await git(["add", "broken.txt"])
@@ -922,6 +924,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await runYrdProcess(["bun", "yrd", "submit", "--queue", "main", "--json"], submitted.io)).toBe(2)
     expect(submitted.stderr()).toContain("task/broken")
     expect(submitted.stderr()).toContain("needs an open change")
+    expect(custodyWarning).toHaveBeenCalledWith(
+      expect.stringContaining("preview custody keeps task/broken's anchors: its change history is unreadable"),
+    )
     const run = capture(repo)
     expect(await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], run.io), run.stderr()).toBe(
       0,
