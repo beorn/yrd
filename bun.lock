@@ -82,9 +82,9 @@
     },
   },
   "overrides": {
-    "git-super": "github:beorn/git-super#1311b95eb709757a15d85badd9f8764fa7046086",
-    "gitomic": "github:beorn/gitomic#d2167d26c17b412aae4978f534d455bcf6a5a27d",
-    "loggily": "github:beorn/loggily#115f855f63d7666e821b7cfbf1253ded91348d75",
+    "git-super": "github:beorn/git-super#756d509cb52e8a358bf2f631d1063524bc64931c",
+    "gitomic": "github:beorn/gitomic#047422e334e3b65c9690cf2012b0af2c64110447",
+    "loggily": "github:beorn/loggily#2ed01cf6cca4fff010f4ecf2481eb2848401068d",
   },
   "packages": {
     "@bearly/cli-process": ["@bearly/cli-process@0.1.0", "", {}, "sha512-rMue1/wZy0eO3mTTOqhiB48E54z1uDggW6qItP/BH9mJvFz//tJ8b1FrPv0TELwbd5oUIHz3QUt3x0AcrudLVA=="],
@@ -385,9 +385,9 @@
 
     "gifenc": ["gifenc@1.0.3", "", {}, "sha512-xdr6AdrfGBcfzncONUOlXMBuc5wJDtOueE3c5rdG0oNgtINLD+f2iFZltrBRZYzACRbKr+mSVU/x98zv2u3jmw=="],
 
-    "git-super": ["git-super@github:beorn/git-super#1311b95", { "dependencies": { "@bearly/flock": "0.2.2", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-1311b95", "sha512-6qiJlzm498Pa9P3a3pbP5kDRSkYwMSC1t44e1qNtqfKSTUD71RgH0GVuiKd6R2szcJ6tceL8vDRRkZA63HxZEA=="],
+    "git-super": ["git-super@github:beorn/git-super#756d509", { "dependencies": { "@bearly/flock": "0.2.2", "@bearly/pacing": "^0.1.0", "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "gitomic": "^0.4.0", "loggily": "^0.10.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-756d509", "sha512-f1+e4sW25wQe3R9qIuneofnjjv7brhmu8e4BZM++vYlJA/oeL6O5lCeTIwFcbljpvB3rlG2V/EVnb7oupj0AwA=="],
 
-    "gitomic": ["gitomic@github:beorn/gitomic#d2167d2", { "dependencies": { "@bearly/cli-process": "^0.1.0", "@bearly/flock": "^0.2.2", "@bearly/pacing": "^0.1.0" }, "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-d2167d2", "sha512-lJtEYA03O6YW2pX5W+7UZvmdvZXAbe9RCssb96n5U85Sh/iSJAUk4mdFA7FuQlJ616w6TIOAW7g4esAK/8CDZQ=="],
+    "gitomic": ["gitomic@github:beorn/gitomic#047422e", { "dependencies": { "@bearly/cli-process": "^0.1.0", "@bearly/flock": "^0.2.2", "@bearly/pacing": "^0.1.0" }, "peerDependencies": { "isomorphic-git": "^1.38.7" }, "optionalPeers": ["isomorphic-git"], "bin": { "gitomic": "./src/bin.ts" } }, "beorn-gitomic-047422e", "sha512-Fx+TN+zZVC1mBK23PHk5lXJndCa4gG8Bi0jz1OO0jd4555d75IJP+E+BA1VGZVrVZwms4eNJzfdNIYs9eTxCXA=="],
 
     "hast-util-to-html": ["hast-util-to-html@9.0.5", "", { "dependencies": { "@types/hast": "^3.0.0", "@types/unist": "^3.0.0", "ccount": "^2.0.0", "comma-separated-tokens": "^2.0.0", "hast-util-whitespace": "^3.0.0", "html-void-elements": "^3.0.0", "mdast-util-to-hast": "^13.0.0", "property-information": "^7.0.0", "space-separated-tokens": "^2.0.0", "stringify-entities": "^4.0.0", "zwitch": "^2.0.4" } }, "sha512-OguPdidb+fbHQSU4Q4ZiLKnzWo8Wwsf5bZfbvu7//a9oTYoqD/fWpe96NuHkoS9h0ccGOTe0C4NGXdtS0iObOw=="],
 
@@ -423,7 +423,7 @@
 
     "lightningcss-win32-x64-msvc": ["lightningcss-win32-x64-msvc@1.32.0", "", { "os": "win32", "cpu": "x64" }, "sha512-Amq9B/SoZYdDi1kFrojnoqPLxYhQ4Wo5XiL8EVJrVsB8ARoC1PWW6VGtT0WKCemjy8aC+louJnjS7U18x3b06Q=="],
 
-    "loggily": ["loggily@github:beorn/loggily#115f855", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-115f855", "sha512-qV1CPJkiLNp21vyYfc4AyPj2VYBzTUuQihQdSWRno3Q9Yei0RQh2SX62sTmApqwwvWfb7gQphCpkCbxdyJxZtA=="],
+    "loggily": ["loggily@github:beorn/loggily#2ed01cf", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-2ed01cf", "sha512-U/4MJTPBK27UF+xU24X/hYOfobuh+y3vhvHExzC+ymkEEK77/WxsQYfC1Ch77NqVbvQ4KkIPK/ZlfZwu3Yps1g=="],
 
     "magic-string": ["magic-string@0.30.21", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.5" } }, "sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ=="],
 
