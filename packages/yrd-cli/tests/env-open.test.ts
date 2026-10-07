@@ -612,6 +612,46 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).not.toContain("deleted refs/heads/task/kept")
   })
 
+  it.each([true, false])(
+    "names the continuation or unmerged work for an existing clean environment (merged=%s, hh 27720)",
+    async (merged) => {
+      const w = await world("true")
+      const name = "reopened's-work"
+      const first = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", name], first.io), first.stderr()).toBe(0)
+      const bay = join(w.work, ".bays", name)
+      const tree = gitIn(bay)
+      writeFileSync(join(bay, "preserved.txt"), "existing work\n")
+      await tree(["add", "preserved.txt"])
+      await tree(["commit", "--quiet", "-m", "named existing work"])
+      const head = (await tree(["rev-parse", "HEAD"])).trim()
+      if (merged) await w.git(["merge", "--quiet", "--no-ff", `task/${name}`, "-m", "merge existing work"])
+      await w.git(["commit", "--quiet", "--allow-empty", "-m", "advance requested base"])
+      await w.git(["push", "--quiet", "origin", "main"])
+      const second = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", name], second.io)).toBe(2)
+      expect(second.stderr()).toContain(bay)
+      if (merged) {
+        const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+        expect(second.stderr()).toContain(`yrd env close ${quote(bay)} && yrd env open --issue ${quote(name)}`)
+        const close = capture(w.work)
+        expect(await runYrdProcess(["bun", "yrd", "env", "close", bay], close.io), close.stderr()).toBe(0)
+        const reopened = capture(w.work)
+        expect(
+          await runYrdProcess(["bun", "yrd", "env", "open", "--issue", name], reopened.io),
+          reopened.stderr(),
+        ).toBe(0)
+        expect(reopened.stderr()).toContain("reused local")
+      } else {
+        expect(second.stderr()).toContain("unmerged")
+        expect(second.stderr()).toContain("named existing work")
+        expect(second.stderr()).not.toContain("yrd env close")
+        expect((await tree(["rev-parse", "HEAD"])).trim()).toBe(head)
+      }
+      expect(readFileSync(join(bay, "preserved.txt"), "utf8")).toBe("existing work\n")
+    },
+  )
+
   it("a second open of a live bay is refused and leaves the environment and its uncommitted file (hh 25976)", async () => {
     const w = await world("true")
     const first = capture(w.work)
@@ -625,6 +665,8 @@ describe("yrd env open prepares the retained environment", () => {
     expect(existsSync(join(bay, "uncommitted.txt")), second.stderr()).toBe(true)
     expect(await w.git(["worktree", "list", "--porcelain"])).toContain(bay)
     expect(second.stderr()).not.toContain("removed the half-made environment")
+    expect(second.stderr()).toContain("uncommitted.txt")
+    expect(second.stderr()).not.toContain("yrd env close")
   })
 
   it("keeps a failed environment and reports its command and output", async () => {

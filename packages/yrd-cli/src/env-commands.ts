@@ -344,6 +344,35 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
           `name the environment flat with --bay <name>${options.issue === undefined ? "" : ` --issue ${options.issue}`}`,
       )
     }
+    const existing = (await registeredWorktrees(git)).find(
+      (entry) => entry.branch === branch && resolve(entry.path) === resolve(baysRootOf(), name),
+    )
+    if (existing !== undefined) {
+      const treeGit = gitIn(existing.path, process, selection)
+      await requireClean(treeGit, existing.path)
+      const unmerged = (await treeGit(["log", "--oneline", `${base}..HEAD`])).trim()
+      if (unmerged !== "") {
+        throw new Error(
+          `environment ${existing.path} has commits unmerged into requested base ${base}; continue in this environment:\n${unmerged}`,
+        )
+      }
+      if (existing.locked !== undefined) {
+        throw new Error(
+          `environment ${existing.path} is locked${existing.locked === "" ? "" : `: ${existing.locked}`}; resolve the hold before reopening`,
+        )
+      }
+      const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
+      const reopen = [
+        "yrd env open",
+        ...(options.bay === undefined ? [] : [`--bay ${quote(options.bay)}`]),
+        ...(options.issue === undefined ? [] : [`--issue ${quote(options.issue)}`]),
+        ...(options.hold === undefined ? [] : [`--hold ${quote(options.hold)}`]),
+        ...(options.json === true ? ["--json"] : []),
+      ].join(" ")
+      throw new Error(
+        `environment ${existing.path} is clean and merged into requested base ${base}; to continue: yrd env close ${quote(existing.path)} && ${reopen}`,
+      )
+    }
     const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(), process })
     const excludedSubmodules = await declaredPrivateSubmodules(git, resolve(root), base)
     const result = await workspace.provision({ bay: name, name, branch, base, excludedSubmodules })
@@ -505,8 +534,10 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
 
 /** Refuse before running user teardown; a dirty tree is work, not garbage. */
 async function requireClean(git: Git, path: string): Promise<void> {
-  const dirty = await git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"])
-  if (dirty !== "") throw new Error(`environment ${path} is dirty; preserve or commit its changes before yrd env close`)
+  const dirty = (await git(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"])).trim()
+  if (dirty !== "") {
+    throw new Error(`environment ${path} is dirty; preserve or commit these changes before continuing:\n${dirty}`)
+  }
 }
 
 /** Retained environments preserve user work; GitSuper owns populated-submodule removal. */
