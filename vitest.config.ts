@@ -15,7 +15,8 @@ pinYrdTestStateHome()
 // Externalizing it lets vite-node fall through to Bun's own `import()`.
 export default defineConfig({
   test: {
-    include: ["packages/*/tests/**/*.test.{ts,tsx}", "tests/**/*.test.{ts,tsx}"],
+    // scripts/** too (28006): its one test went red at the pin while this config never collected it.
+    include: ["packages/*/tests/**/*.test.{ts,tsx}", "tests/**/*.test.{ts,tsx}", "scripts/**/*.test.{ts,tsx}"],
     // 27098: the queue runs the git-super it froze to its physical landing root,
     // never an ambient `git super`. These tests compose through that same binary.
     env: {
