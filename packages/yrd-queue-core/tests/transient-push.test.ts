@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, test } from "vitest"
-import { matchTransientPush5xx } from "../src/transient-push.ts"
+import { isTransientPushHold, matchTransientPush5xx, TRANSIENT_PUSH_HOLD } from "../src/transient-push.ts"
 
 describe("transient GitHub 5xx on a git push", () => {
   test.each([
@@ -57,5 +57,14 @@ describe("not a transient 5xx — stay fail-loud, no retry", () => {
     ["empty", ""],
   ])("%s", (_why, text) => {
     expect(matchTransientPush5xx(text)).toBeUndefined()
+  })
+})
+
+describe("auto-probe only holds this code wrote", () => {
+  test("keys on the hold phrase, not on quoted 5xx text", () => {
+    expect(isTransientPushHold(`${TRANSIENT_PUSH_HOLD} on merge publication`)).toBe(true)
+    expect(isTransientPushHold("remote: Internal Server Error")).toBe(false)
+    expect(isTransientPushHold("The requested URL returned error: 500")).toBe(false)
+    expect(isTransientPushHold(undefined)).toBe(false)
   })
 })

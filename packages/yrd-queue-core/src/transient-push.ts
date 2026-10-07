@@ -58,10 +58,10 @@ export function matchTransientPush5xx(text: string): TransientPush5xx | undefine
   return undefined
 }
 
-/** A standing stuck change whose record is a 5xx hold the queue retries itself. */
+/** A standing stuck change this code wrote; other 5xx-quoting stucks keep a manual resume. */
 export function isTransientPushHold(reason: string | undefined): boolean {
   if (reason === undefined || reason === "") return false
-  return matchTransientPush5xx(reason) !== undefined || reason.includes(TRANSIENT_PUSH_HOLD)
+  return reason.includes(TRANSIENT_PUSH_HOLD)
 }
 
 function errorText(error: unknown): string {

@@ -70,6 +70,7 @@ import { settledBaseCommit } from "../src/settled-base.ts"
 import { prepareWorktree, SetupFailed } from "../src/worktree.ts"
 import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
 import { transientPushRetry } from "../src/transient-push.ts"
+import { roundHealthDocument } from "../src/service-health.ts"
 
 const roots: string[] = []
 // The real queue child needs GitSuper even when the worker's PATH is sealed.
@@ -2201,6 +2202,12 @@ it("holds a 5xx merge publication without exit 2, then a later round lands it", 
     expect(mergePublishes).toBe(3)
     expect(logRecords(first).filter((row) => row.subject === "transient-push-5xx")).toHaveLength(3)
     expect(logRecords(first).filter((row) => row.kind === "change" && row.decision === "stuck")).toHaveLength(1)
+    expect(logRecords(first)).toContainEqual(
+      expect.objectContaining({ decision: "stuck", code: "yrd-publication-5xx" }),
+    )
+    const heldPage = roundHealthDocument("yrd", undefined, 120_000, new Date(), undefined, undefined, first.stuck)
+    expect(heldPage.state).toBe("unhealthy")
+    expect(heldPage.facts).toMatchObject({ stuckChanges: [branch] })
 
     const second = await queueRun(options)
     expect(second).toMatchObject({ exitCode: 0, merged: [branch], stuck: [] })
@@ -2212,6 +2219,10 @@ it("holds a 5xx merge publication without exit 2, then a later round lands it", 
     expect(logRecords(second)).toContainEqual(
       expect.objectContaining({ kind: "observation", subject: "transient-push-hold-cleared", branch }),
     )
+    const clearedPage = roundHealthDocument("yrd", undefined, 120_000, new Date(), undefined, undefined, second.stuck)
+    expect(clearedPage.state).toBe("healthy")
+    expect(clearedPage.error).toBeUndefined()
+    expect(clearedPage.facts?.stuckChanges).toBeUndefined()
   } finally {
     restoreStderr()
     restoreSleep()
