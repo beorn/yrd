@@ -73,7 +73,18 @@ export type PopulateReference = Readonly<{
   acquired?: (pin: ReferenceAcquisition) => void
   /** Told about each store as it is created. A store already there says nothing. */
   populated?: (store: ReferenceStore) => void
+  /**
+   * Preview custody (27510): keep each pin through `anchor`, a create-only ref in the EXISTING store, instead of a
+   * permanent `refs/yrd/pins/<sha>`. A preview never provisions an author's checkout, so a missing store fails by
+   * name and nothing is cloned. A store already holding `anchor` at the same pin is verified and reused with its age
+   * untouched; at another pin it fails by name. `anchored` hears each anchor this call created, so a failed attempt
+   * removes exactly those.
+   */
+  preview?: Readonly<{ anchor: string; anchored: (anchor: PreviewAnchor) => void }>
 }>
+
+/** One preview anchor a call created: the store it lives in, the gitlink it keeps and the pin it holds. */
+export type PreviewAnchor = Readonly<{ store: string; path: string; sha: string }>
 
 export type ReferenceAcquisition = Readonly<{ path: string; sha: string }> &
   (
@@ -258,6 +269,13 @@ export async function populateReferenceStores(options: PopulateReference): Promi
       const miss =
         present || localSource === undefined ? undefined : await localSourceMiss(options.gitIn, localSource, sha)
       const local = !present && localSource !== undefined && miss === undefined
+      if (!existing && options.preview !== undefined) {
+        throw new ReferenceUnpopulated(
+          root,
+          named,
+          `preview custody keeps ${sha} only in an existing store, and ${store} is not one; a preview never creates it`,
+        )
+      }
       if (!existing) {
         const started = Date.now()
         const cloneFrom = local ? localSource : url
@@ -302,6 +320,7 @@ export async function populateReferenceStores(options: PopulateReference): Promi
           git: seamProcess(storeGit, resolve(store)),
           remote: localSource,
           repository: store,
+          ...(options.preview === undefined ? {} : { anchor: false }),
         })
       }
       if (present || local || (await holdsCommit(storeGit, sha))) {
@@ -309,7 +328,8 @@ export async function populateReferenceStores(options: PopulateReference): Promi
         // A pin that arrived on a branch stops being reachable the moment that
         // branch moves, and the next gc in this store takes it — so the ref is
         // written for a pin already here exactly as for one just fetched.
-        await storeGit(["update-ref", pinRef(sha), sha])
+        if (options.preview === undefined) await storeGit(["update-ref", pinRef(sha), sha])
+        else await writePreviewAnchor(storeGit, root, store, named, sha, options.preview)
       } else {
         // TWO CAUSES, OPPOSITE OWNERS, ONE PROBE. Whichever way this fetch
         // fails, the pin is not here — but "the remote does not have it" is a
@@ -333,7 +353,7 @@ export async function populateReferenceStores(options: PopulateReference): Promi
             "--no-recurse-submodules",
             "--no-write-fetch-head",
             "origin",
-            `${sha}:${pinRef(sha)}`,
+            options.preview === undefined ? `${sha}:${pinRef(sha)}` : sha,
           ])
         } catch (error) {
           await unresolved(
@@ -343,6 +363,7 @@ export async function populateReferenceStores(options: PopulateReference): Promi
         if (!(await holdsCommit(storeGit, sha))) {
           await unresolved(`${store} still lacks ${sha} after one fetch from origin`)
         }
+        if (options.preview !== undefined) await writePreviewAnchor(storeGit, root, store, named, sha, options.preview)
       }
       options.acquired?.(
         present
@@ -362,6 +383,45 @@ export async function populateReferenceStores(options: PopulateReference): Promi
     }
   }
   return created
+}
+
+/**
+ * Create `preview.anchor` at `sha` in `store`, create-only, with a reflog whose first entry dates the anchor (27510).
+ * An anchor already at `sha` is this candidate's own, and its age is kept; one at any other pin is a conflict.
+ */
+async function writePreviewAnchor(
+  storeGit: Git,
+  root: string,
+  store: string,
+  path: string,
+  sha: string,
+  preview: NonNullable<PopulateReference["preview"]>,
+): Promise<void> {
+  const held = await refTarget(storeGit, preview.anchor)
+  if (held === sha) return
+  if (held !== undefined) {
+    throw new ReferenceUnpopulated(root, path, `${store} already holds ${preview.anchor} at ${held}, not at ${sha}`)
+  }
+  await createRef(storeGit, preview.anchor, sha)
+  preview.anchored({ path, sha, store })
+}
+
+/**
+ * Create `ref` at `sha` only if it does not exist (`update-ref --stdin`'s `create`), with a reflog whose first entry
+ * records when it was made.
+ */
+export async function createRef(git: Git, ref: string, sha: string): Promise<void> {
+  await git(["update-ref", "--create-reflog", "--stdin"], `create ${ref} ${sha}\n`)
+}
+
+/** The object `ref` names in this repository, or undefined when no such ref exists (an exact-name listing). */
+export async function refTarget(git: Git, ref: string): Promise<string | undefined> {
+  const listed = (await git(["for-each-ref", "--format=%(refname) %(objectname)", ref])).trim()
+  for (const line of listed.split("\n")) {
+    const [name, oid] = line.split(" ")
+    if (name === ref && oid !== undefined) return oid
+  }
+  return undefined
 }
 
 /** Missing/unreadable cache entries are misses; a broken repository or object is an error. */

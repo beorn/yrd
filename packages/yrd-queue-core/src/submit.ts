@@ -816,6 +816,10 @@ async function composeSubmit(git: Git, request: SubmitRequest, admitted: SubmitA
       beforeMerge: async (candidate) => {
         await modelMovedGitlinks(git, admitted.root, admitted.bases, admitted.head, candidate)
       },
+      previewCustody: {
+        subject: request.branch,
+        leftover: (why) => console.warn(`yrd: preview custody left an orphan anchor; the next submit sweeps it: ${why}`),
+      },
     })
     verifying = composed.verifying
     if (composed.state === "failed") {

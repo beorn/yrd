@@ -1,0 +1,206 @@
+/**
+ * Preview custody (27510; @cto 75b60919, 142e2df8, eb147b05): a successful preview or submit keeps its candidate ROOT
+ * and every recursive public recorded component readable after its composition scratch is gone.
+ *
+ * Each store holds one create-only anchor, `refs/yrd/preview/<clone>/<subject>/<candidate-root>`, at its own recorded
+ * commit: the root store at the candidate root, each component's store (the common dir's module store, the one a
+ * receipt row names) at the gitlink that root records. A reader resolves the ROOT anchor first; its absence means the
+ * receipt was superseded (the subject prefix lists its successor) or retired (the prefix is empty).
+ *
+ * One supersession per subject, root first: create the new component anchors and then the new root (expected
+ * absence), delete the old ROOT (expected OID, the commit point), then the old components. A failure before the
+ * commit point removes only what this attempt created, new root first, and leaves the prior custody readable; a
+ * failure after it keeps the new custody, and the old components are orphans that every later attempt sweeps.
+ */
+import { createHash } from "node:crypto"
+import { realpathSync } from "node:fs"
+import { join } from "node:path"
+import { createExclusive, DEFAULT_MUTATION_LOCK_WAIT_MS } from "git-super/exclusive"
+import type { Git } from "./git.ts"
+import { encodeQueueComponent } from "./refs.ts"
+import {
+  createRef,
+  declaredSubmodules,
+  gitlinksAt,
+  populateReferenceStores,
+  refTarget,
+  ReferenceUnpopulated,
+  type PreviewAnchor,
+} from "./reference.ts"
+
+export const PREVIEW_REF_ROOT = "refs/yrd/preview"
+
+export type PreviewCustodyOptions = Readonly<{
+  /** Git in the author's root checkout (any worktree of the clone). */
+  git: Git
+  /** Git bound to a directory, with the caller's process, selection and env. */
+  gitIn: (cwd: string) => Git
+  /** The candidate root the receipt names. */
+  candidate: string
+  /** The composition scratch, still present: the source of objects an author store lacks. */
+  source: string
+  /** Root-relative private submodule paths the composed tree leaves out (27147). */
+  excludedSubmodules: readonly string[]
+  /** The change's branch: one custody chain per clone and subject. */
+  subject: string
+  /** Told about leftovers a committed supersession could not delete; the next attempt sweeps them. */
+  leftover?: (why: string) => void
+}>
+
+export type PreviewCustody = Readonly<{
+  /** The root anchor, `refs/yrd/preview/<clone>/<subject>/<candidate-root>`. */
+  anchor: string
+  /** The prior root anchors this attempt superseded. */
+  superseded: readonly string[]
+}>
+
+/** The clone's identity: the full SHA-256 of its canonical absolute git-common-dir. */
+export function previewCloneKey(commonDir: string): string {
+  return createHash("sha256").update(realpathSync(commonDir)).digest("hex")
+}
+
+/** Every anchor of one clone and subject shares this prefix; listing it finds the live candidate or nothing. */
+export function previewSubjectPrefix(clone: string, subject: string): string {
+  return `${PREVIEW_REF_ROOT}/${clone}/${encodeQueueComponent(subject)}/`
+}
+
+/** Keep the candidate's closure through its anchors, superseding the subject's prior candidate. */
+export async function anchorPreviewCustody(options: PreviewCustodyOptions): Promise<PreviewCustody> {
+  const common = (await options.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+  const main = await mainWorktree(options.git, common)
+  const clone = previewCloneKey(common)
+  const prefix = previewSubjectPrefix(clone, options.subject)
+  const anchor = `${prefix}${options.candidate}`
+  const rootGit = options.gitIn(main)
+  const lock = createExclusive(join(common, "yrd-worktree-mutations"), { timeoutMs: DEFAULT_MUTATION_LOCK_WAIT_MS })
+  return lock.run(
+    async () => {
+      const prior = (await refsUnder(rootGit, prefix)).filter((ref) => ref.name !== anchor)
+      const created: PreviewAnchor[] = []
+      let rootCreated = false
+      try {
+        await populateReferenceStores({
+          commit: options.candidate,
+          excludedSubmodules: options.excludedSubmodules,
+          gitIn: options.gitIn,
+          preview: { anchor, anchored: (made) => created.push(made) },
+          repo: main,
+          source: options.source,
+        })
+        const held = await refTarget(rootGit, anchor)
+        if (held === undefined) {
+          await createRef(rootGit, anchor, options.candidate)
+          rootCreated = true
+        } else if (held !== options.candidate) {
+          throw new ReferenceUnpopulated(main, undefined, `${main} already holds ${anchor} at ${held}`)
+        }
+        // The commit point: the prior candidate stops being readable only here.
+        for (const old of prior) await rootGit(["update-ref", "-d", old.name, old.oid])
+      } catch (error) {
+        await removeAttempt(rootGit, anchor, options.candidate, rootCreated, created, options.gitIn)
+        throw error
+      }
+      // Past the commit point nothing restores the prior candidate or undoes this one: a sweep that fails is named,
+      // and its orphans wait for the next attempt's sweep.
+      try {
+        const stores = new Set(await closureStores(options.gitIn, main, options.candidate, options.excludedSubmodules))
+        for (const old of prior) {
+          for (const store of await closureStores(options.gitIn, main, old.oid, options.excludedSubmodules)) {
+            stores.add(store)
+          }
+        }
+        await sweepOrphans(rootGit, options.gitIn, `${PREVIEW_REF_ROOT}/${clone}/`, stores, options.leftover)
+      } catch (error) {
+        options.leftover?.(`the orphan sweep after ${anchor} failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      return { anchor, superseded: prior.map((ref) => ref.name) }
+    },
+    { holder: `yrd preview custody ${options.subject}` },
+  )
+}
+
+/** The clone's main worktree, whose checkout paths lead to the common dir's module stores. */
+async function mainWorktree(git: Git, common: string): Promise<string> {
+  const listed = await git(["worktree", "list", "--porcelain"])
+  const first = listed.split("\n\n")[0] ?? ""
+  const path = /^worktree (.+)$/mu.exec(first)?.[1]
+  if (path === undefined || /^bare$/mu.test(first)) {
+    throw new ReferenceUnpopulated(
+      common,
+      undefined,
+      `preview custody needs the main worktree of ${common}, and git worktree list names none`,
+    )
+  }
+  return path
+}
+
+/** A failed attempt removes only what it created, new root first, each at its expected OID. */
+async function removeAttempt(
+  rootGit: Git,
+  anchor: string,
+  candidate: string,
+  rootCreated: boolean,
+  created: readonly PreviewAnchor[],
+  gitIn: (cwd: string) => Git,
+): Promise<void> {
+  if (rootCreated) await rootGit(["update-ref", "-d", anchor, candidate])
+  for (const made of created) await gitIn(made.store)(["update-ref", "-d", anchor, made.sha])
+}
+
+/** Every component store a candidate's recorded closure lives in, as main-worktree checkout paths. */
+async function closureStores(
+  gitIn: (cwd: string) => Git,
+  main: string,
+  commit: string,
+  excluded: readonly string[],
+): Promise<readonly string[]> {
+  const stores: string[] = []
+  const levels: Array<Readonly<{ dir: string; prefix: string; commit: string }>> = [{ dir: main, prefix: "", commit }]
+  while (levels.length > 0) {
+    const level = levels.shift()
+    if (level === undefined) break
+    const git = gitIn(level.dir)
+    const urls = await declaredSubmodules(git, level.commit)
+    const included = [...urls.keys()].filter((path) => {
+      const named = level.prefix === "" ? path : join(level.prefix, path)
+      return !excluded.some((root) => named === root || named.startsWith(`${root}/`))
+    })
+    for (const { path, sha } of await gitlinksAt(git, level.commit, included)) {
+      const store = join(level.dir, path)
+      stores.push(store)
+      levels.push({ commit: sha, dir: store, prefix: level.prefix === "" ? path : join(level.prefix, path) })
+    }
+  }
+  return stores
+}
+
+/** A component anchor whose root anchor is gone is an orphan, deleted at its expected OID. */
+async function sweepOrphans(
+  rootGit: Git,
+  gitIn: (cwd: string) => Git,
+  clonePrefix: string,
+  stores: ReadonlySet<string>,
+  leftover: PreviewCustodyOptions["leftover"],
+): Promise<void> {
+  for (const store of stores) {
+    const storeGit = gitIn(store)
+    for (const ref of await refsUnder(storeGit, clonePrefix)) {
+      if ((await refTarget(rootGit, ref.name)) !== undefined) continue
+      try {
+        await storeGit(["update-ref", "-d", ref.name, ref.oid])
+      } catch (error) {
+        leftover?.(`${store} keeps ${ref.name}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+}
+
+async function refsUnder(git: Git, prefix: string): Promise<readonly Readonly<{ name: string; oid: string }>[]> {
+  const listed = (await git(["for-each-ref", "--format=%(refname) %(objectname)", prefix])).trim()
+  if (listed === "") return []
+  return listed.split("\n").map((line) => {
+    const [name, oid] = line.split(" ")
+    if (name === undefined || oid === undefined) throw new Error(`for-each-ref ${prefix} printed ${line}`)
+    return { name, oid }
+  })
+}
