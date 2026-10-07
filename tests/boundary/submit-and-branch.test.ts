@@ -43,13 +43,19 @@ describe("the submit path", { timeout: 120_000 }, () => {
     const target = await refSha(origin, "refs/heads/main")
     const fetchHead = join(repo, ".git", "FETCH_HEAD")
     await writeFile(fetchHead, "the caller's previous fetch\n")
-    // The only local ref write allowed is Gitomic's private fetch cache.
+    // The only local ref writes allowed are Gitomic's private fetch cache and the preview's own custody anchor
+    // (27510): refs/yrd/preview/<clone>/<subject>/<candidate-root>, at the candidate its receipt names.
     const callerRefs = async () =>
       (await git(repo, "for-each-ref", "--format=%(refname) %(objectname)"))
         .split("\n")
-        .filter((line) => line !== "" && !line.startsWith("refs/gitomic/"))
+        .filter((line) => line !== "" && !line.startsWith("refs/gitomic/") && !line.startsWith("refs/yrd/preview/"))
         .join("\n")
+    const previewAnchors = async () =>
+      (await git(repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/preview/"))
+        .split("\n")
+        .filter((line) => line !== "")
     const beforeLocal = await callerRefs()
+    expect(await previewAnchors()).toEqual([])
     const beforeRemote = await git(origin, "for-each-ref", "--format=%(refname) %(objectname)")
 
     const preview = await runYrd(repo, ...argv, branch, "--dry-run", "--json")
@@ -60,6 +66,10 @@ describe("the submit path", { timeout: 120_000 }, () => {
       verifying: { state: "verified", head, targetHead: target },
     })
     expect(await callerRefs()).toBe(beforeLocal)
+    const candidate = (JSON.parse(preview.stdout) as { verifying: { candidate: string } }).verifying.candidate
+    expect(await previewAnchors()).toEqual([
+      expect.stringMatching(new RegExp(`^refs/yrd/preview/[0-9a-f]{64}/${branch}/${candidate} ${candidate}$`, "u")),
+    ])
     expect(await git(origin, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(beforeRemote)
     expect(await readFile(fetchHead, "utf8")).toBe("the caller's previous fetch\n")
 
