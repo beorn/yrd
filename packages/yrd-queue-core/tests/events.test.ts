@@ -2245,6 +2245,35 @@ describe("the queue-format boundary", () => {
     expect((await readChangeEvents(location, "lab", branch, tip)).map((row) => row.id)).toEqual(
       written.events.map((row) => row.id),
     )
+    // A custody move after advertisement must report a changed reading, never an empty successful list.
+    // Existing static-history coverage cannot exercise the advertisement/acquisition boundary.
+    const fetch = location.backend.fetchRefs
+    if (fetch === undefined) throw new Error("fixture backend lacks remote acquisition")
+    let moved = false
+    const moving = {
+      ...location,
+      backend: {
+        ...location.backend,
+        fetchRefs: async (...args: Parameters<typeof fetch>) => {
+          const requested = args[1]
+          if (!moved && Array.isArray(requested) && requested.includes(coldRef)) {
+            moved = true
+            await store.backend.publish!(
+              store.repo,
+              [
+                { ref: hotRef, expect: "0".repeat(40), oid: tip },
+                { ref: coldRef, expect: tip, oid: null },
+              ],
+              "origin",
+            )
+          }
+          return fetch(...args)
+        },
+      },
+    }
+    await expect(listChanges(moving, "lab")).rejects.toThrow(Conflict)
+    expect(moved).toBe(true)
+    expect((await listChanges(location, "lab")).get(branch)).toMatchObject({ status: "merged", merge: head, tip })
   })
 
   it("reuses only a validated queue read from the same location", async () => {

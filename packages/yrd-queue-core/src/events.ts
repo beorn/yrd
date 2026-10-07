@@ -6,6 +6,7 @@ import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
 import {
   assertBranch,
+  archivedChangesPrefix,
   changesRef,
   classifyQueueRef,
   pauseRef,
@@ -1821,14 +1822,12 @@ export async function queueFormat(store: QueueReadStore, queue: string): Promise
 export async function readStatus(store: QueueLocation, queue: string, branch: string): Promise<EventChange> {
   await readEventQueue(store, queue)
   const ref = changesRef(queue, branch)
-  const chain = await openEvents({ ...store, ref })
-  const tip = await chain.head()
-  if (tip === null) throw new Error(`missing event chain ${ref} in ${store.repo}`)
-  try {
-    return project(await readEventChain(chain), ref, store.repo)
-  } catch (error) {
-    throw new Error(`${ref}@${tip}: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
-  }
+  const { histories, invalid } = await readBranchHistory(store, queue, branch)
+  const defect = invalid.get(branch)
+  if (defect !== undefined) throw new Error(`${defect.ref}@${defect.tip}: ${defect.error}`)
+  const history = histories.get(branch)
+  if (history === undefined) throw new Error(`missing event chain ${ref} in ${store.repo}`)
+  return history.state
 }
 
 /** Toggle one open change's attributed ignore overlay under its selected chain tip. */
@@ -1892,7 +1891,12 @@ export async function readChangeEvents(
   selectedTip: string,
 ): Promise<readonly Event[]> {
   const ref = changesRef(queue, branch)
-  const events = await readEventChain(await openEvents({ ...store, ref }))
+  const { histories, invalid } = await readBranchHistory(store, queue, branch)
+  const defect = invalid.get(branch)
+  if (defect !== undefined) throw new Error(`${defect.ref}@${defect.tip}: ${defect.error}`)
+  const history = histories.get(branch)
+  if (history === undefined) throw new Error(`missing event chain ${ref} in ${store.repo}`)
+  const events = history.events
   const state = project(events, ref, store.repo)
   if (state.tip !== selectedTip) {
     throw new Conflict(`${ref} moved after the selected reading: expected ${selectedTip}, read ${state.tip}`, {
@@ -2269,15 +2273,27 @@ type ChangeHistories = Readonly<{
   invalid: ReadonlyMap<string, InvalidChangeHistory>
 }>
 
+/** Detail reads acquire only the selected branch's events, using the same hot/cold inventory as list. */
+async function readBranchHistory(store: QueueReadStore, queue: string, branch: string): Promise<ChangeHistories> {
+  const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
+  const chains = await readEventChains([changesRef(queue, branch), `${archivedChangesPrefix(queue)}${branch}`], store)
+  return projectChangeHistories(chains, prefixes, store.repo)
+}
+
 function projectChangeHistories(
   chains: ReadonlyMap<string, readonly Event[]>,
-  prefix: string,
+  prefixes: readonly string[],
   repo: string,
 ): ChangeHistories {
   const histories = new Map<string, ChangeHistory>()
   const invalid = new Map<string, InvalidChangeHistory>()
   for (const [ref, events] of chains) {
+    const prefix = prefixes.find((part) => ref.startsWith(part))
+    if (prefix === undefined) throw new Error(`unexpected change history ref ${ref}`)
     const branch = ref.slice(prefix.length)
+    if (histories.has(branch) || invalid.has(branch)) {
+      throw new Conflict(`branch ${branch} has both hot and cold histories; retry the reading`, { refs: [ref] })
+    }
     try {
       histories.set(branch, { state: project(events, ref, repo), events })
     } catch (error) {
@@ -2294,9 +2310,9 @@ export async function readEventQueueWithChanges(
   store: QueueReadStore,
   queue: string,
 ): Promise<Readonly<{ queue: EventQueue } & ChangeHistories>> {
-  const prefix = `${queueRefPrefix(queue)}/changes/`
-  const [queueState, chains] = await Promise.all([readEventQueue(store, queue), readEventChains(prefix, store)])
-  return { queue: queueState, ...projectChangeHistories(chains, prefix, store.repo) }
+  const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
+  const [queueState, chains] = await Promise.all([readEventQueue(store, queue), readEventChains(prefixes, store)])
+  return { queue: queueState, ...projectChangeHistories(chains, prefixes, store.repo) }
 }
 
 /** Branch histories and projections from one batched remote fetch. */
@@ -2321,9 +2337,9 @@ export async function listChangeHistories(
       throw new Error(`validated queue must come from the same location: ${store.remote}#${queue} in ${store.repo}`)
     }
   }
-  const prefix = `${queueRefPrefix(queue)}/changes/`
-  const chains = await readEventChains(prefix, store)
-  return projectChangeHistories(chains, prefix, store.repo)
+  const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
+  const chains = await readEventChains(prefixes, store)
+  return projectChangeHistories(chains, prefixes, store.repo)
 }
 
 /** Branch projections for an event queue. */

@@ -59,6 +59,11 @@ export function changesRef(queue: string, branch: string): string {
   return `${queueRefPrefix(queue)}/changes/${branch}`
 }
 
+/** Cold custody stays outside every refs/yrd/ wildcard fetch. */
+export function archivedChangesPrefix(queue: string): string {
+  return `refs/yrd-archive/${encodeQueueComponent(queue)}/`
+}
+
 export function assertBranch(branch: string): void {
   if (
     branch.length === 0 ||
