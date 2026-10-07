@@ -2206,6 +2206,47 @@ describe("the queue-format boundary", () => {
     expect((await readStatus(location, "lab", "task/42")).status).toBe("queued")
   })
 
+  /** @failure 27957: moving an ended chain outside the hot prefix hides its merge and history from list/detail.
+   * @level l1 @consumer yrd list, queue show and selected change history
+   * Existing history tests retain every chain under changes/ and cannot detect cold-custody disappearance.
+   */
+  it("keeps a cold merged branch discoverable with its original events and merge evidence", async () => {
+    const { store, location } = remoteMemStore("yrd-cold-change-history")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const head = (await target.transact(async (map) => map.set("work.txt", "retained payload"), "work")).oid
+    const at = new Date("2026-09-22T14:00:00.000Z")
+    const queueTip = await seedEventQueue(location, "lab", head, at)
+    const branch = "task/retained"
+    const hotRef = changesRef("lab", branch)
+    const coldRef = `refs/yrd-archive/lab/${branch}`
+    const chain = await openEvents({ ...store, ref: hotRef })
+    const written = await chain.append(
+      [
+        changeInput("opened", { queueTip, at, commit: head, by: "@dev/6" }),
+        changeInput("merged", { queueTip, at, commit: head }),
+      ],
+      { expect: null },
+    )
+    const tip = written.events.at(-1)!.id
+    expect((await listChanges(location, "lab")).get(branch)).toMatchObject({ status: "merged", merge: head })
+    await store.backend.publish!(
+      store.repo,
+      [
+        { ref: coldRef, expect: "0".repeat(40), oid: tip },
+        { ref: hotRef, expect: tip, oid: null },
+      ],
+      "origin",
+    )
+    expect((await listRefs(hotRef, location)).size).toBe(0)
+    expect((await listRefs(coldRef, location)).get(coldRef)).toBe(tip)
+    expect((await listChanges(location, "lab")).get(branch)).toMatchObject({ status: "merged", merge: head, tip })
+    expect((await readEventQueueWithChanges(location, "lab")).histories.get(branch)?.state.merge).toBe(head)
+    expect(await readStatus(location, "lab", branch)).toMatchObject({ status: "merged", merge: head, tip })
+    expect((await readChangeEvents(location, "lab", branch, tip)).map((row) => row.id)).toEqual(
+      written.events.map((row) => row.id),
+    )
+  })
+
   it("reuses only a validated queue read from the same location", async () => {
     const first = remoteMemStore("yrd-event-first")
     const second = remoteMemStore("yrd-event-second")
