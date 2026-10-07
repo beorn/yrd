@@ -30,7 +30,7 @@ import { transportFaultIn } from "./setup-transport.ts"
 import { accessSync, constants, existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { ensureCommitObject } from "git-super/objects"
-import { GitExit, seamProcess, type Git } from "./git.ts"
+import { GitExit, refAt, seamProcess, type Git } from "./git.ts"
 
 /** One store this run created, as the caller records it. */
 export type ReferenceStore = Readonly<{
@@ -397,7 +397,7 @@ async function writePreviewAnchor(
   sha: string,
   preview: NonNullable<PopulateReference["preview"]>,
 ): Promise<void> {
-  const held = await refTarget(storeGit, preview.anchor)
+  const held = await refAt(storeGit, preview.anchor)
   if (held === sha) return
   if (held !== undefined) {
     throw new ReferenceUnpopulated(root, path, `${store} already holds ${preview.anchor} at ${held}, not at ${sha}`)
@@ -412,16 +412,6 @@ async function writePreviewAnchor(
  */
 export async function createRef(git: Git, ref: string, sha: string): Promise<void> {
   await git(["update-ref", "--create-reflog", "--stdin"], `create ${ref} ${sha}\n`)
-}
-
-/** The object `ref` names in this repository, or undefined when no such ref exists (an exact-name listing). */
-export async function refTarget(git: Git, ref: string): Promise<string | undefined> {
-  const listed = (await git(["for-each-ref", "--format=%(refname) %(objectname)", ref])).trim()
-  for (const line of listed.split("\n")) {
-    const [name, oid] = line.split(" ")
-    if (name === ref && oid !== undefined) return oid
-  }
-  return undefined
 }
 
 /** Missing/unreadable cache entries are misses; a broken repository or object is an error. */

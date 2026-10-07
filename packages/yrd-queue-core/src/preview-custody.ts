@@ -16,7 +16,7 @@ import { createHash } from "node:crypto"
 import { realpathSync } from "node:fs"
 import { join } from "node:path"
 import { createExclusive, DEFAULT_MUTATION_LOCK_WAIT_MS, type Exclusive } from "git-super/exclusive"
-import type { Git } from "./git.ts"
+import { refAt, type Git } from "./git.ts"
 import { encodeQueueComponent } from "./refs.ts"
 import {
   createRef,
@@ -24,7 +24,6 @@ import {
   gitlinksAt,
   isRepositoryAt,
   populateReferenceStores,
-  refTarget,
   ReferenceUnpopulated,
   type PreviewAnchor,
 } from "./reference.ts"
@@ -107,7 +106,7 @@ export async function anchorPreviewCustody(options: PreviewCustodyOptions): Prom
           repo: main,
           source: options.source,
         })
-        const held = await refTarget(rootGit, anchor)
+        const held = await refAt(rootGit, anchor)
         if (held === undefined) {
           await createRef(rootGit, anchor, options.candidate)
           rootCreated = true
@@ -294,7 +293,7 @@ async function sweepOrphans(
     if (!(await isRepositoryAt(gitIn, store))) continue
     const storeGit = gitIn(store)
     for (const ref of await refsUnder(storeGit, clonePrefix)) {
-      if ((await refTarget(rootGit, ref.name)) !== undefined) continue
+      if ((await refAt(rootGit, ref.name)) !== undefined) continue
       try {
         await storeGit(["update-ref", "-d", ref.name, ref.oid])
       } catch (error) {
