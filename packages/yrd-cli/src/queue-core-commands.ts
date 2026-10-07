@@ -805,6 +805,7 @@ export async function coreQueueCommand(
     request.command === "unignore" ||
     request.command === "merge" ||
     (request.command === "submit" && request.dryRun !== true) ||
+    (request.command === "archive" && !request.dryRun) ||
     (request.command === "override" && request.action !== "list")
   await using _invalidateAfterWriter = {
     async [Symbol.asyncDispose](): Promise<void> {
