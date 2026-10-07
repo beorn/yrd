@@ -2457,21 +2457,23 @@ describe("the queue-format boundary", () => {
     // @failure 27957: the archival audit is state-neutral, including the original ending age/notices.
     // Unknown-event tolerance adds a diagnostic and cannot supply the required audit contract.
     const beforeArchive = await readStatus(location, "lab", branch)
-    const archivedAt = new Date("2026-10-07T12:00:00.000Z")
-    expect(
-      evolve(
-        beforeArchive,
-        event("archived", B, [
-          ["Queue", queueTip],
-          ["Time", archivedAt.toISOString()],
-          ["Archive-Ref", hotRef],
-          ["Archive-Tip", tip],
-          ["Archive-State", "merged"],
-          ["Archive-EndedAt", at.toISOString()],
-          ["Archive-AgeMs", String(archivedAt.getTime() - at.getTime())],
-        ]),
-      ),
-    ).toEqual({ ...beforeArchive, tip: B })
+    // A reader validates audit consistency independently of the writer's retention policy.
+    for (const archivedAt of [new Date("2026-10-07T12:00:00.000Z"), new Date(at.getTime() + 86_400_000)]) {
+      expect(
+        evolve(
+          beforeArchive,
+          event("archived", B, [
+            ["Queue", queueTip],
+            ["Time", archivedAt.toISOString()],
+            ["Archive-Ref", hotRef],
+            ["Archive-Tip", tip],
+            ["Archive-State", "merged"],
+            ["Archive-EndedAt", at.toISOString()],
+            ["Archive-AgeMs", String(archivedAt.getTime() - at.getTime())],
+          ]),
+        ),
+      ).toEqual({ ...beforeArchive, tip: B })
+    }
     expect((await listChanges(location, "lab")).get(branch)).toMatchObject({ status: "merged", merge: head })
     await store.backend.publish!(
       store.repo,

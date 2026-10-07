@@ -698,8 +698,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         requiredProp(event, "Archive-Tip") !== state.tip ||
         requiredProp(event, "Archive-State") !== state.status ||
         requiredProp(event, "Archive-EndedAt") !== state.endedAt.toISOString() ||
-        age !== at.getTime() - state.endedAt.getTime() ||
-        age < ARCHIVE_AGE_MS
+        age !== at.getTime() - state.endedAt.getTime()
       ) {
         throw new Error(`event ${event.id} has an invalid archive custody audit`)
       }

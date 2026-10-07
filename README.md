@@ -285,7 +285,8 @@ An archive moves a ref outside the hot namespace. It preserves history and does 
 
 For each history, the command stages an `archived` event whose first parent is the selected hot tip.
 The event records that ref and tip, ending state and time, age, actor and archive time; it leaves the ending state and time unchanged.
-One atomic remote update creates the absent cold ref, deletes the exact selected hot tip and checks the unchanged queue authority.
+One atomic remote update creates the absent cold ref and deletes the exact selected hot tip; the server checks those two leases.
+Git checks the unchanged queue tip against the push's ref advertisement on the client; it is not checked inside the server's atomic transaction.
 A conflict stops the pass without a mutating retry. A remote without atomic push support refuses the update.
 
 After each update, one remote reading must find the exact new cold tip and no hot ref before the next transfer starts.
