@@ -13,7 +13,6 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
-import { openEvents } from "gitomic/events"
 import {
   existsSync,
   appendFileSync,
@@ -177,6 +176,7 @@ import {
   runIndexRef,
   runIndexPath,
   RUN_INDEX_CODES,
+  openEvents,
   type SubmitGitlink,
 } from "@yrd/queue-core"
 import { formatQueueAddress, formatStoredQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"

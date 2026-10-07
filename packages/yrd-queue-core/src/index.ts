@@ -123,6 +123,7 @@ export {
   selectionFor,
   gitIn,
   listRefs,
+  openEvents,
   readRemoteCommit,
   refAt,
   resolveGitSelection,
