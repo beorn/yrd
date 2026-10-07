@@ -26,7 +26,18 @@ import {
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join, resolve } from "node:path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
-import { createEventQueue, createEventStore, readConfig, readJournals, submit, type Git } from "@yrd/queue-core"
+import {
+  changeInput,
+  changesRef,
+  createEventQueue,
+  createEventStore,
+  readConfig,
+  readEventQueue,
+  readJournals,
+  submit,
+  type Git,
+} from "@yrd/queue-core"
+import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { runYrdProcess } from "../src/cli.ts"
@@ -251,6 +262,70 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
 })
 
 describe("yrd watch, the ending's exit code", () => {
+  /**
+   * @failure A normal queue advance between the ref advertisement and event read kills JSON watch (27946).
+   * @level l2 @consumer a submitter waiting for its selected change to merge
+   * Existing fence and stale-pane tests never advance a real remote ref between reads.
+   * The selected Git executable only schedules the real ref update; it fabricates no Git result or event.
+   */
+  it("continues to merged when the change advances during its event listing", async () => {
+    const w = await world()
+    const branch = "task/advancing"
+    await change(w, branch, true)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queue = await readEventQueue(store, "main")
+    const ref = changesRef("main", branch)
+    const chain = await openEvents({ ...store, ref, writer: "yrd" })
+    const before = await chain.head()
+    if (before === null) throw new Error("submitted fixture change has no event tip")
+    const commit = (await w.git(["rev-parse", branch])).trim()
+    await chain.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit })], { expect: before })
+    const after = await chain.head()
+    if (after === null) throw new Error("merged fixture change has no event tip")
+    const remote = join(dirname(w.work), "remote.git")
+    await w.git(["--git-dir", remote, "update-ref", ref, before, after])
+
+    const marker = join(w.workdir, "advanced")
+    const executable = join(w.workdir, "advancing-git.ts")
+    writeFileSync(
+      executable,
+      `#!${process.execPath}
+import { existsSync, writeFileSync } from "node:fs"
+const args = process.argv.slice(2)
+const result = Bun.spawnSync(["git", ...args], { stdin: "inherit", stdout: "pipe", stderr: "pipe" })
+if (result.exitCode === 0 && args.includes("ls-remote") && args.includes("refs/yrd/main/*") && !existsSync(${JSON.stringify(marker)})) {
+  const moved = Bun.spawnSync(["git", "--git-dir", ${JSON.stringify(remote)}, "update-ref", ${JSON.stringify(ref)}, ${JSON.stringify(after)}, ${JSON.stringify(before)}], { stdout: "pipe", stderr: "pipe" })
+  if (moved.exitCode !== 0) throw new Error(new TextDecoder().decode(moved.stderr))
+  writeFileSync(${JSON.stringify(marker)}, "advanced")
+}
+process.stdout.write(result.stdout)
+process.stderr.write(result.stderr)
+process.exit(result.exitCode)
+`,
+    )
+    chmodSync(executable, 0o755)
+    const run = capture(w.work)
+    await expect(
+      coreQueueCommand(
+        w.work,
+        run.io,
+        { command: "list", terms: [branch], watch: true },
+        {
+          json: true,
+          workdir: w.workdir,
+          selection: { executable, contract: "native", scope: "default", origin: "real-Git race fixture" },
+        },
+      ),
+    ).resolves.toBe(0)
+    expect(readFileSync(marker, "utf8")).toBe("advanced")
+    const rounds = run
+      .stdout()
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+  })
+
   // The producer owns its protocol; ordinary Git calls still use the real
   // selected executable. These defects cross run creation and the watch lifecycle.
   it("a malformed observation cannot poison the next watch with a headerless run journal", async () => {
