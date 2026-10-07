@@ -256,4 +256,29 @@ describe("anchorPreviewCustody (27510)", () => {
     expect(Object.keys(await anchorsIn(join(product, "vendor/dep")))).toEqual([live])
     expect(Object.keys(await anchorsIn(join(product, "vendor/dep/apps/nested")))).toEqual([live])
   }, 60_000)
+
+  /**
+   * @cto a3b6b631: the swap takes its own acquisition, so two attempts for one subject can interleave as A composes,
+   * B composes and swaps inside A's gap, then A swaps. Custody then holds the LAST SWAPPED candidate (here the older
+   * one), and B's receipt, emitted first, must still lead its reader to A.
+   */
+  it("leaves exactly one live candidate when a second attempt swaps inside the first one's gap", async () => {
+    const product = await author_clone()
+    const a = await candidate(product, "a")
+    const nestedA = (await gitIn(join(product, "vendor/dep/apps/nested"))(["rev-parse", "HEAD"])).trim()
+    const b = await candidate(product, "b")
+    // B swaps first and emits its receipt (release-then-emit); A's swap follows.
+    const bReceipt = await custody(product, b.root)
+    await custody(product, a.root)
+
+    const live = anchor(product, "task/a", a.root)
+    const loser = bReceipt.anchor
+    expect(await anchorsIn(product)).toEqual({ [live]: a.root })
+    expect(await anchorsIn(join(product, "vendor/dep"))).toEqual({ [live]: a.dep })
+    expect(await anchorsIn(join(product, "vendor/dep/apps/nested"))).toEqual({ [live]: nestedA })
+    // From B's own receipt: its root anchor names itself as absent, and the subject prefix lists the superseder.
+    await expect(gitIn(product)(["rev-parse", "--verify", `${loser}^{commit}`])).rejects.toThrow()
+    const prefix = loser.slice(0, loser.lastIndexOf("/") + 1)
+    expect(Object.keys(await anchorsIn(product, prefix))).toEqual([live])
+  }, 60_000)
 })
