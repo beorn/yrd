@@ -268,7 +268,7 @@ describe("yrd watch, the ending's exit code", () => {
    * Existing fence and stale-pane tests never advance a real remote ref between reads.
    * The selected Git executable only schedules the real ref update; it fabricates no Git result or event.
    */
-  it("continues to merged when the change advances during its event listing", async () => {
+  it.each(["advance", "disappear", "diverge"] as const)("handles %s during its event listing", async (movement) => {
     const w = await world()
     const branch = "task/advancing"
     await change(w, branch, true)
@@ -284,6 +284,18 @@ describe("yrd watch, the ending's exit code", () => {
     if (after === null) throw new Error("merged fixture change has no event tip")
     const remote = join(dirname(w.work), "remote.git")
     await w.git(["--git-dir", remote, "update-ref", ref, before, after])
+    let divergent = commit
+    if (movement === "diverge") {
+      const unrelated = await openEvents({ ...store, ref: "refs/yrd/test/divergent", writer: "yrd" })
+      await unrelated.append([changeInput("opened", { queueTip: queue.tip, at: new Date(), commit, by: "yrd" })], {
+        expect: null,
+      })
+      const tip = await unrelated.head()
+      if (tip === null) throw new Error("divergent fixture chain has no event tip")
+      divergent = tip
+    }
+    const update =
+      movement === "disappear" ? ["-d", ref, before] : [ref, movement === "advance" ? after : divergent, before]
 
     const marker = join(w.workdir, "advanced")
     const executable = join(w.workdir, "advancing-git.ts")
@@ -294,7 +306,7 @@ import { existsSync, writeFileSync } from "node:fs"
 const args = process.argv.slice(2)
 const result = Bun.spawnSync(["git", ...args], { stdin: "inherit", stdout: "pipe", stderr: "pipe" })
 if (result.exitCode === 0 && args.includes("ls-remote") && args.includes("refs/yrd/main/*") && !existsSync(${JSON.stringify(marker)})) {
-  const moved = Bun.spawnSync(["git", "--git-dir", ${JSON.stringify(remote)}, "update-ref", ${JSON.stringify(ref)}, ${JSON.stringify(after)}, ${JSON.stringify(before)}], { stdout: "pipe", stderr: "pipe" })
+  const moved = Bun.spawnSync(["git", "--git-dir", ${JSON.stringify(remote)}, "update-ref", ...${JSON.stringify(update)}], { stdout: "pipe", stderr: "pipe" })
   if (moved.exitCode !== 0) throw new Error(new TextDecoder().decode(moved.stderr))
   writeFileSync(${JSON.stringify(marker)}, "advanced")
 }
@@ -305,19 +317,28 @@ process.exit(result.exitCode)
     )
     chmodSync(executable, 0o755)
     const run = capture(w.work)
-    await expect(
-      coreQueueCommand(
-        w.work,
-        run.io,
-        { command: "list", terms: [branch], watch: true },
-        {
-          json: true,
-          workdir: w.workdir,
-          selection: { executable, contract: "native", scope: "default", origin: "real-Git race fixture" },
-        },
-      ),
-    ).resolves.toBe(0)
+    const watched = coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "list", terms: [branch], watch: true },
+      {
+        json: true,
+        workdir: w.workdir,
+        selection: { executable, contract: "native", scope: "default", origin: "real-Git race fixture" },
+      },
+    )
+    if (movement !== "advance") {
+      await expect(watched).rejects.toThrow(
+        new RegExp(
+          `${movement === "disappear" ? "disappeared" : "diverged"} during event list: .*${before}.*${movement === "disappear" ? "absent" : divergent}`,
+        ),
+      )
+      expect(readFileSync(marker, "utf8")).toBe("advanced")
+      return
+    }
+    await expect(watched).resolves.toBe(0)
     expect(readFileSync(marker, "utf8")).toBe("advanced")
+    expect(run.stderr()).toContain("advanced during event list")
     const rounds = run
       .stdout()
       .trim()

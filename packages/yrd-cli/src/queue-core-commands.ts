@@ -13,6 +13,7 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
+import { openEvents } from "gitomic/events"
 import {
   existsSync,
   appendFileSync,
@@ -2519,7 +2520,11 @@ export async function coreQueueCommand(
             writeHealth(
               relaunchStalledHealthDocument(
                 SERVICE,
-                { checkout: relaunchSource ?? gitlink.checkout, path: primaryComponent().path, sha: targetPin(primaryComponent().path) },
+                {
+                  checkout: relaunchSource ?? gitlink.checkout,
+                  path: primaryComponent().path,
+                  sha: targetPin(primaryComponent().path),
+                },
                 why,
                 {
                   ...waitingFacts,
@@ -3010,11 +3015,32 @@ export async function coreQueueCommand(
         ) {
           await refuseMissingEventMarker(declared.config.target.remote, declared.config.target.branch)
         }
-        const reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, selectedStore, {
-          all: request.all,
-          drafts: request.drafts,
-          draftWindow,
-        })
+        let reading: EventListingResult
+        for (;;) {
+          try {
+            reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, selectedStore, {
+              all: request.all,
+              drafts: request.drafts,
+              draftWindow,
+            })
+            break
+          } catch (error) {
+            if (!(error instanceof EventListingMoved)) throw error
+            const current = await (await openEvents({ ...selectedStore, ref: error.ref, writer: "yrd" })).head()
+            const evidence = `read ${error.read ?? "absent"}, observed ${error.observed ?? "absent"}, current ${current ?? "absent"}`
+            if (current === null) throw new Error(`${error.ref} disappeared during event list: ${evidence}`)
+            const isAncestor = selectedStore.backend.isAncestor
+            if (isAncestor === undefined) {
+              throw new Error(`${error.ref} moved during event list but its backend cannot check ancestry: ${evidence}`)
+            }
+            for (const tip of [error.read, error.observed]) {
+              if (tip !== undefined && tip !== current && !(await isAncestor(repo, tip, current))) {
+                throw new Error(`${error.ref} diverged during event list: ${evidence}`)
+              }
+            }
+            io.stderr(`${error.ref} advanced during event list: ${evidence}; reading again\n`)
+          }
+        }
         const { journals, all, drafts, observation } = reading
         if (options.json !== true) narrateMalformed(io, journals, said)
         // The run-history lens is for stats and watch detail. List is the
@@ -5237,6 +5263,20 @@ export async function readEventListing(
 }
 
 /** A history read and its final observation must name the same event tips. */
+class EventListingMoved extends Error {
+  constructor(
+    readonly ref: string,
+    readonly read: string | undefined,
+    readonly observed: string | undefined,
+  ) {
+    super(
+      read === undefined
+        ? `${ref} appeared during event list at ${observed}; read the queue again`
+        : `${ref} moved during event list: read ${read}, observed ${observed ?? "absent"}`,
+    )
+  }
+}
+
 export function assertEventListingFence(
   name: string,
   queue: Pick<EventQueue, "tip">,
@@ -5253,12 +5293,12 @@ export function assertEventListingFence(
   const changePrefix = `${queueRefPrefix(name)}/changes/`
   for (const [ref, tip] of expected) {
     if (advertised.get(ref) !== tip) {
-      throw new Error(`${ref} moved during event list: read ${tip}, observed ${advertised.get(ref) ?? "absent"}`)
+      throw new EventListingMoved(ref, tip, advertised.get(ref))
     }
   }
   for (const [ref, tip] of advertised) {
     if (ref.startsWith(changePrefix) && !expected.has(ref)) {
-      throw new Error(`${ref} appeared during event list at ${tip}; read the queue again`)
+      throw new EventListingMoved(ref, undefined, tip)
     }
   }
 }
