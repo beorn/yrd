@@ -2334,6 +2334,60 @@ describe("yrd queue up, the service", () => {
   }, 30_000)
 
   /**
+   * @failure  `primary` was computed ONCE after the entry classify while `moved` was reassigned on every re-capture.
+   *           A re-capture that un-moved the head component and moved a different one left the exit, the waiting
+   *           facts and the stalled page naming the OLD path — with from == to, since its target pin now equalled
+   *           its loaded pin — and with no `moved` list to correct it (@cto 27886 follow-up, bfc715c5).
+   * @level    l2 (two declared components, a real remote, the real CLI)
+   * @consumer the operator reading which component a relaunch exit names
+   */
+  it("names the component a re-capture moved, never the one it un-moved", async () => {
+    const w = await gitlinkVectorWorld()
+    // The entry target moves the FIRST component's gitlink; the second is untouched.
+    await w.git(["update-index", "--cacheinfo", "160000", w.d, w.componentPath])
+    await w.git(["commit", "--quiet", "-m", `target records ${w.componentPath} at d`])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const service = w.command(
+      w.work,
+      run.io,
+      { command: "up", intervalSeconds: 0, stop: stop.signal, relaunchWaitCapMs: 60_000 },
+      { json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(() => expect(run.stdout()).toContain("waiting-for-checkout"), { timeout: 8000 })
+      // The re-capture UN-moves the first component (back to what we load) and moves the SECOND.
+      await w.git(["update-index", "--cacheinfo", "160000", w.c, w.componentPath])
+      await w.git(["update-index", "--cacheinfo", "160000", w.f, w.secondPath])
+      await w.git(["commit", "--quiet", "-m", `target un-moves ${w.componentPath} and moves ${w.secondPath}`])
+      await w.git(["push", "--quiet", "origin", "main"])
+      await vi.waitFor(() => expect(run.stdout()).toContain(w.secondPath), { timeout: 8000 })
+      const health = JSON.parse(readFileSync(join(w.workdir, "service-health.json"), "utf8")) as {
+        facts?: Record<string, unknown>
+      }
+      expect(health.facts?.waitingForCheckout, "the waiting facts still name the un-moved component").toBe(w.secondPath)
+      expect(JSON.stringify(health.facts), "a fact still names the un-moved component").not.toContain(w.componentPath)
+      // The second component's checkout lands; the exit names IT, with its real from and to.
+      const second = gitIn(join(w.work, w.secondPath))
+      await second(["fetch", "--quiet", "origin", "main"])
+      await second(["checkout", "--quiet", w.f])
+      const exit = await service
+      expect(exit, run.stdout()).toBe(0)
+      expect(records(run).at(-1)).toEqual({
+        exitCode: 0,
+        from: w.e,
+        gitlink: w.secondPath,
+        reason: "gitlink-moved",
+        to: w.f,
+      })
+    } finally {
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 30_000)
+
+  /**
    * @failure  THE PRODUCTION CONFIGURATION, and no test had it. Every gitlink
    *           test above runs the queue from the SAME checkout the runtime
    *           lives in — which is what the pre-M8 deployment looked like. M8
