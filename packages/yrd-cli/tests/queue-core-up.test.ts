@@ -81,7 +81,7 @@ import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand, endingCode } from "../src/queue-core-commands.ts"
 import { environmentInventory } from "../src/env-commands.ts"
-import { closeRequestFile, listCloseRequests, writeCloseRequest } from "../src/env-close-requests.ts"
+import { closeRequestFile, listCloseRequests, stageCloseRequest, writeCloseRequest } from "../src/env-close-requests.ts"
 import { workdirOf } from "../src/workdir.ts"
 import { changesSuffix } from "../src/watch-list.tsx"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
@@ -880,9 +880,177 @@ describe("yrd queue up, the service", () => {
       expect([...attempts].sort((left, right) => (left ?? 0) - (right ?? 0))).toEqual([1, 2, 3])
       expect(existsSync(environment.path), run.stderr()).toBe(true)
       expect(existsSync(file), run.stderr()).toBe(false)
+      // Fix 1: the request pass refuses rather than delegating, so no second
+      // request file is ever written into the slot it just staged away.
+      expect(listCloseRequests(workdir), run.stderr()).toEqual([])
     } finally {
       stop.abort()
       roundCensus.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure 22894 fix 1: the cursor sweep's census pre-check passes and its own
+   *          close then finds coverage incomplete, so the SERVICE files a close
+   *          request, which a later round satisfies under the DIRECT predicate —
+   *          a close nobody asked for, under the asked-for rule.
+   * @level   l2
+   * @consumer the operator whose env must survive a close no one requested
+   * @testonly none
+   */
+  it("a sweep close whose own census is incomplete refuses and files no request (22894 fix 1)", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "unnamed-retained", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    const uid = process.getuid?.()
+    if (uid === undefined) throw new Error("this queue case needs a real unix uid")
+    const roundCensus = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+    vi.mocked(removely.inspectProcessCensus).mockResolvedValue({
+      rows: [],
+      coverage: {
+        ...observed.coverage,
+        complete: false,
+        unreadable: [
+          {
+            pid: 4242,
+            uid,
+            comm: "bun",
+            denied: ["process"],
+            issues: [{ source: "process", resource: "cwd", reason: "denied", code: "EACCES" }],
+            argv: ["bun", "private-argument-must-not-be-reported"],
+          },
+        ],
+      },
+    })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(existsSync(environment.path), run.stderr()).toBe(true)
+      expect(listCloseRequests(workdir), run.stderr()).toEqual([])
+      const rows = allCleanupRows(workdir).filter((row) => row.path === environment.path)
+      expect(rows.length, run.stderr()).toBeGreaterThan(0)
+      expect(
+        rows.every((row) => row.request === undefined),
+        JSON.stringify(rows),
+      ).toBe(true)
+      expect(
+        rows.some((row) => String(row.why).includes("pid 4242")),
+        JSON.stringify(rows),
+      ).toBe(true)
+    } finally {
+      stop.abort()
+      roundCensus.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure 22894 fix 3: a round that dies mid-close leaves its staged request
+   *          behind, and nothing ever lists the staging directory, so the row is
+   *          orphaned forever with no journal row.
+   * @level   l2
+   * @consumer the operator whose request must survive a service restart
+   * @testonly none
+   */
+  it("names and re-evaluates a staged request a dead round left behind (22894 fix 3)", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const uid = process.getuid?.()
+    if (uid === undefined) throw new Error("this queue case needs a real unix uid")
+    const open = async (bay: string): Promise<string> => {
+      const run = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", bay, "--json"], run.io),
+        run.stderr(),
+      ).toBe(0)
+      return (JSON.parse(run.stdout()) as { path: string }).path
+    }
+    const request = (path: string) => ({
+      name: basename(path),
+      path,
+      requester: "@dev/luna2",
+      uid,
+      at: new Date().toISOString(),
+      predicate: "direct-admission" as const,
+      options: { noRehome: true },
+      head: selected,
+    })
+    // A: staged, slot free (the round died mid-close). B: staged, and a
+    // re-request already stands in its slot.
+    const first = await open("delegated-staged")
+    writeCloseRequest(workdir, request(first))
+    const firstStaged = stageCloseRequest(closeRequestFile(workdir, first))
+    const second = await open("delegated-superseded")
+    writeCloseRequest(workdir, request(second))
+    const secondStaged = stageCloseRequest(closeRequestFile(workdir, second))
+    writeCloseRequest(workdir, request(second))
+    expect(existsSync(firstStaged)).toBe(true)
+    expect(existsSync(secondStaged)).toBe(true)
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    let rounds = 0
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: () => {
+              rounds++
+              if (rounds === 2) stop.abort()
+            },
+          },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      const rows = allCleanupRows(workdir).filter((row) => typeof row.request === "object")
+      // The free slot is named and put back, then closed in the same round.
+      expect(rows.filter((row) => row.result === "interrupted").length, JSON.stringify(rows)).toBe(1)
+      // The occupied slot is named and its staged copy dropped, so the standing
+      // re-request is the one that lives on.
+      expect(rows.filter((row) => row.result === "interrupted-superseded").length, JSON.stringify(rows)).toBe(1)
+      expect(rows.filter((row) => row.result === "closed").length, JSON.stringify(rows)).toBe(2)
+      expect(existsSync(firstStaged), run.stderr()).toBe(false)
+      expect(existsSync(secondStaged), run.stderr()).toBe(false)
+      expect(existsSync(first), run.stderr()).toBe(false)
+      expect(existsSync(second), run.stderr()).toBe(false)
+      expect(listCloseRequests(workdir)).toEqual([])
+    } finally {
+      stop.abort()
+      census.mockRestore()
     }
   }, 120_000)
 

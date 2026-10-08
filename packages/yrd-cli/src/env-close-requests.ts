@@ -16,7 +16,7 @@
  */
 
 import { createHash } from "node:crypto"
-import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync } from "node:fs"
+import { linkSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 
@@ -160,6 +160,38 @@ export function stageCloseRequest(file: string): string {
     throw new Error(`close request ${file} could not be staged at ${staged}: ${String(cause)}`, { cause })
   }
   return staged
+}
+
+/** Every request a dead round left staged, in a stable order: nothing stages silently. */
+export function listStagedCloseRequests(workdir: string): readonly string[] {
+  const directory = join(closeRequestsDirectory(workdir), ".processing")
+  let names: string[]
+  try {
+    names = readdirSync(directory)
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw new Error(`staged close request directory ${directory} could not be read: ${String(cause)}`, { cause })
+  }
+  return names
+    .filter((name) => name.endsWith(".json"))
+    .sort()
+    .map((name) => join(directory, name))
+}
+
+/**
+ * Move a staged request back to its own name. Returns false when the slot is
+ * already taken (a re-request stands, and the staged copy must never clobber
+ * it): the link publishes only when the name is free.
+ */
+export function unstageCloseRequest(staged: string, file: string): boolean {
+  try {
+    linkSync(staged, file)
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "EEXIST") return false
+    throw new Error(`staged close request ${staged} could not be restored to ${file}: ${String(cause)}`, { cause })
+  }
+  removeFile(staged)
+  return true
 }
 
 /** Put a staged request back under its own name, carrying the consumer's retry bound. */

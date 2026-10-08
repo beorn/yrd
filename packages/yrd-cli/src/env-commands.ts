@@ -46,7 +46,7 @@ import { originHead } from "./queue-location.ts"
 import { issueResolver } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
-import { admitEnvironmentClose, type CloseAdmission } from "./env-close-holders.ts"
+import { admitEnvironmentClose, type CloseAdmission, type CloseCensusReceipt } from "./env-close-holders.ts"
 import {
   ENV_CLOSE_PREDICATE,
   requesterOf,
@@ -70,6 +70,30 @@ export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noReho
  * `HAB_RUN_REPORT_EXIT = 4` (hab-subcommands/run.ts).
  */
 export const ENV_CLOSE_QUEUED_EXIT = 4
+
+/**
+ * This invocation's same-UID CWD census could not certify the close. It carries
+ * the census receipt, so a queue-round caller can bound its own retry without
+ * parsing prose, and its message is the loud refusal this path threw before
+ * 22894 (the environment is preserved).
+ *
+ * A QUEUE-ROUND caller refuses with this and never delegates: a request pass or
+ * a sweep close that filed a request would be a close nobody asked for, run
+ * under the asked-for rule.
+ */
+export class IncompleteCensusError extends Error {
+  readonly refusal: string
+  readonly census: CloseCensusReceipt
+  constructor(refusal: string, census: CloseCensusReceipt, message: string) {
+    super(message)
+    this.name = "IncompleteCensusError"
+    this.refusal = refusal
+    this.census = census
+  }
+}
+
+/** Who runs the close decides what an uncertifiable census means. */
+export type CloseAdmissionMode = "delegate" | "refuse"
 export type EnvListOptions = Readonly<{ json?: boolean }>
 
 /** One environment as git holds it: a worktree under the bays root. */
@@ -568,6 +592,13 @@ export async function closeEnvironment(
   io: YrdCliIO,
   /** test-only seam (28120): production callers never pass it; the default is the real same-UID census. */
   censusSource?: () => Promise<ProcessCensus<"same-uid">>,
+  /**
+   * Internal, never a CLI option (22894). The `env close` verb delegates an
+   * uncertifiable census to the queue's own round; a queue-round caller (the
+   * request pass, the sweep) must refuse instead — it IS the capable context,
+   * and filing a request from it would close a path nobody asked for.
+   */
+  onIncompleteCensus: CloseAdmissionMode = "delegate",
 ): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
   const selection = await resolveGitSelection(root)
@@ -628,6 +659,7 @@ export async function closeEnvironment(
   await requireClean(treeGit, path)
   const admission = await admitEnvironmentClose(path, io, censusSource)
   if (admission.kind === "needs-delegation") {
+    if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
     return queueDelegatedClose(path, options, io, workdir, commit, admission)
   }
   const config = await readConfig(
@@ -670,10 +702,7 @@ export async function closeEnvironment(
   if (recheck.kind === "needs-delegation") {
     // Teardown already ran, so delegating now would run it twice in a context
     // that cannot tell what this one did. Refuse loudly and preserve instead.
-    throw new Error(
-      `same-UID process CWD census ${recheck.census.mechanism} became incomplete after teardown; ` +
-        `environment ${path} was preserved; a context that can read every same-UID pid must close it`,
-    )
+    throw uncertified(path, recheck, "after teardown")
   }
   if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true) {
     const retain =
@@ -750,6 +779,19 @@ export async function closeEnvironment(
   }
   io.stdout(options.json === true ? `${JSON.stringify({ closed: path })}\n` : `closed environment ${path}\n`)
   return 0
+}
+
+/** The loud refusal a queue-round caller makes when its own census cannot certify. */
+function uncertified(
+  path: string,
+  admission: Extract<CloseAdmission, { kind: "needs-delegation" }>,
+  when = "",
+): IncompleteCensusError {
+  return new IncompleteCensusError(
+    admission.refusal,
+    admission.census,
+    `${admission.refusal}${when === "" ? "" : ` ${when}`}; environment ${path} was preserved`,
+  )
 }
 
 /**

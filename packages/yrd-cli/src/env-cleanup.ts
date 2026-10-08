@@ -14,14 +14,17 @@ import { createLocalGitProcess } from "git-super/process"
 import { createLocalGitWorktreeStore } from "git-super/worktree"
 import { inspectProcessCwds, type ProcessCwdProjection } from "removely"
 import { environmentCwdHolder, processCwdCoverage } from "./env-close-holders.ts"
-import { ENV_CLOSE_QUEUED_EXIT, closeEnvironment, environmentInventory } from "./env-commands.ts"
+import { IncompleteCensusError, closeEnvironment, environmentInventory } from "./env-commands.ts"
 import {
   MAX_COVERAGE_ATTEMPTS,
+  closeRequestFile,
   dropCloseRequest,
   listCloseRequests,
+  listStagedCloseRequests,
   readCloseRequest,
   restoreCloseRequest,
   stageCloseRequest,
+  unstageCloseRequest,
   type StoredCloseRequest,
 } from "./env-close-requests.ts"
 import { environmentIssues } from "./env-cleanup-provenance.ts"
@@ -97,9 +100,6 @@ async function consumeCloseRequests(
   }>,
 ): Promise<Readonly<{ closed: number; handled: ReadonlySet<string> }>> {
   const { workdir, registry, worktrees, io, outcome } = input
-  const files = listCloseRequests(workdir).slice(0, ENVIRONMENT_BATCH)
-  if (files.length === 0) return { closed: 0, handled: new Set() }
-  const inventory = await environmentInventory(registry, worktrees, workdir)
   const journal = (
     file: string,
     request: StoredCloseRequest | undefined,
@@ -136,6 +136,42 @@ async function consumeCloseRequests(
     )
     io.stderr(`yrd: environment close request ${file}: ${result}: ${why}\n`)
   }
+  // Staging exists so a crash mid-close leaves the row in a named place. That
+  // place needs a reader, or the request is orphaned and unjournaled forever:
+  // name every staged row, then put it back (its slot free) so this round
+  // re-evaluates it existence-first, or drop it when a re-request stands.
+  for (const staged of listStagedCloseRequests(workdir)) {
+    let interrupted: StoredCloseRequest | undefined
+    try {
+      interrupted = readCloseRequest(staged)
+    } catch (cause) {
+      journal(staged, undefined, staged, "unreadable", String(cause))
+      continue
+    }
+    if (interrupted === undefined) continue
+    const slot = closeRequestFile(workdir, interrupted.path)
+    if (!unstageCloseRequest(staged, slot)) {
+      journal(
+        slot,
+        interrupted,
+        interrupted.path,
+        "interrupted-superseded",
+        `${staged} was left by a round that died mid-close; a re-request already stands at ${slot}`,
+      )
+      dropCloseRequest(staged)
+      continue
+    }
+    journal(
+      slot,
+      interrupted,
+      interrupted.path,
+      "interrupted",
+      `${staged} was left by a round that died mid-close; re-evaluated this round`,
+    )
+  }
+  const files = listCloseRequests(workdir).slice(0, ENVIRONMENT_BATCH)
+  if (files.length === 0) return { closed: 0, handled: new Set() }
+  const inventory = await environmentInventory(registry, worktrees, workdir)
   let closed = 0
   const handled = new Set<string>()
   for (const file of files) {
@@ -152,21 +188,20 @@ async function consumeCloseRequests(
     }
     handled.add(request.path)
     if (!existsSync(request.path)) {
-      dropCloseRequest(file)
       journal(file, request, request.path, "already-removed", `${request.path} is gone; the request is satisfied`)
+      dropCloseRequest(file)
       continue
     }
     const current = inventory.rows.find((row) => row.path === request.path)
     if (current === undefined) {
-      dropCloseRequest(file)
       journal(file, request, request.path, "stale", `${request.path} is no longer a registered environment`)
+      dropCloseRequest(file)
       continue
     }
     const fingerprint =
       `${current.name} ${current.branch ?? "(detached)"} ${current.head ?? "(no head)"} ` +
       `hold=${current.hold === null ? "no" : JSON.stringify(current.hold)}`
     if (current.hold !== null) {
-      dropCloseRequest(file)
       journal(
         file,
         request,
@@ -175,10 +210,10 @@ async function consumeCloseRequests(
         `held${current.hold === "" ? "" : `: ${current.hold}`}`,
         fingerprint,
       )
+      dropCloseRequest(file)
       continue
     }
     if (current.head !== request.head) {
-      dropCloseRequest(file)
       journal(
         file,
         request,
@@ -187,6 +222,7 @@ async function consumeCloseRequests(
         `registered HEAD moved from ${request.head} to ${current.head ?? "(none)"}`,
         fingerprint,
       )
+      dropCloseRequest(file)
       continue
     }
     // Stage before the close so two consumers cannot both act on one request and
@@ -205,64 +241,63 @@ async function consumeCloseRequests(
             output += text
           },
         },
+        undefined,
+        // The round IS the capable context: an incomplete census here must
+        // never file a second request (that is a close nobody asked for).
+        "refuse",
       )
     } catch (cause) {
-      dropCloseRequest(staged)
-      journal(file, request, request.path, "retired", String(cause), fingerprint)
-      continue
-    }
-    if (exit === ENV_CLOSE_QUEUED_EXIT) {
-      // The round's own close could not certify either. The closure wrote its own
-      // request file (create-or-match) while ours was staged, so that fresh one is
-      // removed and our staged row carries the bounded count forward.
-      dropCloseRequest(file)
-      const attempts = (request.coverageAttempts ?? 0) + 1
-      const retired = { ...request, coverageAttempts: attempts }
-      if (attempts >= MAX_COVERAGE_ATTEMPTS) {
-        dropCloseRequest(staged)
-        journal(
-          file,
-          retired,
-          request.path,
-          "retired",
-          `coverage refused ${attempts} times; last: ${output.trim()}`,
-          fingerprint,
-        )
-      } else {
-        restoreCloseRequest(staged, file, attempts)
-        journal(
-          file,
-          retired,
-          request.path,
-          "kept",
-          `coverage refused ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${output.trim()}`,
-          fingerprint,
-        )
+      if (cause instanceof IncompleteCensusError) {
+        const attempts = (request.coverageAttempts ?? 0) + 1
+        const retired = { ...request, coverageAttempts: attempts }
+        if (attempts >= MAX_COVERAGE_ATTEMPTS) {
+          journal(
+            file,
+            retired,
+            request.path,
+            "retired",
+            `coverage refused ${attempts} times; last: ${cause.refusal}`,
+            fingerprint,
+          )
+          dropCloseRequest(staged)
+        } else {
+          journal(
+            file,
+            retired,
+            request.path,
+            "kept",
+            `coverage refused ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${cause.refusal}`,
+            fingerprint,
+          )
+          restoreCloseRequest(staged, file, attempts)
+        }
+        continue
       }
+      journal(file, request, request.path, "retired", String(cause), fingerprint)
+      dropCloseRequest(staged)
       continue
     }
     if (exit !== 0) {
-      dropCloseRequest(staged)
       journal(file, request, request.path, "retired", `native close exited ${exit}: ${output.trim()}`, fingerprint)
+      dropCloseRequest(staged)
       continue
     }
     let parsed: unknown
     try {
       parsed = JSON.parse(output)
     } catch {
-      dropCloseRequest(staged)
       journal(file, request, request.path, "retired", `malformed close result ${output.trim()}`, fingerprint)
+      dropCloseRequest(staged)
       continue
     }
     if (typeof parsed === "object" && parsed !== null && "closed" in parsed && parsed.closed === request.path) {
+      journal(file, request, request.path, "closed", `closed at the request of ${request.requester}`, fingerprint)
       dropCloseRequest(staged)
       closed++
-      journal(file, request, request.path, "closed", `closed at the request of ${request.requester}`, fingerprint)
       // One close per round, like every other removal here: a waiting merge is
       // judged before another removal (@i/10-yrd eligibility discipline).
       break
     }
-    dropCloseRequest(staged)
     journal(
       file,
       request,
@@ -273,6 +308,7 @@ async function consumeCloseRequests(
         : `unproven close result ${output.trim()}`,
       fingerprint,
     )
+    dropCloseRequest(staged)
   }
   return { closed, handled }
 }
@@ -640,6 +676,10 @@ async function cleanupEnvironments(
             output += text
           },
         },
+        undefined,
+        // A sweep close is not asked for by anyone: an uncertifiable census is
+        // the pre-22894 loud refusal, never a filed request (22894).
+        "refuse",
       )
       if (exit !== 0) throw new Error(`native close exited ${exit}: ${output}`)
       const result: unknown = JSON.parse(output)
