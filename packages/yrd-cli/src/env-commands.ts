@@ -47,11 +47,54 @@ import { originHead } from "./queue-location.ts"
 import { issueResolver } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
-import { admitEnvironmentClose } from "./env-close-holders.ts"
+import { admitEnvironmentClose, type CloseAdmission, type CloseCensusReceipt } from "./env-close-holders.ts"
+import {
+  ENV_CLOSE_PREDICATE,
+  requesterOf,
+  writeCloseRequest,
+  type EnvCloseRequest,
+  type EnvCloseRequestOptions,
+} from "./env-close-requests.ts"
 import type { ProcessCensus } from "removely"
 
 export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string; hold?: string }>
 export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
+
+/**
+ * The close was ACCEPTED, not done: this caller's same-UID CWD census could not
+ * certify it, so a context whose census reads every pid (the queue's own round,
+ * ruling 27723) will run the same close lifecycle.
+ *
+ * Distinct from 0 on purpose. The caller asked for a close and the environment
+ * still exists, so `yrd env close X && <assumes X gone>` must not proceed on a
+ * lie — the exit-0-on-disagreement class. Precedent: hab run's accepted-not-done
+ * `HAB_RUN_REPORT_EXIT = 4` (hab-subcommands/run.ts).
+ */
+export const ENV_CLOSE_QUEUED_EXIT = 4
+
+/**
+ * This invocation's same-UID CWD census could not certify the close. It carries
+ * the census receipt, so a queue-round caller can bound its own retry without
+ * parsing prose, and its message is the loud refusal this path threw before
+ * 22894 (the environment is preserved).
+ *
+ * A QUEUE-ROUND caller refuses with this and never delegates: a request pass or
+ * a sweep close that filed a request would be a close nobody asked for, run
+ * under the asked-for rule.
+ */
+export class IncompleteCensusError extends Error {
+  readonly refusal: string
+  readonly census: CloseCensusReceipt
+  constructor(refusal: string, census: CloseCensusReceipt, message: string) {
+    super(message)
+    this.name = "IncompleteCensusError"
+    this.refusal = refusal
+    this.census = census
+  }
+}
+
+/** Who runs the close decides what an uncertifiable census means. */
+export type CloseAdmissionMode = "delegate" | "refuse"
 export type EnvListOptions = Readonly<{ json?: boolean }>
 
 /** One environment as git holds it: a worktree under the bays root. */
@@ -564,6 +607,13 @@ export async function closeEnvironment(
   io: YrdCliIO,
   /** test-only seam (28120): production callers never pass it; the default is the real same-UID census. */
   censusSource?: () => Promise<ProcessCensus<"same-uid">>,
+  /**
+   * Internal, never a CLI option (22894). The `env close` verb delegates an
+   * uncertifiable census to the queue's own round; a queue-round caller (the
+   * request pass, the sweep) must refuse instead — it IS the capable context,
+   * and filing a request from it would close a path nobody asked for.
+   */
+  onIncompleteCensus: CloseAdmissionMode = "delegate",
 ): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
   const selection = await resolveGitSelection(root)
@@ -622,7 +672,11 @@ export async function closeEnvironment(
     )
   }
   await requireClean(treeGit, path)
-  await admitEnvironmentClose(path, io, censusSource)
+  const admission = await admitEnvironmentClose(path, io, censusSource)
+  if (admission.kind === "needs-delegation") {
+    if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
+    return queueDelegatedClose(path, options, io, workdir, commit, admission)
+  }
   const config = await readConfig(
     treeGit,
     commit,
@@ -659,7 +713,12 @@ export async function closeEnvironment(
     })
   }
   const modules = await treeGit(["ls-tree", commit, "--", ".gitmodules"])
-  await admitEnvironmentClose(path, io, censusSource)
+  const recheck = await admitEnvironmentClose(path, io, censusSource)
+  if (recheck.kind === "needs-delegation") {
+    // Teardown already ran, so delegating now would run it twice in a context
+    // that cannot tell what this one did. Refuse loudly and preserve instead.
+    throw uncertified(path, recheck, "after teardown")
+  }
   if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true) {
     const retain =
       options.retain === undefined
@@ -735,6 +794,65 @@ export async function closeEnvironment(
   }
   io.stdout(options.json === true ? `${JSON.stringify({ closed: path })}\n` : `closed environment ${path}\n`)
   return 0
+}
+
+/** The loud refusal a queue-round caller makes when its own census cannot certify. */
+function uncertified(
+  path: string,
+  admission: Extract<CloseAdmission, { kind: "needs-delegation" }>,
+  when = "",
+): IncompleteCensusError {
+  return new IncompleteCensusError(
+    admission.refusal,
+    admission.census,
+    `${admission.refusal}${when === "" ? "" : ` ${when}`}; environment ${path} was preserved`,
+  )
+}
+
+/**
+ * File the durable close request for a context that can take a complete census
+ * (22894). A write this process cannot make is a loud refusal naming the file
+ * and the cure — never a silent `queued`, never a removal.
+ */
+function queueDelegatedClose(
+  path: string,
+  options: EnvCloseOptions,
+  io: YrdCliIO,
+  workdir: string,
+  head: string,
+  admission: Extract<CloseAdmission, { kind: "needs-delegation" }>,
+): YrdCliExitCode {
+  const chosen: EnvCloseRequestOptions = {
+    ...(options.retain === undefined ? {} : { retain: options.retain }),
+    ...(options.noRehome === true ? { noRehome: true } : {}),
+  }
+  const request: EnvCloseRequest = {
+    name: basename(path),
+    path,
+    requester: requesterOf(globalThis.process.env),
+    uid: typeof globalThis.process.getuid === "function" ? globalThis.process.getuid() : -1,
+    at: new Date().toISOString(),
+    predicate: ENV_CLOSE_PREDICATE,
+    options: chosen,
+    head,
+  }
+  const { file, alreadyStood } = writeCloseRequest(workdir, request)
+  io.stderr(
+    `yrd: env close ${path}: ${admission.refusal}; this caller cannot certify the close; ` +
+      `queued request ${file} for the queue's own round, which reads every same-UID pid and journals the outcome\n`,
+  )
+  io.stdout(
+    options.json === true
+      ? `${JSON.stringify({
+          queued: path,
+          reason: "incomplete-census",
+          request: file,
+          census: admission.census,
+          ...(alreadyStood ? { alreadyQueued: true } : {}),
+        })}\n`
+      : `queued environment close for ${path}: ${admission.refusal}; a context that can read every same-UID pid will close it; request ${file}\n`,
+  )
+  return ENV_CLOSE_QUEUED_EXIT
 }
 
 /** A local branch whose path contains `branch`, or sits inside it: git can store only one of the two (25850). */

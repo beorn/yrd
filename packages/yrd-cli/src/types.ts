@@ -23,8 +23,14 @@
  * outcome and no queue command returns it. A probe that printed `unknown` and
  * exited 2 would be making two claims that disagree, which is the defect this
  * whole bead is about, one layer down.
+ *
+ * 4 is `yrd env close`'s ACCEPTED-NOT-DONE (22894): the environment is still
+ * there and its close has been queued for a context whose same-UID census reads
+ * every pid. It is not 0 because a caller chaining on success would otherwise
+ * treat a live environment as gone; it is not 2 because nothing was refused.
+ * Same class as hab run's `HAB_RUN_REPORT_EXIT = 4`.
  */
-export type YrdCliExitCode = 0 | 1 | 2 | 3
+export type YrdCliExitCode = 0 | 1 | 2 | 3 | 4
 
 export type YrdCliIO = {
   stdout(text: string): void

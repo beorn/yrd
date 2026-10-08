@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join, relative, sep } from "node:path"
+import { basename, dirname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import * as removely from "removely"
@@ -26,7 +26,15 @@ import { createEventStore, previewCloneKey, previewSubjectPrefix } from "@yrd/qu
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
-import { environmentCwdHolder } from "../src/env-close-holders.ts"
+import { admitEnvironmentClose, environmentCwdHolder } from "../src/env-close-holders.ts"
+import {
+  closeRequestFile,
+  closeRequestsDirectory,
+  listCloseRequests,
+  readCloseRequest,
+  requesterOf,
+} from "../src/env-close-requests.ts"
+import { workdirOf } from "../src/workdir.ts"
 import { environmentIssues, environmentProvenance } from "../src/env-cleanup-provenance.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
@@ -176,6 +184,37 @@ it("cleanup provenance excludes inherited history and refuses incomplete or unkn
   writeFileSync(path, creation + entry(head, "future-command: unknown"))
   await expect(environmentProvenance(w.work, w.git)).rejects.toThrow(/future-command/u)
 })
+
+/** One denied same-UID cwd read exactly as removely records it: identity evidence, no readable row. */
+function unreadableDenial(
+  argv: readonly string[] = ["bun", "private-argument-must-not-be-reported"],
+): removely.UnreadableProcess {
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new Error("this case needs a real unix uid")
+  return {
+    pid: 4242,
+    uid,
+    comm: "bun",
+    denied: ["process"],
+    issues: [{ source: "process", resource: "cwd", reason: "denied", code: "EACCES" }],
+    argv: [...argv],
+  }
+}
+
+/** The census this caller cannot complete: one uncleared denial, no readable row. */
+async function incompleteCensus(): Promise<removely.ProcessCensus<"same-uid">> {
+  const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+  return { rows: [], coverage: { ...observed.coverage, complete: false, unreadable: [unreadableDenial()] } }
+}
+
+/** A census the caller read completely, carrying one readable holder. */
+async function holderCensus(pid: number, cwd: string): Promise<removely.ProcessCensus<"same-uid">> {
+  const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+  return {
+    rows: [{ pid, sources: { cwd: { availability: "readable", value: cwd, issues: [] } }, issues: [] }],
+    coverage: { ...observed.coverage, complete: true, unreadable: [] },
+  }
+}
 
 async function command(
   cwd: string,
@@ -970,5 +1009,150 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       await runYrdProcess(["bun", "yrd", "env", "close", borrower, "--json"], closeBorrower.io),
       closeBorrower.stderr(),
     ).toBe(0)
+  })
+
+  /**
+   * @failure 22894: a caller whose own same-UID CWD census cannot read every pid
+   *          may neither certify the close nor state an intent: it refuses, and
+   *          the environment waits for a human. The intent belongs to a context
+   *          whose census reads every pid.
+   * @level   l1 (injected incomplete census at the existing process-census boundary)
+   * @consumer every seat whose sandbox scopes ptrace over other same-UID pids
+   */
+  it.runIf(process.platform === "linux")(
+    "queues the close for a capable context when this caller's census is incomplete (22894 T1)",
+    async () => {
+      const w = await world(":")
+      const state = join(dirname(w.work), "state")
+      await w.git(["config", "yrd.workdir", state])
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      const { path } = await openEnvironment(w.work, head)
+      const workdir = await workdirOf(w.git, { cwd: w.work })
+      processCensus.mockResolvedValue(await incompleteCensus())
+      const run = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], run.io), run.stderr()).toBe(4)
+      const receipt = JSON.parse(run.stdout()) as Record<string, unknown>
+      const file = closeRequestFile(workdir, path)
+      expect(receipt, run.stderr()).toMatchObject({
+        queued: path,
+        reason: "incomplete-census",
+        request: file,
+        census: { mechanism: "proc", complete: false, rows: 0, unreadable: 1, uncleared: 1 },
+      })
+      expect(run.stderr()).toContain("cannot certify the close")
+      expect(run.stderr()).toContain("queued request")
+      expect(readCloseRequest(file)).toMatchObject({
+        name: basename(path),
+        path,
+        requester: requesterOf(process.env),
+        predicate: "direct-admission",
+        options: {},
+        head,
+      })
+      // The request is intent, never a removal: the environment is untouched.
+      expect(existsSync(path)).toBe(true)
+      expect(await w.git(["worktree", "list", "--porcelain"])).toContain(path)
+      // Re-filing the same intent is idempotent (create-or-match), and the first
+      // requester and time survive.
+      const standing = readCloseRequest(file)
+      const again = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], again.io), again.stderr()).toBe(4)
+      expect(JSON.parse(again.stdout())).toMatchObject({ queued: path, alreadyQueued: true })
+      expect(readCloseRequest(file)).toEqual(standing)
+      // A request for the same path with DIFFERENT options is a conflict, named
+      // with the standing requester, never overwritten.
+      const conflict = capture(w.work)
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "env", "close", path, "--json", "--retain", join(state, "elsewhere")],
+          conflict.io,
+        ),
+        conflict.stderr(),
+      ).toBe(2)
+      expect(conflict.stderr()).toContain("already stands")
+      expect(conflict.stderr()).toContain(requesterOf(process.env))
+      expect(readCloseRequest(file)).toEqual(standing)
+    },
+  )
+
+  /**
+   * @failure 22894: the readable-holder refusal (28120) must stay a refusal. It
+   *          must never become a queued delegation, which would put a close the
+   *          caller can already judge in front of the queue.
+   * @level   l1 (injected complete census carrying one readable holder)
+   * @consumer the caller whose environment genuinely has a process inside it
+   */
+  it.runIf(process.platform === "linux")(
+    "a readable holder still refuses the direct close and files no request (28120, 22894 T4)",
+    async () => {
+      const w = await world(":")
+      const state = join(dirname(w.work), "state")
+      await w.git(["config", "yrd.workdir", state])
+      const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+      const workdir = await workdirOf(w.git, { cwd: w.work })
+      processCensus.mockResolvedValue(await holderCensus(4242, path))
+      const run = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], run.io), run.stderr()).toBe(2)
+      expect(run.stderr()).toContain("process 4242 has CWD")
+      expect(run.stderr()).toContain("was preserved")
+      expect(existsSync(path)).toBe(true)
+      expect(listCloseRequests(workdir)).toEqual([])
+    },
+  )
+
+  /**
+   * @failure 22894: a request this caller cannot write must be a loud refusal
+   *          naming the file and the cure, never a silent `queued` for a close
+   *          that will never happen.
+   * @level   l1 (an unwritable request directory)
+   * @consumer a sandboxed seat with no write to the queue workdir
+   */
+  it.runIf(process.platform === "linux")(
+    "refuses loudly, and writes nothing, when the request cannot be written (22894 T5)",
+    async () => {
+      const w = await world(":")
+      const state = join(dirname(w.work), "state")
+      await w.git(["config", "yrd.workdir", state])
+      const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+      const workdir = await workdirOf(w.git, { cwd: w.work })
+      const directory = closeRequestsDirectory(workdir)
+      mkdirSync(directory, { recursive: true })
+      chmodSync(directory, 0o500)
+      processCensus.mockResolvedValue(await incompleteCensus())
+      try {
+        const run = capture(w.work)
+        expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], run.io), run.stderr()).toBe(2)
+        expect(run.stderr()).toContain("could not be written")
+        expect(run.stderr()).toContain(directory)
+        expect(run.stderr()).toContain("read every same-UID pid")
+        expect(existsSync(path)).toBe(true)
+        expect(listCloseRequests(workdir)).toEqual([])
+      } finally {
+        chmodSync(directory, 0o700)
+      }
+    },
+  )
+
+  /**
+   * @failure 22894: the delegation split must not disturb the identity-clearing
+   *          exemption the shared admission already owns (removely's
+   *          `clearedByIdentity`) — a cleared denial is evidence, not a gap.
+   * @level   l1 (injected denied census at the existing process-census boundary)
+   * @consumer the shared admission policy, both callers
+   */
+  it.runIf(process.platform === "linux")("clears identity-denied pids and still admits (28120, 22894 T6)", async () => {
+    const w = await world(":")
+    const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+    const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+    const io = capture(w.work)
+    const admission = await admitEnvironmentClose(path, io.io, async () => ({
+      rows: [],
+      coverage: {
+        ...observed.coverage,
+        complete: false,
+        unreadable: [unreadableDenial(["/usr/lib/systemd/systemd", "--user"])],
+      },
+    }))
+    expect(admission).toEqual({ kind: "admitted" })
   })
 })

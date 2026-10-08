@@ -1313,6 +1313,14 @@ function buildProgram(
   env_
     .command("close <path>")
     .description("run teardown and remove a clean, unlocked environment, retaining its submodule stores")
+    .addHelpSection(
+      "When this caller's same-UID CWD census cannot read every pid:",
+      "The close is not certified and not refused: the request is queued under the queue workdir " +
+        "(`state/yrd/env-close-requests/`) and the queue's own round, whose census reads every pid, " +
+        "runs the same close lifecycle and journals the outcome. That ending exits 4, named `queued` " +
+        "in --json, because the environment still exists. A request this caller cannot write is " +
+        "refused loudly instead.",
+    )
     .option(
       "--retain <directory>",
       "durable GitSuper retention directory; defaults to the workdir retained-modules directory",

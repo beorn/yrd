@@ -49,12 +49,35 @@ export function environmentCwdHolder(
   })
 }
 
+/** The census facts one admission read, named so a refusal can carry them to a capable context. */
+export type CloseCensusReceipt = Readonly<{
+  mechanism: string
+  complete: boolean
+  rows: number
+  unreadable: number
+  uncleared: number
+}>
+
+/**
+ * What one admission decided.
+ *
+ * `admitted` may proceed. `needs-delegation` means this invocation's census
+ * could NOT certify the close and no readable holder was found: the caller is
+ * not permitted to quietly proceed, and refusing outright would leave the
+ * environment to a human, so the intent is delegated to a context whose census
+ * reads every pid (22894). A readable holder is never delegation — it is a
+ * refusal, exactly as before (28120).
+ */
+export type CloseAdmission =
+  | Readonly<{ kind: "admitted" }>
+  | Readonly<{ kind: "needs-delegation"; refusal: string; census: CloseCensusReceipt }>
+
 /** Authoritative close admission, shared by direct close and the queue's close lifecycle. */
 export async function admitEnvironmentClose(
   path: string,
   io: YrdCliIO,
   censusSource?: () => Promise<ProcessCensus<"same-uid">>,
-): Promise<void> {
+): Promise<CloseAdmission> {
   let snapshot: ProcessCwdProjection
   const exempt = new Set<number>([process.pid])
   let ancestryAvailable = false
@@ -96,9 +119,26 @@ export async function admitEnvironmentClose(
   const coverage = processCwdCoverage(snapshot)
   const holder = environmentCwdHolder(path, snapshot, exempt)
   if (coverage.refusal !== undefined) {
-    throw new Error(
-      `${coverage.refusal}${holder === undefined ? "" : `; process ${holder.pid} has CWD ${holder.cwd}`}; environment ${path} was preserved`,
-    )
+    // A READABLE holder inside the path is a refusal, exactly as before: the
+    // caller knows the pid and the cwd and can name them. Incomplete coverage
+    // with NO readable holder is the case this invocation cannot decide, and it
+    // is delegated rather than guessed either way.
+    if (holder !== undefined) {
+      throw new Error(
+        `${coverage.refusal}; process ${holder.pid} has CWD ${holder.cwd}; environment ${path} was preserved`,
+      )
+    }
+    return {
+      kind: "needs-delegation",
+      refusal: coverage.refusal,
+      census: {
+        mechanism: snapshot.mechanism,
+        complete: snapshot.complete,
+        rows: snapshot.rows.length,
+        unreadable: snapshot.unreadable.length,
+        uncleared: coverage.uncleared.length,
+      },
+    }
   }
   const ownCwd =
     environmentCwdHolder(path, { ...snapshot, rows: snapshot.rows.filter((row) => row.pid === process.pid) }) !==
@@ -113,4 +153,5 @@ export async function admitEnvironmentClose(
       `process ${holder.pid} has CWD ${holder.cwd}; environment ${path} was preserved; wait for its owner to leave before retrying`,
     )
   }
+  return { kind: "admitted" }
 }
