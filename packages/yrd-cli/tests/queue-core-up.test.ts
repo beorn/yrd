@@ -35,7 +35,7 @@ import { hostname, tmpdir } from "node:os"
 import { monitorEventLoopDelay } from "node:perf_hooks"
 import { dirname, join, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import { afterAll, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as gitomic from "gitomic"
 import * as removely from "removely"
@@ -105,6 +105,22 @@ process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
 process.env.GIT_CONFIG_VALUE_0 = "always"
 
 const roots: string[] = []
+
+// The native close's admission reads removely's process census (28120). Host process churn is not these rows'
+// subject: a same-UID process mid-exit reads unreadable and keeps the close on a busy host (28126). Every row
+// injects an idle host, no rows and complete coverage; a row that needs a holder mocks inspectProcessCwds.
+let idleCensus: removely.ProcessCensus<"same-uid"> | undefined
+beforeAll(async () => {
+  if (process.platform !== "linux") return
+  const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+  idleCensus = { ...observed, rows: [], coverage: { ...observed.coverage, complete: true, unreadable: [] } }
+})
+beforeEach(() => {
+  if (idleCensus !== undefined) vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue(idleCensus)
+})
+afterEach(() => {
+  if (idleCensus !== undefined) vi.mocked(removely.inspectProcessCensus).mockRestore()
+})
 
 // A selected event change must keep the watch open through every working phase.
 describe("event watch selector endings", () => {
