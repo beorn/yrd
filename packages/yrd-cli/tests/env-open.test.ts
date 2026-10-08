@@ -21,7 +21,8 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import * as removely from "removely"
 import { createEventQueue, createEventStore, readConfig, type Git } from "@yrd/queue-core"
 import { createGitWorkspace } from "@yrd/bay"
 import { createProcess } from "@yrd/process"
@@ -32,6 +33,27 @@ import type { YrdCliIO } from "../src/types.ts"
 process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
 process.env.GIT_CONFIG_VALUE_0 = "always"
+
+// A spy cannot replace a binding of an installed ESM package's namespace (standalone CI), so the seam is a module mock.
+vi.mock("removely", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("removely")>()
+  return { ...actual, inspectProcessCensus: vi.fn(actual.inspectProcessCensus) }
+})
+
+const realProcessCensus = (await vi.importActual<typeof import("removely")>("removely")).inspectProcessCensus
+const processCensus = vi.mocked(removely.inspectProcessCensus)
+// The native close's admission reads the process census (28120); host process churn is not these rows' subject, so
+// every row closes against an idle host (28174, as 28126 did for queue-core-up).
+beforeEach(async () => {
+  if (process.platform !== "linux") return
+  const observed = await realProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+  processCensus.mockResolvedValue({
+    ...observed,
+    rows: [],
+    coverage: { ...observed.coverage, complete: true, unreadable: [] },
+  })
+})
+afterEach(() => processCensus.mockReset())
 
 const roots: string[] = []
 afterAll(() => {
