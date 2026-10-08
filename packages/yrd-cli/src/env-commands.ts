@@ -29,6 +29,7 @@ import {
   gitIn,
   issueOf,
   readConfig,
+  readRemoteCommit,
   refAt,
   resolveGitSelection,
   retirePreviewSubject,
@@ -79,11 +80,25 @@ function legacyBaysRoot(repo: string): string {
   return join(repo, ".bays")
 }
 
-/** The base a fresh environment is cut from: the target as this checkout last
- * fetched it, else the local branch of that name. Named, so a refusal says
- * which ref was missing rather than "could not resolve HEAD". */
+/** The base a fresh environment is cut from: the target as origin answers it
+ * now, read with its objects in one fetch (28133). The tracking ref is only as
+ * new as this checkout's last fetch: on 2026-10-08 an environment cut from it
+ * sat 60 s behind main and missed the merge it needed. An origin with no such
+ * branch leaves the tracking ref, else the local branch of that name. Named, so
+ * a refusal says which ref was missing rather than "could not resolve HEAD". */
 async function resolveBaseSha(git: Git, target: string): Promise<string> {
+  const branchRef = `refs/heads/${target}`
   const tracking = `refs/remotes/origin/${target}`
+  let head: string | undefined
+  try {
+    head = await readRemoteCommit(git, "origin", branchRef)
+  } catch (error) {
+    throw new Error(
+      `yrd env open: origin did not answer for ${branchRef}, so its head is unknown and ${tracking} may be ` +
+        `behind it; retry when origin answers: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  if (head !== undefined) return head
   const tracked = await refAt(git, tracking)
   if (tracked !== undefined) return tracked
   const local = await refAt(git, target)

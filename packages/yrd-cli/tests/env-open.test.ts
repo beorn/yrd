@@ -181,6 +181,36 @@ describe("yrd env open prepares the retained environment", () => {
     expect(existsSync(join(w.work, ".bays", "newer-key"))).toBe(true)
   })
 
+  /**
+   * @failure 28133: `yrd env open` cut a fresh environment from refs/remotes/origin/main as the checkout last
+   *          fetched it. On 2026-10-08 the 28124 environment sat on b56bbf0d although origin's main had been
+   *          feb9af30 for 60 s, so it missed 28123 and needed a git-super merge to repair.
+   * @level   l2 (real bare remote advanced by a second clone, real retained worktree)
+   * @consumer every seat opening an environment while main moves
+   * @testonly none
+   */
+  it("cuts a fresh environment from origin's head at open time, not from the checkout's last fetch", async () => {
+    const w = await world(":")
+    const fetched = (await w.git(["rev-parse", "refs/remotes/origin/main"])).trim()
+    const peer = join(w.work, "..", "peer")
+    await w.git(["clone", "--quiet", join(w.work, "..", "remote.git"), peer])
+    const peerGit = gitIn(peer)
+    writeFileSync(join(peer, "LANDED"), "a merge that landed after the last fetch\n")
+    await peerGit(["add", "LANDED"])
+    await peerGit(["-c", "user.email=peer@yrd.test", "-c", "user.name=peer", "commit", "--quiet", "-m", "land"])
+    await peerGit(["push", "--quiet", "origin", "main"])
+    const landed = (await peerGit(["rev-parse", "HEAD"])).trim()
+    expect((await w.git(["rev-parse", "refs/remotes/origin/main"])).trim()).toBe(fetched)
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "fresh-base"], run.io)).toBe(0)
+
+    const bay = join(w.work, ".bays", "fresh-base")
+    expect((await gitIn(bay)(["rev-parse", "HEAD"])).trim()).toBe(landed)
+    expect(existsSync(join(bay, "LANDED"))).toBe(true)
+    expect(run.stderr()).toContain(`cut from main ${landed.slice(0, 12)}`)
+  })
+
   // A bead nested under another opens task/<parent>/<leaf> beside task/<parent>, and git stores a branch as a path,
   // so the raw refusal named neither cause nor way out (@dev/fixer, 25850 beside 25843, 2026-09-25).
   it("refuses a branch beneath an existing branch and names --bay", async () => {
