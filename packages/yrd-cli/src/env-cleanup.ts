@@ -1,9 +1,10 @@
-import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   gitIn,
   readBranchHistory,
+  type Git,
   type GitRunner,
   type GitSelection,
   type QueueConfig,
@@ -13,11 +14,20 @@ import { createLocalGitProcess } from "git-super/process"
 import { createLocalGitWorktreeStore } from "git-super/worktree"
 import { inspectProcessCwds, type ProcessCwdProjection } from "removely"
 import { environmentCwdHolder, processCwdCoverage } from "./env-close-holders.ts"
-import { closeEnvironment, environmentInventory } from "./env-commands.ts"
+import { ENV_CLOSE_QUEUED_EXIT, closeEnvironment, environmentInventory } from "./env-commands.ts"
+import {
+  MAX_COVERAGE_ATTEMPTS,
+  dropCloseRequest,
+  listCloseRequests,
+  readCloseRequest,
+  restoreCloseRequest,
+  stageCloseRequest,
+  type StoredCloseRequest,
+} from "./env-close-requests.ts"
 import { environmentIssues } from "./env-cleanup-provenance.ts"
 import { repositoryHere } from "./declaration.ts"
 import { issueLookup, type ResolvedIssue } from "./issue-resolver.ts"
-import type { YrdCliIO } from "./types.ts"
+import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
 type CachedEnvironment = {
   paths: { path: string; optional: boolean }[]
@@ -60,6 +70,211 @@ type CleanupProgress = { cursor: number; hint: string | undefined; loaded: boole
 /** Where the hint lives: the run's existing state dir, not a new config key. */
 function cursorHintPath(workdir: string): string {
   return join(workdir, "state", "yrd", "environment-cleanup.json")
+}
+
+/**
+ * Consume the durable close requests a caller filed because its own same-UID CWD
+ * census could not certify the close (22894). This round IS the capable context:
+ * it runs the SAME `closeEnvironment` lifecycle the direct verb runs, under the
+ * direct admission predicate (clean, unlocked, no holder, ancestry not required),
+ * one close per round like every other removal here.
+ *
+ * Retirement is loud and bounded. Existence is checked FIRST, so a path already
+ * gone is an `already-removed` row and never a close attempt (23162: freshness at
+ * destruction). The registry row is re-read, and a gone registration, a hold or a
+ * moved HEAD retires the request as `stale`. Only an incomplete census is
+ * retryable — at most MAX_COVERAGE_ATTEMPTS rounds — after which the file is
+ * DELETED with the whole request and the last refusal in its final journal row
+ * (no archive directory). Every other refusal retires at once with its reason.
+ */
+async function consumeCloseRequests(
+  input: Readonly<{
+    workdir: string
+    registry: string
+    worktrees: Git
+    io: YrdCliIO
+    outcome: QueueRunOutcome
+  }>,
+): Promise<Readonly<{ closed: number; handled: ReadonlySet<string> }>> {
+  const { workdir, registry, worktrees, io, outcome } = input
+  const files = listCloseRequests(workdir).slice(0, ENVIRONMENT_BATCH)
+  if (files.length === 0) return { closed: 0, handled: new Set() }
+  const inventory = await environmentInventory(registry, worktrees, workdir)
+  const journal = (
+    file: string,
+    request: StoredCloseRequest | undefined,
+    path: string,
+    result: string,
+    why: string,
+    fingerprint?: string,
+  ): void => {
+    appendFileSync(
+      outcome.log,
+      `${JSON.stringify({
+        kind: "observation",
+        run: outcome.run,
+        at: new Date().toISOString(),
+        scope: "environment-cleanup",
+        registry,
+        path,
+        ...(request === undefined
+          ? { requestFile: file }
+          : {
+              request: {
+                requester: request.requester,
+                at: request.at,
+                options: request.options,
+                path: request.path,
+                head: request.head,
+                ...(fingerprint === undefined ? {} : { fingerprint }),
+                ...(request.coverageAttempts === undefined ? {} : { coverageAttempts: request.coverageAttempts }),
+              },
+            }),
+        result,
+        why,
+      })}\n`,
+    )
+    io.stderr(`yrd: environment close request ${file}: ${result}: ${why}\n`)
+  }
+  let closed = 0
+  const handled = new Set<string>()
+  for (const file of files) {
+    let request: StoredCloseRequest
+    try {
+      const standing = readCloseRequest(file)
+      if (standing === undefined) continue
+      request = standing
+    } catch (cause) {
+      // A file this round cannot read is named and LEFT STANDING: deleting it
+      // would destroy the only record of who asked for what.
+      journal(file, undefined, file, "unreadable", String(cause))
+      continue
+    }
+    handled.add(request.path)
+    if (!existsSync(request.path)) {
+      dropCloseRequest(file)
+      journal(file, request, request.path, "already-removed", `${request.path} is gone; the request is satisfied`)
+      continue
+    }
+    const current = inventory.rows.find((row) => row.path === request.path)
+    if (current === undefined) {
+      dropCloseRequest(file)
+      journal(file, request, request.path, "stale", `${request.path} is no longer a registered environment`)
+      continue
+    }
+    const fingerprint =
+      `${current.name} ${current.branch ?? "(detached)"} ${current.head ?? "(no head)"} ` +
+      `hold=${current.hold === null ? "no" : JSON.stringify(current.hold)}`
+    if (current.hold !== null) {
+      dropCloseRequest(file)
+      journal(
+        file,
+        request,
+        request.path,
+        "stale",
+        `held${current.hold === "" ? "" : `: ${current.hold}`}`,
+        fingerprint,
+      )
+      continue
+    }
+    if (current.head !== request.head) {
+      dropCloseRequest(file)
+      journal(
+        file,
+        request,
+        request.path,
+        "stale",
+        `registered HEAD moved from ${request.head} to ${current.head ?? "(none)"}`,
+        fingerprint,
+      )
+      continue
+    }
+    // Stage before the close so two consumers cannot both act on one request and
+    // a crash mid-close leaves the row in a named place.
+    const staged = stageCloseRequest(file)
+    let exit: YrdCliExitCode
+    let output = ""
+    try {
+      exit = await closeEnvironment(
+        request.path,
+        { ...request.options, json: true },
+        {
+          ...io,
+          cwd: registry,
+          stdout: (text) => {
+            output += text
+          },
+        },
+      )
+    } catch (cause) {
+      dropCloseRequest(staged)
+      journal(file, request, request.path, "retired", String(cause), fingerprint)
+      continue
+    }
+    if (exit === ENV_CLOSE_QUEUED_EXIT) {
+      // The round's own close could not certify either. The closure wrote its own
+      // request file (create-or-match) while ours was staged, so that fresh one is
+      // removed and our staged row carries the bounded count forward.
+      dropCloseRequest(file)
+      const attempts = (request.coverageAttempts ?? 0) + 1
+      const retired = { ...request, coverageAttempts: attempts }
+      if (attempts >= MAX_COVERAGE_ATTEMPTS) {
+        dropCloseRequest(staged)
+        journal(
+          file,
+          retired,
+          request.path,
+          "retired",
+          `coverage refused ${attempts} times; last: ${output.trim()}`,
+          fingerprint,
+        )
+      } else {
+        restoreCloseRequest(staged, file, attempts)
+        journal(
+          file,
+          retired,
+          request.path,
+          "kept",
+          `coverage refused ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${output.trim()}`,
+          fingerprint,
+        )
+      }
+      continue
+    }
+    if (exit !== 0) {
+      dropCloseRequest(staged)
+      journal(file, request, request.path, "retired", `native close exited ${exit}: ${output.trim()}`, fingerprint)
+      continue
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(output)
+    } catch {
+      dropCloseRequest(staged)
+      journal(file, request, request.path, "retired", `malformed close result ${output.trim()}`, fingerprint)
+      continue
+    }
+    if (typeof parsed === "object" && parsed !== null && "closed" in parsed && parsed.closed === request.path) {
+      dropCloseRequest(staged)
+      closed++
+      journal(file, request, request.path, "closed", `closed at the request of ${request.requester}`, fingerprint)
+      // One close per round, like every other removal here: a waiting merge is
+      // judged before another removal (@i/10-yrd eligibility discipline).
+      break
+    }
+    dropCloseRequest(staged)
+    journal(
+      file,
+      request,
+      request.path,
+      "retired",
+      typeof parsed === "object" && parsed !== null && "kept" in parsed
+        ? `kept: ${output.trim()}`
+        : `unproven close result ${output.trim()}`,
+      fingerprint,
+    )
+  }
+  return { closed, handled }
 }
 
 export function createEnvironmentCleanup() {
@@ -203,6 +418,10 @@ async function cleanupEnvironments(
     )
     return
   }
+  // 22894: a close no caller here could certify is consumed BEFORE the cursor
+  // batch, because this round is the context whose census reads every pid.
+  const requests = await consumeCloseRequests({ workdir, registry, worktrees: registryGit, io, outcome })
+  closed += requests.closed
   const store = { repo, remote: config.target.remote, selection: git.selection, backend: git.backend }
   const historyCache = new Map<string, ReturnType<typeof readBranchHistory>>()
   const historyOf = (branch: string): ReturnType<typeof readBranchHistory> => {
@@ -279,6 +498,11 @@ async function cleanupEnvironments(
   let stoppedAt = -1
   for (const [index, row] of ordered.entries()) {
     try {
+      if (requests.handled.has(row.path)) {
+        // This round already ran the direct close lifecycle for this path under a
+        // filed request; evaluating it again here only repeats the census.
+        continue
+      }
       let entry = cache.get(row.path)
       if (entry === undefined) {
         entry = { paths: [], branches: [], statuses: new Map() }

@@ -33,7 +33,7 @@ import {
 } from "node:fs"
 import { hostname, tmpdir } from "node:os"
 import { monitorEventLoopDelay } from "node:perf_hooks"
-import { dirname, join, resolve } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { tryAcquireFlock } from "@bearly/flock"
@@ -81,6 +81,7 @@ import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand, endingCode } from "../src/queue-core-commands.ts"
 import { environmentInventory } from "../src/env-commands.ts"
+import { closeRequestFile, listCloseRequests, writeCloseRequest } from "../src/env-close-requests.ts"
 import { workdirOf } from "../src/workdir.ts"
 import { changesSuffix } from "../src/watch-list.tsx"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
@@ -705,6 +706,9 @@ describe("yrd queue up, the service", () => {
             expect(run.stderr()).not.toContain("private-argument-must-not-be-reported")
           } else expect(run.stderr()).toContain("census proc incomplete")
         }
+        // 22894 T7: the sweep's own closes (and its preserves) never file a
+        // close request — delegation belongs to the direct verb alone.
+        expect(listCloseRequests(workdir), run.stderr()).toEqual([])
         // The run record carries the service's own coverage receipt: rows,
         // unreadable rows, uncleared rows and completeness as this process read
         // them, which is the CWD ruling's acceptance evidence.
@@ -722,6 +726,165 @@ describe("yrd queue up, the service", () => {
       }
     },
   )
+
+  /**
+   * @failure 22894: a close request a caller filed because its own same-UID
+   *          census could not certify the close is never consumed, so the
+   *          environment waits for a human.
+   * @level   l2
+   * @consumer the seat whose sandbox scopes ptrace over other same-UID pids
+   * @testonly none
+   */
+  it("consumes a filed close request: this round closes the environment and deletes the row (22894 T2)", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "delegated-close", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    const uid = process.getuid?.()
+    if (uid === undefined) throw new Error("this queue case needs a real unix uid")
+    const file = closeRequestFile(workdir, environment.path)
+    writeCloseRequest(workdir, {
+      name: basename(environment.path),
+      path: environment.path,
+      requester: "@dev/luna2",
+      uid,
+      at: new Date().toISOString(),
+      predicate: "direct-admission",
+      options: { noRehome: true },
+      head: selected,
+    })
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(existsSync(environment.path), run.stderr()).toBe(false)
+      expect(existsSync(file), run.stderr()).toBe(false)
+      const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && typeof row.request === "object")
+      expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
+      expect(closed?.path).toBe(environment.path)
+      expect(closed?.request).toMatchObject({
+        requester: "@dev/luna2",
+        path: environment.path,
+        head: selected,
+        options: { noRehome: true },
+      })
+    } finally {
+      stop.abort()
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure 22894: a request whose round ALSO cannot take a complete census is
+   *          either retried forever (the file grows without bound) or dropped on
+   *          the first refusal (the intent is lost without a record).
+   * @level   l2
+   * @consumer the operator whose workdir must not accumulate dead requests
+   * @testonly none
+   */
+  it("retries a request whose close census is incomplete and retires it after three rounds (22894 T3)", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "delegated-retry", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    const uid = process.getuid?.()
+    if (uid === undefined) throw new Error("this queue case needs a real unix uid")
+    const file = closeRequestFile(workdir, environment.path)
+    writeCloseRequest(workdir, {
+      name: basename(environment.path),
+      path: environment.path,
+      requester: "@dev/luna2",
+      uid,
+      at: new Date().toISOString(),
+      predicate: "direct-admission",
+      options: { noRehome: true },
+      head: selected,
+    })
+    const roundCensus = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    // The round reads every pid; the CLOSE (the same-UID census) does not. This
+    // is 22894's specimen, narrowed to the admission boundary.
+    const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+    vi.mocked(removely.inspectProcessCensus).mockResolvedValue({
+      rows: [],
+      coverage: {
+        ...observed.coverage,
+        complete: false,
+        unreadable: [
+          {
+            pid: 4242,
+            uid,
+            comm: "bun",
+            denied: ["process"],
+            issues: [{ source: "process", resource: "cwd", reason: "denied", code: "EACCES" }],
+            argv: ["bun", "private-argument-must-not-be-reported"],
+          },
+        ],
+      },
+    })
+    const stop = new AbortController()
+    let rounds = 0
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          {
+            command: "up",
+            intervalSeconds: 0,
+            stop: stop.signal,
+            afterRound: () => {
+              rounds++
+              if (rounds === 3) stop.abort()
+            },
+          },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      const rows = allCleanupRows(workdir).filter((row) => typeof row.request === "object")
+      expect(rows.filter((row) => row.result === "kept").length, JSON.stringify(rows)).toBe(2)
+      expect(rows.filter((row) => row.result === "retired").length, JSON.stringify(rows)).toBe(1)
+      const attempts = rows.map((row) => (row.request as { coverageAttempts?: number }).coverageAttempts)
+      expect([...attempts].sort((left, right) => (left ?? 0) - (right ?? 0))).toEqual([1, 2, 3])
+      expect(existsSync(environment.path), run.stderr()).toBe(true)
+      expect(existsSync(file), run.stderr()).toBe(false)
+    } finally {
+      stop.abort()
+      roundCensus.mockRestore()
+    }
+  }, 120_000)
 
   /**
    * @failure A named, merged environment whose issue is closed is left behind,
