@@ -1,4 +1,5 @@
 import { isAbsolute, relative, sep } from "node:path"
+import { realpathSync } from "node:fs"
 import {
   clearedByIdentity,
   inspectProcessCensus,
@@ -32,9 +33,18 @@ export function environmentCwdHolder(
   snapshot: ProcessCwdProjection,
   exempt: ReadonlySet<number> = new Set(),
 ) {
+  let target: string
+  try {
+    target = realpathSync(path)
+  } catch (cause) {
+    throw new Error(
+      `environment ${path} cannot resolve its cwd containment target; environment was preserved; inspect its path before retrying`,
+      { cause },
+    )
+  }
   return snapshot.rows.find(({ pid, cwd }) => {
     if (exempt.has(pid)) return false
-    const within = relative(path, cwd)
+    const within = relative(target, cwd)
     return within === "" || (within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within))
   })
 }

@@ -26,6 +26,7 @@ import { createEventStore, previewCloneKey, previewSubjectPrefix } from "@yrd/qu
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { closeEnvironment } from "../src/env-commands.ts"
+import { environmentCwdHolder } from "../src/env-close-holders.ts"
 import { environmentIssues, environmentProvenance } from "../src/env-cleanup-provenance.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
@@ -399,6 +400,24 @@ describe("yrd env open prepares the retained environment", () => {
 })
 
 describe("yrd env close preserves anything it cannot safely remove", () => {
+  /**
+   * @failure 28120: symlinked environment paths missed kernel-resolved cwd holders.
+   * @level l1 (real filesystem symlink at the shared containment boundary)
+   * @consumer the queue's early holder filter and authoritative close admission
+   */
+  it("finds a holder through a symlinked environment path (28120)", () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-holder-symlink-"))
+    roots.push(root)
+    const target = join(root, "physical")
+    const alias = join(root, "alias")
+    mkdirSync(target)
+    symlinkSync(target, alias, "dir")
+    const holder = { pid: 4242, cwd: realpathSync(target) }
+    expect(environmentCwdHolder(alias, { rows: [holder], unreadable: [], complete: true, mechanism: "proc" })).toEqual(
+      holder,
+    )
+  })
+
   /**
    * @failure 28120: direct close removed an unrelated process's cwd and ran teardown first.
    * @level l2 (real CLI and native cwd holder in a temporary retained worktree)
