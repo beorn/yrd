@@ -20,7 +20,7 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
-import { afterAll, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import * as removely from "removely"
 import { createEventStore, previewCloneKey, previewSubjectPrefix } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
@@ -34,6 +34,31 @@ process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
 process.env.GIT_CONFIG_VALUE_0 = "always"
 
 const roots: string[] = []
+const realProcessCensus = removely.inspectProcessCensus
+// Non-holder lifecycle rows inject this external boundary; host process churn is not their subject.
+beforeEach(async () => {
+  if (process.platform !== "linux") return
+  const observed = await realProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+  vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue({
+    ...observed,
+    rows: [],
+    coverage: { ...observed.coverage, complete: true, unreadable: [] },
+  })
+})
+afterEach(() => vi.restoreAllMocks())
+
+/** Scope real kernel observations to the native fixture; missing expected PIDs fail loudly. */
+function fixtureCensus(census: removely.ProcessCensus<"same-uid">, pids: readonly number[]) {
+  for (const pid of pids) {
+    if (!census.rows.some((row) => row.pid === pid)) throw new Error(`fixture process ${pid} missing from real census`)
+  }
+  const unreadable = (census.coverage.unreadable ?? []).filter((row) => pids.includes(row.pid))
+  return {
+    ...census,
+    rows: census.rows.filter((row) => pids.includes(row.pid)),
+    coverage: { ...census.coverage, unreadable, complete: unreadable.length === 0 },
+  }
+}
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
@@ -398,6 +423,14 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
         const ready = holder.stdout.getReader()
         expect(new TextDecoder().decode((await ready.read()).value)).toContain("ready")
         ready.releaseLock()
+        if (invocation === "caller child") {
+          vi.spyOn(removely, "inspectProcessCensus").mockImplementation(async () =>
+            fixtureCensus(await realProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 }), [
+              process.pid,
+              holder.pid,
+            ]),
+          )
+        }
 
         const local = capture(path)
         const closed =
@@ -445,6 +478,12 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       const w = await world(":", `'${process.execPath.replaceAll("'", "'\\''")}' -e '${launcher}'`)
       const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
       const marker = join(dirname(path), "teardown-holder.pid")
+      vi.spyOn(removely, "inspectProcessCensus").mockImplementation(async () =>
+        fixtureCensus(await realProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 }), [
+          process.pid,
+          ...(existsSync(marker) ? [Number(readFileSync(marker, "utf8"))] : []),
+        ]),
+      )
       try {
         const closed = capture(w.work)
         expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(2)
@@ -505,16 +544,37 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       const selected = (await w.git(["rev-parse", "HEAD"])).trim()
       const { path } = await openEnvironment(w.work, selected)
       const cli = join(dirname(fileURLToPath(import.meta.url)), "../../../bin/yrd.ts")
-
+      // A real shell and child run the real lifecycle with CTO's internal dependency;
+      // only their kernel process rows belong to this fixture's census population.
+      const nativeEntry = join(dirname(w.work), "native-close.ts")
+      writeFileSync(
+        nativeEntry,
+        `
+        import { closeEnvironment } from ${JSON.stringify(join(dirname(fileURLToPath(import.meta.url)), "../src/env-commands.ts"))};
+        import { inspectProcessCensus } from ${JSON.stringify(Bun.resolveSync("removely", dirname(fileURLToPath(import.meta.url))))};
+        const census = async () => {
+          const observed = await inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2000 });
+          const pids = [process.pid, process.ppid];
+          for (const pid of pids) if (!observed.rows.some(row => row.pid === pid)) throw new Error("fixture PID missing: " + pid);
+          const unreadable = (observed.coverage.unreadable ?? []).filter(row => pids.includes(row.pid));
+          return { ...observed, rows: observed.rows.filter(row => pids.includes(row.pid)), coverage: { ...observed.coverage, unreadable, complete: unreadable.length === 0 } };
+        };
+        try {
+          process.exitCode = await closeEnvironment(process.argv[2], { json: true }, {
+            cwd: process.cwd(), color: false, stdout: text => process.stdout.write(text), stderr: text => process.stderr.write(text),
+          }, census);
+        } catch (error) { console.error(error.message); process.exitCode = 2; }
+      `,
+      )
       const closed = await command(
         path,
         [
           "sh",
           "-c",
-          'printf "shell-pid=%s\\n" "$$" >&2; "$1" "$2" env close "$3" --json; result=$?; exit "$result"',
+          'printf "shell-pid=%s\\n" "$$" >&2; "$1" "$2" "$3"; result=$?; exit "$result"',
           "yrd-close-shell",
           process.execPath,
-          cli,
+          nativeEntry,
           path,
         ],
         process.env,

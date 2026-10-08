@@ -4,6 +4,7 @@ import {
   inspectProcessCensus,
   inspectProcessCwds,
   type ProcessCwdProjection,
+  type ProcessCensus,
   type UnreadableProcess,
 } from "removely"
 import type { YrdCliIO } from "./types.ts"
@@ -39,7 +40,11 @@ export function environmentCwdHolder(
 }
 
 /** Authoritative close admission, shared by direct close and the queue's close lifecycle. */
-export async function admitEnvironmentClose(path: string, io: YrdCliIO): Promise<void> {
+export async function admitEnvironmentClose(
+  path: string,
+  io: YrdCliIO,
+  censusSource?: () => Promise<ProcessCensus<"same-uid">>,
+): Promise<void> {
   let snapshot: ProcessCwdProjection
   const exempt = new Set<number>([process.pid])
   let ancestryAvailable = false
@@ -47,7 +52,9 @@ export async function admitEnvironmentClose(path: string, io: YrdCliIO): Promise
   if (process.platform === "linux") {
     // The existing cwd projection derives these exact facts from this same collector.
     // Keep the ppid evidence alongside them so exemptions never come from another scan.
-    const census = await inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+    const census = await (censusSource === undefined
+      ? inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+      : censusSource())
     snapshot = {
       rows: census.rows.flatMap((row) => {
         const cwd = row.sources.cwd
@@ -77,15 +84,16 @@ export async function admitEnvironmentClose(path: string, io: YrdCliIO): Promise
     `yrd: env close ${snapshot.mechanism === "proc" ? "same-UID holders inspected; other-UID holders are not inspectable" : "lsof cwd holders inspected; UID scope and ancestry are unproven"}; exempt PIDs: ${[...exempt].join(", ")}. This scan is non-atomic: a process can enter after the check.\n`,
   )
   const coverage = processCwdCoverage(snapshot)
-  if (coverage.refusal !== undefined) throw new Error(`${coverage.refusal}; environment ${path} was preserved`)
   const holder = environmentCwdHolder(path, snapshot, exempt)
+  if (coverage.refusal !== undefined) {
+    throw new Error(
+      `${coverage.refusal}${holder === undefined ? "" : `; process ${holder.pid} has CWD ${holder.cwd}`}; environment ${path} was preserved`,
+    )
+  }
   const ownCwd =
     environmentCwdHolder(path, { ...snapshot, rows: snapshot.rows.filter((row) => row.pid === process.pid) }) !==
     undefined
-  if (
-    (!ancestryAvailable && ownCwd) ||
-    (holder !== undefined && holder.pid === unreadableAncestor)
-  ) {
+  if ((!ancestryAvailable && ownCwd) || (holder !== undefined && holder.pid === unreadableAncestor)) {
     throw new Error(
       `ancestry unavailable${process.platform === "linux" ? " for this invocation" : " on this platform"}; own-cwd close refused; run the close from outside the environment; environment ${path} was preserved`,
     )

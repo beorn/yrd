@@ -47,6 +47,7 @@ import { issueResolver } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 import { admitEnvironmentClose } from "./env-close-holders.ts"
+import type { ProcessCensus } from "removely"
 
 export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string; hold?: string }>
 export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
@@ -546,6 +547,8 @@ export async function closeEnvironment(
   operand: string,
   options: EnvCloseOptions,
   io: YrdCliIO,
+  /** test-only seam (28120): production callers never pass it; the default is the real same-UID census. */
+  censusSource?: () => Promise<ProcessCensus<"same-uid">>,
 ): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
   const selection = await resolveGitSelection(root)
@@ -604,7 +607,7 @@ export async function closeEnvironment(
     )
   }
   await requireClean(treeGit, path)
-  await admitEnvironmentClose(path, io)
+  await admitEnvironmentClose(path, io, censusSource)
   const config = await readConfig(
     treeGit,
     commit,
@@ -641,7 +644,7 @@ export async function closeEnvironment(
     })
   }
   const modules = await treeGit(["ls-tree", commit, "--", ".gitmodules"])
-  await admitEnvironmentClose(path, io)
+  await admitEnvironmentClose(path, io, censusSource)
   if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true) {
     const retain =
       options.retain === undefined
