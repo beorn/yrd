@@ -34,19 +34,26 @@ process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
 process.env.GIT_CONFIG_VALUE_0 = "always"
 
+// A spy cannot replace a binding of an installed ESM package's namespace (standalone CI), so the seam is a module mock.
+vi.mock("removely", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("removely")>()
+  return { ...actual, inspectProcessCensus: vi.fn(actual.inspectProcessCensus) }
+})
+
 const roots: string[] = []
-const realProcessCensus = removely.inspectProcessCensus
+const realProcessCensus = (await vi.importActual<typeof import("removely")>("removely")).inspectProcessCensus
+const processCensus = vi.mocked(removely.inspectProcessCensus)
 // Non-holder lifecycle rows inject this external boundary; host process churn is not their subject.
 beforeEach(async () => {
   if (process.platform !== "linux") return
   const observed = await realProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
-  vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue({
+  processCensus.mockResolvedValue({
     ...observed,
     rows: [],
     coverage: { ...observed.coverage, complete: true, unreadable: [] },
   })
 })
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => processCensus.mockReset())
 
 /** Scope real kernel observations to the native fixture; missing expected PIDs fail loudly. */
 function fixtureCensus(census: removely.ProcessCensus<"same-uid">, pids: readonly number[]) {
@@ -443,7 +450,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
         expect(new TextDecoder().decode((await ready.read()).value)).toContain("ready")
         ready.releaseLock()
         if (invocation === "caller child") {
-          vi.spyOn(removely, "inspectProcessCensus").mockImplementation(async () =>
+          processCensus.mockImplementation(async () =>
             fixtureCensus(await realProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 }), [
               process.pid,
               holder.pid,
@@ -497,7 +504,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       const w = await world(":", `'${process.execPath.replaceAll("'", "'\\''")}' -e '${launcher}'`)
       const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
       const marker = join(dirname(path), "teardown-holder.pid")
-      vi.spyOn(removely, "inspectProcessCensus").mockImplementation(async () =>
+      processCensus.mockImplementation(async () =>
         fixtureCensus(await realProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 }), [
           process.pid,
           ...(existsSync(marker) ? [Number(readFileSync(marker, "utf8"))] : []),
@@ -531,7 +538,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       const w = await world(":", "printf touched > ../ancestry-teardown-ran.txt")
       const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
       const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
-      const census = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue({
+      const census = processCensus.mockResolvedValue({
         rows: [
           { pid: process.pid, sources: { cwd: { availability: "readable", value: path, issues: [] } }, issues: [] },
         ],
