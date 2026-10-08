@@ -374,6 +374,40 @@ describe("yrd env open prepares the retained environment", () => {
 
 describe("yrd env close preserves anything it cannot safely remove", () => {
   /**
+   * @failure 28120: direct close removed an unrelated process's cwd and ran teardown first.
+   * @level l2 (real CLI and native cwd holder in a temporary retained worktree)
+   * @consumer callers closing an environment still used by another process
+   */
+  it("refuses a live cwd holder before teardown and preserves the environment (28120)", async () => {
+    const w = await world(":", "printf touched > ../holder-teardown-ran.txt")
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openEnvironment(w.work, selected)
+    const cli = join(dirname(fileURLToPath(import.meta.url)), "../../../bin/yrd.ts")
+    const holder = Bun.spawn([process.execPath, "-e", 'console.log("ready"); setInterval(() => {}, 1000)'], {
+      cwd: path,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "inherit",
+    })
+    try {
+      const ready = holder.stdout.getReader()
+      expect(new TextDecoder().decode((await ready.read()).value)).toContain("ready")
+      ready.releaseLock()
+
+      const closed = await command(w.work, [process.execPath, cli, "env", "close", path, "--json"], process.env)
+
+      expect(closed.exit, closed.stderr).toBe(2)
+      expect(closed.stderr).toContain(String(holder.pid))
+      expect(existsSync(path)).toBe(true)
+      expect(await w.git(["worktree", "list", "--porcelain"])).toContain(path)
+      expect(existsSync(join(dirname(path), "holder-teardown-ran.txt"))).toBe(false)
+    } finally {
+      holder.kill()
+      await holder.exited
+    }
+  })
+
+  /**
    * @failure 25949: successful removal was reported as failure when the caller's cwd was the removed environment.
    * @level l2 (real CLI subprocess and materialized submodule)
    * @consumer a caller closing the environment from its own shell
