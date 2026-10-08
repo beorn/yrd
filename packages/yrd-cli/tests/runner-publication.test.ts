@@ -457,18 +457,19 @@ describe("runner ref publication", () => {
         state: "idle",
         since: now,
       }
-      await new RunnerPublisher(
+      const publisher = new RunnerPublisher(
         git,
         "origin",
         "main",
         () => {},
         () => {},
-      ).publish(claim)
+      )
+      await publisher.publish(claim)
       const ref = runnerRef("main")
       const tip = await readRemoteCommit(git, "origin", ref)
       const readerRoot = join(root, "reader")
       await boot(["clone", "--no-local", "--quiet", remote, readerRoot])
-      return { reader: gitIn(readerRoot), tip, ref }
+      return { reader: gitIn(readerRoot), tip, ref, git, publisher, claim }
     }
 
     /** @failure The remote tip was reported unreadable instead of fetching its object. @level l2 */
@@ -479,21 +480,58 @@ describe("runner ref publication", () => {
       expect(published.claim?.Runner).toBe("host/42")
     })
 
-    /** @failure A tip that cannot be obtained reported a bare `rev-list` failure, not the fetch attempted. @level l2 */
-    it("names the fetch it attempted when the runner tip stays absent", async () => {
+    /** @failure A parentless runner update between advertisement and fetch left the old object absent and hid the acquired claim. @level l2 @consumer off-machine runner status readers */
+    it("reads the acquired claim when the advertised parentless tip moves before fetch", async () => {
+      const f = await unfetchedFixture()
+      expect(await f.reader(["cat-file", "--batch-check=%(objectname) %(objecttype)"], `${f.tip}\n`)).toContain(
+        `${f.tip} missing`,
+      )
+      await f.publisher.publish({
+        ...f.claim,
+        state: "provisioning",
+        deadline: new Date(Date.parse(f.claim.since) + 30 * 60_000).toISOString(),
+      })
+      expect(await readRemoteCommit(f.git, "origin", f.ref)).not.toBe(f.tip)
+
+      const published = await readPublishedRunner(f.reader, "main", "origin", f.tip)
+
+      expect(published.signal).toBe("fresh")
+      expect(published.claim?.State).toBe("provisioning")
+    })
+
+    /** @failure Treating the advertisement as an immutable identity hid a readable current ref behind a bogus stale SHA. @level l2 */
+    it("recovers the current ref even when the advertised object cannot be obtained", async () => {
       const f = await unfetchedFixture()
       const published = await readPublishedRunner(f.reader, "main", "origin", "f".repeat(40))
-      expect(published.signal).toBe("unreadable")
-      expect(published.why).toContain("not fetched")
-      expect(published.why).toContain(`git fetch origin ${f.ref}`)
+      expect(published.signal).toBe("fresh")
+      expect(published.claim?.Runner).toBe("host/42")
     })
 
     /** @failure A failed fetch was hidden behind the same bare `rev-list` failure. @level l2 */
     it("names a failed fetch when the remote cannot be reached", async () => {
       const f = await unfetchedFixture()
       const published = await readPublishedRunner(f.reader, "main", "no-such-remote", "f".repeat(40))
-      expect(published.signal).toBe("unreadable")
+      expect(published.signal).toBe("not-fetched")
       expect(published.why).toContain(`git fetch no-such-remote ${f.ref} failed:`)
+      expect(published.why).toContain("f".repeat(40))
+      expect(published.why).toContain("missing locally")
+      expect(published.why).toContain("git cat-file")
+      expect(
+        runnerLine(
+          { journalDir: "/no-local-journal", service: { kind: "absent", why: "no local document" }, published },
+          new Date(),
+        ).holds,
+      ).toContain(`runner status not fetched: ${published.why}`)
+    })
+
+    /** @failure A ref removed after advertisement was confused with an invalid runner claim. @level l2 @consumer off-machine runner status readers */
+    it("reports an absent ref when it disappears before acquisition", async () => {
+      const f = await unfetchedFixture()
+      await f.git(["push", "--quiet", "origin", `:${f.ref}`])
+      const published = await readPublishedRunner(f.reader, "main", "origin", f.tip)
+      expect(published.signal).toBe("absent")
+      expect(published.why).toContain(`origin ${f.ref}`)
+      expect(published.why).toContain(f.tip)
     })
 
     /**
@@ -503,14 +541,13 @@ describe("runner ref publication", () => {
      */
     it("names an initial object query that failed and does not fetch on a guess", async () => {
       const f = await unfetchedFixture()
-      const fetches: string[][] = []
+      const fetches = vi.spyOn(f.reader.backend, "fetchRefs")
       let queries = 0
       const failing = async (args: readonly string[], input?: string): Promise<string> => {
         if (args[0] === "cat-file") {
           queries += 1
           throw new Error("simulated object query failure: repository index is corrupt")
         }
-        if (args[0] === "fetch") fetches.push([...args])
         return await f.reader(args, input)
       }
 
@@ -518,7 +555,7 @@ describe("runner ref publication", () => {
 
       expect(published.signal).toBe("unreadable")
       expect(queries, "the probe is asked exactly once").toBe(1)
-      expect(fetches, "an indeterminate query must not license a network fetch").toEqual([])
+      expect(fetches, "an indeterminate query must not license a network fetch").not.toHaveBeenCalled()
       expect(published.why, "the query command is preserved").toContain(
         "git cat-file --batch-check=%(objectname) %(objecttype)",
       )
@@ -532,31 +569,39 @@ describe("runner ref publication", () => {
      *          absent", hiding the fault behind the one outcome the fetch already ruled out.
      *          @level l2
      */
-    it("names a failed object query after a successful fetch instead of calling the object absent", async () => {
-      const f = await unfetchedFixture()
-      const fetches: string[][] = []
-      let queries = 0
-      const flaky = async (args: readonly string[], input?: string): Promise<string> => {
-        if (args[0] === "cat-file") {
-          queries += 1
-          if (queries === 2) throw new Error("simulated query failure after fetch")
+    it.each(["failed", "missing"] as const)(
+      "names a %s object query after acquiring the runner ref",
+      async (outcome) => {
+        const f = await unfetchedFixture()
+        const fetches = vi.spyOn(f.reader.backend, "fetchRefs")
+        let queries = 0
+        const flaky = async (args: readonly string[], input?: string): Promise<string> => {
+          if (args[0] === "cat-file") {
+            queries += 1
+            if (queries === 2) {
+              if (outcome === "failed") throw new Error("simulated query failure after fetch")
+              return `${input?.trim()} missing\n`
+            }
+            return await f.reader(args, input)
+          }
           return await f.reader(args, input)
         }
-        if (args[0] === "fetch") fetches.push([...args])
-        return await f.reader(args, input)
-      }
+        Object.defineProperties(flaky, Object.getOwnPropertyDescriptors(f.reader))
 
-      const published = await readPublishedRunner(flaky, "main", "origin", f.tip)
+        const published = await readPublishedRunner(flaky, "main", "origin", f.tip)
 
-      expect(published.signal).toBe("unreadable")
-      expect(queries, "one probe before the fetch, one after").toBe(2)
-      expect(fetches, "the proved-missing tip is still fetched once").toHaveLength(1)
-      expect(published.why, "absence is not claimed when the query failed").not.toContain("left the object absent")
-      expect(published.why, "the successful fetch is named").toContain(`git fetch origin ${f.ref}`)
-      expect(published.why, "the failed query command is named").toContain(
-        "git cat-file --batch-check=%(objectname) %(objecttype)",
-      )
-      expect(published.why, "the cause is preserved").toContain("simulated query failure after fetch")
-    })
+        expect(published.signal).toBe(outcome === "failed" ? "unreadable" : "not-fetched")
+        expect(queries, "one probe before the fetch, one after").toBe(2)
+        expect(fetches, "the proved-missing tip is acquired once").toHaveBeenCalledTimes(1)
+        expect(published.why, "absence is not claimed when the query failed").not.toContain("left the object absent")
+        expect(published.why, "the successful fetch is named").toContain(`git fetch origin ${f.ref}`)
+        expect(published.why, "the failed query command is named").toContain(
+          "git cat-file --batch-check=%(objectname) %(objecttype)",
+        )
+        expect(published.why, "the cause is preserved").toContain(
+          outcome === "failed" ? "simulated query failure after fetch" : "missing locally",
+        )
+      },
+    )
   })
 })

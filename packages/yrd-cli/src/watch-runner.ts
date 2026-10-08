@@ -1123,9 +1123,11 @@ function runnerLineOf(
       return {
         detail,
         holds:
-          published?.signal === "unreadable"
-            ? `runner status unreadable: ${published.why ?? "the remote claim could not be read"}`
-            : `no runner status published at origin (refs/yrd/${queue}/runner)`,
+          published?.signal === "not-fetched"
+            ? `runner status not fetched: ${published.why}`
+            : published?.signal === "unreadable"
+              ? `runner status unreadable: ${published.why ?? "the remote claim could not be read"}`
+              : `no runner status published at origin (refs/yrd/${queue}/runner)`,
         state,
       }
     }

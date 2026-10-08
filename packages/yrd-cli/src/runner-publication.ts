@@ -34,13 +34,13 @@ type Trailers = Readonly<
 >
 
 export type PublishedRunner = Readonly<{
-  signal: "fresh" | "silent" | "absent" | "unreadable"
+  signal: "fresh" | "silent" | "absent" | "not-fetched" | "unreadable"
   claim?: Trailers
   phase?: RunnerDeadlineJudgment
   round?: RunnerDueJudgment
   /** Newer append-only trailer names this reader preserved but cannot judge. */
   unjudgedTrailers?: readonly string[]
-  /** Absence and unreadability must say where the reader looked and why it could not answer. */
+  /** Acquisition and claim failures say where the reader looked and why it could not answer. */
   why?: string
 }>
 
@@ -115,9 +115,9 @@ async function objectPresence(git: Git, oid: string): Promise<ObjectPresence> {
 /**
  * The tip comes from the ls-remote listing of the queue prefix, and the runner
  * ref is deliberately kept out of the fetched queue refs, so its object may
- * never have arrived locally. Fetch it once before reading; a tip that still
- * cannot be read names the fetch that was attempted rather than a bare
- * `rev-list` failure.
+ * never have arrived locally. Acquire the ref once before reading a missing
+ * object, using the acquired OID: a parentless heartbeat can replace the
+ * advertised tip between listing and fetch without bringing the old object.
  */
 export async function readPublishedRunner(
   git: Git,
@@ -129,37 +129,41 @@ export async function readPublishedRunner(
   const ref = runnerRef(queue)
   if (tip === undefined) return { signal: "absent", why: `${remote} ${ref} is absent` }
   const fetchCommand = `git fetch ${remote} ${ref}`
+  let readTip = tip
   const initial = await objectPresence(git, tip)
   if (initial.kind === "indeterminate") {
     return { signal: "unreadable", why: `${remote} ${ref} at ${tip} could not be read: ${initial.why}` }
   }
   if (initial.kind === "missing") {
+    const missing = `${remote} ${ref} advertised ${tip}: ${PRESENCE_QUERY} (stdin: ${tip}) found the object missing locally`
     try {
-      await git(["fetch", "--no-tags", "--quiet", remote, ref])
+      const acquired = await readRemoteCommit(git, remote, ref)
+      if (acquired === undefined) {
+        return { signal: "absent", why: `${missing}; ${fetchCommand} succeeded but the ref is now absent` }
+      }
+      readTip = acquired
     } catch (error) {
       return {
-        signal: "unreadable",
-        why: `${remote} ${ref} at ${tip} could not be read: not fetched; ${fetchCommand} failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        signal: "not-fetched",
+        why: `${missing}; ${fetchCommand} failed: ${error instanceof Error ? error.message : String(error)}`,
       }
     }
-    const afterFetch = await objectPresence(git, tip)
+    const afterFetch = await objectPresence(git, readTip)
     if (afterFetch.kind === "indeterminate") {
       return {
         signal: "unreadable",
-        why: `${remote} ${ref} at ${tip} could not be read: object query failed after ${fetchCommand} succeeded: ${afterFetch.why}`,
+        why: `${missing}; ${fetchCommand} succeeded with acquired object ${readTip}; object query failed: ${afterFetch.why}`,
       }
     }
     if (afterFetch.kind === "missing") {
       return {
-        signal: "unreadable",
-        why: `${remote} ${ref} at ${tip} could not be read: not fetched; ${fetchCommand} left the object absent`,
+        signal: "not-fetched",
+        why: `${missing}; ${fetchCommand} succeeded with acquired object ${readTip}; ${PRESENCE_QUERY} (stdin: ${readTip}) found it missing locally`,
       }
     }
   }
   try {
-    const claim = await claimAt(git, tip, ref)
+    const claim = await claimAt(git, readTip, ref)
     const verdict = judgeRunnerClaim(claim, now)
     const phase = judgeRunnerDeadline(claim, now)
     const round = judgeRunnerDue(claim, now)
@@ -172,13 +176,13 @@ export async function readPublishedRunner(
           phase,
           round,
           ...unjudged,
-          why: `${remote} ${ref} at ${tip}: ${verdict.reason}`,
+          why: `${remote} ${ref} at ${readTip}: ${verdict.reason}`,
         }
       : { signal: verdict.status, claim: trailers(claim), phase, round, ...unjudged }
   } catch (error) {
     return {
       signal: "unreadable",
-      why: `${remote} ${ref} at ${tip} could not be read: ${error instanceof Error ? error.message : String(error)}`,
+      why: `${remote} ${ref} at ${readTip} could not be read: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
 }
