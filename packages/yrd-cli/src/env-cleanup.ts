@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve, sep } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   gitIn,
-  listChangeHistories,
+  readBranchHistory,
   type GitRunner,
   type GitSelection,
   type QueueConfig,
@@ -211,13 +211,8 @@ async function cleanupEnvironments(
     if (result.code === 1) throw new Error(`commit ${head} in ${root} is not on target ${target}`)
   }
   let snapshot: ProcessCwdProjection
-  let histories: Awaited<ReturnType<typeof listChangeHistories>>
   try {
     snapshot = await census()
-    histories = await listChangeHistories(
-      { repo, remote: config.target.remote, selection: git.selection, backend: git.backend },
-      config.target.branch,
-    )
   } catch (cause) {
     for (const row of inventory.rows) preserve(row.path, String(cause))
     appendFileSync(
@@ -225,6 +220,15 @@ async function cleanupEnvironments(
       `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), scope: "environment-cleanup", registry, closed, kept, deferred: 0, remaining: inventory.rows.length - closed, ...(censusReceipt === undefined ? {} : { census: censusReceipt }) })}\n`,
     )
     return
+  }
+  const store = { repo, remote: config.target.remote, selection: git.selection, backend: git.backend }
+  const historyCache = new Map<string, ReturnType<typeof readBranchHistory>>()
+  const historyOf = (branch: string): ReturnType<typeof readBranchHistory> => {
+    const cached = historyCache.get(branch)
+    if (cached !== undefined) return cached
+    const pending = readBranchHistory(store, config.target.branch, branch)
+    historyCache.set(branch, pending)
+    return pending
   }
   const lookup = issueLookup(config, repo, input.env)
   const statuses = new Map<string, Promise<ResolvedIssue>>()
@@ -320,19 +324,21 @@ async function cleanupEnvironments(
       }
       const ownLog = entry.paths[1]
       if (ownLog === undefined) throw new Error(`environment ${row.path}: HEAD reflog identity absent`)
-      const bindingKey = (): string =>
+      const bindingKey = async (): Promise<string> =>
         JSON.stringify([
           head,
           row.branch,
           config.blob,
           identity(ownLog),
-          [...new Set([...(row.branch === undefined ? [] : [row.branch]), ...entry.branches])].map((branch) => [
-            branch,
-            histories.histories.get(branch)?.events.at(-1)?.id,
-            histories.invalid.get(branch)?.tip,
-          ]),
+          await Promise.all(
+            [...new Set([...(row.branch === undefined ? [] : [row.branch]), ...entry.branches])].map(async (branch) => [
+              branch,
+              (await historyOf(branch)).history?.events.at(-1)?.id,
+            ]),
+          ),
         ])
-      if (entry.issues === undefined || entry.bindingKey !== bindingKey()) {
+      const key = await bindingKey()
+      if (entry.issues === undefined || entry.bindingKey !== key) {
         const bindings = await environmentIssues(
           row.path,
           treeGit,
@@ -340,8 +346,8 @@ async function cleanupEnvironments(
           row.branch,
           git,
           config.target.branch,
-          { repo, remote: config.target.remote, selection: git.selection, backend: git.backend },
-          histories,
+          store,
+          async (branch) => (await historyOf(branch)).history,
           input.resolveIssue ??
             (async (raw) => {
               if (lookup === undefined) throw new Error(`issue ${raw}: target declaration has no issueResolver`)
@@ -350,7 +356,7 @@ async function cleanupEnvironments(
         )
         entry.issues = bindings.issues
         entry.branches = bindings.branches
-        entry.bindingKey = bindingKey()
+        entry.bindingKey = await bindingKey()
         entry.expensiveKey = undefined
       }
       const issues = entry.issues

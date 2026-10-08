@@ -2496,7 +2496,10 @@ type ChangeHistories = Readonly<{
   invalid: ReadonlyMap<string, InvalidChangeHistory>
 }>
 
-/** Internal detail/admission selection; not exported from the package entry. */
+/** Exact hot+cold refs for one branch. Throws on an invalid chain, naming
+ *  `ref@tip`. `history` is undefined when the branch has no chain.
+ *  Environment cleanup uses this so a round does not materialize every change
+ *  chain under the queue prefixes (28011). */
 export async function readBranchHistory(
   store: QueueReadStore,
   queue: string,

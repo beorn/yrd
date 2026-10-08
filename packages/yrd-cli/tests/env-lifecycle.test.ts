@@ -80,7 +80,7 @@ it("cleanup unions every creating OID and canonical branch binding without inher
     w.git,
     "main",
     createEventStore(w.work, "origin", w.git.selection),
-    { histories: new Map(), invalid: new Map() },
+    async () => undefined,
     async (raw) => raw,
   )
   expect(new Set(issues.issues)).toEqual(new Set(["111", "112", "@i/10-yrd/27723-scope"]))

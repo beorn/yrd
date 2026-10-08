@@ -86,6 +86,7 @@ export {
   isOpen,
   listChangeHistories,
   listChanges,
+  readBranchHistory,
   queueFormat,
   queueRef,
   queueResumedAfter,

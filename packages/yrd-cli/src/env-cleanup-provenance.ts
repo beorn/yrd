@@ -3,8 +3,8 @@ import {
   changesRef,
   enumerateChangeSegments,
   issueBindingsOf,
-  listChangeHistories,
   normalizeIssueReference,
+  readBranchHistory,
   type Git,
 } from "@yrd/queue-core"
 import { readReflogEntries } from "git-super"
@@ -100,8 +100,8 @@ export async function environmentIssues(
   currentBranch: string | undefined,
   queueGit: Git,
   queue: string,
-  store: Parameters<typeof listChangeHistories>[0],
-  histories: Awaited<ReturnType<typeof listChangeHistories>>,
+  store: Parameters<typeof readBranchHistory>[0],
+  historyOf: (branch: string) => Promise<Awaited<ReturnType<typeof readBranchHistory>>["history"]>,
   resolveIssue: (raw: string) => Promise<string>,
 ): Promise<Readonly<{ issues: readonly string[]; branches: readonly string[] }>> {
   const provenance = await environmentProvenance(cwd, git, currentBranch)
@@ -132,9 +132,13 @@ export async function environmentIssues(
   }
   const spans = new Set<string>()
   for (const branch of provenance.branches) {
-    const invalid = histories.invalid.get(branch)
-    if (invalid !== undefined) throw new Error(`${cwd}: change chain ${invalid.ref} is unproven: ${invalid.error}`)
-    const history = histories.histories.get(branch)
+    let history: Awaited<ReturnType<typeof historyOf>>
+    try {
+      history = await historyOf(branch)
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error)
+      throw new Error(`${cwd}: change chain ${text}`)
+    }
     if (history === undefined) continue
     for (const segment of enumerateChangeSegments(history.events, changesRef(queue, branch), store.repo)) {
       if (segment.state.issue !== undefined) await add(segment.state.issue)
