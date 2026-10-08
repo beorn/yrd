@@ -1,5 +1,5 @@
 import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs"
-import { dirname, join, relative, resolve, sep } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   gitIn,
@@ -11,7 +11,8 @@ import {
 } from "@yrd/queue-core"
 import { createLocalGitProcess } from "git-super/process"
 import { createLocalGitWorktreeStore } from "git-super/worktree"
-import { clearedByIdentity, inspectProcessCwds, type ProcessCwdProjection, type UnreadableProcess } from "removely"
+import { inspectProcessCwds, type ProcessCwdProjection } from "removely"
+import { environmentCwdHolder, processCwdCoverage } from "./env-close-holders.ts"
 import { closeEnvironment, environmentInventory } from "./env-commands.ts"
 import { environmentIssues } from "./env-cleanup-provenance.ts"
 import { repositoryHere } from "./declaration.ts"
@@ -65,13 +66,6 @@ export function createEnvironmentCleanup() {
   const cache = new Map<string, CachedEnvironment>()
   const progress: CleanupProgress = { cursor: 0, hint: undefined, loaded: false }
   return (input: Parameters<typeof cleanupEnvironments>[0]) => cleanupEnvironments(input, cache, progress)
-}
-
-/** Names a denied row by pid, command and denial code — never its argv. */
-function unreadableLabel(entry: UnreadableProcess): string {
-  const codes = [...new Set(entry.issues.flatMap((issue) => (issue.code === undefined ? [] : [issue.code])))]
-  const suffix = codes.length === 0 ? "" : ` (${codes.join(", ")})`
-  return `pid ${entry.pid} ${entry.comm ?? "(no comm)"}${suffix}`
 }
 
 /** A missing required index/reflog is uncertainty, never an unchanged identity. */
@@ -163,31 +157,19 @@ async function cleanupEnvironments(
     // A denied same-UID read is cleared only by removely's own identity
     // predicate. Anything it cannot clear could be a holder, so the run keeps
     // the environment and names the pid, command and denial it could not rule out.
-    const uncleared = snapshot.unreadable.filter((entry) => clearedByIdentity(entry) === undefined)
+    const coverage = processCwdCoverage(snapshot)
     censusReceipt = {
       mechanism: snapshot.mechanism,
       complete: snapshot.complete,
       rows: snapshot.rows.length,
       unreadable: snapshot.unreadable.length,
-      uncleared: uncleared.length,
+      uncleared: coverage.uncleared.length,
     }
-    if (uncleared.length > 0) {
-      throw new Error(
-        `same-UID process CWD census ${snapshot.mechanism} could not read ${uncleared
-          .map((entry) => unreadableLabel(entry))
-          .join(", ")}; a holder among them cannot be ruled out`,
-      )
-    }
-    if (!snapshot.complete && snapshot.unreadable.length === 0) {
-      throw new Error(`same-UID process CWD census ${snapshot.mechanism} incomplete: no readable coverage`)
-    }
+    if (coverage.refusal !== undefined) throw new Error(coverage.refusal)
     return snapshot
   }
   const busy = (path: string, snapshot: ProcessCwdProjection): string | undefined => {
-    const holder = snapshot.rows.find(({ cwd }) => {
-      const within = relative(path, cwd)
-      return within === "" || (within !== ".." && !within.startsWith(`..${sep}`) && !within.startsWith(sep))
-    })
+    const holder = environmentCwdHolder(path, snapshot)
     return holder === undefined ? undefined : `process ${holder.pid} has CWD ${holder.cwd}`
   }
   const process = createLocalGitProcess()

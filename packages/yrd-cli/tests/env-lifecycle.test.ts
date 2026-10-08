@@ -20,7 +20,8 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
+import * as removely from "removely"
 import { createEventStore, previewCloneKey, previewSubjectPrefix } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
@@ -378,54 +379,156 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
    * @level l2 (real CLI and native cwd holder in a temporary retained worktree)
    * @consumer callers closing an environment still used by another process
    */
-  it("refuses a live cwd holder before teardown and preserves the environment (28120)", async () => {
-    const w = await world(":", "printf touched > ../holder-teardown-ran.txt")
-    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const { path } = await openEnvironment(w.work, selected)
-    const cli = join(dirname(fileURLToPath(import.meta.url)), "../../../bin/yrd.ts")
-    const holder = Bun.spawn([process.execPath, "-e", 'console.log("ready"); setInterval(() => {}, 1000)'], {
-      cwd: path,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "inherit",
-    })
-    try {
-      const ready = holder.stdout.getReader()
-      expect(new TextDecoder().decode((await ready.read()).value)).toContain("ready")
-      ready.releaseLock()
+  it.runIf(process.platform === "linux").each(["CLI sibling", "caller child"])(
+    "refuses a live cwd holder (%s) before teardown (28120)",
+    async (invocation) => {
+      const w = await world(":", "printf touched > ../holder-teardown-ran.txt")
+      const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+      const { path } = await openEnvironment(w.work, selected)
+      const cli = join(dirname(fileURLToPath(import.meta.url)), "../../../bin/yrd.ts")
+      const heldPath = invocation === "caller child" ? join(path, "nested") : path
+      if (heldPath !== path) mkdirSync(heldPath)
+      const holder = Bun.spawn([process.execPath, "-e", 'console.log("ready"); setInterval(() => {}, 1000)'], {
+        cwd: heldPath,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "inherit",
+      })
+      try {
+        const ready = holder.stdout.getReader()
+        expect(new TextDecoder().decode((await ready.read()).value)).toContain("ready")
+        ready.releaseLock()
 
-      const closed = await command(w.work, [process.execPath, cli, "env", "close", path, "--json"], process.env)
+        const local = capture(path)
+        const closed =
+          invocation === "CLI sibling"
+            ? await command(w.work, [process.execPath, cli, "env", "close", path, "--json"], process.env)
+            : {
+                exit: await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], local.io),
+                stderr: local.stderr(),
+                stdout: local.stdout(),
+              }
 
-      expect(closed.exit, closed.stderr).toBe(2)
-      expect(closed.stderr).toContain(String(holder.pid))
-      expect(existsSync(path)).toBe(true)
-      expect(await w.git(["worktree", "list", "--porcelain"])).toContain(path)
-      expect(existsSync(join(dirname(path), "holder-teardown-ran.txt"))).toBe(false)
-    } finally {
-      holder.kill()
-      await holder.exited
-    }
-  })
+        expect(closed.exit, closed.stderr).toBe(2)
+        expect(closed.stderr).toContain(String(holder.pid))
+        expect(closed.stderr).toContain("same-UID holders inspected; other-UID holders are not inspectable")
+        expect(closed.stderr).toContain("exempt PIDs:")
+        expect(closed.stderr).toContain("a process can enter after the check")
+        expect(existsSync(path)).toBe(true)
+        expect(await w.git(["worktree", "list", "--porcelain"])).toContain(path)
+        expect(existsSync(join(dirname(path), "holder-teardown-ran.txt"))).toBe(false)
+      } finally {
+        holder.kill()
+        await holder.exited
+      }
+    },
+  )
+
+  /**
+   * @failure 28120: teardown could start a holder after the first safe admission.
+   * @level l2 (real teardown starts a native process in the temporary worktree)
+   * @consumer close callers whose declared teardown leaves background work
+   */
+  it.runIf(process.platform === "linux")(
+    "keeps a holder started by teardown at the fresh removal check (28120)",
+    async () => {
+      const program =
+        'import { writeFileSync } from "node:fs"; writeFileSync("../teardown-holder.pid", String(process.pid)); setInterval(() => {}, 1000)'
+      const launcher = `const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(program)}],
+        { cwd: process.cwd(), stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      child.unref();
+      for (let attempt = 0; attempt < 200; attempt++) {
+        if (await Bun.file("../teardown-holder.pid").exists()) process.exit(0);
+        await Bun.sleep(10);
+      }
+      child.kill(); await child.exited; throw new Error("teardown holder did not become ready");`
+      const w = await world(":", `'${process.execPath.replaceAll("'", "'\\''")}' -e '${launcher}'`)
+      const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+      const marker = join(dirname(path), "teardown-holder.pid")
+      try {
+        const closed = capture(w.work)
+        expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(2)
+        const pid = Number(readFileSync(marker, "utf8"))
+        expect(closed.stderr()).toContain(`process ${pid} has CWD`)
+        expect(existsSync(path)).toBe(true)
+        expect(await w.git(["worktree", "list", "--porcelain"])).toContain(path)
+      } finally {
+        if (existsSync(marker)) {
+          const pid = Number(readFileSync(marker, "utf8"))
+          process.kill(pid, "SIGTERM")
+          await vi.waitFor(() => expect(existsSync(`/proc/${pid}/cwd`)).toBe(false))
+        }
+      }
+    },
+  )
+
+  /**
+   * @failure 28120: absent ancestry evidence was treated as permission to close from inside.
+   * @level l1 (injected unreadable ancestry at the existing process-census boundary)
+   * @consumer own-directory callers on platforms without readable ancestry
+   */
+  it.runIf(process.platform === "linux")(
+    "names the outside-environment cure when invocation ancestry is unreadable (28120)",
+    async () => {
+      const w = await world(":", "printf touched > ../ancestry-teardown-ran.txt")
+      const { path } = await openEnvironment(w.work, (await w.git(["rev-parse", "HEAD"])).trim())
+      const observed = await removely.inspectProcessCensus({ scope: "same-uid", sources: ["cwd"], deadlineMs: 2_000 })
+      const census = vi.spyOn(removely, "inspectProcessCensus").mockResolvedValue({
+        rows: [
+          { pid: process.pid, sources: { cwd: { availability: "readable", value: path, issues: [] } }, issues: [] },
+        ],
+        coverage: { ...observed.coverage, complete: true, unreadable: [] },
+      })
+      try {
+        const closed = capture(path)
+        expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(2)
+        expect(closed.stderr()).toContain("ancestry unavailable")
+        expect(closed.stderr()).toContain("run the close from outside the environment")
+        expect(existsSync(path)).toBe(true)
+        expect(existsSync(join(dirname(path), "ancestry-teardown-ran.txt"))).toBe(false)
+      } finally {
+        census.mockRestore()
+      }
+    },
+  )
 
   /**
    * @failure 25949: successful removal was reported as failure when the caller's cwd was the removed environment.
    * @level l2 (real CLI subprocess and materialized submodule)
    * @consumer a caller closing the environment from its own shell
    */
-  it("closes from inside the removed environment and reports success (25949)", async () => {
-    const w = await world(":")
-    await addMaterializedDependency(w)
-    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const { path } = await openEnvironment(w.work, selected)
-    const cli = join(dirname(fileURLToPath(import.meta.url)), "../../../bin/yrd.ts")
+  it.runIf(process.platform === "linux")(
+    "closes from inside the removed environment and reports success (25949)",
+    async () => {
+      const w = await world(":")
+      await addMaterializedDependency(w)
+      const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+      const { path } = await openEnvironment(w.work, selected)
+      const cli = join(dirname(fileURLToPath(import.meta.url)), "../../../bin/yrd.ts")
 
-    const closed = await command(path, [process.execPath, cli, "env", "close", path, "--json"], process.env)
+      const closed = await command(
+        path,
+        [
+          "sh",
+          "-c",
+          'printf "shell-pid=%s\\n" "$$" >&2; "$1" "$2" env close "$3" --json; result=$?; exit "$result"',
+          "yrd-close-shell",
+          process.execPath,
+          cli,
+          path,
+        ],
+        process.env,
+      )
 
-    expect(closed.exit, closed.stderr).toBe(0)
-    expect(JSON.parse(closed.stdout)).toEqual({ closed: path })
-    expect(existsSync(path)).toBe(false)
-    expect(await w.git(["worktree", "list", "--porcelain"])).not.toContain(path)
-  })
+      expect(closed.exit, closed.stderr).toBe(0)
+      const shellPid = closed.stderr.match(/^shell-pid=(\d+)$/mu)?.[1]
+      expect(shellPid).toBeTypeOf("string")
+      expect(closed.stderr).toMatch(new RegExp(`exempt PIDs: [^\\n]*\\b${shellPid}\\b`, "u"))
+      expect(JSON.parse(closed.stdout)).toEqual({ closed: path })
+      expect(existsSync(path)).toBe(false)
+      expect(await w.git(["worktree", "list", "--porcelain"])).not.toContain(path)
+    },
+  )
 
   // #27156: existence admission precedes teardown and every child-content read.
   it.each([false, true])("private custody gates close before teardown: initialized=%s", async (initialized) => {
@@ -563,7 +666,12 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     if (teardown) {
       expect(readFileSync(join(dirname(path), "closed.txt"), "utf8")).toBe(`${selected}\n`)
       expect(closed.stderr()).toContain("retained environment removal proof")
-      const proof = closed.stderr().trim().replace("retained environment removal proof ", "")
+      const proofLine = closed
+        .stderr()
+        .split("\n")
+        .find((line) => line.startsWith("retained environment removal proof "))
+      expect(proofLine).toBeTypeOf("string")
+      const proof = proofLine!.slice("retained environment removal proof ".length)
       expect(readFileSync(proof, "utf8")).toContain("vendor/dependency/config")
     }
   })

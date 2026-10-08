@@ -46,6 +46,7 @@ import { originHead } from "./queue-location.ts"
 import { issueResolver } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
+import { admitEnvironmentClose } from "./env-close-holders.ts"
 
 export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string; hold?: string }>
 export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
@@ -603,6 +604,7 @@ export async function closeEnvironment(
     )
   }
   await requireClean(treeGit, path)
+  await admitEnvironmentClose(path, io)
   const config = await readConfig(
     treeGit,
     commit,
@@ -639,6 +641,7 @@ export async function closeEnvironment(
     })
   }
   const modules = await treeGit(["ls-tree", commit, "--", ".gitmodules"])
+  await admitEnvironmentClose(path, io)
   if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true) {
     const retain =
       options.retain === undefined
