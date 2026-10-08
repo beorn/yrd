@@ -15,7 +15,7 @@ import {
 } from "./git.ts"
 import { isOpen, listChanges, queueFormat, queueRef } from "./events.ts"
 import { declaredPrivateSubmodules } from "./private-submodules.ts"
-import { populateReferenceStores } from "./reference.ts"
+import { isRepositoryAt, populateReferenceStores } from "./reference.ts"
 import { remoteUrl } from "./remote.ts"
 
 export type PinCarrierPin = Readonly<{ path: string; sha: string }>
@@ -85,7 +85,18 @@ export async function preparePinCarrier(
           "the queue does not hold it, so a carrier cannot move its gitlink",
       )
     }
-    const child = childGit(join(repo, pin.path))
+    // The queue clone materializes a component only as the store populateReferenceStores gives it, and
+    // a path the queue's own tree does not carry gets none. Spawning into the absent directory would fail
+    // inside posix_spawn with a cwd ENOENT that names neither the path nor the queue, so name it here.
+    const store = join(repo, pin.path)
+    if (!(await isRepositoryAt(childGit, store))) {
+      throw new Error(
+        `${pin.path} is not a component of ${target.remote}/${target.branch} at ${targetHead}: ` +
+          `the queue clone ${repo} has no store at ${store}. ` +
+          `--gitlink takes a gitlink path the queue can fetch and verify, spelled as the queue's tree spells it (e.g. vendor/tribe).`,
+      )
+    }
+    const child = childGit(store)
     const remote = await remoteUrl(child, "origin")
     try {
       // A local object is insufficient: the queue must be able to fetch this

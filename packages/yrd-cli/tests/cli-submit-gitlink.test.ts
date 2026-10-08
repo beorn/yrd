@@ -215,6 +215,22 @@ async function raceCarrierCleanup(w: World, branch: string, outcome: "absent" | 
 }
 
 describe("yrd submit --gitlink builds a queue-owned carrier", () => {
+  /** @failure A --gitlink path the queue branch does not carry dies in an internal cwd fault that names neither the path nor the queue, so the author cannot tell a mistyped path from a broken queue.
+   * @level l2 @consumer carrier authors whose component path or queue branch is wrong
+   */
+  it("refuses a --gitlink path the queue carries no store for, by name", async () => {
+    const w = await world()
+    const one = w.components[0]!
+    const ran = await yrd(w.work, "submit", "--gitlink", `vendor/undeclared=${one.held}`, "--issue", "25804", "--json")
+    expect(ran.exitCode, ran.report).not.toBe(0)
+    // The path is named, and the internal spawn cwd never is.
+    expect(ran.stderr).toContain("vendor/undeclared")
+    expect(ran.stderr).toContain("no store")
+    expect(ran.stderr).not.toContain("cannot run")
+    expect(ran.stderr).not.toContain("does not exist")
+    expect(await refs(w.remote)).not.toContain("pin/vendor-undeclared")
+  }, 90_000)
+
   /** @failure Local cleanup failure hides a committed submit receipt or deletes a moved ref (26653 AC1, AC2).
    * @level l2 @consumer carrier authors receiving the public CLI receipt
    */
