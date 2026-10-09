@@ -6,7 +6,7 @@
  * @testonly none
  */
 import { createProcess } from "@yrd/process"
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
@@ -165,6 +165,54 @@ describe("submit reuses a fenced admission observation", () => {
     expect(calls.seams.submitEvent?.fetch ?? 0).toBe(1)
     expect(calls.seams.unattributed).toBeUndefined()
     expect(calls.unreadable).toBe(0)
+  })
+
+  /** @failure previewRetirement listChangeHistories fetches every changes/* chain, including unrelated branches (28442). */
+  it("fetches only the submitting branch's change refs during preview retirement", async () => {
+    const w = await world()
+    const store = createEventStore(w.work, "origin", selectionFor(w.git))
+    const tip = (await readEventQueue(store, "main")).tip
+    const noise = await (
+      await openEvents({ ...store, ref: changesRef("main", "task/noise"), writer: "@dev/11" })
+    ).append([changeInput("opened", { queueTip: tip, at: new Date(), commit: w.target, by: "@dev/11" })], {
+      expect: null,
+    })
+    expect(noise.head, "fixture noise change must publish").not.toBeNull()
+    const log = join(w.root, "fetch-argv.log")
+    const wrapper = join(w.root, "git-log-fetch.ts")
+    writeFileSync(
+      wrapper,
+      `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+const logPath = process.env.YRD_FETCH_ARGV_LOG
+if (!logPath) throw new Error("YRD_FETCH_ARGV_LOG")
+const args = process.argv.slice(2)
+if (args.includes("fetch")) appendFileSync(logPath, JSON.stringify(args) + "\\n")
+const result = spawnSync("git", args, { stdio: "inherit" })
+process.exit(result.status ?? 1)
+`,
+    )
+    chmodSync(wrapper, 0o755)
+    const runner = gitIn(
+      w.work,
+      undefined,
+      { ...selectionFor(w.git), executable: wrapper },
+      { env: { ...process.env, YRD_FETCH_ARGV_LOG: log } },
+    )
+    const submitted = await submit(runner, "origin", request)
+    expect(submitted.retry).toBe(false)
+    const fetches = existsSync(log)
+      ? readFileSync(log, "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as string[])
+      : []
+    const joined = fetches.flat().join("\n")
+    expect(joined, joined).toContain("task/probe")
+    expect(joined, joined).not.toContain("task/noise")
+    expect(joined, joined).not.toMatch(/refs\/yrd\/main\/changes\/\*/u)
   })
 
   it("bounds one-push reads when only the queue tip advances after admission", async () => {
