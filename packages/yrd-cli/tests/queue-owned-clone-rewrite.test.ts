@@ -8,12 +8,12 @@
  * @consumer every command that resolves a queue location for a hosted address
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { queueName, remoteUrl } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
+import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import { parseQueueAddress } from "../src/address.ts"
 import { resolveDeclaredQueueLocations, resolveQueueLocation } from "../src/queue-location.ts"
 
@@ -31,7 +31,10 @@ const address = "yrd-owned-clone.invalid/org/product#main"
 type Fixture = Readonly<{ root: string; product: string; env: NodeJS.ProcessEnv; outside: string }>
 
 async function fixture(): Promise<Fixture> {
-  const root = mkdtempSync(join(tmpdir(), "yrd-cli-owned-clone-rewrite-"))
+  // The fixture root must be outside every Git repository: a declared queue resolves its base with
+  // `repositoryHere(cwd) ?? cwd`, so a root inside a repository resolves declared paths against the
+  // HOST repository instead of this fixture (28434).
+  const root = outsideRepositoryRoot("yrd-cli-owned-clone-rewrite-")
   roots.push(root)
   const product = join(root, "product")
   mkdirSync(product, { recursive: true })

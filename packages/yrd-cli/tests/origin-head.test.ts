@@ -11,6 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
+import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import { originHead, resolveQueueLocation } from "../src/queue-location.ts"
 
 function git(cwd: string, ...args: string[]): string {
@@ -56,10 +57,11 @@ describe("originHead (hh 25626)", () => {
     // A path or URL can never be a remote name, so there is no recorded HEAD to read, and outside a
     // repository a local read cannot even run: this address resolves as it did before 25626.
     const { root, upstream } = cloned("trunk")
-    const outside = mkdtempSync(join(tmpdir(), "yrd-origin-head-outside-"))
+    // Built by a helper that proves the premise instead of trusting TMPDIR: the yrd service's own
+    // TMPDIR (/hh/dev/.git/yrd/tmp) is inside a repository, where Git discovers it from any fixture
+    // path and the local read succeeds, so this row would pass over the defect (28434).
+    const outside = outsideRepositoryRoot("yrd-origin-head-outside-")
     roots.push(outside)
-    // The premise, asserted: under a TMPDIR inside a repository (the yrd service's own is /hh/dev/.git/yrd/tmp)
-    // git discovers that repository, the local read succeeds, and this row would pass over the defect.
     expect(spawnSync("git", ["rev-parse", "--git-dir"], { cwd: outside, encoding: "utf8" }).status).not.toBe(0)
     const location = await resolveQueueLocation(outside, upstream, {
       ...process.env,

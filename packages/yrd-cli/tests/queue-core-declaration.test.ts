@@ -45,6 +45,7 @@ import {
   watchRows,
 } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
+import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import { openEvents } from "gitomic/events"
 import { assertEventListingFence, coreQueueCommand, openEventDetail } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
@@ -2216,7 +2217,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   })
 
   it.each(["list", "show", "watch"])("%s refuses outside a clone with repository guidance", async (verb) => {
-    const outside = mkdtempSync(join(tmpdir(), "yrd-cli-no-clone-"))
+    const outside = outsideRepositoryRoot("yrd-cli-no-clone-")
     roots.push(outside)
     const command = verb === "watch" ? ["watch", "topic"] : ["queue", verb, "topic"]
     for (const selector of [[], ["--queue", "main"], ["--queue", `${outside}/no-repository#main`]]) {
@@ -2229,7 +2230,7 @@ describe("a queue is the selected origin branch carrying config", () => {
   })
 
   it.each(["run", "up", "pause", "resume"])("%s outside a clone requires an address-valued flag", async (verb) => {
-    const outside = mkdtempSync(join(tmpdir(), "yrd-cli-no-clone-"))
+    const outside = outsideRepositoryRoot("yrd-cli-no-clone-")
     roots.push(outside)
     const reason = verb === "pause" ? ["--reason", "checking"] : []
     for (const selector of [[], ["--queue", "main"]]) {
