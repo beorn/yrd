@@ -23,6 +23,7 @@ import { describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import { createScriptedProcess, exitedResult } from "@yrd/process/testing/scripted-process"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
+import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import * as gitRunner from "../src/git.ts"
 import { openLog, readRunLog } from "../src/log.ts"
 import { gitSuperExecution, verifyCandidate } from "../src/verifying.ts"
@@ -977,7 +978,9 @@ exec ${JSON.stringify(nativeGit)} "$@"
   )
 
   it("preserves the settled Git failure when publishing its evidence fails", async () => {
-    const root = temporaryRoot("raw-publication-failure")
+    // `git rev-parse HEAD` here must fail as "not a git repository". A temporary directory is only
+    // outside one when TMPDIR is, so this row takes a directory a helper proved is outside any (28434).
+    const root = outsideRepositoryRoot("yrd-git-runner-raw-publication-failure-")
     const log = openLog(join(root, "logs"))
     let metadata = ""
     const git = gitIn(root, undefined, undefined, {
