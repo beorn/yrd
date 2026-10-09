@@ -355,6 +355,8 @@ async function gitlinkWorld(sourceReadFailure = false, eventQueue = true): Promi
   await cg(["remote", "set-url", "origin", "https://git-super.test/owned/submodule.git"])
   await cg(["checkout", "--quiet", "-b", "main"])
   cpSync(resolve(import.meta.dirname, "../src"), join(submoduleWork, "packages/yrd-cli/src"), { recursive: true })
+  // The runtime reads its version from the package manifest beside src (version.ts imports ../package.json).
+  cpSync(resolve(import.meta.dirname, "../package.json"), join(submoduleWork, "packages/yrd-cli/package.json"))
   writeFileSync(join(submoduleWork, "lib.txt"), "a\n")
   await cg(["add", "lib.txt", "packages"])
   await cg(["commit", "--quiet", "-m", "a"])
@@ -466,6 +468,7 @@ async function gitlinkVectorWorld(
     await cg(["checkout", "--quiet", "-b", "main"])
     if (withCliSource) {
       cpSync(resolve(import.meta.dirname, "../src"), join(work, "packages/yrd-cli/src"), { recursive: true })
+      cpSync(resolve(import.meta.dirname, "../package.json"), join(work, "packages/yrd-cli/package.json"))
     }
     writeFileSync(join(work, "lib.txt"), "a\n")
     await cg(["add", "lib.txt", ...(withCliSource ? ["packages"] : [])])
