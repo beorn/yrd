@@ -33,7 +33,7 @@ import {
 } from "../src/index.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runnerFor } from "../src/git.ts"
-import { gitSuperBin } from "../../../tests/support/git-super-bin.ts"
+import { requireFrozenGitSuper } from "../src/git-super-selection.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -1225,7 +1225,9 @@ describe("event submit", () => {
     const targetHead = (await w.git(["rev-parse", "refs/heads/main"])).trim()
     await using real = createProcess({ cwd: w.work })
     const recordedArgvs: (readonly string[])[] = []
-    const executable = join(gitSuperBin, "git-super")
+    // The binary verifyCandidate runs: the frozen selection, which a host config may take from another checkout
+    // than the one holding this test.
+    const executable = requireFrozenGitSuper(process.env, "the 25626 argv row").bin
     const recording: Process = {
       ...real,
       async run(request) {
