@@ -60,7 +60,7 @@ import {
 } from "./program-root.ts"
 import { queueRefPrefix, runIndexRef } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
-import { revertedPathsFinding, revertGuardAction } from "./revert-guard.ts"
+import { revertedPathsFinding, revertedPathsReason, revertGuardAction } from "./revert-guard.ts"
 import { publishCheckedChildren } from "./publication.ts"
 import { prepareWorktree, SETUP, SetupFailed } from "./worktree.ts"
 import { DERIVE, DeriveFailed } from "./derive.ts"
@@ -1865,10 +1865,13 @@ export async function eventQueueRun(
         continue
       }
       // #27363: the compose revert detector's durable finding, and — under an explicit
-      // `revert-guard: refuse` — the named stick BEFORE the merge CAS. A hit or an
-      // incomplete/ambiguous proof sticks the change by name; the run never errors.
-      const revertFinding = revertedPathsFinding(verified.verifying.reverted)
-      const revertAction = revertGuardAction(verified.verifying.reverted, candidateConfig?.revertGuard ?? "observe")
+      // `revert-guard: refuse` — the named stick BEFORE the merge CAS. The two decisions are
+      // independent (#28000): a `bounded`-only proof is silent by design, so an admission warning
+      // is written only when the report has something to say, while the refusal `refuse` promises
+      // must still stick on any gap — bounded included, because a bounded search can hide a revert.
+      const revertReport = verified.verifying.reverted
+      const revertFinding = revertedPathsFinding(revertReport)
+      const revertAction = revertGuardAction(revertReport, candidateConfig?.revertGuard ?? "observe")
       if (revertFinding !== undefined) {
         tip = await appendOwnedChange(store, queue, branch, tip, {
           type: "admission-warning",
@@ -1879,19 +1882,23 @@ export async function eventQueueRun(
           title: `admission reverted paths ${short(branch, head)}`,
         })
         log.write({ kind: "observation", subject: "revert-guard", reason: revertFinding.reason })
-        if (revertAction === "stick") {
-          const reason = `revert-guard stopped the compose: ${revertFinding.reason}`
-          const ended = await appendOwnedChange(store, queue, branch, tip, { type: "stuck", at: new Date(), reason })
-          await writeStuckStop(branch, head, ended, reason)
-          await tell(branch, "stuck", ended)
-          writeStuck(branch, head, {
-            code: "yrd-revert-guard-refused",
-            subject: reason,
-            via: `revert-guard in the compose of ${short(branch, head)}`,
-            next: "read the reverted-paths admission warning, repair the compose or lift the change, then resume the queue",
-          })
-          return result(2, observedMerged, failed, [branch])
-        }
+      }
+      if (revertAction === "stick") {
+        // `stick` implies a report: the policy table only refuses on a named hit or gap. The named
+        // fragment comes from the report itself, so a bounded refusal names the bound it reached.
+        const named =
+          revertReport === undefined ? "the guard could not name its proof" : revertedPathsReason(revertReport)
+        const reason = `revert-guard stopped the compose: ${named}`
+        const ended = await appendOwnedChange(store, queue, branch, tip, { type: "stuck", at: new Date(), reason })
+        await writeStuckStop(branch, head, ended, reason)
+        await tell(branch, "stuck", ended)
+        writeStuck(branch, head, {
+          code: "yrd-revert-guard-refused",
+          subject: reason,
+          via: `revert-guard in the compose of ${short(branch, head)}`,
+          next: "read the revert-guard stop reason, repair the compose or lift the change, then resume the queue",
+        })
+        return result(2, observedMerged, failed, [branch])
       }
       const raises = (await readRootChanges(git, candidate))?.changes ?? []
       tip = await appendOwnedChange(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })

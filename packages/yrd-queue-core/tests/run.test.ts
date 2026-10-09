@@ -908,6 +908,66 @@ it("stops an event queue at a stuck change", async () => {
   expect((await readStatus(store, "main", "task/b")).status).toBe("queued")
 })
 
+/** @failure A `revert-guard: refuse` compose whose proof was bounded-only merged anyway: the caller
+ *           nested the named stick inside the admission-warning branch, and a bounded search warns
+ *           nobody (#28000), so the refusal the setting promises was skipped and the change landed.
+ * @level l3 @consumer the queue operator who set revert-guard: refuse
+ */
+it("refuses a bounded-only revert-guard proof under refuse instead of merging it", async () => {
+  const w = await world()
+  const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  await createWorldEventQueue(w)
+  // The candidate carries the refusal in its own config, as a real refused change does.
+  await w.git(["checkout", "--quiet", "-b", "task/refuse", "main"])
+  writeFileSync(join(w.work, "one.txt"), "one.txt\n")
+  writeFileSync(join(w.work, ".yrd.yml"), `${readFileSync(join(w.work, ".yrd.yml"), "utf8")}revert-guard: refuse\n`)
+  await w.git(["add", "one.txt", ".yrd.yml"])
+  await w.git(["commit", "--quiet", "-m", "one.txt under refuse"])
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", {
+    branch: "task/refuse",
+    issue: "@i/10-yrd/1",
+    submitter: "@dev/2",
+    target: { branch: "main", remote: "origin" },
+  })
+
+  const verify = verifying.verifyCandidate
+  // Exactly the report #28000 makes silent: the guard RAN, reached its declared window, found
+  // nothing. `observe` says nothing here; `refuse` must still stop, because the window can hide a
+  // revert — the same window-cap regression the policy unit row drives.
+  using _bounded = vi.spyOn(verifying, "verifyCandidate").mockImplementation(async (options) => {
+    const outcome = await verify(options)
+    if (outcome.state !== "verified") return outcome
+    return {
+      ...outcome,
+      verifying: {
+        ...outcome.verifying,
+        reverted: {
+          base: { base: w.target, state: "single" },
+          count: 0,
+          coverage: "complete",
+          gaps: [{ depth: 0, kind: "bounded", path: ".", reason: "target history window W=50 exhausted" }],
+          paths: [],
+          swallowed: [],
+        },
+      },
+    }
+  })
+
+  const outcome = await queueRun({ ...(await w.options({ exit: 0 })), checks: [], notify: undefined })
+
+  expect(outcome).toMatchObject({ exitCode: 2, merged: [], stuck: ["task/refuse"] })
+  expect(await remoteTarget(w)).toBe(w.target)
+  expect((await readStatus(store, "main", "task/refuse")).status).toBe("stuck")
+  const stuck = logRecords(outcome).find((row) => row.code === "yrd-revert-guard-refused")
+  expect(stuck, "the named stick must be yrd-revert-guard-refused").toBeDefined()
+  expect(String(stuck?.reason ?? ""), "the stick must name the bound it refused on").toContain("window")
+  await w.git(["fetch", "--quiet", "origin", "main"])
+  const onTarget = spawnSync("git", ["merge-base", "--is-ancestor", head, "origin/main"], { cwd: w.work })
+  expect(onTarget.status, "the refused change must never reach the target").toBe(1)
+})
+
 /** @failure A resumed event queue still refused its stuck head, so the operator could not restart the line.
  * @level l3 @consumer queue operator
  */
