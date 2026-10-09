@@ -237,6 +237,47 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).toContain(`cut from main ${landed.slice(0, 12)}`)
   })
 
+  /**
+   * @failure A branch opened without --issue carries no bead id, so every retirement path that keys on the
+   *          owning issue refuses it as unnameable — and the creator is never told (28113).
+   * @level l2 (a real env open over a git fixture, in process)
+   * @consumer `yrd env open --bay` callers who should have used `--issue`
+   * @testonly none
+   */
+  it("announces an id-less branch at open, naming the --issue form (28113)", async () => {
+    const w = await world("true")
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "fixer-guards-tools"], run.io)).toBe(0)
+
+    expect(run.stderr()).toContain("task/fixer-guards-tools carries no bead id")
+    expect(run.stderr()).toContain("--issue <ref>")
+    // The path is still what stdout carries; the announce never replaces it.
+    expect(run.stdout().trim()).not.toBe("")
+  })
+
+  /**
+   * @failure The announce must not fire when --issue already named the branch, and must never reach stdout
+   *          (scripted callers parse `--json`) (28113).
+   * @level l2 (a real env open over a git fixture, in process)
+   * @consumer `--json` and `--issue` callers of `yrd env open`
+   * @testonly none
+   */
+  it("stays silent with --issue, and keeps the announce on stderr for --json (28113)", async () => {
+    const bound = await world("true")
+    const quiet = capture(bound.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "26050"], quiet.io)).toBe(0)
+    expect(quiet.stderr()).not.toContain("carries no bead id")
+
+    const probe = await world("true")
+    const json = capture(probe.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "probe", "--json"], json.io)).toBe(0)
+    expect(JSON.parse(json.stdout())).toMatchObject({ branch: "task/probe", name: "probe" })
+    // stdout stays a single JSON object; the announce rides stderr only.
+    expect(json.stdout()).not.toContain("carries no bead id")
+    expect(json.stderr()).toContain("task/probe carries no bead id")
+  })
+
   // A bead nested under another opens task/<parent>/<leaf> beside task/<parent>, and git stores a branch as a path,
   // so the raw refusal named neither cause nor way out (@dev/fixer, 25850 beside 25843, 2026-09-25).
   it("refuses a branch beneath an existing branch and names --bay", async () => {
