@@ -45,7 +45,6 @@ import {
   createEventQueue,
   decide,
   initial,
-  listChangeHistories,
   project,
   queueFormat,
   queueRef,
@@ -820,9 +819,10 @@ async function admitSubmitAtHead(
 }
 
 /**
- * The branches whose change has ended for good, read from the queue's own branch fold (27510 retirement): landed,
- * or cancelled as dropped, withdrawn or deleted. A failed or resubmitted change is still live. A branch whose history
- * is invalid is never evidence of retirement: it is named and left out.
+ * The submitting branch, when its own change has ended for good (27510 retirement, 28442 one-branch read): landed,
+ * or cancelled as dropped, withdrawn or deleted. A failed or resubmitted change is still live. Other ended subjects
+ * keep the seven-day preview-custody backstop: listing every change chain here shares the 300000 ms git bound. A
+ * branch whose history is invalid is never evidence of retirement: it is named and left out.
  */
 async function endedSubjects(
   git: Git,
@@ -840,18 +840,21 @@ async function endedSubjects(
     )
     return new Set()
   }
-  const { histories, invalid } = await listChangeHistories(store, request.target.branch)
-  for (const [branch, defect] of invalid) {
-    console.warn(`yrd: preview custody keeps ${branch}'s anchors: its change history is unreadable: ${defect.error}`)
-  }
-  const ended = new Set<string>()
-  for (const [branch, history] of histories) {
+  try {
+    const { history } = await readBranchHistory(store, request.target.branch, request.branch)
+    if (history === undefined) return new Set()
     const { reason, status } = history.state
     if (status === "merged" || (status === "cancelled" && ["dropped", "withdrawn", "deleted"].includes(reason ?? ""))) {
-      ended.add(branch)
+      return new Set([request.branch])
     }
+    return new Set()
+  } catch (error) {
+    if (error instanceof Conflict) throw error
+    console.warn(
+      `yrd: preview custody keeps ${request.branch}'s anchors: its change history is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    return new Set()
   }
-  return ended
 }
 
 async function composeSubmit(
