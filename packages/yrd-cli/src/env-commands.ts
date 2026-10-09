@@ -262,6 +262,25 @@ async function pinSubmoduleIdentities(
 }
 
 /**
+ * Whether pinning the per-worktree identity leaked into the SHARED config the
+ * co-resident worktrees inherit. Both halves are compared: the check read only
+ * `user.name`, so a write that moved only `user.email` slipped past it (#28285).
+ */
+export function sharedIdentityMoved(
+  before: Readonly<{ email: string; name: string }>,
+  after: Readonly<{ email: string; name: string }>,
+): boolean {
+  return before.name !== after.name || before.email !== after.email
+}
+
+/** The shared config's whole identity, read as one value so a write cannot hide in the half nobody read. */
+async function sharedIdentity(git: GitRunner): Promise<Readonly<{ email: string; name: string }>> {
+  const read = async (key: string): Promise<string> =>
+    (await git(["config", "--local", "--get", "--default=", key])).trim()
+  return { email: await read("user.email"), name: await read("user.name") }
+}
+
+/**
  * Pin the caller's declared identity into the environment's OWN worktree
  * config, so a commit made there names the seat and not whichever seat last
  * wrote the shared config (#27299).
@@ -279,8 +298,12 @@ async function pinSubmoduleIdentities(
  * environment materialized are pinned by {@link pinSubmoduleIdentities}, from
  * this same declared identity.
  */
-async function pinDeclaredIdentity(path: string, git: GitRunner, io: YrdCliIO): Promise<void> {
-  const identity = declaredSeatIdentity()
+async function pinDeclaredIdentity(
+  path: string,
+  git: GitRunner,
+  identity: Readonly<{ email: string; name: string }> | undefined,
+  io: YrdCliIO,
+): Promise<void> {
   if (identity === undefined) return
   const scoped = (
     await git(["config", "--local", "--type=bool", "--get", "--default=false", "extensions.worktreeConfig"])
@@ -295,15 +318,15 @@ async function pinDeclaredIdentity(path: string, git: GitRunner, io: YrdCliIO): 
     )
     return
   }
-  const sharedBefore = (await git(["config", "--local", "--get", "--default=", "user.name"])).trim()
+  const sharedBefore = await sharedIdentity(git)
   await git(["config", "--worktree", "user.name", identity.name])
   await git(["config", "--worktree", "user.email", identity.email])
-  const sharedAfter = (await git(["config", "--local", "--get", "--default=", "user.name"])).trim()
-  if (sharedAfter !== sharedBefore) {
+  const sharedAfter = await sharedIdentity(git)
+  if (sharedIdentityMoved(sharedBefore, sharedAfter)) {
     throw new Error(
       `yrd env open: pinning the seat identity in ${path} wrote the shared config ` +
-        `(user.name '${sharedBefore}' became '${sharedAfter}'); extensions.worktreeConfig is enabled but git stored it ` +
-        `outside this worktree`,
+        `(user.name '${sharedBefore.name}' became '${sharedAfter.name}', user.email '${sharedBefore.email}' became ` +
+        `'${sharedAfter.email}'); extensions.worktreeConfig is enabled but git stored it outside this worktree`,
     )
   }
   io.stderr(
@@ -337,6 +360,11 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   if (options.hold !== undefined && options.hold.trim() === "") {
     throw new Error("yrd env open --hold needs a non-empty reason")
   }
+  // The caller's declared identity is read BEFORE any environment exists
+  // (#28285): a half-declared identity is refused here, leaving no bay, branch
+  // or worktree registration behind. Reading it only at the pin — after
+  // provisioning — stranded an unlocked environment on every refusal.
+  const declaredIdentity = declaredSeatIdentity()
   const commit = options.commit
   if (commit !== undefined && options.issue !== undefined) {
     throw new Error(
@@ -438,7 +466,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     provisioned = result.output
   }
   const { path, baseSha } = provisioned
-  await pinDeclaredIdentity(path, gitIn(path, process, selection), io)
+  await pinDeclaredIdentity(path, gitIn(path, process, selection), declaredIdentity, io)
   if (options.hold !== undefined) {
     try {
       await createLocalGitWorktreeStore({ repo: root }).lock(path, options.hold)

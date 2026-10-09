@@ -30,6 +30,7 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { formatYrdRuntimeVersion } from "../src/version.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import { sharedIdentityMoved } from "../src/env-commands.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
@@ -1105,14 +1106,29 @@ describe("yrd env open pins the caller's declared seat identity (#27299)", () =>
     })
   })
 
-  it("refuses a half-declared identity rather than guessing the other half", async () => {
+  it("refuses a half-declared identity before creating anything, so nothing is left behind (#28285)", async () => {
     const w = await world(":")
     await withDeclaredIdentity("@dev/luna6-fixture", undefined, async () => {
       const run = capture(w.work)
       expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "half"], run.io), run.stderr()).not.toBe(0)
       expect(run.stderr()).toMatch(/GIT_AUTHOR_EMAIL/u)
       expect(run.stderr()).toMatch(/needs both/u)
+      // The identity is read BEFORE the environment exists: the refusal leaves no
+      // bay directory, no branch and no worktree registration behind. The old call
+      // site read it only after provisioning, stranding an unlocked environment.
+      const bay = join(w.work, ".bays", "half")
+      expect(existsSync(bay), `no environment is left behind:\n${run.stderr()}`).toBe(false)
+      expect((await w.git(["branch", "--list", "task/half"])).trim()).toBe("")
+      expect(await w.git(["worktree", "list"])).not.toContain("half")
     })
+  })
+
+  it("the shared-config guard compares both identity halves, not only user.name (#28285)", () => {
+    const before = { name: "@dev/5", email: "seat@x.test" }
+    // A write that moved only the email is a leak the name-only check missed.
+    expect(sharedIdentityMoved(before, { name: "@dev/5", email: "other@x.test" })).toBe(true)
+    expect(sharedIdentityMoved(before, { name: "yrd", email: "seat@x.test" })).toBe(true)
+    expect(sharedIdentityMoved(before, { name: "@dev/5", email: "seat@x.test" })).toBe(false)
   })
 
   it("pins the declared identity into each materialized submodule, not only the root (#27403)", async () => {
