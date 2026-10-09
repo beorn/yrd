@@ -213,6 +213,7 @@ const CHECK_SERVICE_COMMAND = `hab ps ${SERVICE}`
 
 import { queueTempRoot, workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
+import { formatUnknownTopLevelKeyWarning } from "./version.ts"
 
 function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution | undefined) {
   if (resolution === undefined) {
@@ -740,12 +741,7 @@ export async function coreQueueCommand(
           ? {}
           : {
               newerKeys: (keys) => {
-                const one = keys.length === 1
-                io.stderr(
-                  `yrd: the declaration at ${targetLabel} has ${one ? "a key" : "keys"} this environment's Yrd does not know: ` +
-                    `${keys.map((key) => `${key}:`).join(", ")}. The queue runs ${one ? "it" : "them"}; ${NAMED[request.command]} does not, ` +
-                    `so it proceeds without ${one ? "it" : "them"}. Update this environment's Yrd to the one the target pins to silence this.\n`,
-                )
+                io.stderr(formatUnknownTopLevelKeyWarning(targetLabel, NAMED[request.command], keys))
               },
             },
       )

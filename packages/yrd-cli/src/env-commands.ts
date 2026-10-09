@@ -56,6 +56,7 @@ import {
   type EnvCloseRequestOptions,
 } from "./env-close-requests.ts"
 import type { ProcessCensus } from "removely"
+import { formatUnknownTopLevelKeyWarning } from "./version.ts"
 
 export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string; hold?: string }>
 export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
@@ -323,12 +324,7 @@ async function pinDeclaredIdentity(path: string, git: GitRunner, io: YrdCliIO): 
  * running a declaration it cannot read in full is the silent error.
  */
 function warnNewerDeclarationKeys(at: string, command: string, keys: readonly string[], io: YrdCliIO): void {
-  const one = keys.length === 1
-  io.stderr(
-    `yrd: the declaration at ${at} has ${one ? "a key" : "keys"} this environment's Yrd does not know: ` +
-      `${keys.map((key) => `${key}:`).join(", ")}. The queue runs ${one ? "it" : "them"}; ${command} does not, ` +
-      `so it proceeds without ${one ? "it" : "them"}. Update this environment's Yrd to the one the target pins to silence this.\n`,
-  )
+  io.stderr(formatUnknownTopLevelKeyWarning(at, command, keys))
 }
 
 /**

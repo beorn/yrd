@@ -99,3 +99,17 @@ export function formatYrdRuntimeVersion(git: typeof sourceGit = sourceGit): stri
   const dirty = status.stdout.trim() !== ""
   return `yrd ${YRD_VERSION}+${sha}${dirty ? "-dirty" : ""}`
 }
+
+/**
+ * Submit / env open / env close: an unknown top-level key is a loud warning, not a
+ * refusal (26121). Name the key, this reader's version, and the cure.
+ */
+export function formatUnknownTopLevelKeyWarning(at: string, command: string, keys: readonly string[]): string {
+  const one = keys.length === 1
+  return (
+    `yrd: the declaration at ${at} has ${one ? "a key" : "keys"} this environment's Yrd does not know: ` +
+    `${keys.map((key) => `${key}:`).join(", ")} (${formatYrdRuntimeVersion()}). ` +
+    `The queue runs ${one ? "it" : "them"}; ${command} does not, so it proceeds without ${one ? "it" : "them"}. ` +
+    `Run with main's yrd to apply it.\n`
+  )
+}

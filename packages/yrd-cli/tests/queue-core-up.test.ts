@@ -2157,7 +2157,8 @@ describe("yrd queue up, the service", () => {
       expect(records(run)[0]).toMatchObject({ head })
       expect(run.stderr()).toContain("has a key this environment's Yrd does not know: later:")
       expect(run.stderr()).toContain("The queue runs it; submit does not")
-      expect(run.stderr()).toContain("Update this environment's Yrd to the one the target pins")
+      expect(run.stderr()).toContain("Run with main's yrd to apply it")
+      expect(run.stderr()).toMatch(/yrd \S+\+\S+/)
       if (!eventQueue) {
         expect(creationWarning).toHaveBeenCalledWith(expect.stringContaining("newer declaration keys later:"))
       }
