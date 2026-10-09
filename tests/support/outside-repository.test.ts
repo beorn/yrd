@@ -17,6 +17,7 @@ import { assertOutsideRepository, outsideRepositoryRoot } from "./outside-reposi
 const roots: string[] = []
 
 afterEach(() => {
+  // raw-delete-allow: the fixture roots these rows made with outsideRepositoryRoot or mkdtemp, and nothing else
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 

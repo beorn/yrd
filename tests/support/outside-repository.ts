@@ -75,6 +75,7 @@ function candidate(base: string, prefix: string): Attempt {
   }
   const discovered = discoveredRepository(directory)
   if (discovered.kind === "outside") return { kind: "outside", directory }
+  // raw-delete-allow: the empty directory this call just made with mkdtemp under base, refused because Git discovers a repository around it
   rmSync(directory, { recursive: true, force: true })
   if (discovered.kind === "repository") {
     return {
