@@ -532,6 +532,16 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       `${name}: reused ${provisioned.adoption} branch ${branch} at ${provisioned.headSha}; requested target ${target} ${baseSha}\n`,
     )
   }
+  // 28113: a branch opened without --issue carries no bead id, so every retirement path that keys on the
+  // owning issue refuses it by name — it is unnameable to `drop-decided` and to the dark-work census, and
+  // the creator is never told. ANNOUNCE, never refuse: a spike or a probe legitimately has no bead. The
+  // line names yrd's OWN flag, so yrd still learns nothing of hh's bead model — no second resolver here.
+  // stderr, so `--json` stdout and every scripted caller stay byte-identical; the exit code is unchanged.
+  if (branch !== undefined && options.issue === undefined) {
+    io.stderr(
+      `${branch} carries no bead id; open bead work with --issue <ref> — it names the branch task/<issue> and binds it with a Refs commit\n`,
+    )
+  }
   // `base` is the base the caller REQUESTED, resolved in the owning root repository — never the head the
   // environment happens to stand at: a reused branch's head is reported as `head`, not as `base` (27165).
   if (options.json === true) {
