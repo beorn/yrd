@@ -1,7 +1,7 @@
 /** Submit against a real event queue and remote. */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, sep } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { Conflict } from "gitomic"
 import { openEvents } from "gitomic/events"
@@ -90,6 +90,53 @@ function store(w: World) {
   return createEventStore(w.work, "origin", selectionFor(w.git))
 }
 describe("event submit", () => {
+  /** @failure 28187: submit creates a registered candidate inside the inherited habitat scratch root.
+   * @level l2 @consumer Yrd submit verification
+   * Existing submit tests verify composition but never observe the live worktree's location.
+   * @reach fs-walk <fixture-only: temp world and inherited scratch; real submit verifies their candidate>
+   * @testonly none
+   */
+  it("keeps submit verification outside the inherited scratch root", async () => {
+    const fixture = mkdtempSync(join(tmpdir(), "yrd-submit-scratch-"))
+    roots.push(fixture)
+    vi.stubEnv("TMPDIR", fixture)
+    try {
+      const w = await world()
+      await branchWithCommit(w, "task/scratch-placement", "one.txt")
+      const scratch = join(fixture, "hab-scratch")
+      mkdirSync(scratch)
+      vi.stubEnv("TMPDIR", scratch)
+      const common = (await w.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+      let candidatePath: string | undefined
+      const verify = verifying.verifyCandidate
+      using observer = vi.spyOn(verifying, "verifyCandidate").mockImplementation((options) =>
+        verify({
+          ...options,
+          beforeMerge: async (candidate) => {
+            candidatePath = candidate
+            expect(existsSync(join(candidate, ".git"))).toBe(true)
+            expect((await gitIn(candidate)(["rev-parse", "--is-inside-work-tree"])).trim()).toBe("true")
+            await options.beforeMerge?.(candidate)
+          },
+        }),
+      )
+      const result = await submit(w.git, "origin", {
+        branch: "task/scratch-placement",
+        submitter: "@dev/2",
+        target: { branch: "main", remote: "origin" },
+      })
+      console.log(JSON.stringify({ scratch, candidatePath, verified: result.verifying.state }))
+      expect(result.verifying.state).toBe("verified")
+      expect(candidatePath?.startsWith(`${scratch}${sep}`)).toBe(false)
+      expect(candidatePath?.startsWith(`${join(common, "yrd", "tmp")}${sep}`)).toBe(true)
+      expect(readdirSync(scratch)).toEqual([])
+      expect(candidatePath === undefined || existsSync(candidatePath)).toBe(false)
+      expect(observer).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   /** @failure 27957: cold custody must preserve merged-head refusal and lineage when a new head reopens.
    * @level l2 @consumer yrd queue submit
    * Existing reopen coverage keeps history hot and cannot detect a cold branch being treated as new.

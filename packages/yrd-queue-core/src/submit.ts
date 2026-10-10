@@ -20,7 +20,6 @@
  */
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pushRefUpdates } from "git-super/push"
 import { retryTransientPush } from "./transient-push.ts"
@@ -863,7 +862,11 @@ async function composeSubmit(
   admitted: SubmitAdmission,
   ended: ReadonlySet<string>,
 ): Promise<Verification> {
-  const scratch = mkdtempSync(join(tmpdir(), "yrd-submit-verifying-"))
+  // Submit, like the queue runner, keeps registered worktrees out of inherited habitat scratch.
+  const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+  const tempRoot = join(common, "yrd", "tmp")
+  mkdirSync(tempRoot, { recursive: true })
+  const scratch = mkdtempSync(join(tempRoot, "yrd-submit-verifying-"))
   const hooksPath = join(scratch, "hooks-disabled")
   mkdirSync(hooksPath)
   let verifying: Verification
