@@ -542,6 +542,16 @@ describe("a run's journal, read back", () => {
       join(dir, `${run}.jsonl`),
       `${JSON.stringify({ at: at.toISOString(), branch, head, kind: "a-kind-from-a-newer-writer", run })}\n`,
     )
+    // The clean control is a NEIGHBOUR this reader can read, with a real
+    // journal of its own: absence of a matching run proves nothing about a
+    // clean read (24735 corrected review finding 3).
+    openLog(dir, () => at).write({
+      at: at.toISOString(),
+      branch: "task/other",
+      decision: "merged",
+      head: "def456",
+      kind: "change",
+    })
     const journals = readJournals(dir, { now: at })
     const runs = journals.runs.get(journalKey(branch, head))
     // The run was still FOLDED; only this reader's reading of it is partial.
@@ -553,13 +563,21 @@ describe("a run's journal, read back", () => {
     expect(skewed[0]?.row.next?.because).toContain("a-kind-from-a-newer-writer")
     expect(skewed[0]?.row.next?.because).toContain("restart the watch from the landing root")
     expect(skewed[0]?.row.next?.because).not.toContain("fix the writer")
-    // Per run, never per listing: a change this run never wrote stays clean.
+    // The DEFAULT listing carries the same skew, never only the split lens
+    // (24735 corrected review finding 2).
+    const folded = watchRows([{ branch, head, state: "merged" } as Row], { journals })
+    expect(folded[0]?.row.unknownKinds).toEqual(["a-kind-from-a-newer-writer"])
+    expect(folded[0]?.row.next?.because).toContain("restart the watch from the landing root")
+    // A neighbour whose own journal reads clean stays clean, per run and folded.
     const clean = watchRows([{ branch: "task/other", head: "def456", state: "merged" } as Row], {
       journals,
       perRun: true,
     })
     expect(clean[0]?.row.next).toBeUndefined()
     expect(clean[0]?.row.unknownKinds).toBeUndefined()
+    const cleanFolded = watchRows([{ branch: "task/other", head: "def456", state: "merged" } as Row], { journals })
+    expect(cleanFolded[0]?.row.unknownKinds).toBeUndefined()
+    expect(cleanFolded[0]?.row.next).toBeUndefined()
   })
 
   // Was "still refuses a partial incident outside a change-ref race

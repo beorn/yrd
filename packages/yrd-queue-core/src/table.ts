@@ -171,15 +171,35 @@ export function watchRowKey(row: WatchRow): string {
  * lose every superseded run's verdict if it were folded away.
  */
 export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): readonly WatchRow[] {
-  if (options.latest === true || options.perRun !== true || options.journals === undefined) {
-    return rows.map((row) => ({ row }))
-  }
   const journals = options.journals
+  if (options.latest === true || options.perRun !== true || journals === undefined) {
+    // The default lens is a status surface too (@cto a04a006b, 24735 finding
+    // 2): a change whose journal this reader could not fully read wears the
+    // same skew here as it does per run, never only in the split lens.
+    return rows.map((row) => ({ row: skewedRow(row, journals?.runs.get(journalKey(row.branch, row.head)) ?? []) }))
+  }
   return rows.flatMap((row) => {
     const runs = journals.runs.get(journalKey(row.branch, row.head)) ?? []
     if (runs.length === 0) return [{ row }]
     return runs.map((run, index) => ({ row: runRow(row, run, index === 0), run }))
   })
+}
+
+/**
+ * The one row a change shows when the page is not split by run, wearing the
+ * skew of the newest run whose journal carried a kind this reader does not
+ * know. No journal on this machine leaves the row exactly as the fold gave it.
+ */
+function skewedRow(current: Row, runs: readonly JournalRun[]): Row {
+  const skewed = runs.find((run) => (run.unknownKinds?.length ?? 0) > 0)
+  if (skewed === undefined) return current
+  const skew = skewNext(skewed)
+  return {
+    ...current,
+    unknownKinds: skewed.unknownKinds,
+    // This change's own next owner when it has one; the reader's cure otherwise.
+    ...(current.next !== undefined || skew === undefined ? {} : { next: skew }),
+  }
 }
 
 /**

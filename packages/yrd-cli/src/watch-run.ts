@@ -16,7 +16,7 @@
  */
 
 import type { CheckView, Row } from "@yrd/queue-core"
-import { STATE_WORDS, clock, runShortName, timingLine } from "./watch-format.ts"
+import { STATE_WORDS, clock, runShortName, skewMarker, timingLine } from "./watch-format.ts"
 import { watchNotice } from "./watch-notice.ts"
 
 /** The kinds a run can be. `queue` is the only one built; the union exists so the next one is a data change. */
@@ -139,8 +139,9 @@ export function explanationLine(row: Row): string | undefined {
  * then the explanation line.
  */
 export function statusLineOf(row: Row, joinedRun = false): Readonly<{ status: string; explanation?: string }> {
+  const skew = skewMarker(row)
   if (row.state === "merged") {
-    const status = capitalize(STATE_WORDS.merged.word)
+    const status = `${capitalize(STATE_WORDS.merged.word)}${skew}`
     if (row.merge === undefined) {
       return { status, explanation: "the head is on the queue branch, and no merged record names the merge commit" }
     }
@@ -148,12 +149,12 @@ export function statusLineOf(row: Row, joinedRun = false): Readonly<{ status: st
     return { status, explanation: `as ${row.merge.slice(0, 12)}${at}` }
   }
   const explanation = explanationLine(row)
-  const status = capitalize(headlineOf(row, joinedRun))
+  const status = `${capitalize(headlineOf(row, joinedRun))}${skew}`
   const statusWord = status.toLowerCase().split(/\s+/u)[0] ?? ""
   // The explanation already names the state ("It failed …"): do not print
   // "Failed" again in front of it (26242 row 12).
   if (explanation !== undefined && statusWord !== "" && explanation.toLowerCase().includes(statusWord)) {
-    return { status: explanation }
+    return { status: `${explanation}${skew}` }
   }
   return {
     status,

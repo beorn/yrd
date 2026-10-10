@@ -11,7 +11,7 @@
 import { describe, expect, it } from "vitest"
 import type { Row } from "@yrd/queue-core"
 import { metadataGroups, metadataKeyWidth, timelineOf } from "../src/watch-change.ts"
-import { explanationLine, headlineOf, runOf, runTitle, stepsOf, timingRows } from "../src/watch-run.ts"
+import { explanationLine, headlineOf, runOf, runTitle, statusLineOf, stepsOf, timingRows } from "../src/watch-run.ts"
 
 const NOW_MS = Date.UTC(2026, 8, 3, 12, 0, 0)
 
@@ -37,6 +37,16 @@ describe("the status box's own lines", () => {
     expect(headlineOf(row({ result: "stuck verify", state: "merged" }), true)).toBe(
       "change merged, run result: stuck verify",
     )
+  })
+
+  // 24735, @cto a04a006b: the skew belongs IN the status string the box draws,
+  // so a clean merged row and a skewed one can never print the same status.
+  it("keeps a row's reader skew inside the status string, never beside it", () => {
+    const clean = row({ result: "pass test", state: "merged" })
+    const skewed = { ...clean, unknownKinds: ["a-kind-from-a-newer-writer"] }
+    expect(statusLineOf(clean).status).toBe("Merged")
+    expect(statusLineOf(skewed).status).toBe("Merged · reader skew")
+    expect(statusLineOf(clean).status).not.toBe(statusLineOf(skewed).status)
   })
 
   it("names the reason a failed or stuck change carries, and the position of one in line", () => {

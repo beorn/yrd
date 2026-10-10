@@ -981,9 +981,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
   // The fold stays additive, so a writer may add a kind without breaking a
   // reader — the reader says only that ITS reading of this run is partial.
   const unknownKinds = [
-    ...new Set(
-      records.map((record) => record.kind).filter((kind) => !(LOG_KINDS as readonly string[]).includes(kind)),
-    ),
+    ...new Set(records.map((record) => record.kind).filter((kind) => !(LOG_KINDS as readonly string[]).includes(kind))),
   ]
   const numbered = records.filter((record) => record.kind === "run-number")
   if (numbered.length > 1) {

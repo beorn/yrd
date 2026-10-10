@@ -122,6 +122,16 @@ describe("the one glyph table", () => {
     expect(stateGlyph({ state: "verifying", format: "event" })).toBe("◉")
   })
 
+  // 24735, @cto a04a006b: the marker is INSEPARABLE from the folded word, so a
+  // row this reader could not fully read never reads like a clean row.
+  it("wears the reader's skew inside the status word, so clean and skewed rows never read the same", () => {
+    const clean = { state: "merged" as const }
+    const skewed = { ...clean, unknownKinds: ["a-kind-from-a-newer-writer"] }
+    expect(stateWord(clean)).toBe("merged")
+    expect(stateWord(skewed)).toBe("merged · reader skew")
+    expect(stateWord(clean)).not.toBe(stateWord(skewed))
+  })
+
   it("overlays the working glyph on any state while a check runs, and keeps the state's glyph otherwise", () => {
     expect(stateGlyph({ state: "queued" })).toBe("○")
     expect(stateGlyph({ state: "failed" })).toBe("×")
