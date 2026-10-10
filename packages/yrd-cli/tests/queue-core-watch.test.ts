@@ -272,16 +272,17 @@ describe("yrd watch, the ending's exit code", () => {
    * Existing fence and stale-pane tests never advance a real remote ref between reads.
    * The retry must not fetch unrelated history again (27957); reaching the ending alone missed that cost.
    * Archive custody, queue-only movement and successive stale branches exercise the same acquisition contract.
+   * A mid-read malformed event remains a named invalid row; static invalid-chain coverage misses this retry.
    * Existing rows miss those transition shapes; no production seam is added.
    * The selected Git executable only schedules the real ref update; it fabricates no Git result or event.
    */
-  it.each(["advance", "archive", "queue", "two-moves", "disappear", "diverge", "diverge-kept"] as const)(
+  it.each(["advance", "archive", "queue", "two-moves", "malformed", "disappear", "diverge", "diverge-kept"] as const)(
     "handles %s during its event listing",
     async (movement) => {
       const w = await world()
       const branch = "task/advancing"
       await change(w, branch, true)
-      const succeeds = ["advance", "archive", "queue", "two-moves"].includes(movement)
+      const succeeds = ["advance", "archive", "queue", "two-moves", "malformed"].includes(movement)
       if (succeeds) await change(w, "task/unrelated", true)
       const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
       const queue = await readEventQueue(store, "main")
@@ -320,7 +321,15 @@ describe("yrd watch, the ending's exit code", () => {
           ? `delete ${ref} ${before}`
           : `update ${ref} ${succeeds ? after : divergent} ${before}`,
       ]
-      if (movement === "archive") {
+      if (movement === "malformed") {
+        await w.git(["--git-dir", remote, "update-ref", ref, after, before])
+        // Valid event framing, malformed Yrd data: no required queue/time/commit properties.
+        await chain.append([{ type: "merged" }], { expect: after })
+        const malformed = await chain.head()
+        if (malformed === null) throw new Error("malformed fixture change has no event tip")
+        await w.git(["--git-dir", remote, "update-ref", ref, before, malformed])
+        updates = [`update ${ref} ${malformed} ${before}`]
+      } else if (movement === "archive") {
         // Build custody with the real archive actuator, then replay its atomic remote transition during the read.
         await w.git(["--git-dir", remote, "update-ref", ref, after, before])
         const archived = await archiveQueue(store, "main", {
@@ -391,7 +400,7 @@ process.exit(result.exitCode)
       const watched = coreQueueCommand(
         w.work,
         run.io,
-        { command: "list", terms: [branch], watch: true, stop: stop.signal, intervalSeconds: 1 },
+        { command: "list", terms: [branch], watch: movement !== "malformed", stop: stop.signal, intervalSeconds: 1 },
         {
           json: true,
           workdir: w.workdir,
@@ -415,12 +424,22 @@ process.exit(result.exitCode)
         .filter((line) => line.includes("advanced during event list"))
       expect(notices).toHaveLength(movement === "two-moves" ? 2 : 1)
       for (const notice of notices) expect(notice).toMatch(/read .+, observed .+, current .+/u)
-      const rounds = run
-        .stdout()
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line))
-      expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+      const rounds =
+        movement === "malformed"
+          ? [JSON.parse(run.stdout())]
+          : run
+              .stdout()
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line))
+      expect(rounds.at(-1)).toMatchObject({
+        changes: [{ branch, state: movement === "malformed" ? "invalid" : "merged" }],
+      })
+      if (movement === "malformed") {
+        expect(rounds.at(-1)).toMatchObject({ changes: [{ ref, diagnostic: expect.stringContaining(ref) }] })
+        expect(run.stderr()).toContain("is malformed")
+        expect(run.stderr()).toContain("needs Queue:")
+      }
       const fetched = readFileSync(fetches, "utf8")
         .trim()
         .split("\n")

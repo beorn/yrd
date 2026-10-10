@@ -5384,13 +5384,17 @@ export async function readEventListing(
         : error.ref.startsWith(coldPrefix)
           ? error.ref.slice(coldPrefix.length)
           : undefined
-      const selected = branch === undefined ? undefined : await readBranchHistory(store, config.target.branch, branch)
+      const selected =
+        branch === undefined
+          ? undefined
+          : await readBranchHistory(store, config.target.branch, branch, { invalid: "return" })
       const nextQueue = branch === undefined ? await readEventQueue(store, config.target.branch) : undefined
-      const current = selected?.history?.state.tip ?? nextQueue?.tip ?? null
+      const current = selected?.history?.state.tip ?? selected?.invalid?.tip ?? nextQueue?.tip ?? null
       const evidence = `read ${error.read ?? "absent"}, observed ${error.observed ?? "absent"}, current ${current ?? "absent"}`
       if (current === null) throw new Error(`${error.ref} disappeared during event list: ${evidence}`)
       const events =
         selected?.history?.events ??
+        selected?.invalid?.events ??
         (await (await openEvents({ ...store, ref: error.ref, writer: "yrd" })).events({ at: current, complete: true }))
       const lineage = new Set(events.map((event) => event.id))
       for (const tip of [error.read, error.observed]) {
@@ -5398,10 +5402,16 @@ export async function readEventListing(
           throw new Error(`${error.ref} diverged during event list: ${evidence}`)
         }
       }
-      if (branch !== undefined && selected?.history !== undefined) {
-        histories.set(branch, selected.history)
-        changes.set(branch, selected.history.state)
-        invalid.delete(branch)
+      if (branch !== undefined && selected !== undefined) {
+        if (selected.invalid !== undefined) {
+          invalid.set(branch, selected.invalid)
+          histories.delete(branch)
+          changes.delete(branch)
+        } else if (selected.history !== undefined) {
+          histories.set(branch, selected.history)
+          changes.set(branch, selected.history.state)
+          invalid.delete(branch)
+        }
         queueRefs.delete(changesRef(config.target.branch, branch))
         queueRefs.delete(`${coldPrefix}${branch}`)
         queueRefs.set(selected.ref, current)
@@ -5409,7 +5419,11 @@ export async function readEventListing(
         queue = nextQueue
         queueRefs.set(error.ref, current)
       }
-      options.onRetry?.(`${error.ref} advanced during event list: ${evidence}; reading again\n`)
+      options.onRetry?.(
+        selected?.invalid === undefined
+          ? `${error.ref} advanced during event list: ${evidence}; reading again\n`
+          : `${error.ref} advanced during event list and is malformed: ${evidence}; ${selected.invalid.error}\n`,
+      )
     }
   }
   const directMerges = await eventDirectMergeCommits(

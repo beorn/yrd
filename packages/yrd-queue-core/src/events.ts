@@ -2497,21 +2497,26 @@ type ChangeHistories = Readonly<{
 }>
 
 /** Exact hot+cold refs for one branch. Throws on an invalid chain, naming
- *  `ref@tip`. `history` is undefined when the branch has no chain.
+ *  `ref@tip`, unless the listing opts into returning its existing invalid entry.
+ *  `history` is undefined when the branch has no valid chain.
  *  Environment cleanup uses this so a round does not materialize every change
  *  chain under the queue prefixes (28011). */
 export async function readBranchHistory(
   store: QueueReadStore,
   queue: string,
   branch: string,
-): Promise<Readonly<{ ref: string; history: ChangeHistory | undefined }>> {
+  options: Readonly<{ invalid?: "return" }> = {},
+): Promise<Readonly<{ ref: string; history: ChangeHistory | undefined; invalid?: InvalidChangeHistory }>> {
   const prefixes = [`${queueRefPrefix(queue)}/changes/`, archivedChangesPrefix(queue)]
   const hot = changesRef(queue, branch)
   const cold = `${archivedChangesPrefix(queue)}${branch}`
   const chains = await readEventChains([hot, cold], store)
   const { histories, invalid } = projectChangeHistories(chains, prefixes, store.repo)
   const defect = invalid.get(branch)
-  if (defect !== undefined) throw new Error(`${defect.ref}@${defect.tip}: ${defect.error}`)
+  if (defect !== undefined) {
+    if (options.invalid === "return") return { ref: defect.ref, history: undefined, invalid: defect }
+    throw new Error(`${defect.ref}@${defect.tip}: ${defect.error}`)
+  }
   return { ref: chains.has(cold) ? cold : hot, history: histories.get(branch) }
 }
 
