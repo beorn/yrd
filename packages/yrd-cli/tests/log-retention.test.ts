@@ -287,6 +287,34 @@ describe("an absent optional root is named in the row, never a healthy zero (F2)
     expect(observation.missing).toEqual([missing])
   })
 
+  it("writes NO row when an absent optional root is the round's only fact (@cto 2026-10-10T23:30Z)", () => {
+    const { workdir } = tree("absent-only")
+    const wrote = appendRetentionObservation(
+      workdir,
+      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], remaining: [], missing: ["/x/checks"] },
+      NOW,
+    )
+    expect(wrote).toBe(false)
+    expect(existsSync(join(workdir, RETENTION_JOURNAL))).toBe(false)
+  })
+
+  it("still names the absent optional root in a row it DOES write, for a round that removed something", () => {
+    const { workdir, logs } = tree("absent-plus-removal")
+    const removed = [{ path: join(logs, round(ago(30))), name: round(ago(30)), within: logs, started: ago(30) }]
+    const wrote = appendRetentionObservation(
+      workdir,
+      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed, failures: [], remaining: [], missing: ["/x/checks"] },
+      NOW,
+    )
+    expect(wrote).toBe(true)
+    const rows = readFileSync(join(workdir, RETENTION_JOURNAL), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ removed: 1, missing: ["/x/checks"] })
+  })
+
   it("names an absent optional root in the human rendering", () => {
     const lines = retentionHumanLines(
       { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], remaining: [], missing: ["/x/checks"] },

@@ -345,12 +345,15 @@ function writeRetentionRow(workdir: string, row: Record<string, unknown>): void 
  * Whether a sweep result is worth a row (@cto 2026-10-10T23:16Z): it removed
  * something, or it failed. A round with nothing expired writes NOTHING — "one
  * observation row per round" meant at most one, and a row on every idle round is
- * exactly the unbounded file this note closed. A declared-OPTIONAL root that was
- * ABSENT still writes a row, so F2's named absence is never silently dropped; a
- * REQUIRED root that is missing is a failure, reported below.
+ * exactly the unbounded file this note closed. An absent declared-OPTIONAL root
+ * is a NORMAL host state and is never a row on its own (@cto 2026-10-10T23:30Z) —
+ * a host that never runs a check would re-announce `checks/` every round — but it
+ * stays named inside any row that IS written, and in the verb's output, so where
+ * the sweep looked is never hidden. A REQUIRED root that is missing is a failure,
+ * reported below.
  */
 export function retentionRowWorthWriting(result: RetentionResult): boolean {
-  return result.removed.length > 0 || result.failures.length > 0 || result.missing.length > 0
+  return result.removed.length > 0 || result.failures.length > 0
 }
 
 /**
