@@ -5129,8 +5129,12 @@ function journalFact(
  * defect once while a NEW one still reaches the reader the round it appears.
  */
 function narrateJournalReading(io: YrdCliIO, journals: Journals, said: Set<string>): void {
+  const counts = new Map<string, number>()
   for (const fallback of journals.fallbacks ?? []) {
-    const line = `yrd: run journal ${fallback.run}: read raw facts (projection ${fallback.reason}); ${fallback.detail}\n`
+    counts.set(fallback.reason, (counts.get(fallback.reason) ?? 0) + 1)
+  }
+  for (const [reason, count] of counts) {
+    const line = `yrd: run journals in ${journals.dir}: read raw facts for ${count} round(s) (projection ${reason}); per-run details are in --json journal.fallbacks\n`
     if (said.has(line)) continue
     said.add(line)
     io.stderr(line)

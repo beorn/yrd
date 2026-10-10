@@ -246,7 +246,9 @@ describe("event queue observation refusals", () => {
 
     const human = capture(w.work)
     expect(await coreQueueCommand(w.work, human.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    expect(human.stderr()).toContain(`run journal ${journal.id}: read raw facts (projection missing)`)
+    expect(human.stderr()).toContain(
+      `run journals in ${join(w.workdir, "logs")}: read raw facts for 1 round(s) (projection missing)`,
+    )
     const watched = capture(w.work)
     rendered.onWait = async () => {
       if (rendered.load === undefined) throw new Error("watch supplied no refresh loader")
@@ -262,7 +264,11 @@ describe("event queue observation refusals", () => {
           { interactive: true, workdir: w.workdir },
         ),
       ).toBe(0)
-      expect(watched.stderr().split(`run journal ${journal.id}: read raw facts (projection missing)`)).toHaveLength(2)
+      expect(
+        watched
+          .stderr()
+          .split(`run journals in ${join(w.workdir, "logs")}: read raw facts for 1 round(s) (projection missing)`),
+      ).toHaveLength(2)
     } finally {
       rendered.onWait = undefined
     }
