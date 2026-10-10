@@ -62,6 +62,7 @@ import {
   parseChangeRef,
   changesRef,
   readChangeEvents,
+  readBranchHistory,
   readEventQueue,
   readEventOps,
   readEventQueueWithChanges,
@@ -3107,30 +3108,12 @@ export async function coreQueueCommand(
         ) {
           await refuseMissingEventMarker(declared.config.target.remote, declared.config.target.branch)
         }
-        let reading: EventListingResult
-        for (;;) {
-          try {
-            reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, selectedStore, {
-              all: request.all,
-              drafts: request.drafts,
-              draftWindow,
-            })
-            break
-          } catch (error) {
-            if (!(error instanceof EventListingMoved)) throw error
-            const chain = await openEvents({ ...selectedStore, ref: error.ref, writer: "yrd" })
-            const current = await chain.head()
-            const evidence = `read ${error.read ?? "absent"}, observed ${error.observed ?? "absent"}, current ${current ?? "absent"}`
-            if (current === null) throw new Error(`${error.ref} disappeared during event list: ${evidence}`)
-            const lineage = new Set((await chain.events({ at: current, complete: true })).map((event) => event.id))
-            for (const tip of [error.read, error.observed]) {
-              if (tip !== undefined && tip !== current && !lineage.has(tip)) {
-                throw new Error(`${error.ref} diverged during event list: ${evidence}`)
-              }
-            }
-            io.stderr(`${error.ref} advanced during event list: ${evidence}; reading again\n`)
-          }
-        }
+        const reading = await readEventListing(git, declared.config, repo, workdir, declared.oid, selectedStore, {
+          all: request.all,
+          drafts: request.drafts,
+          draftWindow,
+          onRetry: (message) => io.stderr(message),
+        })
         const { journals, all, drafts, observation } = reading
         if (options.json !== true) narrateMalformed(io, journals, said)
         // The run-history lens is for stats and watch detail. List is the
@@ -5250,6 +5233,7 @@ export async function readEventListing(
     now?: number | Date
     forceFresh?: boolean
     draftWindow?: DraftWindow
+    onRetry?: (message: string) => void
   }> = {},
 ): Promise<EventListingResult> {
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
@@ -5382,8 +5366,66 @@ export async function readEventListing(
   }
 
   // 4. Full read
-  const { queue, histories, invalid } = await readEventQueueWithChanges(store, config.target.branch)
+  const acquired = await readEventQueueWithChanges(store, config.target.branch)
+  let queue = acquired.queue
+  const histories = new Map(acquired.histories)
+  const invalid = new Map(acquired.invalid)
   const changes = new Map([...histories].map(([branch, history]) => [branch, history.state]))
+  // Keep this acquisition alive across fences. A moving history only needs its
+  // own hot+cold read; restarting the listing reacquires every archived chain.
+  for (;;) {
+    try {
+      assertEventListingFence(config.target.branch, queue, changes, queueRefs, invalid)
+      break
+    } catch (error) {
+      if (!(error instanceof EventListingMoved)) throw error
+      const branch = error.ref.startsWith(changePrefix)
+        ? error.ref.slice(changePrefix.length)
+        : error.ref.startsWith(coldPrefix)
+          ? error.ref.slice(coldPrefix.length)
+          : undefined
+      const selected =
+        branch === undefined
+          ? undefined
+          : await readBranchHistory(store, config.target.branch, branch, { invalid: "return" })
+      const nextQueue = branch === undefined ? await readEventQueue(store, config.target.branch) : undefined
+      const current = selected?.history?.state.tip ?? selected?.invalid?.tip ?? nextQueue?.tip ?? null
+      const evidence = `read ${error.read ?? "absent"}, observed ${error.observed ?? "absent"}, current ${current ?? "absent"}`
+      if (current === null) throw new Error(`${error.ref} disappeared during event list: ${evidence}`)
+      const events =
+        selected?.history?.events ??
+        selected?.invalid?.events ??
+        (await (await openEvents({ ...store, ref: error.ref, writer: "yrd" })).events({ at: current, complete: true }))
+      const lineage = new Set(events.map((event) => event.id))
+      for (const tip of [error.read, error.observed]) {
+        if (tip !== undefined && tip !== current && !lineage.has(tip)) {
+          throw new Error(`${error.ref} diverged during event list: ${evidence}`)
+        }
+      }
+      if (branch !== undefined && selected !== undefined) {
+        if (selected.invalid !== undefined) {
+          invalid.set(branch, selected.invalid)
+          histories.delete(branch)
+          changes.delete(branch)
+        } else if (selected.history !== undefined) {
+          histories.set(branch, selected.history)
+          changes.set(branch, selected.history.state)
+          invalid.delete(branch)
+        }
+        queueRefs.delete(changesRef(config.target.branch, branch))
+        queueRefs.delete(`${coldPrefix}${branch}`)
+        queueRefs.set(selected.ref, current)
+      } else if (nextQueue !== undefined) {
+        queue = nextQueue
+        queueRefs.set(error.ref, current)
+      }
+      options.onRetry?.(
+        selected?.invalid === undefined
+          ? `${error.ref} advanced during event list: ${evidence}; reading again\n`
+          : `${error.ref} advanced during event list and is malformed: ${evidence}; ${selected.invalid.error}\n`,
+      )
+    }
+  }
   const directMerges = await eventDirectMergeCommits(
     git,
     config.target.branch,
@@ -5393,7 +5435,6 @@ export async function readEventListing(
     new Set(),
     { allHistory: options.directHistory },
   )
-  assertEventListingFence(config.target.branch, queue, changes, queueRefs, invalid)
   const listNow =
     options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
   const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))

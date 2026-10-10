@@ -36,6 +36,7 @@ import {
   queueFormat,
   queueRef,
   readChangeEvents,
+  readBranchHistory,
   readEventOps,
   readEventQueue,
   readEventQueueWithChanges,
@@ -2647,6 +2648,8 @@ describe("the queue-format boundary", () => {
       ref: changesRef("lab", "task/broken"),
       error: expect.stringContaining("needs an open change"),
     })
+    // Default readers used by cleanup and submit must still distinguish malformed custody from absence.
+    await expect(readBranchHistory(location, "lab", "task/broken")).rejects.toThrow(/needs an open change/u)
     const oldDrop = histories.get("task/old-drop")
     expect(oldDrop?.state).toMatchObject({
       status: "cancelled",
