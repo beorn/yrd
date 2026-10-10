@@ -216,7 +216,7 @@ const CHECK_SERVICE_COMMAND = `hab ps ${SERVICE}`
 
 import { queueTempRoot, workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
-import { formatUnknownTopLevelKeyWarning } from "./version.ts"
+import { formatDeclarationSkewCure, formatUnknownTopLevelKeyWarning } from "./version.ts"
 
 function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution | undefined) {
   if (resolution === undefined) {
@@ -749,10 +749,20 @@ export async function coreQueueCommand(
             },
       )
     } catch (error) {
-      throw new Error(
-        `the declaration at ${targetLabel} cannot be read: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      )
+      const detail = error instanceof Error ? error.message : String(error)
+      // A read that only ADDRESSES the queue (submit and the other queue-addressing
+      // verbs) downgrades an unknown TOP-level key to a warning (27187/27796). A newer
+      // value inside a key this Yrd DOES know — an unknown `notify[].on`, say — still
+      // refuses, because it cannot be skipped without changing what the command means;
+      // and the bare "cannot be read" line then named neither the cause (this
+      // environment's Yrd predates the declaration the target holds) nor the cure, so
+      // an older base had no path forward (28510). Name both. A read that RUNS the
+      // declaration keeps today's line: the queue is the reader that must know every
+      // key, and it is not the older one.
+      const skew = RUNS_THE_DECLARATION.has(request.command)
+        ? ""
+        : formatDeclarationSkewCure(targetLabel, NAMED[request.command])
+      throw new Error(`the declaration at ${targetLabel} cannot be read: ${detail}${skew}`, { cause: error })
     }
     if (declared === undefined) return undefined
     return { config: declared, oid }

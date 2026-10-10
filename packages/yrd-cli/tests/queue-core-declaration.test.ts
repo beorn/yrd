@@ -2399,6 +2399,24 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(service.stderr()).toContain("does not parse")
   })
 
+  it("names the cause and the cure when a tolerant read refuses a newer nested declaration value", async () => {
+    // An unknown TOP-level key is a warning since 27187/27796; a newer value inside a
+    // key this Yrd DOES know still refuses. The refusal must name both why (this
+    // environment's Yrd is older than the declaration the target holds) and what to
+    // run, so an older base has a path forward (28510).
+    const repo = await world('notify: [{desk: {run: "echo hi", on: future-end}}]\n')
+    const run = capture(repo)
+
+    const error = (await coreQueueCommand(repo, run.io, { command: "list" }, { queue: "main" }).catch(
+      (cause: unknown) => cause,
+    )) as Error
+    expect(error.message).toContain("the declaration at origin/main cannot be read")
+    expect(error.message).toContain(".yrd.yml notify[0] desk: on: must be")
+    expect(error.message).toContain("is older than the declaration at origin/main")
+    expect(error.message).toContain("run main's yrd: @in main -- bun yrd queue list")
+    expect(error.message).toMatch(/\(yrd \S+\+\S+\)/u)
+  })
+
   it("refuses a selected branch with no config, names that branch, and names the cure", async () => {
     const repo = await world()
     const run = capture(repo)
