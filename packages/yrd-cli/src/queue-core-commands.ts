@@ -34,6 +34,7 @@ import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import { issueResolver } from "./issue-resolver.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
+import { sweepRoundOutput } from "./log-retention.ts"
 import { runAdmission } from "./admission.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
@@ -888,6 +889,13 @@ export async function coreQueueCommand(
       return undefined
     }
     await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
+    // ROUND-OUTPUT RETENTION (28499, @cto ruling 2026-10-10T02:50Z): beside the environment
+    // sweep, remove the RAW output of rounds older than the window — the round's git
+    // stdout/stderr and trace2, the locally-run check output, the environment artifacts and
+    // the checks/ tree — oldest first, journals kept. Selection is by directory NAME, so a
+    // round never opens a round; one observation row is written per round. A sweep that
+    // cannot run is a named warning row, never this round's outcome.
+    await sweepRoundOutput({ workdir, run: outcome.run, journal: outcome.log, stderr: (text) => io.stderr(text) })
     emit(io, options.json, outcome, describeRun(outcome))
     // Naming the branch is `describeRun`'s; naming what fixes it is this
     // round's own log, which the ending that stuck it already wrote in full
