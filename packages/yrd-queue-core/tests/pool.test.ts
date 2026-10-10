@@ -10,9 +10,10 @@
  * second borrow, with no refusal note on the way.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { safeRemoveSync } from "removely"
 import { afterAll, expect, it } from "vitest"
 import type { Git } from "../src/git.ts"
 import { WorktreePool } from "../src/pool.ts"
@@ -22,7 +23,7 @@ import { gitSuperBin, gitSuperSha } from "../../../tests/support/git-super-bin.t
 const scratch: string[] = []
 
 afterAll(() => {
-  for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
+  for (const dir of scratch) safeRemoveSync(dir, { within: realpathSync(tmpdir()), allowMissing: true })
 })
 
 const WITNESS = join("node_modules", "cache-witness")

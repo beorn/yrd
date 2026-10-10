@@ -7,10 +7,12 @@
  */
 import { describe, expect, test } from "vitest"
 import { execFileSync } from "node:child_process"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { realpathSync } from "node:fs"
+import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createLogger } from "loggily"
+import { safeRemoveSync } from "removely"
 import { adaptProcessGit } from "../src/git-super.ts"
 import { createProcess } from "../src/index.ts"
 
@@ -75,7 +77,7 @@ describe("adaptProcessGit", () => {
       expect(result.failure).toContain(String(limit))
       expect(result.failure).toContain("ls-tree")
     } finally {
-      await rm(root, { recursive: true, force: true })
+      safeRemoveSync(root, { within: realpathSync(tmpdir()), allowMissing: true })
     }
   })
 })
