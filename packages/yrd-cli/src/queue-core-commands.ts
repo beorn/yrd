@@ -3120,7 +3120,7 @@ export async function coreQueueCommand(
           onRetry: (message) => io.stderr(message),
         })
         const { journals, all, drafts, observation } = reading
-        if (options.json !== true) narrateMalformed(io, journals, said)
+        if (options.json !== true) narrateJournalReading(io, journals, said)
         // The run-history lens is for stats and watch detail. List is the
         // current head of each branch in both output formats; JSON expands
         // that head by run unless --latest selects its single row.
@@ -3143,6 +3143,9 @@ export async function coreQueueCommand(
                 state: runnerOf({ unfiltered, runner: localRunner, stopped }, new Date()).state,
                 service: service.kind === "beating" ? { kind: service.kind } : { kind: service.kind, why: service.why },
                 published,
+                ...(localRunner.projectionFallback === undefined
+                  ? {}
+                  : { projectionFallback: localRunner.projectionFallback }),
               }
             : undefined
         // The table and stop come from the same authority read as this listing.
@@ -3703,7 +3706,7 @@ export async function coreQueueCommand(
       const { journals } = reading
       // The counts below are read from the same rows; a row the journal could
       // not be read for must not make an understated stat look measured.
-      if (options.json !== true) narrateMalformed(io, journals, new Set())
+      if (options.json !== true) narrateJournalReading(io, journals, new Set())
       // Per RUN: `queue stats` counts decisions, and one change can carry several.
       const rows = watchRows(reading.document, {
         journals,
@@ -3741,7 +3744,7 @@ export async function coreQueueCommand(
         drafts: true,
         draftWindow: "all",
       })
-      if (options.json !== true) narrateMalformed(io, reading.journals, new Set())
+      if (options.json !== true) narrateJournalReading(io, reading.journals, new Set())
       if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") return 2
 
       const unfiltered = watchRows(reading.all, { journals: reading.journals })
@@ -5105,18 +5108,19 @@ function journalFor(item: WatchRow, journals: Journals): JournalRun | undefined 
  */
 function journalFact(
   journals: Journals,
-): Readonly<{ dir: string; absent?: string; malformed?: Journals["malformed"] }> {
+): Readonly<{ dir: string; absent?: string; malformed?: Journals["malformed"]; fallbacks?: Journals["fallbacks"] }> {
   return {
     dir: journals.dir,
     ...(journals.absent === undefined ? {} : { absent: journals.absent }),
     ...(journals.malformed.length === 0 ? {} : { malformed: journals.malformed }),
+    ...(journals.fallbacks === undefined ? {} : { fallbacks: journals.fallbacks }),
   }
 }
 
 /**
- * Every journal row the reader could not read, said out loud on stderr the
- * first time this command sees it. Narration, so the product on stdout is
- * unchanged and a `--json` consumer reads the same defects from
+ * Raw projection fallback and every unreadable journal row, said on stderr
+ * the first time this command sees them. Narration keeps human stdout's
+ * table intact; a `--json` consumer reads the same facts from
  * {@link journalFact} instead.
  *
  * The read survives one malformed row (24408) — and a skipped row that nobody
@@ -5124,7 +5128,13 @@ function journalFact(
  * scoped to one invocation, so a watch refreshing every few seconds states a
  * defect once while a NEW one still reaches the reader the round it appears.
  */
-function narrateMalformed(io: YrdCliIO, journals: Journals, said: Set<string>): void {
+function narrateJournalReading(io: YrdCliIO, journals: Journals, said: Set<string>): void {
+  for (const fallback of journals.fallbacks ?? []) {
+    const line = `yrd: run journal ${fallback.run}: read raw facts (projection ${fallback.reason}); ${fallback.detail}\n`
+    if (said.has(line)) continue
+    said.add(line)
+    io.stderr(line)
+  }
   for (const defect of journals.malformed) {
     const line = `yrd: run journal ${defect.run} has a row that could not be read for ${defect.key}: ${defect.message}; the row was skipped — fix the writer (26230)\n`
     if (said.has(line)) continue

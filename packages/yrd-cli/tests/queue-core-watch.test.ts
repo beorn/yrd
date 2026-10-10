@@ -226,6 +226,56 @@ async function drain(w: World): Promise<void> {
 }
 
 describe("event queue observation refusals", () => {
+  // AC4: reader-level fallback facts were invisible in the actual list/watch
+  // outputs. One real command journey proves JSON facts, human narration and
+  // watch deduplication without adding a test-only production surface.
+  it("names raw journal fallback in list JSON and once across watch refreshes", async () => {
+    const w = await world()
+    const journal = openLog(join(w.workdir, "logs"))
+    journal.write({ kind: "run", target: "main", queue: "main" })
+    const json = capture(w.work)
+    expect(await coreQueueCommand(w.work, json.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const listed = JSON.parse(json.stdout()) as {
+      journal: { fallbacks: readonly { run: string; reason: string; detail: string }[] }
+      runner: { projectionFallback?: { run: string; reason: string } }
+    }
+    expect(listed.journal.fallbacks).toMatchObject([{ run: journal.id, reason: "missing" }])
+    expect(listed.journal.fallbacks[0]?.detail).toContain(`${journal.id}.projection.json`)
+    expect(listed.runner.projectionFallback).toMatchObject({ run: journal.id, reason: "missing" })
+    expect(json.stderr()).toBe("")
+
+    const human = capture(w.work)
+    expect(await coreQueueCommand(w.work, human.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    expect(human.stderr()).toContain(`run journal ${journal.id}: read raw facts (projection missing)`)
+    const watched = capture(w.work)
+    rendered.onWait = async () => {
+      if (rendered.load === undefined) throw new Error("watch supplied no refresh loader")
+      await rendered.load()
+      await rendered.load()
+    }
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          watched.io,
+          { command: "list", watch: true },
+          { interactive: true, workdir: w.workdir },
+        ),
+      ).toBe(0)
+      expect(watched.stderr().split(`run journal ${journal.id}: read raw facts (projection missing)`)).toHaveLength(2)
+    } finally {
+      rendered.onWait = undefined
+    }
+    journal.finish()
+    const completed = capture(w.work)
+    expect(await coreQueueCommand(w.work, completed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
+      0,
+    )
+    const completedDocument = JSON.parse(completed.stdout()) as typeof listed
+    expect(completedDocument.journal.fallbacks).toEqual([])
+    expect(completedDocument.runner.projectionFallback).toBeUndefined()
+  })
+
   /** @failure Event queue stats could report success after Git-Super refused its root observation.
    * @level l2 @consumer operator reading queue list and queue stats from the same event queue
    */
