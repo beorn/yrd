@@ -150,6 +150,24 @@ describe("revert guard (27363)", () => {
     expect(report.swallowed.map((row) => row.path)).toContain("vendor/dep")
   })
 
+  it("S2 negative (28557): a deliberate deletion of lines an earlier shared change added is not a revert", async () => {
+    const w = await deletionWorld()
+    const report = await detect(w, w.candidate, w.head)
+    expect(report.coverage).toBe("complete")
+    expect(report.paths).toEqual([])
+    expect(report.swallowed).toEqual([])
+    expect(revertedPathsFinding(report)).toBeUndefined()
+    expect(revertGuardAction(report, "observe")).toBe("clean")
+  })
+
+  it("S2 positive (28557): a revert of a target advance made after the base still warns", async () => {
+    const w = await targetAdvanceWorld()
+    const report = await detect(w, w.candidate, w.head)
+    expect(report.coverage).toBe("complete")
+    expect(report.paths.map((row) => row.path)).toContain("vendor/dep/impl.txt")
+    expect(revertedPathsFinding(report)?.coverage).toBe("complete")
+  })
+
   it("negative: a metadata-only re-pin with equal trees is not a hit", async () => {
     const w = await world()
     const report = await detect(w, w.candidateMetadata, w.candidateMetadata)
@@ -550,4 +568,56 @@ async function nestedWorld(): Promise<NestedWorld> {
     return dir
   }
   return { candidateStale, checkoutAt, head, target }
+}
+
+/**
+ * #28557: the target never advanced the path since the base; the branch's own commit deletes lines
+ * an earlier merge added. Shapes the measured 27421 compose (km write-log-ledger `walkFrom`: the
+ * branch deletes exactly the six lines feb326ab42 added, and `git log <base>..<target> -- <file>`
+ * is empty because the target never touched that path). The older change is already shared history,
+ * so restoring its pre-image is the branch's deliberate deletion, not a put-back of a target advance.
+ */
+async function deletionWorld(): Promise<RegressionWorld> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-revert-deletion-"))
+  roots.push(root)
+  const dep = join(root, "dep")
+  mkdirSync(dep)
+  await gitIn(dep, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(dep, { "impl.txt": "one\n" }, "impl before the earlier merge")
+  await commit(dep, { "impl.txt": "one\nwalk-from\n" }, "earlier merged change adds the bound")
+  const basePin = await commit(dep, { "shared.txt": "shared\n" }, "base")
+  const targetPin = await commit(dep, { "target-only.txt": "target\n" }, "target advances elsewhere")
+  await gitIn(dep, undefined, undefined, { env })(["checkout", "--quiet", "-b", "branch", basePin])
+  const candidatePin = await commit(dep, { "impl.txt": "one\n" }, "branch deletes the bound")
+  const product = join(root, "product")
+  mkdirSync(product)
+  await gitIn(product, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(product, { "readme.txt": "product\n" }, "product base")
+  await pin(product, "vendor/dep", dep, basePin, "fork pins the base")
+  const target = await pin(product, "vendor/dep", dep, targetPin, "target advances elsewhere")
+  const head = await pin(product, "vendor/dep", dep, candidatePin, "branch deletes the bound")
+  return { candidate: head, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
+}
+
+/** #28557: the target DID advance the path after the base; the candidate restores the pre-advance value. */
+async function targetAdvanceWorld(): Promise<RegressionWorld> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-revert-advance-"))
+  roots.push(root)
+  const dep = join(root, "dep")
+  mkdirSync(dep)
+  await gitIn(dep, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(dep, { "impl.txt": "one\n" }, "impl before the earlier merge")
+  await commit(dep, { "impl.txt": "one\nwalk-from\n" }, "earlier merged change adds the bound")
+  const basePin = await commit(dep, { "shared.txt": "shared\n" }, "base")
+  const targetPin = await commit(dep, { "impl.txt": "one\nwalk-from\nmore\n" }, "target advances the path")
+  await gitIn(dep, undefined, undefined, { env })(["checkout", "--quiet", "-b", "branch", basePin])
+  const candidatePin = await commit(dep, { "candidate.txt": "c\n" }, "candidate keeps the pre-advance value")
+  const product = join(root, "product")
+  mkdirSync(product)
+  await gitIn(product, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(product, { "readme.txt": "product\n" }, "product base")
+  await pin(product, "vendor/dep", dep, basePin, "fork pins the base")
+  const target = await pin(product, "vendor/dep", dep, targetPin, "target advances the path")
+  const head = await pin(product, "vendor/dep", dep, candidatePin, "candidate keeps the pre-advance value")
+  return { candidate: head, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
 }
