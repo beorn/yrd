@@ -8,9 +8,9 @@
  * @consumer queue operator, host-health (disk and IO pressure)
  * @testonly none
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
-import { dirname, join, resolve } from "node:path"
+import { dirname, join, resolve, sep } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   ROUND_OUTPUT_WINDOW_MS,
@@ -189,12 +189,42 @@ describe("retentionHumanLines (the operator's rendering)", () => {
   })
 })
 
+/**
+ * A scratch root OUTSIDE `tmpdir()`, which is the whole point of the R1 case:
+ * removely's DEFAULT `allowedRoots` is [tmpdir()], so a fixture under mkdtemp()
+ * proves nothing about the real /hh/var/yrd-workdir tree. `homedir()` is NOT
+ * reliably outside it — the Vitest home guard pins HOME to `<run root>/home`,
+ * i.e. INSIDE tmpdir(), measured 2026-10-10 — so prefer tmpdir()'s own parent,
+ * outside by construction, and fall back to homedir() where that parent is not
+ * writable (a bare `vitest` run, where tmpdir() is `/tmp`).
+ */
+function scratchOutsideTmpdir(): string {
+  const tmp = resolve(tmpdir())
+  const candidates = [dirname(tmp), homedir()].filter((candidate) => {
+    const parent = resolve(candidate)
+    return parent !== tmp && !parent.startsWith(`${tmp}${sep}`)
+  })
+  const refused: string[] = []
+  for (const parent of candidates) {
+    try {
+      accessSync(parent, constants.W_OK)
+      return mkdtempSync(join(parent, ".yrd-log-retention-selftest-"))
+    } catch {
+      // silent-fallback-allow: a directory this process cannot write is not the
+      // fixture's host, so the next candidate must carry it; the throw below
+      // names every host refused rather than leaving a bare empty result.
+      refused.push(parent)
+    }
+  }
+  throw new Error(
+    `log retention fixture: no writable root outside ${tmp} to host the R1 case; refused ${refused.join(", ")}`,
+  )
+}
+
 describe("retention against a root OUTSIDE tmpdir (R1: allowedRoots)", () => {
   it("removes a real queue-style root that removely's default allowed roots would refuse", async () => {
-    // A root outside tmpdir is the whole point: removely defaults allowedRoots
-    // to [tmpdir()], so a fixture under mkdtemp() proves nothing about the real
-    // /hh/var/yrd-workdir tree. Guard the test's own premise, then remove.
-    const scratch = mkdtempSync(join(homedir(), ".yrd-log-retention-selftest-"))
+    // Guard the test's own premise, then remove.
+    const scratch = scratchOutsideTmpdir()
     roots.push(scratch)
     const logs = join(scratch, "logs")
     mkdirSync(logs, { recursive: true })

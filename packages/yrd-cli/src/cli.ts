@@ -49,15 +49,7 @@ import { closeEnvironment, listEnvironments, openEnvironment } from "./env-comma
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere } from "./declaration.ts"
-import {
-  ROUND_OUTPUT_WINDOW_MS,
-  ROUND_REMOVAL_BATCH,
-  expiredRoundOutput,
-  removeExpiredRoundOutput,
-  retentionHumanLines,
-  retentionObservation,
-  type ExpiredRoundOutput,
-} from "./log-retention.ts"
+import { pruneRoundOutput, retentionHumanLines, retentionObservation } from "./log-retention.ts"
 import { resolveDeclaredQueueLocations, resolveQueueLocation, type QueueLocation } from "./queue-location.ts"
 import { formatQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
@@ -1294,9 +1286,9 @@ function buildProgram(
       setExit(taken)
     })
 
-  // The queue workdir's own log tree (28499, @cto ruling 2026-10-10T02:50Z). The
-  // round prunes its own raw output a batch at a time; THIS verb is the one-time
-  // bounded drain of a backlog that already exists — dry-run first, then apply.
+  // The queue workdir's own log tree (28499, @cto ruling 2026-10-10T02:50Z). NO
+  // round prunes its own raw output: THIS verb is the one and only drain of the
+  // backlog, in bounded batches — dry-run first, then apply.
   // Journals are kept: `yrd runs <n>` and the "why not merged" explainer read
   // them after the round ends, so only the raw output a journal points at goes.
   const logs = program.command("logs").description("the queue workdir's own log tree: what is kept and what is pruned")
@@ -1329,52 +1321,37 @@ function buildProgram(
         { path: join(location.workdir, "logs") },
         { path: join(location.workdir, "checks"), optional: true },
       ]
-      const scan = expiredRoundOutput({ roots, now })
-      const selected = scan.entries
-      const chosen = limit === undefined ? selected : selected.slice(0, limit)
-      const removed: ExpiredRoundOutput[] = []
-      if (dryRun !== true) {
-        // Bounded batches through removely; the list is selected ONCE, so a
-        // drain of thousands never re-walks the tree between batches.
-        for (let index = 0; index < chosen.length; index += ROUND_REMOVAL_BATCH) {
-          const batch = await removeExpiredRoundOutput({ selected: chosen.slice(index, index + ROUND_REMOVAL_BATCH) })
-          removed.push(...batch.removed)
-        }
-      }
-      const result = {
-        windowMs: ROUND_OUTPUT_WINDOW_MS,
-        removed,
-        remaining: selected.slice(removed.length),
-        missing: scan.missing,
-      }
+      // The ONE composition — select once, remove the oldest `limit` in bounded
+      // batches — lives in `pruneRoundOutput`, so this verb and its tests run the
+      // same selection and the batches never re-walk the tree.
+      const result = await pruneRoundOutput({ roots, now, limit, dryRun })
       // One observation row, in the very log tree just pruned: the drain is on record.
       const record = openLog(join(location.workdir, "logs"), () => now)
       appendFileSync(record.path, `${JSON.stringify(retentionObservation(result, { run: record.id, at: now }))}\n`)
-      const days = Math.round(ROUND_OUTPUT_WINDOW_MS / (24 * 60 * 60 * 1000))
-      const stillOlder = selected.length - removed.length
+      const days = Math.round(result.windowMs / (24 * 60 * 60 * 1000))
       // `--dry-run` PROMISES a list, so the human mode prints the paths it would
       // remove (and the apply mode the paths it did): a count alone would leave
       // the operator unable to check the one thing the flag exists for.
-      const listed = dryRun === true ? chosen : removed
+      const listed = dryRun === true ? result.planned : result.removed
       io.stdout(
         json === true
           ? `${JSON.stringify({
               workdir: location.workdir,
               dryRun: dryRun === true,
               windowDays: days,
-              selected: selected.length,
-              planned: chosen.length,
-              removed: removed.length,
-              remaining: stillOlder,
-              ...(scan.missing.length === 0 ? {} : { missing: scan.missing }),
-              ...(dryRun === true ? { list: chosen.map((entry) => entry.path) } : {}),
+              selected: result.selected.length,
+              planned: result.planned.length,
+              removed: result.removed.length,
+              remaining: result.remaining.length,
+              ...(result.missing.length === 0 ? {} : { missing: result.missing }),
+              ...(dryRun === true ? { list: result.planned.map((entry) => entry.path) } : {}),
             })}\n`
           : retentionHumanLines(
               {
-                windowMs: ROUND_OUTPUT_WINDOW_MS,
-                removed,
-                remaining: selected.slice(removed.length),
-                missing: scan.missing,
+                windowMs: result.windowMs,
+                removed: result.removed,
+                remaining: result.remaining,
+                missing: result.missing,
               },
               { roots: roots.map((root) => root.path), dryRun: dryRun === true, listed },
             ).join("\n") + "\n",

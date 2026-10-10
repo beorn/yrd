@@ -30,13 +30,13 @@ import { safeRemove } from "removely"
 export const ROUND_OUTPUT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
- * How many round-output directories ONE queue round removes, oldest first. The
- * steady-state rate is tiny — the tree ages ~590 round directories a day and a
- * round runs every ~15 s, so ~0.4 directories a round — and each removal is a
- * bounded recursive delete, so this keeps a round's own cost far under the
- * 27723 bar (30 s, 400 spawns) while a catch-up burst still drains. The 7-day
- * backlog on this host (thousands of directories) is drained ONCE, outside the
- * round, with `yrd logs prune` — never by leaning on this batch.
+ * How many round-output directories `yrd logs prune` removes per batch, oldest
+ * first. Retention is drained EXPLICITLY by that verb — no queue round prunes
+ * automatically (the round-side sweep was split out of this head, 28499). The
+ * verb selects the whole oldest-first list ONCE and deletes it in batches of
+ * this size, so draining thousands never re-walks the tree between batches and
+ * each batch stays a bounded recursive delete, far under the 27723 bar (30 s,
+ * 400 spawns).
  */
 export const ROUND_REMOVAL_BATCH = 8
 
@@ -72,6 +72,14 @@ export type RetentionResult = Readonly<{
   remaining: readonly ExpiredRoundOutput[]
   missing: readonly string[]
 }>
+
+/**
+ * A `yrd logs prune` drain: the usual result, plus the list the run SELECTED
+ * (everything older than the window) and the oldest `limit` of it it PLANNED to
+ * remove. The verb reports both, so it never re-derives them from the scan.
+ */
+export type RetentionDrain = RetentionResult &
+  Readonly<{ selected: readonly ExpiredRoundOutput[]; planned: readonly ExpiredRoundOutput[] }>
 
 function rootOf(root: RetentionRoot): Readonly<{ path: string; optional: boolean }> {
   return typeof root === "string"
@@ -159,22 +167,45 @@ export async function removeExpiredRoundOutput(
   return { removed, remaining: input.selected.slice(removed.length) }
 }
 
-/** Select expired round output under `roots`, then remove at most `limit` of it (oldest first). */
+/**
+ * Select expired round output under `roots`, then remove at most `limit` of it
+ * (oldest first) through removely — the ONE composition `yrd logs prune` runs,
+ * and the interface its tests drive. The list is selected ONCE and removed in
+ * batches of `ROUND_REMOVAL_BATCH`, so a drain of thousands never re-walks the
+ * tree between batches. `dryRun` selects and reports but removes nothing.
+ */
 export async function pruneRoundOutput(
-  input: Readonly<{ roots: readonly RetentionRoot[]; now: Date; windowMs?: number; limit: number; dryRun?: boolean }>,
-): Promise<RetentionResult> {
+  input: Readonly<{
+    roots: readonly RetentionRoot[]
+    now: Date
+    windowMs?: number
+    limit?: number
+    dryRun?: boolean
+  }>,
+): Promise<RetentionDrain> {
+  if (input.limit !== undefined && (!Number.isSafeInteger(input.limit) || input.limit < 0)) {
+    throw new Error(`log retention batch must be a non-negative integer, got ${String(input.limit)}`)
+  }
   const windowMs = input.windowMs ?? ROUND_OUTPUT_WINDOW_MS
   const scan = expiredRoundOutput({ roots: input.roots, now: input.now, windowMs })
-  const removed = await removeExpiredRoundOutput({ selected: scan.entries, limit: input.limit, dryRun: input.dryRun })
-  return { windowMs, removed: removed.removed, remaining: removed.remaining, missing: scan.missing }
+  const selected = scan.entries
+  const planned = input.limit === undefined ? selected : selected.slice(0, input.limit)
+  const removed: ExpiredRoundOutput[] = []
+  if (input.dryRun !== true) {
+    for (let index = 0; index < planned.length; index += ROUND_REMOVAL_BATCH) {
+      const batch = await removeExpiredRoundOutput({ selected: planned.slice(index, index + ROUND_REMOVAL_BATCH) })
+      removed.push(...batch.removed)
+    }
+  }
+  return { windowMs, selected, planned, removed, remaining: selected.slice(removed.length), missing: scan.missing }
 }
 
 /**
- * The ONE observation row a round writes about this sweep (28499 ruling): what
- * it removed, how much round output is STILL older than the window, and the
- * oldest such name — so a reader can watch the sweep fall behind without
- * opening a single round directory. Absent `oldest` means the tree is inside
- * the window.
+ * The ONE observation row `yrd logs prune` writes about its sweep (28499
+ * ruling): what it removed, how much round output is STILL older than the
+ * window, and the oldest such name — so a reader can watch retention fall
+ * behind without opening a single round directory. Absent `oldest` means the
+ * tree is inside the window.
  */
 export function retentionObservation(
   result: RetentionResult,
