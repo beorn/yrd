@@ -49,6 +49,26 @@ describe("the status box's own lines", () => {
     expect(statusLineOf(clean).status).not.toBe(statusLineOf(skewed).status)
   })
 
+  // @dev/4 R3: the merged branch returned its merge explanation before reading
+  // the row's next, so a merged row wore the skew and never the cure behind it.
+  it("carries a merged row's reader cure into the box's explanation, not only into its status", () => {
+    const merged = row({ state: "merged" })
+    const skewed = {
+      ...merged,
+      next: {
+        because:
+          "journal q-newer carries record kind a-kind-from-a-newer-writer this watch does not know; restart the watch from the landing root",
+        owner: "the watch's own build",
+      },
+      unknownKinds: ["a-kind-from-a-newer-writer"],
+    }
+    const box = statusLineOf(skewed)
+    expect(box.status).toBe("Merged · reader skew")
+    expect(box.explanation).toContain("q-newer")
+    expect(box.explanation).toContain("restart the watch from the landing root")
+    expect(statusLineOf(merged).explanation ?? "").not.toContain("reader skew")
+  })
+
   it("names the reason a failed or stuck change carries, and the position of one in line", () => {
     expect(headlineOf(row({ reason: "test", state: "failed" }))).toBe("failed test")
     expect(headlineOf(row({ position: 2, state: "queued" }))).toBe("queued #2")

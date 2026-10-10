@@ -189,6 +189,9 @@ export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): 
  * The one row a change shows when the page is not split by run, wearing the
  * skew of the newest run whose journal carried a kind this reader does not
  * know. No journal on this machine leaves the row exactly as the fold gave it.
+ * A change that already has an operational next owner keeps it: @cto 056e31bf
+ * pin 1 forbids dropping the journal, the kind or the reader's cure, and
+ * @cto a04a006b requires the row to carry the cure beside the status marker.
  */
 function skewedRow(current: Row, runs: readonly JournalRun[]): Row {
   const skewed = runs.find((run) => (run.unknownKinds?.length ?? 0) > 0)
@@ -197,8 +200,16 @@ function skewedRow(current: Row, runs: readonly JournalRun[]): Row {
   return {
     ...current,
     unknownKinds: skewed.unknownKinds,
-    // This change's own next owner when it has one; the reader's cure otherwise.
-    ...(current.next !== undefined || skew === undefined ? {} : { next: skew }),
+    // This change's own next owner when it has one — the reader's cure rides in
+    // the SAME sentence rather than replacing it.
+    ...(skew === undefined
+      ? {}
+      : {
+          next:
+            current.next === undefined
+              ? skew
+              : { owner: current.next.owner, because: `${current.next.because}; ${skew.because}` },
+        }),
   }
 }
 

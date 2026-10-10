@@ -568,6 +568,26 @@ describe("a run's journal, read back", () => {
     const folded = watchRows([{ branch, head, state: "merged" } as Row], { journals })
     expect(folded[0]?.row.unknownKinds).toEqual(["a-kind-from-a-newer-writer"])
     expect(folded[0]?.row.next?.because).toContain("restart the watch from the landing root")
+    // @cto 056e31bf pin 1 on a change that ALREADY has an operational next
+    // owner (@dev/4 R3): the owner survives and the journal, the kind and the
+    // reader's cure stay visible in the same line. The old code dropped the
+    // cure whole whenever a next owner was present.
+    const busy = watchRows(
+      [
+        {
+          branch,
+          head,
+          next: { because: "repair the failing check", owner: "the author" },
+          state: "failed",
+        } as Row,
+      ],
+      { journals },
+    )[0]?.row
+    expect(busy?.next?.owner).toBe("the author")
+    expect(busy?.next?.because).toContain("repair the failing check")
+    expect(busy?.next?.because).toContain(run)
+    expect(busy?.next?.because).toContain("a-kind-from-a-newer-writer")
+    expect(busy?.next?.because).toContain("restart the watch from the landing root")
     // A neighbour whose own journal reads clean stays clean, per run and folded.
     const clean = watchRows([{ branch: "task/other", head: "def456", state: "merged" } as Row], {
       journals,

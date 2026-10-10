@@ -142,11 +142,18 @@ export function statusLineOf(row: Row, joinedRun = false): Readonly<{ status: st
   const skew = skewMarker(row)
   if (row.state === "merged") {
     const status = `${capitalize(STATE_WORDS.merged.word)}${skew}`
+    // A merged change has no operational next owner (table.ts), so a `next` on
+    // it is the reader's own cure: this branch returned before consuming it,
+    // so the box stated the skew and never the cure behind it (@dev/4 R3, 24735).
+    const cure = skew === "" || row.next === undefined ? "" : ` — ${row.next.because}`
     if (row.merge === undefined) {
-      return { status, explanation: "the head is on the queue branch, and no merged record names the merge commit" }
+      return {
+        status,
+        explanation: `the head is on the queue branch, and no merged record names the merge commit${cure}`,
+      }
     }
     const at = row.endedAt === undefined ? "" : ` at ${clock(row.endedAt)}`
-    return { status, explanation: `as ${row.merge.slice(0, 12)}${at}` }
+    return { status, explanation: `as ${row.merge.slice(0, 12)}${at}${cure}` }
   }
   const explanation = explanationLine(row)
   const status = `${capitalize(headlineOf(row, joinedRun))}${skew}`
