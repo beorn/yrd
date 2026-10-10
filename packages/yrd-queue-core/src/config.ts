@@ -125,6 +125,15 @@ export type QueueConfig = Readonly<{
    * never a stuck change.
    */
   revertGuard: "observe" | "refuse"
+  /**
+   * The physical queue root the declaration requires (28481). `tilde` is the ONE
+   * accepted word: the queue's environments must sit under the post-27065 root whose
+   * address boundary is a literal `~`. The key is a capability gate — a reader that
+   * does not know it predates the cutover, and must not open an environment here,
+   * because it would silently write the legacy `%23` root instead (a silent fallback,
+   * not a spelling bug). ABSENT asks for nothing.
+   */
+  queueRoot?: "tilde"
   /** Whole-branch Bun.Glob patterns that suppress unsubmitted drafts. */
   ignore: readonly string[]
   /** Target-owned command that resolves a raw issue reference to its canonical identity. */
@@ -217,9 +226,11 @@ export function parseConfig(
   const teardown = optionalString(declared, "teardown")
   const issueResolver = readIssueResolver(declared.issueResolver)
   const admission = readAdmission(declared.admission)
+  const queueRoot = readQueueRoot(declared["queue-root"])
   return {
     archiveAfter: readArchiveAfter(declared["archive-after"]),
     revertGuard: readRevertGuard(declared["revert-guard"]),
+    ...(queueRoot === undefined ? {} : { queueRoot }),
     blob,
     checks: readChecks(declared.checks),
     health: readHealth(declared.health),
@@ -258,6 +269,22 @@ function readRevertGuard(value: unknown): "observe" | "refuse" {
   if (value === "refuse") return "refuse"
   throw new Error(
     `yrd-revert-guard-invalid: .yrd.yml revert-guard: the only accepted value is refuse; received ${JSON.stringify(value)}`,
+  )
+}
+
+/**
+ * `queue-root` (28481): the declaration's demand for the post-27065 physical root.
+ * `tilde` is the ONE accepted word — a marker with a single meaning, the same shape
+ * as `archive-after: never` — so a typo refuses by name rather than reading as "no
+ * requirement". Its consumer is the capability gate itself: only a reader at or after
+ * the tilde cutover knows this key, and every reader that does provides the tilde
+ * root, so a declaration naming it can never be silently honoured by pre-cutover code.
+ */
+function readQueueRoot(value: unknown): "tilde" | undefined {
+  if (value === undefined) return undefined
+  if (value === "tilde") return "tilde"
+  throw new Error(
+    `yrd-queue-root-invalid: .yrd.yml queue-root: the only accepted value is tilde; received ${JSON.stringify(value)}`,
   )
 }
 
@@ -440,6 +467,7 @@ const TOP_KEYS = [
   "setup",
   "teardown",
   "notify",
+  "queue-root",
   "revert-guard",
 ] as const
 
