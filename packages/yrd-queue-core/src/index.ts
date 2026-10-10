@@ -156,12 +156,21 @@ export {
   journalKey,
   openLog,
   readJournals,
+  readJournalProjection,
   readRunLog,
   runDiedInPreamble,
   runId,
   runStartedAt,
 } from "./log.ts"
-export type { JournalCheck, JournalCommand, JournalRun, JournalStep, Journals, LogRecord } from "./log.ts"
+export type {
+  JournalCheck,
+  JournalCommand,
+  JournalProjectionFallback,
+  JournalRun,
+  JournalStep,
+  Journals,
+  LogRecord,
+} from "./log.ts"
 export { declaredPrivateSubmodules, refuseMovedPrivateGitlinks } from "./private-submodules.ts"
 export {
   checkedTree,
@@ -180,7 +189,7 @@ export {
   ReferenceUnpopulated,
 } from "./reference.ts"
 export type { PopulateReference, ReferenceStore } from "./reference.ts"
-export { queueRun, QueueAuthorityUnreadable } from "./run.ts"
+export { queueRun, QueueAuthorityUnreadable, QueueRunAfterRunFailed } from "./run.ts"
 export { LegacyOverridePresent, QueueRunEventRetryExhausted } from "./event-run.ts"
 export type { QueueRunOptions, QueueRunOutcome, RoundLine } from "./run.ts"
 export { ENDINGS, queueName, readConfig, targetName } from "./config.ts"

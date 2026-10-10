@@ -22,6 +22,7 @@ import { homedir, tmpdir } from "node:os"
 import { dirname, join, resolve, sep } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
+import { journalKey, openLog, readJournals } from "@yrd/queue-core"
 import {
   ROUND_OUTPUT_WINDOW_MS,
   expiredRoundOutput,
@@ -132,13 +133,20 @@ describe("expiredRoundOutput (selection, by name only)", () => {
 })
 
 describe("pruneRoundOutput (bounded removal through removely)", () => {
-  it("removes at most `limit` directories oldest first and keeps the journals", async () => {
+  it("removes at most `limit` directories oldest first and keeps journals with usable projections", async () => {
     const { logs } = tree("remove")
-    const oldest = place(join(logs, round(ago(30))))
+    // The new projection shares the journal's lifetime, not the pruned output's.
+    // Existing coverage kept only a dummy journal and could not detect loss of
+    // the persisted reader facts or accidental inclusion in the run census.
+    const log = openLog(logs, () => ago(30))
+    log.write({ kind: "run", target: "main", queue: "main" })
+    log.write({ kind: "change", branch: "task/retained", head: "abc123", decision: "failed" })
+    log.finish()
+    const oldest = place(join(logs, log.id))
     const middle = place(join(logs, round(ago(20))))
     const next = place(join(logs, round(ago(15))))
-    const journal = join(logs, `${round(ago(30))}.jsonl`)
-    writeFileSync(journal, "{}\n")
+    const journal = log.path
+    const projection = journal.replace(/\.jsonl$/u, ".projection.json")
 
     const first = await pruneRoundOutput({ roots: [logs], now: NOW, limit: 2 })
     expect(first.removed.map((entry) => entry.path)).toEqual([oldest, middle])
@@ -146,6 +154,11 @@ describe("pruneRoundOutput (bounded removal through removely)", () => {
     expect(existsSync(middle)).toBe(false)
     expect(existsSync(next)).toBe(true)
     expect(existsSync(journal)).toBe(true)
+    expect(existsSync(projection)).toBe(true)
+    const reading = readJournals(logs, { now: ago(30) })
+    expect(reading.fallbacks).toEqual([])
+    expect([...reading.runs.values()].flat()).toHaveLength(1)
+    expect(reading.runs.get(journalKey("task/retained", "abc123"))).toMatchObject([{ decision: "failed" }])
     expect(first.remaining.map((entry) => entry.path)).toEqual([next])
 
     const second = await pruneRoundOutput({ roots: [logs], now: NOW, limit: 2 })

@@ -13,6 +13,7 @@
  */
 
 import { execFileSync } from "node:child_process"
+import * as fs from "node:fs"
 import {
   chmodSync,
   mkdirSync,
@@ -74,6 +75,7 @@ const rendered: {
   open: undefined,
   snapshot: undefined,
 }))
+vi.mock("node:fs", async (original) => ({ ...(await original<typeof import("node:fs")>()) }))
 vi.mock("silvery/runtime", () => ({
   run: async (element: Readonly<{ props: PaneProps }>) => {
     rendered.sources = element.props.sources
@@ -226,6 +228,125 @@ async function drain(w: World): Promise<void> {
 }
 
 describe("event queue observation refusals", () => {
+  // AC4: reader-level fallback facts were invisible in the actual list/watch
+  // outputs. One real command journey proves JSON facts, human narration and
+  // watch deduplication without adding a test-only production surface.
+  it("names raw journal fallback in list JSON and once across watch refreshes", async () => {
+    const w = await world()
+    const journal = openLog(join(w.workdir, "logs"))
+    journal.write({ kind: "run", target: "main", queue: "main" })
+    const second = openLog(join(w.workdir, "logs"), () => new Date(Date.now() + 1))
+    second.write({ kind: "run", target: "main", queue: "main" })
+    const json = capture(w.work)
+    expect(await coreQueueCommand(w.work, json.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const listed = JSON.parse(json.stdout()) as {
+      journal: { fallbacks: readonly { run: string; reason: string; detail: string }[] }
+      runner: { projectionFallback?: { run: string; reason: string } }
+    }
+    expect(listed.journal.fallbacks).toMatchObject([
+      { run: journal.id, reason: "missing" },
+      { run: second.id, reason: "missing" },
+    ])
+    expect(listed.journal.fallbacks[0]?.detail).toContain(`${journal.id}.projection.json`)
+    expect(listed.runner.projectionFallback).toMatchObject({ run: second.id, reason: "missing" })
+    expect(json.stderr()).toBe("")
+
+    const human = capture(w.work)
+    expect(await coreQueueCommand(w.work, human.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    expect(human.stderr()).toContain(
+      `run journals in ${join(w.workdir, "logs")}: read raw facts for 2 round(s) (projection missing)`,
+    )
+    const watched = capture(w.work)
+    rendered.onWait = async () => {
+      if (rendered.load === undefined) throw new Error("watch supplied no refresh loader")
+      await rendered.load()
+      await rendered.load()
+    }
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          watched.io,
+          { command: "list", watch: true },
+          { interactive: true, workdir: w.workdir },
+        ),
+      ).toBe(0)
+      expect(
+        watched
+          .stderr()
+          .split(`run journals in ${join(w.workdir, "logs")}: read raw facts for 2 round(s) (projection missing)`),
+      ).toHaveLength(2)
+    } finally {
+      rendered.onWait = undefined
+    }
+    journal.finish()
+    second.finish()
+    const completed = capture(w.work)
+    expect(await coreQueueCommand(w.work, completed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
+      0,
+    )
+    const completedDocument = JSON.parse(completed.stdout()) as typeof listed
+    expect(completedDocument.journal.fallbacks).toEqual([])
+    expect(completedDocument.runner.projectionFallback).toBeUndefined()
+  })
+
+  // AC2/3/5: the command's two readers must both skip completed raw journals.
+  // Reader-unit tests cannot see a hidden raw read or inflated decision count
+  // in list/watch composition, so use one real failed run and two notice rounds.
+  it("completed list and watch skip raw journals and count one failure across notice-only rounds", async () => {
+    const w = await world()
+    await change(w, "task/failure", false)
+    await drain(w)
+    const head = (await w.git(["rev-parse", "task/failure"])).trim()
+    const logs = join(w.workdir, "logs")
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const notice = openLog(logs, () => new Date(Date.now() + attempt + 1))
+      notice.write({ kind: "run", target: "main", queue: "main" })
+      notice.write({ kind: "message", branch: "task/failure", head, says: "failed", to: "notify", delivered: true })
+      notice.finish()
+    }
+    const paths = new Set(
+      readdirSync(logs)
+        .filter((name) => name.endsWith(".jsonl"))
+        .map((name) => join(logs, name)),
+    )
+    expect(paths.size).toBe(3)
+    const read = vi.spyOn(fs, "readFileSync")
+    try {
+      const listed = capture(w.work)
+      expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+      const document = JSON.parse(listed.stdout()) as {
+        changes: { branch: string; state: string }[]
+        journal: { fallbacks: unknown[] }
+      }
+      expect(document.changes.filter((row) => row.branch === "task/failure")).toHaveLength(1)
+      expect(document.changes[0]?.state).toBe("failed")
+      expect(document.journal.fallbacks).toEqual([])
+      const watched = capture(w.work)
+      rendered.onWait = async () => {
+        if (rendered.load === undefined) throw new Error("watch supplied no refresh loader")
+        const refreshed = await rendered.load()
+        expect(refreshed.decisions).toHaveLength(1)
+      }
+      try {
+        expect(
+          await coreQueueCommand(
+            w.work,
+            watched.io,
+            { command: "list", watch: true },
+            { interactive: true, workdir: w.workdir },
+          ),
+        ).toBe(0)
+        expect(rendered.snapshot?.decisions).toHaveLength(1)
+      } finally {
+        rendered.onWait = undefined
+      }
+      expect(read.mock.calls.filter(([path]) => paths.has(String(path)))).toHaveLength(0)
+    } finally {
+      read.mockRestore()
+    }
+  })
+
   /** @failure Event queue stats could report success after Git-Super refused its root observation.
    * @level l2 @consumer operator reading queue list and queue stats from the same event queue
    */

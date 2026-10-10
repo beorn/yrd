@@ -11,9 +11,10 @@
  */
 
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs"
+import * as fs from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import {
   checksOf,
   clocks,
@@ -32,6 +33,8 @@ import { openLog, readRunLog, recentCasRefusalStreak } from "../src/log.ts"
 import { journalRun } from "../../../tests/support/journal-run.ts"
 
 const roots: string[] = []
+
+vi.mock("node:fs", async (original) => ({ ...(await original<typeof import("node:fs")>()) }))
 
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
@@ -380,6 +383,166 @@ describe("a run's journal, read back", () => {
     ])
     // A command that failed before it could write output names no files, and says why.
     expect(steps?.[2]?.commands).toEqual([{ args: ["push", "origin"], cwd: "/w", failure: "spawn" }])
+  })
+
+  it("reads a completed projection without opening raw Git rows and preserves command and date facts", () => {
+    // AC2/3: existing cache tests warm the process-local cache first, so they
+    // cannot catch a fresh reader parsing every completed raw journal.
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("completed-projection"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", target: "main", queue: "q" })
+    log.write({
+      kind: "step",
+      name: "compose",
+      phase: "merge",
+      branch: "task/one",
+      head: "abc123",
+      start: at.toISOString(),
+    })
+    log.write({
+      kind: "git",
+      args: ["merge", "task/one"],
+      cwd: "/w",
+      evidence: "/w/git/1.stdout.bin.json",
+      exit: 1,
+      discarded: "x".repeat(100_000),
+    })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed", reason: "compose" })
+    log.finish()
+    const read = vi.spyOn(fs, "readFileSync")
+    try {
+      const journals = readJournals(dir, { now: at })
+      expect(read.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(0)
+      expect(journals.fallbacks).toEqual([])
+      const run = journals.runs.get(journalKey("task/one", "abc123"))?.[0]
+      expect(run).toMatchObject({ id: log.id, decision: "failed", startedAt: at, at })
+      expect(run?.steps[0]?.startedAt).toEqual(at)
+      expect(run?.steps[0]?.commands).toEqual([
+        {
+          args: ["merge", "task/one"],
+          cwd: "/w",
+          exit: 1,
+          stdout: "/w/git/1.stdout.bin",
+          stderr: "/w/git/1.stderr.bin",
+        },
+      ])
+    } finally {
+      read.mockRestore()
+    }
+  })
+
+  it.each([
+    ["missing", "missing"],
+    ["partial", "partial"],
+    ["corrupt", "corrupt"],
+    ["old-schema", "incompatible"],
+    ["new-schema", "incompatible"],
+    ["old-fold", "incompatible"],
+    ["new-fold", "incompatible"],
+    ["same-size-edit", "source-changed"],
+    ["append-during-load", "source-changed"],
+    ["replacement", "source-changed"],
+    ["truncation", "source-changed"],
+    ["unreadable-artifact", "unreadable"],
+    ["unsupported-identity", "unsupported-identity"],
+    ["source-stat-during-load", "unreadable"],
+    ["raw-cache-stat-failure", "unreadable"],
+  ] as const)("names %s projection fallback and retains the raw journal facts", (fault, reason) => {
+    // AC4: existing raw-cache tests never invalidate a persisted artifact.
+    // Warm raw facts also catch reuse of stale process-cache data after a race.
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-fallback"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    readJournals(dir, { now: at })
+    log.finish()
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const parsed = JSON.parse(fs.readFileSync(artifact, "utf8")) as Record<string, unknown>
+    let spy: ReturnType<typeof vi.spyOn> | undefined
+    switch (fault) {
+      case "missing":
+        rmSync(artifact)
+        break
+      case "partial":
+        writeFileSync(artifact, "{}")
+        break
+      case "corrupt":
+        writeFileSync(artifact, "{")
+        break
+      case "old-schema":
+        writeFileSync(artifact, JSON.stringify({ ...parsed, schema: 0 }))
+        break
+      case "new-schema":
+        writeFileSync(artifact, JSON.stringify({ ...parsed, schema: 2 }))
+        break
+      case "new-fold":
+        writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 4 }))
+        break
+      case "old-fold":
+        writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 2 }))
+        break
+      case "same-size-edit":
+        writeFileSync(log.path, fs.readFileSync(log.path, "utf8").replace("task/one", "task/two"))
+        break
+      case "replacement": {
+        const replacement = `${log.path}.replacement`
+        writeFileSync(replacement, fs.readFileSync(log.path, "utf8").replace("task/one", "task/two"))
+        fs.renameSync(replacement, log.path)
+        break
+      }
+      case "truncation":
+        writeFileSync(log.path, `${fs.readFileSync(log.path, "utf8").split("\n")[0]}\n`)
+        break
+      case "unreadable-artifact":
+        rmSync(artifact)
+        mkdirSync(artifact)
+        break
+      case "unsupported-identity":
+      case "source-stat-during-load":
+      case "raw-cache-stat-failure": {
+        if (fault === "raw-cache-stat-failure") {
+          rmSync(artifact)
+          log.write({ kind: "warning", subject: "invalidate-raw-cache", reason: "new source bytes" })
+        }
+        const stat = fs.statSync
+        let calls = 0
+        spy = vi.spyOn(fs, "statSync").mockImplementation(((...args: Parameters<typeof fs.statSync>) => {
+          const result = stat(...args)
+          if (String(args[0]) !== log.path) return result
+          calls++
+          if (fault === "unsupported-identity") return { ...result, ctimeNs: undefined }
+          if (calls === 2) throw new Error(`source stat ${log.path}: EACCES`)
+          return result
+        }) as typeof fs.statSync)
+        break
+      }
+      case "append-during-load": {
+        const read = fs.readFileSync
+        spy = vi.spyOn(fs, "readFileSync").mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
+          const result = read(...args)
+          if (String(args[0]) === artifact) {
+            log.write({ kind: "change", branch: "task/two", head: "abc123", decision: "merged" })
+          }
+          return result
+        }) as typeof fs.readFileSync)
+        break
+      }
+    }
+    try {
+      const journals = readJournals(dir, { now: at })
+      expect(journals.fallbacks).toMatchObject([{ run: log.id, reason, detail: expect.any(String) }])
+      if (fault === "truncation") expect(journals.runs.size).toBe(0)
+      else {
+        const branch = ["same-size-edit", "append-during-load", "replacement"].includes(fault) ? "task/two" : "task/one"
+        expect(journals.runs.get(journalKey(branch, "abc123"))?.[0]?.decision).toBe(
+          fault === "append-during-load" ? "merged" : "failed",
+        )
+      }
+    } finally {
+      spy?.mockRestore()
+    }
   })
 
   it("rereads a journal when the file's mtime or size changes", () => {

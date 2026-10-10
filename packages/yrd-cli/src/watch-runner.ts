@@ -34,6 +34,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import {
   LOG_KINDS,
+  readJournalProjection,
   runDiedInPreamble,
   runStartedAt,
   serviceStoppedLine,
@@ -43,6 +44,7 @@ import {
   type ServiceIntentFact,
   type ServiceExitFact,
   type StopFact,
+  type JournalProjectionFallback,
 } from "@yrd/queue-core"
 import { readQueueHealth, SERVICE } from "./queue-health.ts"
 import { pidPresence } from "@yrd/process"
@@ -168,6 +170,8 @@ export type RunnerFlow = Readonly<{
 export type RunnerFacts = Readonly<{
   /** The directory the journals were looked for in. */
   journalDir: string
+  /** Why this read used raw journal facts instead of a completed projection. */
+  projectionFallback?: JournalProjectionFallback
   /** Why there is no run to show, when there is none: a sentence naming what was looked for and where. */
   absent?: string
   /** The newest run journal on this machine. */
@@ -445,7 +449,8 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
   // no `.pid` file exists. Reading liveness from that absence would call a run
   // three seconds old dead. The worktree pid still answers for journals written
   // before 24470, and for a run past its preamble it is the same process.
-  const read = readRunHeader(path)
+  const projection = readJournalProjection(journalDir, id)
+  const read = readRunHeader(path, projection.kind === "projection" ? projection.runnerRecords : undefined)
   const pidPath = join(workdir, "worktrees", id, RUN_PID)
   const claimed = existsSync(pidPath) ? readPid(pidPath) : undefined
   const pid = read.pid ?? claimed
@@ -473,6 +478,7 @@ export async function readRunnerFacts(workdir: string, now: Date = new Date()): 
   return {
     journalDir,
     service,
+    ...(projection.kind === "raw" ? { projectionFallback: projection.fallback } : {}),
     ...(roundLockHolder === undefined ? {} : { roundLockHolder }),
     latest: {
       alive,
@@ -535,10 +541,15 @@ function lineOf(records: readonly LogRecord[]): RoundLine | undefined {
  * it needs — which is why the header's own `pid` comes back with the fields.
  * Every malformed record below still refuses as loudly as it ever did.
  */
-function readRunHeader(path: string): JournalHead {
+function readRunHeader(path: string, projected?: readonly LogRecord[]): JournalHead {
   let text: string
   try {
-    text = readFileSync(path, "utf8")
+    // Retain the one interpreter, including read-time date handling. Compact
+    // non-Git records use exactly the same path as raw journal lines.
+    text =
+      projected === undefined
+        ? readFileSync(path, "utf8")
+        : projected.map((record) => JSON.stringify(record)).join("\n")
   } catch (error) {
     throw new Error(`run journal ${path}: required run header cannot be read: ${errorDetail(error)}`, {
       cause: error,

@@ -12,13 +12,15 @@
  */
 
 import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
+import * as fs from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   exitedHealthDocument,
   gracefulStopHealthDocument,
   openLog,
+  readJournals,
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
   runId,
@@ -36,6 +38,8 @@ import {
 import { runnerStatusWord } from "../src/watch-list.tsx"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
+
+vi.mock("node:fs", async (original) => ({ ...(await original<typeof import("node:fs")>()) }))
 
 /** A believable health document, as `writtenHealthDocument` shapes one: its writer declares its own deadline. */
 const BEATING: RunnerService = { kind: "beating", state: "healthy", since: NOW }
@@ -114,6 +118,161 @@ function workdirWith(
 }
 
 describe("readRunnerFacts", () => {
+  // AC3 requires a growth witness, not one fixed payload. Both production
+  // consumers must skip discarded bytes while retaining every command fact.
+  it("scales projections with rounds and retained commands, independent of discarded Git bytes", async () => {
+    const artifactSizes: number[] = []
+    for (const sample of [
+      { rounds: 1, commands: 1, discarded: 0 },
+      { rounds: 1, commands: 1, discarded: 1_000_000 },
+      { rounds: 3, commands: 4, discarded: 0 },
+    ]) {
+      const workdir = mkdtempSync(join(tmpdir(), "yrd-projection-growth-"))
+      const dir = join(workdir, "logs")
+      const paths = new Set<string>()
+      let artifactBytes = 0
+      for (let round = 0; round < sample.rounds; round++) {
+        const log = openLog(dir, () => new Date(NOW.getTime() + round))
+        log.write({ kind: "run", target: "main", queue: "main" })
+        log.write({
+          kind: "step",
+          name: "compose",
+          phase: "merge",
+          branch: `task/${round}`,
+          head: "abc123",
+          start: NOW.toISOString(),
+        })
+        for (let command = 0; command < sample.commands; command++) {
+          log.write({
+            kind: "git",
+            args: ["show", String(command)],
+            cwd: "/w",
+            evidence: `/w/git/${command}.stdout.bin.json`,
+            discarded: "x".repeat(sample.discarded),
+          })
+        }
+        log.write({ kind: "change", branch: `task/${round}`, head: "abc123", decision: "failed" })
+        log.finish()
+        paths.add(log.path)
+        artifactBytes += fs.statSync(log.path.replace(/\.jsonl$/u, ".projection.json")).size
+      }
+      artifactSizes.push(artifactBytes)
+      const read = vi.spyOn(fs, "readFileSync")
+      try {
+        const detail = readJournals(dir, { now: NOW })
+        const runner = await readRunnerFacts(workdir, NOW)
+        expect(detail.fallbacks).toEqual([])
+        expect(runner.projectionFallback).toBeUndefined()
+        const runs = [...detail.runs.values()].flat()
+        expect(runs).toHaveLength(sample.rounds)
+        expect(runs.flatMap((run) => run.steps.flatMap((step) => step.commands))).toHaveLength(
+          sample.rounds * sample.commands,
+        )
+        expect(read.mock.calls.filter(([path]) => paths.has(String(path)))).toHaveLength(0)
+      } finally {
+        read.mockRestore()
+      }
+    }
+    // Source size is metadata, so a larger decimal size can add a few bytes.
+    expect(Math.abs(artifactSizes[1]! - artifactSizes[0]!)).toBeLessThan(100)
+    expect(artifactSizes[2]!).toBeGreaterThan(artifactSizes[0]! * 3)
+  })
+
+  // The approved cache contract keeps invalid start dates as input strings:
+  // the runner's fallback clock belongs to each read, never to publication.
+  // Existing date and skew cases use only raw journals, missing this boundary.
+  it.each([false, true])(
+    "preserves date and reader-skew semantics through projection: invalidStart=%s",
+    async (invalidStart) => {
+      vi.useFakeTimers()
+      vi.setSystemTime(NOW)
+      let read: ReturnType<typeof vi.spyOn> | undefined
+      try {
+        const workdir = mkdtempSync(join(tmpdir(), "yrd-runner-parity-"))
+        const log = openLog(join(workdir, "logs"), () => NOW)
+        log.write({ kind: "run", target: "main", queue: "main", pid: process.pid })
+        log.write({
+          kind: "step",
+          name: "compose",
+          phase: "merge",
+          start: invalidStart ? "not-a-date" : NOW.toISOString(),
+        })
+        log.write({ kind: "future-writer-kind", note: "reader skew" } as never)
+        const raw = await readRunnerFacts(workdir)
+        expect(raw.latest?.activeStep?.start).toEqual(NOW)
+        expect(raw.latest?.unknownKinds).toEqual(["future-writer-kind"])
+        log.finish()
+        const later = new Date(NOW.getTime() + 1_000)
+        vi.setSystemTime(later)
+        read = vi.spyOn(fs, "readFileSync")
+        const projected = await readRunnerFacts(workdir)
+        expect(projected.projectionFallback).toBeUndefined()
+        expect(projected.latest?.activeStep?.start).toEqual(invalidStart ? later : NOW)
+        expect(projected.latest?.unknownKinds).toEqual(raw.latest?.unknownKinds)
+        expect(runnerLine(projected, later).detail).toContain("restart the watch from the landing root")
+        expect(read.mock.calls.filter((args: readonly unknown[]) => String(args[0]) === log.path)).toHaveLength(0)
+      } finally {
+        read?.mockRestore()
+        vi.useRealTimers()
+      }
+    },
+  )
+
+  // Runner pre-header validation is stricter than detail folding. A projection
+  // must not erase invalid prefix bytes that readRunLog normally skips.
+  it.each(["\n", "null\n", '{"kind":"git","run":"q-old","at":"now"}\n'])(
+    "retains malformed pre-header refusal after projection publication: %j",
+    async (prefix) => {
+      const workdir = mkdtempSync(join(tmpdir(), "yrd-runner-prefix-"))
+      const log = openLog(join(workdir, "logs"), () => NOW)
+      log.write({ kind: "run", target: "main", queue: "main" })
+      writeFileSync(log.path, prefix + fs.readFileSync(log.path, "utf8"))
+      log.finish()
+      await expect(readRunnerFacts(workdir, NOW)).rejects.toThrow(/run journal .* record 1 before the run header/u)
+    },
+  )
+
+  // AC3: the actual runner consumer must avoid raw Git payloads on a cold
+  // completed read. Existing runner cases never publish a projection, and the
+  // detail-reader test cannot detect a runner that keeps opening raw journals.
+  it("reads completed projected records without raw opens and refreshes process and service facts", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-runner-projection-"))
+    const log = openLog(join(workdir, "logs"), () => NOW)
+    log.write({ kind: "run", target: "main", queue: "main", checks: ["test"] })
+    log.write({ kind: "git", evidence: "discarded", payload: "x".repeat(100_000) })
+    log.write({ kind: "step", name: "compose", phase: "merge", start: NOW.toISOString() })
+    log.finish()
+    const pidPath = join(workdir, "worktrees", log.id, ".pid")
+    mkdirSync(join(workdir, "worktrees", log.id), { recursive: true })
+    writeFileSync(pidPath, String(process.pid))
+    writeFileSync(join(workdir, QUEUE_HEALTH_DOCUMENT), healthDocument({ staleAfterMs: 30_000 }))
+    const readFile = vi.spyOn(fs, "readFileSync")
+    try {
+      const running = await readRunnerFacts(workdir, NOW)
+      expect(readFile.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(0)
+      expect(running.latest).toMatchObject({
+        id: log.id,
+        alive: true,
+        pid: process.pid,
+        target: "main",
+        queue: "main",
+        checks: ["test"],
+        activeStep: { name: "compose", start: NOW },
+      })
+      expect(running.service.kind).toBe("beating")
+      writeFileSync(pidPath, "2147483647")
+      writeFileSync(join(workdir, QUEUE_HEALTH_DOCUMENT), healthDocument({ staleAfterMs: -1_000 }))
+      const stopped = await readRunnerFacts(workdir, NOW)
+      expect(stopped.latest).toMatchObject({ alive: false, pid: 2147483647 })
+      expect(stopped.latest?.activeStep).toBeUndefined()
+      expect(stopped.latest?.steps?.[0]?.start).toEqual(NOW)
+      expect(stopped.service.kind).toBe("unknown")
+      expect(readFile.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(0)
+    } finally {
+      readFile.mockRestore()
+    }
+  })
+
   it("says where it looked when there is no journal directory, and when the directory holds no run", async () => {
     const empty = mkdtempSync(join(tmpdir(), "yrd-watch-runner-"))
     expect((await readRunnerFacts(empty)).absent).toContain("there is no such directory")

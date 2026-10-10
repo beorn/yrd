@@ -58,7 +58,7 @@
  * the setup did are the queue's, a failing check the submitter's. A passing
  * result is nobody's, so only the stuck case below reads it.
  */
-import { readdir, readFile } from "node:fs/promises"
+import { readdir, readFile, stat } from "node:fs/promises"
 import { basename, dirname } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
@@ -113,6 +113,24 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     for (const record of records) expect(typeof record.kind, run.report).toBe("string")
     // One queue run, so one id across every record.
     expect(new Set(records.map((record) => record.run)).size, run.report).toBe(1)
+
+    // AC1 (#24750): publication happens after the entire disposal stack,
+    // including its remote-call tail. Existing log assertions miss an absent
+    // or prematurely captured reusable projection.
+    const projection = JSON.parse(await readFile(path.replace(/\.jsonl$/, ".projection.json"), "utf8")) as {
+      source: unknown
+      runnerRecords: unknown
+    }
+    const source = await stat(path, { bigint: true })
+    expect(projection.source, run.report).toMatchObject({
+      run: records[0]?.run,
+      dev: String(source.dev),
+      ino: String(source.ino),
+      size: String(source.size),
+      mtimeNs: String(source.mtimeNs),
+      ctimeNs: String(source.ctimeNs),
+    })
+    expect(projection.runnerRecords, run.report).toContainEqual(theOne(records, "remote-calls"))
   })
 
   /**
