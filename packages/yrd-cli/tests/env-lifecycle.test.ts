@@ -443,6 +443,58 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).toContain("setup exploded")
     expect(run.stderr()).toContain(bay)
   })
+
+  /**
+   * @failure 26906: `yrd env open`'s failed-setup report dropped the frozen-lockfile diagnosis,
+   *          and the retained bay's lockfile was left rewritten by it, so the caller could not
+   *          tell its own starting bytes from the diagnosis's dependency change.
+   * @level l2 (real `bun install --frozen-lockfile` refusal through `yrd env open`)
+   * @consumer every seat whose environment setup fails a frozen install
+   */
+  it("keeps a failed frozen install's lockfile bytes and names the diagnosis (26906)", async () => {
+    const w = await world("bun install --frozen-lockfile")
+    const manifest = (version: string): string =>
+      `${JSON.stringify(
+        { dependencies: { "fixture-dep": `file:./vendor-${version}` }, name: "fixture-root", version: "0.0.0" },
+        null,
+        2,
+      )}\n`
+    await w.git(["checkout", "--quiet", "main"])
+    for (const version of ["1.0.0", "2.0.0"]) {
+      mkdirSync(join(w.work, `vendor-${version}`), { recursive: true })
+      writeFileSync(
+        join(w.work, `vendor-${version}`, "package.json"),
+        `${JSON.stringify({ name: "fixture-dep", version }, null, 2)}\n`,
+      )
+    }
+    writeFileSync(join(w.work, "package.json"), manifest("1.0.0"))
+    // The one moment a lockfile is GENERATED rather than diffed: a real, offline `bun install`
+    // against the BEFORE manifest, in the fixture's own work tree.
+    const seeded = await command(w.work, ["bun", "install"])
+    expect(seeded, seeded.stderr).toMatchObject({ exit: 0 })
+    const locked = readFileSync(join(w.work, "bun.lock"), "utf8")
+    // The candidate raises the dependency in package.json ALONE, never touching the lockfile:
+    // 24140's own repro for a `bun install --frozen-lockfile` that refuses without naming what moved.
+    writeFileSync(join(w.work, "package.json"), manifest("2.0.0"))
+    await w.git(["add", "package.json", "bun.lock", "vendor-1.0.0", "vendor-2.0.0"])
+    await w.git(["commit", "--quiet", "-m", "raise the dependency without the lockfile"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "frozen"], run.io), run.stderr()).toBe(2)
+
+    const listed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io), listed.stderr()).toBe(0)
+    const rows = JSON.parse(listed.stdout()) as { environments: { path: string }[] }
+    expect(rows.environments).toHaveLength(1)
+    const bay = rows.environments[0]!.path
+    expect(existsSync(bay), run.stderr()).toBe(true)
+    // The failure text names the diagnosis and what moved.
+    expect(run.stderr()).toContain("frozen-lockfile diagnosis")
+    expect(run.stderr()).toContain("fixture-dep")
+    // And the retained bay's tracked lockfile is byte-identical to the candidate's.
+    expect(readFileSync(join(bay, "bun.lock"), "utf8")).toBe(locked)
+  })
 })
 
 describe("yrd env close preserves anything it cannot safely remove", () => {

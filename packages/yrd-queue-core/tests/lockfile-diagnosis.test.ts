@@ -104,11 +104,61 @@ describe("frozenLockfileDiagnosis", () => {
     expect(result).toContain(join(cwd, "bun.lock"))
     expect(result).toContain(join(cwd, "package.json"))
     expect(result).toContain(`worktree root ${cwd}`)
-    // The lockfile on disk is left at the re-resolved (AFTER) state, as a real
-    // unfrozen `bun install` would leave it — this diagnosis never re-freezes
-    // or restores the worktree it just mutated; the caller's own cleanup owns
-    // that (worktree.ts removes the whole disposable tree next).
-    expect(readFileSync(join(cwd, "bun.lock"), "utf8")).toContain("new@1.0.0")
+    // 26906: the lockfile on disk goes BACK to the bytes the failed setup left.
+    // The queue's worktree is disposable, but an `env open` environment failed
+    // INTO RETENTION (25976) — the caller is told to inspect it, and cannot
+    // tell its own starting bytes from this diagnosis's dependency change
+    // unless the diagnosis is a pure observer.
+    expect(readFileSync(join(cwd, "bun.lock"), "utf8")).not.toContain("new@1.0.0")
+  })
+
+  /**
+   * @failure 26906: a setup-failed, retained environment's lockfile was left rewritten by the
+   *          frozen-lockfile diagnosis, and the failure text never named the mutation.
+   * @level l1 (real files and a real child process, no install)
+   * @consumer every seat whose retained environment's setup fails a frozen install
+   */
+  it("leaves the tree it ran in byte-identical and names the rollback (26906)", async () => {
+    const cwd = dir()
+    const before = `${JSON.stringify({ packages: { moved: ["moved@1.0.0", {}] }, workspaces: { "": { name: "root" } } })}\n`
+    writeFileSync(join(cwd, "bun.lock"), before)
+    writeFileSync(
+      join(cwd, "after.lock"),
+      JSON.stringify({ packages: { moved: ["moved@2.0.0", {}] }, workspaces: { "": { name: "root" } } }),
+    )
+    const result = await frozenLockfileDiagnosis({
+      cwd,
+      setupRun: "sh -c 'cp after.lock bun.lock' --frozen-lockfile",
+    })
+    // It still names what moved ...
+    expect(result).toContain("moved: moved@1.0.0 -> moved@2.0.0")
+    // ... and puts the starting bytes back, so the tree it ran in is unchanged.
+    expect(readFileSync(join(cwd, "bun.lock"), "utf8")).toBe(before)
+    // The rollback is stated, never silent.
+    expect(result).toContain("restored its starting bytes")
+  })
+
+  /**
+   * @failure 26906: a re-resolve that FAILS (nonzero exit, timeout, signal) can already have
+   *          rewritten the lockfile — `bun install` writes it before linking — so a retained
+   *          environment would be left mutated even on the failure branch.
+   * @level l1 (real files and a real child process, no install)
+   * @consumer every seat whose retained environment's setup fails a frozen install
+   */
+  it("rolls back a FAILED re-resolve that had already rewritten the lockfile (26906)", async () => {
+    const cwd = dir()
+    const before = `${JSON.stringify({ packages: { moved: ["moved@1.0.0", {}] } })}\n`
+    writeFileSync(join(cwd, "bun.lock"), before)
+    writeFileSync(join(cwd, "after.lock"), JSON.stringify({ packages: { moved: ["moved@2.0.0", {}] } }))
+    // Rewrite the lockfile, THEN fail — the order a real install can take.
+    const result = await frozenLockfileDiagnosis({
+      cwd,
+      setupRun: "sh -c 'cp after.lock bun.lock && exit 9' --frozen-lockfile",
+    })
+    expect(result).toContain("exited 9")
+    // The tree it ran in is unchanged, and the rollback is named, not silent.
+    expect(readFileSync(join(cwd, "bun.lock"), "utf8")).toBe(before)
+    expect(result).toContain("restored its starting bytes")
   })
 
   it("says so plainly when re-resolving changes nothing named", async () => {

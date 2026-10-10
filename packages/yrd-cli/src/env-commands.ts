@@ -547,9 +547,14 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       const result = error.ran.result
       const output = readFileSync(result.log, "utf8").trim() || "(setup produced no output)"
       const why = result.why === undefined ? "" : ` (${result.why})`
+      // 26906: SetupFailed carries lockfile-diagnosis.ts's forensics (which dependency moved, and the
+      // rollback that keeps the retained bay byte-identical), but THIS report rebuilds the failure text
+      // from the ran result and the log alone -- so without this line the one thing that names the
+      // frozen refusal's cause is dropped exactly where a seat needs it.
+      const diagnosis = error.diagnosis === undefined ? "" : `\n${error.diagnosis}`
       throw new Error(
         `environment setup ${result.result} in preserved bay ${path}: exit ${String(result.exit)}${why}\n` +
-          `command: ${setup}\n${output}\nlog ${result.log}`,
+          `command: ${setup}\n${output}\nlog ${result.log}${diagnosis}`,
         { cause: error },
       )
     }

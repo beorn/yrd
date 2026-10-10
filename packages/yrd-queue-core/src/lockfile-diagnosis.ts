@@ -13,15 +13,19 @@
  *
  * Triggered ONLY when the failing command line names `--frozen-lockfile`;
  * every other setup failure is unrelated and gets none of this. Advisory
- * throughout: mutating the already-failed, never-merged worktree by
- * re-running its install without the flag is safe precisely because that
- * worktree is disposable, but whatever this returns is APPENDED to the
- * failure text a human reads — it never throws past its own boundary, and it
- * never changes what the setup itself decided (`SetupFailed` is still the
- * setup's own verdict; this only adds to its message).
+ * throughout: the re-resolve is a pure OBSERVATION — its lockfile output is
+ * read, diffed, and rolled back to the bytes the failed setup left, so the
+ * tree this ran in comes out exactly as it went in. That rollback is load
+ * bearing for `env open`, whose failed setup is RETAINED for inspection
+ * (25976), not the disposable queue worktree this was first written for: the
+ * caller cannot tell its own starting bytes from this diagnosis's dependency
+ * change if the tree is left rewritten (26906). Whatever this returns is
+ * APPENDED to the failure text a human reads — it never throws past its own
+ * boundary, and it never changes what the setup itself decided (`SetupFailed`
+ * is still the setup's own verdict; this only adds to its message).
  */
 
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { DEFAULT_CHECK_BOUND_MS } from "./check.ts"
@@ -93,7 +97,7 @@ async function diagnose(options: FrozenLockfileDiagnosis): Promise<string> {
   } catch (error) {
     return (
       `frozen-lockfile diagnosis: re-running \`${rerun}\` without ${FROZEN_FLAG} in the same disposable worktree ` +
-      `(to see the lockfile it would have produced) itself threw: ${error instanceof Error ? error.message : String(error)}; ${where}`
+      `(to see the lockfile it would have produced) itself threw: ${error instanceof Error ? error.message : String(error)}${restoreStartingLockfile(lockfilePath, before)}; ${where}`
     )
   }
   if (result.timedOut || result.signal !== null || result.exitCode !== 0) {
@@ -105,7 +109,7 @@ async function diagnose(options: FrozenLockfileDiagnosis): Promise<string> {
     const stderr = result.stderr.trim()
     return (
       `frozen-lockfile diagnosis: re-running \`${rerun}\` without ${FROZEN_FLAG} to compare lockfiles ${why}` +
-      `${stderr === "" ? "" : `: ${stderr}`}; ${where}`
+      `${stderr === "" ? "" : `: ${stderr}`}${restoreStartingLockfile(lockfilePath, before)}; ${where}`
     )
   }
 
@@ -113,14 +117,20 @@ async function diagnose(options: FrozenLockfileDiagnosis): Promise<string> {
   try {
     after = readFileSync(lockfilePath, "utf8")
   } catch (error) {
-    return `frozen-lockfile diagnosis: the re-resolve exited 0 but ${lockfilePath} could not be read afterwards: ${error instanceof Error ? error.message : String(error)}; ${where}`
+    return `frozen-lockfile diagnosis: the re-resolve exited 0 but ${lockfilePath} could not be read afterwards: ${error instanceof Error ? error.message : String(error)}${restoreStartingLockfile(lockfilePath, before)}; ${where}`
   }
+  // 26906: put the starting bytes back before anything else runs. Reading the
+  // re-resolve's own output stays possible (it is already in memory); leaving
+  // the file rewritten does not, because the tree may be a RETAINED
+  // environment whose whole point is to be inspected exactly as it failed.
+  // Idempotent, and quiet when the re-resolve changed nothing.
+  const rollback = restoreStartingLockfile(lockfilePath, before)
 
   let comparison: LockfileRead
   try {
     comparison = { after: parseLockfile(after), before: parseLockfile(before) }
   } catch (error) {
-    return `frozen-lockfile diagnosis: re-resolved successfully but could not parse ${lockfilePath} to compare entries: ${error instanceof Error ? error.message : String(error)}; ${where}`
+    return `frozen-lockfile diagnosis: re-resolved successfully but could not parse ${lockfilePath} to compare entries: ${error instanceof Error ? error.message : String(error)}${rollback}; ${where}`
   }
 
   const manifestKeys = comparison.after.manifestKeys.length > 0 ? comparison.after.manifestKeys : [""]
@@ -131,14 +141,38 @@ async function diagnose(options: FrozenLockfileDiagnosis): Promise<string> {
     return (
       `frozen-lockfile diagnosis: re-resolved without ${FROZEN_FLAG}; the lockfile ` +
       `${before === after ? "came back identical" : "changed, but no named package entry's locator differs"} — ` +
-      `inspect ${lockfilePath} directly; ${lookedAt}`
+      `inspect ${lockfilePath} directly${rollback}; ${lookedAt}`
     )
   }
   const lines = changed.map(({ from, name, to }) => `- ${name}: ${from} -> ${to}`)
   return (
     `frozen-lockfile diagnosis: \`${setupRun.trim()}\` refused because the lockfile would change; re-resolving ` +
-    `without ${FROZEN_FLAG} in this same disposable worktree shows what changed:\n${lines.join("\n")}\n${lookedAt}`
+    `without ${FROZEN_FLAG} in this same worktree shows what changed:\n${lines.join("\n")}${rollback}\n${lookedAt}`
   )
+}
+
+/**
+ * Put the lockfile back to the bytes the failed setup left, and say so. Reads
+ * the current bytes first, so it is a NO-OP (and silent) whenever the prior
+ * step already left the tree unchanged — the ordinary queue worktree's message
+ * is untouched. A rollback that itself fails is NAMED, loudly — never
+ * swallowed — so a reader always knows whether the tree they are about to
+ * inspect is really the tree the setup left behind.
+ */
+function restoreStartingLockfile(lockfilePath: string, before: string): string {
+  let current: string | undefined
+  try {
+    current = readFileSync(lockfilePath, "utf8")
+  } catch {
+    current = undefined
+  }
+  if (current === before) return ""
+  try {
+    writeFileSync(lockfilePath, before)
+    return `; the re-resolve left ${lockfilePath} changed and this diagnosis restored its starting bytes, so the tree it ran in is unchanged`
+  } catch (error) {
+    return `; the re-resolve left ${lockfilePath} changed and this diagnosis COULD NOT restore its starting bytes (the tree is MODIFIED): ${error instanceof Error ? error.message : String(error)}`
+  }
 }
 
 type LockfileRead = Readonly<{ before: ParsedLockfile; after: ParsedLockfile }>
