@@ -626,7 +626,7 @@ const journalFileCache = new Map<string, { source: JournalSource; runs: readonly
 // Change the fold identity whenever JournalRun or runner interpretation changes.
 // Exact equality is required: an older fold cannot recognize a newer artifact.
 const JOURNAL_PROJECTION_SCHEMA = 1
-const JOURNAL_PROJECTION_FOLD = 2
+const JOURNAL_PROJECTION_FOLD = 3
 
 type JournalSource = Readonly<{
   run: string
@@ -1374,6 +1374,10 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
     return found
   }
   for (const record of records) {
+    // Delivery retries are evidence about an earlier decision, not another
+    // attempt. Keep the original records for the runner, without minting a
+    // change run (or moving its decision time) from a notice alone.
+    if (record.kind === "message") continue
     const { branch, head } = record
     if (typeof branch !== "string" || typeof head !== "string") continue
     const at = new Date(record.at)
