@@ -162,7 +162,15 @@ export {
   runId,
   runStartedAt,
 } from "./log.ts"
-export type { JournalCheck, JournalCommand, JournalRun, JournalStep, Journals, LogRecord } from "./log.ts"
+export type {
+  JournalCheck,
+  JournalCommand,
+  JournalProjectionFallback,
+  JournalRun,
+  JournalStep,
+  Journals,
+  LogRecord,
+} from "./log.ts"
 export { declaredPrivateSubmodules, refuseMovedPrivateGitlinks } from "./private-submodules.ts"
 export {
   checkedTree,

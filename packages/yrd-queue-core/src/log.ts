@@ -269,7 +269,7 @@ export function openLog(
     finish() {
       try {
         const before = journalSource(path, id)
-        const records = readRunLog(directory, id)
+        const records = runLogRecords(readFileSync(path, "utf8"), true)
         const startedAt = runStartedAt(id)
         if (startedAt === undefined) throw new Error(`journal ${path}: run id has no start instant`)
         const runs = runsIn(records, id, startedAt)
@@ -580,13 +580,41 @@ export function runStartedAt(id: string): Date | undefined {
 
 /** One run's journal, read: every record it wrote, in order. A line that is not a record is skipped and counted, never guessed at. */
 export function readRunLog(dir: string, run: string): readonly LogRecord[] {
-  const text = readFileSync(join(dir, `${run}.jsonl`), "utf8")
+  return runLogRecords(readFileSync(join(dir, `${run}.jsonl`), "utf8"))
+}
+
+/** Projection publication must preserve the runner's stricter opening contract. */
+function runLogRecords(text: string, projecting = false): readonly LogRecord[] {
   const records: LogRecord[] = []
-  for (const line of text.split("\n")) {
+  const lines = text.split("\n")
+  if (lines.at(-1) === "") lines.pop()
+  let headed = false
+  for (const line of lines) {
+    if (projecting && !headed && line.trim() === "") throw new Error("empty record before run header")
     if (line.trim() === "") continue
     const parsed: unknown = JSON.parse(line)
+    if (projecting && !headed) {
+      const prefix = parsed as LogRecord | null
+      if (
+        typeof prefix !== "object" ||
+        prefix === null ||
+        (prefix.kind !== "run" && prefix.kind !== "git") ||
+        (prefix.kind === "git" &&
+          (typeof prefix.run !== "string" || typeof prefix.at !== "string" || typeof prefix.evidence !== "string"))
+      ) {
+        throw new Error("invalid record before run header")
+      }
+      headed = prefix.kind === "run"
+    }
     if (typeof parsed !== "object" || parsed === null) continue
     const record = parsed as LogRecord
+    if (
+      projecting &&
+      typeof record.kind === "string" &&
+      (typeof record.run !== "string" || typeof record.at !== "string")
+    ) {
+      throw new Error("runner record cannot be retained with its original fields")
+    }
     if (typeof record.kind !== "string" || typeof record.run !== "string" || typeof record.at !== "string") continue
     records.push(record)
   }
@@ -598,7 +626,7 @@ const journalFileCache = new Map<string, { source: JournalSource; runs: readonly
 // Change the fold identity whenever JournalRun or runner interpretation changes.
 // Exact equality is required: an older fold cannot recognize a newer artifact.
 const JOURNAL_PROJECTION_SCHEMA = 1
-const JOURNAL_PROJECTION_FOLD = 1
+const JOURNAL_PROJECTION_FOLD = 2
 
 type JournalSource = Readonly<{
   run: string

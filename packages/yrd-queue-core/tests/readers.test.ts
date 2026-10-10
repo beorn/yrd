@@ -438,6 +438,7 @@ describe("a run's journal, read back", () => {
     ["corrupt", "corrupt"],
     ["old-schema", "incompatible"],
     ["new-schema", "incompatible"],
+    ["old-fold", "incompatible"],
     ["new-fold", "incompatible"],
     ["same-size-edit", "source-changed"],
     ["append-during-load", "source-changed"],
@@ -471,7 +472,10 @@ describe("a run's journal, read back", () => {
         writeFileSync(artifact, JSON.stringify({ ...parsed, schema: 2 }))
         break
       case "new-fold":
-        writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 2 }))
+        writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 3 }))
+        break
+      case "old-fold":
+        writeFileSync(artifact, JSON.stringify({ ...parsed, fold: 1 }))
         break
       case "same-size-edit":
         writeFileSync(log.path, fs.readFileSync(log.path, "utf8").replace("task/one", "task/two"))

@@ -12,9 +12,10 @@
  */
 
 import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
+import * as fs from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   exitedHealthDocument,
   gracefulStopHealthDocument,
@@ -36,6 +37,8 @@ import {
 import { runnerStatusWord } from "../src/watch-list.tsx"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
+
+vi.mock("node:fs", async (original) => ({ ...(await original<typeof import("node:fs")>()) }))
 
 /** A believable health document, as `writtenHealthDocument` shapes one: its writer declares its own deadline. */
 const BEATING: RunnerService = { kind: "beating", state: "healthy", since: NOW }
@@ -114,6 +117,61 @@ function workdirWith(
 }
 
 describe("readRunnerFacts", () => {
+  // Runner pre-header validation is stricter than detail folding. A projection
+  // must not erase invalid prefix bytes that readRunLog normally skips.
+  it.each(["\n", "null\n", '{"kind":"git","run":"q-old","at":"now"}\n'])(
+    "retains malformed pre-header refusal after projection publication: %j",
+    async (prefix) => {
+      const workdir = mkdtempSync(join(tmpdir(), "yrd-runner-prefix-"))
+      const log = openLog(join(workdir, "logs"), () => NOW)
+      log.write({ kind: "run", target: "main", queue: "main" })
+      writeFileSync(log.path, prefix + fs.readFileSync(log.path, "utf8"))
+      log.finish()
+      await expect(readRunnerFacts(workdir, NOW)).rejects.toThrow(/run journal .* record 1 before the run header/u)
+    },
+  )
+
+  // AC3: the actual runner consumer must avoid raw Git payloads on a cold
+  // completed read. Existing runner cases never publish a projection, and the
+  // detail-reader test cannot detect a runner that keeps opening raw journals.
+  it("reads completed projected records without raw opens and refreshes process and service facts", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-runner-projection-"))
+    const log = openLog(join(workdir, "logs"), () => NOW)
+    log.write({ kind: "run", target: "main", queue: "main", checks: ["test"] })
+    log.write({ kind: "git", evidence: "discarded", payload: "x".repeat(100_000) })
+    log.write({ kind: "step", name: "compose", phase: "merge", start: NOW.toISOString() })
+    log.finish()
+    const pidPath = join(workdir, "worktrees", log.id, ".pid")
+    mkdirSync(join(workdir, "worktrees", log.id), { recursive: true })
+    writeFileSync(pidPath, String(process.pid))
+    writeFileSync(join(workdir, QUEUE_HEALTH_DOCUMENT), healthDocument({ staleAfterMs: 30_000 }))
+    const readFile = vi.spyOn(fs, "readFileSync")
+    try {
+      const running = await readRunnerFacts(workdir, NOW)
+      expect(readFile.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(0)
+      expect(running.latest).toMatchObject({
+        id: log.id,
+        alive: true,
+        pid: process.pid,
+        target: "main",
+        queue: "main",
+        checks: ["test"],
+        activeStep: { name: "compose", start: NOW },
+      })
+      expect(running.service.kind).toBe("beating")
+      writeFileSync(pidPath, "2147483647")
+      writeFileSync(join(workdir, QUEUE_HEALTH_DOCUMENT), healthDocument({ staleAfterMs: -1_000 }))
+      const stopped = await readRunnerFacts(workdir, NOW)
+      expect(stopped.latest).toMatchObject({ alive: false, pid: 2147483647 })
+      expect(stopped.latest?.activeStep).toBeUndefined()
+      expect(stopped.latest?.steps?.[0]?.start).toEqual(NOW)
+      expect(stopped.service.kind).toBe("unknown")
+      expect(readFile.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(0)
+    } finally {
+      readFile.mockRestore()
+    }
+  })
+
   it("says where it looked when there is no journal directory, and when the directory holds no run", async () => {
     const empty = mkdtempSync(join(tmpdir(), "yrd-watch-runner-"))
     expect((await readRunnerFacts(empty)).absent).toContain("there is no such directory")
