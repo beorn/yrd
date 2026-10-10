@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The revert guard's S2 reverted-path walk is bounded at the change's divergence base: a branch that
+  deletes lines an earlier merged change added, with no target advance on that path since the base,
+  is its own deliberate change and no longer raises a reverted-paths warning. A candidate pin that
+  already contains the target pin keeps the full window, so a real revert of a target advance after
+  the base still warns (28557).
+
 - Queue environment cleanup files a close request when a bound change merges, then consumes it in the same
   round (`direct-admission`, ancestry not required). Dropped issues join closed ones as sweep-ended; unique
   HEAD still keeps the environment. Incomplete-census consume still refuses and retires (21122).

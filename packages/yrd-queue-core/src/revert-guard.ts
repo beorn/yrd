@@ -10,7 +10,15 @@
  *
  * Two signals, both tree-entry OID+mode:
  *  - S2 (reverted path): the candidate sets a path to a value the TARGET's own
- *    first-parent history held before the target's own change to that path.
+ *    first-parent history held before the target's own change to that path. Only the
+ *    target's advances the candidate's pin does not already carry count (#28557): the
+ *    level's divergence base is the merge base of the candidate and target pins, and
+ *    when it sits BELOW the target pin the walk is bounded at it, so a branch that
+ *    deletes lines an earlier, already-shared change added is its own deliberate
+ *    deletion, never a put-back. A candidate pin that CONTAINS the target pin (the
+ *    measured fast-forward pin move) keeps the full window: its ancestry carries the
+ *    target's change, so an interior regression against the target is the revert this
+ *    guard exists to catch.
  *  - S3 (swallowed composition): a component pin the compose moved (or reused) has a
  *    tree IDENTICAL to the target's while the incoming pin's tree DIFFERS — the
  *    correction was composed away. A commit-OID difference with equal trees is NOT
@@ -206,7 +214,6 @@ async function walk(level: Level): Promise<void> {
     })
     return
   }
-
   // Every gitlink either the candidate or the incoming side moved. An unchanged side
   // keeps the target's pin, which is exactly what a missing row means.
   const links = new Map<string, { target: string; candidate: string; incoming: string }>()
@@ -277,14 +284,41 @@ async function walk(level: Level): Promise<void> {
     })
   }
 
-  for (const row of toCandidate) {
-    if (row.oldMode === GITLINK || row.newMode === GITLINK) continue
-    if (row.newSha === row.oldSha && row.newMode === row.oldMode) continue
-    await assessPath(level, row)
+  // #28557: the target advances that count are the ones the candidate pin does not already carry. The
+  // base is read only when a real path row needs it, so a pin-only compose pays no extra git call.
+  const judged = toCandidate.filter(
+    (row) =>
+      row.oldMode !== GITLINK && row.newMode !== GITLINK && !(row.newSha === row.oldSha && row.newMode === row.oldMode),
+  )
+  const base = judged.length === 0 ? undefined : await advanceBase(level)
+  for (const row of judged) await assessPath(level, row, base)
+}
+
+/**
+ * The level's divergence base, or undefined when the whole window must be judged (#28557).
+ *
+ * `mergeBases(target, candidate)`: a single base BELOW the target pin means the candidate pin
+ * diverged and never carried the target's later advance, so only advances after the base count.
+ * A base that IS the target pin means the candidate pin contains the target pin — the 27363
+ * fast-forward pin move — and the full window stays. An unreadable base is a named `unjudged`
+ * gap, never a silent widening or narrowing of the proof.
+ */
+async function advanceBase(level: Level): Promise<string | undefined> {
+  try {
+    const bases = await mergeBases(level.git, level.target, level.candidate)
+    return bases.length === 1 && bases[0] !== level.target ? bases[0] : undefined
+  } catch (error) {
+    level.report.gaps.push({
+      kind: "unjudged",
+      depth: level.depth,
+      path: level.prefix === "" ? "." : level.prefix,
+      reason: `candidate/target base unreadable: ${detail(error)}`,
+    })
+    return undefined
   }
 }
 
-async function assessPath(level: Level, row: RawRow): Promise<void> {
+async function assessPath(level: Level, row: RawRow, base: string | undefined): Promise<void> {
   const full = level.prefix + row.path
   if (level.budget.remaining <= 0) {
     level.report.gaps.push({
@@ -298,7 +332,12 @@ async function assessPath(level: Level, row: RawRow): Promise<void> {
   level.budget.remaining -= 1
   let viewed: readonly string[]
   try {
-    viewed = await firstParentTouching(level.git, level.target, level.bounds.window + 1, row.path)
+    viewed = await firstParentTouching(
+      level.git,
+      base === undefined ? level.target : `${base}..${level.target}`,
+      level.bounds.window + 1,
+      row.path,
+    )
   } catch (error) {
     level.report.gaps.push({
       kind: "unjudged",
@@ -387,8 +426,13 @@ async function entryAt(
   return { mode, oid }
 }
 
-async function firstParentTouching(git: Git, target: string, window: number, path: string): Promise<readonly string[]> {
-  const out = await git(["rev-list", "--first-parent", `--max-count=${String(window)}`, target, "--", path])
+async function firstParentTouching(
+  git: Git,
+  revision: string,
+  window: number,
+  path: string,
+): Promise<readonly string[]> {
+  const out = await git(["rev-list", "--first-parent", `--max-count=${String(window)}`, revision, "--", path])
   return out
     .split("\n")
     .map((row) => row.trim())
