@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs"
+import { appendFileSync, readdirSync, renameSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { runStartedAt } from "@yrd/queue-core"
 import { safeRemove } from "removely"
@@ -30,13 +30,14 @@ import { safeRemove } from "removely"
 export const ROUND_OUTPUT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
- * How many round-output directories `yrd logs prune` removes per batch, oldest
- * first. Retention is drained EXPLICITLY by that verb — no queue round prunes
- * automatically (the round-side sweep was split out of this head, 28499). The
- * verb selects the whole oldest-first list ONCE and deletes it in batches of
- * this size, so draining thousands never re-walks the tree between batches and
- * each batch stays a bounded recursive delete, far under the 27723 bar (30 s,
- * 400 spawns).
+ * How many round-output directories are removed per batch, oldest first. Two
+ * callers drain through it, and neither removes at once: the queue round's own
+ * bounded sweep (`sweepRoundOutputInRound`) removes ONE batch per round, so a
+ * queue that keeps running drains the backlog with no operator; the explicit
+ * `yrd logs prune` verb selects the whole oldest-first list ONCE and deletes it
+ * in batches of this size, so draining thousands never re-walks the tree between
+ * batches. Each batch stays a bounded recursive delete, far under the 27723 bar
+ * (30 s, 400 spawns).
  */
 export const ROUND_REMOVAL_BATCH = 8
 
@@ -65,10 +66,20 @@ export type RetentionRoot = string | Readonly<{ path: string; optional?: boolean
 /** What one scan saw: the expired entries, and any OPTIONAL roots that were not on disk (named, never silent). */
 export type RetentionScan = Readonly<{ entries: readonly ExpiredRoundOutput[]; missing: readonly string[] }>
 
-/** What one pass of the sweep did: the window, what it removed, what is STILL older than it, and optional roots not seen. */
+/** One round-output directory a sweep could not remove, with the error it raised. */
+export type RetentionFailure = Readonly<{ path: string; name: string; error: string }>
+
+/**
+ * What one pass of the sweep did: the window, what it removed, what it could
+ * NOT remove and why, what is STILL older than it, and optional roots not seen.
+ * A failure is a RESULT, not an exception (@cto 2026-10-10T23:16Z): a disposal
+ * step must never stop the merge line, so one unremovable directory is reported
+ * and skipped, never thrown past the round.
+ */
 export type RetentionResult = Readonly<{
   windowMs: number
   removed: readonly ExpiredRoundOutput[]
+  failures: readonly RetentionFailure[]
   remaining: readonly ExpiredRoundOutput[]
   missing: readonly string[]
 }>
@@ -142,13 +153,20 @@ export function expiredRoundOutput(
 /** Remove a chosen list of round-output directories, oldest first, at most `limit` of them, through removely. */
 export async function removeExpiredRoundOutput(
   input: Readonly<{ selected: readonly ExpiredRoundOutput[]; limit?: number; dryRun?: boolean }>,
-): Promise<Readonly<{ removed: readonly ExpiredRoundOutput[]; remaining: readonly ExpiredRoundOutput[] }>> {
+): Promise<
+  Readonly<{
+    removed: readonly ExpiredRoundOutput[]
+    failures: readonly RetentionFailure[]
+    remaining: readonly ExpiredRoundOutput[]
+  }>
+> {
   const limit = input.limit ?? input.selected.length
   if (!Number.isSafeInteger(limit) || limit < 0) {
     throw new Error(`log retention batch must be a non-negative integer, got ${String(input.limit)}`)
   }
   const chosen = input.selected.slice(0, limit)
   const removed: ExpiredRoundOutput[] = []
+  const failures: RetentionFailure[] = []
   if (input.dryRun !== true) {
     for (const entry of chosen) {
       // The containment root is the tree the entry was FOUND under: a removal
@@ -158,13 +176,28 @@ export async function removeExpiredRoundOutput(
       // without this a real queue root — /hh/var/yrd-workdir/… — is refused
       // ("containment root … is not under an allowed root"), which is exactly the
       // tree this sweep exists to prune.
-      await safeRemove(entry.path, { within: entry.within, allowedRoots: [entry.within] })
-      removed.push(entry)
+      try {
+        await safeRemove(entry.path, { within: entry.within, allowedRoots: [entry.within] })
+        removed.push(entry)
+      } catch (cause) {
+        // The batch CONTINUES past a directory it cannot remove (@cto
+        // 2026-10-10T23:16Z): the failure is a result. It stays in `remaining`
+        // and is reported, so one unremovable directory never blocks the drain
+        // of the ones behind it, and the next round retries it.
+        failures.push({
+          path: entry.path,
+          name: entry.name,
+          error: cause instanceof Error ? cause.message : String(cause),
+        })
+      }
     }
   }
-  // `remaining` is everything still older than the window, not just this batch:
-  // chosen is the oldest prefix of an oldest-first list, so removal is a prefix too.
-  return { removed, remaining: input.selected.slice(removed.length) }
+  // `remaining` is everything still older than the window that this pass did NOT
+  // remove — failed entries included and in oldest-first order. It is computed
+  // from the removed SET, not a prefix length: with a failure in the middle, the
+  // older `slice(removed.length)` would have dropped entries still on disk.
+  const removedPaths = new Set(removed.map((entry) => entry.path))
+  return { removed, failures, remaining: input.selected.filter((entry) => !removedPaths.has(entry.path)) }
 }
 
 /**
@@ -191,13 +224,24 @@ export async function pruneRoundOutput(
   const selected = scan.entries
   const planned = input.limit === undefined ? selected : selected.slice(0, input.limit)
   const removed: ExpiredRoundOutput[] = []
+  const failures: RetentionFailure[] = []
   if (input.dryRun !== true) {
     for (let index = 0; index < planned.length; index += ROUND_REMOVAL_BATCH) {
       const batch = await removeExpiredRoundOutput({ selected: planned.slice(index, index + ROUND_REMOVAL_BATCH) })
       removed.push(...batch.removed)
+      failures.push(...batch.failures)
     }
   }
-  return { windowMs, selected, planned, removed, remaining: selected.slice(removed.length), missing: scan.missing }
+  const removedPaths = new Set(removed.map((entry) => entry.path))
+  return {
+    windowMs,
+    selected,
+    planned,
+    removed,
+    failures,
+    remaining: selected.filter((entry) => !removedPaths.has(entry.path)),
+    missing: scan.missing,
+  }
 }
 
 /**
@@ -208,9 +252,10 @@ export async function pruneRoundOutput(
  * tree is inside the window.
  *
  * Journaled BESIDE the run journals, in `<workdir>/retention.jsonl` (the one
- * writer is cli.ts), never inside the log tree: every `logs/*.jsonl` is a run
- * and this row is not one, so a run-journal name on it made the runner's own
- * header read refuse the newest journal.
+ * writer, `appendRetentionObservation`, is shared by cli.ts and the round),
+ * never inside the log tree: every `logs/*.jsonl` is a run and this row is not
+ * one, so a run-journal name on it made the runner's own header read refuse the
+ * newest journal.
  */
 export function retentionObservation(result: RetentionResult, input: Readonly<{ at: Date }>): Record<string, unknown> {
   const remaining = result.remaining.length
@@ -222,6 +267,9 @@ export function retentionObservation(result: RetentionResult, input: Readonly<{ 
     removed: result.removed.length,
     remaining,
     ...(remaining === 0 ? {} : { oldest: result.remaining[0]?.name }),
+    // A removal that FAILED is in the row (@cto 2026-10-10T23:16Z): a reader must
+    // see the path and the error, never a "removed 3" hiding a fourth that stayed.
+    ...(result.failures.length === 0 ? {} : { failures: result.failures }),
     // An optional root that was not on disk is named in the row: "removed 0"
     // must never be the only fact a reader has about where the sweep looked.
     ...(result.missing.length === 0 ? {} : { missing: result.missing }),
@@ -246,4 +294,130 @@ export function retentionHumanLines(
       : [`yrd: log retention: no such optional root (absent, not an error): ${result.missing.join(", ")}`]),
     ...input.listed.map((entry) => entry.path),
   ]
+}
+
+/**
+ * The one file an observation row is written to, BESIDE the run journals in the
+ * workdir — never inside the log tree: every `logs/*.jsonl` is a run and this
+ * row is not one, so a run-journal name on it made the runner's own header read
+ * refuse the newest journal (watch-runner readRunHeader).
+ */
+export const RETENTION_JOURNAL = "retention.jsonl"
+
+/**
+ * How large `retention.jsonl` may grow before it is rotated. 8 MiB is @cto's
+ * number (2026-10-10T23:16Z): a queue round writes at most one row per interval,
+ * and a row is ~230 bytes, so at a 120 s interval this holds several years —
+ * while a pathological burst still cannot grow the file without bound.
+ */
+export const RETENTION_JOURNAL_MAX_BYTES = 8 * 1024 * 1024
+
+/** The row a sweep that could not RUN reports: nothing removed, the error named. */
+const NOTHING_SWEPT: RetentionResult = {
+  windowMs: ROUND_OUTPUT_WINDOW_MS,
+  removed: [],
+  failures: [],
+  remaining: [],
+  missing: [],
+}
+
+/** Rotate `retention.jsonl` to `.1` once it is at the bound, so two files at most ever exist. */
+function rotateRetentionJournal(file: string): void {
+  let size: number
+  try {
+    size = statSync(file).size
+  } catch (cause) {
+    // No file yet is the ordinary first write, not a failure.
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return
+    throw new Error(`log retention cannot size ${file}: ${String(cause)}`, { cause })
+  }
+  if (size >= RETENTION_JOURNAL_MAX_BYTES) renameSync(file, `${file}.1`)
+}
+
+/** Write one row, rotating first — the one place either caller touches the file. */
+function writeRetentionRow(workdir: string, row: Record<string, unknown>): void {
+  const file = join(workdir, RETENTION_JOURNAL)
+  rotateRetentionJournal(file)
+  appendFileSync(file, `${JSON.stringify(row)}\n`)
+}
+
+/**
+ * Whether a sweep result is worth a row (@cto 2026-10-10T23:16Z): it removed
+ * something, or it failed. A round with nothing expired writes NOTHING — "one
+ * observation row per round" meant at most one, and a row on every idle round is
+ * exactly the unbounded file this note closed. An absent declared-OPTIONAL root
+ * is a NORMAL host state and is never a row on its own (@cto 2026-10-10T23:30Z) —
+ * a host that never runs a check would re-announce `checks/` every round — but it
+ * stays named inside any row that IS written, and in the verb's output, so where
+ * the sweep looked is never hidden. A REQUIRED root that is missing is a failure,
+ * reported below.
+ */
+export function retentionRowWorthWriting(result: RetentionResult): boolean {
+  return result.removed.length > 0 || result.failures.length > 0
+}
+
+/**
+ * Append one observation row for a sweep — the ONE writer both the queue round
+ * and `yrd logs prune` share. Returns whether a row was written, so a caller
+ * (and a test) can tell "nothing worth saying" from "not called".
+ */
+export function appendRetentionObservation(workdir: string, result: RetentionResult, at: Date): boolean {
+  if (!retentionRowWorthWriting(result)) return false
+  writeRetentionRow(workdir, retentionObservation(result, { at }))
+  return true
+}
+
+/**
+ * The queue round's own bounded sweep — the pruner that ACTS in 28499's split
+ * AC4 (@cto 2026-10-10T22:53Z; failure isolation 2026-10-10T23:16Z). It removes
+ * at most one `ROUND_REMOVAL_BATCH` of expired round output per round, oldest
+ * first, then writes at most one observation row, so a queue that keeps running
+ * drains the backlog with no operator invoking `yrd logs prune`. It is the SAME
+ * selection and removal `pruneRoundOutput` runs; the round only fixes the bound
+ * and names the roots (`logs` REQUIRED — the round just wrote its journal there
+ * via `openLog`; `checks` OPTIONAL — a host may never have run a check).
+ *
+ * A disposal step MUST NOT stop the merge line (@cto 2026-10-10T23:16Z): every
+ * failure — a directory that will not remove, a missing required root, or a row
+ * that will not write — is named on stderr (and in the row, where one can be
+ * written), the round's outcome STANDS, and the next round retries. The
+ * precedent is the up loop's QueueRunEventRetryExhausted line, never a throw.
+ */
+export async function sweepRoundOutputInRound(
+  input: Readonly<{ workdir: string; now: Date; report?: (line: string) => void }>,
+): Promise<RetentionDrain | undefined> {
+  const report = input.report ?? ((line: string): void => void process.stderr.write(line))
+  let result: RetentionDrain
+  try {
+    result = await pruneRoundOutput({
+      roots: [{ path: join(input.workdir, "logs") }, { path: join(input.workdir, "checks"), optional: true }],
+      now: input.now,
+      limit: ROUND_REMOVAL_BATCH,
+    })
+  } catch (cause) {
+    // The sweep could not even RUN — a required root missing or unreadable. It is
+    // REPORTED, never thrown: the round has already judged and merged.
+    const error = cause instanceof Error ? cause.message : String(cause)
+    try {
+      writeRetentionRow(input.workdir, { ...retentionObservation(NOTHING_SWEPT, { at: input.now }), error })
+    } catch (writeCause) {
+      report(`yrd: log retention could not record its failure: ${String(writeCause)}\n`)
+    }
+    report(`yrd: log retention sweep failed: ${error}; the service retries at its next round\n`)
+    // silent-fallback-allow: the failure is named loudly on stderr AND recorded in
+    // the retention row above; `undefined` means "no drain to report", not "silently
+    // gave up". Throwing here is what let one unremovable directory stop the merge
+    // line (@cto 2026-10-10T23:16Z).
+    return undefined
+  }
+  for (const failure of result.failures) {
+    report(`yrd: log retention could not remove ${failure.path}: ${failure.error}; the next round retries\n`)
+  }
+  try {
+    appendRetentionObservation(input.workdir, result, input.now)
+  } catch (cause) {
+    // The sweep RAN; only its row failed. Still never fatal to the round.
+    report(`yrd: log retention could not write its observation row: ${String(cause)}; the next round retries\n`)
+  }
+  return result
 }

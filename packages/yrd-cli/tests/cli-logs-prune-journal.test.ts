@@ -9,7 +9,16 @@
  * @reach    fs-walk <fixture-only: a temporary repository and its queue workdir; no CODE checkout is walked>
  * @testonly none
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { safeRemoveSync } from "removely"
@@ -107,5 +116,30 @@ describe("yrd logs prune journals its observation beside the run journals (28499
     // The reader the run-shaped name broke: the runner's own facts read.
     const facts = await readRunnerFacts(workdir)
     expect(facts.absent, JSON.stringify(facts)).toContain("it holds no run journal")
+  })
+
+  it("exits non-zero and names a round directory it cannot remove, and still says so in the row", async () => {
+    const { work, workdir, logs } = await queueWithAnExpiredRound()
+    const expired = join(logs, "q-20260901T000000000Z-deadbeef")
+    // The queue round must SURVIVE a stuck directory (@cto 2026-10-10T23:16Z); the
+    // operator's explicit drain is the one place it is a failure. A read-only
+    // parent refuses the child's removal — a real EACCES, not a missing path.
+    chmodSync(logs, 0o500)
+    let prune: Ran
+    try {
+      prune = await yrd(work, "logs", "prune", "--json")
+    } finally {
+      chmodSync(logs, 0o700)
+    }
+    expect(prune.exitCode, prune.report).toBe(1)
+    expect(prune.stderr).toContain(expired)
+    expect(existsSync(expired), prune.report).toBe(true)
+    const reported = JSON.parse(prune.stdout) as { failures: readonly { path: string }[] }
+    expect(reported.failures.map((failure) => failure.path)).toEqual([expired])
+    const rows = readFileSync(join(workdir, "retention.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(JSON.stringify(rows.at(-1)?.failures)).toContain(expired)
   })
 })

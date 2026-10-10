@@ -34,6 +34,7 @@ import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import { issueResolver } from "./issue-resolver.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
+import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
 import { runAdmission } from "./admission.ts"
 import {
@@ -869,8 +870,16 @@ export async function coreQueueCommand(
       )
       outcome = await queueRun({
         ...baseOptions,
-        afterRun: (outcome) =>
-          cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue }),
+        afterRun: async (outcome) => {
+          await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
+          // The round ALSO drains its own raw output, one ROUND_REMOVAL_BATCH per
+          // round (28499, @cto 2026-10-10T22:53Z), beside cleanupEnvironments: both
+          // are post-judgment disposal. A disposal step must never stop the merge
+          // line (@cto 2026-10-10T23:16Z): the sweep reports every failure on stderr
+          // and in its row and RETURNS, so the round's outcome stands and the service
+          // keeps running instead of exiting into Hab's restart budget.
+          await sweepRoundOutputInRound({ workdir, now: new Date() })
+        },
         ...(onRecord === undefined
           ? {}
           : {
