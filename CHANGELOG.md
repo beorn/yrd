@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Queue environment cleanup files a close request when a bound change merges, then consumes it in the same
+  round (`direct-admission`, ancestry not required). Dropped issues join closed ones as sweep-ended; unique
+  HEAD still keeps the environment. Incomplete-census consume still refuses and retires (21122).
+
 - `yrd env open` pins the caller's declared seat identity into every submodule it materialized, not only the
   environment root. A submodule is its own repository, so the root's `config.worktree` never reached it and a
   commit there fell through to the shared `~/.gitconfig` identity — this fleet's operator — attributing the

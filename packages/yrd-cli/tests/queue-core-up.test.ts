@@ -1070,12 +1070,13 @@ describe("yrd queue up, the service", () => {
   it("closes a merged, closed-issue environment and keeps each ineligible class with its reason", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
-    // The target-owned resolver proves closure: a closed status lets the queue
-    // retire the environment, an open status is a KEEP.
+    // The target-owned resolver proves closure: a closed or dropped status lets
+    // the queue retire the environment, an open status is a KEEP. Unique HEAD
+    // still keeps a dropped issue (21122: do not close unique commits).
     const resolver = join(dirname(w.work), "issue-resolver.sh")
     writeFileSync(
       resolver,
-      '#!/usr/bin/env bash\ncase "$1" in 27601) status=closed ;; *) status=open ;; esac\nprintf \'{"id":"%s","status":"%s"}\' "$1" "$status"\n',
+      '#!/usr/bin/env bash\ncase "$1" in 27601) status=closed ;; 27602) status=dropped ;; *) status=open ;; esac\nprintf \'{"id":"%s","status":"%s"}\' "$1" "$status"\n',
     )
     await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
     await w.git(["fetch", "--quiet", "origin", "main"])
@@ -1097,6 +1098,8 @@ describe("yrd queue up, the service", () => {
     const issueOpen = await open("27600-open")
     const unmerged = await open("unmerged-retained")
     await gitIn(unmerged)(["commit", "--quiet", "--allow-empty", "-m", "not on main yet"])
+    const droppedUnmerged = await open("27602-dropped")
+    await gitIn(droppedUnmerged)(["commit", "--quiet", "--allow-empty", "-m", "dropped but unique"])
     const borrowed = await open("borrowed-retained")
     const borrower = "sibling-retained-environment"
     const census = vi
@@ -1129,7 +1132,7 @@ describe("yrd queue up, the service", () => {
       const registration = await w.git(["worktree", "list", "--porcelain", "-z"])
       expect(existsSync(closedIssue), stderr).toBe(false)
       expect(registration, stderr).not.toContain(closedIssue)
-      for (const path of [held, issueOpen, unmerged, borrowed]) {
+      for (const path of [held, issueOpen, unmerged, droppedUnmerged, borrowed]) {
         expect(existsSync(path), stderr).toBe(true)
         expect(registration, stderr).toContain(path)
       }
@@ -1141,6 +1144,116 @@ describe("yrd queue up, the service", () => {
     } finally {
       stop.abort()
       factory.mockRestore()
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure 21122: a round that merges a bound change leaves the environment
+   *          behind because the sweep still wants a closed issue, so the env
+   *          waits for a human `yrd env close`.
+   * @level l2
+   * @consumer the seat whose change just landed and whose env should delete itself
+   * @testonly none
+   */
+  it("files a close request when a bound change merges and closes the env while its issue is still open", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    await w.git(["checkout", "--quiet", "-b", "task/21122-merge", "main"])
+    writeFileSync(join(w.work, "21122-merge.txt"), "merged work\n")
+    await w.git(["add", "21122-merge.txt"])
+    await w.git(["commit", "--quiet", "-m", "bound change whose env must close on merge"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/21122-merge",
+      submitter: "@dev/13",
+      target: { branch: "main", remote: "origin" },
+    })
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "21122-merge", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    expect(existsSync(environment.path)).toBe(true)
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(existsSync(environment.path), run.stderr()).toBe(false)
+      expect(listCloseRequests(workdir), run.stderr()).toEqual([])
+      const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && typeof row.request === "object")
+      expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
+      expect(closed?.path).toBe(environment.path)
+    } finally {
+      stop.abort()
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure 21122 P3: a dropped bead's environment whose HEAD is already on
+   *          the target stays forever because requireClosed only accepts
+   *          status "closed".
+   * @level l2
+   * @consumer the operator who dropped the issue and expects the empty env gone
+   * @testonly none
+   */
+  it("closes an environment whose bound issue is dropped when HEAD is on the target", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const resolver = join(dirname(w.work), "issue-resolver.sh")
+    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"dropped"}\' "$1"\n')
+    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", "21123-dropped", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const environment = JSON.parse(opened.stdout()) as { path: string }
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(existsSync(environment.path), run.stderr()).toBe(false)
+      expect(listCloseRequests(workdir), run.stderr()).toEqual([])
+      const closed = allCleanupRows(workdir).find((row) => row.path === environment.path && row.result === "closed")
+      expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
+      expect(closed?.request, "sweep close files no request").toBeUndefined()
+    } finally {
+      stop.abort()
       census.mockRestore()
     }
   }, 120_000)

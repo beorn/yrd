@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs"
-import { dirname, join, resolve } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   gitIn,
@@ -16,15 +16,18 @@ import { inspectProcessCwds, type ProcessCwdProjection } from "removely"
 import { environmentCwdHolder, processCwdCoverage } from "./env-close-holders.ts"
 import { IncompleteCensusError, closeEnvironment, environmentInventory } from "./env-commands.ts"
 import {
+  ENV_CLOSE_PREDICATE,
   MAX_COVERAGE_ATTEMPTS,
   closeRequestFile,
   dropCloseRequest,
   listCloseRequests,
   listStagedCloseRequests,
   readCloseRequest,
+  requesterOf,
   restoreCloseRequest,
   stageCloseRequest,
   unstageCloseRequest,
+  writeCloseRequest,
   type StoredCloseRequest,
 } from "./env-close-requests.ts"
 import { environmentIssues } from "./env-cleanup-provenance.ts"
@@ -313,6 +316,55 @@ async function consumeCloseRequests(
   return { closed, handled }
 }
 
+/**
+ * CTO A / 21122: MERGED is the only event filer. A bound environment whose
+ * branch this round merged gets the same durable close request the incomplete-
+ * census path writes. Filing is intent, never a census fact. Held rows and
+ * missing HEADs are named; a write this process cannot make is `file-failed`.
+ * DROPPED / issue-ended do not file here; they widen the sweep.
+ */
+function fileMergedCloseRequests(
+  input: Readonly<{
+    workdir: string
+    rows: readonly { path: string; branch?: string; head?: string; hold: string | null }[]
+    merged: readonly string[]
+    env?: NodeJS.ProcessEnv
+    record: (path: string, result: string, why: string) => void
+  }>,
+): void {
+  if (input.merged.length === 0) return
+  const merged = new Set(input.merged)
+  const uid = typeof globalThis.process.getuid === "function" ? globalThis.process.getuid() : -1
+  const requester = requesterOf(input.env ?? globalThis.process.env)
+  for (const row of input.rows) {
+    if (row.branch === undefined || !merged.has(row.branch)) continue
+    if (row.hold !== null) continue
+    if (row.head === undefined) {
+      input.record(row.path, "file-failed", `merged ${row.branch} but registered environment has no HEAD`)
+      continue
+    }
+    try {
+      const { file, alreadyStood } = writeCloseRequest(input.workdir, {
+        name: basename(row.path),
+        path: row.path,
+        requester,
+        uid,
+        at: new Date().toISOString(),
+        predicate: ENV_CLOSE_PREDICATE,
+        options: { noRehome: true },
+        head: row.head,
+      })
+      input.record(
+        row.path,
+        "filed",
+        `${alreadyStood ? "close request already stood" : "close request"} ${file} after merge of ${row.branch}`,
+      )
+    } catch (cause) {
+      input.record(row.path, "file-failed", String(cause))
+    }
+  }
+}
+
 export function createEnvironmentCleanup() {
   const cache = new Map<string, CachedEnvironment>()
   const progress: CleanupProgress = { cursor: 0, hint: undefined, loaded: false }
@@ -443,6 +495,15 @@ async function cleanupEnvironments(
     }
     if (result.code === 1) throw new Error(`commit ${head} in ${root} is not on target ${target}`)
   }
+  // File before census so a round that cannot certify still leaves the request
+  // for the next consume.
+  fileMergedCloseRequests({
+    workdir,
+    rows: inventory.rows,
+    merged: outcome.merged,
+    env: input.env,
+    record,
+  })
   let snapshot: ProcessCwdProjection
   try {
     snapshot = await census()
@@ -470,6 +531,7 @@ async function cleanupEnvironments(
   const lookup = issueLookup(config, repo, input.env)
   const statuses = new Map<string, Promise<ResolvedIssue>>()
   let lookups = 0
+  /** Sweep eligibility: bound issue is ended (`closed` or `dropped`, 21122 P3). */
   const requireClosed = async (id: string, entry: CachedEnvironment, fresh = false): Promise<void> => {
     let pending = fresh ? undefined : statuses.get(id)
     if (pending === undefined) {
@@ -488,7 +550,7 @@ async function cleanupEnvironments(
       entry.expensiveKey = undefined
       entry.statuses.set(id, status)
     }
-    if (issue.id !== id || issue.status !== "closed") {
+    if (issue.id !== id || (issue.status !== "closed" && issue.status !== "dropped")) {
       throw new Error(`issue ${id}: configured lookup returned ${status}; closure unproven`)
     }
   }
