@@ -217,6 +217,19 @@ describe("the queue declaration grammar", () => {
     expect(parseConfig("{}\n", SOURCE).revertGuard).toBe("observe")
   })
 
+  // 28481: `queue-root: tilde` is the capability gate that makes a STRICT pre-cutover
+  // reader refuse a declaration it would otherwise honour by silently writing the
+  // legacy %23 root (a tolerant reader only warns — see the key's doc comment).
+  // `tilde` is the one accepted word; absent asks for nothing.
+  it("reads queue-root and refuses anything but the tilde word", () => {
+    expect(parseConfig("queue-root: tilde\n", SOURCE).queueRoot).toBe("tilde")
+    expect(parseConfig("{}\n", SOURCE).queueRoot).toBeUndefined()
+    expect("queueRoot" in parseConfig("{}\n", SOURCE)).toBe(false)
+    expect(() => parseConfig("queue-root: hash\n", SOURCE)).toThrow(
+      /yrd-queue-root-invalid: \.yrd\.yml queue-root: the only accepted value is tilde; received "hash"/u,
+    )
+  })
+
   // 27187: a read that never RUNS the declaration (submit, list) hears the names of
   // top-level keys newer than its parser and reads the rest; a read that runs it
   // (the queue's round, check) still refuses, as do retired keys and nested fields.
