@@ -530,6 +530,24 @@ describe("a run's journal, read back", () => {
     expect(read.malformed).toEqual([])
   })
 
+  // 24735 row 3: a record kind this build does not know is NAMED on the change
+  // it is about, so the change table marks that row unreadable instead of
+  // showing the last state it could fold.
+  it("names an unknown record kind on its change instead of folding a last-known state", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const branch = "task/one"
+    const head = "abc123"
+    const { dir, run } = journalDir([{ branch, decision: "merged", head, kind: "change" }], at)
+    appendFileSync(
+      join(dir, `${run}.jsonl`),
+      `${JSON.stringify({ at: at.toISOString(), branch, head, kind: "a-kind-from-a-newer-writer", run })}\n`,
+    )
+    const read = readJournals(dir, { now: at })
+    const runs = read.runs.get(journalKey(branch, head))
+    expect(runs?.[0]?.malformed?.[0]).toContain("a-kind-from-a-newer-writer")
+    expect(read.malformed[0]?.message).toContain("a-kind-from-a-newer-writer")
+  })
+
   // Was "still refuses a partial incident outside a change-ref race
   // diagnostic". 24408 supersedes the refusal, not the detection: a partial
   // incident that is not a race diagnostic is still a defect, and it is still

@@ -33,6 +33,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import {
+  LOG_KINDS,
   runDiedInPreamble,
   runStartedAt,
   serviceStoppedLine,
@@ -555,6 +556,16 @@ function readRunHeader(path: string): JournalHead {
       if (typeof after !== "object" || after === null) continue
       const record = after as Record<string, unknown>
       if (typeof record.kind !== "string") continue
+      // A KIND THIS BUILD DOES NOT KNOW is the incident this reader is named
+      // for (24735): skipping it silently turned a journal written by a newer
+      // yrd into an ordinary, healthy reading. The reader's own vocabulary is
+      // LOG_KINDS, so a kind outside it is NAMED here, with its cure, rather
+      // than dropped. A line that is not a record at all is still skipped.
+      if (!(LOG_KINDS as readonly string[]).includes(record.kind)) {
+        throw new Error(
+          `run journal ${path}: record ${index + 1} has a record kind this build does not know: ${JSON.stringify(record.kind)}; restart yrd watch from a checkout at main's yrd gitlink`,
+        )
+      }
       records.push(record as unknown as LogRecord)
       if (record.kind === "step" || record.kind === "check") {
         const kind = record.kind as "step" | "check"

@@ -80,6 +80,8 @@ function workdirWith(
     header?: boolean | string
     gitBeforeHeader?: boolean
     lastWriteAgoMs?: number
+    /** A record appended AFTER the header, as a writer from another build would append one. */
+    after?: string
     /** The service's health document, when the workdir has one. */
     health?: string
   }>,
@@ -99,7 +101,7 @@ function workdirWith(
   const prefix = options.gitBeforeHeader
     ? `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: join(logs, id, "git", "1.stdout.bin.json") })}\n`
     : ""
-  writeFileSync(path, `${prefix}${header}`)
+  writeFileSync(path, `${prefix}${header}${options.after ?? ""}`)
   const lastWrite = new Date(NOW.getTime() - (options.lastWriteAgoMs ?? 0))
   utimesSync(path, lastWrite, lastWrite)
   if (options.pid !== undefined || options.pidText !== undefined || options.pidDirectory === true) {
@@ -161,6 +163,35 @@ describe("readRunnerFacts", () => {
     mkdirSync(path)
 
     await expect(readRunnerFacts(workdir)).rejects.toThrow(`run journal ${path}`)
+  })
+
+  /**
+   * @failure A journal written by a NEWER yrd carries a record kind this reader
+   *          does not know. PAST the header the reader skipped it and returned
+   *          an ordinary reading, so a journal it could not understand read as
+   *          a healthy one — the same lie as the RUNNER SILENT this bead is
+   *          named for (24735 row 4). A load that cannot be understood must say
+   *          so, naming the kind, so the operator's cure is knowable.
+   * @level    l1
+   * @consumer the operator running yrd watch from a checkout older than the queue
+   */
+  it("refuses an unknown record kind PAST the header, naming the kind (24735 row 4)", async () => {
+    const unknown = "a-kind-from-a-newer-writer"
+    const record = (kind: string): string =>
+      `${JSON.stringify({ kind, run: "q-whatever", at: NOW.toISOString(), branch: "task/x", head: "a".repeat(40) })}\n`
+    await expect(readRunnerFacts(workdirWith({ ageMs: 60_000, after: record(unknown) }))).rejects.toThrow(
+      new RegExp(unknown, "u"),
+    )
+    // CONTROL 1: a kind this build DOES know, in the same position, still reads.
+    await expect(readRunnerFacts(workdirWith({ ageMs: 60_000, after: record("settle") }))).resolves.toBeDefined()
+    // CONTROL 2: a genuinely silent runner still says silent. The guard is about
+    // a journal that cannot be understood, never about a quiet one.
+    const silent: RunnerFacts = {
+      journalDir: "/w/logs",
+      service: { kind: "absent", why: "no local health document" },
+      published: { signal: "silent" },
+    }
+    expect(runnerWord(silent, false)).toBe("silent")
   })
 
   /**

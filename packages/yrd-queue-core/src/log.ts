@@ -1008,6 +1008,15 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
     if (typeof branch !== "string" || typeof head !== "string") continue
     const at = new Date(record.at)
     if (Number.isNaN(at.getTime())) continue
+    if (!(LOG_KINDS as readonly string[]).includes(record.kind)) {
+      // A kind this build does not know must never be joined as a last-known
+      // state (24735 row 3): name it on the change it is about, so the change
+      // table marks that row unreadable instead of showing a stale one.
+      ;(held(branch, head, at).malformed ??= []).push(
+        `run journal ${id} has a record kind this build does not know: ${JSON.stringify(record.kind)}`,
+      )
+      continue
+    }
     const reason = typeof record.reason === "string" ? record.reason : undefined
     // `next` is deliberately not read here: it is legacy diagnostic text as
     // often as it is incident authority, so only `incidentIn` weighs it.

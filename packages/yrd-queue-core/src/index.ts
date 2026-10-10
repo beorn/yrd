@@ -152,6 +152,7 @@ export {
 export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckView } from "./check.ts"
 export {
   CHANGE_REF_DIAGNOSTICS,
+  LOG_KINDS,
   journalKey,
   openLog,
   readJournals,
