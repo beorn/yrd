@@ -186,9 +186,17 @@ export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): 
 }
 
 /**
- * The one row a change shows when the page is not split by run, wearing the
- * skew of the newest run whose journal carried a kind this reader does not
- * know. No journal on this machine leaves the row exactly as the fold gave it.
+ * The one row a change shows when the page is not split by run. No journal on
+ * this machine leaves the row exactly as the fold gave it.
+ *
+ * @cto 25d6aa5f splits two predicates over this ONE row. The STATUS is the
+ * newest run's own reading, so a clean newer retry reads clean and never sends
+ * the operator to restart a watch that reads the current run fine — the skew
+ * marker rides only that run's kinds. The DETAIL is not allowed to look
+ * complete either: when an OLDER run carried a kind this build does not know,
+ * the row names that run as partial history, because the fold counted records
+ * this reader never understood. The per-run lens keeps each run's own truth.
+ *
  * A change that already has an operational next owner keeps it: @cto 056e31bf
  * pin 1 forbids dropping the journal, the kind or the reader's cure, and
  * @cto a04a006b requires the row to carry the cure beside the status marker.
@@ -196,10 +204,12 @@ export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): 
 function skewedRow(current: Row, runs: readonly JournalRun[]): Row {
   const skewed = runs.find((run) => (run.unknownKinds?.length ?? 0) > 0)
   if (skewed === undefined) return current
-  const skew = skewNext(skewed)
+  const newest = runs[0] === skewed
+  const skew = newest ? skewNext(skewed) : olderSkewNext(skewed)
   return {
     ...current,
-    unknownKinds: skewed.unknownKinds,
+    // The status marker is the NEWEST run's own reading, never an older run's.
+    ...(newest ? { unknownKinds: skewed.unknownKinds } : {}),
     // This change's own next owner when it has one — the reader's cure rides in
     // the SAME sentence rather than replacing it.
     ...(skew === undefined
@@ -244,6 +254,23 @@ function skewNext(run: JournalRun | undefined): NextOwner | undefined {
   if (run === undefined || kinds === undefined || kinds.length === 0) return undefined
   return {
     because: `journal ${run.id} carries record kind ${kinds.join(", ")} this watch does not know; restart the watch from the landing root`,
+    owner: "the watch's own build",
+  }
+}
+
+/**
+ * What the collapsed row says about an OLDER run whose journal carried a kind
+ * this build does not know, when the newest run read clean (@cto 25d6aa5f).
+ * The status cell stays the newest run's — a clean newer read must never send
+ * the operator to restart a healthy watch — but the detail states what the
+ * fold is: this reader never understood every record, so the counts it folded
+ * may be partial. A trust note, never the repair instruction above.
+ */
+function olderSkewNext(run: JournalRun | undefined): NextOwner | undefined {
+  const kinds = run?.unknownKinds
+  if (run === undefined || kinds === undefined || kinds.length === 0) return undefined
+  return {
+    because: `older run ${run.id} carries kind ${kinds.join(", ")} this watch does not know; folded counts may be partial`,
     owner: "the watch's own build",
   }
 }
