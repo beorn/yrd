@@ -392,7 +392,8 @@ it("runs a check-free event change through one atomic merge", async () => {
   expect(message).toContain("Submitter: @dev/2")
   expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/main/candidates/*"])).toBe("")
   // @failure 26272: a completed round leaves its empty worktree parent behind.
-  expect(readdirSync(join(w.workdir, "worktrees"))).toEqual([])
+  // The pooled check tree (#28503) is the one directory that stays, by design.
+  expect(runParents(w)).toEqual([])
 })
 
 /** @failure 26272: cleanup erases a run parent that still holds a file beside its worktree.
@@ -417,16 +418,18 @@ it("keeps nonempty queue and notify parents after their worktrees close", async 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/parent-content"] })
   const parent = join(w.workdir, "worktrees")
   const names = readdirSync(parent)
-  expect(names).toHaveLength(2)
-  expect(names).toContain(outcome.run)
-  expect(names.some((name) => name.startsWith("notify-"))).toBe(true)
+  // #28503 moved the check tree into the pool, so the round's OWN parent has no
+  // worktree beside it and is correctly removed; the notify parent, which still
+  // holds the file its notify wrote beside its worktree, is the one to keep.
+  expect(names).not.toContain(outcome.run)
+  const notify = names.find((name) => name.startsWith("notify-"))
+  expect(notify).toBeDefined()
   const retained = warnings.filter((line) => line.startsWith("yrd: kept non-empty worktree run directory "))
-  expect(retained).toHaveLength(2)
-  for (const name of names) {
-    const path = join(parent, name)
-    expect(readdirSync(path)).toEqual(["keep"])
-    expect(retained.some((line) => line.includes(path) && /\b(?:ENOTEMPTY|EEXIST)\b/u.test(line))).toBe(true)
-  }
+  expect(retained).toHaveLength(1)
+  const path = join(parent, notify as string)
+  expect(readdirSync(path)).toEqual(["keep"])
+  expect(retained[0]).toContain(path)
+  expect(retained[0]).toMatch(/\b(?:ENOTEMPTY|EEXIST)\b/u)
 })
 
 it("leaves an idle event round unnumbered and the next index value at one (26193)", async () => {
@@ -1275,7 +1278,7 @@ it("retains both setup attempts when a remote-class outage stops the event line"
   const w = await world()
   const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
   await createWorldEventQueue(w)
-  await submitCommit(w, "task/setup-stuck-retry", "one.txt")
+  await submitCommit(w, "task/setup-stuck-retry", "package.json")
   const fault = faultySetup(w, UNREACHABLE_SETUP)
 
   const outcome = await queueRun({ ...(await w.options({ exit: 0, setup: fault.command })), notify: undefined })
@@ -1320,7 +1323,7 @@ it("runs an event program-root check through the shared protected executor", asy
     expect.stringMatching(/^verify exit=0 .*result=pass attempt=1 phase=merge /u),
   ])
   // @failure 26272: protected P/C roots left an empty scaffold under the ended run.
-  expect(readdirSync(join(w.workdir, "worktrees"), { recursive: true })).toEqual([])
+  expect(runParents(w)).toEqual([])
 })
 
 /** @failure A change could replace a target-owned check script before its own event check ran.
@@ -1542,7 +1545,7 @@ it("delivers an event ending and settles its recipient on the branch chain", asy
     },
   })
   // @failure 26272: notification teardown leaves its empty worktree parent behind.
-  expect(readdirSync(join(w.workdir, "worktrees"))).toEqual([])
+  expect(runParents(w)).toEqual([])
 })
 
 /** @failure 27198: a run compared only receipts, so a newly declared entry was owed every past ending.
@@ -3592,6 +3595,34 @@ function whereRan(w: World): readonly (readonly [string, string])[] {
   return ranPrograms(w).map((ran) => [ran.program, ran.cwd] as const)
 }
 
+/**
+ * The phases whose `setup` the round ran, in order, deduplicated (a program
+ * writes a start row and an end row). It is the discriminator the pooled tree
+ * removed from the PATH: which phase provisioned, not where it stood (#28503).
+ */
+function setupPhases(outcome: QueueRunOutcome): readonly string[] {
+  return [
+    ...new Set(
+      logRecords(outcome)
+        .filter((record) => record.kind === "check" && record.name === "setup")
+        .map((record) => String(record.phase)),
+    ),
+  ]
+}
+
+/**
+ * Everything under `worktrees/` a round did NOT keep. The pooled check tree
+ * (#28503) is the one thing that stays by design, so a run's own parents are
+ * what may not remain.
+ */
+function runParents(w: World): readonly string[] {
+  const parent = join(w.workdir, "worktrees")
+  if (!existsSync(parent)) return []
+  return readdirSync(parent, { recursive: true })
+    .map(String)
+    .filter((name) => name !== "pool" && !name.startsWith("pool/"))
+}
+
 /** Nothing judged a worktree the setup had not prepared first. */
 function everyCheckWasPrepared(order: readonly (readonly [string, string])[]): void {
   for (const [index, [what, where]] of order.entries()) {
@@ -3970,10 +4001,33 @@ describe("28503 — a round's check tree is materialized once, not per phase or 
       notify: undefined,
     })
     expect(outcome.merged).toEqual(["task/one"])
-    const order = whereRan(w)
-    expect(order.length).toBeGreaterThan(0)
-    // Nothing the round ran may sit in a submit tree: hh declares no submit check.
-    expect(order.filter(([, where]) => where.includes("-submit-"))).toEqual([])
+    // The change moves no install input, so the submit phase has nothing to
+    // provision: setup runs in the merge phase alone.
+    expect(setupPhases(outcome)).toEqual(["merge"])
+  })
+
+  it("a submit runs setup only when the candidate moves what setup reads", async () => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    // A manifest is an install input, so this submit is the exception: setup
+    // runs at submit, refusing a broken install early rather than at merge.
+    await w.git(["checkout", "--quiet", "-b", "task/manifest", "main"])
+    writeFileSync(join(w.work, "package.json"), '{"name":"manifest"}\n')
+    await w.git(["add", "package.json"])
+    await w.git(["commit", "--quiet", "-m", "manifest"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/manifest",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    const outcome = await queueRun({
+      ...(await w.options({ exit: 0, on: ["merge"], setup: w.setupCommand(0) })),
+      notify: undefined,
+    })
+    expect(outcome.merged).toEqual(["task/manifest"])
+    expect(setupPhases(outcome)).toEqual(["submit", "merge"])
   })
 
   it("two rounds materialize one merge tree, not one per change", async () => {
@@ -3988,5 +4042,92 @@ describe("28503 — a round's check tree is materialized once, not per phase or 
       .map(([, where]) => where)
     expect(mergeTrees.length).toBeGreaterThanOrEqual(2)
     expect(new Set(mergeTrees).size).toBe(1)
+    expect(mergeTrees[0]).toContain(join("worktrees", "pool", "main"))
+  })
+
+  it("a tracked write refuses reuse and rebuilds fresh", async () => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    await submitCommit(w, "task/one", "one.txt")
+    await queueRun({ ...(await w.options({ exit: 0 })), notify: undefined })
+    // Round two writes over a TRACKED file and fails, so the tree it leaves is
+    // not the candidate's; the next round must refuse it by name and rebuild.
+    const dirty = join(w.workdir, "dirty.sh")
+    writeFileSync(dirty, "#!/bin/sh\necho overwritten >> target.txt\nexit 1\n")
+    chmodSync(dirty, 0o755)
+    await submitCommit(w, "task/two", "two.txt")
+    const second = await queueRun({
+      ...(await w.options({ exit: 0 })),
+      checks: [{ name: "dirty", run: dirty, on: ["merge"] }],
+      notify: undefined,
+    })
+    expect(second.merged).toEqual([])
+    await submitCommit(w, "task/three", "three.txt")
+    const third = await queueRun({ ...(await w.options({ exit: 0 })), notify: undefined })
+    expect(third.merged).toEqual(["task/three"])
+    expect(
+      logRecords(third).some(
+        (record) => record.kind === "warning" && String(record.reason ?? "").includes("tracked modification"),
+      ),
+    ).toBe(true)
+  })
+
+  it("a stale ignored file from round one is absent in round two", async () => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    // Both candidates commit the ignore rule, so the stale file is IGNORED in
+    // round two too: only `clean -x` reaches it, and an omitted -x fails here.
+    const submitIgnoring = async (branch: string, file: string): Promise<void> => {
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, file), `${file}\n`)
+      writeFileSync(join(w.work, ".gitignore"), "stale.txt\n")
+      await w.git(["add", file, ".gitignore"])
+      await w.git(["commit", "--quiet", "-m", branch])
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", {
+        branch,
+        submitter: "@dev/2",
+        target: { branch: "main", remote: "origin" },
+        issue: "@i/10-yrd/1",
+      })
+    }
+    const stale = join(w.workdir, "stale.sh")
+    writeFileSync(stale, "#!/bin/sh\necho stale > stale.txt\nexit 0\n")
+    chmodSync(stale, 0o755)
+    await submitIgnoring("task/one", "one.txt")
+    await queueRun({
+      ...(await w.options({ exit: 0 })),
+      checks: [{ name: "stale", run: stale, on: ["merge"] }],
+      notify: undefined,
+    })
+    const observed = join(w.workdir, "observed.sh")
+    const log = w.checkLog
+    writeFileSync(
+      observed,
+      `#!/bin/sh\nif [ -f stale.txt ]; then echo "stale-present" >> "${log}"; exit 1; fi\n` +
+        `echo "stale-absent" >> "${log}"\nexit 0\n`,
+    )
+    chmodSync(observed, 0o755)
+    await submitIgnoring("task/two", "two.txt")
+    const second = await queueRun({
+      ...(await w.options({ exit: 0 })),
+      checks: [{ name: "observed", run: observed, on: ["merge"] }],
+      notify: undefined,
+    })
+    expect(second.merged).toEqual(["task/two"])
+    expect(readFileSync(w.checkLog, "utf8")).toContain("stale-absent")
+    expect(readFileSync(w.checkLog, "utf8")).not.toContain("stale-present")
+  })
+
+  it("a failed setup leaves no pooled tree", async () => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    await submitCommit(w, "task/one", "one.txt")
+    const outcome = await queueRun({
+      ...(await w.options({ exit: 0, setup: w.setupCommand(1) })),
+      notify: undefined,
+    })
+    expect(outcome.merged).toEqual([])
+    expect(existsSync(join(w.workdir, "worktrees", "pool", "main", "candidate"))).toBe(false)
   })
 })

@@ -62,7 +62,9 @@ import { queueRefPrefix, runIndexRef } from "./refs.ts"
 import { verifyCandidate } from "./verifying.ts"
 import { revertedPathsFinding, revertedPathsReason, revertGuardAction } from "./revert-guard.ts"
 import { publishCheckedChildren } from "./publication.ts"
-import { prepareWorktree, SETUP, SetupFailed } from "./worktree.ts"
+import { SETUP, SetupFailed } from "./worktree.ts"
+import { installInputsChanged } from "./install-inputs.ts"
+import { WorktreePool } from "./pool.ts"
 import { DERIVE, DeriveFailed } from "./derive.ts"
 import {
   allDeclaredChecksOff,
@@ -300,6 +302,21 @@ export async function eventQueueRun(
       options.plumbing?.journal?.(record)
     },
   }
+  // #28503 slice 2: one warm check tree per (repository, ref, role) for the whole
+  // queue, instead of one made and torn down per phase and per change.
+  const pool = new WorktreePool({
+    workdir: options.workdir,
+    ref: queue,
+    repo: options.repo,
+    git,
+    hooksPath,
+    process: options.process,
+    env: options.env,
+    selection: options.selection,
+    gitOptions,
+    populateReference: options.populateReference,
+    plumbing,
+  })
   const runIdentity = { id: log.id, startedAt: new Date().toISOString(), host: hostname(), actor: "yrd" }
   const writeStuck = (
     branch: string,
@@ -1946,35 +1963,34 @@ export async function eventQueueRun(
             process: options.process,
             selection: options.selection,
           })
-          const baseTree = await prepareWorktree(
-            git,
-            options.repo,
-            baseCommit,
-            join(options.workdir, "worktrees", log.id, `${branch.replaceAll("/", "_")}-base-${String(attempt)}`),
-            {
-              targetSha: target,
-              queueRun: true,
-              plumbing,
-              populateReference: options.populateReference,
-              selection: options.selection,
-              gitOptions,
-              process: options.process,
-              env: options.env,
-              setup: {
-                run: options.setup,
-                logDir: join(
-                  options.workdir,
-                  "checks",
-                  `${branch}@${head}`,
-                  log.id,
-                  `attempt-${String(attempt)}`,
-                  "base",
-                ),
-                tmpdir,
-              },
+          const baseTree = await pool.borrow({
+            role: "base",
+            commit: baseCommit,
+            targetSha: target,
+            note: (cause) => log.write({ kind: "warning", branch, head, reason: cause }),
+            setup: {
+              run: options.setup,
+              logDir: join(
+                options.workdir,
+                "checks",
+                `${branch}@${head}`,
+                log.id,
+                `attempt-${String(attempt)}`,
+                "base",
+              ),
+              tmpdir,
             },
-          )
-          await baseTree.remove()
+          })
+          try {
+            await pool.give(baseTree)
+          } catch (error) {
+            log.write({
+              branch,
+              head,
+              kind: "warning",
+              reason: `settled-base cleanup failed after attribution: ${error instanceof Error ? error.message : String(error)}`,
+            })
+          }
           ground = "passed"
         } catch (baseError) {
           if (!(baseError instanceof SetupFailed)) {
@@ -2019,6 +2035,18 @@ export async function eventQueueRun(
           ...(fault === undefined ? {} : { fault }),
         }
       }
+      // #28503 slice 1: whether this candidate moves anything `setup:` reads. Read
+      // once for the change; a phase with no check of its own runs setup only when
+      // the candidate's OWN install inputs moved, since the target's install has
+      // already proved the rest. A name-only diff: no blob hashing, no checkout.
+      const installInputsMoved =
+        options.noCheck === true || options.setup === undefined
+          ? false
+          : await installInputsChanged(git, target, candidate)
+      // A declaration that names NO check at all is the exception: its setup is
+      // then the round's whole work, and skipping it would quietly make the
+      // declaration inert rather than merely cheap.
+      const setupIsTheOnlyWork = options.setup !== undefined && options.checks.length === 0
       for (let attempt = 1; attempt <= 1 + TRANSPORT_RETRY_LIMIT; attempt++) {
         const startOfAttempt = results.length
         skippedByOverride = new Set()
@@ -2064,8 +2092,13 @@ export async function eventQueueRun(
             if (overridden) skippedByOverride.add(check.name)
             return !overridden
           })
-          // A declared setup still runs when this phase has no check to run, unless every declared check is off (then the phase was skipped above).
-          if (checks.length === 0 && options.setup === undefined) continue
+          // A phase with no check of its own materializes a tree for one reason
+          // only: early discovery that the candidate's own install inputs broke
+          // provisioning (#28503). When the candidate moves none of what `setup:`
+          // reads, the target's own install is the proof and the phase runs
+          // nothing — unless the declaration names no check at all, where the
+          // setup IS the work and skipping it would make the declaration inert.
+          if (checks.length === 0 && !setupIsTheOnlyWork && !installInputsMoved) continue
           const logDir = join(
             options.workdir,
             "checks",
@@ -2079,31 +2112,16 @@ export async function eventQueueRun(
           let worktree
           try {
             worktree = await timedStep(log, { branch, head, name: "prepare", phase }, () =>
-              prepareWorktree(
-                git,
-                options.repo,
-                candidate,
-                join(
-                  options.workdir,
-                  "worktrees",
-                  log.id,
-                  `${branch.replaceAll("/", "_")}-${phase}-${String(attempt)}`,
-                ),
-                {
-                  targetSha: target,
-                  queueRun: true,
-                  plumbing,
-                  populateReference: options.populateReference,
-                  selection: options.selection,
-                  gitOptions,
-                  process: options.process,
-                  env: options.env,
-                  ...(options.setup === undefined ? {} : { setup: { run: options.setup, logDir, tmpdir } }),
-                  starting: ({ log: path, start }) => recordProgramStart({ log }, { ...setupAbout, start, log: path }),
-                  record: ({ result: setupResult, start, end }) =>
-                    recordProgramResult({ log }, { ...setupAbout, start, end }, setupResult),
-                },
-              ),
+              pool.borrow({
+                role: "candidate",
+                commit: candidate,
+                targetSha: target,
+                note: (cause) => log.write({ kind: "warning", branch, head, reason: cause }),
+                ...(options.setup === undefined ? {} : { setup: { run: options.setup, logDir, tmpdir } }),
+                starting: ({ log: path, start }) => recordProgramStart({ log }, { ...setupAbout, start, log: path }),
+                record: ({ result: setupResult, start, end }) =>
+                  recordProgramResult({ log }, { ...setupAbout, start, end }, setupResult),
+              }),
             )
           } catch (error) {
             if (!(error instanceof SetupFailed)) throw error
@@ -2194,7 +2212,16 @@ export async function eventQueueRun(
             }
           } finally {
             if (worktree !== undefined) {
-              await timedStep(log, { branch, head, name: "remove", phase: "deprovision" }, () => worktree.remove())
+              try {
+                await timedStep(log, { branch, head, name: "remove", phase: "deprovision" }, () => pool.give(worktree))
+              } catch (error) {
+                log.write({
+                  kind: "warning",
+                  branch,
+                  head,
+                  reason: `returning the check tree to the pool failed: ${error instanceof Error ? error.message : String(error)}`,
+                })
+              }
             }
           }
           if (setupDecision !== undefined || results.slice(startOfAttempt).some(({ run }) => run.result !== "pass")) {
@@ -2341,30 +2368,15 @@ export async function eventQueueRun(
               process: options.process,
               selection: options.selection,
             })
-            baseWorktree = await prepareWorktree(
-              git,
-              options.repo,
-              baseCommit,
-              join(
-                options.workdir,
-                "worktrees",
-                log.id,
-                `${branch.replaceAll("/", "_")}-check-base-${String(stopped.attempt)}`,
-              ),
-              {
-                targetSha: target,
-                queueRun: true,
-                plumbing,
-                populateReference: options.populateReference,
-                selection: options.selection,
-                gitOptions,
-                process: options.process,
-                env: options.env,
-                ...(options.setup === undefined
-                  ? {}
-                  : { setup: { run: options.setup, logDir: baseLogDir, tmpdir: baseTmpdir } }),
-              },
-            )
+            baseWorktree = await pool.borrow({
+              role: "base",
+              commit: baseCommit,
+              targetSha: target,
+              note: (cause) => log.write({ kind: "warning", branch, head, reason: cause }),
+              ...(options.setup === undefined
+                ? {}
+                : { setup: { run: options.setup, logDir: baseLogDir, tmpdir: baseTmpdir } }),
+            })
             const phaseChecks = decisionResults.filter(({ phase }) => phase === stopped.phase)
             for (const row of phaseChecks) {
               const check = options.checks.find(({ name }) => name === row.run.name)
@@ -2448,7 +2460,7 @@ export async function eventQueueRun(
           } finally {
             if (baseWorktree !== undefined) {
               try {
-                await baseWorktree.remove()
+                await pool.give(baseWorktree)
               } catch (error) {
                 log.write({
                   kind: "warning",

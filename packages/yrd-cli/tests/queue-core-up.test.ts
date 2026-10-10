@@ -5632,7 +5632,7 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
    * carries `sticks-again.txt`. Every judgement appends the worktree it ran in,
    * so a case can count how often one head was judged.
    */
-  function gate(w: World): Readonly<{ declaration: string; judgements: (branch: string) => number }> {
+  function gate(w: World): Readonly<{ declaration: string; judgements: (subject: string) => number }> {
     const log = join(dirname(w.workdir), "gate-judgements.log")
     const script = join(dirname(w.workdir), "gate.sh")
     writeFileSync(log, "")
@@ -5640,7 +5640,9 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
       script,
       [
         "#!/bin/sh",
-        `pwd >> "${log}"`,
+        // The pooled tree (#28503) is ONE directory for every change, so the
+        // path no longer names the judged change; the change's own file does.
+        `if [ -e stuck.txt ]; then echo "subject=stuck" >> "${log}"; else echo "subject=fix" >> "${log}"; fi`,
         "if [ -f fails.txt ]; then echo 'this tree fails the gate' >&2; exit 1; fi",
         "if [ -f repaired.txt ] && [ ! -f sticks-again.txt ]; then exit 0; fi",
         "echo 'the gate cannot judge this tree: it needs repaired.txt and no sticks-again.txt' >&2",
@@ -5651,10 +5653,10 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     chmodSync(script, 0o755)
     return {
       declaration: `checks:\n  - gate:\n      on: [submit]\n      run: ${script}\n`,
-      judgements: (branch) =>
+      judgements: (subject) =>
         readFileSync(log, "utf8")
           .split("\n")
-          .filter((line) => line.includes(`/${branch.replaceAll("/", "_")}-submit-`)).length,
+          .filter((line) => line === `subject=${subject}`).length,
     }
   }
 
@@ -5701,14 +5703,12 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     const stuck = await yrd(w, "queue", "run", "--json")
     expect(stuck.exitCode, stuck.report).toBe(2)
     expect(await stopOf(w)).toMatchObject({ by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` })
-    expect(check.judgements("task/stuck"), readFileSync(join(dirname(w.workdir), "gate-judgements.log"), "utf8")).toBe(
-      1,
-    )
+    expect(check.judgements("stuck"), readFileSync(join(dirname(w.workdir), "gate-judgements.log"), "utf8")).toBe(1)
 
     const merged = await yrd(w, "merge", "task/fix")
 
     expect(await onMain(w, fixHead), merged.report).toBe(true)
-    expect(check.judgements("task/stuck"), merged.report).toBe(2)
+    expect(check.judgements("stuck"), merged.report).toBe(2)
     expect(await onMain(w, stuckHead), merged.report).toBe(true)
     expect(await stopOf(w)).toBeNull()
     expect(merged.exitCode, merged.report).toBe(0)

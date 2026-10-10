@@ -1128,19 +1128,18 @@ function isExit(error: unknown, code: number): boolean {
   )
 }
 
+/** One entry of a two-tree diff, as `git diff-tree -z` prints it. */
+export type TreeDiffRow = Readonly<{ path: string; oldMode: string; newMode: string; sha: string }>
+
 /**
- * The gitlink rows of one tree-to-tree diff, read as git prints it with `-z`
- * — `:<old mode> <new mode> <old sha> <new sha> <status>\0<path>\0` per entry
- * — for every path a gitlink stands at on either side: added, moved, or taken
- * out. `sha` is the new side's, the zero sha for a gitlink taken out.
+ * Every entry of one tree-to-tree diff, read as git prints it with `-z`
+ * — `:<old mode> <new mode> <old sha> <new sha> <status>\0<path>\0` per entry,
+ * in git's own order. `sha` is the new side's, the zero sha for a path taken
+ * out; no blob is hashed here and no tree is checked out.
  */
-export async function gitlinkRows(
-  git: Git,
-  from: string,
-  to: string,
-): Promise<readonly Readonly<{ path: string; oldMode: string; newMode: string; sha: string }>[]> {
+export async function treeDiffRows(git: Git, from: string, to: string): Promise<readonly TreeDiffRow[]> {
   const fields = (await git(["diff-tree", "-r", "-z", "--no-renames", from, to])).split("\0")
-  const rows: { path: string; oldMode: string; newMode: string; sha: string }[] = []
+  const rows: TreeDiffRow[] = []
   for (let at = 0; at + 1 < fields.length; at += 2) {
     const [colonOldMode, newMode, , newSha] = (fields[at] ?? "").split(" ")
     const oldMode = colonOldMode?.replace(/^:/u, "")
@@ -1148,8 +1147,16 @@ export async function gitlinkRows(
     if (oldMode === undefined || newMode === undefined || newSha === undefined || path === undefined || path === "") {
       continue
     }
-    if (oldMode !== "160000" && newMode !== "160000") continue
     rows.push({ newMode, oldMode, path, sha: newSha })
   }
   return rows
+}
+
+/**
+ * The gitlink rows of one tree-to-tree diff, for every path a gitlink stands
+ * at on either side: added, moved, or taken out. `sha` is the new side's, the
+ * zero sha for a gitlink taken out.
+ */
+export async function gitlinkRows(git: Git, from: string, to: string): Promise<readonly TreeDiffRow[]> {
+  return (await treeDiffRows(git, from, to)).filter((row) => row.oldMode === "160000" || row.newMode === "160000")
 }

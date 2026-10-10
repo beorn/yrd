@@ -598,7 +598,9 @@ it.each([
     ...real,
     run(request) {
       if (request.env?.YRD_CHECK_SCOPE === "settled-base-attribution") baseCheckRan = true
-      if (baseCheckRan && !cleanupRejected && request.argv.includes("worktree") && request.argv.includes("prune")) {
+      // #28503: the settled-base tree is returned to the pool, not removed, so
+      // the cleanup a verdict must survive is the return's own `clean`.
+      if (baseCheckRan && !cleanupRejected && request.argv.includes("clean")) {
         cleanupRejected = true
         throw new Error("fixture settled-base cleanup failed")
       }
