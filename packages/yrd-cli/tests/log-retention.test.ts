@@ -24,11 +24,14 @@ import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
 import { journalKey, openLog, readJournals } from "@yrd/queue-core"
 import {
+  RETENTION_JOURNAL,
   ROUND_OUTPUT_WINDOW_MS,
+  ROUND_REMOVAL_BATCH,
   expiredRoundOutput,
   pruneRoundOutput,
   retentionHumanLines,
   retentionObservation,
+  sweepRoundOutputInRound,
 } from "../src/log-retention.ts"
 
 const DAY = 24 * 60 * 60 * 1000
@@ -283,5 +286,60 @@ describe("an absent optional root is named in the row, never a healthy zero (F2)
       { roots: ["/x/logs", "/x/checks"], dryRun: true, listed: [] },
     )
     expect(lines.join("\n")).toContain("no such optional root (absent, not an error): /x/checks")
+  })
+})
+
+describe("sweepRoundOutputInRound (the round hook)", () => {
+  it("removes at most one ROUND_REMOVAL_BATCH per round, oldest first, and records one observation row", async () => {
+    const { workdir, logs } = tree("round-bound")
+    // Ten expired rounds, listed oldest first: ago(17) is the oldest.
+    const oldestFirst = [17, 16, 15, 14, 13, 12, 11, 10, 9, 8].map((days) => place(join(logs, round(ago(days)))))
+    const first = await sweepRoundOutputInRound({ workdir, now: NOW })
+    // The round takes a BOUNDED batch, not the whole backlog: removal is the
+    // oldest prefix, so the newest rounds survive for a later round.
+    expect(first.removed).toHaveLength(ROUND_REMOVAL_BATCH)
+    expect(first.remaining).toHaveLength(oldestFirst.length - ROUND_REMOVAL_BATCH)
+    for (const removed of oldestFirst.slice(0, ROUND_REMOVAL_BATCH)) expect(existsSync(removed)).toBe(false)
+    for (const kept of oldestFirst.slice(ROUND_REMOVAL_BATCH)) expect(existsSync(kept)).toBe(true)
+    // Exactly one row, beside the journals, naming what is STILL older than the window.
+    const rows = readFileSync(join(workdir, RETENTION_JOURNAL), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      kind: "observation",
+      scope: "log-retention",
+      removed: ROUND_REMOVAL_BATCH,
+      remaining: oldestFirst.length - ROUND_REMOVAL_BATCH,
+    })
+    expect(rows[0]?.oldest).toBe(round(ago(9)))
+    // A second round makes progress on the rest, still within its bound.
+    const second = await sweepRoundOutputInRound({ workdir, now: NOW })
+    expect(second.removed).toHaveLength(oldestFirst.length - ROUND_REMOVAL_BATCH)
+    expect(second.remaining).toHaveLength(0)
+  })
+
+  it("never touches the journals it sits beside, and writes its row at the workdir root, not in the log tree", async () => {
+    const { workdir, logs } = tree("round-journals")
+    const journal = join(logs, `${round(ago(30))}.jsonl`)
+    writeFileSync(journal, `{"kind":"run"}\n`)
+    place(join(logs, round(ago(30))))
+    await sweepRoundOutputInRound({ workdir, now: NOW })
+    // The expired round DIRECTORY goes; its journal does not.
+    expect(existsSync(join(logs, round(ago(30))))).toBe(false)
+    expect(readFileSync(journal, "utf8")).toBe(`{"kind":"run"}\n`)
+    expect(existsSync(join(workdir, RETENTION_JOURNAL))).toBe(true)
+    // A run-journal name inside logs/ would make the runner's header read refuse the newest journal.
+    expect(existsSync(join(logs, RETENTION_JOURNAL))).toBe(false)
+  })
+
+  it("is LOUD when its REQUIRED root is missing, and records no row for a sweep it did not run", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-log-retention-round-required-"))
+    roots.push(workdir)
+    await expect(sweepRoundOutputInRound({ workdir, now: NOW })).rejects.toThrow(
+      `required root ${join(workdir, "logs")} does not exist`,
+    )
+    expect(existsSync(join(workdir, RETENTION_JOURNAL))).toBe(false)
   })
 })

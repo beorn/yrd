@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs"
+import { appendFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { runStartedAt } from "@yrd/queue-core"
 import { safeRemove } from "removely"
@@ -30,13 +30,14 @@ import { safeRemove } from "removely"
 export const ROUND_OUTPUT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
- * How many round-output directories `yrd logs prune` removes per batch, oldest
- * first. Retention is drained EXPLICITLY by that verb — no queue round prunes
- * automatically (the round-side sweep was split out of this head, 28499). The
- * verb selects the whole oldest-first list ONCE and deletes it in batches of
- * this size, so draining thousands never re-walks the tree between batches and
- * each batch stays a bounded recursive delete, far under the 27723 bar (30 s,
- * 400 spawns).
+ * How many round-output directories are removed per batch, oldest first. Two
+ * callers drain through it, and neither removes at once: the queue round's own
+ * bounded sweep (`sweepRoundOutputInRound`) removes ONE batch per round, so a
+ * queue that keeps running drains the backlog with no operator; the explicit
+ * `yrd logs prune` verb selects the whole oldest-first list ONCE and deletes it
+ * in batches of this size, so draining thousands never re-walks the tree between
+ * batches. Each batch stays a bounded recursive delete, far under the 27723 bar
+ * (30 s, 400 spawns).
  */
 export const ROUND_REMOVAL_BATCH = 8
 
@@ -208,9 +209,10 @@ export async function pruneRoundOutput(
  * tree is inside the window.
  *
  * Journaled BESIDE the run journals, in `<workdir>/retention.jsonl` (the one
- * writer is cli.ts), never inside the log tree: every `logs/*.jsonl` is a run
- * and this row is not one, so a run-journal name on it made the runner's own
- * header read refuse the newest journal.
+ * writer, `appendRetentionObservation`, is shared by cli.ts and the round),
+ * never inside the log tree: every `logs/*.jsonl` is a run and this row is not
+ * one, so a run-journal name on it made the runner's own header read refuse the
+ * newest journal.
  */
 export function retentionObservation(result: RetentionResult, input: Readonly<{ at: Date }>): Record<string, unknown> {
   const remaining = result.remaining.length
@@ -246,4 +248,41 @@ export function retentionHumanLines(
       : [`yrd: log retention: no such optional root (absent, not an error): ${result.missing.join(", ")}`]),
     ...input.listed.map((entry) => entry.path),
   ]
+}
+
+/**
+ * The one file an observation row is written to, BESIDE the run journals in the
+ * workdir — never inside the log tree: every `logs/*.jsonl` is a run and this
+ * row is not one, so a run-journal name on it made the runner's own header read
+ * refuse the newest journal (watch-runner readRunHeader).
+ */
+export const RETENTION_JOURNAL = "retention.jsonl"
+
+/** Append one observation row for a sweep — the ONE writer both the queue round and `yrd logs prune` share. */
+export function appendRetentionObservation(workdir: string, result: RetentionResult, at: Date): void {
+  appendFileSync(join(workdir, RETENTION_JOURNAL), `${JSON.stringify(retentionObservation(result, { at }))}\n`)
+}
+
+/**
+ * The queue round's own bounded sweep — the pruner that ACTS in 28499's split
+ * AC4 (@cto 2026-10-10T22:53Z). It removes at most one `ROUND_REMOVAL_BATCH` of
+ * expired round output per round, oldest first, then writes the one observation
+ * row, so a queue that keeps running drains the backlog with no operator
+ * invoking `yrd logs prune`. It is the SAME selection and removal `pruneRoundOutput`
+ * runs; the round only fixes the bound and names the roots.
+ *
+ * `logs` is REQUIRED (the round just wrote its journal there, `openLog`), and a
+ * REQUIRED root that is missing fails LOUDLY — the round never reports a sweep
+ * it did not run; `checks` is OPTIONAL (a host may never have run a check).
+ */
+export async function sweepRoundOutputInRound(
+  input: Readonly<{ workdir: string; now: Date }>,
+): Promise<RetentionDrain> {
+  const result = await pruneRoundOutput({
+    roots: [{ path: join(input.workdir, "logs") }, { path: join(input.workdir, "checks"), optional: true }],
+    now: input.now,
+    limit: ROUND_REMOVAL_BATCH,
+  })
+  appendRetentionObservation(input.workdir, result, input.now)
+  return result
 }

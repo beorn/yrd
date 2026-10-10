@@ -34,6 +34,7 @@ import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import { issueResolver } from "./issue-resolver.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
+import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
 import { runAdmission } from "./admission.ts"
 import {
@@ -869,8 +870,14 @@ export async function coreQueueCommand(
       )
       outcome = await queueRun({
         ...baseOptions,
-        afterRun: (outcome) =>
-          cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue }),
+        afterRun: async (outcome) => {
+          await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
+          // The round ALSO drains its own raw output, one ROUND_REMOVAL_BATCH per
+          // round (28499, @cto 2026-10-10T22:53Z), beside cleanupEnvironments: both
+          // are post-judgment disposal. A failure here is LOUD — queueRun wraps it in
+          // QueueRunAfterRunFailed — so the round never reports a sweep it did not run.
+          await sweepRoundOutputInRound({ workdir, now: new Date() })
+        },
         ...(onRecord === undefined
           ? {}
           : {

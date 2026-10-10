@@ -28,7 +28,6 @@
  */
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
-import { appendFileSync } from "node:fs"
 import { join } from "node:path"
 import { drainOutput } from "loggily"
 import {
@@ -48,7 +47,7 @@ import { closeEnvironment, listEnvironments, openEnvironment } from "./env-comma
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere } from "./declaration.ts"
-import { pruneRoundOutput, retentionHumanLines, retentionObservation } from "./log-retention.ts"
+import { appendRetentionObservation, pruneRoundOutput, retentionHumanLines } from "./log-retention.ts"
 import { resolveDeclaredQueueLocations, resolveQueueLocation, type QueueLocation } from "./queue-location.ts"
 import { formatQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
@@ -1285,9 +1284,10 @@ function buildProgram(
       setExit(taken)
     })
 
-  // The queue workdir's own log tree (28499, @cto ruling 2026-10-10T02:50Z). NO
-  // round prunes its own raw output: THIS verb is the one and only drain of the
-  // backlog, in bounded batches — dry-run first, then apply.
+  // The queue workdir's own log tree (28499, @cto ruling 2026-10-10T02:50Z,
+  // split 2026-10-10T22:53Z): the queue round ALSO sweeps its own raw output,
+  // one ROUND_REMOVAL_BATCH per round (`sweepRoundOutputInRound`), so THIS verb
+  // is the explicit bounded drain of the backlog — dry-run first, then apply.
   // Journals are kept: `yrd runs <n>` and the "why not merged" explainer read
   // them after the round ends, so only the raw output a journal points at goes.
   const logs = program.command("logs").description("the queue workdir's own log tree: what is kept and what is pruned")
@@ -1330,11 +1330,7 @@ function buildProgram(
       // (watch-runner readRunHeader: record 1 before the run header must have
       // kind "run" or "git"). The drain is still on record, in one file a
       // reader opens without touching a single round directory.
-      const retentionJournal = "retention.jsonl"
-      appendFileSync(
-        join(location.workdir, retentionJournal),
-        `${JSON.stringify(retentionObservation(result, { at: now }))}\n`,
-      )
+      appendRetentionObservation(location.workdir, result, now)
       const days = Math.round(result.windowMs / (24 * 60 * 60 * 1000))
       // `--dry-run` PROMISES a list, so the human mode prints the paths it would
       // remove (and the apply mode the paths it did): a count alone would leave
