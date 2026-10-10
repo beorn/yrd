@@ -39,7 +39,14 @@ import { eventRows } from "./event-table.ts"
 import { assertPlainEventQueueRun } from "./event-config.ts"
 import { eventDirectMergeCommits } from "./direct.ts"
 import { createEventStore, selectionFor, listRefs, type Event } from "./git.ts"
-import { checkLogPath, effectiveCheckTimeoutMs, runCheck, TRANSPORT_RETRY_LIMIT, type CheckResult } from "./check.ts"
+import {
+  checkLogPath,
+  effectiveCheckTimeoutMs,
+  readCheckTrailer,
+  runCheck,
+  TRANSPORT_RETRY_LIMIT,
+  type CheckResult,
+} from "./check.ts"
 import { InvalidQueueConfig, UnknownConfigKey, queueName, readConfig } from "./config.ts"
 import { offTheTarget, readRemoteCommit, type Git, type GitInvocationOptions, type GitRunner } from "./git.ts"
 import {
@@ -82,6 +89,7 @@ import {
   messageFor,
   notifyOutsideRound,
   overrideNotice,
+  sameFailureDetail,
   sameFailureReason,
 } from "./with-notify.ts"
 import { changeName } from "./refs.ts"
@@ -98,6 +106,25 @@ function endingTime(event: Event, context: string): string {
     throw new Error(`${context}: ending event ${event.id} has no valid Time`)
   }
   return time
+}
+
+/**
+ * The failing checks' identity for a notice: every failing `Check:` row's name,
+ * exit and verdict, with the volatile fields (attempt, phase, ms, log) dropped,
+ * sorted by name and joined with `; ` (24735 row 5). All of them, so row order
+ * never changes the identity. Absent when the ending carries no failing row,
+ * where the comparison stays on the `reason`.
+ */
+function failureIdentity(event: Event): string | undefined {
+  // A validated event's rows always carry exit and result (`checkedRows` in
+  // events.ts refuses one that does not), so the fallback below is unreachable.
+  const identities = event.props
+    .filter(([key]) => key === EVENT_TRAILERS.check)
+    .map(([, value]) => readCheckTrailer(value))
+    .filter((row) => row.result === "fail")
+    .map((row) => `${row.name} exit=${row.exit ?? ""} result=${row.result ?? ""}`)
+  if (identities.length === 0) return undefined
+  return [...identities].sort((left, right) => left.localeCompare(right)).join("; ")
 }
 
 /** Exact set equality between a declared name set and a recorded name list. */
@@ -634,6 +661,15 @@ export async function eventQueueRun(
               .map((event) => event.props.find(([key]) => key === EVENT_TRAILERS.reason)?.[1]),
           )
         : undefined
+    // The cause beside the reason: the failing checks' identity, and the one
+    // every prior charged failure of this branch carried. Both are sent with
+    // the record and folded apart, so the notifier's hold turns on reason AND
+    // detail and can only fire less often (24735 row 5).
+    const detail = failedEvents === undefined ? undefined : failureIdentity(ending)
+    const priorDetail =
+      failedEvents === undefined
+        ? undefined
+        : sameFailureDetail(failedEvents.filter((event) => event.id !== eventId).map((event) => failureIdentity(event)))
     const head = change.commit
     const text = messageFor(kind, {
       branch,
@@ -666,7 +702,14 @@ export async function eventQueueRun(
           ...(kind === "merged"
             ? { merge }
             : { reason: kind === "cancelled" ? "branch absent from remote" : (change.reason ?? kind), log: log.path }),
-          ...(kind === "failed" ? { failures, ...(priorReason !== undefined ? { priorReason } : {}) } : {}),
+          ...(kind === "failed"
+            ? {
+                failures,
+                ...(priorReason === undefined ? {} : { priorReason }),
+                ...(detail === undefined ? {} : { detail }),
+                ...(priorDetail === undefined ? {} : { priorDetail }),
+              }
+            : {}),
           ...(kind === "deferred"
             ? { projectedMs: change.deferred?.projectedMs, boundMs: change.deferred?.boundMs }
             : {}),

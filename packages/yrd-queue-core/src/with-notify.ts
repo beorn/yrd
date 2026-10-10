@@ -88,6 +88,23 @@ export type NotifyRecord =
        * notifier then says what it always said.
        */
       priorReason?: string
+      /**
+       * On a `failed` record only: the failing checks' identity — every failing
+       * `Check:` row's name, exit and verdict, with the volatile fields
+       * (attempt, phase, ms, log) dropped, all rows sorted by name and joined
+       * with `; `. The cause the record already carries, and the notifier's
+       * hold turns on it too (@cto 0ac17165 (B), 24735 row 5). Absent when the
+       * ending carries no failing row, where the comparison stays on the
+       * `reason` — a verifier refusal has no `Check:` row at all.
+       */
+      detail?: string
+      /**
+       * On a `failed` record only, and only when every prior charged failure of
+       * this branch carried one and the same `detail` (mirroring
+       * `priorReason`). Absent means "not unambiguous", and the notifier then
+       * says what it always said.
+       */
+      priorDetail?: string
       projectedMs?: number
       boundMs?: number
     }>
@@ -183,6 +200,19 @@ export function sameFailureReason(reasons: readonly (string | undefined)[]): str
   const first = reasons[0]
   if (first === undefined || first === "") return undefined
   return reasons.every((reason) => reason === first) ? first : undefined
+}
+
+/**
+ * The one check identity every prior failure carried, or nothing — the same
+ * unambiguous-only fold as {@link sameFailureReason}, over `detail` (24735 row
+ * 5). The two are folded separately and the notifier holds only when both
+ * match, so a missing `detail` on either side leaves its text exactly as it
+ * was and the hold can only fire less often.
+ */
+export function sameFailureDetail(details: readonly (string | undefined)[]): string | undefined {
+  const first = details[0]
+  if (first === undefined || first === "") return undefined
+  return details.every((detail) => detail === first) ? first : undefined
 }
 
 /** How one notify entry went: it took the record, there was none to take it, or it exited non-zero. */
