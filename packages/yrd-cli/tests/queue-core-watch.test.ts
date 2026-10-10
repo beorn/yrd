@@ -266,6 +266,7 @@ describe("yrd watch, the ending's exit code", () => {
    * @failure A normal queue advance between the ref advertisement and event read kills JSON watch (27946).
    * @level l2 @consumer a submitter waiting for its selected change to merge
    * Existing fence and stale-pane tests never advance a real remote ref between reads.
+   * The retry must not fetch unrelated history again (27957); reaching the ending alone missed that cost.
    * The selected Git executable only schedules the real ref update; it fabricates no Git result or event.
    */
   it.each(["advance", "disappear", "diverge", "diverge-kept"] as const)(
@@ -274,6 +275,7 @@ describe("yrd watch, the ending's exit code", () => {
       const w = await world()
       const branch = "task/advancing"
       await change(w, branch, true)
+      if (movement === "advance") await change(w, "task/unrelated", true)
       const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
       const queue = await readEventQueue(store, "main")
       const ref = changesRef("main", branch)
@@ -310,12 +312,17 @@ describe("yrd watch, the ending's exit code", () => {
         movement === "disappear" ? ["-d", ref, before] : [ref, movement === "advance" ? after : divergent, before]
 
       const marker = join(w.workdir, "advanced")
+      const retryMarker = join(w.workdir, "retrying")
+      const retryFetches = join(w.workdir, "retry-fetches.jsonl")
       const executable = join(w.workdir, "advancing-git.ts")
       writeFileSync(
         executable,
         `#!${process.execPath}
-import { existsSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, writeFileSync } from "node:fs"
 const args = process.argv.slice(2)
+if (args.includes("fetch") && existsSync(${JSON.stringify(retryMarker)})) {
+  appendFileSync(${JSON.stringify(retryFetches)}, JSON.stringify(args) + "\\n")
+}
 const result = Bun.spawnSync(["git", ...args], { stdin: "inherit", stdout: "pipe", stderr: "pipe" })
 if (result.exitCode === 0 && args.includes("ls-remote") && args.includes("refs/*") && !existsSync(${JSON.stringify(marker)})) {
   const moved = Bun.spawnSync(["git", "--git-dir", ${JSON.stringify(remote)}, "update-ref", ...${JSON.stringify(update)}], { stdout: "pipe", stderr: "pipe" })
@@ -329,11 +336,18 @@ process.exit(result.exitCode)
       )
       chmodSync(executable, 0o755)
       const run = capture(w.work)
+      const io = {
+        ...run.io,
+        stderr: (text: string) => {
+          run.io.stderr(text)
+          if (text.includes("advanced during event list")) writeFileSync(retryMarker, "retrying")
+        },
+      }
       const stop = new AbortController()
       const deadline = setTimeout(() => stop.abort(), 5_000)
       const watched = coreQueueCommand(
         w.work,
-        run.io,
+        io,
         { command: "list", terms: [branch], watch: true, stop: stop.signal, intervalSeconds: 1 },
         {
           json: true,
@@ -359,6 +373,11 @@ process.exit(result.exitCode)
         .split("\n")
         .map((line) => JSON.parse(line))
       expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+      const fetched = readFileSync(retryFetches, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[])
+      expect(fetched.flat().filter((arg) => arg.includes("refs/yrd/") && arg.includes("task/unrelated"))).toEqual([])
     },
   )
 
