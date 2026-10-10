@@ -36,6 +36,12 @@ export type Row<Status extends string = ChangeStatus | "direct" | "invalid"> = R
    * Row.next} says the same thing in the one line a reader acts on.
    */
   malformed?: readonly string[]
+  /**
+   * Record kinds in this change's run journal that THIS reader's build does not
+   * know. Reader version skew, never malformed bytes (24735, @cto 056e31bf):
+   * the run was still folded, and {@link Row.next} carries the reader's cure.
+   */
+  unknownKinds?: readonly string[]
   /** A selected chain that cannot fold, or retained merged endings whose equality cannot be proved. */
   diagnostic?: string
   /** Immutable ending identity distinguishing retained ambiguous merged rows. */
@@ -194,6 +200,23 @@ function malformedNext(run: JournalRun | undefined): NextOwner | undefined {
   }
 }
 
+/**
+ * What a row says when this reader did not know every kind its run journal
+ * carried (24735, @cto 056e31bf). READER version skew, and the cure is the
+ * reader's own build — never the writer's bytes, which is why this is a
+ * separate sentence from {@link malformedNext} and must never carry its
+ * fix-the-writer wording. The run is still folded; only this reader's reading
+ * of it is partial.
+ */
+function skewNext(run: JournalRun | undefined): NextOwner | undefined {
+  const kinds = run?.unknownKinds
+  if (run === undefined || kinds === undefined || kinds.length === 0) return undefined
+  return {
+    because: `journal ${run.id} carries record kind ${kinds.join(", ")} this watch does not know; restart the watch from the landing root`,
+    owner: "the watch's own build",
+  }
+}
+
 /** Join already-recorded run facts; never rederive the change's state. */
 function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   const check = run.decision === "failed" ? run.checks.findLast((check) => check.result === "fail") : run.checks.at(-1)
@@ -217,6 +240,8 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   // says (25521 — a cancelled change's detail read `checking` for 6 days).
   const live = newest && stillInLine(current.state) ? run.running : undefined
   const defect = malformedNext(run)
+  const skew = skewNext(run)
+  const next = defect ?? skew
   return {
     ...current,
     // Assign absent run-only values too: no later run's facts may survive this join.
@@ -231,10 +256,11 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
     incident: run.incident,
     diagnostics: run.diagnostics,
     malformed: run.malformed,
+    unknownKinds: run.unknownKinds,
     // This run's own defect when it has one; otherwise the change's next
     // owner, which the newest run's defect may already have replaced — the
     // journal is defective for the change, not for one of its runs.
-    ...(defect === undefined ? {} : { next: defect }),
+    ...(next === undefined ? {} : { next }),
     result,
     log: check?.log,
     run: run.id,

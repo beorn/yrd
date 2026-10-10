@@ -530,10 +530,10 @@ describe("a run's journal, read back", () => {
     expect(read.malformed).toEqual([])
   })
 
-  // 24735 row 3: a record kind this build does not know is NAMED on the change
-  // it is about, so the change table marks that row unreadable instead of
-  // showing the last state it could fold.
-  it("names an unknown record kind on its change instead of folding a last-known state", () => {
+  // 24735 rows 1 and 3 as amended by @cto 056e31bf: an unknown record kind is
+  // reader version skew, never malformed and never a last-known state, and it
+  // marks only the run that carries it.
+  it("names an unknown record kind as reader skew on its own run, never malformed (24735 rows 1/3)", () => {
     const at = new Date("2026-09-03T20:00:00.000Z")
     const branch = "task/one"
     const head = "abc123"
@@ -542,10 +542,24 @@ describe("a run's journal, read back", () => {
       join(dir, `${run}.jsonl`),
       `${JSON.stringify({ at: at.toISOString(), branch, head, kind: "a-kind-from-a-newer-writer", run })}\n`,
     )
-    const read = readJournals(dir, { now: at })
-    const runs = read.runs.get(journalKey(branch, head))
-    expect(runs?.[0]?.malformed?.[0]).toContain("a-kind-from-a-newer-writer")
-    expect(read.malformed[0]?.message).toContain("a-kind-from-a-newer-writer")
+    const journals = readJournals(dir, { now: at })
+    const runs = journals.runs.get(journalKey(branch, head))
+    // The run was still FOLDED; only this reader's reading of it is partial.
+    expect(runs?.[0]?.unknownKinds).toEqual(["a-kind-from-a-newer-writer"])
+    expect(runs?.[0]?.malformed).toBeUndefined()
+    expect(journals.malformed).toEqual([])
+    // The row carries the READER's cure, never the malformed row's writer cure.
+    const skewed = watchRows([{ branch, head, state: "merged" } as Row], { journals, perRun: true })
+    expect(skewed[0]?.row.next?.because).toContain("a-kind-from-a-newer-writer")
+    expect(skewed[0]?.row.next?.because).toContain("restart the watch from the landing root")
+    expect(skewed[0]?.row.next?.because).not.toContain("fix the writer")
+    // Per run, never per listing: a change this run never wrote stays clean.
+    const clean = watchRows([{ branch: "task/other", head: "def456", state: "merged" } as Row], {
+      journals,
+      perRun: true,
+    })
+    expect(clean[0]?.row.next).toBeUndefined()
+    expect(clean[0]?.row.unknownKinds).toBeUndefined()
   })
 
   // Was "still refuses a partial incident outside a change-ref race
