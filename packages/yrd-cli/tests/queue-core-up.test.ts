@@ -26,6 +26,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -1150,18 +1151,27 @@ describe("yrd queue up, the service", () => {
 
   /**
    * @failure 21122: MERGED must close the environment opened for that change,
-   *          while a personal bay now checking out the change must survive.
+   *          including a symlinked home, while a personal bay now checking
+   *          out the change must survive.
    * @level l2
    * @consumer the seat whose change just landed and whose env should delete itself
    * @testonly none
    */
   it.each([
-    { bay: "21122-merge", closes: true },
-    { bay: "21122-personal", closes: false },
+    { bay: "21122-merge", closes: true, linkedRoot: false },
+    { bay: "21122-personal", closes: false, linkedRoot: false },
+    { bay: "21122-merge", closes: true, linkedRoot: true },
   ])(
-    "a merge closes only its original environment ($bay)",
-    async ({ bay, closes }) => {
+    "a merge closes only its original environment ($bay, linked root $linkedRoot)",
+    async ({ bay, closes, linkedRoot }) => {
       const w = await world()
+      if (linkedRoot) {
+        const physical = join(dirname(w.work), "physical-bays")
+        const alias = join(dirname(w.work), "alias-bays")
+        mkdirSync(physical)
+        symlinkSync(physical, alias, "dir")
+        await w.git(["config", "worktree.poolRoot", alias])
+      }
       await w.git(["config", "yrd.workdir", w.workdir])
       const resolver = join(dirname(w.work), "issue-resolver.sh")
       writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
@@ -1184,8 +1194,10 @@ describe("yrd queue up, the service", () => {
         await runYrdProcess(["bun", "yrd", "env", "open", "--bay", bay, "--json"], opened.io),
         opened.stderr(),
       ).toBe(0)
-      const environment = JSON.parse(opened.stdout()) as { path: string }
-      // Same live checkout in both cases; the environment's opening differs.
+      const openedEnvironment = JSON.parse(opened.stdout()) as { path: string }
+      const environment = { path: realpathSync(openedEnvironment.path) }
+      if (linkedRoot) expect(environment.path).not.toBe(openedEnvironment.path)
+      // Same live checkout in all cases; the environment's opening differs.
       await gitIn(environment.path)(["checkout", "--quiet", "task/21122-merge"])
       expect(existsSync(environment.path)).toBe(true)
       const census = vi

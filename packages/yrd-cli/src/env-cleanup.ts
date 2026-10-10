@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { basename, dirname, join, relative, resolve, sep } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
@@ -349,7 +349,11 @@ async function fileMergedCloseRequests(
       // env open ties task/<name> to this path. A later checkout must not
       // turn a personal bay into the merged change's disposable environment.
       const openedForBranch = input.branchRoots.some(
-        (root) => row.branch === `task/${relative(root, row.path).split(sep).join("/")}`,
+        (root) =>
+          row.branch ===
+          `task/${relative(existsSync(root) ? realpathSync(root) : resolve(root), row.path)
+            .split(sep)
+            .join("/")}`,
       )
       if (!openedForBranch) {
         input.record(row.path, "kept", `merged ${row.branch}; environment was not opened for that branch`)
