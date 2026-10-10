@@ -1324,13 +1324,23 @@ function buildProgram(
       // batches — lives in `pruneRoundOutput`, so this verb and its tests run the
       // same selection and the batches never re-walk the tree.
       const result = await pruneRoundOutput({ roots, now, limit, dryRun })
-      // One observation row per sweep, journaled BESIDE the run journals, never
-      // among them: every `logs/*.jsonl` is a run, and a q-<utc>-<id> name on
-      // this row made the runner's own header read refuse the newest journal
+      // At most one observation row per sweep, journaled BESIDE the run journals,
+      // never among them: every `logs/*.jsonl` is a run, and a q-<utc>-<id> name
+      // on this row made the runner's own header read refuse the newest journal
       // (watch-runner readRunHeader: record 1 before the run header must have
-      // kind "run" or "git"). The drain is still on record, in one file a
-      // reader opens without touching a single round directory.
+      // kind "run" or "git"). The drain is still on record, in one file a reader
+      // opens without touching a single round directory. The shared writer skips
+      // the row when there is nothing to say and bounds the file (28499).
       appendRetentionObservation(location.workdir, result, now)
+      // A removal that FAILS is named here, and makes the verb exit non-zero: the
+      // queue round must survive it (@cto 2026-10-10T23:16Z), but the operator's
+      // explicit drain is the one place a failure is a failure.
+      if (result.failures.length > 0) {
+        for (const failure of result.failures) {
+          io.stderr(`yrd: could not remove ${failure.path}: ${failure.error}\n`)
+        }
+        setExit(1)
+      }
       const days = Math.round(result.windowMs / (24 * 60 * 60 * 1000))
       // `--dry-run` PROMISES a list, so the human mode prints the paths it would
       // remove (and the apply mode the paths it did): a count alone would leave
@@ -1347,12 +1357,14 @@ function buildProgram(
               removed: result.removed.length,
               remaining: result.remaining.length,
               ...(result.missing.length === 0 ? {} : { missing: result.missing }),
+              ...(result.failures.length === 0 ? {} : { failures: result.failures }),
               ...(dryRun === true ? { list: result.planned.map((entry) => entry.path) } : {}),
             })}\n`
           : retentionHumanLines(
               {
                 windowMs: result.windowMs,
                 removed: result.removed,
+                failures: result.failures,
                 remaining: result.remaining,
                 missing: result.missing,
               },

@@ -7,14 +7,17 @@
  * @level    l2 (a hermetic log tree on a real filesystem, real removely removal)
  * @consumer queue operator, host-health (disk and IO pressure)
  * @testonly none
+ * @reach    fs-walk <fixture-only: mkdtempSync scratch queue workdirs with logs/ and checks/ round-output trees>
  */
 import {
   accessSync,
+  chmodSync,
   constants,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   writeFileSync,
 } from "node:fs"
@@ -25,12 +28,16 @@ import { afterAll, describe, expect, it } from "vitest"
 import { journalKey, openLog, readJournals } from "@yrd/queue-core"
 import {
   RETENTION_JOURNAL,
+  RETENTION_JOURNAL_MAX_BYTES,
   ROUND_OUTPUT_WINDOW_MS,
   ROUND_REMOVAL_BATCH,
+  appendRetentionObservation,
   expiredRoundOutput,
   pruneRoundOutput,
+  removeExpiredRoundOutput,
   retentionHumanLines,
   retentionObservation,
+  retentionRowWorthWriting,
   sweepRoundOutputInRound,
 } from "../src/log-retention.ts"
 
@@ -201,7 +208,7 @@ describe("retentionHumanLines (the operator's rendering)", () => {
       { path: "/x/logs/q-b", name: "q-b", within: "/x/logs", started: ago(20) },
     ]
     const lines = retentionHumanLines(
-      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], remaining: selected, missing: [] },
+      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], remaining: selected, missing: [] },
       { roots: ["/x/logs", "/x/checks"], dryRun: true, listed: selected },
     )
     expect(lines[0]).toContain("would remove 2 round-output directories older than 7 days")
@@ -211,7 +218,7 @@ describe("retentionHumanLines (the operator's rendering)", () => {
 
   it("names the roots it searched even when nothing is over the window", () => {
     const lines = retentionHumanLines(
-      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], remaining: [], missing: [] },
+      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], remaining: [], missing: [] },
       { roots: ["/x/logs", "/x/checks"], dryRun: false, listed: [] },
     )
     expect(lines[0]).toContain("removed 0 round-output directories older than 7 days")
@@ -272,7 +279,7 @@ describe("an absent optional root is named in the row, never a healthy zero (F2)
   it("names the absent optional root in the observation row the prune writes", () => {
     const missing = "/x/checks"
     const observation = retentionObservation(
-      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], remaining: [], missing: [missing] },
+      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], remaining: [], missing: [missing] },
       { at: NOW },
     )
     expect(observation.kind).toBe("observation")
@@ -282,7 +289,7 @@ describe("an absent optional root is named in the row, never a healthy zero (F2)
 
   it("names an absent optional root in the human rendering", () => {
     const lines = retentionHumanLines(
-      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], remaining: [], missing: ["/x/checks"] },
+      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], failures: [], remaining: [], missing: ["/x/checks"] },
       { roots: ["/x/logs", "/x/checks"], dryRun: true, listed: [] },
     )
     expect(lines.join("\n")).toContain("no such optional root (absent, not an error): /x/checks")
@@ -297,8 +304,8 @@ describe("sweepRoundOutputInRound (the round hook)", () => {
     const first = await sweepRoundOutputInRound({ workdir, now: NOW })
     // The round takes a BOUNDED batch, not the whole backlog: removal is the
     // oldest prefix, so the newest rounds survive for a later round.
-    expect(first.removed).toHaveLength(ROUND_REMOVAL_BATCH)
-    expect(first.remaining).toHaveLength(oldestFirst.length - ROUND_REMOVAL_BATCH)
+    expect(first?.removed).toHaveLength(ROUND_REMOVAL_BATCH)
+    expect(first?.remaining).toHaveLength(oldestFirst.length - ROUND_REMOVAL_BATCH)
     for (const removed of oldestFirst.slice(0, ROUND_REMOVAL_BATCH)) expect(existsSync(removed)).toBe(false)
     for (const kept of oldestFirst.slice(ROUND_REMOVAL_BATCH)) expect(existsSync(kept)).toBe(true)
     // Exactly one row, beside the journals, naming what is STILL older than the window.
@@ -316,8 +323,8 @@ describe("sweepRoundOutputInRound (the round hook)", () => {
     expect(rows[0]?.oldest).toBe(round(ago(9)))
     // A second round makes progress on the rest, still within its bound.
     const second = await sweepRoundOutputInRound({ workdir, now: NOW })
-    expect(second.removed).toHaveLength(oldestFirst.length - ROUND_REMOVAL_BATCH)
-    expect(second.remaining).toHaveLength(0)
+    expect(second?.removed).toHaveLength(oldestFirst.length - ROUND_REMOVAL_BATCH)
+    expect(second?.remaining).toHaveLength(0)
   })
 
   it("never touches the journals it sits beside, and writes its row at the workdir root, not in the log tree", async () => {
@@ -334,12 +341,123 @@ describe("sweepRoundOutputInRound (the round hook)", () => {
     expect(existsSync(join(logs, RETENTION_JOURNAL))).toBe(false)
   })
 
-  it("is LOUD when its REQUIRED root is missing, and records no row for a sweep it did not run", async () => {
-    const workdir = mkdtempSync(join(tmpdir(), "yrd-log-retention-round-required-"))
+  it("keeps the round alive across three rounds when one directory cannot be removed, and removes the rest", async () => {
+    const { workdir, logs, checks } = tree("round-stuck")
+    // A read-only `logs` refuses the removal of its own child; `checks` still drains.
+    const stuck = place(join(logs, round(ago(60))))
+    const removable = place(join(checks, "fixer", round(ago(60))))
+    chmodSync(logs, 0o500)
+    const lines: string[] = []
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        // The round RETURNS every time — the process never exits into Hab's
+        // restart budget over one directory (@cto 2026-10-10T23:16Z).
+        const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: (line) => lines.push(line) })
+        expect(result, `round ${String(attempt)} must return, never throw`).toBeDefined()
+        expect(result?.failures.map((failure) => failure.path)).toEqual([stuck])
+        expect(existsSync(stuck)).toBe(true)
+      }
+    } finally {
+      chmodSync(logs, 0o700)
+    }
+    expect(existsSync(removable)).toBe(false)
+    expect(lines).toHaveLength(3)
+    for (const line of lines) {
+      expect(line).toContain(stuck)
+      expect(line).toContain("the next round retries")
+    }
+    const rows = readFileSync(join(workdir, RETENTION_JOURNAL), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(rows).toHaveLength(3)
+    for (const row of rows) expect(JSON.stringify(row.failures)).toContain(stuck)
+  })
+
+  it("reports a sweep that cannot RUN — a missing required root — as a failure, never a throw", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-log-retention-round-noroot-"))
     roots.push(workdir)
-    await expect(sweepRoundOutputInRound({ workdir, now: NOW })).rejects.toThrow(
-      `required root ${join(workdir, "logs")} does not exist`,
-    )
+    const lines: string[] = []
+    const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: (line) => lines.push(line) })
+    expect(result).toBeUndefined()
+    expect(lines.join("")).toContain(`required root ${join(workdir, "logs")} does not exist`)
+    expect(lines.join("")).toContain("the service retries at its next round")
+    const rows = readFileSync(join(workdir, RETENTION_JOURNAL), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: "observation", scope: "log-retention", removed: 0, remaining: 0 })
+    expect(String(rows[0]?.error)).toContain("required root")
+  })
+})
+
+describe("a removal failure is a result, never an exception (28499, @cto 2026-10-10T23:16Z)", () => {
+  it("continues past an entry that fails, reports it, and keeps it in remaining", async () => {
+    const { logs } = tree("batch-fail")
+    // A round selected by name that is already gone: the race with a concurrent
+    // `yrd logs prune` that removely refuses with "target does not exist".
+    const gone = join(logs, round(ago(30)))
+    const oldest = place(join(logs, round(ago(29))))
+    const next = place(join(logs, round(ago(28))))
+    const result = await removeExpiredRoundOutput({
+      selected: [
+        { path: gone, name: round(ago(30)), within: logs, started: ago(30) },
+        { path: oldest, name: round(ago(29)), within: logs, started: ago(29) },
+        { path: next, name: round(ago(28)), within: logs, started: ago(28) },
+      ],
+    })
+    // The batch finishes: a failure in the middle never blocks the drain.
+    expect(result.removed.map((entry) => entry.path)).toEqual([oldest, next])
+    expect(result.failures.map((failure) => failure.path)).toEqual([gone])
+    expect(result.failures[0]?.error).toContain("does not exist")
+    // The failed entry stays visible, so the next round retries it.
+    expect(result.remaining.map((entry) => entry.path)).toEqual([gone])
+    expect(existsSync(oldest)).toBe(false)
+    expect(existsSync(next)).toBe(false)
+  })
+})
+
+describe("retention.jsonl is bounded (28499, @cto 2026-10-10T23:16Z)", () => {
+  it("writes no row for a round with nothing to say", async () => {
+    const { workdir } = tree("round-quiet")
+    const result = await sweepRoundOutputInRound({ workdir, now: NOW, report: () => {} })
+    expect(result?.removed).toEqual([])
+    expect(result?.failures).toEqual([])
     expect(existsSync(join(workdir, RETENTION_JOURNAL))).toBe(false)
+    expect(
+      retentionRowWorthWriting({
+        windowMs: ROUND_OUTPUT_WINDOW_MS,
+        removed: [],
+        failures: [],
+        remaining: [],
+        missing: [],
+      }),
+    ).toBe(false)
+  })
+
+  it("rotates at the bound, leaving exactly two files with the new rows in the fresh one", () => {
+    const { workdir, logs } = tree("round-rotate")
+    const file = join(workdir, RETENTION_JOURNAL)
+    writeFileSync(file, "x".repeat(RETENTION_JOURNAL_MAX_BYTES))
+    const removed = [{ path: join(logs, round(ago(30))), name: round(ago(30)), within: logs, started: ago(30) }]
+    const wrote = appendRetentionObservation(
+      workdir,
+      { windowMs: ROUND_OUTPUT_WINDOW_MS, removed, failures: [], remaining: [], missing: [] },
+      NOW,
+    )
+    expect(wrote).toBe(true)
+    expect(
+      readdirSync(workdir)
+        .filter((name) => name.startsWith(RETENTION_JOURNAL))
+        .sort(),
+    ).toEqual([RETENTION_JOURNAL, `${RETENTION_JOURNAL}.1`])
+    expect(readFileSync(`${file}.1`, "utf8")).toHaveLength(RETENTION_JOURNAL_MAX_BYTES)
+    const rows = readFileSync(file, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: "observation", scope: "log-retention", removed: 1 })
   })
 })

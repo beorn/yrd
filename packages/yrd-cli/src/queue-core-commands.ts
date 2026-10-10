@@ -874,8 +874,10 @@ export async function coreQueueCommand(
           await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
           // The round ALSO drains its own raw output, one ROUND_REMOVAL_BATCH per
           // round (28499, @cto 2026-10-10T22:53Z), beside cleanupEnvironments: both
-          // are post-judgment disposal. A failure here is LOUD — queueRun wraps it in
-          // QueueRunAfterRunFailed — so the round never reports a sweep it did not run.
+          // are post-judgment disposal. A disposal step must never stop the merge
+          // line (@cto 2026-10-10T23:16Z): the sweep reports every failure on stderr
+          // and in its row and RETURNS, so the round's outcome stands and the service
+          // keeps running instead of exiting into Hab's restart budget.
           await sweepRoundOutputInRound({ workdir, now: new Date() })
         },
         ...(onRecord === undefined
