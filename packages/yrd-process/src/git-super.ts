@@ -42,9 +42,12 @@ export function adaptProcessGit(process: Pick<Process, "run">, defaults: GitProc
           ? {}
           : { timeoutMs: request.timeoutMs ?? defaults.timeoutMs }),
       })
-      const failure = [truncationFailure(argv, result.outputTruncation ?? []), verdictFailure(result)]
-        .filter((entry): entry is string => entry !== undefined)
-        .join("; ")
+      const truncation = truncationFailure(argv, result.outputTruncation ?? [])
+      const settlement =
+        (result.verdict !== undefined && result.verdict !== "EXITED") || result.sweepFailure !== undefined
+          ? (result.sweepFailure ?? `process verdict ${result.verdict}`)
+          : undefined
+      const failure = [truncation, settlement].filter((entry): entry is string => entry !== undefined).join("; ")
       return {
         code: result.exitCode,
         stdout: result.stdout,
@@ -56,13 +59,6 @@ export function adaptProcessGit(process: Pick<Process, "run">, defaults: GitProc
       }
     },
   }
-}
-
-/** The process never exited normally: its verdict did not settle, or the sweep could not certify teardown. */
-function verdictFailure(result: Pick<GitProcessResult, "verdict" | "sweepFailure">): string | undefined {
-  return (result.verdict !== undefined && result.verdict !== "EXITED") || result.sweepFailure !== undefined
-    ? (result.sweepFailure ?? `process verdict ${result.verdict}`)
-    : undefined
 }
 
 /**

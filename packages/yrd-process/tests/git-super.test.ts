@@ -1,3 +1,10 @@
+/**
+ * @failure An adapted Git process hides a truncated capture, so a consumer parses a hole in the output as a
+ *          complete read (one oversized file bounces the queue with no machine-readable cause).
+ * @level l1
+ * @consumer @yrd/process
+ * @reach fs-walk <fixture-only: one temporary repository this test creates and reads>
+ */
 import { describe, expect, test } from "vitest"
 import { execFileSync } from "node:child_process"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
