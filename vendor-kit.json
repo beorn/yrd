@@ -3,7 +3,7 @@
     "source-siblings"
   ],
   "vars": {
-    "bunVersion": "1.4.2",
+    "bunVersion": "1.4.3",
     "testCommand": "bun run check"
   }
 }
