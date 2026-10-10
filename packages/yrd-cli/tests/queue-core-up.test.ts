@@ -1149,64 +1149,78 @@ describe("yrd queue up, the service", () => {
   }, 120_000)
 
   /**
-   * @failure 21122: a round that merges a bound change leaves the environment
-   *          behind because the sweep still wants a closed issue, so the env
-   *          waits for a human `yrd env close`.
+   * @failure 21122: MERGED must close the environment opened for that change,
+   *          while a personal bay now checking out the change must survive.
    * @level l2
    * @consumer the seat whose change just landed and whose env should delete itself
    * @testonly none
    */
-  it("files a close request when a bound change merges and closes the env while its issue is still open", async () => {
-    const w = await world()
-    await w.git(["config", "yrd.workdir", w.workdir])
-    const resolver = join(dirname(w.work), "issue-resolver.sh")
-    writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
-    await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
-    await w.git(["fetch", "--quiet", "origin", "main"])
-    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
-    const workdir = await workdirOf(w.git, { cwd: w.work })
-    await w.git(["checkout", "--quiet", "-b", "task/21122-merge", "main"])
-    writeFileSync(join(w.work, "21122-merge.txt"), "merged work\n")
-    await w.git(["add", "21122-merge.txt"])
-    await w.git(["commit", "--quiet", "-m", "bound change whose env must close on merge"])
-    await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", {
-      branch: "task/21122-merge",
-      submitter: "@dev/13",
-      target: { branch: "main", remote: "origin" },
-    })
-    const opened = capture(w.work)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "21122-merge", "--json"], opened.io),
-      opened.stderr(),
-    ).toBe(0)
-    const environment = JSON.parse(opened.stdout()) as { path: string }
-    expect(existsSync(environment.path)).toBe(true)
-    const census = vi
-      .spyOn(removely, "inspectProcessCwds")
-      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
-    const stop = new AbortController()
-    const run = capture(w.work)
-    try {
+  it.each([
+    { bay: "21122-merge", closes: true },
+    { bay: "21122-personal", closes: false },
+  ])(
+    "a merge closes only its original environment ($bay)",
+    async ({ bay, closes }) => {
+      const w = await world()
+      await w.git(["config", "yrd.workdir", w.workdir])
+      const resolver = join(dirname(w.work), "issue-resolver.sh")
+      writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
+      await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+      await w.git(["fetch", "--quiet", "origin", "main"])
+      await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+      const workdir = await workdirOf(w.git, { cwd: w.work })
+      await w.git(["checkout", "--quiet", "-b", "task/21122-merge", "main"])
+      writeFileSync(join(w.work, "21122-merge.txt"), "merged work\n")
+      await w.git(["add", "21122-merge.txt"])
+      await w.git(["commit", "--quiet", "-m", "bound change whose env must close on merge"])
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", {
+        branch: "task/21122-merge",
+        submitter: "@dev/13",
+        target: { branch: "main", remote: "origin" },
+      })
+      const opened = capture(w.work)
       expect(
-        await coreQueueCommand(
-          w.work,
-          run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
-          { json: true, workdir },
-        ),
-        run.stderr(),
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", bay, "--json"], opened.io),
+        opened.stderr(),
       ).toBe(0)
-      expect(existsSync(environment.path), run.stderr()).toBe(false)
-      expect(listCloseRequests(workdir), run.stderr()).toEqual([])
-      const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && typeof row.request === "object")
-      expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
-      expect(closed?.path).toBe(environment.path)
-    } finally {
-      stop.abort()
-      census.mockRestore()
-    }
-  }, 120_000)
+      const environment = JSON.parse(opened.stdout()) as { path: string }
+      // Same live checkout in both cases; the environment's opening differs.
+      await gitIn(environment.path)(["checkout", "--quiet", "task/21122-merge"])
+      expect(existsSync(environment.path)).toBe(true)
+      const census = vi
+        .spyOn(removely, "inspectProcessCwds")
+        .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+      const stop = new AbortController()
+      const run = capture(w.work)
+      try {
+        expect(
+          await coreQueueCommand(
+            w.work,
+            run.io,
+            { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+            { json: true, workdir },
+          ),
+          run.stderr(),
+        ).toBe(0)
+        expect(existsSync(environment.path), run.stderr()).toBe(!closes)
+        expect(listCloseRequests(workdir), run.stderr()).toEqual([])
+        const filed = allCleanupRows(workdir).filter((row) => row.result === "filed" && row.path === environment.path)
+        expect(filed, JSON.stringify(allCleanupRows(workdir))).toHaveLength(closes ? 1 : 0)
+        const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && typeof row.request === "object")
+        if (closes) {
+          expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
+          expect(closed?.path).toBe(environment.path)
+        } else {
+          expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeUndefined()
+        }
+      } finally {
+        stop.abort()
+        census.mockRestore()
+      }
+    },
+    120_000,
+  )
 
   /**
    * @failure 21122 P3: a dropped bead's environment whose HEAD is already on

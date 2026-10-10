@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs"
-import { basename, dirname, join, resolve } from "node:path"
+import { basename, dirname, join, relative, resolve, sep } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   gitIn,
@@ -30,7 +30,7 @@ import {
   writeCloseRequest,
   type StoredCloseRequest,
 } from "./env-close-requests.ts"
-import { environmentIssues } from "./env-cleanup-provenance.ts"
+import { environmentIssues, environmentProvenance } from "./env-cleanup-provenance.ts"
 import { repositoryHere } from "./declaration.ts"
 import { issueLookup, type ResolvedIssue } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
@@ -323,15 +323,17 @@ async function consumeCloseRequests(
  * missing HEADs are named; a write this process cannot make is `file-failed`.
  * DROPPED / issue-ended do not file here; they widen the sweep.
  */
-function fileMergedCloseRequests(
+async function fileMergedCloseRequests(
   input: Readonly<{
     workdir: string
     rows: readonly { path: string; branch?: string; head?: string; hold: string | null }[]
     merged: readonly string[]
+    branchRoots: readonly string[]
+    selection: GitSelection
     env?: NodeJS.ProcessEnv
     record: (path: string, result: string, why: string) => void
   }>,
-): void {
+): Promise<void> {
   if (input.merged.length === 0) return
   const merged = new Set(input.merged)
   const uid = typeof globalThis.process.getuid === "function" ? globalThis.process.getuid() : -1
@@ -344,6 +346,24 @@ function fileMergedCloseRequests(
       continue
     }
     try {
+      // env open ties task/<name> to this path. A later checkout must not
+      // turn a personal bay into the merged change's disposable environment.
+      const openedForBranch = input.branchRoots.some(
+        (root) => row.branch === `task/${relative(root, row.path).split(sep).join("/")}`,
+      )
+      if (!openedForBranch) {
+        input.record(row.path, "kept", `merged ${row.branch}; environment was not opened for that branch`)
+        continue
+      }
+      const provenance = await environmentProvenance(
+        row.path,
+        gitIn(row.path, undefined, input.selection, { env: input.env }),
+        row.branch,
+      )
+      if (provenance.branches.length !== 1 || provenance.branches[0] !== row.branch) {
+        input.record(row.path, "kept", `merged ${row.branch}; environment spans ${provenance.branches.join(", ")}`)
+        continue
+      }
       const { file, alreadyStood } = writeCloseRequest(input.workdir, {
         name: basename(row.path),
         path: row.path,
@@ -497,10 +517,13 @@ async function cleanupEnvironments(
   }
   // File before census so a round that cannot certify still leaves the request
   // for the next consume.
-  fileMergedCloseRequests({
+  await fileMergedCloseRequests({
     workdir,
     rows: inventory.rows,
     merged: outcome.merged,
+    // The third inventory root holds detached exact-commit environments.
+    branchRoots: inventory.roots.slice(0, 2),
+    selection: input.selection,
     env: input.env,
     record,
   })
