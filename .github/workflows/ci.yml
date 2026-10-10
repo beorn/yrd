@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.3"
       # The suite builds throwaway repositories and commits in them.
       - run: git config --global user.name ci && git config --global user.email ci@example.invalid
       - uses: ./.github/actions/source-siblings
