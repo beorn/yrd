@@ -8,9 +8,19 @@
  * @consumer queue operator, host-health (disk and IO pressure)
  * @testonly none
  */
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  accessSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { dirname, join, resolve, sep } from "node:path"
+import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   ROUND_OUTPUT_WINDOW_MS,
@@ -28,7 +38,12 @@ const round = (when: Date): string => `q-${when.toISOString().replace(/[-:.]/gu,
 
 const roots: string[] = []
 afterAll(() => {
-  for (const root of roots) rmSync(root, { force: true, recursive: true })
+  // Each root is scoped to its own parent: the R1 case below deliberately makes one OUTSIDE tmpdir(),
+  // which removely's default allowed roots refuse, so the parent is named as the allowed root too.
+  for (const root of roots) {
+    const parent = realpathSync(dirname(root))
+    safeRemoveSync(root, { within: parent, allowedRoots: [parent], allowMissing: true })
+  }
 })
 
 type Tree = Readonly<{ workdir: string; logs: string; checks: string }>

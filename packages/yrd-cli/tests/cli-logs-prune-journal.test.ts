@@ -9,9 +9,10 @@
  * @reach    fs-walk <fixture-only: a temporary repository and its queue workdir; no CODE checkout is walked>
  * @testonly none
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it } from "vitest"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runYrdProcess } from "../src/cli.ts"
@@ -23,7 +24,7 @@ import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 const roots: string[] = []
 
 afterAll(() => {
-  for (const root of roots) rmSync(root, { force: true, recursive: true })
+  for (const root of roots) safeRemoveSync(root, { within: realpathSync(tmpdir()), allowMissing: true })
 })
 
 type Ran = Readonly<{ exitCode: YrdCliExitCode; stdout: string; stderr: string; report: string }>
