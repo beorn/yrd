@@ -4,7 +4,7 @@
  *
  * The command surface is
  * `yrd queue submit|withdraw|run|up|stop|start|pause|resume|list|stats|show|health`,
- * `yrd drop`, `yrd merge`, `yrd check`, `yrd env open|list|close`, with `yrd submit` and
+ * `yrd drop`, `yrd merge`, `yrd check`, `yrd env open|list|close`, `yrd logs prune`, with `yrd submit` and
  * `yrd list` as the aliases of the two used most, `yrd watch` as
  * `queue list --watch`, and `yrd bay` as `env`'s until flag day's word is
  * retired. Every
@@ -28,6 +28,7 @@
  */
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
+import { appendFileSync } from "node:fs"
 import { join } from "node:path"
 import { drainOutput } from "loggily"
 import {
@@ -35,6 +36,7 @@ import {
   createEventStore,
   isQueueEventShapeUnreadable,
   lookupRunIndex,
+  openLog,
   parseDuration,
   readRunLog,
   runIndexPath,
@@ -47,6 +49,15 @@ import { closeEnvironment, listEnvironments, openEnvironment } from "./env-comma
 import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from "./mirror-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere } from "./declaration.ts"
+import {
+  ROUND_OUTPUT_WINDOW_MS,
+  ROUND_REMOVAL_BATCH,
+  expiredRoundOutput,
+  removeExpiredRoundOutput,
+  retentionHumanLines,
+  retentionObservation,
+  type ExpiredRoundOutput,
+} from "./log-retention.ts"
 import { resolveDeclaredQueueLocations, resolveQueueLocation, type QueueLocation } from "./queue-location.ts"
 import { formatQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
@@ -1281,6 +1292,93 @@ function buildProgram(
         { json, env, log: log() },
       )
       setExit(taken)
+    })
+
+  // The queue workdir's own log tree (28499, @cto ruling 2026-10-10T02:50Z). The
+  // round prunes its own raw output a batch at a time; THIS verb is the one-time
+  // bounded drain of a backlog that already exists — dry-run first, then apply.
+  // Journals are kept: `yrd runs <n>` and the "why not merged" explainer read
+  // them after the round ends, so only the raw output a journal points at goes.
+  const logs = program.command("logs").description("the queue workdir's own log tree: what is kept and what is pruned")
+  logs.helpCommand(false)
+  logs
+    .command("prune")
+    .description(
+      "remove round output older than the retention window (default 7 days), oldest first; journals are kept",
+    )
+    .option("--dry-run", "list what would be removed and remove nothing")
+    .option("--limit <count>", "remove at most this many round-output directories", int)
+    .option("--queue <value>", QUEUE_HELP)
+    .option("--json", "emit stable JSON")
+    .action(async (options) => {
+      const { dryRun, json, limit, queue } = options as {
+        dryRun?: boolean
+        json?: boolean
+        limit?: number
+        queue?: string
+      }
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 0)) {
+        io.stderr(`yrd: --limit must be a non-negative integer (got ${String(limit)})\n`)
+        setExit(1)
+        return
+      }
+      const location = await resolveQueueLocation(cwd(), queue, env)
+      const now = new Date()
+      // `logs` is required, `checks` optional (a host may never have run a check).
+      const roots = [
+        { path: join(location.workdir, "logs") },
+        { path: join(location.workdir, "checks"), optional: true },
+      ]
+      const scan = expiredRoundOutput({ roots, now })
+      const selected = scan.entries
+      const chosen = limit === undefined ? selected : selected.slice(0, limit)
+      const removed: ExpiredRoundOutput[] = []
+      if (dryRun !== true) {
+        // Bounded batches through removely; the list is selected ONCE, so a
+        // drain of thousands never re-walks the tree between batches.
+        for (let index = 0; index < chosen.length; index += ROUND_REMOVAL_BATCH) {
+          const batch = await removeExpiredRoundOutput({ selected: chosen.slice(index, index + ROUND_REMOVAL_BATCH) })
+          removed.push(...batch.removed)
+        }
+      }
+      const result = {
+        windowMs: ROUND_OUTPUT_WINDOW_MS,
+        removed,
+        remaining: selected.slice(removed.length),
+        missing: scan.missing,
+      }
+      // One observation row, in the very log tree just pruned: the drain is on record.
+      const record = openLog(join(location.workdir, "logs"), () => now)
+      appendFileSync(record.path, `${JSON.stringify(retentionObservation(result, { run: record.id, at: now }))}\n`)
+      const days = Math.round(ROUND_OUTPUT_WINDOW_MS / (24 * 60 * 60 * 1000))
+      const stillOlder = selected.length - removed.length
+      // `--dry-run` PROMISES a list, so the human mode prints the paths it would
+      // remove (and the apply mode the paths it did): a count alone would leave
+      // the operator unable to check the one thing the flag exists for.
+      const listed = dryRun === true ? chosen : removed
+      io.stdout(
+        json === true
+          ? `${JSON.stringify({
+              workdir: location.workdir,
+              dryRun: dryRun === true,
+              windowDays: days,
+              selected: selected.length,
+              planned: chosen.length,
+              removed: removed.length,
+              remaining: stillOlder,
+              ...(scan.missing.length === 0 ? {} : { missing: scan.missing }),
+              ...(dryRun === true ? { list: chosen.map((entry) => entry.path) } : {}),
+            })}\n`
+          : retentionHumanLines(
+              {
+                windowMs: ROUND_OUTPUT_WINDOW_MS,
+                removed,
+                remaining: selected.slice(removed.length),
+                missing: scan.missing,
+              },
+              { roots: roots.map((root) => root.path), dryRun: dryRun === true, listed },
+            ).join("\n") + "\n",
+      )
     })
 
   // `env` is the printed name; `bay` is today's word, kept as its alias.
