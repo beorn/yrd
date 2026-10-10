@@ -3950,3 +3950,43 @@ describe("one generic temp root (27721)", () => {
     expect(existsSync(join(w.workdir, "tmp"))).toBe(false)
   })
 })
+
+/**
+ * 28503 slices 1 and 2 (RED, before any production change).
+ *
+ * Slice 1: hh declares a setup and a merge-only check, so the submit phase has
+ * no check to run, yet a round still builds a submit worktree and runs the
+ * setup in it (event-run.ts:2067). Slice 2: every round builds a fresh merge
+ * worktree per change, so N rounds materialize N trees; the ruling wants one
+ * persistent tree per repository and ref, moved by checkout.
+ */
+describe("28503 — a round's check tree is materialized once, not per phase or per round", () => {
+  it("a no-check submit materializes no tree and runs no setup", async () => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    await submitCommit(w, "task/one", "one.txt")
+    const outcome = await queueRun({
+      ...(await w.options({ exit: 0, on: ["merge"], setup: w.setupCommand(0) })),
+      notify: undefined,
+    })
+    expect(outcome.merged).toEqual(["task/one"])
+    const order = whereRan(w)
+    expect(order.length).toBeGreaterThan(0)
+    // Nothing the round ran may sit in a submit tree: hh declares no submit check.
+    expect(order.filter(([, where]) => where.includes("-submit-"))).toEqual([])
+  })
+
+  it("two rounds materialize one merge tree, not one per change", async () => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    await submitCommit(w, "task/one", "one.txt")
+    await queueRun({ ...(await w.options({ exit: 0 })), notify: undefined })
+    await submitCommit(w, "task/two", "two.txt")
+    await queueRun({ ...(await w.options({ exit: 0 })), notify: undefined })
+    const mergeTrees = whereRan(w)
+      .filter(([what]) => what === "check")
+      .map(([, where]) => where)
+    expect(mergeTrees.length).toBeGreaterThanOrEqual(2)
+    expect(new Set(mergeTrees).size).toBe(1)
+  })
+})
