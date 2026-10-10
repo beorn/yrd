@@ -156,6 +156,7 @@ export {
   journalKey,
   openLog,
   readJournals,
+  readJournalProjection,
   readRunLog,
   runDiedInPreamble,
   runId,

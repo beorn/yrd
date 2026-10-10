@@ -280,8 +280,8 @@ export function openLog(
         atomicWriteFileSync(
           path.replace(/\.jsonl$/u, ".projection.json"),
           `${JSON.stringify({
-            schema: 1,
-            fold: 1,
+            schema: JOURNAL_PROJECTION_SCHEMA,
+            fold: JOURNAL_PROJECTION_FOLD,
             source,
             runs,
             runnerRecords: records.filter((record) => record.kind !== "git"),
@@ -552,6 +552,8 @@ export type Journals = Readonly<{
    * nobody prints is exactly the silent error this reader must not commit.
    */
   malformed: readonly Readonly<{ run: string; key: string; message: string }>[]
+  /** Selected journals read raw, with the reason their disposable projection was not reusable. */
+  fallbacks?: readonly JournalProjectionFallback[]
   /** Every run that wrote about a change, newest run first, keyed `<branch>@<head>`. */
   runs: ReadonlyMap<string, readonly JournalRun[]>
 }>
@@ -591,19 +593,50 @@ export function readRunLog(dir: string, run: string): readonly LogRecord[] {
   return records
 }
 
-const journalFileCache = new Map<string, { mtimeMs: number; size: number; runs: JournalRun[] }>()
+const journalFileCache = new Map<string, { source: JournalSource; runs: readonly JournalRun[] }>()
+
+// Change the fold identity whenever JournalRun or runner interpretation changes.
+// Exact equality is required: an older fold cannot recognize a newer artifact.
+const JOURNAL_PROJECTION_SCHEMA = 1
+const JOURNAL_PROJECTION_FOLD = 1
+
+type JournalSource = Readonly<{
+  run: string
+  dev: string
+  ino: string
+  size: string
+  mtimeNs: string
+  ctimeNs: string
+}>
+
+export type JournalProjectionFallback = Readonly<{
+  run: string
+  reason: "missing" | "partial" | "corrupt" | "incompatible" | "source-changed" | "unreadable" | "unsupported-identity"
+  detail: string
+}>
+
+export type JournalProjectionRead =
+  | Readonly<{
+      kind: "projection"
+      source: JournalSource
+      runs: readonly JournalRun[]
+      runnerRecords: readonly LogRecord[]
+    }>
+  | Readonly<{ kind: "raw"; source?: JournalSource; fallback: JournalProjectionFallback }>
+
+class UnsupportedJournalIdentity extends Error {}
 
 function journalPath(dir: string, id: string): string {
   return join(dir, `${id}.jsonl`)
 }
 
 /** Metadata identity for completed local append-only journals; never a content hash. */
-function journalSource(path: string, run: string) {
+function journalSource(path: string, run: string): JournalSource {
   const stat = statSync(path, { bigint: true })
   const fields = ["dev", "ino", "size", "mtimeNs", "ctimeNs"] as const
   for (const field of fields) {
     if (typeof stat[field] !== "bigint") {
-      throw new Error(`journal ${path}: source identity ${field} is unsupported on this platform`)
+      throw new UnsupportedJournalIdentity(`journal ${path}: source identity ${field} is unsupported on this platform`)
     }
   }
   return {
@@ -616,6 +649,210 @@ function journalSource(path: string, run: string) {
   }
 }
 
+function sameJournalSource(left: JournalSource, right: JournalSource): boolean {
+  return (Object.keys(left) as (keyof JournalSource)[]).every((field) => left[field] === right[field])
+}
+
+function projectionObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("expected an object")
+  return value as Record<string, unknown>
+}
+
+function projectionDate(value: unknown): Date {
+  if (typeof value !== "string") throw new Error("expected a serialized date")
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) throw new Error(`invalid serialized date: ${value}`)
+  return date
+}
+
+function projectionStrings(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+}
+
+function projectionRecord(value: unknown): value is LogRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  return typeof record.kind === "string" && typeof record.run === "string" && typeof record.at === "string"
+}
+
+function projectionCommands(value: unknown): readonly JournalCommand[] {
+  if (!Array.isArray(value)) throw new Error("expected commands array")
+  return value.map((entry) => {
+    const command = projectionObject(entry)
+    if (
+      !projectionStrings(command.args) ||
+      typeof command.cwd !== "string" ||
+      (command.exit !== undefined && typeof command.exit !== "number") ||
+      ["stdout", "stderr", "failure"].some((key) => command[key] !== undefined && typeof command[key] !== "string")
+    ) {
+      throw new Error("invalid command facts")
+    }
+    return command as JournalCommand
+  })
+}
+
+function projectionCheck(value: unknown): JournalCheck {
+  const check = projectionObject(value)
+  if (
+    typeof check.name !== "string" ||
+    typeof check.phase !== "string" ||
+    ["log", "exit"].some((key) => check[key] !== undefined && typeof check[key] !== "string") ||
+    (check.ms !== undefined && typeof check.ms !== "number") ||
+    (check.scope !== undefined && check.scope !== "narrowed" && check.scope !== "full") ||
+    (check.result !== undefined && !["pass", "fail", "stuck", "deferred"].includes(String(check.result)))
+  ) {
+    throw new Error("invalid check facts")
+  }
+  return {
+    ...check,
+    startedAt: projectionDate(check.startedAt),
+    ...(check.endedAt === undefined ? {} : { endedAt: projectionDate(check.endedAt) }),
+  } as JournalCheck
+}
+
+function projectionRun(value: unknown, source: JournalSource): JournalRun {
+  const run = projectionObject(value)
+  if (
+    run.id !== source.run ||
+    typeof run.branch !== "string" ||
+    typeof run.head !== "string" ||
+    !Array.isArray(run.checks) ||
+    !Array.isArray(run.steps) ||
+    ["base", "merge", "reason"].some((key) => run[key] !== undefined && typeof run[key] !== "string") ||
+    (run.number !== undefined && (!Number.isSafeInteger(run.number) || Number(run.number) < 1)) ||
+    (run.decision !== undefined && (typeof run.decision !== "string" || !TERMINAL_DECISIONS.has(run.decision))) ||
+    ["malformed", "unknownKinds"].some((key) => run[key] !== undefined && !projectionStrings(run[key])) ||
+    (run.diagnostics !== undefined && (!Array.isArray(run.diagnostics) || !run.diagnostics.every(projectionRecord)))
+  ) {
+    throw new Error("invalid run facts")
+  }
+  if (run.incident !== undefined) {
+    const incident = projectionObject(run.incident)
+    if (["code", "subject", "via", "evidence", "next", "owner"].some((key) => typeof incident[key] !== "string")) {
+      throw new Error("invalid incident facts")
+    }
+  }
+  if (
+    run.compositions !== undefined &&
+    (!Array.isArray(run.compositions) ||
+      run.compositions.some((entry) => {
+        const composition = projectionObject(entry)
+        return (
+          ["path", "base", "from", "merged"].some((key) => typeof composition[key] !== "string") ||
+          (composition.to !== undefined && typeof composition.to !== "string")
+        )
+      }))
+  ) {
+    throw new Error("invalid composition facts")
+  }
+  const startedAt = projectionDate(run.startedAt)
+  if (startedAt.getTime() !== runStartedAt(source.run)?.getTime()) throw new Error("run start does not match its id")
+  const steps = run.steps.map((entry) => {
+    const step = projectionObject(entry)
+    if (
+      typeof step.name !== "string" ||
+      typeof step.phase !== "string" ||
+      (step.ms !== undefined && typeof step.ms !== "number") ||
+      ["threw", "unended"].some((key) => step[key] !== undefined && step[key] !== true) ||
+      (step.parts !== undefined &&
+        (!Array.isArray(step.parts) ||
+          step.parts.some((part) => {
+            const fact = projectionObject(part)
+            return typeof fact.name !== "string" || typeof fact.ms !== "number"
+          })))
+    ) {
+      throw new Error("invalid step facts")
+    }
+    return {
+      ...step,
+      startedAt: projectionDate(step.startedAt),
+      ...(step.endedAt === undefined ? {} : { endedAt: projectionDate(step.endedAt) }),
+      commands: projectionCommands(step.commands),
+    } as JournalStep
+  })
+  return {
+    ...run,
+    id: source.run,
+    branch: run.branch,
+    head: run.head,
+    startedAt,
+    at: projectionDate(run.at),
+    steps,
+    checks: run.checks.map(projectionCheck),
+    commands: projectionCommands(run.commands),
+    ...(run.running === undefined ? {} : { running: projectionCheck(run.running) }),
+  } as JournalRun
+}
+
+/** Shared acquisition for detail and runner readers. Invalid cache bytes never replace raw truth. */
+export function readJournalProjection(dir: string, id: string): JournalProjectionRead {
+  const path = journalPath(dir, id)
+  const artifact = path.replace(/\.jsonl$/u, ".projection.json")
+  let source: JournalSource | undefined
+  const raw = (reason: JournalProjectionFallback["reason"], detail: string): JournalProjectionRead => ({
+    kind: "raw",
+    ...(source === undefined ? {} : { source }),
+    fallback: { run: id, reason, detail },
+  })
+  try {
+    source = journalSource(path, id)
+  } catch (error) {
+    return raw(error instanceof UnsupportedJournalIdentity ? "unsupported-identity" : "unreadable", String(error))
+  }
+  let text: string
+  try {
+    text = readFileSync(artifact, "utf8")
+  } catch (error) {
+    return raw(
+      (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable",
+      `${artifact}: ${String(error)}`,
+    )
+  }
+  try {
+    const parsed = projectionObject(JSON.parse(text))
+    if (
+      parsed.schema === undefined ||
+      parsed.fold === undefined ||
+      parsed.source === undefined ||
+      !Array.isArray(parsed.runs) ||
+      !Array.isArray(parsed.runnerRecords)
+    ) {
+      return raw("partial", `${artifact}: incomplete projection`)
+    }
+    if (parsed.schema !== JOURNAL_PROJECTION_SCHEMA || parsed.fold !== JOURNAL_PROJECTION_FOLD) {
+      return raw("incompatible", `${artifact}: schema=${String(parsed.schema)} fold=${String(parsed.fold)}`)
+    }
+    const held = projectionObject(parsed.source)
+    if (Object.keys(source).some((field) => typeof held[field] !== "string")) {
+      return raw("partial", `${artifact}: incomplete source identity`)
+    }
+    if (!sameJournalSource(source, held as JournalSource)) {
+      return raw("source-changed", `${path}: source identity differs from projection`)
+    }
+    if (
+      !parsed.runnerRecords.every(projectionRecord) ||
+      parsed.runnerRecords.some((record) => record.kind === "git" || record.run !== id)
+    ) {
+      return raw("corrupt", `${artifact}: invalid runner records`)
+    }
+    if (!parsed.runnerRecords.some((record) => record.kind === "run")) {
+      return raw("partial", `${artifact}: no run header`)
+    }
+    const capturedSource = source
+    const runs = parsed.runs.map((run) => projectionRun(run, capturedSource))
+    const after = journalSource(path, id)
+    if (!sameJournalSource(source, after)) {
+      // A raw process-cache hit must also be judged against the new source,
+      // not the identity from before the append that invalidated this artifact.
+      source = after
+      return raw("source-changed", `${path}: changed while loading projection`)
+    }
+    return { kind: "projection", source, runs, runnerRecords: parsed.runnerRecords }
+  } catch (error) {
+    return raw("corrupt", `${artifact}: ${String(error)}`)
+  }
+}
+
 function pruneJournalCache(dir: string, windowed: readonly string[]): void {
   const live = new Set(windowed.map((id) => journalPath(dir, id)))
   const prefix = dir.endsWith("/") ? dir : `${dir}/`
@@ -624,14 +861,23 @@ function pruneJournalCache(dir: string, windowed: readonly string[]): void {
   }
 }
 
-function cachedRunsIn(dir: string, id: string, startedAt: Date): readonly JournalRun[] {
+function cachedRunsIn(
+  dir: string,
+  id: string,
+  startedAt: Date,
+): Readonly<{ runs: readonly JournalRun[]; fallback?: JournalProjectionFallback }> {
   const path = journalPath(dir, id)
-  const st = statSync(path)
+  const projection = readJournalProjection(dir, id)
+  if (projection.kind === "projection") return { runs: projection.runs }
   const hit = journalFileCache.get(path)
-  if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.runs
+  if (hit !== undefined && projection.source !== undefined && sameJournalSource(hit.source, projection.source)) {
+    return { runs: hit.runs, fallback: projection.fallback }
+  }
   const runs = [...runsIn(readRunLog(dir, id), id, startedAt)]
-  journalFileCache.set(path, { mtimeMs: st.mtimeMs, size: st.size, runs })
-  return runs
+  if (projection.source !== undefined && sameJournalSource(projection.source, journalSource(path, id))) {
+    journalFileCache.set(path, { source: projection.source, runs })
+  }
+  return { runs, fallback: projection.fallback }
 }
 
 /**
@@ -848,10 +1094,13 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
   pruneJournalCache(dir, windowed)
   const runs = new Map<string, JournalRun[]>()
   const malformed: { run: string; key: string; message: string }[] = []
+  const fallbacks: JournalProjectionFallback[] = []
   for (const id of [...windowed].sort()) {
     const startedAt = runStartedAt(id)
     if (startedAt === undefined) continue
-    for (const run of cachedRunsIn(dir, id, startedAt)) {
+    const read = cachedRunsIn(dir, id, startedAt)
+    if (read.fallback !== undefined) fallbacks.push(read.fallback)
+    for (const run of read.runs) {
       const key = journalKey(run.branch, run.head)
       for (const message of run.malformed ?? []) malformed.push({ key, message, run: run.id })
       const held = runs.get(key)
@@ -859,7 +1108,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
       else held.unshift(run)
     }
   }
-  return { dir, malformed, runs }
+  return { dir, malformed, runs, fallbacks }
 }
 
 /**
