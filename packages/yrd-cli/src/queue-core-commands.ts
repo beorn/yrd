@@ -81,6 +81,7 @@ import {
   queueRun,
   LegacyOverridePresent,
   QueueAuthorityUnreadable,
+  QueueRunAfterRunFailed,
   QueueRunEventRetryExhausted,
   readConfig,
   readJournals,
@@ -868,6 +869,8 @@ export async function coreQueueCommand(
       )
       outcome = await queueRun({
         ...baseOptions,
+        afterRun: (outcome) =>
+          cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue }),
         ...(onRecord === undefined
           ? {}
           : {
@@ -885,6 +888,9 @@ export async function coreQueueCommand(
         ...(noCheck === undefined ? {} : { noCheck }),
       })
     } catch (error) {
+      // Cleanup used to run outside this catch. Keep its original process
+      // failure path: the round judged, so reporting stuck() would be false.
+      if (error instanceof QueueRunAfterRunFailed) throw error.cause
       if (error instanceof LegacyOverridePresent && request.command === "up") {
         return { kind: "legacy-override-present", error }
       }
@@ -902,7 +908,6 @@ export async function coreQueueCommand(
       // silent-fallback-allow: stuck() emitted the full run failure; undefined only makes the command exit 2.
       return undefined
     }
-    await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
     emit(io, options.json, outcome, describeRun(outcome))
     // Naming the branch is `describeRun`'s; naming what fixes it is this
     // round's own log, which the ending that stuck it already wrote in full

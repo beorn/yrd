@@ -66,6 +66,11 @@ export type QueueRunOptions = Readonly<{
   tempRoot: string
   /** Receives every log record as it is written, for the human rendering. */
   render?: (record: LogRecord) => void
+  /**
+   * Caller-owned cleanup after the core's entire disposal scope. The journal
+   * is complete only after this returns; later writes invalidate its projection.
+   */
+  afterRun?: (outcome: QueueRunOutcome) => Promise<void>
   /** The logger the worktree plumbing narrates to; pass one only at trace. */
   plumbing?: PlumbingLog
   git?: Git
@@ -188,9 +193,35 @@ function nowMs(options: QueueRunOptions): number {
   return options.now !== undefined ? options.now() : Date.now()
 }
 
+/** Caller cleanup failed after the round judged; never a failure to judge. */
+export class QueueRunAfterRunFailed extends Error {
+  constructor(
+    readonly outcome: QueueRunOutcome,
+    cause: unknown,
+  ) {
+    super(`caller cleanup for ${outcome.run} failed: ${String(cause)}`, { cause })
+    this.name = "QueueRunAfterRunFailed"
+  }
+}
+
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
-  await using resources = new AsyncDisposableStack()
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
+  try {
+    const outcome = await queueRunWithLog(options, log)
+    try {
+      await options.afterRun?.(outcome)
+    } catch (cause) {
+      throw new QueueRunAfterRunFailed(outcome, cause)
+    }
+    return outcome
+  } finally {
+    // Both the core disposal scope and caller cleanup have finished, even on throw.
+    log.finish()
+  }
+}
+
+async function queueRunWithLog(options: QueueRunOptions, log: QueueRunLog): Promise<QueueRunOutcome> {
+  await using resources = new AsyncDisposableStack()
   const runWorktrees = join(options.workdir, "worktrees", log.id)
   resources.defer(() => {
     // The queue owns this scaffold; settledBaseCommit also serves callers

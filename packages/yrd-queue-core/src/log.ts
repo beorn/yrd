@@ -36,6 +36,7 @@
  * never write one file and a run that built nothing still has its own log.
  */
 
+import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   appendFileSync,
   closeSync,
@@ -233,6 +234,8 @@ export type QueueRunLog = Readonly<{
   /** The file every record of this run is appended to. */
   path: string
   write(record: LogWrite): LogRecord
+  /** Publish disposable reader facts after every run-owned disposer has finished. */
+  finish(): void
   openGitOutput: NonNullable<GitInvocationOptions["openOutput"]>
   writeGitInvocation(invocation: GitInvocation): void
 }>
@@ -263,6 +266,40 @@ export function openLog(
     id,
     path,
     write,
+    finish() {
+      try {
+        const before = journalSource(path, id)
+        const records = readRunLog(directory, id)
+        const startedAt = runStartedAt(id)
+        if (startedAt === undefined) throw new Error(`journal ${path}: run id has no start instant`)
+        const runs = runsIn(records, id, startedAt)
+        const source = journalSource(path, id)
+        if (JSON.stringify(before) !== JSON.stringify(source)) {
+          throw new Error(`journal ${path}: source changed while building its projection`)
+        }
+        atomicWriteFileSync(
+          path.replace(/\.jsonl$/u, ".projection.json"),
+          `${JSON.stringify({
+            schema: 1,
+            fold: 1,
+            source,
+            runs,
+            runnerRecords: records.filter((record) => record.kind !== "git"),
+          })}\n`,
+        )
+      } catch (error) {
+        // A disposable projection cannot change the queue's outcome. If even
+        // the raw journal cannot carry the warning, stderr names both failures.
+        const reason = error instanceof Error ? error.message : String(error)
+        try {
+          write({ kind: "warning", subject: "journal-projection", reason })
+        } catch (warningError) {
+          process.stderr.write(
+            `journal projection ${path}: ${reason}; could not journal warning: ${String(warningError)}\n`,
+          )
+        }
+      }
+    },
     openGitOutput() {
       mkdirSync(gitDirectory, { recursive: true })
       const stem = join(gitDirectory, String(++invocationCount))
@@ -558,6 +595,25 @@ const journalFileCache = new Map<string, { mtimeMs: number; size: number; runs: 
 
 function journalPath(dir: string, id: string): string {
   return join(dir, `${id}.jsonl`)
+}
+
+/** Metadata identity for completed local append-only journals; never a content hash. */
+function journalSource(path: string, run: string) {
+  const stat = statSync(path, { bigint: true })
+  const fields = ["dev", "ino", "size", "mtimeNs", "ctimeNs"] as const
+  for (const field of fields) {
+    if (typeof stat[field] !== "bigint") {
+      throw new Error(`journal ${path}: source identity ${field} is unsupported on this platform`)
+    }
+  }
+  return {
+    run,
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    size: String(stat.size),
+    mtimeNs: String(stat.mtimeNs),
+    ctimeNs: String(stat.ctimeNs),
+  }
 }
 
 function pruneJournalCache(dir: string, windowed: readonly string[]): void {

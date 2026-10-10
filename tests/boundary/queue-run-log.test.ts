@@ -117,7 +117,10 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     // AC1 (#24750): publication happens after the entire disposal stack,
     // including its remote-call tail. Existing log assertions miss an absent
     // or prematurely captured reusable projection.
-    const projection = JSON.parse(await readFile(path.replace(/\.jsonl$/, ".projection.json"), "utf8"))
+    const projection = JSON.parse(await readFile(path.replace(/\.jsonl$/, ".projection.json"), "utf8")) as {
+      source: unknown
+      runnerRecords: unknown
+    }
     const source = await stat(path, { bigint: true })
     expect(projection.source, run.report).toMatchObject({
       run: records[0]?.run,

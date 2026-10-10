@@ -9,6 +9,7 @@
 
 import { spawnSync } from "node:child_process"
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -714,6 +715,43 @@ it("applies an event override to merge checks and runs the check after clear", a
  * @level    l3 — a real round through every runner, counted from git's own trace2 log
  * @consumer the operator reading a round's GitHub login cost
  */
+it("publishes after caller cleanup throws without changing the completed run into a run failure", async () => {
+  // AC1 / CTO 46c4b175: the existing remote-call test sees only core disposal,
+  // never a caller's later journal append or cleanup error.
+  const w = await world()
+  await createWorldEventQueue(w)
+  const cause = new Error("caller cleanup failed after judging")
+  let completed: { log: string; exitCode: number } | undefined
+  await expect(
+    queueRun({
+      ...(await w.options({ exit: 0 })),
+      checks: [],
+      notify: undefined,
+      afterRun: async (outcome) => {
+        completed = outcome
+        const rows = readFileSync(outcome.log, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+        expect(rows.at(-1)).toMatchObject({ kind: "remote-calls" })
+        appendFileSync(
+          outcome.log,
+          `${JSON.stringify({ kind: "observation", run: outcome.run, at: new Date().toISOString(), subject: "caller-cleanup-tail" })}\n`,
+        )
+        throw cause
+      },
+    }),
+  ).rejects.toMatchObject({ name: "QueueRunAfterRunFailed", cause, outcome: { exitCode: 0 } })
+  if (completed === undefined) throw new Error("completed round never reached caller cleanup")
+  const projection = JSON.parse(readFileSync(completed.log.replace(/\.jsonl$/u, ".projection.json"), "utf8")) as {
+    runnerRecords: readonly { kind: string; subject?: string }[]
+  }
+  expect(projection.runnerRecords.at(-1)).toMatchObject({ kind: "observation", subject: "caller-cleanup-tail" })
+  expect(
+    projection.runnerRecords.filter((row) => row.kind === "warning" && row.subject === "journal-projection"),
+  ).toEqual([])
+})
+
 it("closes the round's journal with every remote call it made, counted from git's trace2 log", async () => {
   const w = await world()
   await createWorldEventQueue(w)
