@@ -312,16 +312,15 @@ describe("yrd watch, the ending's exit code", () => {
         movement === "disappear" ? ["-d", ref, before] : [ref, movement === "advance" ? after : divergent, before]
 
       const marker = join(w.workdir, "advanced")
-      const retryMarker = join(w.workdir, "retrying")
-      const retryFetches = join(w.workdir, "retry-fetches.jsonl")
+      const fetches = join(w.workdir, "fetches.jsonl")
       const executable = join(w.workdir, "advancing-git.ts")
       writeFileSync(
         executable,
         `#!${process.execPath}
 import { appendFileSync, existsSync, writeFileSync } from "node:fs"
 const args = process.argv.slice(2)
-if (args.includes("fetch") && existsSync(${JSON.stringify(retryMarker)})) {
-  appendFileSync(${JSON.stringify(retryFetches)}, JSON.stringify(args) + "\\n")
+if (args.includes("fetch")) {
+  appendFileSync(${JSON.stringify(fetches)}, JSON.stringify(args) + "\\n")
 }
 const result = Bun.spawnSync(["git", ...args], { stdin: "inherit", stdout: "pipe", stderr: "pipe" })
 if (result.exitCode === 0 && args.includes("ls-remote") && args.includes("refs/*") && !existsSync(${JSON.stringify(marker)})) {
@@ -336,18 +335,11 @@ process.exit(result.exitCode)
       )
       chmodSync(executable, 0o755)
       const run = capture(w.work)
-      const io = {
-        ...run.io,
-        stderr: (text: string) => {
-          run.io.stderr(text)
-          if (text.includes("advanced during event list")) writeFileSync(retryMarker, "retrying")
-        },
-      }
       const stop = new AbortController()
       const deadline = setTimeout(() => stop.abort(), 5_000)
       const watched = coreQueueCommand(
         w.work,
-        io,
+        run.io,
         { command: "list", terms: [branch], watch: true, stop: stop.signal, intervalSeconds: 1 },
         {
           json: true,
@@ -373,11 +365,15 @@ process.exit(result.exitCode)
         .split("\n")
         .map((line) => JSON.parse(line))
       expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
-      const fetched = readFileSync(retryFetches, "utf8")
+      const fetched = readFileSync(fetches, "utf8")
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as string[])
-      expect(fetched.flat().filter((arg) => arg.includes("refs/yrd/") && arg.includes("task/unrelated"))).toEqual([])
+      // One initial full listing may acquire this chain; retrying the selected change must not acquire it again.
+      // Count native acquisitions so the contract is independent of when progress narration is emitted.
+      expect(
+        fetched.flat().filter((arg) => arg.includes("refs/yrd/") && arg.includes("task/unrelated")).length,
+      ).toBeLessThanOrEqual(1)
     },
   )
 
