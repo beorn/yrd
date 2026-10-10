@@ -314,6 +314,8 @@ async function advanceBase(level: Level): Promise<string | undefined> {
       path: level.prefix === "" ? "." : level.prefix,
       reason: `candidate/target base unreadable: ${detail(error)}`,
     })
+    // silent-fallback-allow: the unreadable base was just recorded as a named unjudged gap; undefined keeps the
+    // whole window under judgment, the conservative proof, rather than narrowing it.
     return undefined
   }
 }
