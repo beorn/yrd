@@ -125,7 +125,6 @@ describe("event submit", () => {
         submitter: "@dev/2",
         target: { branch: "main", remote: "origin" },
       })
-      console.log(JSON.stringify({ scratch, candidatePath, verified: result.verifying.state }))
       expect(result.verifying.state).toBe("verified")
       expect(candidatePath?.startsWith(`${scratch}${sep}`)).toBe(false)
       expect(candidatePath?.startsWith(`${join(common, "yrd", "tmp")}${sep}`)).toBe(true)
