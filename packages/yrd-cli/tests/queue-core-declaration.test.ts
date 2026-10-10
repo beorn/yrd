@@ -2399,22 +2399,32 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(service.stderr()).toContain("does not parse")
   })
 
-  it("names the cause and the cure when a tolerant read refuses a newer nested declaration value", async () => {
+  it.each([
+    [
+      "a newer nested value",
+      'notify: [{desk: {run: "echo hi", on: future-end}}]\n',
+      ".yrd.yml notify[0] desk: on: must be",
+    ],
+    ["a malformed value", "notify: [{desk: {run: 5}}]\n", ".yrd.yml notify[0] desk: needs run: <command>"],
+  ])("names the mechanism and the cure when a tolerant read refuses %s", async (_label, config, detail) => {
     // An unknown TOP-level key is a warning since 27187/27796; a newer value inside a
-    // key this Yrd DOES know still refuses. The refusal must name both why (this
-    // environment's Yrd is older than the declaration the target holds) and what to
-    // run, so an older base has a path forward (28510).
-    const repo = await world('notify: [{desk: {run: "echo hi", on: future-end}}]\n')
+    // key this Yrd DOES know still refuses — and so does a simply malformed value. The
+    // refusal must name the MECHANISM and the cure, never a guessed cause: no line may
+    // claim this environment is older, because the same text fires for a declaration
+    // main would refuse too (28510).
+    const repo = await world(config)
     const run = capture(repo)
 
     const error = (await coreQueueCommand(repo, run.io, { command: "list" }, { queue: "main" }).catch(
       (cause: unknown) => cause,
     )) as Error
     expect(error.message).toContain("the declaration at origin/main cannot be read")
-    expect(error.message).toContain(".yrd.yml notify[0] desk: on: must be")
-    expect(error.message).toContain("is older than the declaration at origin/main")
+    expect(error.message).toContain(detail)
+    expect(error.message).toContain("cannot read it. If origin/main's declaration is newer than this Yrd")
     expect(error.message).toContain("run main's yrd: @in main -- bun yrd queue list")
+    expect(error.message).toContain("if main's yrd refuses it too, the declaration itself is malformed")
     expect(error.message).toMatch(/\(yrd \S+\+\S+\)/u)
+    expect(error.message).not.toContain("is older than")
   })
 
   it("refuses a selected branch with no config, names that branch, and names the cure", async () => {

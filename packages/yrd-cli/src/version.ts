@@ -119,13 +119,15 @@ export function formatUnknownTopLevelKeyWarning(at: string, command: string, key
  * verbs — downgrades an unknown TOP-level declaration key to a warning (27187,
  * 27796). A newer value inside a key this Yrd DOES know (an unknown `notify[].on`,
  * say) still refuses, because it cannot be skipped without changing what the
- * command means. This names the reader's own identity and the cure for that skew,
- * so an environment whose Yrd predates the target's declaration is not left with a
- * refusal that says neither why nor what to run (28510).
+ * command means. The SAME refusal fires for a declaration that is simply
+ * malformed, so this names the MECHANISM, never a guessed cause: the reader's own
+ * identity, the skew cure to try first, and how to tell skew from a bad
+ * declaration (main's yrd refuses it too, 28510).
  */
 export function formatDeclarationSkewCure(at: string, command: string): string {
   return (
-    ` This environment's Yrd (${formatYrdRuntimeVersion()}) is older than the declaration at ${at}, which uses ` +
-    `a key or value this Yrd does not know; run main's yrd: @in main -- bun yrd ${command} …`
+    ` This environment's Yrd (${formatYrdRuntimeVersion()}) cannot read it. If ${at}'s declaration is newer than ` +
+    `this Yrd, run main's yrd: @in main -- bun yrd ${command} …; if main's yrd refuses it too, the declaration ` +
+    `itself is malformed.`
   )
 }

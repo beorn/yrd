@@ -754,9 +754,10 @@ export async function coreQueueCommand(
       // verbs) downgrades an unknown TOP-level key to a warning (27187/27796). A newer
       // value inside a key this Yrd DOES know — an unknown `notify[].on`, say — still
       // refuses, because it cannot be skipped without changing what the command means;
-      // and the bare "cannot be read" line then named neither the cause (this
-      // environment's Yrd predates the declaration the target holds) nor the cure, so
-      // an older base had no path forward (28510). Name both. A read that RUNS the
+      // and the bare "cannot be read" line then named neither the cure nor how to tell
+      // a newer declaration from a merely malformed one, so an older base had no path
+      // forward (28510). Name both, as a MECHANISM and not a guessed cause (the same
+      // refusal fires for a bad declaration). A read that RUNS the
       // declaration keeps today's line: the queue is the reader that must know every
       // key, and it is not the older one.
       const skew = RUNS_THE_DECLARATION.has(request.command)
