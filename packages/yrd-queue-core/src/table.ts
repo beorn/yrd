@@ -36,6 +36,12 @@ export type Row<Status extends string = ChangeStatus | "direct" | "invalid"> = R
    * Row.next} says the same thing in the one line a reader acts on.
    */
   malformed?: readonly string[]
+  /**
+   * Record kinds in this change's run journal that THIS reader's build does not
+   * know. Reader version skew, never malformed bytes (24735, @cto 056e31bf):
+   * the run was still folded, and {@link Row.next} carries the reader's cure.
+   */
+  unknownKinds?: readonly string[]
   /** A selected chain that cannot fold, or retained merged endings whose equality cannot be proved. */
   diagnostic?: string
   /** Immutable ending identity distinguishing retained ambiguous merged rows. */
@@ -165,15 +171,56 @@ export function watchRowKey(row: WatchRow): string {
  * lose every superseded run's verdict if it were folded away.
  */
 export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): readonly WatchRow[] {
-  if (options.latest === true || options.perRun !== true || options.journals === undefined) {
-    return rows.map((row) => ({ row }))
-  }
   const journals = options.journals
+  if (options.latest === true || options.perRun !== true || journals === undefined) {
+    // The default lens is a status surface too (@cto a04a006b, 24735 finding
+    // 2): a change whose journal this reader could not fully read wears the
+    // same skew here as it does per run, never only in the split lens.
+    return rows.map((row) => ({ row: skewedRow(row, journals?.runs.get(journalKey(row.branch, row.head)) ?? []) }))
+  }
   return rows.flatMap((row) => {
     const runs = journals.runs.get(journalKey(row.branch, row.head)) ?? []
     if (runs.length === 0) return [{ row }]
     return runs.map((run, index) => ({ row: runRow(row, run, index === 0), run }))
   })
+}
+
+/**
+ * The one row a change shows when the page is not split by run. No journal on
+ * this machine leaves the row exactly as the fold gave it.
+ *
+ * @cto 25d6aa5f splits two predicates over this ONE row. The STATUS is the
+ * newest run's own reading, so a clean newer retry reads clean and never sends
+ * the operator to restart a watch that reads the current run fine — the skew
+ * marker rides only that run's kinds. The DETAIL is not allowed to look
+ * complete either: when an OLDER run carried a kind this build does not know,
+ * the row names that run as partial history, because the fold counted records
+ * this reader never understood. The per-run lens keeps each run's own truth.
+ *
+ * A change that already has an operational next owner keeps it: @cto 056e31bf
+ * pin 1 forbids dropping the journal, the kind or the reader's cure, and
+ * @cto a04a006b requires the row to carry the cure beside the status marker.
+ */
+function skewedRow(current: Row, runs: readonly JournalRun[]): Row {
+  const skewed = runs.find((run) => (run.unknownKinds?.length ?? 0) > 0)
+  if (skewed === undefined) return current
+  const newest = runs[0] === skewed
+  const skew = newest ? skewNext(skewed) : olderSkewNext(skewed)
+  return {
+    ...current,
+    // The status marker is the NEWEST run's own reading, never an older run's.
+    ...(newest ? { unknownKinds: skewed.unknownKinds } : {}),
+    // This change's own next owner when it has one — the reader's cure rides in
+    // the SAME sentence rather than replacing it.
+    ...(skew === undefined
+      ? {}
+      : {
+          next:
+            current.next === undefined
+              ? skew
+              : { owner: current.next.owner, because: `${current.next.because}; ${skew.because}` },
+        }),
+  }
 }
 
 /**
@@ -191,6 +238,40 @@ function malformedNext(run: JournalRun | undefined): NextOwner | undefined {
   return {
     because: `run journal ${run.id} has a malformed row for this change (${run.malformed.join("; ")}); the row was skipped — fix the writer (26230)`,
     owner: "the queue's operator",
+  }
+}
+
+/**
+ * What a row says when this reader did not know every kind its run journal
+ * carried (24735, @cto 056e31bf). READER version skew, and the cure is the
+ * reader's own build — never the writer's bytes, which is why this is a
+ * separate sentence from {@link malformedNext} and must never carry its
+ * fix-the-writer wording. The run is still folded; only this reader's reading
+ * of it is partial.
+ */
+function skewNext(run: JournalRun | undefined): NextOwner | undefined {
+  const kinds = run?.unknownKinds
+  if (run === undefined || kinds === undefined || kinds.length === 0) return undefined
+  return {
+    because: `journal ${run.id} carries record kind ${kinds.join(", ")} this watch does not know; restart the watch from the landing root`,
+    owner: "the watch's own build",
+  }
+}
+
+/**
+ * What the collapsed row says about an OLDER run whose journal carried a kind
+ * this build does not know, when the newest run read clean (@cto 25d6aa5f).
+ * The status cell stays the newest run's — a clean newer read must never send
+ * the operator to restart a healthy watch — but the detail states what the
+ * fold is: this reader never understood every record, so the counts it folded
+ * may be partial. A trust note, never the repair instruction above.
+ */
+function olderSkewNext(run: JournalRun | undefined): NextOwner | undefined {
+  const kinds = run?.unknownKinds
+  if (run === undefined || kinds === undefined || kinds.length === 0) return undefined
+  return {
+    because: `older run ${run.id} carries kind ${kinds.join(", ")} this watch does not know; folded counts may be partial`,
+    owner: "the watch's own build",
   }
 }
 
@@ -217,6 +298,8 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   // says (25521 — a cancelled change's detail read `checking` for 6 days).
   const live = newest && stillInLine(current.state) ? run.running : undefined
   const defect = malformedNext(run)
+  const skew = skewNext(run)
+  const next = defect ?? skew
   return {
     ...current,
     // Assign absent run-only values too: no later run's facts may survive this join.
@@ -231,10 +314,11 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
     incident: run.incident,
     diagnostics: run.diagnostics,
     malformed: run.malformed,
+    unknownKinds: run.unknownKinds,
     // This run's own defect when it has one; otherwise the change's next
     // owner, which the newest run's defect may already have replaced — the
     // journal is defective for the change, not for one of its runs.
-    ...(defect === undefined ? {} : { next: defect }),
+    ...(next === undefined ? {} : { next }),
     result,
     log: check?.log,
     run: run.id,

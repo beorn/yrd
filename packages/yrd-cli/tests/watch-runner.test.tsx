@@ -80,6 +80,8 @@ function workdirWith(
     header?: boolean | string
     gitBeforeHeader?: boolean
     lastWriteAgoMs?: number
+    /** A record appended AFTER the header, as a writer from another build would append one. */
+    after?: string
     /** The service's health document, when the workdir has one. */
     health?: string
   }>,
@@ -99,7 +101,7 @@ function workdirWith(
   const prefix = options.gitBeforeHeader
     ? `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: join(logs, id, "git", "1.stdout.bin.json") })}\n`
     : ""
-  writeFileSync(path, `${prefix}${header}`)
+  writeFileSync(path, `${prefix}${header}${options.after ?? ""}`)
   const lastWrite = new Date(NOW.getTime() - (options.lastWriteAgoMs ?? 0))
   utimesSync(path, lastWrite, lastWrite)
   if (options.pid !== undefined || options.pidText !== undefined || options.pidDirectory === true) {
@@ -161,6 +163,42 @@ describe("readRunnerFacts", () => {
     mkdirSync(path)
 
     await expect(readRunnerFacts(workdir)).rejects.toThrow(`run journal ${path}`)
+  })
+
+  /**
+   * @failure A journal written by a NEWER yrd carries a record kind this reader
+   *          does not know. PAST the header the reader skipped it in silence, so
+   *          a journal it could not fully read was indistinguishable from one
+   *          it understood — the same lie as the RUNNER SILENT this bead is
+   *          named for. @cto 056e31bf rules it READER VERSION SKEW: the run is
+   *          still folded, and this row NAMES the kind with the reader's cure.
+   * @level    l1
+   * @consumer the operator running yrd watch from a checkout older than the queue
+   */
+  it("names an unknown record kind PAST the header as reader skew, never as a failure (24735 row 4)", async () => {
+    const unknown = "a-kind-from-a-newer-writer"
+    const record = (kind: string): string =>
+      `${JSON.stringify({ kind, run: "q-whatever", at: NOW.toISOString(), branch: "task/x", head: "a".repeat(40) })}\n`
+    const facts = await readRunnerFacts(workdirWith({ ageMs: 60_000, after: record(unknown) }))
+    // A newer writer's kind is NOT a failed load: the run still reads.
+    expect(facts.latest?.unknownKinds).toEqual([unknown])
+    const line = runnerLine(facts, NOW)
+    expect(line.detail).toContain(unknown)
+    expect(line.detail).toContain("restart the watch from the landing root")
+    // The cure names the READER; it never borrows the malformed row's wording.
+    expect(line.detail).not.toContain("fix the writer")
+    // CONTROL 1: a kind this build DOES know reads with no skew note at all.
+    const known = await readRunnerFacts(workdirWith({ ageMs: 60_000, after: record("settle") }))
+    expect(known.latest?.unknownKinds).toBeUndefined()
+    expect(runnerLine(known, NOW).detail).not.toContain("does not know")
+    // CONTROL 2: a genuinely silent runner still says silent. This is asserted
+    // against the published ref, so a quiet journal can never be turned into it.
+    const silent: RunnerFacts = {
+      journalDir: "/w/logs",
+      service: { kind: "absent", why: "no local health document" },
+      published: { signal: "silent" },
+    }
+    expect(runnerWord(silent, false)).toBe("silent")
   })
 
   /**

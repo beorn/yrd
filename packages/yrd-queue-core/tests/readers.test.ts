@@ -530,6 +530,111 @@ describe("a run's journal, read back", () => {
     expect(read.malformed).toEqual([])
   })
 
+  // 24735 rows 1 and 3 as amended by @cto 056e31bf: an unknown record kind is
+  // reader version skew, never malformed and never a last-known state, and it
+  // marks only the run that carries it.
+  it("names an unknown record kind as reader skew on its own run, never malformed (24735 rows 1/3)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const branch = "task/one"
+    const head = "abc123"
+    const { dir, run } = journalDir([{ branch, decision: "merged", head, kind: "change" }], at)
+    appendFileSync(
+      join(dir, `${run}.jsonl`),
+      `${JSON.stringify({ at: at.toISOString(), branch, head, kind: "a-kind-from-a-newer-writer", run })}\n`,
+    )
+    // The clean control is a NEIGHBOUR this reader can read, with a real
+    // journal of its own: absence of a matching run proves nothing about a
+    // clean read (24735 corrected review finding 3).
+    openLog(dir, () => at).write({
+      at: at.toISOString(),
+      branch: "task/other",
+      decision: "merged",
+      head: "def456",
+      kind: "change",
+    })
+    const journals = readJournals(dir, { now: at })
+    const runs = journals.runs.get(journalKey(branch, head))
+    // The run was still FOLDED; only this reader's reading of it is partial.
+    expect(runs?.[0]?.unknownKinds).toEqual(["a-kind-from-a-newer-writer"])
+    expect(runs?.[0]?.malformed).toBeUndefined()
+    expect(journals.malformed).toEqual([])
+    // The row carries the READER's cure, never the malformed row's writer cure.
+    const skewed = watchRows([{ branch, head, state: "merged" } as Row], { journals, perRun: true })
+    expect(skewed[0]?.row.next?.because).toContain("a-kind-from-a-newer-writer")
+    expect(skewed[0]?.row.next?.because).toContain("restart the watch from the landing root")
+    expect(skewed[0]?.row.next?.because).not.toContain("fix the writer")
+    // The DEFAULT listing carries the same skew, never only the split lens
+    // (24735 corrected review finding 2).
+    const folded = watchRows([{ branch, head, state: "merged" } as Row], { journals })
+    expect(folded[0]?.row.unknownKinds).toEqual(["a-kind-from-a-newer-writer"])
+    expect(folded[0]?.row.next?.because).toContain("restart the watch from the landing root")
+    // @cto 056e31bf pin 1 on a change that ALREADY has an operational next
+    // owner (@dev/4 R3): the owner survives and the journal, the kind and the
+    // reader's cure stay visible in the same line. The old code dropped the
+    // cure whole whenever a next owner was present.
+    const busy = watchRows(
+      [
+        {
+          branch,
+          head,
+          next: { because: "repair the failing check", owner: "the author" },
+          state: "failed",
+        } as Row,
+      ],
+      { journals },
+    )[0]?.row
+    expect(busy?.next?.owner).toBe("the author")
+    expect(busy?.next?.because).toContain("repair the failing check")
+    expect(busy?.next?.because).toContain(run)
+    expect(busy?.next?.because).toContain("a-kind-from-a-newer-writer")
+    expect(busy?.next?.because).toContain("restart the watch from the landing root")
+    // A neighbour whose own journal reads clean stays clean, per run and folded.
+    const clean = watchRows([{ branch: "task/other", head: "def456", state: "merged" } as Row], {
+      journals,
+      perRun: true,
+    })
+    expect(clean[0]?.row.next).toBeUndefined()
+    expect(clean[0]?.row.unknownKinds).toBeUndefined()
+    const cleanFolded = watchRows([{ branch: "task/other", head: "def456", state: "merged" } as Row], { journals })
+    expect(cleanFolded[0]?.row.unknownKinds).toBeUndefined()
+    expect(cleanFolded[0]?.row.next).toBeUndefined()
+  })
+
+  // 24735, @cto 25d6aa5f: two predicates over ONE collapsed row. The status is
+  // the NEWEST run's own reading — a clean newer retry must never send the
+  // operator to restart a healthy watch — while the detail still names the
+  // older run whose records this build never understood, as partial history.
+  it("lets a clean newer retry clear the status and still names the older skewed run in the detail", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const branch = "task/retry"
+    const head = "beef01"
+    const { dir, run: older } = journalDir([{ branch, decision: "failed", head, kind: "change" }], at)
+    appendFileSync(
+      join(dir, `${older}.jsonl`),
+      `${JSON.stringify({ at: at.toISOString(), branch, head, kind: "a-kind-from-a-newer-writer", run: older })}\n`,
+    )
+    const later = new Date(at.getTime() + 60_000)
+    openLog(dir, () => later).write({ at: later.toISOString(), branch, decision: "merged", head, kind: "change" })
+    const journals = readJournals(dir, { now: later })
+    const runs = journals.runs.get(journalKey(branch, head)) ?? []
+    // Newest first: the retry read clean, the run under it did not.
+    expect(runs[0]?.unknownKinds).toBeUndefined()
+    expect(runs.at(-1)?.unknownKinds).toEqual(["a-kind-from-a-newer-writer"])
+    const collapsed = watchRows([{ branch, head, state: "merged" } as Row], { journals })[0]?.row
+    // STATUS: the newest run's own reading, so nothing asks for a restart.
+    expect(collapsed?.unknownKinds).toBeUndefined()
+    expect(collapsed?.next?.because).not.toContain("restart the watch from the landing root")
+    // DETAIL: the older run is named, with what the fold is.
+    expect(collapsed?.next?.because).toContain(`older run ${older}`)
+    expect(collapsed?.next?.because).toContain("a-kind-from-a-newer-writer")
+    expect(collapsed?.next?.because).toContain("folded counts may be partial")
+    // The per-run lens keeps each run's own truth, unchanged.
+    const perRun = watchRows([{ branch, head, state: "failed" } as Row], { journals, perRun: true })
+    expect(perRun[0]?.row.unknownKinds).toBeUndefined()
+    expect(perRun[1]?.row.unknownKinds).toEqual(["a-kind-from-a-newer-writer"])
+    expect(perRun[1]?.row.next?.because).toContain("restart the watch from the landing root")
+  })
+
   // Was "still refuses a partial incident outside a change-ref race
   // diagnostic". 24408 supersedes the refusal, not the detection: a partial
   // incident that is not a race diagnostic is still a defect, and it is still

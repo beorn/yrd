@@ -485,6 +485,13 @@ export type JournalRun = Readonly<{
    * read. Absent when every row of this run about this change was sound.
    */
   malformed?: readonly string[]
+  /**
+   * A record kind in this run's journal that THIS reader's build does not know.
+   * Reader version skew, never a writer defect: the reader folds every kind it
+   * knows and names the rest here, so no row is left at a last-known state
+   * without saying why (24735, @cto 056e31bf). Absent when every kind is known.
+   */
+  unknownKinds?: readonly string[]
   /** The target recorded in this run's header; never borrowed from a later run. */
   base?: string
   /** The merge commit this run recorded, if it recorded one. */
@@ -969,6 +976,13 @@ function commandOf(record: LogRecord): JournalCommand | undefined {
 }
 
 function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): readonly JournalRun[] {
+  // READER VERSION SKEW (24735, @cto 056e31bf): kinds this build knows are
+  // folded; kinds it does not are NAMED, never dropped and never malformed.
+  // The fold stays additive, so a writer may add a kind without breaking a
+  // reader — the reader says only that ITS reading of this run is partial.
+  const unknownKinds = [
+    ...new Set(records.map((record) => record.kind).filter((kind) => !(LOG_KINDS as readonly string[]).includes(kind))),
+  ]
   const numbered = records.filter((record) => record.kind === "run-number")
   if (numbered.length > 1) {
     throw new Error(`run journal ${id} has ${numbered.length} run-number rows; expected at most one`)
@@ -1148,6 +1162,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       ...(change.incident === undefined ? {} : { incident: change.incident }),
       ...(change.diagnostics === undefined ? {} : { diagnostics: change.diagnostics }),
       ...(change.malformed === undefined ? {} : { malformed: change.malformed }),
+      ...(unknownKinds.length === 0 ? {} : { unknownKinds }),
       ...(change.merge === undefined ? {} : { merge: change.merge }),
       ...(change.compositions === undefined ? {} : { compositions: change.compositions }),
       ...(typeof base === "string" ? { base } : {}),

@@ -19,7 +19,7 @@
  */
 
 import { incidentLine, type Row } from "@yrd/queue-core"
-import { STATE_WORDS, stateGlyph, stateWord } from "./watch-format.ts"
+import { STATE_WORDS, skewMarker, stateGlyph, stateWord } from "./watch-format.ts"
 
 export type Notice = Readonly<{
   glyph: string
@@ -41,7 +41,13 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
         ? `run result: ${row.result}`
         : (row.reason ?? row.result)
   // The state's own word, the check overlay apart below; `direct` is no change and says what happened instead.
-  const word = row.state === "direct" ? "went around the queue" : stateWord({ state: row.state, format: row.format })
+  // The row's own skew metadata rides the ONE formatter, so the trailer reads
+  // the same word the list cell does (@dev/4 R3, 24735). A direct row has no
+  // state word of its own, and must keep the marker too.
+  const word =
+    row.state === "direct"
+      ? `went around the queue${skewMarker(row)}`
+      : stateWord({ state: row.state, format: row.format, unknownKinds: row.unknownKinds })
   const state = joinedRun ? `change ${word}` : word
   const next =
     row.incident !== undefined

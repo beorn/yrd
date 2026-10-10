@@ -33,6 +33,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import {
+  LOG_KINDS,
   runDiedInPreamble,
   runStartedAt,
   serviceStoppedLine,
@@ -95,6 +96,12 @@ export type RunnerRun = Readonly<{
   pid?: number
   /** True when that process answers `kill -0`: the run is executing right now. */
   alive: boolean
+  /**
+   * Record kinds in the newest journal that THIS build does not know. Reader
+   * version skew, never a writer defect (24735, @cto 056e31bf): the run is
+   * still read, and only its own row says this reading is partial.
+   */
+  unknownKinds?: readonly string[]
   /**
    * The run threw in its Git preamble: it is not executing and it never reached
    * the queue it was for. A terminal outcome with its own cure, and deliberately
@@ -494,6 +501,8 @@ type JournalHead = Readonly<{
   steps?: readonly RunnerJournalStep[]
   /** The line as the run journalled it, when it has. */
   line?: RoundLine
+  /** Record kinds this build does not know, NAMED rather than dropped (24735). */
+  unknownKinds?: readonly string[]
 }>
 
 /** The run's own reading of its line: the last `observation` record with subject `line` (25669). */
@@ -541,6 +550,7 @@ function readRunHeader(path: string): JournalHead {
   let header: Record<string, unknown> | undefined
   const openSteps: ActiveRunnerStep[] = []
   const allSteps: RunnerJournalStep[] = []
+  const unknownKinds = new Set<string>()
   for (const [index, line] of lines.entries()) {
     if (header !== undefined) {
       // PAST THE HEADER the journal is the run's ordinary business, which this
@@ -555,6 +565,12 @@ function readRunHeader(path: string): JournalHead {
       if (typeof after !== "object" || after === null) continue
       const record = after as Record<string, unknown>
       if (typeof record.kind !== "string") continue
+      // A KIND THIS BUILD DOES NOT KNOW is reader version skew, never a failed
+      // load (24735, @cto 056e31bf). The reader keeps folding every kind it
+      // knows - a writer may add one without breaking a reader - and NAMES the
+      // rest on the row, so a newer journal is never read as silence or as a
+      // last-known state. A line that is not a record at all is still skipped.
+      if (!(LOG_KINDS as readonly string[]).includes(record.kind)) unknownKinds.add(record.kind)
       records.push(record as unknown as LogRecord)
       if (record.kind === "step" || record.kind === "check") {
         const kind = record.kind as "step" | "check"
@@ -664,6 +680,7 @@ function readRunHeader(path: string): JournalHead {
     activeStep,
     ...(allSteps.length === 0 ? {} : { steps: allSteps }),
     ...(line === undefined ? {} : { line }),
+    ...(unknownKinds.size === 0 ? {} : { unknownKinds: [...unknownKinds].sort() }),
     died,
     headed: true,
     ...(typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? { pid } : {}),
@@ -697,7 +714,16 @@ function journalVerdict(
   alive: boolean,
 ): Pick<
   RunnerRun,
-  "target" | "gitlink" | "queue" | "checks" | "effectiveChecks" | "activeStep" | "steps" | "line" | "unstarted"
+  | "target"
+  | "gitlink"
+  | "queue"
+  | "checks"
+  | "effectiveChecks"
+  | "activeStep"
+  | "steps"
+  | "line"
+  | "unknownKinds"
+  | "unstarted"
 > {
   const unstarted = !alive && read.died
   if (!read.headed) {
@@ -713,6 +739,7 @@ function journalVerdict(
     ...(alive && read.activeStep !== undefined ? { activeStep: read.activeStep } : {}),
     ...(read.steps === undefined ? {} : { steps: read.steps }),
     ...(read.line === undefined ? {} : { line: read.line }),
+    ...(read.unknownKinds === undefined ? {} : { unknownKinds: read.unknownKinds }),
     ...(unstarted ? { unstarted: true as const } : {}),
   }
 }
@@ -979,7 +1006,15 @@ function runnerLineOf(
       : published?.why === undefined
         ? undefined
         : `${published.why}${unjudged}`
-  const rawDetail = publishedDetail === undefined ? localDetail : `${publishedDetail} · ${localDetail}`
+  // READER VERSION SKEW is named on this row and never folded into silence or
+  // a last-known state (24735, @cto 056e31bf). The cure is this watch's own
+  // build, so it is never the fix-the-writer sentence a malformed row carries.
+  const readSkew =
+    facts?.latest?.unknownKinds === undefined
+      ? ""
+      : `journal ${facts.latest.id} carries record kind ${facts.latest.unknownKinds.join(", ")} this watch does not know; restart the watch from the landing root`
+  const skewedDetail = readSkew === "" ? localDetail : localDetail === "" ? readSkew : `${localDetail} · ${readSkew}`
+  const rawDetail = publishedDetail === undefined ? skewedDetail : `${publishedDetail} · ${skewedDetail}`
   const detail = rawDetail.replace(/[—\s]+$/u, "")
   switch (state) {
     case "provisioning":

@@ -300,6 +300,20 @@ describe("the notice", () => {
     expect(line).toContain("next: @dev/2")
   })
 
+  // @dev/4 R3: watch-notice forwarded only state/format to stateWord, so the
+  // single-result trailer read the plain folded word while the list cell wore
+  // the skew. The metadata rides the ONE formatter, and a direct row keeps it.
+  it("wears the row's reader skew in its own word, folded states and direct rows alike", () => {
+    const word = (over: Partial<Row>): string => (noticeLine(row(over)).split("  ·  ")[0] ?? "").trim()
+    expect(word({ state: "failed" })).toBe("× failed")
+    expect(word({ state: "failed", unknownKinds: ["a-kind-from-a-newer-writer"] })).toBe("× failed · reader skew")
+    expect(word({ state: "direct" })).toContain("went around the queue")
+    expect(word({ state: "direct" })).not.toContain("reader skew")
+    expect(word({ state: "direct", unknownKinds: ["a-kind-from-a-newer-writer"] })).toBe(
+      "→ went around the queue · reader skew",
+    )
+  })
+
   it("says a change is queued AND that a check is running on it, because both are true", () => {
     // The records say queued until the checked record merges; the journal says a
     // check is running now. The notice carries both rather than picking one and

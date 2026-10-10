@@ -26,7 +26,7 @@ export {
  * The word a row's state reads as (watch-words.ts): a check running on it now
  * reads checking whatever its events say; otherwise the core's event state.
  */
-type DisplayRow = Pick<Row, "state" | "live" | "format">
+type DisplayRow = Pick<Row, "state" | "live" | "format" | "unknownKinds">
 
 export function displayState(row: DisplayRow): DisplayState {
   if (row.live !== undefined) return "checking"
@@ -49,7 +49,20 @@ export function displayState(row: DisplayRow): DisplayState {
 
 /** The word for a row, read from the one table when it draws. */
 export function stateWord(row: DisplayRow): string {
-  return STATE_WORDS[displayState(row)].word
+  // The row's own skew is INSEPARABLE from the word (24735, @cto a04a006b): a
+  // clean row and a row this reader could not fully read may never render the
+  // same status, in the cell or in any box drawn from the same word.
+  return `${STATE_WORDS[displayState(row)].word}${skewMarker(row)}`
+}
+
+/**
+ * The marker a row wears when this reader did not know every record kind its
+ * journal carried (24735, @cto a04a006b). Reader version skew is not a failed
+ * load and not a writer defect, so the row keeps the word its fold gives and
+ * states the skew beside it; the cure names the READER's own build.
+ */
+export function skewMarker(row: Pick<Row, "unknownKinds">): string {
+  return (row.unknownKinds?.length ?? 0) === 0 ? "" : " · reader skew"
 }
 
 /** Full recorded warnings, shared by plain output and the selected change detail. */

@@ -16,7 +16,7 @@
  */
 
 import type { CheckView, Row } from "@yrd/queue-core"
-import { STATE_WORDS, clock, runShortName, timingLine } from "./watch-format.ts"
+import { STATE_WORDS, clock, runShortName, skewMarker, timingLine } from "./watch-format.ts"
 import { watchNotice } from "./watch-notice.ts"
 
 /** The kinds a run can be. `queue` is the only one built; the union exists so the next one is a data change. */
@@ -139,21 +139,37 @@ export function explanationLine(row: Row): string | undefined {
  * then the explanation line.
  */
 export function statusLineOf(row: Row, joinedRun = false): Readonly<{ status: string; explanation?: string }> {
+  const skew = skewMarker(row)
   if (row.state === "merged") {
-    const status = capitalize(STATE_WORDS.merged.word)
+    const status = `${capitalize(STATE_WORDS.merged.word)}${skew}`
+    // A merged change has no operational next owner (table.ts), so a `next` on
+    // it is a reader note: the current run's own cure, or — when a NEWER run
+    // read clean — the older run's partial history (@cto 25d6aa5f). This branch
+    // returned before consuming it, so the box stated the status and never the
+    // note behind it (@dev/4 R3/R4, 24735). Keyed on `next`, never on the
+    // status marker: a clean newest run has no marker and still owes the note.
+    const cure = row.next === undefined ? "" : ` — ${row.next.because}`
     if (row.merge === undefined) {
-      return { status, explanation: "the head is on the queue branch, and no merged record names the merge commit" }
+      return {
+        status,
+        explanation: `the head is on the queue branch, and no merged record names the merge commit${cure}`,
+      }
     }
     const at = row.endedAt === undefined ? "" : ` at ${clock(row.endedAt)}`
-    return { status, explanation: `as ${row.merge.slice(0, 12)}${at}` }
+    return { status, explanation: `as ${row.merge.slice(0, 12)}${at}${cure}` }
   }
   const explanation = explanationLine(row)
+  // The marker is already IN this word: headlineOf reads watchNotice, whose
+  // word is stateWord (watch-notice.ts), so appending it here printed it twice
+  // — `Failed · reader skew · reader skew` (@dev/4 R4, 24735). One marker, one
+  // home; the explanation form below still appends it, because a bare
+  // explanation carries no word.
   const status = capitalize(headlineOf(row, joinedRun))
   const statusWord = status.toLowerCase().split(/\s+/u)[0] ?? ""
   // The explanation already names the state ("It failed …"): do not print
   // "Failed" again in front of it (26242 row 12).
   if (explanation !== undefined && statusWord !== "" && explanation.toLowerCase().includes(statusWord)) {
-    return { status: explanation }
+    return { status: `${explanation}${skew}` }
   }
   return {
     status,
