@@ -28,7 +28,7 @@ import { openEvents } from "gitomic/events"
 import type { RefUpdate } from "gitomic"
 import { gitEnvironment } from "../src/git.ts"
 import { incidentTrailers } from "../src/incident.ts"
-import { recentCasRefusals } from "../src/log.ts"
+import { readJournals, recentCasRefusals } from "../src/log.ts"
 import { reminderDue } from "../src/override.ts"
 import {
   changeName,
@@ -750,6 +750,41 @@ it("publishes after caller cleanup throws without changing the completed run int
   expect(
     projection.runnerRecords.filter((row) => row.kind === "warning" && row.subject === "journal-projection"),
   ).toEqual([])
+})
+
+// AC1: disposable publication failure must preserve the completed queue outcome.
+// Caller-cleanup and reader-fault tests never fail the writer's atomic rename.
+it("keeps a merged outcome and names raw fallback when projection publication fails", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  await submitCommit(w, "task/projection-fault", "projection-fault.txt")
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    checks: [],
+    notify: undefined,
+    afterRun: async (completed) => {
+      mkdirSync(completed.log.replace(/\.jsonl$/u, ".projection.json"))
+    },
+  })
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/projection-fault"] })
+  expect(logRecords(outcome)).toContainEqual(
+    expect.objectContaining({
+      kind: "warning",
+      subject: "journal-projection",
+      reason: expect.stringContaining("rename"),
+    }),
+  )
+  const journals = readJournals(dirname(outcome.log))
+  expect([...journals.runs.values()].flat()).toContainEqual(
+    expect.objectContaining({ branch: "task/projection-fault", decision: "merged" }),
+  )
+  expect(journals.fallbacks).toContainEqual(
+    expect.objectContaining({
+      run: outcome.run,
+      reason: "unreadable",
+      detail: expect.stringContaining(".projection.json"),
+    }),
+  )
 })
 
 it("closes the round's journal with every remote call it made, counted from git's trace2 log", async () => {
