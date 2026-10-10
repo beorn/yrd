@@ -442,6 +442,12 @@ describe("a run's journal, read back", () => {
     ["new-fold", "incompatible"],
     ["same-size-edit", "source-changed"],
     ["append-during-load", "source-changed"],
+    ["replacement", "source-changed"],
+    ["truncation", "source-changed"],
+    ["unreadable-artifact", "unreadable"],
+    ["unsupported-identity", "unsupported-identity"],
+    ["source-stat-during-load", "unreadable"],
+    ["raw-cache-stat-failure", "unreadable"],
   ] as const)("names %s projection fallback and retains the raw journal facts", (fault, reason) => {
     // AC4: existing raw-cache tests never invalidate a persisted artifact.
     // Warm raw facts also catch reuse of stale process-cache data after a race.
@@ -480,6 +486,38 @@ describe("a run's journal, read back", () => {
       case "same-size-edit":
         writeFileSync(log.path, fs.readFileSync(log.path, "utf8").replace("task/one", "task/two"))
         break
+      case "replacement": {
+        const replacement = `${log.path}.replacement`
+        writeFileSync(replacement, fs.readFileSync(log.path, "utf8").replace("task/one", "task/two"))
+        fs.renameSync(replacement, log.path)
+        break
+      }
+      case "truncation":
+        writeFileSync(log.path, `${fs.readFileSync(log.path, "utf8").split("\n")[0]}\n`)
+        break
+      case "unreadable-artifact":
+        rmSync(artifact)
+        mkdirSync(artifact)
+        break
+      case "unsupported-identity":
+      case "source-stat-during-load":
+      case "raw-cache-stat-failure": {
+        if (fault === "raw-cache-stat-failure") {
+          rmSync(artifact)
+          log.write({ kind: "warning", subject: "invalidate-raw-cache", reason: "new source bytes" })
+        }
+        const stat = fs.statSync
+        let calls = 0
+        spy = vi.spyOn(fs, "statSync").mockImplementation(((...args: Parameters<typeof fs.statSync>) => {
+          const result = stat(...args)
+          if (String(args[0]) !== log.path) return result
+          calls++
+          if (fault === "unsupported-identity") return { ...result, ctimeNs: undefined }
+          if (calls === 2) throw new Error(`source stat ${log.path}: EACCES`)
+          return result
+        }) as typeof fs.statSync)
+        break
+      }
       case "append-during-load": {
         const read = fs.readFileSync
         spy = vi.spyOn(fs, "readFileSync").mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
@@ -495,10 +533,13 @@ describe("a run's journal, read back", () => {
     try {
       const journals = readJournals(dir, { now: at })
       expect(journals.fallbacks).toMatchObject([{ run: log.id, reason, detail: expect.any(String) }])
-      const branch = fault === "same-size-edit" || fault === "append-during-load" ? "task/two" : "task/one"
-      expect(journals.runs.get(journalKey(branch, "abc123"))?.[0]?.decision).toBe(
-        fault === "append-during-load" ? "merged" : "failed",
-      )
+      if (fault === "truncation") expect(journals.runs.size).toBe(0)
+      else {
+        const branch = ["same-size-edit", "append-during-load", "replacement"].includes(fault) ? "task/two" : "task/one"
+        expect(journals.runs.get(journalKey(branch, "abc123"))?.[0]?.decision).toBe(
+          fault === "append-during-load" ? "merged" : "failed",
+        )
+      }
     } finally {
       spy?.mockRestore()
     }

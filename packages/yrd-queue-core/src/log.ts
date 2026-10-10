@@ -868,7 +868,15 @@ export function readJournalProjection(dir: string, id: string): JournalProjectio
     }
     const capturedSource = source
     const runs = parsed.runs.map((run) => projectionRun(run, capturedSource))
-    const after = journalSource(path, id)
+    let after: JournalSource
+    try {
+      after = journalSource(path, id)
+    } catch (error) {
+      // Failure to validate the source is an I/O/identity fallback, not corrupt
+      // projection bytes. Do not reuse a raw cache under the earlier identity.
+      source = undefined
+      return raw(error instanceof UnsupportedJournalIdentity ? "unsupported-identity" : "unreadable", String(error))
+    }
     if (!sameJournalSource(source, after)) {
       // A raw process-cache hit must also be judged against the new source,
       // not the identity from before the append that invalidated this artifact.
@@ -902,8 +910,23 @@ function cachedRunsIn(
     return { runs: hit.runs, fallback: projection.fallback }
   }
   const runs = [...runsIn(readRunLog(dir, id), id, startedAt)]
-  if (projection.source !== undefined && sameJournalSource(projection.source, journalSource(path, id))) {
-    journalFileCache.set(path, { source: projection.source, runs })
+  if (projection.source !== undefined) {
+    try {
+      if (sameJournalSource(projection.source, journalSource(path, id))) {
+        journalFileCache.set(path, { source: projection.source, runs })
+      }
+    } catch (error) {
+      // Raw facts were read successfully. Optional process caching must not
+      // turn a failed metadata check into a refusal of those facts.
+      return {
+        runs,
+        fallback: {
+          run: id,
+          reason: error instanceof UnsupportedJournalIdentity ? "unsupported-identity" : "unreadable",
+          detail: `${path}: ${String(error)}`,
+        },
+      }
+    }
   }
   return { runs, fallback: projection.fallback }
 }
