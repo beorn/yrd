@@ -365,6 +365,29 @@ it("runs a check-free event change through one atomic merge", async () => {
   const outcome = await queueRun(options)
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-run"] })
+  // @failure 24846: the round's own merge -- the one operation that changes main -- runs
+  //          git-super outside the git evidence seam, so a reader of the log cannot see it.
+  // @level l3
+  // @consumer queue operator and every reader of the run log
+  // @testonly none
+  // The frozen git-super binary is executed directly (27098), so the subcommand is a
+  // bare argument and "super" never appears as one: the binary is named by the row's
+  // own executable, and the merge is the argument that changes main.
+  const gitRows = logRecords(outcome).filter((record) => record.kind === "git")
+  const mergeRows = gitRows.filter(
+    (record) =>
+      Array.isArray(record.args) && record.args.includes("merge") && String(record.executable).includes("git-super"),
+  )
+  expect(
+    mergeRows.map((row) => row.args),
+    JSON.stringify(gitRows.map((row) => [row.executable, row.args])),
+  ).toHaveLength(1)
+  expect(String(mergeRows[0]!.evidence)).toMatch(/\.json$/u)
+  // The row names a real artifact, not a dangling path: the evidence file carries the
+  // merge invocation that ran, which is the one thing a reader replays from the round.
+  const mergeEvidence = JSON.parse(readFileSync(String(mergeRows[0]!.evidence), "utf8")) as Record<string, unknown>
+  expect(mergeEvidence.args).toEqual(mergeRows[0]!.args)
+  expect(mergeEvidence.cwd).toEqual(expect.any(String))
   expect(logRecords(outcome)).toEqual(
     expect.arrayContaining([expect.objectContaining({ kind: "run-number", number: 1, run: outcome.run })]),
   )
