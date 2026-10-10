@@ -150,10 +150,17 @@ export class WorktreePool {
    * candidate's, so the reset's checkout would either fail or judge the write.
    * Submodule rows count too — a checkout that no longer matches the recorded
    * gitlink is the same lie one level down.
+   *
+   * Untracked content does NOT refuse, and neither does untracked content inside
+   * a submodule: the reset cleans every ignored and untracked file, so those
+   * bytes cannot reach a judgment, and `--ignore-submodules=untracked` stops a
+   * submodule that merely holds an untracked file from reporting as modified and
+   * turning every borrow back into a fresh materialization (@cto 2026-10-10,
+   * the same defect @dev/review2 found on the lane's head).
    */
   private async reuseRefusal(path: string): Promise<string> {
     const at = this.gitAt(path)
-    const status = (await at(["status", "--porcelain", "--untracked-files=no"])).trim()
+    const status = (await at(["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"])).trim()
     if (status === "") return ""
     const first = status.split("\n")[0] ?? ""
     return `a tracked modification stands in the pooled tree (${first.trim()})`
@@ -172,7 +179,13 @@ export class WorktreePool {
     if (head !== input.commit) {
       throw new Error(`pooled tree ${path} read back ${head} after checking out ${input.commit}`)
     }
-    await this.store().materializeSubmodules(path, { force: true, hooks: "quarantine" })
+    await this.store(path).materializeSubmodules(path, {
+      force: true,
+      hooks: "quarantine",
+      // The warm tree keeps the fresh one's boundary: a private child is never
+      // initialized, so the reset names the same exclusions the materializer did.
+      excludedSubmodules: await this.excludedSubmodules(input.commit),
+    })
     await this.clean(path)
   }
 
@@ -242,12 +255,25 @@ export class WorktreePool {
   /** Remove a pooled tree and forget its registration, exactly as a per-run tree's removal does. */
   private async forget(path: string): Promise<void> {
     rmSync(path, { force: true, recursive: true })
-    await this.store().prune()
+    await this.store(path).prune()
   }
 
-  private store(): ReturnType<typeof createGitWorktreeStore> {
+  /**
+   * A store whose seam answers for the reference checkout AND for `path`, the
+   * worktree it is materializing, running each request in the cwd that request
+   * names: a seam that answered only for the reference - or ran everything
+   * there - refused the pooled cwd and rebuilt fresh every round, which is the
+   * defect @dev/4 reproduced at cc95eaf9c3.
+   */
+  private store(path: string): ReturnType<typeof createGitWorktreeStore> {
     const checkout = this.options.repo
-    return createGitWorktreeStore({ gitProcess: seamProcess(this.options.git, checkout), repo: checkout })
+    return createGitWorktreeStore({
+      gitProcess: seamProcess(this.options.git, checkout, {
+        also: [path],
+        at: (cwd) => this.gitAt(cwd),
+      }),
+      repo: checkout,
+    })
   }
 
   private gitAt(path: string): Git {

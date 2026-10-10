@@ -4045,6 +4045,47 @@ describe("28503 — a round's check tree is materialized once, not per phase or 
     expect(mergeTrees[0]).toContain(join("worktrees", "pool", "main"))
   })
 
+  it("reuses the warm tree: the install cache round one left is still there in round two", async () => {
+    const w = await world()
+    await createWorldEventQueue(w)
+    // The cache is what the pool exists to keep, and only an artifact that
+    // survives the second borrow can prove the reuse was REAL rather than a
+    // fresh materialization at the same path (@dev/4, 2026-10-10).
+    const seed = join(w.workdir, "seed.sh")
+    writeFileSync(seed, "#!/bin/sh\nmkdir -p node_modules\necho retained > node_modules/cache-witness\nexit 0\n")
+    chmodSync(seed, 0o755)
+    await submitCommit(w, "task/one", "one.txt")
+    await queueRun({
+      ...(await w.options({ exit: 0 })),
+      checks: [{ name: "seed", run: seed, on: ["merge"] }],
+      notify: undefined,
+    })
+    const log = w.checkLog
+    const observed = join(w.workdir, "observe.sh")
+    writeFileSync(
+      observed,
+      "#!/bin/sh\nif [ -f node_modules/cache-witness ]; then echo warm-reuse >> " +
+        log +
+        "; else echo cold-rebuild >> " +
+        log +
+        "; fi\nexit 0\n",
+    )
+    chmodSync(observed, 0o755)
+    await submitCommit(w, "task/two", "two.txt")
+    const second = await queueRun({
+      ...(await w.options({ exit: 0 })),
+      checks: [{ name: "observe", run: observed, on: ["merge"] }],
+      notify: undefined,
+    })
+    expect(second.merged).toEqual(["task/two"])
+    expect(readFileSync(log, "utf8")).toContain("warm-reuse")
+    expect(
+      logRecords(second).some(
+        (record) => record.kind === "warning" && String(record.reason ?? "").includes("could not be reset"),
+      ),
+    ).toBe(false)
+  })
+
   it("a tracked write refuses reuse and rebuilds fresh", async () => {
     const w = await world()
     await createWorldEventQueue(w)

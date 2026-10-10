@@ -17,7 +17,7 @@
 import { hostname } from "node:os"
 import { randomUUID } from "node:crypto"
 import { accessSync, constants, statSync } from "node:fs"
-import { basename, isAbsolute, resolve } from "node:path"
+import { basename, isAbsolute, resolve, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createShellBackend, type GitomicBackend } from "gitomic"
@@ -1006,15 +1006,43 @@ export class GitExit extends Error {
   }
 }
 
-/** Keep git-super's store on Yrd's selected Git process and its failure evidence. */
-export function seamProcess(git: Git, repo: string): GitProcess {
+/**
+ * Keep git-super's store on Yrd's selected Git process and its failure evidence.
+ *
+ * The store asks about the reference checkout AND about each worktree it is
+ * materializing, so the seam answers for every root named in `also` and runs
+ * each request in the cwd that request named (`at`). A seam that answered only
+ * for the reference - or ran every request there - refused the pooled cwd and
+ * made every warm borrow a silent fresh materialization (#28503, @dev/4
+ * 2026-10-10). A cwd outside the named roots is ground this run does not own,
+ * and still throws rather than being answered from the wrong checkout.
+ */
+export function seamProcess(
+  git: Git,
+  repo: string,
+  options: Readonly<{ also?: readonly string[]; at?: (cwd: string) => Git }> = {},
+): GitProcess {
+  const roots = [resolve(repo), ...(options.also ?? []).map((other) => resolve(other))]
+  // A root owns everything beneath it: a worktree's submodules are worktrees of
+  // their own under it, and materializing reads the reference checkout's own
+  // submodule copies. A path outside every root is still refused.
+  const owns = (asked: string): boolean => roots.some((root) => asked === root || asked.startsWith(root + sep))
   return {
     async run(request) {
-      if (resolve(request.repo) !== repo) {
-        throw new Error(`git-super's worktree store asked Git about ${request.repo}; its seam answers for ${repo} only`)
+      const asked = resolve(request.repo)
+      if (!owns(asked)) {
+        throw new Error(
+          `git-super's worktree store asked Git about ${request.repo}; its seam answers for ${roots.join(", ")} only`,
+        )
+      }
+      const bound = asked === resolve(repo) ? git : options.at?.(request.repo)
+      if (bound === undefined) {
+        throw new Error(
+          `git-super's worktree store asked Git about ${request.repo}, which this seam was given no Git runner for`,
+        )
       }
       try {
-        return { code: 0, stderr: "", stdout: await git(request.args, request.stdin) }
+        return { code: 0, stderr: "", stdout: await bound(request.args, request.stdin) }
       } catch (error) {
         const evidence = error instanceof GitExit ? error.evidence : undefined
         const answered = evidence?.result
