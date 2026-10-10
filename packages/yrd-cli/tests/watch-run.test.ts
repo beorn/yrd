@@ -69,6 +69,37 @@ describe("the status box's own lines", () => {
     expect(statusLineOf(merged).explanation ?? "").not.toContain("reader skew")
   })
 
+  // @dev/4 R4: the marker has ONE home — stateWord, read through watchNotice by
+  // headlineOf — so appending it again in the box printed it twice. Their
+  // production proof read `Failed · reader skew · reader skew`.
+  it("prints exactly one reader-skew marker in the box, a failed row and a direct one alike", () => {
+    const markers = (text: string | undefined): number => (text?.split("reader skew").length ?? 1) - 1
+    const failed = row({ state: "failed", unknownKinds: ["future-kind"] })
+    expect(statusLineOf(failed).status).toBe("Failed · reader skew")
+    expect(markers(statusLineOf(failed).status)).toBe(1)
+    const direct = row({ state: "direct", unknownKinds: ["future-kind"] })
+    expect(statusLineOf(direct).status).toBe("Went around the queue · reader skew")
+    expect(markers(statusLineOf(direct).status)).toBe(1)
+  })
+
+  // @dev/4 R4: the note was gated on the status marker, so a merged row whose
+  // NEWEST run read clean lost the older run's partial history (@cto 25d6aa5f)
+  // in both merge forms. The note hangs off `next`, never off the marker.
+  it("shows an older run's partial-history note in a clean merged box, both merge forms", () => {
+    const note = {
+      because: "older run q-old carries kind future-kind this watch does not know; folded counts may be partial",
+      owner: "the watch's own build",
+    }
+    const ancestryOnly = statusLineOf(row({ next: note, state: "merged" }))
+    expect(ancestryOnly.status).toBe("Merged")
+    expect(ancestryOnly.explanation).toContain("older run q-old")
+    expect(ancestryOnly.explanation).toContain("folded counts may be partial")
+    const recorded = statusLineOf(row({ merge: "2f5d9fbe7653abcd", next: note, state: "merged" }))
+    expect(recorded.status).toBe("Merged")
+    expect(recorded.explanation).toContain("older run q-old")
+    expect(recorded.explanation).toContain("2f5d9fbe7653")
+  })
+
   it("names the reason a failed or stuck change carries, and the position of one in line", () => {
     expect(headlineOf(row({ reason: "test", state: "failed" }))).toBe("failed test")
     expect(headlineOf(row({ position: 2, state: "queued" }))).toBe("queued #2")
