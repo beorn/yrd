@@ -563,6 +563,12 @@ it("sends two failed endings when the same head is resubmitted", async () => {
   expect(messages(w)[0]?.priorReason).toBeUndefined()
   expect(messages(w)[1]?.priorReason).toBe(messages(w)[0]?.reason)
   expect(messages(w)[1]?.priorReason).toBeDefined()
+  // 24735 row 5: the failing check's identity travels beside the reason, and a
+  // branch failing the same check the same way carries the earlier one.
+  expect(messages(w)[0]?.detail).toBe("verify exit=1 result=fail")
+  expect(messages(w)[0]?.priorDetail).toBeUndefined()
+  expect(messages(w)[1]?.detail).toBe("verify exit=1 result=fail")
+  expect(messages(w)[1]?.priorDetail).toBe(messages(w)[0]?.detail)
 })
 
 /** @failure 25041: a second stuck event for the same branch@head reused the first notice identity.

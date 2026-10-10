@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { isChargedFailure, sameFailureReason } from "../src/with-notify.ts"
+import { isChargedFailure, sameFailureDetail, sameFailureReason } from "../src/with-notify.ts"
 
 /**
  * The notifier's third disposition — hold and route, do not resubmit — fires
@@ -44,6 +44,34 @@ describe("sameFailureReason — the one reason they all carry, or nothing", () =
     expect(sameFailureReason(["", ""])).toBeUndefined()
     expect(sameFailureReason(["typecheck", undefined])).toBeUndefined()
     expect(sameFailureReason([undefined, "typecheck"])).toBeUndefined()
+  })
+})
+
+describe("sameFailureDetail — the one cause they all carry, or nothing (24735 row 5)", () => {
+  it("returns the cause when every prior failure carries it", () => {
+    expect(sameFailureDetail(["verify exit=1 result=fail", "verify exit=1 result=fail"])).toBe(
+      "verify exit=1 result=fail",
+    )
+  })
+
+  it("returns it for a single prior failure", () => {
+    expect(sameFailureDetail(["typecheck exit=1 result=fail"])).toBe("typecheck exit=1 result=fail")
+  })
+
+  it("NEGATIVE CONTROL: a different cause is the same reason failing a new way, not a repeat", () => {
+    expect(sameFailureDetail(["verify exit=1 result=fail", "verify exit=2 result=fail"])).toBeUndefined()
+    expect(sameFailureDetail(["verify exit=2 result=fail", "verify exit=1 result=fail"])).toBeUndefined()
+  })
+
+  it("no prior failures is not a repeat", () => {
+    expect(sameFailureDetail([])).toBeUndefined()
+  })
+
+  it("a missing or empty cause never becomes a repeat, however many agree", () => {
+    expect(sameFailureDetail([undefined, undefined])).toBeUndefined()
+    expect(sameFailureDetail(["", ""])).toBeUndefined()
+    expect(sameFailureDetail(["verify exit=1 result=fail", undefined])).toBeUndefined()
+    expect(sameFailureDetail([undefined, "verify exit=1 result=fail"])).toBeUndefined()
   })
 })
 
