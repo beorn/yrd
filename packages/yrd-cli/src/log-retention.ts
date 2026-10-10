@@ -206,15 +206,16 @@ export async function pruneRoundOutput(
  * window, and the oldest such name — so a reader can watch retention fall
  * behind without opening a single round directory. Absent `oldest` means the
  * tree is inside the window.
+ *
+ * Journaled BESIDE the run journals, in `<workdir>/retention.jsonl` (the one
+ * writer is cli.ts), never inside the log tree: every `logs/*.jsonl` is a run
+ * and this row is not one, so a run-journal name on it made the runner's own
+ * header read refuse the newest journal.
  */
-export function retentionObservation(
-  result: RetentionResult,
-  input: Readonly<{ run: string; at: Date }>,
-): Record<string, unknown> {
+export function retentionObservation(result: RetentionResult, input: Readonly<{ at: Date }>): Record<string, unknown> {
   const remaining = result.remaining.length
   return {
     kind: "observation",
-    run: input.run,
     at: input.at.toISOString(),
     scope: "log-retention",
     windowDays: Math.round(result.windowMs / (24 * 60 * 60 * 1000)),

@@ -242,7 +242,7 @@ describe("an absent optional root is named in the row, never a healthy zero (F2)
     const missing = "/x/checks"
     const observation = retentionObservation(
       { windowMs: ROUND_OUTPUT_WINDOW_MS, removed: [], remaining: [], missing: [missing] },
-      { run: "q-test", at: NOW },
+      { at: NOW },
     )
     expect(observation.kind).toBe("observation")
     expect(observation.removed).toBe(0)

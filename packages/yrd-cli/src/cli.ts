@@ -36,7 +36,6 @@ import {
   createEventStore,
   isQueueEventShapeUnreadable,
   lookupRunIndex,
-  openLog,
   parseDuration,
   readRunLog,
   runIndexPath,
@@ -1325,9 +1324,17 @@ function buildProgram(
       // batches — lives in `pruneRoundOutput`, so this verb and its tests run the
       // same selection and the batches never re-walk the tree.
       const result = await pruneRoundOutput({ roots, now, limit, dryRun })
-      // One observation row, in the very log tree just pruned: the drain is on record.
-      const record = openLog(join(location.workdir, "logs"), () => now)
-      appendFileSync(record.path, `${JSON.stringify(retentionObservation(result, { run: record.id, at: now }))}\n`)
+      // One observation row per sweep, journaled BESIDE the run journals, never
+      // among them: every `logs/*.jsonl` is a run, and a q-<utc>-<id> name on
+      // this row made the runner's own header read refuse the newest journal
+      // (watch-runner readRunHeader: record 1 before the run header must have
+      // kind "run" or "git"). The drain is still on record, in one file a
+      // reader opens without touching a single round directory.
+      const retentionJournal = "retention.jsonl"
+      appendFileSync(
+        join(location.workdir, retentionJournal),
+        `${JSON.stringify(retentionObservation(result, { at: now }))}\n`,
+      )
       const days = Math.round(result.windowMs / (24 * 60 * 60 * 1000))
       // `--dry-run` PROMISES a list, so the human mode prints the paths it would
       // remove (and the apply mode the paths it did): a count alone would leave
