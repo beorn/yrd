@@ -238,8 +238,8 @@ export type {
   OverrideTable,
   OverrideWrite,
 } from "./override.ts"
-export { dispatchNotifications, notifyOutsideRound, overrideNotice } from "./with-notify.ts"
-export type { OutsideRound, OverrideNotice } from "./with-notify.ts"
+export { dispatchNotifications, notifyOutsideRound, notifyRetiredRoot, overrideNotice } from "./with-notify.ts"
+export type { OutsideRound, OverrideNotice, RetiredRootNotice } from "./with-notify.ts"
 
 export { remoteUrl } from "./remote.ts"
 

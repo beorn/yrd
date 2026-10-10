@@ -77,6 +77,10 @@ const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]
 // `override` is a merge-check override's own event (25296, @cto ccd8dfa8): the
 // verb's set, clear and replace, and a round's expiry and half-window reminder.
 // Not a default: only an entry that names it hears it.
+// `retired-root-written` is the sweep's own occasion (28481 layer 3, @cto
+// 6eb10b57): the service found a write under a retired `%23` queue root. It is
+// an OCCASION, not a change ending — the record has no `change` — and, like
+// `override`, only an entry that names it hears it.
 export const ENDINGS = [
   "admission-warning",
   "merged",
@@ -86,6 +90,7 @@ export const ENDINGS = [
   "observed",
   "deferred",
   "override",
+  "retired-root-written",
   "cancelled",
 ] as const
 const DEFAULT_ENDINGS = ["merged", "failed", "stuck", "merged-direct", "cancelled"] as const

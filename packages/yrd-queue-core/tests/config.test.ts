@@ -134,6 +134,16 @@ describe("the queue declaration grammar", () => {
     })
   })
 
+  it("reads the sweep's own retiring occasion, which is an ending an entry may name", () => {
+    const config = parseConfig(
+      "notify:\n  - sweeper:\n      on: [retired-root-written]\n      run: bun tools/yrd-notify.ts\n",
+      SOURCE,
+    )
+    expect(config.notify).toEqual([
+      { name: "sweeper", on: ["retired-root-written"], run: "bun tools/yrd-notify.ts" },
+    ])
+  })
+
   it.each([
     [
       "positive retention is halted",

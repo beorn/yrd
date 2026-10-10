@@ -34,6 +34,7 @@ import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import { issueResolver } from "./issue-resolver.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
+import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
 import { runAdmission } from "./admission.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
@@ -114,10 +115,12 @@ import {
   parseUntil,
   type OverrideFact,
   type OverrideEntry,
+  type RetiredRootNotice,
   type QueueReadStore,
   type OverrideTable,
   type PinCarrierPin,
   notifyOutsideRound,
+  notifyRetiredRoot,
   dispatchNotifications,
   overrideNotice,
   HEARTBEAT_GRACE_MS,
@@ -2757,6 +2760,11 @@ export async function coreQueueCommand(
             )
           },
         }
+        // One incident per retired root: dispatch when the root's observation
+        // changes, never on every tick, and retry a failed delivery rather than
+        // remember it as said (28481 layer 3, @cto 6eb10b57, @dev/2 review).
+        let retiredRootSaid: string | undefined
+        let retiredRootNamed: string | undefined
         for (;;) {
           const conflict = runnerConflictExit()
           if (conflict !== undefined) return conflict
@@ -2968,6 +2976,49 @@ export async function coreQueueCommand(
           if (stopped()) return 0
 
           await request.afterRound?.(outcome)
+          // The retired-root sweep, once per tick (28481 layer 3, @cto 6eb10b57):
+          // the `%23` sibling of this queue root is never written by this code,
+          // so any live write there is a client still on the pre-27065 builder.
+          // One incident per root — a repeat inside a state is an upsert — and
+          // the clearing edge when the newest write ages past a day.
+          const retiredRoot = sweepRetiredRoot(workdir)
+          if (retiredRoot !== undefined && retiredRoot.unreadable.length > 0) {
+            // An incomplete census is a named instrument failure — it may not pass
+            // for quiet, and it may not withdraw a standing incident. Name it once
+            // per shape; the page below still goes when there is one to send
+            // (28481 layer 3, @dev/2 review).
+            const key = retiredRootUnreadableKey(
+              retiredRoot.kind === "page" ? retiredRoot.notice.root : retiredRoot.root,
+              retiredRoot.unreadable,
+            )
+            if (key !== retiredRootNamed) {
+              io.stderr(
+                `yrd: the retired root could not be fully read (${retiredRoot.unreadable.join(", ")});` +
+                  (retiredRoot.kind === "page"
+                    ? " the page names the newest READABLE write, which may not be the newest\n"
+                    : " withholding the clearing edge rather than clearing a standing incident on an incomplete census\n"),
+              )
+              retiredRootNamed = key
+            }
+          }
+          if (retiredRoot?.kind === "page") {
+            retiredRootSaid = await sayRetiredRoot(retiredRootSaid, retiredRoot, (reading) =>
+              tellRetiredRoot(
+                {
+                  config,
+                  git,
+                  repo,
+                  targetSha: outcome.target,
+                  workdir,
+                  tempRoot,
+                  ...(env === undefined ? {} : { env }),
+                  ...(options.populateReference === undefined ? {} : { populateReference: options.populateReference }),
+                },
+                reading,
+                io,
+              ),
+            )
+          }
           // The gitlink, at the target as this round left it: the round that merged
           // the change moving this yrd's own gitlink is the last one this code runs.
           const after = await reload(outcome.target)
@@ -4096,6 +4147,167 @@ async function tellOverride(
     )
   }
   return handed
+}
+
+/**
+ * How long a retired root's newest write may stand before its incident clears
+ * (@cto 6eb10b57): a write older than a day is no live writer, so the page is
+ * the emitter's to withdraw. The root itself is never drained or removed.
+ */
+const RETIRED_ROOT_CLEAR_MS = 24 * 60 * 60 * 1000
+
+/** A retired-root tick that has a page to send: the state, the record, and what it could not read. */
+export type RetiredRootReading = Readonly<{
+  kind: "page"
+  active: boolean
+  notice: RetiredRootNotice
+  /** Paths the census could not read; non-empty means `notice` names the newest READABLE write. */
+  unreadable: readonly string[]
+}>
+
+/**
+ * A retired root the census could not fully read while finding nothing readable
+ * to page. The walk cannot prove the root is quiet, so no clearing edge may be
+ * sent and the standing incident stays (28481 layer 3, @dev/2 review of the
+ * unreadable subtree).
+ */
+export type RetiredRootReadingBlocked = Readonly<{ kind: "withheld"; root: string; unreadable: readonly string[] }>
+
+/** The key that names one unreadable census, so it is reported once per shape, not per tick. */
+export function retiredRootUnreadableKey(root: string, unreadable: readonly string[]): string {
+  return `unreadable\u0000${root}\u0000${[...unreadable].sort().join("\u0000")}`
+}
+
+/**
+ * The observation identity of one retired-root tick: whether the page stands or
+ * clears, and the newest write's instant. A repeat of the SAME observation is
+ * not re-dispatched — the wire would upsert one row and not wake — while a
+ * later write, or a later episode after a clear, is a new observation and does
+ * dispatch (@dev/2 review, 28481 layer 3).
+ */
+export function retiredRootObservation(reading: RetiredRootReading): string {
+  return `${reading.active ? "live" : "clear"}\u0000${reading.notice.writtenAt}`
+}
+
+/**
+ * Carry one reading to the notify entries and answer what the caller should
+ * remember as said: the observation key once it was delivered, or the previous
+ * key when the delivery failed, so the next tick restates it instead of
+ * suppressing the incident forever (@dev/2 review, 28481 layer 3).
+ */
+export async function sayRetiredRoot(
+  said: string | undefined,
+  reading: RetiredRootReading,
+  tell: (reading: RetiredRootReading) => Promise<boolean>,
+): Promise<string | undefined> {
+  const observation = retiredRootObservation(reading)
+  if (observation === said) return said
+  return (await tell(reading)) ? observation : said
+}
+
+/**
+ * The retired-root sweep (28481 layer 3, @cto 6eb10b57): once per tick the
+ * service looks beside its OWN queue root for the pre-cutover `%23` sibling and
+ * decides whether a client is still writing it. `workdir` is the queue root, so
+ * the retired root is its own sibling with the tilde boundary re-escaped — the
+ * address-based detector cannot be used here without re-deriving the host
+ * workdir, and the sibling rule is exact.
+ *
+ * A post-cutover write within the clear window is `active`; one older than the
+ * window is the clearing edge; a root with no post-cutover write is a leftover
+ * and says nothing. One incident per root: the caller dispatches on a new
+ * observation and a repeat of the same one is an upsert on the wire. A census
+ * that could not read part of the root withholds (`RetiredRootReadingBlocked`):
+ * it never sends the clearing edge, because the write it cannot see may be the
+ * newest one.
+ */
+export function sweepRetiredRoot(workdir: string): RetiredRootReading | RetiredRootReadingBlocked | undefined {
+  const root = retiredRootBeside(workdir)
+  if (root === undefined) return undefined
+  const sweep = retiredRootSweep(root)
+  const blocked = sweep.unreadable.length > 0
+  // Nothing readable would be a page: with a complete census that is a leftover
+  // (or an empty root) and says nothing. An incomplete one cannot prove quiet, so
+  // it withholds instead of reporting the clear.
+  if (sweep.newest === undefined || !sweep.live) {
+    return blocked ? { kind: "withheld", root, unreadable: sweep.unreadable } : undefined
+  }
+  const active = Date.now() - sweep.newest.mtimeMs < RETIRED_ROOT_CLEAR_MS
+  // The clearing edge is the one claim an incomplete census may not make: a fresh
+  // write in an unreadable subtree would be invisible here.
+  if (!active && blocked) return { kind: "withheld", root, unreadable: sweep.unreadable }
+  return {
+    kind: "page",
+    active,
+    unreadable: sweep.unreadable,
+    notice: {
+      record: "retired-root-written",
+      root: sweep.root,
+      address: root.slice(root.lastIndexOf("/") + 1),
+      path: sweep.newest.path,
+      writtenAt: new Date(sweep.newest.mtimeMs).toISOString(),
+      cutover: RETIRED_ROOT_CUTOVER,
+      branches: sweep.branches,
+      active,
+    },
+  }
+}
+
+/**
+ * Hand one retired-root reading to the declaration's notify entries and say, on
+ * stderr, what each answered. Never throws: a failed entry is a failed delivery,
+ * and the next tick that changes observation restates the incident. Answers
+ * whether every entry was carried — a failed entry leaves the observation
+ * unremembered so the next tick retries it (@dev/2 review, 28481 layer 3).
+ */
+async function tellRetiredRoot(
+  context: Readonly<{
+    config: QueueConfig
+    git: Git
+    repo: string
+    targetSha: string
+    workdir: string
+    tempRoot: string
+    env?: NodeJS.ProcessEnv
+    populateReference?: boolean
+  }>,
+  reading: RetiredRootReading,
+  io: YrdCliIO,
+): Promise<boolean> {
+  let handed: readonly Readonly<{ name: string; delivery: string; failure?: string }>[]
+  try {
+    handed = await notifyRetiredRoot(
+      {
+        git: context.git,
+        notify: context.config.notify,
+        repo: context.repo,
+        targetSha: context.targetSha,
+        workdir: context.workdir,
+        tempRoot: context.tempRoot,
+        ...(context.config.setup === undefined ? {} : { setup: context.config.setup }),
+        ...(context.env === undefined ? {} : { env: context.env }),
+        ...(context.populateReference === undefined ? {} : { populateReference: context.populateReference }),
+      },
+      reading.notice,
+    )
+  } catch (error) {
+    handed = [{ delivery: "failed", failure: error instanceof Error ? error.message : String(error), name: "notify" }]
+  }
+  let told = true
+  for (const each of handed) {
+    if (each.delivery === "none") {
+      io.stderr(
+        "yrd: no notify entry in .yrd.yml wants retired-root-written, so nobody was told;" +
+          ` the ${reading.active ? "live" : "cleared"} retired root ${reading.notice.address} is on the record\n`,
+      )
+    } else if (each.delivery === "failed") {
+      told = false
+      io.stderr(
+        `yrd: could not tell ${each.name} about the retired root ${reading.notice.address}: ${each.failure ?? "no reason given"}\n`,
+      )
+    }
+  }
+  return told
 }
 
 function runOptions(

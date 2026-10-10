@@ -232,6 +232,8 @@ The submitter and the queue share only the selected remote. The submitter pushes
 
    A failed record adds `reason`, `log`, and the branch's `failures` count; a merged record adds `merge`. Notify commands choose recipients and compose delivery text.
 
+   `retired-root-written` is the service's own occasion, not a change's: the per-tick sweep found a write under the retired percent-escaped queue root (`<host root>/<host>/<path>%23<queue>`, the spelling the pre-27065 builder used). That record carries no `change`; it is identified by `root`, `address` (the retired root's queue address), `path` (the newest file written under it), `writtenAt`, `cutover`, the `branches` named under it, and `active`. `active: false` is the clearing edge, sent once the newest post-cutover write is older than a day. It rides the wire's incident rail — emitter `yrd`, subject the retired root's address, condition `retired-root-written` — so a repeat upserts one incident rather than opening a ball every tick. The root is never drained; the sweep only reads and pages.
+
    For a change's current ending, later rounds read receipts between that ending and the captured tip. Any receipt settles a name for that ending. Exit 0 told it.
 
    Exit 4 means the transport answered and refused, with its reason on the command's last stdout line. The sent record says `Not-Told: <name> refused=<reason>`.
