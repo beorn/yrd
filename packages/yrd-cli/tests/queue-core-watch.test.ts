@@ -27,12 +27,16 @@ import { tmpdir } from "node:os"
 import { delimiter, dirname, join, resolve } from "node:path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import {
+  archiveQueue,
+  archivedChangesPrefix,
   changeInput,
   changesRef,
   createEventQueue,
   createEventStore,
   readConfig,
   readEventQueue,
+  queueRef,
+  writeQueueEvent,
   readJournals,
   submit,
   type Git,
@@ -267,15 +271,18 @@ describe("yrd watch, the ending's exit code", () => {
    * @level l2 @consumer a submitter waiting for its selected change to merge
    * Existing fence and stale-pane tests never advance a real remote ref between reads.
    * The retry must not fetch unrelated history again (27957); reaching the ending alone missed that cost.
+   * Archive custody, queue-only movement and successive stale branches exercise the same acquisition contract.
+   * Existing rows miss those transition shapes; no production seam is added.
    * The selected Git executable only schedules the real ref update; it fabricates no Git result or event.
    */
-  it.each(["advance", "disappear", "diverge", "diverge-kept"] as const)(
+  it.each(["advance", "archive", "queue", "two-moves", "disappear", "diverge", "diverge-kept"] as const)(
     "handles %s during its event listing",
     async (movement) => {
       const w = await world()
       const branch = "task/advancing"
       await change(w, branch, true)
-      if (movement === "advance") await change(w, "task/unrelated", true)
+      const succeeds = ["advance", "archive", "queue", "two-moves"].includes(movement)
+      if (succeeds) await change(w, "task/unrelated", true)
       const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
       const queue = await readEventQueue(store, "main")
       const ref = changesRef("main", branch)
@@ -308,8 +315,52 @@ describe("yrd watch, the ending's exit code", () => {
         if (tip === null) throw new Error("divergent fixture chain has no event tip")
         divergent = tip
       }
-      const update =
-        movement === "disappear" ? ["-d", ref, before] : [ref, movement === "advance" ? after : divergent, before]
+      let updates = [
+        movement === "disappear"
+          ? `delete ${ref} ${before}`
+          : `update ${ref} ${succeeds ? after : divergent} ${before}`,
+      ]
+      if (movement === "archive") {
+        // Build custody with the real archive actuator, then replay its atomic remote transition during the read.
+        await w.git(["--git-dir", remote, "update-ref", ref, after, before])
+        const archived = await archiveQueue(store, "main", {
+          dryRun: false,
+          at: new Date(Date.now() + 8 * 86_400_000),
+          by: "fixture",
+          limit: 1,
+        })
+        expect(archived.readbacks.map((entry) => entry.branch)).toEqual([branch])
+        const cold = `${archivedChangesPrefix("main")}${branch}`
+        const coldTip = (await w.git(["--git-dir", remote, "rev-parse", cold])).trim()
+        await w.git(["--git-dir", remote, "update-ref", "-d", cold, coldTip])
+        await w.git(["--git-dir", remote, "update-ref", ref, before])
+        updates = [`delete ${ref} ${before}`, `create ${cold} ${coldTip}`]
+      } else if (movement === "queue") {
+        // The selected change is already merged; only queue history moves across its advertised fence.
+        await w.git(["--git-dir", remote, "update-ref", ref, after, before])
+        const next = await writeQueueEvent(store, "main", {
+          type: "observed",
+          commit,
+          by: "yrd-run",
+          at: new Date(),
+        })
+        await w.git(["--git-dir", remote, "update-ref", queueRef("main"), queue.tip, next])
+        updates = [`update ${queueRef("main")} ${next} ${queue.tip}`]
+      } else if (movement === "two-moves") {
+        const otherRef = changesRef("main", "task/unrelated")
+        const other = await openEvents({ ...store, ref: otherRef, writer: "yrd" })
+        const otherBefore = await other.head()
+        if (otherBefore === null) throw new Error("second fixture change has no event tip")
+        const otherCommit = (await w.git(["rev-parse", "task/unrelated"])).trim()
+        await other.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit: otherCommit })], {
+          expect: otherBefore,
+        })
+        const otherAfter = await other.head()
+        if (otherAfter === null) throw new Error("second merged fixture change has no event tip")
+        await w.git(["--git-dir", remote, "update-ref", otherRef, otherBefore, otherAfter])
+        // Both stale histories must settle at successive fences, with one refresh for each branch.
+        updates.push(`update ${otherRef} ${otherAfter} ${otherBefore}`)
+      }
 
       const marker = join(w.workdir, "advanced")
       const fetches = join(w.workdir, "fetches.jsonl")
@@ -324,7 +375,7 @@ if (args.includes("fetch")) {
 }
 const result = Bun.spawnSync(["git", ...args], { stdin: "inherit", stdout: "pipe", stderr: "pipe" })
 if (result.exitCode === 0 && args.includes("ls-remote") && args.includes("refs/*") && !existsSync(${JSON.stringify(marker)})) {
-  const moved = Bun.spawnSync(["git", "--git-dir", ${JSON.stringify(remote)}, "update-ref", ...${JSON.stringify(update)}], { stdout: "pipe", stderr: "pipe" })
+  const moved = Bun.spawnSync(["git", "--git-dir", ${JSON.stringify(remote)}, "update-ref", "--stdin"], { stdin: Buffer.from(${JSON.stringify("start\n" + updates.join("\n") + "\nprepare\ncommit\n")}), stdout: "pipe", stderr: "pipe" })
   if (moved.exitCode !== 0) throw new Error(new TextDecoder().decode(moved.stderr))
   writeFileSync(${JSON.stringify(marker)}, "advanced")
 }
@@ -347,7 +398,7 @@ process.exit(result.exitCode)
           selection: { executable, contract: "native", scope: "default", origin: "real-Git race fixture" },
         },
       ).finally(() => clearTimeout(deadline))
-      if (movement !== "advance") {
+      if (!succeeds) {
         await expect(watched).rejects.toThrow(
           new RegExp(
             `${movement === "disappear" ? "disappeared" : "diverged"} during event list: .*${before}.*${movement === "disappear" ? "absent" : divergent}`,
@@ -358,7 +409,12 @@ process.exit(result.exitCode)
       }
       await expect(watched).resolves.toBe(0)
       expect(readFileSync(marker, "utf8")).toBe("advanced")
-      expect(run.stderr()).toContain("advanced during event list")
+      const notices = run
+        .stderr()
+        .split("\n")
+        .filter((line) => line.includes("advanced during event list"))
+      expect(notices).toHaveLength(movement === "two-moves" ? 2 : 1)
+      for (const notice of notices) expect(notice).toMatch(/read .+, observed .+, current .+/u)
       const rounds = run
         .stdout()
         .trim()
@@ -371,9 +427,13 @@ process.exit(result.exitCode)
         .map((line) => JSON.parse(line) as string[])
       // One initial full listing may acquire this chain; retrying the selected change must not acquire it again.
       // Count native acquisitions so the contract is independent of when progress narration is emitted.
-      expect(
-        fetched.flat().filter((arg) => arg.includes("refs/yrd/") && arg.includes("task/unrelated")).length,
-      ).toBeLessThanOrEqual(1)
+      const unrelatedAcquisitions = fetched
+        .flat()
+        .filter((arg) => arg.includes("refs/yrd/") && arg.includes("task/unrelated")).length
+      expect(unrelatedAcquisitions).toBeLessThanOrEqual(movement === "two-moves" ? 2 : 1)
+      if (movement === "queue") {
+        expect(fetched.flat().filter((arg) => arg.includes("refs/yrd/") && arg.includes(branch))).toHaveLength(1)
+      }
     },
   )
 
