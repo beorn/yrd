@@ -1,5 +1,5 @@
 import type { GitProcess, GitProcessResult } from "git-super/process"
-import type { Process } from "./index.ts"
+import type { OutputTruncation, Process } from "./index.ts"
 
 export type GitProcessDefaults = Readonly<{
   env?: NodeJS.ProcessEnv
@@ -30,9 +30,10 @@ function gitEnvironment(source: NodeJS.ProcessEnv, overlay: NodeJS.ProcessEnv | 
 export function adaptProcessGit(process: Pick<Process, "run">, defaults: GitProcessDefaults = {}): GitProcess {
   return {
     async run(request) {
+      const argv = ["git", "-C", request.repo, ...request.args]
       const env = gitEnvironment(defaults.env ?? globalThis.process.env, request.env)
       const result = await process.run({
-        argv: ["git", "-C", request.repo, ...request.args],
+        argv,
         cwd: request.repo,
         env,
         ...(request.stdin === undefined ? {} : { stdin: request.stdin }),
@@ -41,6 +42,9 @@ export function adaptProcessGit(process: Pick<Process, "run">, defaults: GitProc
           ? {}
           : { timeoutMs: request.timeoutMs ?? defaults.timeoutMs }),
       })
+      const failure = [truncationFailure(argv, result.outputTruncation ?? []), verdictFailure(result)]
+        .filter((entry): entry is string => entry !== undefined)
+        .join("; ")
       return {
         code: result.exitCode,
         stdout: result.stdout,
@@ -48,12 +52,34 @@ export function adaptProcessGit(process: Pick<Process, "run">, defaults: GitProc
         signal: result.signal,
         timedOut: result.timedOut,
         ...(result.stalled === undefined ? {} : { stalled: result.stalled }),
-        ...((result.verdict !== undefined && result.verdict !== "EXITED") || result.sweepFailure !== undefined
-          ? { failure: result.sweepFailure ?? `process verdict ${result.verdict}` }
-          : {}),
+        ...(failure === "" ? {} : { failure }),
       }
     },
   }
+}
+
+/** The process never exited normally: its verdict did not settle, or the sweep could not certify teardown. */
+function verdictFailure(result: Pick<GitProcessResult, "verdict" | "sweepFailure">): string | undefined {
+  return (result.verdict !== undefined && result.verdict !== "EXITED") || result.sweepFailure !== undefined
+    ? (result.sweepFailure ?? `process verdict ${result.verdict}`)
+    : undefined
+}
+
+/**
+ * Past `maxOutputBytes` the capture keeps a head and a tail, drops the middle, lets the child exit 0, and
+ * names the loss only in this field and a WARN line — so a consumer that parses stdout reads a hole as a
+ * complete answer (the one oversized file that bounces the queue, 24650/24669). Reported as `failure`,
+ * the field every consumer already refuses, and named with the command and the exact limit it ran past.
+ */
+function truncationFailure(argv: readonly string[], truncations: readonly OutputTruncation[]): string | undefined {
+  if (truncations.length === 0) return undefined
+  const losses = truncations
+    .map(
+      ({ stream, droppedBytes, totalBytes, limitBytes }) =>
+        `${stream}: ${String(droppedBytes)} of ${String(totalBytes)} bytes dropped past the ${String(limitBytes)}-byte capture limit`,
+    )
+    .join("; ")
+  return `${argv.join(" ")}: capture truncated (${losses}), so the middle of the output is gone and this read is not complete`
 }
 
 /** One human-readable line for a failed `adaptProcessGit` call: the process-level
