@@ -17,6 +17,9 @@ import { closeRequestFile, writeCloseRequest } from "../src/env-close-requests.t
 import type { QueueConfig } from "@yrd/queue-core"
 import { testGitIn } from "../../../tests/support/test-git-in.ts"
 
+// Spies need a mutable facade when standalone CI loads removely as native ESM.
+vi.mock("removely", async (original) => ({ ...(await original<typeof import("removely")>()) }))
+
 // The REAL refusal class, wrapped exactly as `closeEnvironment` wraps a git-super failure it cannot rehome.
 vi.mock("../src/env-commands.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/env-commands.ts")>()
