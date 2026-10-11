@@ -823,6 +823,16 @@ export async function closeEnvironment(
   // only synchronously with a complete census and the operator present, and it is NEVER delegated.
   const discarding = options.discardPrivateStore === true
   const discardReason = (options.reason ?? "").trim()
+  // 28661 Y3 (@cto 3c77f2f1): --reason describes a DELIBERATE discard. Beside a plain close it was parsed and read
+  // by nobody — a silently ignored flag, which NO SILENT ERRORS refuses — so the caller is told here, before
+  // anything runs, that nothing would have read it.
+  if (!discarding && options.reason !== undefined) {
+    throw new Error(
+      `environment ${path} was given --reason "<text>" without --discard-private-store: a plain close destroys no ` +
+        `declared-private store, so nothing would read the reason. Pass --discard-private-store with --reason ` +
+        `"<text>" to destroy the stores on purpose, or drop --reason.`,
+    )
+  }
   if (discarding && discardReason === "") {
     throw new Error(
       `environment ${path} was asked to --discard-private-store with no --reason: the reason is required and is journaled before any byte goes. ` +
@@ -867,8 +877,10 @@ export async function closeEnvironment(
   if (discarded.length > 0) {
     // ONE loud line, in the operator's face, naming EVERY private path and the reason it is being destroyed —
     // never a per-path repeat, and never silence. The reason travels verbatim into git-super's own journal.
+    // 28661 Y3 (@cto 3c77f2f1): it reads "(pending census)" because requireClean and admission still run AFTER
+    // it; a later refusal must not leave a line that reads as if the stores were already gone.
     io.stderr(
-      `yrd: env close DISCARDING ${String(discarded.length)} declared-private store(s) of ${path} under --discard-private-store — reason: ${discardReason}\n` +
+      `yrd: env close discarding (pending census) ${String(discarded.length)} declared-private store(s) of ${path} under --discard-private-store — reason: ${discardReason}\n` +
         discarded
           .map((entry) => `yrd:   ${entry.submodule}${entry.store === undefined ? "" : ` (store ${entry.store})`}\n`)
           .join(""),

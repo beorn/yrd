@@ -291,32 +291,29 @@ describe("the enclosing scaffold sweep keeps a checkout the removal policy prese
     expect(existsSync(store)).toBe(true)
   })
 
-  // The same pair git-super's removal takes, on the repo-side guard: a reason is REQUIRED (an empty one is a
-  // refusal, not consent), and a reasoned discard journals the actor and the reason before any byte goes.
-  it("passes the declaration only for a reasoned override, and journals the actor and the reason", async () => {
-    const root = mkdtempSync(join(tmpdir(), "yrd-plain-removal-discard-"))
+  // 28661 Y1 (@cto 3c77f2f1): the queue has NO discard path, structurally. The override used to be an option on
+  // this guard; it is now gone from the type, so an override-shaped argument is not a parameter and cannot change
+  // the answer. This is the runtime half of that removal: pass the exact shape a caller used to be able to use and
+  // prove the store still stands and the refusal still names the routes that DO own a discard.
+  it("has no discard path: an override-shaped argument changes nothing", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-plain-removal-no-discard-"))
     roots.push(root)
     const { repo, linked, store } = await fixture(root, "head")
-    const journal: Array<Readonly<{ store: string; reason: string; actor: string | null }>> = []
 
-    const refused = await refusePrivateStoreRemoval(testGitIn(repo, undefined, undefined, { env }), linked, repo, {
-      discardPrivateStore: { reason: "  " },
+    // The parameter is gone from the signature, so reaching the old call at all takes a cast: the point is that
+    // JS ignores the extra argument, and the refusal is unchanged.
+    const withOverrideShape = refusePrivateStoreRemoval as unknown as (
+      ...args: [...Parameters<typeof refusePrivateStoreRemoval>, Readonly<Record<string, unknown>>]
+    ) => Promise<void>
+    const error = await withOverrideShape(testGitIn(repo, undefined, undefined, { env }), linked, repo, {
+      discardPrivateStore: { reason: "abandoned unpushed draft", actor: "seat-under-test" },
     }).then(
       () => undefined,
       (cause: unknown) => cause,
     )
-    expect(refused).toBeInstanceOf(PrivateStoreRefusalError)
-    expect(existsSync(store)).toBe(true)
 
-    await refusePrivateStoreRemoval(testGitIn(repo, undefined, undefined, { env }), linked, repo, {
-      discardPrivateStore: { reason: "abandoned unpushed draft", actor: "seat-under-test" },
-      journal: (record) => journal.push(record),
-    })
-
-    expect(journal).toHaveLength(1)
-    expect(journal[0]?.store).toBe(store)
-    expect(journal[0]?.reason).toBe("abandoned unpushed draft")
-    expect(journal[0]?.actor).toBe("seat-under-test")
+    expect(error).toBeInstanceOf(PrivateStoreRefusalError)
+    expect(String(error)).toContain("@gate/git-worktree-private-store:")
     expect(existsSync(store)).toBe(true)
   })
 })

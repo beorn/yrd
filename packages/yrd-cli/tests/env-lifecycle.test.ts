@@ -943,6 +943,17 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     expect(existsSync(path)).toBe(true)
     expect(existsSync(store)).toBe(true)
 
+    // ARM 2b — --reason WITHOUT its flag. Y3 (@cto 3c77f2f1): it was parsed and read by nobody; it is now refused
+    // by name before anything runs, and every private byte survives.
+    const pointlessReason = capture(w.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", path, "--reason", "no flag", "--json"], pointlessReason.io),
+      pointlessReason.stderr(),
+    ).toBe(2)
+    expect(pointlessReason.stderr()).toContain('--reason "<text>" without --discard-private-store')
+    expect(existsSync(path)).toBe(true)
+    expect(existsSync(store)).toBe(true)
+
     // ARM 3 — the reasoned pair. ONE loud line names every private path and the reason BEFORE the removal; the
     // store is DELETED and never copied into retained-modules; and the environment is gone.
     const discarded = capture(w.work)
@@ -963,7 +974,8 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       ),
       discarded.stderr(),
     ).toBe(0)
-    expect(discarded.stderr()).toContain("DISCARDING")
+    // Y3: the line says pending census because requireClean and admission still run after it.
+    expect(discarded.stderr()).toContain("discarding (pending census)")
     expect(discarded.stderr()).toContain("vendor/dependency")
     expect(discarded.stderr()).toContain(store)
     expect(discarded.stderr()).toContain("abandoned unpushed draft")

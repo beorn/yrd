@@ -33,12 +33,7 @@ import {
 } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import type { Process } from "@yrd/process"
-import {
-  assertNoPrivateStore,
-  createGitWorktreeStore,
-  PrivateStoreRefusalError,
-  type PrivateStoreDiscard,
-} from "git-super/worktree"
+import { assertNoPrivateStore, createGitWorktreeStore, PrivateStoreRefusalError } from "git-super/worktree"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
@@ -103,12 +98,6 @@ export type FreshWorktree = Readonly<{
    */
   populateReference?: boolean
   plumbing?: PlumbingLog
-  /**
-   * The operator's explicit decision to delete a declared-private submodule store on purpose (28661 gate
-   * `git-worktree-private-store`). The queue itself never sets it: a reason is REQUIRED by the guard, and the
-   * discard is journaled with its actor before the bytes go.
-   */
-  discardPrivateStore?: Readonly<{ reason: string; actor?: string | null }>
   /** The command's fixed selection and invocation evidence, for the reference stores as for the tree. */
   selection?: GitSelection
   gitOptions?: GitInvocationOptions
@@ -265,7 +254,7 @@ export async function freshWorktree(
     excludedSubmodules: excluded,
     path,
     remove: async () => {
-      await removeWorktree(git, path, repo, options.discardPrivateStore, discardJournalFor(plumbing?.journal))
+      await removeWorktree(git, path, repo)
       plumbing?.trace?.("released worktree", { commit, path })
     },
   }
@@ -624,17 +613,14 @@ export async function prepareWorktree(
  * prune here, `safeRemoveSync` in the pool — never reaches the primitive, so it asks the same question through
  * the same guard rather than removing blind. Reads declarations and existence only: nothing inside the store is
  * read, copied, hashed or renamed (27058; chief ruling c8a3b06d).
+ *
+ * It takes NO override, deliberately (@cto 3c77f2f1, Y1): the queue has no discard path, structurally. A discard
+ * is a person destroying private bytes, and it runs only through the surfaces that own it — `yrd env close
+ * <path> --discard-private-store --reason "<text>"` for an environment, `git super worktree remove <path>
+ * --discard-private-store --reason "<text>"` for a plain worktree. An override option here would be how a queued
+ * discard arrives later, with nobody present to read the reason.
  */
-export async function refusePrivateStoreRemoval(
-  git: Git,
-  checkout: string,
-  repo: string,
-  options: Readonly<{
-    /** The same pair git-super's removal takes: a reason is REQUIRED, and the discard is journaled before it goes. */
-    discardPrivateStore?: Readonly<{ reason: string; actor?: string | null }>
-    journal?: (record: PrivateStoreDiscard) => void
-  }> = {},
-): Promise<void> {
+export async function refusePrivateStoreRemoval(git: Git, checkout: string, repo: string): Promise<void> {
   const adminDir = worktreeAdminDir(checkout)
   // No admin dir, or no submodule store inside it, means there is nothing here to protect and the question is not
   // asked. That keeps this guard off the path of every ordinary tree — including one whose refs are already broken,
@@ -652,23 +638,27 @@ export async function refusePrivateStoreRemoval(
     throw new PrivateStoreRefusalError(
       `@gate/git-worktree-private-store: cannot remove ${checkout}: its admin dir ${adminDir} holds a submodule ` +
         `store and its recorded HEAD cannot be read (${messageOf(cause)}); the checkout is kept; inspect that ` +
-        `admin dir and its store before retrying removal, or pass --discard-private-store --reason "<text>" to ` +
-        `delete the store on purpose`,
+        `admin dir and its store before retrying removal: the queue itself has no discard path, so a store is ` +
+        `destroyed only on purpose, by ` +
+        '`yrd env close <path> --discard-private-store --reason "<text>"` for an environment, or by ' +
+        '`git super worktree remove <path> --discard-private-store --reason "<text>"` for a plain worktree — ' +
+        `each running the operator custody steps its own refusal names`,
     )
   }
   if (head === "") {
     throw new PrivateStoreRefusalError(
       `@gate/git-worktree-private-store: cannot remove ${checkout}: its admin dir ${adminDir} holds a submodule ` +
         `store and records no HEAD; the checkout is kept; inspect that admin dir and its store before retrying ` +
-        `removal, or pass --discard-private-store --reason "<text>" to delete the store on purpose`,
+        `removal: the queue itself has no discard path, so a store is destroyed only on purpose, by ` +
+        '`yrd env close <path> --discard-private-store --reason "<text>"` for an environment, or by ' +
+        '`git super worktree remove <path> --discard-private-store --reason "<text>"` for a plain worktree — ' +
+        `each running the operator custody steps its own refusal names`,
     )
   }
   await assertNoPrivateStore(seamProcess(git, resolve(repo)), {
     adminDir,
     repository: resolve(repo),
     head,
-    ...(options.discardPrivateStore === undefined ? {} : { discardPrivateStore: options.discardPrivateStore }),
-    ...(options.journal === undefined ? {} : { journal: options.journal }),
   })
 }
 
@@ -745,41 +735,11 @@ function worktreeAdminDir(checkout: string): string | undefined {
   return pointer?.[1] === undefined ? undefined : resolve(checkout, pointer[1])
 }
 
-/**
- * Adapt the guard's discard record into the run journal's own shape. `override` is the kind the queue already
- * keeps for a decision a person made on purpose, and a null actor becomes the explicit string
- * "(no actor token)": a missing actor is stated in the record rather than dropped from it.
- */
-function discardJournalFor(
-  journal: ((record: LogWrite) => void) | undefined,
-): ((record: PrivateStoreDiscard) => void) | undefined {
-  if (journal === undefined) return undefined
-  return (record) =>
-    journal({
-      action: "discard-private-store",
-      actor: record.actor ?? "(no actor token)",
-      kind: "override",
-      name: record.name,
-      path: record.path,
-      reason: record.reason,
-      store: record.store,
-    })
-}
-
 /** Forget stale registrations under git-super's repository worktree mutation lock (26240). */
-async function removeWorktree(
-  git: Git,
-  path: string,
-  repo: string,
-  discardPrivateStore?: Readonly<{ reason: string; actor?: string | null }>,
-  journal?: (record: PrivateStoreDiscard) => void,
-): Promise<void> {
+async function removeWorktree(git: Git, path: string, repo: string): Promise<void> {
   // 28661: `rmSync` below destroys this worktree, and with it any private submodule store inside its admin dir;
   // the prune then forgets the registration that held the store. Refuse first.
-  await refusePrivateStoreRemoval(git, path, repo, {
-    ...(discardPrivateStore === undefined ? {} : { discardPrivateStore }),
-    ...(journal === undefined ? {} : { journal }),
-  })
+  await refusePrivateStoreRemoval(git, path, repo)
   // `worktree remove --force` refuses a tree with untracked files it did not
   // make; a check may have written anything, so the directory goes first and
   // git is told to forget the entry afterwards.
