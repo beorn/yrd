@@ -55,6 +55,7 @@ export const RETIRE_ROOT_CODES = {
   absent: "yrd-retire-root-absent",
   foreignFile: "yrd-retire-root-foreign-file",
   archiveDiffers: "yrd-retire-archive-exists-different-bytes",
+  archiveAmbiguous: "yrd-retire-root-archive-ambiguous",
   noLiveRoot: "yrd-retire-no-live-root",
 } as const
 
@@ -163,6 +164,26 @@ export function tombstoneLine(archive: string, sha256: string, at: Date): string
 
 const recordedHash = (path: string): string | undefined =>
   /sha256=([0-9a-f]{64})/u.exec(readFileSync(path, "utf8"))?.[1]
+
+/**
+ * The archive the tombstone ITSELF names. The verb reads this back rather than
+ * recomputing the path from today's date, so a retirement made yesterday is still
+ * recognised — and its own record stays idempotent — on a later day (@cto round 2).
+ */
+const recordedArchive = (path: string): string | undefined => /archive=(\S+)/u.exec(readFileSync(path, "utf8"))?.[1]
+
+/**
+ * The archives this verb already wrote for `base` under `.retired/`:
+ * `<base>.<date>.tar.zst` REGULAR files, never the `<archive>.tmp` a crash left
+ * mid-write. Found by NAME, never by recomputing today's date (@cto round 2).
+ */
+function findExistingArchives(archiveDir: string, base: string): string[] {
+  if (!existsSync(archiveDir)) return []
+  return readdirSync(archiveDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.startsWith(`${base}.`) && entry.name.endsWith(".tar.zst"))
+    .map((entry) => join(archiveDir, entry.name))
+    .sort()
+}
 
 /**
  * `tar -tf`'s entry names as a SET. A failure is RETURNED, not thrown-and-dropped,
@@ -283,8 +304,7 @@ export async function retireRetiredRoot(
   const liveRoot = queueRoot(input.host, input.address)
   const root = legacyQueueRoot(input.host, input.address)
   const base = basename(root)
-  const archive = retiredArchivePath(root, at)
-  const archiveDir = dirname(archive)
+  const archiveDir = join(dirname(root), ".retired")
   const retiring = join(archiveDir, `${base}.retiring`)
   const tombstoneTemp = `${root}.tombstone-tmp`
 
@@ -299,7 +319,6 @@ export async function retireRetiredRoot(
   }
 
   const stat = lstatSync(root, { throwIfNoEntry: false })
-  const archivePresent = existsSync(archive)
   const retiringPresent = existsSync(retiring)
 
   // Already retired: our tombstone is a regular file whose recorded hash matches
@@ -307,18 +326,23 @@ export async function retireRetiredRoot(
   // tombstone in place, so finish that instead of calling it done (@cto D5).
   if (stat?.isFile() === true) {
     const recorded = recordedHash(root)
-    if (recorded === undefined || !archivePresent || recorded !== sha256Of(archive)) {
+    const named = recordedArchive(root)
+    // The tombstone names its own archive; that file's bytes must still hash to what
+    // the tombstone records. Never recompute the path from today's date (@cto round 2).
+    if (recorded === undefined || named === undefined || !existsSync(named) || recorded !== sha256Of(named)) {
       throw refuse(
         RETIRE_ROOT_CODES.foreignFile,
         root,
-        "the root is a file that is not this verb's matching tombstone, so overwriting it would destroy a record",
+        named === undefined || !existsSync(named)
+          ? "the root is a file that is not this verb's matching tombstone (it names no archive, or that archive is missing), so overwriting it would destroy a record"
+          : "the root is a file that is not this verb's matching tombstone (its recorded hash does not match the archive it names), so overwriting it would destroy a record",
       )
     }
-    const archiveBytes = statSync(archive).size
+    const archiveBytes = statSync(named).size
     if (!retiringPresent) {
       return {
         root,
-        archive,
+        archive: named,
         tombstone: readFileSync(root, "utf8"),
         action: "skipped",
         files: 0,
@@ -333,7 +357,7 @@ export async function retireRetiredRoot(
       const moved = census(retiring, base)
       return {
         root,
-        archive,
+        archive: named,
         tombstone: readFileSync(root, "utf8"),
         action: "resumed",
         files: moved.files,
@@ -343,10 +367,10 @@ export async function retireRetiredRoot(
         dryRun: true,
       }
     }
-    const moved = await removeRetiring(process, retiring, archive, root, base)
+    const moved = await removeRetiring(process, retiring, named, root, base)
     return {
       root,
-      archive,
+      archive: named,
       tombstone: readFileSync(root, "utf8"),
       action: "resumed",
       files: moved.files,
@@ -365,10 +389,21 @@ export async function retireRetiredRoot(
     )
   }
 
-  // A crash after the root was moved aside but before the tombstone landed: the
-  // root is absent and `.retiring` plus the archive are the verb's own names.
+  // A crash after the root was moved aside but before the tombstone landed, or a
+  // retirement whose archive is already written: the verb finds its OWN archive by
+  // name under `.retired/`, never by recomputing today's date (@cto round 2). More
+  // than one candidate is ambiguous and refused by name.
+  const existing = findExistingArchives(archiveDir, base)
+  if (existing.length > 1) {
+    throw refuse(
+      RETIRE_ROOT_CODES.archiveAmbiguous,
+      root,
+      `more than one archive for ${base} exists in ${archiveDir} (${describe(existing)}), so this verb cannot tell which is the record and chooses none`,
+    )
+  }
+  const priorArchive = existing[0]
   const resuming = stat === undefined
-  if (resuming && !(retiringPresent && archivePresent)) {
+  if (resuming && !(retiringPresent && priorArchive !== undefined)) {
     throw refuse(
       RETIRE_ROOT_CODES.absent,
       root,
@@ -379,6 +414,9 @@ export async function retireRetiredRoot(
   const tree = resuming ? retiring : root
   const counted = census(tree, base)
   const process = input.process ?? createProcess()
+  // A new dated name is computed ONLY for a first archive; a re-run reuses the one it finds.
+  const archive = priorArchive ?? retiredArchivePath(root, at)
+  const archivePresent = priorArchive !== undefined
 
   // An archive already here is kept only when it matches the tree it would
   // replace; a different record would be OVERWRITTEN, which this verb never does.

@@ -265,4 +265,53 @@ describe("yrd queue retire-root (28601)", () => {
     // paths directly, so a dot entry can never be mistaken for a queue root by yrd itself.
     expect(existsSync(queueRoot(host, address))).toBe(true)
   })
+
+  it("a completed retirement re-run a day later is still `skipped` (the tombstone names its own archive)", async () => {
+    const { host, root } = hostIn()
+    plant(root)
+    const archive = retiredArchivePath(root, AT)
+    await retireRetiredRoot({ host, address, at: AT })
+    const later = new Date(Date.parse(AT.toISOString()) + 24 * 60 * 60_000)
+    const again = await retireRetiredRoot({ host, address, at: later })
+    expect(again.action).toBe("skipped")
+    expect(again.archive).toBe(archive)
+    expect(existsSync(retiredArchivePath(root, later))).toBe(false)
+  })
+
+  it("resumes the after-e state a day later: it finds yesterday's archive by name", async () => {
+    const { host, root } = hostIn()
+    plant(root)
+    const archive = retiredArchivePath(root, AT)
+    tarTree(dirname(root), basename(root), archive)
+    renameSync(root, retiringPath(root, AT))
+    const later = new Date(Date.parse(AT.toISOString()) + 24 * 60 * 60_000)
+    const result = await retireRetiredRoot({ host, address, at: later })
+    expect(result.action).toBe("resumed")
+    expect(result.archive).toBe(archive)
+    expect(lstatSync(root).isFile()).toBe(true)
+    expect(existsSync(retiringPath(root, AT))).toBe(false)
+  })
+
+  it("the after-c state re-run a day later REUSES the archive and writes no second one", async () => {
+    const { host, root } = hostIn()
+    plant(root)
+    const archive = retiredArchivePath(root, AT)
+    tarTree(dirname(root), basename(root), archive)
+    const before = readFileSync(archive)
+    const later = new Date(Date.parse(AT.toISOString()) + 24 * 60 * 60_000)
+    const result = await retireRetiredRoot({ host, address, at: later })
+    expect(result.action).toBe("resumed")
+    expect(result.archive).toBe(archive)
+    expect(readFileSync(archive).equals(before)).toBe(true)
+    expect(existsSync(retiredArchivePath(root, later))).toBe(false)
+  })
+
+  it("refuses by name when TWO candidate archives exist: it never guesses which is the record", async () => {
+    const { host, root } = hostIn()
+    plant(root)
+    const later = new Date(Date.parse(AT.toISOString()) + 24 * 60 * 60_000)
+    tarTree(dirname(root), basename(root), retiredArchivePath(root, AT))
+    tarTree(dirname(root), basename(root), retiredArchivePath(root, later))
+    expect(await codeOf(() => retireRetiredRoot({ host, address, at: later }))).toBe(RETIRE_ROOT_CODES.archiveAmbiguous)
+  })
 })
