@@ -801,6 +801,103 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     expect(existsSync(store)).toBe(false)
   })
 
+  // #27120 half 2 (@cto, on @dev/review2's NO-GO): R1 derived `modules/${privatePath}`, but Git stores a
+  // submodule by its declaration NAME. A supported `git submodule add --name secret ... vendor/dependency`
+  // makes name != path, so the path-keyed probe looked at modules/vendor/dependency - which never exists -
+  // and let the close remove the environment and COPY the real store into retained-modules. The decisive
+  // regression: name != path plus a remaining private admin store, both initialized and deinitialized.
+  it("refuses a private checkout whose declaration NAME differs from its path", async () => {
+    const w = await world(":")
+    // A real materialized dependency, added under a NAME that differs from its path.
+    const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-submodule-"))
+    roots.push(root)
+    const seed = gitIn(root)
+    const remote = join(root, "remote.git")
+    const child = join(root, "child")
+    await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+    await seed(["clone", "--quiet", remote, child])
+    const childGit = gitIn(child)
+    await childGit(["config", "user.email", "env-open@yrd.test"])
+    await childGit(["config", "user.name", "yrd"])
+    await childGit(["checkout", "--quiet", "-b", "main"])
+    writeFileSync(join(child, "READY"), "materialized\n")
+    await childGit(["add", "READY"])
+    await childGit(["commit", "--quiet", "-m", "seed materialized dependency"])
+    await childGit(["push", "--quiet", "origin", "main"])
+    await w.git([
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "--quiet",
+      "--name",
+      "secret",
+      remote,
+      "vendor/dependency",
+    ])
+    // The section is `secret`; its path is `vendor/dependency`. Git keys the admin store by the NAME.
+    expect((await w.git(["config", "-f", ".gitmodules", "--get", "submodule.secret.path"])).trim()).toBe(
+      "vendor/dependency",
+    )
+    await w.git(["config", "-f", ".gitmodules", "submodule.secret.private", "true"])
+    await w.git(["add", ".gitmodules"])
+    await w.git(["commit", "--quiet", "-m", "declare the private dependency under the name secret"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openEnvironment(w.work, selected)
+    const gitfile = join(path, "vendor/dependency/.git")
+    const store = (
+      await w.git(["-C", path, "rev-parse", "--path-format=absolute", "--git-path", "modules/secret"])
+    ).trim()
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+
+    // ARM 1 - initialized: refuse, name the route, and leave every byte of the store alone.
+    await w.git(["-C", path, "submodule", "update", "--init", "vendor/dependency"])
+    expect(existsSync(gitfile)).toBe(true)
+    expect(existsSync(store)).toBe(true)
+    // The store lives under the NAME; the old path-keyed probe looked here and found nothing.
+    expect(existsSync(join(dirname(store), "vendor", "dependency"))).toBe(false)
+    const refused = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io), refused.stderr()).toBe(2)
+    expect(refused.stderr()).toContain("private checkout, custody not proven")
+    expect(refused.stderr()).toContain("vendor/dependency")
+    expect(JSON.parse(refused.stdout())).toMatchObject({
+      kept: path,
+      class: "private checkout",
+      submodule: "vendor/dependency",
+      store,
+    })
+    expect(JSON.parse(refused.stdout()).command).toContain("private-store verify")
+    expect(existsSync(path)).toBe(true)
+    expect(existsSync(store)).toBe(true)
+
+    // ARM 2 - deinitialized (@dev/review2's exact specimen): the gitfile is gone, modules/secret remains.
+    await w.git(["-C", path, "submodule", "deinit", "-f", "vendor/dependency"])
+    expect(existsSync(gitfile)).toBe(false)
+    expect(existsSync(store)).toBe(true)
+    const emptied = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], emptied.io), emptied.stderr()).toBe(2)
+    expect(emptied.stderr()).toContain("is still present")
+    expect(emptied.stderr()).toContain("vendor/dependency")
+    expect(JSON.parse(emptied.stdout())).toMatchObject({
+      kept: path,
+      class: "private checkout",
+      submodule: "vendor/dependency",
+      store,
+    })
+    expect(existsSync(path)).toBe(true)
+    expect(existsSync(store)).toBe(true)
+    // The boundary (@cto, c8a3b06d): a refused close keeps the environment; it never COPIES the store into
+    // retention and removes the original. The old path-keyed close copied `modules/secret` in here.
+    expect(existsSync(join(workdir, "retained-modules"))).toBe(false)
+
+    // STAGE 3 - the operator's store step, and only then does the ordinary close succeed.
+    rmSync(dirname(store), { recursive: true, force: true })
+    const closed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+    expect(existsSync(path)).toBe(false)
+  })
+
   it("opens, lists and closes a workdir configured through a symlink", async () => {
     const w = await world(":")
     const actual = join(w.work, "state-actual")
