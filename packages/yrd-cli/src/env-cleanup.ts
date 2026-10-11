@@ -324,6 +324,23 @@ async function consumeCloseRequests(
  * missing HEADs are named; a write this process cannot make is `file-failed`.
  * DROPPED / issue-ended do not file here; they widen the sweep.
  */
+/** One named class from a refused `env close --json`, or undefined when that refusal names none. */
+function namedCloseRefusal(output: string): string | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(output)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined
+  const row = parsed as Readonly<{ kept?: unknown; class?: unknown; store?: unknown; command?: unknown }>
+  if (typeof row.kept !== "string" || typeof row.class !== "string" || row.class === "") return undefined
+  const parts = [`kept: ${row.class}`]
+  if (typeof row.store === "string" && row.store !== "") parts.push(`store ${row.store}`)
+  if (typeof row.command === "string" && row.command !== "") parts.push(`retire with ${row.command}`)
+  return parts.join("; ")
+}
+
 async function fileMergedCloseRequests(
   input: Readonly<{
     workdir: string
@@ -806,7 +823,17 @@ async function cleanupEnvironments(
         // the pre-22894 loud refusal, never a filed request (22894).
         "refuse",
       )
-      if (exit !== 0) throw new Error(`native close exited ${exit}: ${output}`)
+      if (exit !== 0) {
+        // #27120 AC2: a refusal that names a class is still a refusal — the environment stays — but the
+        // sweep reports it as one named class with its retire path, never as a per-seat note. A refusal
+        // that names nothing still falls through to the loud throw below.
+        const named = namedCloseRefusal(output)
+        if (named !== undefined) {
+          preserve(row.path, named)
+          continue
+        }
+        throw new Error(`native close exited ${exit}: ${output}`)
+      }
       const result: unknown = JSON.parse(output)
       if (typeof result !== "object" || result === null) throw new Error(`malformed close result ${output}`)
       if ("closed" in result && result.closed === row.path) {

@@ -18,7 +18,7 @@
  */
 
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace, worktreeHomeRoot, type ProvisionedBay } from "@yrd/bay"
 import {
   checkedTree,
@@ -680,6 +680,27 @@ async function requireClean(git: Git, path: string): Promise<void> {
 }
 
 /** Retained environments preserve user work; GitSuper owns populated-submodule removal. */
+/** Quote one path for a POSIX shell command shown to a human. Mirrors git-super's `shellQuote` (#27120 AC1). */
+function quotePath(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
+/**
+ * Whether an entry is present, WITHOUT following it: absent when there is nothing at that name, a real fault
+ * otherwise. `existsSync` would collapse an unreadable parent into "absent" and let the close proceed past a
+ * private store it could not judge, so the error is named here instead (#27120 AC1, chief ruling c8a3b06d).
+ */
+function entryPresent(target: string, what: string): boolean {
+  try {
+    lstatSync(target)
+    return true
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTDIR") return false
+    throw new Error(`cannot inspect ${what} ${target}; the environment was preserved`, { cause })
+  }
+}
+
 export async function closeEnvironment(
   operand: string,
   options: EnvCloseOptions,
@@ -734,20 +755,41 @@ export async function closeEnvironment(
   }
   const treeGit = gitIn(path, process, selection)
   const commit = (await treeGit(["rev-parse", "HEAD"])).trim()
-  for (const privatePath of await declaredPrivateSubmodules(treeGit, path, commit)) {
-    const gitfile = join(path, privatePath, ".git")
-    try {
-      lstatSync(gitfile)
-    } catch (cause) {
-      const code = (cause as NodeJS.ErrnoException).code
-      if (code === "ENOENT" || code === "ENOTDIR") continue
-      throw new Error(`Cannot inspect private submodule gitfile ${gitfile}; environment ${path} was preserved`, {
-        cause,
-      })
+  // #27120 AC1/AC3 (ruling ii): R1 refuses while ANY private byte the close could destroy is still
+  // there — the checkout is initialized, OR it was emptied and the private store still sits in this
+  // environment's own admin dir. R1 is therefore the guard at EVERY stage, and the close never reaches
+  // a removal it has not proved, whatever the worktree-removal side does with an exclusion list it is
+  // never handed. The step that touches the store stays the operator's: this tool reads, copies, hashes
+  // and renames nothing inside it (27058; chief ruling c8a3b06d).
+  const privateSubmodules = await declaredPrivateSubmodules(treeGit, path, commit)
+  for (const privatePath of privateSubmodules) {
+    const checkout = join(path, privatePath)
+    const store = (
+      await treeGit(["rev-parse", "--path-format=absolute", "--git-path", `modules/${privatePath}`])
+    ).trim()
+    const initialized = entryPresent(join(checkout, ".git"), "the private submodule gitfile of")
+    const stored = entryPresent(store, "the private submodule store of")
+    if (!initialized && !stored) continue
+    // Route A is ruled, so this is no longer a pending decision: it stays a REFUSAL (loud stderr,
+    // exit 2) and it NAMES THE ROUTE at whichever stage the operator is standing in. In --json it
+    // also carries one structured class, so a sweep can report the tree by class instead of quoting
+    // a per-seat note.
+    const verify = `git super worktree private-store verify ${quotePath(store)} --checkout ${quotePath(checkout)}`
+    const stage = initialized
+      ? `its checkout ${checkout} is initialized and still holds private content`
+      : `its checkout is empty but the private store ${store} is still present, so a removal would destroy it`
+    const steps = [
+      ...(initialized ? [`look at and empty ${checkout}`] : []),
+      ...(stored ? [`run ${verify}`, `then remove the environment admin's modules subtree ${dirname(store)}`] : []),
+    ]
+    if (options.json === true) {
+      io.stdout(
+        `${JSON.stringify({ kept: path, class: "private checkout", submodule: privatePath, checkout, store, command: verify })}\n`,
+      )
     }
     throw new Error(
-      `environment ${path} cannot close with initialized private submodule ${privatePath}: ` +
-        "custody unproven until 27058's merge exclusion; operator decision pending. Keep this environment until that decision.",
+      `environment ${path} cannot close with private submodule ${privatePath}: private checkout, custody not proven — ${stage}. ` +
+        `Retire it by operator steps: ${steps.join("; ")}. This tool reads, copies, hashes and renames nothing in the store.`,
     )
   }
   await requireClean(treeGit, path)
