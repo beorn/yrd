@@ -47,6 +47,7 @@ import { originHead } from "./queue-location.ts"
 import { issueResolver } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
+import { envOpenRecordFromFlags, writeEnvOpenRecord } from "./env-open-record.ts"
 import { admitEnvironmentClose, type CloseAdmission, type CloseCensusReceipt } from "./env-close-holders.ts"
 import {
   ENV_CLOSE_PREDICATE,
@@ -58,7 +59,14 @@ import {
 import type { ProcessCensus } from "removely"
 import { formatUnknownNotifyEventWarning, formatUnknownTopLevelKeyWarning } from "./version.ts"
 
-export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string; hold?: string }>
+export type EnvOpenOptions = Readonly<{
+  bay?: string
+  issue?: string
+  json?: boolean
+  commit?: string
+  hold?: string
+  keep?: boolean
+}>
 export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
 
 /**
@@ -359,6 +367,23 @@ function warnUnknownNotifyEvents(
   io.stderr(formatUnknownNotifyEventWarning(at, command, unknown))
 }
 
+async function recordOpenedLifetime(
+  path: string,
+  process: Parameters<typeof gitIn>[1],
+  selection: Awaited<ReturnType<typeof resolveGitSelection>>,
+  options: EnvOpenOptions,
+): Promise<void> {
+  const gitDir = (await gitIn(path, process, selection)(["rev-parse", "--absolute-git-dir"])).trim()
+  try {
+    writeEnvOpenRecord(gitDir, envOpenRecordFromFlags(options))
+  } catch (error) {
+    throw new Error(
+      `yrd env open created ${path} but could not record opening lifetime in ${gitDir}: ${error instanceof Error ? error.message : String(error)}; the environment remains open, so inspect git worktree list before retrying`,
+      { cause: error },
+    )
+  }
+}
+
 /**
  * `yrd env open` — open an environment for one branch and keep it. Prints its
  * path on stdout, which is what a caller `cd`s into.
@@ -464,6 +489,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
         ...(options.bay === undefined ? [] : [`--bay ${quote(options.bay)}`]),
         ...(options.issue === undefined ? [] : [`--issue ${quote(options.issue)}`]),
         ...(options.hold === undefined ? [] : [`--hold ${quote(options.hold)}`]),
+        ...(options.keep === true ? ["--keep"] : []),
         ...(options.json === true ? ["--json"] : []),
       ].join(" ")
       throw new Error(
@@ -480,6 +506,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   }
   const { path, baseSha } = provisioned
   await pinDeclaredIdentity(path, gitIn(path, process, selection), declaredIdentity, io)
+  await recordOpenedLifetime(path, process, selection, options)
   if (options.hold !== undefined) {
     try {
       await createLocalGitWorktreeStore({ repo: root }).lock(path, options.hold)

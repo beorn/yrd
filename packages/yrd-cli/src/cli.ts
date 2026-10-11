@@ -1414,6 +1414,7 @@ function buildProgram(
     .option("--bay <name>", "name the environment")
     .option("--issue <ref>", "bind the branch to this issue with a Refs commit before setup")
     .option("--hold <reason>", "lock the worktree with this reason; git worktree unlock <path> clears it")
+    .option("--keep", "record this environment as standing so a merge of its branch does not close it")
     .option("--json", "emit stable JSON")
     .action(async (commit, options) =>
       setExit(
