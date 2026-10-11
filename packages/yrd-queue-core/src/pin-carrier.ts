@@ -14,7 +14,6 @@ import {
   type Git,
 } from "./git.ts"
 import { isOpen, listChanges, queueFormat, queueRef } from "./events.ts"
-import { declaredPrivateSubmodules } from "./private-submodules.ts"
 import { isRepositoryAt, populateReferenceStores } from "./reference.ts"
 import { remoteUrl } from "./remote.ts"
 
@@ -74,17 +73,9 @@ export async function preparePinCarrier(
   const targetHead = await readRemoteCommit(git, target.remote, `refs/heads/${target.branch}`)
   if (targetHead === undefined) throw new Error(`${target.remote}/${target.branch} has no advertised target branch`)
   const childGit = (path: string) => runnerFor(git).at(path)
-  // 27147: a submodule the target declares private has no store here, so its pin cannot be carried.
-  const excludedSubmodules = await declaredPrivateSubmodules(git, repo, targetHead)
-  await populateReferenceStores({ repo, commit: targetHead, excludedSubmodules, gitIn: childGit })
+  await populateReferenceStores({ repo, commit: targetHead, gitIn: childGit })
   const subjects: string[] = []
   for (const pin of pins) {
-    if (excludedSubmodules.includes(pin.path)) {
-      throw new Error(
-        `${pin.path} is declared private = true in ${target.remote}/${target.branch}'s .gitmodules; ` +
-          "the queue does not hold it, so a carrier cannot move its gitlink",
-      )
-    }
     // The queue clone materializes a component only as the store populateReferenceStores gives it, and
     // a path the queue's own tree does not carry gets none. Spawning into the absent directory would fail
     // inside posix_spawn with a cwd ENOENT that names neither the path nor the queue, so name it here.

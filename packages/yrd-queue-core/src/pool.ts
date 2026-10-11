@@ -22,13 +22,10 @@ import { join, resolve } from "node:path"
 import { safeRemoveSync } from "removely"
 import type { Process } from "@yrd/process"
 import { createGitWorktreeStore } from "git-super/worktree"
-import { isPrivateStoreRefusal, nameAbandonedTree } from "./worktree.ts"
 import { gitIn, seamProcess, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
-import { declaredPrivateSubmodules } from "./private-submodules.ts"
 import {
   checkedTree,
   prepareWorktree,
-  refusePrivateStoreRemoval,
   runSetup,
   SetupFailed,
   type PlumbingLog,
@@ -80,19 +77,6 @@ export type WorktreePoolOptions = Readonly<{
   note?: (cause: string) => void
 }>
 
-/**
- * Pooled trees a removal refused to protect a private submodule store (28661 C4), for the WHOLE process.
- *
- * The queue makes a NEW WorktreePool every round (#28503 keeps only the warm tree, not the object), so state
- * held on the instance forgets the refusal at the round boundary: the next round finds the path, tries to remove
- * it again, names it a second time, and spends another spare. Their cure is the operator's, so an abandoned tree
- * is never capacity again for as long as this process runs.
- */
-const abandonedPooledTrees = new Set<string>()
-
-/** How many `-spare-N` slots a refusal looks through before it stops reusing warm capacity and takes a fresh name. */
-const SPARE_SCAN = 100
-
 /** The pool of one ref: borrow a role's tree, give it back, never make one per phase. */
 export class WorktreePool {
   constructor(private readonly options: WorktreePoolOptions) {}
@@ -100,10 +84,7 @@ export class WorktreePool {
   /** A prepared tree of `commit` for `role`, warm when it can be, fresh when it must be. */
   async borrow(input: BorrowPooled): Promise<PreparedWorktree> {
     const base = pooledWorktreePath(this.options.workdir, this.options.ref, input.role)
-    // An abandoned tree is not capacity: the round runs on a spare path this pool owns rather than reusing or
-    // re-deleting bytes no caller proved (28661 C4). State is process-wide (see abandonedPooledTrees), so the
-    // next round's NEW pool does not forget the refusal and try the same tree again.
-    const path = abandonedPooledTrees.has(base) ? this.warmSpare(base) : base
+    const path = base
     if (!existsSync(path)) return await this.materialize(path, input)
     let cause: string
     try {
@@ -113,79 +94,25 @@ export class WorktreePool {
       // judge either. The rebuild below is fresh-by-construction, so it is safe
       // to abandon the directory, and the cause is named rather than swallowed.
       this.note(input, `pooled ${input.role} tree could not be inspected: ${messageOf(error)}`)
-      return await this.materialize(await this.discard(path, base, input), input)
+      return await this.materialize(await this.discard(path), input)
     }
     if (cause !== "") {
       this.note(input, cause)
-      return await this.materialize(await this.discard(path, base, input), input)
+      return await this.materialize(await this.discard(path), input)
     }
     try {
       await this.reset(path, input)
     } catch (error) {
       this.note(input, `pooled ${input.role} tree could not be reset: ${messageOf(error)}`)
-      return await this.materialize(await this.discard(path, base, input), input)
+      return await this.materialize(await this.discard(path), input)
     }
     return await this.setupAt(path, base, input)
   }
 
-  /**
-   * Discard a pooled tree and hand back the path the round should materialize at. A removal refused to protect
-   * a private submodule store ABANDONS the tree — skipped, named once, never counted as free capacity, never
-   * retried next round — and the round continues on a spare path. Every other failure still throws.
-   */
-  private async discard(path: string, base: string, input: BorrowPooled): Promise<string> {
-    try {
-      await this.forget(path)
-      return path
-    } catch (error) {
-      if (!isPrivateStoreRefusal(error)) throw error
-      return this.refuse(path, base, input, error)
-    }
-  }
-
-  /**
-   * Abandon a pooled tree a removal refused to protect a private submodule store: it is named once for the whole
-   * process, never counted as capacity again, and the round continues on a spare this pool already owns.
-   */
-  private refuse(path: string, base: string, input: BorrowPooled, cause: unknown): string {
-    abandonedPooledTrees.add(path)
-    const why = `pooled ${input.role} tree ${path} could not be removed: ${messageOf(cause)}; the queue keeps it and continues`
-    if (input.note ?? this.options.note) this.note(input, why)
-    else nameAbandonedTree(path, messageOf(cause))
-    return this.freshSpare(base)
-  }
-
-  /**
-   * Where a round whose base tree is abandoned continues: an already-warm spare this pool owns when a previous
-   * round built one, so the NEXT round reuses it instead of minting another `-spare-N`.
-   */
-  private warmSpare(base: string): string {
-    for (let index = 1; index <= SPARE_SCAN; index++) {
-      const candidate = `${base}-spare-${index}`
-      if (abandonedPooledTrees.has(candidate)) continue
-      if (existsSync(candidate)) return candidate
-    }
-    return this.freshSpare(base)
-  }
-
-  /**
-   * A name this pool owns that no abandoned tree occupies and nothing is on disk at — the only shape safe to
-   * MATERIALIZE at. Never returns an existing path; when every candidate is taken it refuses LOUDLY rather than
-   * minting a name its own doc disclaims (28661 N2, @cto). A silent `${base}-spare-101` would materialize over a
-   * tree this pool never proved free — the accumulation defect wearing a fresh name.
-   */
-  private freshSpare(base: string): string {
-    for (let index = 1; index <= SPARE_SCAN; index++) {
-      const candidate = `${base}-spare-${index}`
-      if (abandonedPooledTrees.has(candidate)) continue
-      if (!existsSync(candidate)) return candidate
-    }
-    const abandoned = [...abandonedPooledTrees].filter((path) => path.startsWith(`${base}-spare-`)).sort()
-    throw new Error(
-      `pool has no free spare for ${base}: all ${SPARE_SCAN} spare names are present on disk; abandoned trees ` +
-        `${abandoned.length === 0 ? "(none for this base)" : `(${abandoned.join(", ")})`}; remove one of those ` +
-        `trees before borrowing again`,
-    )
+  /** Discard a pooled tree and hand back the path the round should materialize at. */
+  private async discard(path: string): Promise<string> {
+    await this.forget(path)
+    return path
   }
 
   /**
@@ -259,9 +186,7 @@ export class WorktreePool {
     await this.store(path).materializeSubmodules(path, {
       force: true,
       hooks: "quarantine",
-      // The warm tree keeps the fresh one's boundary: a private child is never
-      // initialized, so the reset names the same exclusions the materializer did.
-      excludedSubmodules: await this.excludedSubmodules(input.commit),
+      excludedSubmodules: [],
     })
     await this.clean(path)
   }
@@ -293,7 +218,7 @@ export class WorktreePool {
       })
       const prepared: PreparedWorktree = {
         commit: input.commit,
-        excludedSubmodules: await this.excludedSubmodules(input.commit),
+        excludedSubmodules: [],
         path,
         remove: async () => {
           await this.forget(path)
@@ -318,33 +243,14 @@ export class WorktreePool {
       // the next round's warm start. The materializer does this for a fresh
       // tree; this is the same ending for a warm one.
       if (error instanceof SetupFailed) {
-        try {
-          await this.forget(path)
-        } catch (cleanup) {
-          // 28661 C4: a refusal to protect a private submodule store abandons the tree but must not REPLACE the
-          // verdict this catch carries — the caller classifies SetupFailed, and that decision still stands.
-          if (!isPrivateStoreRefusal(cleanup)) throw cleanup
-          this.refuse(path, base, input, cleanup)
-        }
+        await this.forget(path)
       }
       throw error
     }
   }
 
-  /** The root-relative private submodules of `commit`, so a warm tree carries the same boundary a fresh one does. */
-  private async excludedSubmodules(commit: string): Promise<readonly string[]> {
-    const modules = await this.options.git(["ls-tree", commit, "--", ".gitmodules"])
-    if (modules.trim() === "") return []
-    return await declaredPrivateSubmodules(this.options.git, resolve(this.options.repo), commit)
-  }
-
   /** Remove a pooled tree and forget its registration, exactly as a per-run tree's removal does. */
   private async forget(path: string): Promise<void> {
-    // 28661: this pool removal is the same plain shape as a per-run one — the directory goes, and any private
-    // submodule store inside its admin dir with it — so it asks the same guard before it deletes anything.
-    // A checkout that is already gone needs no guard here: the store question then belongs to the prune below,
-    // which asks it itself.
-    if (existsSync(path)) await refusePrivateStoreRemoval(this.options.git, path, this.options.repo)
     // Contained to the pool's own root: every caller reaches here after the tree existed, so that root resolves.
     safeRemoveSync(path, { within: join(this.options.workdir, "worktrees", "pool"), allowMissing: true })
     await this.store(path).prune()

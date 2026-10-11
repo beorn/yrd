@@ -24,7 +24,6 @@ import { join, resolve } from "node:path"
 import { pushRefUpdates } from "git-super/push"
 import { retryTransientPush } from "./transient-push.ts"
 import { discardWorktree, removeWorktreeRunScaffold } from "./worktree.ts"
-import { refuseMovedPrivateGitlinks } from "./private-submodules.ts"
 import {
   Conflict,
   RetriesExhausted,
@@ -707,14 +706,6 @@ async function admitSubmitAtHead(
     )
   }
   const issue = await issueOf(git, request.branch, head, targetHead, request.issue, request.resolveIssue)
-  // 27147: after issue admission, before composition or any publication.
-  await refuseMovedPrivateGitlinks(
-    git,
-    resolve((await git(["rev-parse", "--show-toplevel"])).trim()),
-    request.branch,
-    base,
-    head,
-  )
   let admission: AdmissionOutcome
   if (request.admit === undefined) {
     admission = { kind: "skipped", reason: "target declares no admission command" }
