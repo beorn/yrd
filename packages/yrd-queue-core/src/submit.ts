@@ -764,6 +764,14 @@ async function admitSubmitAtHead(
               "Update this environment's Yrd to the one the target pins to silence this.",
           )
         },
+        unknownNotifyEvents: (unknown) => {
+          console.warn(
+            `yrd: creating event queue ${targetName(request.target)} from ${targetHead}: notify events this ` +
+              `environment's Yrd does not know: ${unknown.map((entry) => `${entry.entry}: ${entry.event}`).join(", ")}. ` +
+              "The queue runs them; submit fires each entry for the events it knows and skips an entry whose events " +
+              "are all unknown. Update this environment's Yrd to the one the target pins to silence this.",
+          )
+        },
       })
       if (config === undefined) {
         throw new Error(

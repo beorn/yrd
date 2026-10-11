@@ -198,7 +198,17 @@ export class UnknownConfigKey extends Error {
  * `yrd submit` refused `unknown key derive` until this). A RETIRED key refuses in
  * every read; so does an unknown field inside `checks:` or any nested block.
  */
-export type ReadConfigOptions = Readonly<{ newerKeys?: (keys: readonly string[]) => void }>
+export type ReadConfigOptions = Readonly<{
+  newerKeys?: (keys: readonly string[]) => void
+  /**
+   * How an ADDRESSING read treats a `notify:` event this Yrd does not know (28619). Such a
+   * read hands the unknown (entry, event) pairs here and keeps reading: the entry still fires
+   * for the events it DOES know, and an entry whose events are ALL unknown is skipped. Absent,
+   * an unknown event refuses, because a read that RUNS the declaration must understand every
+   * event it might fire. A malformed `on:` refuses either way.
+   */
+  unknownNotifyEvents?: (unknown: readonly Readonly<{ entry: string; event: string }>[]) => void
+}>
 
 export async function readConfig(
   git: Git,
@@ -219,7 +229,13 @@ export async function readConfig(
 /** Parse the declaration's text with its captured source and caller-owned queue identity. */
 export function parseConfig(
   text: string,
-  { at, blob, target, newerKeys }: Readonly<{ at: string; blob: string; target: Target }> & ReadConfigOptions,
+  {
+    at,
+    blob,
+    target,
+    newerKeys,
+    unknownNotifyEvents,
+  }: Readonly<{ at: string; blob: string; target: Target }> & ReadConfigOptions,
 ): QueueConfig {
   let raw: unknown
   try {
@@ -229,7 +245,7 @@ export function parseConfig(
   }
   if (!isRecord(raw)) throw new Error(`.yrd.yml at ${at.slice(0, 12)} is not a mapping`)
   const declared = newerKeys === undefined ? strictTop(raw) : withoutNewerKeys(raw, newerKeys)
-  const notify = readNotify(declared.notify)
+  const notify = readNotify(declared.notify, unknownNotifyEvents)
   const setup = optionalString(declared, "setup")
   const derive = optionalString(declared, "derive")
   const teardown = optionalString(declared, "teardown")
@@ -366,12 +382,15 @@ function namedCommands(
   key: string,
   phases: readonly string[],
   extra: readonly string[],
+  onUnknownPhases?: (where: string, name: string, unknown: readonly string[]) => readonly string[],
 ): readonly Readonly<{ name: string; run: string; on?: readonly string[]; body: Record<string, unknown> }>[] {
   if (value === undefined) return []
   if (!Array.isArray(value)) {
     throw new Error(`.yrd.yml ${key}: must be a list of "- <name>: {run: <command>}" entries`)
   }
-  return value.map((item, index) => {
+  const entries: Array<Readonly<{ name: string; run: string; on?: readonly string[]; body: Record<string, unknown> }>> =
+    []
+  value.forEach((item, index) => {
     const where = `.yrd.yml ${key}[${index}]`
     if (!isRecord(item) || Object.keys(item).length !== 1) {
       throw new Error(`${where}: must be one mapping of the entry's name to its declaration`)
@@ -383,13 +402,31 @@ function namedCommands(
     }
     onlyKeys(body, ["run", "on", ...extra], `${where} ${name}`)
     const on = body.on
-    if (on === undefined) return { body, name, run: body.run }
-    const listed = (Array.isArray(on) ? on : [on]).map(String)
-    for (const phase of listed) {
-      if (!phases.includes(phase)) throw new Error(`${where} ${name}: on: must be ${phases.join(" or ")}`)
+    if (on === undefined) {
+      entries.push({ body, name, run: body.run })
+      return
     }
-    return { body, name, on: listed, run: body.run }
+    // A single value or a list, but every value a string: `on: 12` or a mapping is malformed and
+    // refuses by name, never coerced into an event an older reader might then tolerate (28619).
+    const raw = Array.isArray(on) ? on : [on]
+    if (raw.some((phase) => typeof phase !== "string")) {
+      throw new Error(`${where} ${name}: on: must be ${phases.join(" or ")}`)
+    }
+    const listed = raw as readonly string[]
+    const known = listed.filter((phase) => phases.includes(phase))
+    const unknown = listed.filter((phase) => !phases.includes(phase))
+    if (unknown.length === 0) {
+      entries.push({ body, name, on: listed, run: body.run })
+      return
+    }
+    if (onUnknownPhases === undefined) throw new Error(`${where} ${name}: on: must be ${phases.join(" or ")}`)
+    const kept = [...known, ...onUnknownPhases(where, name, unknown)]
+    // An entry whose events are ALL unknown never fires; skip it rather than keep a notifier that
+    // can never hear anything. An explicit `on: []` is not this case and is kept as declared.
+    if (listed.length > 0 && kept.length === 0) return
+    entries.push({ body, name, on: kept, run: body.run })
   })
+  return entries
 }
 
 /**
@@ -397,8 +434,22 @@ function namedCommands(
  * An entry with no `on:` wants every ending. The name is the declaration's own
  * and the queue reads nothing into it; the records carry it as `To:`.
  */
-function readNotify(value: unknown): readonly Notifier[] {
-  return namedCommands(value, "notify", ENDINGS, []).map((entry) => ({
+function readNotify(value: unknown, unknownEvents?: ReadConfigOptions["unknownNotifyEvents"]): readonly Notifier[] {
+  const heard: Array<Readonly<{ entry: string; event: string }>> = []
+  const entries = namedCommands(
+    value,
+    "notify",
+    ENDINGS,
+    [],
+    unknownEvents === undefined
+      ? undefined
+      : (_where, name, unknown) => {
+          for (const event of unknown) heard.push({ entry: name, event })
+          return []
+        },
+  )
+  if (heard.length > 0) unknownEvents?.([...heard])
+  return entries.map((entry) => ({
     name: entry.name,
     on: (entry.on ?? DEFAULT_ENDINGS) as readonly Ending[],
     run: entry.run,

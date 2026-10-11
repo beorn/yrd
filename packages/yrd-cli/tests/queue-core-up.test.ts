@@ -2313,6 +2313,51 @@ describe("yrd queue up, the service", () => {
     30_000,
   )
 
+  // 28619: like a newer top-level key, a notify event the target declares and this
+  // parser does not know must not refuse a submit — submit only addresses the queue,
+  // and the entry still fires for the events this reader knows (an all-unknown entry
+  // is skipped). It is said on stderr, with the cure. A read that RUNS the declaration
+  // (`up`) stays strict: an event it cannot name is an entry it could not fire.
+  it.each([true, false])(
+    "submit tolerates a notify event newer than its parser, out loud (existing queue: %s)",
+    async (eventQueue) => {
+      using creationWarning = vi.spyOn(console, "warn").mockImplementation(() => {})
+      const w = await world(eventQueue)
+      await redeclare(w, "notify:\n  - submitter:\n      on: [future-ending]\n      run: bun tools/notify.ts\n")
+      const branch = "task/newer-notify"
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, "change.txt"), "candidate\n")
+      await w.git(["add", "change.txt"])
+      await w.git(["commit", "--quiet", "-m", "a change against a newer declaration\n\nRefs: 28619"])
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      const run = capture(w.work)
+      await expect(
+        coreQueueCommand(
+          w.work,
+          run.io,
+          { branch, command: "submit", submitter: "@dev/3" },
+          { json: true, workdir: w.workdir },
+        ),
+      ).resolves.toBe(0)
+      expect(records(run)[0]).toMatchObject({ head })
+      expect(run.stderr()).toContain("submitter: future-ending")
+      expect(run.stderr()).toMatch(/this environment's Yrd does not know/iu)
+      expect(run.stderr()).toContain("Run with main's yrd to apply it")
+      expect(run.stderr()).toMatch(/yrd \S+\+\S+/)
+      if (!eventQueue) {
+        expect(creationWarning).toHaveBeenCalledWith(expect.stringContaining("notify events this"))
+      }
+      // The service's own read of the same declaration refuses it: it would run the event.
+      const up = capture(w.work)
+      await expect(
+        coreQueueCommand(w.work, up.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir }),
+      ).rejects.toThrow(
+        /the declaration at origin\/main cannot be read: \.yrd\.yml notify\[0\] submitter: on: must be/u,
+      )
+    },
+    30_000,
+  )
+
   // Accepted: a legacy protected declaration and its absent successor cannot
   // open a submission; malformed LOCAL hints still diagnose and reach a valid
   // protected queue. Existing service rereads and parser-only tests miss this

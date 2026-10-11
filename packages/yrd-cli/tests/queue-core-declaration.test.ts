@@ -2402,16 +2402,17 @@ describe("a queue is the selected origin branch carrying config", () => {
   it.each([
     [
       "a newer nested value",
-      'notify: [{desk: {run: "echo hi", on: future-end}}]\n',
-      ".yrd.yml notify[0] desk: on: must be",
+      'checks:\n  - verify:\n      run: "echo hi"\n      future-field: true\n',
+      ".yrd.yml checks[0] verify: unknown key future-field",
     ],
     ["a malformed value", "notify: [{desk: {run: 5}}]\n", ".yrd.yml notify[0] desk: needs run: <command>"],
   ])("names the mechanism and the cure when a tolerant read refuses %s", async (_label, config, detail) => {
-    // An unknown TOP-level key is a warning since 27187/27796; a newer value inside a
-    // key this Yrd DOES know still refuses — and so does a simply malformed value. The
-    // refusal must name the MECHANISM and the cure, never a guessed cause: no line may
-    // claim this environment is older, because the same text fires for a declaration
-    // main would refuse too (28510).
+    // An unknown TOP-level key is a warning since 27187/27796, and an unknown notify
+    // event is a warning plus a skipped entry since 28619; a newer value inside any
+    // OTHER key this Yrd DOES know still refuses — and so does a simply malformed
+    // value. The refusal must name the MECHANISM and the cure, never a guessed cause:
+    // no line may claim this environment is older, because the same text fires for a
+    // declaration main would refuse too (28510).
     const repo = await world(config)
     const run = capture(repo)
 

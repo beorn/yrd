@@ -209,6 +209,37 @@ describe("yrd env open prepares the retained environment", () => {
   })
 
   /**
+   * @failure 28619: `yrd env open` read the target's declaration strictly on `notify:`, so a notify
+   *          event the target added refused every bay opened before that Yrd learned the event
+   *          (28601's retired-root-written; the Oct 10 `@dev/6` bay). The entry must warn — naming
+   *          the entry, the event, and the cure — and the rest of the declaration must load.
+   * @level   l2 (real bare remote, declaration at the target, real retained worktree)
+   * @consumer every seat opening an environment from a checkout older than the target's declaration
+   * @testonly none
+   */
+  it("opens when the declaration carries a notify event this Yrd does not know, warning once", async () => {
+    const w = await world(":")
+    const declared = readFileSync(join(w.work, ".yrd.yml"), "utf8")
+    writeFileSync(
+      join(w.work, ".yrd.yml"),
+      `${declared}notify:\n  - submitter:\n      on: [future-ending]\n      run: bun tools/notify.ts\n`,
+    )
+    await w.git(["add", ".yrd.yml"])
+    await w.git(["commit", "--quiet", "-m", "declare a notify event this Yrd does not know"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "newer-notify"], run.io)).toBe(0)
+
+    expect(run.stderr()).toContain("submitter: future-ending")
+    expect(run.stderr()).toMatch(/this environment's Yrd does not know/iu)
+    expect(run.stderr()).toContain(formatYrdRuntimeVersion())
+    expect(run.stderr()).toContain("Run with main's yrd to apply it")
+    expect(run.stderr().match(/future-ending/gu)).toHaveLength(1)
+    expect(existsSync(join(w.work, ".bays", "newer-notify"))).toBe(true)
+  })
+
+  /**
    * @failure 28133: `yrd env open` cut a fresh environment from refs/remotes/origin/main as the checkout last
    *          fetched it. On 2026-10-08 the 28124 environment sat on b56bbf0d although origin's main had been
    *          feb9af30 for 60 s, so it missed 28123 and needed a git-super merge to repair.

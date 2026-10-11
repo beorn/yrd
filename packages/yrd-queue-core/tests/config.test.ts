@@ -139,9 +139,7 @@ describe("the queue declaration grammar", () => {
       "notify:\n  - sweeper:\n      on: [retired-root-written]\n      run: bun tools/yrd-notify.ts\n",
       SOURCE,
     )
-    expect(config.notify).toEqual([
-      { name: "sweeper", on: ["retired-root-written"], run: "bun tools/yrd-notify.ts" },
-    ])
+    expect(config.notify).toEqual([{ name: "sweeper", on: ["retired-root-written"], run: "bun tools/yrd-notify.ts" }])
   })
 
   it.each([
@@ -274,6 +272,61 @@ describe("the queue declaration grammar", () => {
       ],
     ] as const)("still refuses %s in a tolerant read", (_name, declaration, problem) => {
       expect(() => parseConfig(declaration, { ...SOURCE, newerKeys: () => undefined })).toThrow(problem)
+    })
+  })
+
+  // 28619: an ADDRESSING read — submit, env open/close, and the queue verbs (27187) — downgrades a
+  // notify event this older parser does not know to a warning and keeps reading, skipping an
+  // all-unknown entry; a read that RUNS the declaration still refuses it, because the queue is the
+  // reader that must be able to fire every event it reads.
+  describe("a notify event newer than this parser", () => {
+    const mixed =
+      "notify:\n  - submitter:\n      on: [merged, retired-root-quarantined]\n" +
+      "      run: bun tools/notify.ts --to submitter\n"
+
+    it("refuses in a strict read, as the queue's round reads it", () => {
+      expect(() => parseConfig(mixed, SOURCE)).toThrow(
+        /on: must be admission-warning or merged or failed or stuck or merged-direct/u,
+      )
+    })
+
+    it("warns once, naming the entry and the event, and keeps the events it knows", () => {
+      const heard: Array<Readonly<{ entry: string; event: string }>[]> = []
+      const config = parseConfig(mixed, {
+        ...SOURCE,
+        unknownNotifyEvents: (unknown) => heard.push(unknown.map((entry) => ({ ...entry }))),
+      })
+      expect(heard).toEqual([[{ entry: "submitter", event: "retired-root-quarantined" }]])
+      expect(config.notify).toEqual([{ name: "submitter", on: ["merged"], run: "bun tools/notify.ts --to submitter" }])
+    })
+
+    it("skips an entry whose events are all unknown, warning about it and keeping the rest", () => {
+      const heard: Array<Readonly<{ entry: string; event: string }>[]> = []
+      const config = parseConfig(
+        "notify:\n  - orphan:\n      on: [retired-root-quarantined]\n      run: bun tools/notify.ts\n" +
+          "  - keeper:\n      on: [merged]\n      run: bun tools/notify.ts --to keeper\n",
+        { ...SOURCE, unknownNotifyEvents: (unknown) => heard.push(unknown.map((entry) => ({ ...entry }))) },
+      )
+      expect(heard).toEqual([[{ entry: "orphan", event: "retired-root-quarantined" }]])
+      expect(config.notify).toEqual([{ name: "keeper", on: ["merged"], run: "bun tools/notify.ts --to keeper" }])
+    })
+
+    it("keeps an explicitly empty on: list as declared, never skipping it as all-unknown", () => {
+      const config = parseConfig("notify:\n  - quiet:\n      on: []\n      run: bun tools/notify.ts\n", {
+        ...SOURCE,
+        unknownNotifyEvents: () => undefined,
+      })
+      expect(config.notify).toEqual([{ name: "quiet", on: [], run: "bun tools/notify.ts" }])
+    })
+
+    it.each([
+      ["a scalar number", "notify:\n  - everyone:\n      on: 12\n      run: bun x\n"],
+      ["a list with a number", "notify:\n  - everyone:\n      on: [merged, 7]\n      run: bun x\n"],
+      ["a mapping", "notify:\n  - everyone:\n      on: {merged: true}\n      run: bun x\n"],
+    ] as const)("still refuses %s in a tolerant read", (_name, declaration) => {
+      expect(() => parseConfig(declaration, { ...SOURCE, unknownNotifyEvents: () => undefined })).toThrow(
+        /on: must be/u,
+      )
     })
   })
 

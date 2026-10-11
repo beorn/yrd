@@ -115,6 +115,28 @@ export function formatUnknownTopLevelKeyWarning(at: string, command: string, key
 }
 
 /**
+ * Submit / env open / env close: a `notify:` entry naming an event this Yrd does
+ * not know is a loud warning, not a refusal (28619). The entry still fires for the
+ * events this reader knows; an entry whose events are ALL unknown is skipped. Name
+ * each (entry, event), this reader's version, and the cure — the queue runs the
+ * event, this older command cannot.
+ */
+export function formatUnknownNotifyEventWarning(
+  at: string,
+  command: string,
+  unknown: readonly Readonly<{ entry: string; event: string }>[],
+): string {
+  const one = unknown.length === 1
+  const named = unknown.map((entry) => `${entry.entry}: ${entry.event}`).join(", ")
+  return (
+    `yrd: the declaration at ${at} has ${one ? "a notify event" : "notify events"} this environment's Yrd does not know: ` +
+    `${named} (${formatYrdRuntimeVersion()}). ` +
+    `The queue runs ${one ? "it" : "them"}; ${command} does not, so it fires each entry for the events it knows ` +
+    `and skips an entry whose events are all unknown. Run with main's yrd to apply ${one ? "it" : "them"}.\n`
+  )
+}
+
+/**
  * A read that only ADDRESSES the queue — `submit` and the other queue-addressing
  * verbs — downgrades an unknown TOP-level declaration key to a warning (27187,
  * 27796). A newer value inside a key this Yrd DOES know (an unknown `notify[].on`,

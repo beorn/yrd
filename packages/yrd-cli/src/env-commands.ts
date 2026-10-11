@@ -56,7 +56,7 @@ import {
   type EnvCloseRequestOptions,
 } from "./env-close-requests.ts"
 import type { ProcessCensus } from "removely"
-import { formatUnknownTopLevelKeyWarning } from "./version.ts"
+import { formatUnknownNotifyEventWarning, formatUnknownTopLevelKeyWarning } from "./version.ts"
 
 export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string; hold?: string }>
 export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
@@ -350,6 +350,15 @@ function warnNewerDeclarationKeys(at: string, command: string, keys: readonly st
   io.stderr(formatUnknownTopLevelKeyWarning(at, command, keys))
 }
 
+function warnUnknownNotifyEvents(
+  at: string,
+  command: string,
+  unknown: readonly Readonly<{ entry: string; event: string }>[],
+  io: YrdCliIO,
+): void {
+  io.stderr(formatUnknownNotifyEventWarning(at, command, unknown))
+}
+
 /**
  * `yrd env open` — open an environment for one branch and keep it. Prints its
  * path on stdout, which is what a caller `cd`s into.
@@ -407,7 +416,11 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     git,
     base,
     { remote: "origin", branch: target },
-    { newerKeys: (keys) => warnNewerDeclarationKeys(`${target} (${base.slice(0, 12)})`, "env open", keys, io) },
+    {
+      newerKeys: (keys) => warnNewerDeclarationKeys(`${target} (${base.slice(0, 12)})`, "env open", keys, io),
+      unknownNotifyEvents: (unknown) =>
+        warnUnknownNotifyEvents(`${target} (${base.slice(0, 12)})`, "env open", unknown, io),
+    },
   )
   const resolveIssue = config === undefined ? undefined : issueResolver(config, root)
   // 27147: a submodule the base declares `private = true` is left empty and uninitialized; a detached
@@ -720,7 +733,10 @@ export async function closeEnvironment(
     treeGit,
     commit,
     { branch: "HEAD", remote: "origin" },
-    { newerKeys: (keys) => warnNewerDeclarationKeys(path, "env close", keys, io) },
+    {
+      newerKeys: (keys) => warnNewerDeclarationKeys(path, "env close", keys, io),
+      unknownNotifyEvents: (unknown) => warnUnknownNotifyEvents(path, "env close", unknown, io),
+    },
   )
   if (config?.teardown !== undefined) {
     const artifacts = join(workdir, "logs", "environments", basename(path), runId())
