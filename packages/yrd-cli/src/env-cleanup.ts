@@ -3,7 +3,6 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   gitIn,
-  isPrivateStoreRefusal,
   readBranchHistory,
   type Git,
   type GitRunner,
@@ -12,10 +11,16 @@ import {
   type QueueRunOutcome,
 } from "@yrd/queue-core"
 import { createLocalGitProcess } from "git-super/process"
-import { createLocalGitWorktreeStore } from "git-super/worktree"
+import { createLocalGitWorktreeStore, PrivateStoreRefusalError } from "git-super/worktree"
 import { inspectProcessCwds, type ProcessCwdProjection } from "removely"
 import { environmentCwdHolder, processCwdCoverage } from "./env-close-holders.ts"
-import { IncompleteCensusError, closeEnvironment, environmentInventory } from "./env-commands.ts"
+import {
+  IncompleteCensusError,
+  PrivateCheckoutRefusalError,
+  closeEnvironment,
+  environmentInventory,
+  privateStoreVerifyCommand,
+} from "./env-commands.ts"
 import {
   ENV_CLOSE_PREDICATE,
   MAX_COVERAGE_ATTEMPTS,
@@ -278,20 +283,24 @@ async function consumeCloseRequests(
         }
         continue
       }
-      if (isPrivateStoreRefusal(cause)) {
-        // 28661 C4: a close refused to protect a declared-private submodule store is not the queue's to fix.
-        // The tree stays, the round CONTINUES, and the request stays standing so the operator's cure is done
-        // once and the next round closes it - bounded exactly like the coverage refusal, so it is named and
-        // never nagged. Dropping it as "retired" would erase who asked for the close.
+      // 28661 C4 / 27120 (@dev/review2 P2): a close refused to protect a declared-private submodule store is
+      // not the queue's to fix — whether git-super's guard raised it or `env close` raised this CLI's own
+      // private-checkout class. ONE predicate decides that, so a class the ordinary sweep row already knows
+      // cannot be missed here. The tree stays, the round CONTINUES, and the request stays standing so the
+      // operator's cure is done once and the next round closes it - bounded exactly like the coverage refusal,
+      // so it is named and never nagged. Dropping it as "retired" would erase who asked for the close.
+      if (privateRefusalIn(cause) !== undefined) {
         const attempts = (request.coverageAttempts ?? 0) + 1
         const refused = { ...request, coverageAttempts: attempts }
+        // The CLASS and the real route, read from the refusal's own structured payload — never from prose.
+        const named = namedPrivateStoreRefusal(cause, request.path) ?? String(cause)
         if (attempts >= MAX_COVERAGE_ATTEMPTS) {
           journal(
             file,
             refused,
             request.path,
             "retired",
-            `a private submodule store refused the close ${attempts} times; last: ${String(cause)}`,
+            `a private submodule store refused the close ${attempts} times; last: ${named}`,
             fingerprint,
           )
           dropCloseRequest(staged)
@@ -301,7 +310,7 @@ async function consumeCloseRequests(
             refused,
             request.path,
             "kept",
-            `a private submodule store refused the close ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${String(cause)}`,
+            `a private submodule store refused the close ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${named}`,
             fingerprint,
           )
           restoreCloseRequest(staged, file, attempts)
@@ -355,6 +364,69 @@ async function consumeCloseRequests(
  * missing HEADs are named; a write this process cannot make is `file-failed`.
  * DROPPED / issue-ended do not file here; they widen the sweep.
  */
+/** One named class from a refused `env close --json`, or undefined when that refusal names none. */
+function namedCloseRefusal(output: string): string | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(output)
+  } catch (cause) {
+    // A refusal's own text is not always JSON — a plain-`git` refusal, an older yrd, a person's `env close` —
+    // and that is the ordinary "no structured refusal to read" case, so it returns undefined. Anything the
+    // parser fails on for ANOTHER reason is a real fault, and a silent undefined would hide it behind a
+    // "kept: (no class)" line instead of naming it (NO SILENT ERRORS).
+    if (!(cause instanceof SyntaxError)) throw cause
+    return undefined
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined
+  const row = parsed as Readonly<{ kept?: unknown; class?: unknown; store?: unknown; command?: unknown }>
+  if (typeof row.kept !== "string" || typeof row.class !== "string" || row.class === "") return undefined
+  const parts = [`kept: ${row.class}`]
+  if (typeof row.store === "string" && row.store !== "") parts.push(`store ${row.store}`)
+  if (typeof row.command === "string" && row.command !== "") parts.push(`retire with ${row.command}`)
+  return parts.join("; ")
+}
+
+/**
+ * The typed private refusal at any depth of a cause chain — git-super's store refusal (the class queue-core's
+ * `isPrivateStoreRefusal` walks this same way for) OR the CLI's own private-checkout refusal `env close` raises
+ * from R1 — or undefined for any other cause. This is the ONE walk: the close-request disposition above and the
+ * reason text below both read it, so a class cannot be recognized by the ordinary sweep row and missed by the
+ * request path the way @dev/review2's exception-correction review found (#27120 P2). Never message prose.
+ */
+function privateRefusalIn(cause: unknown): PrivateStoreRefusalError | PrivateCheckoutRefusalError | undefined {
+  for (let at: unknown = cause; at instanceof Error; at = at.cause) {
+    if (at instanceof PrivateStoreRefusalError) return at
+    if (at instanceof PrivateCheckoutRefusalError) return at
+  }
+  return undefined
+}
+
+/**
+ * One named class from a cause that IS a typed private refusal at any depth, or undefined for any other cause.
+ * Read from the guard's own structured payload — never from message prose, and never a second `modules/<name>`
+ * derivation — so the sweep reports `kept: private checkout; store <store>; retire with <command>` for the tree,
+ * not a per-seat note (#27120 AC2). This is the boundary the refusal actually crosses: both the pre-close
+ * inspection and the close THROW it, so the exit-code formatter below is never reached on a refusal.
+ */
+function namedPrivateStoreRefusal(cause: unknown, environment: string): string | undefined {
+  const at = privateRefusalIn(cause)
+  if (at instanceof PrivateCheckoutRefusalError) return namedPrivateCheckout(at.refusal.checkout, at.refusal.store)
+  if (!(at instanceof PrivateStoreRefusalError)) return undefined
+  return at.refusals.length === 0
+    ? undefined
+    : at.refusals.map((entry) => namedPrivateCheckout(join(environment, entry.path), entry.store)).join("; ")
+}
+
+/** The one line a private checkout is reported by: its class, the store, and the route that retires it. */
+function namedPrivateCheckout(checkout: string, store: string | undefined): string {
+  const parts = ["kept: private checkout"]
+  if (store !== undefined) {
+    parts.push(`store ${store}`)
+    parts.push(`retire with ${privateStoreVerifyCommand(store, checkout)}`)
+  }
+  return parts.join("; ")
+}
+
 async function fileMergedCloseRequests(
   input: Readonly<{
     workdir: string
@@ -837,7 +909,17 @@ async function cleanupEnvironments(
         // the pre-22894 loud refusal, never a filed request (22894).
         "refuse",
       )
-      if (exit !== 0) throw new Error(`native close exited ${exit}: ${output}`)
+      if (exit !== 0) {
+        // #27120 AC2: a refusal that names a class is still a refusal — the environment stays — but the
+        // sweep reports it as one named class with its retire path, never as a per-seat note. A refusal
+        // that names nothing still falls through to the loud throw below.
+        const named = namedCloseRefusal(output)
+        if (named !== undefined) {
+          preserve(row.path, named)
+          continue
+        }
+        throw new Error(`native close exited ${exit}: ${output}`)
+      }
       const result: unknown = JSON.parse(output)
       if (typeof result !== "object" || result === null) throw new Error(`malformed close result ${output}`)
       if ("closed" in result && result.closed === row.path) {
@@ -847,7 +929,7 @@ async function cleanupEnvironments(
       } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim())
       else throw new Error(`unproven close result ${output}`)
     } catch (cause) {
-      preserve(row.path, String(cause))
+      preserve(row.path, namedPrivateStoreRefusal(cause, row.path) ?? String(cause))
     }
   }
   progress.cursor = stoppedAt < 0 ? 0 : (offset + stoppedAt) % inventory.rows.length

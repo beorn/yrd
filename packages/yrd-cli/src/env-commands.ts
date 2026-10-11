@@ -18,7 +18,7 @@
  */
 
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace, worktreeHomeRoot, type ProvisionedBay } from "@yrd/bay"
 import {
   checkedTree,
@@ -41,7 +41,13 @@ import {
   type GitRunner,
 } from "@yrd/queue-core"
 import { createProcess } from "@yrd/process"
-import { createLocalGitWorktreeStore } from "git-super/worktree"
+import { createLocalGitProcess } from "git-super/process"
+import {
+  assertNoPrivateStore,
+  createLocalGitWorktreeStore,
+  PrivateStoreRefusalError,
+  type PrivateStoreRefusal,
+} from "git-super/worktree"
 import { repositoryHere as findRepository } from "./declaration.ts"
 import { originHead } from "./queue-location.ts"
 import { issueResolver } from "./issue-resolver.ts"
@@ -680,6 +686,49 @@ async function requireClean(git: Git, path: string): Promise<void> {
 }
 
 /** Retained environments preserve user work; GitSuper owns populated-submodule removal. */
+/** Quote one path for a POSIX shell command shown to a human. Mirrors git-super's `shellQuote` (#27120 AC1). */
+function quotePath(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
+/** The one route a private store is retired by, built here so the refusal and every reporter name the same command. */
+export function privateStoreVerifyCommand(store: string, checkout: string): string {
+  return `git super worktree private-store verify ${quotePath(store)} --checkout ${quotePath(checkout)}`
+}
+
+/**
+ * #27120 AC2: a private checkout `env close` will not retire, as a CLASS a caller reads without parsing this
+ * message or re-deriving `modules/<name>`. The store and the verify route come from the same reader that
+ * refused, so the queue sweep can report the tree by class (`kept: private checkout; store …; retire with …`)
+ * instead of quoting a per-seat note. `store` is absent when the checkout is initialized but its store is
+ * already gone, where there is no store route to name.
+ */
+export class PrivateCheckoutRefusalError extends Error {
+  constructor(
+    message: string,
+    readonly refusal: Readonly<{ submodule: string; checkout: string; store?: string; command?: string }>,
+  ) {
+    super(message)
+    this.name = "PrivateCheckoutRefusalError"
+  }
+}
+
+/**
+ * Whether an entry is present, WITHOUT following it: absent when there is nothing at that name, a real fault
+ * otherwise. `existsSync` would collapse an unreadable parent into "absent" and let the close proceed past a
+ * private store it could not judge, so the error is named here instead (#27120 AC1, chief ruling c8a3b06d).
+ */
+function entryPresent(target: string, what: string): boolean {
+  try {
+    lstatSync(target)
+    return true
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTDIR") return false
+    throw new Error(`cannot inspect ${what} ${target}; the environment was preserved`, { cause })
+  }
+}
+
 export async function closeEnvironment(
   operand: string,
   options: EnvCloseOptions,
@@ -734,20 +783,63 @@ export async function closeEnvironment(
   }
   const treeGit = gitIn(path, process, selection)
   const commit = (await treeGit(["rev-parse", "HEAD"])).trim()
-  for (const privatePath of await declaredPrivateSubmodules(treeGit, path, commit)) {
-    const gitfile = join(path, privatePath, ".git")
-    try {
-      lstatSync(gitfile)
-    } catch (cause) {
-      const code = (cause as NodeJS.ErrnoException).code
-      if (code === "ENOENT" || code === "ENOTDIR") continue
-      throw new Error(`Cannot inspect private submodule gitfile ${gitfile}; environment ${path} was preserved`, {
-        cause,
-      })
+  // #27120 AC1/AC3 (ruling ii): R1 refuses while ANY private byte the close could destroy is still
+  // there — the checkout is initialized, OR it was emptied and the private store still sits in this
+  // environment's own admin dir. R1 is therefore the guard at EVERY stage, and the close never reaches
+  // a removal it has not proved, whatever the worktree-removal side does with an exclusion list it is
+  // never handed. The step that touches the store stays the operator's: this tool reads, copies, hashes
+  // and renames nothing inside it (27058; chief ruling c8a3b06d).
+  const privateSubmodules = await declaredPrivateSubmodules(treeGit, path, commit)
+  // The STORE is git-super's question, keyed by the `.gitmodules` section NAME and read at HEAD plus main
+  // (28661's ONE reader). This tool no longer derives `modules/<path>`: Git stores a submodule at
+  // `modules/<name>`, and a supported `git submodule add --name secret … vendor/dependency` makes the two
+  // differ, so a path-keyed probe missed the real store and let the close reach a removal that COPIED the
+  // private store into retention. The guard hands back the refused stores structured, so the route below
+  // names the exact bytes without parsing its message (27120, @cto).
+  const adminDir = (await treeGit(["rev-parse", "--absolute-git-dir"])).trim()
+  let storeRefusals: readonly PrivateStoreRefusal[] = []
+  try {
+    await assertNoPrivateStore(createLocalGitProcess(), { adminDir, repository: path, head: commit })
+  } catch (reason) {
+    if (!(reason instanceof PrivateStoreRefusalError)) throw reason
+    // 27120 / @cto 0516210a: a typed refusal whose store list is EMPTY is still a REFUSAL, not the answer "this
+    // checkout holds no private store". Reading its empty payload as no-private-store would let the close destroy
+    // exactly the bytes git-super declined to judge, so the refusal is RETHROWN unchanged: the caller's class
+    // walk (the sweep's request disposition) then keeps the tree and the operator's request standing.
+    if (reason.refusals.length === 0) throw reason
+    storeRefusals = reason.refusals
+  }
+  // Both answers come from the same reader, but a store can be private per main while this checkout's own
+  // HEAD declares nothing, so R1 answers for the union.
+  const privatePaths = [...new Set([...privateSubmodules, ...storeRefusals.map((entry) => entry.path)])]
+  for (const privatePath of privatePaths) {
+    const checkout = join(path, privatePath)
+    const initialized = entryPresent(join(checkout, ".git"), "the private submodule gitfile of")
+    const store = storeRefusals.find((entry) => entry.path === privatePath)?.store
+    if (!initialized && store === undefined) continue
+    // Route A is ruled, so this is no longer a pending decision: it stays a REFUSAL (loud stderr,
+    // exit 2) and it NAMES THE ROUTE at whichever stage the operator is standing in. In --json it
+    // also carries one structured class, so a sweep can report the tree by class instead of quoting
+    // a per-seat note.
+    const verify = store === undefined ? undefined : privateStoreVerifyCommand(store, checkout)
+    const stage = initialized
+      ? `its checkout ${checkout} is initialized and still holds private content`
+      : `its checkout is empty but the private store ${store} is still present, so a removal would destroy it`
+    const steps = [
+      ...(initialized ? [`look at and empty ${checkout}`] : []),
+      ...(verify === undefined || store === undefined
+        ? []
+        : [`run ${verify}`, `then remove the environment admin's modules subtree ${dirname(store)}`]),
+    ]
+    if (options.json === true) {
+      io.stdout(
+        `${JSON.stringify({ kept: path, class: "private checkout", submodule: privatePath, checkout, store, command: verify })}\n`,
+      )
     }
-    throw new Error(
-      `environment ${path} cannot close with initialized private submodule ${privatePath}: ` +
-        "custody unproven until 27058's merge exclusion; operator decision pending. Keep this environment until that decision.",
+    throw new PrivateCheckoutRefusalError(
+      `environment ${path} cannot close with private submodule ${privatePath}: private checkout, custody not proven — ${stage}. ` +
+        `Retire it by operator steps: ${steps.join("; ")}. This tool reads, copies, hashes and renames nothing in the store.`,
+      { submodule: privatePath, checkout, store, command: verify },
     )
   }
   await requireClean(treeGit, path)
