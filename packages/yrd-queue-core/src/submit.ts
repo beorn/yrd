@@ -902,7 +902,7 @@ async function composeSubmit(
     })
     verifying = composed.verifying
     if (composed.state === "failed") {
-      await composed.failedWorktree.remove()
+      await discardWorktree(composed.failedWorktree)
       throw new Error(
         `${request.branch} at ${admitted.head} cannot be composed with ${targetName(request.target)} at ${admitted.targetHead}: ` +
           `${composed.verifying.detail.code}: ${composed.verifying.detail.message}; ${freshnessLine(admitted.targetHead)}`,

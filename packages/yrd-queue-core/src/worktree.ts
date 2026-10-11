@@ -589,7 +589,9 @@ export async function prepareWorktree(
     }
     return prepared
   } catch (error) {
-    await worktree.remove()
+    // 28661 C4: the cleanup runs through the ONE refusal handler, so a store-protection refusal cannot mask the
+    // verdict this catch is carrying (a SetupFailed from runSetup stays a SetupFailed).
+    await discardWorktree(worktree)
     throw error
   }
 }

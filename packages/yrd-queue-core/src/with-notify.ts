@@ -311,7 +311,7 @@ export async function dispatchNotifications(
               },
             }),
       })
-      resources.defer(() => tree.remove())
+      resources.defer(() => discardWorktree(tree))
       return { cwd: tree.path, runner }
     })()
     return prepared

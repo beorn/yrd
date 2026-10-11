@@ -187,6 +187,7 @@ import {
   runIndexPath,
   RUN_INDEX_CODES,
   openEvents,
+  discardWorktree,
   type SubmitGitlink,
 } from "@yrd/queue-core"
 import { formatQueueAddress, formatStoredQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
@@ -3659,7 +3660,7 @@ export async function coreQueueCommand(
           }
         } finally {
           try {
-            if (prepared !== undefined) await prepared.remove()
+            if (prepared !== undefined) await discardWorktree(prepared)
           } finally {
             rmSync(worktrees, { force: true, recursive: true })
           }

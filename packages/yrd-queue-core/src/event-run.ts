@@ -1892,7 +1892,7 @@ export async function eventQueueRun(
     try {
       if (verified.state === "failed") {
         await timedStep(log, { branch, head, name: "remove", phase: "deprovision" }, () =>
-          verified.failedWorktree.remove(),
+          discardWorktree(verified.failedWorktree),
         )
         const ended = await appendOwnedChange(store, queue, branch, tip, {
           type: "failed",

@@ -17,6 +17,7 @@ import { safeRemoveSync } from "removely"
 import { afterAll, expect, it } from "vitest"
 import type { Git } from "../src/git.ts"
 import { WorktreePool } from "../src/pool.ts"
+import { isPrivateStoreRefusal, SetupFailed } from "../src/worktree.ts"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { gitSuperBin, gitSuperSha } from "../../../tests/support/git-super-bin.ts"
 
@@ -33,6 +34,7 @@ async function poolFixture(): Promise<{
   git: Git
   repo: string
   pool: WorktreePool
+  newPool: () => WorktreePool
   notes: string[]
 }> {
   const root = mkdtempSync(join(tmpdir(), "yrd-pool-"))
@@ -54,17 +56,20 @@ async function poolFixture(): Promise<{
   const hooksPath = join(root, "hooks")
   mkdirSync(hooksPath)
   const notes: string[] = []
-  const pool = new WorktreePool({
+  const options = {
     git,
     hooksPath,
-    note: (cause) => notes.push(cause),
+    note: (cause: string) => notes.push(cause),
     ref: "main",
     repo,
     selection: git.selection,
     env,
     workdir: join(root, "queue"),
-  })
-  return { git, notes, pool, repo }
+  }
+  // The queue makes a NEW pool every round (#28503 keeps the warm tree, not the object), so a case that must
+  // hold across the round boundary builds its second round through this, not by borrowing twice from one object.
+  const newPool = (): WorktreePool => new WorktreePool({ ...options })
+  return { git, newPool, notes, pool: newPool(), repo }
 }
 
 /** Borrow, leave an install cache where a setup would have, and give the tree back. */
@@ -138,7 +143,7 @@ it("refuses reuse only for a tracked change inside a submodule, never for an unt
 // C4: a pooled tree whose removal is REFUSED to protect a private store is skipped, named once, and the round
 // continues on a spare path. It is never counted as free capacity and never retried in a later round.
 it("abandons a pooled tree it may not delete, and continues on a spare path", async () => {
-  const { git, repo, pool, notes } = await poolFixture()
+  const { git, newPool, repo, pool, notes } = await poolFixture()
   // A PUBLIC child the tree actually materializes, so a tracked change in it refuses reuse by name...
   const sub = join(repo, "..", "sub")
   mkdirSync(sub)
@@ -180,9 +185,67 @@ it("abandons a pooled tree it may not delete, and continues on a spare path", as
   expect(second.path).toContain("-spare-")
   expect(notes.join(" ")).toContain("keeps it and continues")
 
-  const third = await pool.borrow({ commit, role: "candidate", targetSha: commit })
-  // Named ONCE: a later round must not retry a removal nobody has cured.
+  // The NEXT ROUND is a NEW pool over the same workdir/ref. The refusal must survive that boundary: the round
+  // neither re-tries nor re-names the abandoned tree, and it continues on the SAME warm spare the last round
+  // built rather than spending another one.
+  const nextRound = newPool()
+  const third = await nextRound.borrow({ commit, role: "candidate", targetSha: commit })
+  // Named ONCE for the whole process: a later round must not retry a removal nobody has cured.
   expect(notes.filter((note) => note.includes("keeps it and continues"))).toHaveLength(1)
+  expect(third.path, "the next round reuses the warm spare, not a second one").toBe(second.path)
+  expect(third.path.endsWith("-spare-2"), "no second spare is minted").toBe(false)
+  expect(existsSync(first), "the abandoned tree is never re-tried").toBe(true)
+  expect(existsSync(join(admin, "modules", "vendor", "secret")), "the store is still held").toBe(true)
   await third.remove()
   await second.remove()
+})
+
+// C4: a refusal while discarding a warm tree must not REPLACE the verdict the round is carrying.
+it("keeps SetupFailed when the cleanup of a failed setup is refused", async () => {
+  const { git, newPool, repo } = await poolFixture()
+  const sub = join(repo, "..", "sub")
+  mkdirSync(sub)
+  writeFileSync(join(sub, "lib.ts"), "export const lib = 1\n")
+  const subGit = gitIn(sub)
+  await subGit(["init", "--quiet", "--initial-branch=main"])
+  await subGit(["config", "user.email", "pool@yrd.test"])
+  await subGit(["config", "user.name", "pool-fixture"])
+  await subGit(["add", "lib.ts"])
+  await subGit(["commit", "--quiet", "-m", "sub"])
+  await git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", sub, "vendor/pkg"])
+  writeFileSync(
+    join(repo, ".gitmodules"),
+    '[submodule "vendor/pkg"]\n\tpath = vendor/pkg\n\turl = ' +
+      sub +
+      '\n[submodule "vendor/secret"]\n\tpath = vendor/secret\n\turl = https://example.invalid/secret.git\n\tprivate = true\n',
+  )
+  await git(["add", ".gitmodules"])
+  await git(["update-index", "--add", "--cacheinfo", "160000," + "1".repeat(40) + ",vendor/secret"])
+  await git(["commit", "--quiet", "-m", "declare the private child"])
+  const commit = (await git(["rev-parse", "HEAD"])).trim()
+
+  // A first round makes the tree warm and returns it.
+  const pool = newPool()
+  const first = await pool.borrow({ commit, role: "candidate", targetSha: commit })
+  await pool.give(first)
+
+  // The store the guard protects, inside THIS tree's admin dir, where the failed setup's cleanup would take it.
+  const admin = (
+    await git(["rev-parse", "--path-format=absolute", "--git-path", join("worktrees", basename(first.path))])
+  ).trim()
+  mkdirSync(join(admin, "modules", "vendor", "secret"), { recursive: true })
+
+  // The next round's setup fails. The verdict that reaches the caller stays the SETUP verdict, and the tree is
+  // abandoned instead of removed.
+  const setup = { run: "exit 17", logDir: join(repo, "..", "setup-log"), tmpdir: join(repo, "..", "setup-tmp") }
+  mkdirSync(setup.logDir, { recursive: true })
+  mkdirSync(setup.tmpdir, { recursive: true })
+  const failure = await pool
+    .borrow({ commit, role: "candidate", targetSha: commit, setup })
+    .then(() => undefined)
+    .catch((cause: unknown) => cause)
+  expect(failure, "the setup verdict reaches the caller").toBeInstanceOf(SetupFailed)
+  expect(isPrivateStoreRefusal(failure), "the refusal rides as a cause, not as the verdict").toBe(false)
+  expect(existsSync(first.path), "a refused cleanup leaves the tree in place").toBe(true)
+  expect(existsSync(join(admin, "modules", "vendor", "secret"))).toBe(true)
 })

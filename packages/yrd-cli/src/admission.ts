@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type ProcessResult } from "@yrd/process"
-import { freshWorktree, type AdmissionVerdict, type Git, type QueueConfig } from "@yrd/queue-core"
+import { discardWorktree, freshWorktree, type AdmissionVerdict, type Git, type QueueConfig } from "@yrd/queue-core"
 
 function cannotJudge(command: string, reason: string, stderr = ""): AdmissionVerdict {
   return {
@@ -83,7 +83,8 @@ export async function runAdmission(
       })
       return admissionVerdict(result, config.run, config.timeoutMs)
     } finally {
-      await tree.remove()
+      // 28661 C4: a refusal to protect a private submodule store must not turn a verdict into cannotJudge.
+      await discardWorktree(tree)
     }
   } catch (cause) {
     return cannotJudge(config.run, `target ${targetHead} at ${repo} could not run: ${String(cause)}`)

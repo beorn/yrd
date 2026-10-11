@@ -10,8 +10,15 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
-import { discardWorktree, refusePrivateStoreRemoval, type Worktree } from "../src/worktree.ts"
+import {
+  discardWorktree,
+  prepareWorktree,
+  refusePrivateStoreRemoval,
+  SetupFailed,
+  type Worktree,
+} from "../src/worktree.ts"
 import { testGitIn } from "../../../tests/support/test-git-in.ts"
+import { gitSuperBin, gitSuperSha } from "../../../tests/support/git-super-bin.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -23,6 +30,8 @@ const env = {
   GIT_CONFIG_COUNT: "1",
   GIT_CONFIG_KEY_0: "protocol.file.allow",
   GIT_CONFIG_VALUE_0: "always",
+  YRD_GIT_SUPER_BIN: join(gitSuperBin, "git-super"),
+  YRD_GIT_SUPER_SHA: gitSuperSha,
 }
 
 const author = ["-c", "user.email=plain-removal@yrd.test", "-c", "user.name=yrd"] as const
@@ -136,5 +145,44 @@ describe("a refused discard skips the tree, names it once and lets the round con
     expect(existsSync(linked)).toBe(true)
     expect(existsSync(store)).toBe(true)
     expect(warned.filter((line) => line.includes(linked))).toHaveLength(1)
+  })
+})
+
+// C4: the cleanup of a FAILED preparation runs through the same handler, so a store-protection refusal cannot
+// mask the verdict the caller classifies (worktree.ts prepareWorktree's catch).
+describe("a refused cleanup keeps the preparation verdict (28661 C4)", () => {
+  it("throws SetupFailed, not the refusal, and leaves the tree and its store in place", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-prepare-refused-"))
+    roots.push(root)
+    // The LINKED worktree is at the commit that predates the private declaration; current main carries it. The
+    // prepared tree is materialized at that same pre-declaration commit, so its materialization is complete,
+    // while the guard that runs at cleanup still sees main's declaration (fixture "main").
+    const { repo } = await fixture(root, "main")
+    const git = testGitIn(repo, undefined, undefined, { env })
+    const before = (await git(["rev-parse", "HEAD~1"])).trim()
+    const path = join(root, "prepared")
+    const logDir = join(root, "setup-log")
+    mkdirSync(logDir, { recursive: true })
+    const store = join(repo, ".git", "worktrees", path.slice(path.lastIndexOf("/") + 1), "modules", "dep")
+
+    const failure = await prepareWorktree(git, repo, before, path, {
+      targetSha: before,
+      env,
+      // The store the guard protects is placed by the setup itself, inside THIS tree's own admin dir, right
+      // before the setup fails: no read, copy or hash of any private byte (27058, chief ruling c8a3b06d).
+      setup: {
+        run: 'admin=$(sed -n "s/^gitdir: //p" .git) && mkdir -p "$admin/modules/dep" && exit 17',
+        logDir,
+        tmpdir: root,
+      },
+    }).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+
+    expect(failure, "the setup verdict reaches the caller").toBeInstanceOf(SetupFailed)
+    expect(String(failure)).not.toContain("private submodule store")
+    expect(existsSync(path), "a refused cleanup leaves the tree in place").toBe(true)
+    expect(existsSync(store), "the store the guard protects survives").toBe(true)
   })
 })
