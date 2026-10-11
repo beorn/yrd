@@ -708,8 +708,10 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     },
   )
 
-  // #27156: existence admission precedes teardown and every child-content read.
-  it.each([false, true])("private custody gates close before teardown: initialized=%s", async (initialized) => {
+  // #27156: existence admission precedes teardown and every child-content read. 28740 removed the
+  // declared-private exclusion, so an opened environment now carries the child materialized; the refusal
+  // is the initialized case, and this proves it runs BEFORE any teardown of the checkout.
+  it("private custody gates close before teardown", async () => {
     const w = await world(":", "printf touched > ../private-teardown-ran.txt")
     await addMaterializedDependency(w)
     await w.git(["config", "-f", ".gitmodules", "submodule.vendor/dependency.private", "true"])
@@ -718,35 +720,24 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const { path } = await openEnvironment(w.work, selected)
     const gitfile = join(path, "vendor/dependency/.git")
-    expect(existsSync(gitfile)).toBe(false)
-    if (initialized) {
-      // A fixture-only historical checkout. Read only its gitfile's existence.
-      await w.git(["-C", path, "submodule", "update", "--init", "vendor/dependency"])
-      expect(existsSync(gitfile)).toBe(true)
-    }
+    expect(existsSync(gitfile)).toBe(true)
     const closed = capture(w.work)
     const exit = await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io)
     const teardown = join(dirname(path), "private-teardown-ran.txt")
-    if (initialized) {
-      expect(exit, closed.stderr()).toBe(2)
-      expect(closed.stderr()).toContain("vendor/dependency")
-      expect(closed.stderr()).toContain("private checkout, custody not proven")
-      // #27120 AC2: the refusal carries one structured class, so a sweep reports the tree by class
-      // name and retire path instead of quoting a per-seat note.
-      expect(JSON.parse(closed.stdout())).toMatchObject({
-        kept: path,
-        class: "private checkout",
-        submodule: "vendor/dependency",
-      })
-      expect((JSON.parse(closed.stdout()) as { command?: string }).command).toContain("private-store verify")
-      expect(existsSync(path)).toBe(true)
-      expect(existsSync(gitfile)).toBe(true)
-      expect(existsSync(teardown)).toBe(false)
-    } else {
-      expect(exit, closed.stderr()).toBe(0)
-      expect(existsSync(path)).toBe(false)
-      expect(existsSync(teardown)).toBe(true)
-    }
+    expect(exit, closed.stderr()).toBe(2)
+    expect(closed.stderr()).toContain("vendor/dependency")
+    expect(closed.stderr()).toContain("private checkout, custody not proven")
+    // #27120 AC2: the refusal carries one structured class, so a sweep reports the tree by class
+    // name and retire path instead of quoting a per-seat note.
+    expect(JSON.parse(closed.stdout())).toMatchObject({
+      kept: path,
+      class: "private checkout",
+      submodule: "vendor/dependency",
+    })
+    expect((JSON.parse(closed.stdout()) as { command?: string }).command).toContain("private-store verify")
+    expect(existsSync(path)).toBe(true)
+    expect(existsSync(gitfile)).toBe(true)
+    expect(existsSync(teardown)).toBe(false)
   })
 
   // #27120 AC3: the ruled Route A, all three stages against one fixture — the initialized checkout

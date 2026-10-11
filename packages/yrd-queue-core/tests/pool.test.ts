@@ -81,31 +81,8 @@ async function borrowWithCache(pool: WorktreePool, commit: string): Promise<stri
   return tree.path
 }
 
-it("keeps the warm tree and its install cache across a second borrow", async () => {
-  const { git, repo, pool, notes } = await poolFixture()
-  // A private child is declared and never initialized, so this fixture needs no
-  // store for it: the point is the cache, on a commit whose submodules exist.
-  writeFileSync(
-    join(repo, ".gitmodules"),
-    '[submodule "vendor/secret"]\n\tpath = vendor/secret\n\turl = https://example.invalid/secret.git\n\tprivate = true\n',
-  )
-  await git(["add", ".gitmodules"])
-  await git(["update-index", "--add", "--cacheinfo", "160000," + "1".repeat(40) + ",vendor/secret"])
-  await git(["commit", "--quiet", "-m", "private child"])
-  const commit = (await git(["rev-parse", "HEAD"])).trim()
-
-  const first = await borrowWithCache(pool, commit)
-  const second = await pool.borrow({ commit, role: "candidate", targetSha: commit })
-
-  expect(second.path).toBe(first)
-  expect(existsSync(join(second.path, WITNESS))).toBe(true)
-  expect(existsSync(join(second.path, "vendor", "secret", ".git"))).toBe(false)
-  expect(notes).toEqual([])
-  await second.remove()
-})
-
-it("refuses reuse only for a tracked change inside a submodule, never for an untracked file", async () => {
-  const { git, notes, pool, repo } = await poolFixture()
+/** A real local child at vendor/pkg on a new commit, so the pool builds a submodule-bearing tree over --reference. */
+async function withLocalSubmodule(repo: string, git: Git): Promise<string> {
   const sub = join(repo, "..", "sub")
   mkdirSync(sub)
   writeFileSync(join(sub, "lib.ts"), "export const lib = 1\n")
@@ -117,7 +94,26 @@ it("refuses reuse only for a tracked change inside a submodule, never for an unt
   await subGit(["commit", "--quiet", "-m", "sub"])
   await git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", sub, "vendor/pkg"])
   await git(["commit", "--quiet", "-m", "add submodule"])
-  const commit = (await git(["rev-parse", "HEAD"])).trim()
+  return (await git(["rev-parse", "HEAD"])).trim()
+}
+
+it("keeps the warm tree and its install cache across a second borrow", async () => {
+  const { git, notes, pool, repo } = await poolFixture()
+  const commit = await withLocalSubmodule(repo, git)
+
+  const first = await borrowWithCache(pool, commit)
+  const second = await pool.borrow({ commit, role: "candidate", targetSha: commit })
+
+  expect(second.path).toBe(first)
+  expect(existsSync(join(second.path, WITNESS))).toBe(true)
+  expect(existsSync(join(second.path, "vendor", "pkg", ".git"))).toBe(true)
+  expect(notes).toEqual([])
+  await second.remove()
+})
+
+it("refuses reuse only for a tracked change inside a submodule, never for an untracked file", async () => {
+  const { git, notes, pool, repo } = await poolFixture()
+  const commit = await withLocalSubmodule(repo, git)
 
   const first = await borrowWithCache(pool, commit)
   expect(existsSync(join(first, "vendor", "pkg", ".git"))).toBe(true)

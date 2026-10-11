@@ -66,7 +66,6 @@ function hostedEnv(rootRemote: string, childRemote: string): NodeJS.ProcessEnv {
  */
 async function world(
   options: Readonly<{
-    privateChild?: boolean
     componentMain?: "descends" | "forks" | "published"
     removesChild?: boolean
   }> = {},
@@ -109,17 +108,7 @@ async function world(
     // (`git config --get-regexp` exits 1 with no match), which no real repo does.
     await git(["submodule", "add", "--quiet", LIB_URL, "vendor/nested"])
   }
-  if (options.privateChild === true) {
-    // 27147: a child declared private is never materialized; the compose excludes it, and so must the derived one.
-    await git(["config", "--file", ".gitmodules", "submodule.vendor/secret.path", "vendor/secret"])
-    await git(["config", "--file", ".gitmodules", "submodule.vendor/secret.url", "https://example.invalid/secret.git"])
-    await git(["config", "--file", ".gitmodules", "submodule.vendor/secret.private", "true"])
-  }
   await git(["add", "-A"])
-  // The gitlink is staged by plumbing AFTER add -A: with no directory on disk, add -A would drop it again.
-  if (options.privateChild === true) {
-    await git(["update-index", "--add", "--cacheinfo", `160000,${"f".repeat(40)},vendor/secret`])
-  }
   await git(["commit", "--quiet", "-m", "base"])
   await git(["push", "--quiet", "origin", "main"])
   const target = (await git(["rev-parse", "HEAD"])).trim()
@@ -370,30 +359,6 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
     expect((await w.git(["rev-parse", `${plain.verifying.candidate}:lib`])).trim()).toBe(
       (await w.git(["rev-parse", `${verified.verifying.candidate}:lib`])).trim(),
     )
-  })
-
-  it("the derived recompose excludes the same private submodules as the first compose (27147 × 27176)", async () => {
-    const w = await world({ privateChild: true })
-    await using real = createProcess({ cwd: w.work, env: w.env })
-    const merges: (readonly string[])[] = []
-    const recording: Process = {
-      ...real,
-      async run(request) {
-        // 27098: the queue runs the frozen git-super binary directly, so a compose
-        // merge child no longer carries the `super` subcommand token.
-        if (request.argv.includes("merge")) merges.push(request.argv)
-        return real.run(request)
-      },
-    }
-    const verified = await compose(w, deriveScript(w.root), "private", recording)
-    if (verified.state !== "verified") throw new Error(`compose failed: ${verified.verifying.detail.message}`)
-    expect(verified.verifying.derived).toBeDefined()
-    expect(merges).toHaveLength(2)
-    for (const argv of merges) {
-      const at = argv.indexOf("--exclude-submodule")
-      expect(at, argv.join(" ")).toBeGreaterThan(0)
-      expect(argv[at + 1]).toBe("vendor/secret")
-    }
   })
 
   it("builds the derived commit on the component's main when main already descends from the merged pin", async () => {
