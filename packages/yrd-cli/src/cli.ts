@@ -48,7 +48,13 @@ import { refreshMirrors, MIRROR_STORE_SETTING, type MirrorRefreshOptions } from 
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { repositoryHere } from "./declaration.ts"
 import { appendRetentionObservation, pruneRoundOutput, retentionHumanLines } from "./log-retention.ts"
-import { resolveDeclaredQueueLocations, resolveQueueLocation, type QueueLocation } from "./queue-location.ts"
+import {
+  hostWorkdir,
+  resolveDeclaredQueueLocations,
+  resolveQueueLocation,
+  type QueueLocation,
+} from "./queue-location.ts"
+import { retireRetiredRoot } from "./retire-root.ts"
 import { formatQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { legendLines } from "./watch-words.ts"
@@ -638,6 +644,29 @@ function buildProgram(
           },
         ),
       )
+    })
+  queue
+    .command("retire-root <queue-address>")
+    .description("archive a pre-cutover percent-escaped queue root and leave a tombstone file in its place (28601)")
+    .option("--dry-run", "print what would move and its byte counts, writing nothing")
+    .option("--json", "emit stable JSON")
+    .action(async (operand: string, options: { dryRun?: boolean; json?: boolean }) => {
+      const address = parseQueueAddress(operand)
+      const host = await hostWorkdir(cwd(), env)
+      const result = await retireRetiredRoot({ host, address, dryRun: options.dryRun === true })
+      if (options.json === true) {
+        io.stdout(`${JSON.stringify(result)}\n`)
+      } else {
+        const verb =
+          result.dryRun === true ? "would retire" : result.action === "skipped" ? "already retired" : "retired"
+        io.stdout(
+          `${verb} ${result.root}\n` +
+            `archive ${result.archive} (${String(result.archiveBytes)} bytes, sha256 ${result.sha256})\n` +
+            `${String(result.files)} files; net ${String(result.bytesFreed)} bytes freed\n` +
+            (result.dryRun === true ? "" : `tombstone: ${result.tombstone}`),
+        )
+      }
+      setExit(0)
     })
   withdrawOptions(queue.command("withdraw <branch>").description(WITHDRAW_DESCRIPTION))
     .addHelpSection("On withdraw:", WITHDRAW_HELP)
