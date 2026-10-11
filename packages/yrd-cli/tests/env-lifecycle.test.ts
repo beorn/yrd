@@ -737,7 +737,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
         class: "private checkout",
         submodule: "vendor/dependency",
       })
-      expect(JSON.parse(closed.stdout()).command).toContain("private-store verify")
+      expect((JSON.parse(closed.stdout()) as { command?: string }).command).toContain("private-store verify")
       expect(existsSync(path)).toBe(true)
       expect(existsSync(gitfile)).toBe(true)
       expect(existsSync(teardown)).toBe(false)
@@ -772,7 +772,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     const refused = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)).toBe(2)
     expect(refused.stderr()).toContain("is initialized and still holds private content")
-    expect(JSON.parse(refused.stdout()).class).toBe("private checkout")
+    expect((JSON.parse(refused.stdout()) as { class?: string }).class).toBe("private checkout")
     expect(existsSync(checkout)).toBe(true)
     expect(existsSync(store)).toBe(true)
 
@@ -867,7 +867,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       submodule: "vendor/dependency",
       store,
     })
-    expect(JSON.parse(refused.stdout()).command).toContain("private-store verify")
+    expect((JSON.parse(refused.stdout()) as { command?: string }).command).toContain("private-store verify")
     expect(existsSync(path)).toBe(true)
     expect(existsSync(store)).toBe(true)
 
