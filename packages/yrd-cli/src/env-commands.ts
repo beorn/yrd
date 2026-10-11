@@ -802,6 +802,11 @@ export async function closeEnvironment(
     await assertNoPrivateStore(createLocalGitProcess(), { adminDir, repository: path, head: commit })
   } catch (reason) {
     if (!(reason instanceof PrivateStoreRefusalError)) throw reason
+    // 27120 / @cto 0516210a: a typed refusal whose store list is EMPTY is still a REFUSAL, not the answer "this
+    // checkout holds no private store". Reading its empty payload as no-private-store would let the close destroy
+    // exactly the bytes git-super declined to judge, so the refusal is RETHROWN unchanged: the caller's class
+    // walk (the sweep's request disposition) then keeps the tree and the operator's request standing.
+    if (reason.refusals.length === 0) throw reason
     storeRefusals = reason.refusals
   }
   // Both answers come from the same reader, but a store can be private per main while this checkout's own
