@@ -685,14 +685,27 @@ function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
 
-/** A worktree's own Git dir, read from the checkout's `.git` entry alone, so a broken repository is never asked. */
+/**
+ * A worktree's own Git dir, read from the checkout's `.git` entry alone, so a broken repository is never asked.
+ *
+ * 28661 C4 (NO SILENT ERRORS): an ABSENT `.git` is a real answer — no admin dir, so no store to protect and the
+ * tree stays removable (an already-removed checkout and any ordinary non-checkout both land here). Any OTHER
+ * lstat failure leaves whatever store that admin dir may hold UNVERIFIED, so it REFUSES by name: returning
+ * `undefined` there reads as "nothing to protect" and lets the caller delete the tree — and the store's custody
+ * with it — blind, which is the data loss this guard exists to prevent.
+ */
 function worktreeAdminDir(checkout: string): string | undefined {
   const dotGit = join(checkout, ".git")
+  if (!existsSync(dotGit)) return undefined
   let state
   try {
     state = lstatSync(dotGit)
-  } catch {
-    return undefined
+  } catch (cause) {
+    throw new PrivateStoreRefusalError(
+      `cannot remove ${checkout}: its .git entry ${dotGit} cannot be read (${messageOf(cause)}), so a private ` +
+        `submodule store in its admin dir cannot be verified; the checkout is kept; inspect ${dotGit} before ` +
+        `retrying removal`,
+    )
   }
   if (state.isDirectory()) return dotGit
   if (!state.isFile()) return undefined
