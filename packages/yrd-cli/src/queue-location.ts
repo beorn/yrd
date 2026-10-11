@@ -126,6 +126,22 @@ export async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git?: Git
 }
 
 /**
+ * The host workdir for a caller that holds no Git of its own: resolve one for the repository containing
+ * `cwd` first, so a DECLARED `yrd.workdir` is read.
+ *
+ * `hostWorkdir` reads `yrd.workdir` only from a supplied Git, so a caller that omits one silently takes the
+ * `$XDG_STATE_HOME/yrd` fallback — which, on a host that declares its own workdir, is not where its queues
+ * live. `yrd queue retire-root` did exactly that and refused its own live root by name on this host (28601):
+ * the verb was unusable, and no cwd or environment reached the declared root. Outside a repository there is
+ * nothing to read and the fallback is the right answer, so that case is unchanged.
+ */
+export async function hostWorkdirHere(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const inside = repositoryHere(cwd)
+  if (inside === undefined) return hostWorkdir(cwd, env)
+  return hostWorkdir(cwd, env, gitIn(inside, undefined, await resolveGitSelection(cwd, { env }), { env }))
+}
+
+/**
  * The queue-owned clone, and a reference every compose can borrow from.
  *
  * The clone is `--no-checkout` — the queue reads objects out of it, never

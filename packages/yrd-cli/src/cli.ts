@@ -49,7 +49,7 @@ import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } 
 import { repositoryHere } from "./declaration.ts"
 import { appendRetentionObservation, pruneRoundOutput, retentionHumanLines } from "./log-retention.ts"
 import {
-  hostWorkdir,
+  hostWorkdirHere,
   resolveDeclaredQueueLocations,
   resolveQueueLocation,
   type QueueLocation,
@@ -652,7 +652,7 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (operand: string, options: { dryRun?: boolean; json?: boolean }) => {
       const address = parseQueueAddress(operand)
-      const host = await hostWorkdir(cwd(), env)
+      const host = await hostWorkdirHere(cwd(), env)
       const result = await retireRetiredRoot({ host, address, dryRun: options.dryRun === true })
       if (options.json === true) {
         io.stdout(`${JSON.stringify(result)}\n`)
