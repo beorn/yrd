@@ -20,14 +20,25 @@
  * hash for the operator. The positional is the queue ADDRESS and the path is
  * derived with `legacyQueueRoot` — the same builder a pre-cutover client used —
  * so this verb can never act on an arbitrary path.
+ *
+ * An archive is checked against the tree by ENTRY SET, never by a count: a
+ * listing includes every directory and symlink, so "as many regular files" is a
+ * different list — and the archive a crash left behind is re-verified against
+ * the moved-aside tree before that tree is removed (@cto D1, D4). Every write is
+ * fsynced before the path is freed (@cto D3), every refusal names the one-way
+ * door it protects, and no cause is ever swallowed (@cto D6).
  */
 import { createHash } from "node:crypto"
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   statSync,
   writeFileSync,
@@ -62,43 +73,84 @@ export type RetireRootResult = Readonly<{
   /** The tombstone record the operator reads at the old path. */
   tombstone: string
   action: RetireRootAction
-  /** Regular files in the archived tree — the census the archive listing is checked against. */
+  /** Regular files in the archived tree — reported beside the entry-set census. */
   files: number
+  /** The archive's measured size: bytes this run wrote, or would write. */
   archiveBytes: number
-  /** Net bytes this frees on the same disk: the tree minus the archive that replaces it. */
+  /** Bytes this run frees: the tree minus the archive that replaces it, or the moved-aside tree on a resume. */
   bytesFreed: number
   sha256: string
   /** True when nothing was written (dry run). */
   dryRun: boolean
 }>
 
+const causeText = (value: unknown): string => (value instanceof Error ? value.message : String(value))
+
 /**
- * A census of the tree: regular files, and their total on-disk byte size.
+ * One walk's census: the entries EXACTLY as `tar` names them (a SET, not a
+ * count), plus the regular-file count and their total byte size.
  *
- * LOUD, never a silent undercount: an unreadable subtree would make this count
- * disagree with `tar`'s listing and let an incomplete archive pass the check
- * below. A tree that cannot be fully read is not archived — the reader names the
- * path instead. (`readdirSync`/`statSync` throw; we let them.)
+ * The SET is what every archive is checked against. A count of regular files
+ * compared to `tar -tf`'s full listing is not a check at all: every directory
+ * and symlink makes the listing longer, so equality could never hold for a tree
+ * with directories and "shorter than the listing" is near-vacuous (@cto D1).
+ * Names are relative to the root's PARENT and the root itself is included
+ * (`<name>/`); directories carry a trailing slash and every other node (file,
+ * symlink, socket, FIFO) is its bare path — exactly `tar -tf`'s form.
+ *
+ * LOUD, never a silent undercount: an unreadable subtree throws, so a tree that
+ * cannot be fully read is never archived on a partial listing.
  */
-function census(root: string): Readonly<{ files: number; bytes: number }> {
+function census(path: string, name: string): Readonly<{ entries: Set<string>; files: number; bytes: number }> {
+  const entries = new Set<string>()
   let files = 0
   let bytes = 0
-  const walk = (dir: string): void => {
-    const entries: readonly Dirent[] = readdirSync(dir, { withFileTypes: true })
-    for (const entry of entries) {
-      const path = join(dir, entry.name)
-      if (entry.isDirectory()) walk(path)
-      else if (entry.isFile()) {
-        files += 1
-        bytes += statSync(path).size
+  const walk = (dir: string, prefix: string): void => {
+    entries.add(`${prefix}/`)
+    const children: readonly Dirent[] = readdirSync(dir, { withFileTypes: true })
+    for (const entry of children) {
+      const childPath = join(dir, entry.name)
+      const childName = `${prefix}/${entry.name}`
+      if (entry.isDirectory()) walk(childPath, childName)
+      else {
+        entries.add(childName)
+        if (entry.isFile()) {
+          files += 1
+          bytes += statSync(childPath).size
+        }
       }
     }
   }
-  walk(root)
-  return { files, bytes }
+  walk(path, name)
+  return { entries, files, bytes }
 }
 
-const sha256Of = (path: string): string => createHash("sha256").update(readFileSync(path)).digest("hex")
+/** A STREAMING sha256 — never the whole archive read into memory (@cto D7). */
+function sha256Of(path: string): string {
+  const hash = createHash("sha256")
+  const fd = openSync(path, "r")
+  try {
+    const buffer = Buffer.allocUnsafe(1 << 20)
+    for (;;) {
+      const read = readSync(fd, buffer, 0, buffer.length, null)
+      if (read <= 0) break
+      hash.update(buffer.subarray(0, read))
+    }
+  } finally {
+    closeSync(fd)
+  }
+  return hash.digest("hex")
+}
+
+/** fsync a path (file OR directory) so a rename that follows cannot outlive the bytes it leaves behind (@cto D3). */
+function fsyncPath(path: string): void {
+  const fd = openSync(path, "r")
+  try {
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
 
 /** The archive address rule: a dot sibling of the queue root, one archive per address and date. */
 export function retiredArchivePath(root: string, at: Date): string {
@@ -112,15 +164,107 @@ export function tombstoneLine(archive: string, sha256: string, at: Date): string
 const recordedHash = (path: string): string | undefined =>
   /sha256=([0-9a-f]{64})/u.exec(readFileSync(path, "utf8"))?.[1]
 
-/** Entries `tar -tf` lists for an archive, so an archive is checked against the census before it is trusted. */
-async function archiveEntryCount(process: Process, archive: string): Promise<number> {
+/**
+ * `tar -tf`'s entry names as a SET. A failure is RETURNED, not thrown-and-dropped,
+ * so the caller can carry WHICH case it was plus tar's exit and stderr into the
+ * one refusal code (@cto D6).
+ */
+type ArchiveListing =
+  | Readonly<{ ok: true; entries: Set<string> }>
+  | Readonly<{ ok: false; exitCode: number; stderr: string }>
+
+async function listArchive(process: Process, archive: string): Promise<ArchiveListing> {
   const listing = await process.run({ argv: ["tar", "-tf", archive] })
   if (listing.exitCode !== 0) {
-    throw new Error(
-      `yrd-retire-archive-unreadable: ${archive}: tar -tf exited ${String(listing.exitCode)}: ${listing.stderr.trim()}`,
+    return { ok: false, exitCode: listing.exitCode, stderr: listing.stderr.trim() }
+  }
+  return { ok: true, entries: new Set(listing.stdout.split("\n").filter((line) => line.trim() !== "")) }
+}
+
+/** A short, readable sample of a name list — never the whole listing in a message. */
+function describe(names: readonly string[], cap = 8): string {
+  const shown = names.slice(0, cap)
+  const more = names.length > shown.length ? `, +${String(names.length - shown.length)} more` : ""
+  return `[${shown.join(", ")}${more}]`
+}
+
+/**
+ * The ONE comparison every archive check uses: entry SETS, not counts (@cto D1).
+ * A name present in the tree but absent from the archive (a socket `tar` skips,
+ * an entry it omitted) and a name in the archive but not in the tree are both
+ * refused BY NAME, so the operator reads which entries disagree.
+ */
+function assertArchiveMatches(
+  expected: Set<string>,
+  actual: Set<string>,
+  root: string,
+  archive: string,
+  door: string,
+): void {
+  const missing = [...expected].filter((name) => !actual.has(name)).sort()
+  const extra = [...actual].filter((name) => !expected.has(name)).sort()
+  if (missing.length === 0 && extra.length === 0) return
+  throw refuse(
+    RETIRE_ROOT_CODES.archiveDiffers,
+    root,
+    `${door}; ${archive} lists ${describe([...actual].sort())} but the tree holds ${describe([...expected].sort())} (missing ${describe(missing)}, extra ${describe(extra)})`,
+  )
+}
+
+/**
+ * Measure the archive that WOULD be written, WITHOUT writing it (@cto D2):
+ * stream `tar -c --zstd -f -` into a byte counter and a sha256, so the dry run
+ * reports a real archive size and a real net instead of the whole tree as if it
+ * were free.
+ */
+async function measureArchive(process: Process, tree: string): Promise<Readonly<{ bytes: number; sha256: string }>> {
+  const hash = createHash("sha256")
+  let bytes = 0
+  const tar = await process.run({
+    argv: ["tar", "-C", dirname(tree), "-c", "--zstd", "-f", "-", basename(tree)],
+    onOutput: (output) => {
+      if (output.stream !== "stdout") return
+      bytes += output.chunk.byteLength
+      hash.update(output.chunk)
+    },
+  })
+  if (tar.exitCode !== 0) {
+    throw new Error(`yrd-retire-archive-failed: ${tree}: tar exited ${String(tar.exitCode)}: ${tar.stderr.trim()}`)
+  }
+  return { bytes, sha256: hash.digest("hex") }
+}
+
+/**
+ * g. Remove the moved-aside tree through `removely`, never `rm` — and only after
+ * re-verifying it against the archive (@cto D4). A write that landed after the
+ * archive is caught here, and the tree is KEPT and refused BY NAME rather than
+ * removed; the resolve state's caller re-runs the verb.
+ */
+async function removeRetiring(
+  process: Process,
+  retiring: string,
+  archive: string,
+  root: string,
+  base: string,
+): Promise<Readonly<{ files: number; bytes: number }>> {
+  const moved = census(retiring, base)
+  const listing = await listArchive(process, archive)
+  if (!listing.ok) {
+    throw refuse(
+      RETIRE_ROOT_CODES.archiveDiffers,
+      root,
+      `the archive ${archive} cannot be listed (tar -tf exited ${String(listing.exitCode)}: ${listing.stderr}), so the moved-aside tree ${retiring} cannot be proven redundant and is KEPT`,
     )
   }
-  return listing.stdout.split("\n").filter((line) => line.trim() !== "").length
+  assertArchiveMatches(
+    moved.entries,
+    listing.entries,
+    root,
+    archive,
+    `the moved-aside tree ${retiring} no longer matches the archive (a write landed after it), so it is KEPT`,
+  )
+  await safeRemove(retiring, { within: dirname(archive), allowedRoots: [dirname(archive)] })
+  return { files: moved.files, bytes: moved.bytes }
 }
 
 export async function retireRetiredRoot(
@@ -138,9 +282,10 @@ export async function retireRetiredRoot(
   const dryRun = input.dryRun === true
   const liveRoot = queueRoot(input.host, input.address)
   const root = legacyQueueRoot(input.host, input.address)
+  const base = basename(root)
   const archive = retiredArchivePath(root, at)
   const archiveDir = dirname(archive)
-  const retiring = join(archiveDir, `${basename(root)}.retiring`)
+  const retiring = join(archiveDir, `${base}.retiring`)
   const tombstoneTemp = `${root}.tombstone-tmp`
 
   // The legacy root may be the ONLY copy of the queue. Refuse before touching
@@ -154,28 +299,62 @@ export async function retireRetiredRoot(
   }
 
   const stat = lstatSync(root, { throwIfNoEntry: false })
+  const archivePresent = existsSync(archive)
+  const retiringPresent = existsSync(retiring)
 
-  // Already retired: a matching tombstone at the root is the verb's own finished state.
+  // Already retired: our tombstone is a regular file whose recorded hash matches
+  // the archive. A crash between f and g leaves `.retiring` behind with the
+  // tombstone in place, so finish that instead of calling it done (@cto D5).
   if (stat?.isFile() === true) {
     const recorded = recordedHash(root)
-    if (recorded !== undefined && existsSync(archive) && recorded === sha256Of(archive)) {
+    if (recorded === undefined || !archivePresent || recorded !== sha256Of(archive)) {
+      throw refuse(
+        RETIRE_ROOT_CODES.foreignFile,
+        root,
+        "the root is a file that is not this verb's matching tombstone, so overwriting it would destroy a record",
+      )
+    }
+    const archiveBytes = statSync(archive).size
+    if (!retiringPresent) {
       return {
         root,
         archive,
         tombstone: readFileSync(root, "utf8"),
         action: "skipped",
         files: 0,
-        archiveBytes: statSync(archive).size,
+        archiveBytes,
         bytesFreed: 0,
         sha256: recorded,
         dryRun,
       }
     }
-    throw refuse(
-      RETIRE_ROOT_CODES.foreignFile,
+    const process = input.process ?? createProcess()
+    if (dryRun) {
+      const moved = census(retiring, base)
+      return {
+        root,
+        archive,
+        tombstone: readFileSync(root, "utf8"),
+        action: "resumed",
+        files: moved.files,
+        archiveBytes,
+        bytesFreed: moved.bytes,
+        sha256: recorded,
+        dryRun: true,
+      }
+    }
+    const moved = await removeRetiring(process, retiring, archive, root, base)
+    return {
       root,
-      "the root is a file that is not this verb's matching tombstone, so overwriting it would destroy a record",
-    )
+      archive,
+      tombstone: readFileSync(root, "utf8"),
+      action: "resumed",
+      files: moved.files,
+      archiveBytes,
+      bytesFreed: moved.bytes,
+      sha256: recorded,
+      dryRun: false,
+    }
   }
   // A symlink, a FIFO or any other node is not ours to move.
   if (stat !== undefined && !stat.isDirectory()) {
@@ -186,9 +365,10 @@ export async function retireRetiredRoot(
     )
   }
 
-  // A crash after the root was moved aside but before the tombstone landed: finish that.
-  const resuming = stat === undefined && existsSync(retiring) && existsSync(archive)
-  if (stat === undefined && !resuming) {
+  // A crash after the root was moved aside but before the tombstone landed: the
+  // root is absent and `.retiring` plus the archive are the verb's own names.
+  const resuming = stat === undefined
+  if (resuming && !(retiringPresent && archivePresent)) {
     throw refuse(
       RETIRE_ROOT_CODES.absent,
       root,
@@ -196,39 +376,50 @@ export async function retireRetiredRoot(
     )
   }
 
-  const counted = stat === undefined ? { files: 0, bytes: 0 } : census(root)
+  const tree = resuming ? retiring : root
+  const counted = census(tree, base)
   const process = input.process ?? createProcess()
 
-  // An archive already here is kept only when it matches the tree we would archive;
-  // a differing one would be OVERWRITTEN, which this verb never does.
-  const archivePresent = existsSync(archive)
+  // An archive already here is kept only when it matches the tree it would
+  // replace; a different record would be OVERWRITTEN, which this verb never does.
+  // ONE code covers "cannot list" and "differs"; the message carries WHICH (@cto D6).
+  let sha256 = ""
+  let archiveBytes = 0
   if (archivePresent && !resuming) {
-    // An archive we cannot even list, or one whose listing disagrees with the tree
-    // we are about to archive, is a DIFFERENT record: writing over it destroys it.
-    const matches = await archiveEntryCount(process, archive)
-      .then((listed) => listed === counted.files)
-      .catch(() => false)
-    if (!matches) {
+    const listing = await listArchive(process, archive)
+    if (!listing.ok) {
       throw refuse(
         RETIRE_ROOT_CODES.archiveDiffers,
         root,
-        `an archive already exists at ${archive} whose listing differs from the census, so writing it would overwrite a record`,
+        `an archive already exists at ${archive} and cannot be listed (tar -tf exited ${String(listing.exitCode)}: ${listing.stderr}), so writing it would overwrite a record`,
       )
     }
+    assertArchiveMatches(
+      counted.entries,
+      listing.entries,
+      root,
+      archive,
+      `an archive already exists at ${archive} whose listing differs from the tree`,
+    )
   }
 
-  const sha256 = archivePresent ? sha256Of(archive) : ""
-  const tombstone = tombstoneLine(archive, sha256, at)
-  const archiveBytes = archivePresent ? statSync(archive).size : 0
   if (dryRun) {
+    if (archivePresent) {
+      sha256 = sha256Of(archive)
+      archiveBytes = statSync(archive).size
+    } else {
+      const measured = await measureArchive(process, tree)
+      sha256 = measured.sha256
+      archiveBytes = measured.bytes
+    }
     return {
       root,
       archive,
-      tombstone,
-      action: resuming ? "resumed" : "archived",
+      tombstone: tombstoneLine(archive, sha256, at),
+      action: archivePresent ? "resumed" : "archived",
       files: counted.files,
       archiveBytes,
-      bytesFreed: counted.bytes - archiveBytes,
+      bytesFreed: resuming ? counted.bytes : counted.bytes - archiveBytes,
       sha256,
       dryRun: true,
     }
@@ -236,52 +427,96 @@ export async function retireRetiredRoot(
 
   mkdirSync(archiveDir, { recursive: true })
 
-  if (stat !== undefined) {
-    if (!archivePresent) {
-      // a. tar with zstd into a temporary file in .retired/, then fsync (tar's own close flushes).
-      const archiveTemp = `${archive}.tmp`
-      const tar = await process.run({
-        argv: ["tar", "-C", dirname(root), "-c", "--zstd", "-f", archiveTemp, basename(root)],
-      })
-      if (tar.exitCode !== 0) {
-        throw new Error(`yrd-retire-archive-failed: ${root}: tar exited ${String(tar.exitCode)}: ${tar.stderr.trim()}`)
+  if (!archivePresent) {
+    // a. tar with zstd into a temporary file in `.retired/`.
+    const archiveTemp = `${archive}.tmp`
+    const tar = await process.run({
+      argv: ["tar", "-C", dirname(tree), "-c", "--zstd", "-f", archiveTemp, base],
+    })
+    if (tar.exitCode !== 0) {
+      throw new Error(`yrd-retire-archive-failed: ${root}: tar exited ${String(tar.exitCode)}: ${tar.stderr.trim()}`)
+    }
+    try {
+      // b. verify the listing's entry SET equals the census before the archive is trusted.
+      const listing = await listArchive(process, archiveTemp)
+      if (!listing.ok) {
+        throw new Error(
+          `yrd-retire-archive-unreadable: ${archiveTemp}: tar -tf exited ${String(listing.exitCode)}: ${listing.stderr}`,
+        )
       }
-      try {
-        // b. verify the listing against the census before the archive is trusted.
-        const listed = await archiveEntryCount(process, archiveTemp)
-        if (listed < counted.files) {
+      assertArchiveMatches(
+        counted.entries,
+        listing.entries,
+        root,
+        archiveTemp,
+        "the archive does not hold exactly the tree that was archived",
+      )
+      // c. rename the archive into place.
+      renameSync(archiveTemp, archive)
+    } catch (cause) {
+      // NEVER swallow a cause: a failed cleanup is APPENDED to the error thrown (@cto D6).
+      const cleanup = await safeRemove(archiveTemp, { within: archiveDir, allowedRoots: [archiveDir] }).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      if (cleanup !== undefined) {
+        if (cause instanceof Error) {
+          cause.message = `${cause.message} (also: the temporary archive ${archiveTemp} could not be removed: ${causeText(cleanup)})`
+        } else {
           throw new Error(
-            `yrd-retire-archive-incomplete: ${root}: the archive lists ${String(listed)} entries but the census counted ${String(counted.files)} files`,
+            `${causeText(cause)} (also: the temporary archive ${archiveTemp} could not be removed: ${causeText(cleanup)})`,
           )
         }
-        // c. rename the archive into place.
-        renameSync(archiveTemp, archive)
-      } catch (cause) {
-        await safeRemove(archiveTemp, { within: archiveDir, allowedRoots: [archiveDir] }).catch(() => undefined)
-        throw cause
       }
+      throw cause
     }
-    // d. write the tombstone beside the root, with the archive's real hash.
-    writeFileSync(tombstoneTemp, tombstoneLine(archive, sha256Of(archive), at))
+    // D3: fsync the archive and its directory BEFORE the path is freed — tar's
+    // close does not fsync, and step g removes the only other copy.
+    fsyncPath(archive)
+    fsyncPath(archiveDir)
   }
 
-  // e. move the root aside, f. place the tombstone on the exact old path.
-  if (existsSync(root) && stat !== undefined) renameSync(root, retiring)
-  if (!existsSync(tombstoneTemp)) writeFileSync(tombstoneTemp, tombstoneLine(archive, sha256Of(archive), at))
-  renameSync(tombstoneTemp, root)
-  // g. remove the moved-aside tree through removely, never `rm`.
-  if (existsSync(retiring)) await safeRemove(retiring, { within: archiveDir, allowedRoots: [archiveDir] })
+  // The archive is now in place: newly written above, or a matching record a
+  // prior run (or the after-c crash state) left behind. Read its real hash/size.
+  sha256 = sha256Of(archive)
+  archiveBytes = statSync(archive).size
 
-  const finalBytes = statSync(archive).size
+  if (resuming) {
+    // The root is already aside; place the tombstone on the exact old path, then
+    // re-verify the moved-aside tree and remove it.
+    writeFileSync(tombstoneTemp, tombstoneLine(archive, sha256, at))
+    renameSync(tombstoneTemp, root)
+    const moved = await removeRetiring(process, retiring, archive, root, base)
+    return {
+      root,
+      archive,
+      tombstone: readFileSync(root, "utf8"),
+      action: "resumed",
+      files: moved.files,
+      archiveBytes,
+      bytesFreed: moved.bytes,
+      sha256,
+      dryRun: false,
+    }
+  }
+
+  // d. write the tombstone beside the root, with the archive's real hash.
+  writeFileSync(tombstoneTemp, tombstoneLine(archive, sha256, at))
+  // e. move the root aside (same filesystem, atomic), f. place the tombstone on the exact old path.
+  renameSync(root, retiring)
+  renameSync(tombstoneTemp, root)
+  // g. remove the moved-aside tree through removely, never `rm`, and only after re-verifying it (@cto D4).
+  await removeRetiring(process, retiring, archive, root, base)
+
   return {
     root,
     archive,
     tombstone: readFileSync(root, "utf8"),
-    action: resuming ? "resumed" : "archived",
+    action: archivePresent ? "resumed" : "archived",
     files: counted.files,
-    archiveBytes: finalBytes,
-    bytesFreed: counted.bytes - finalBytes,
-    sha256: sha256Of(archive),
+    archiveBytes,
+    bytesFreed: counted.bytes - archiveBytes,
+    sha256,
     dryRun: false,
   }
 }
