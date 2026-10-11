@@ -842,7 +842,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const journals = ["task/selected", "task/unrelated"].map((branch, index) => {
       const journal = openLog(logs, () => new Date(at.getTime() + index + 1))
       journal.write({ kind: "run", base: head })
-      journal.write({ kind: "change", branch, head, decision: "cancelled" })
+      journal.write({ kind: "change", branch, head, decision: "failed" })
       return { branch, journal }
     })
     for (const { branch, journal } of journals) {
@@ -851,7 +851,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       ).append(
         [
           changeInput("opened", { queueTip, at, commit: head, by: "yrd" }),
-          changeInput("cancelled", { queueTip, at, reason: "cancelled", run: journal.id }),
+          changeInput("cancelled", { queueTip, at, commit: head, reason: "dropped", run: journal.id }),
         ],
         { expect: null },
       )
@@ -871,17 +871,19 @@ describe("a queue is the selected origin branch carrying config", () => {
         shown.stderr(),
       ).toBe(0)
       // Observe I/O, so filtering the broad result after reading everything cannot pass.
-      expect(read.mock.calls.map(([path]) => String(path)).filter((path) => paths.has(path)), shown.stdout()).toEqual([
-        selected.journal.path,
-      ])
+      expect(
+        read.mock.calls.map(([path]) => String(path)).filter((path) => paths.has(path)),
+        shown.stdout(),
+      ).toEqual([selected.journal.path])
     } finally {
       read.mockRestore()
     }
     const scoped = JSON.parse(shown.stdout()) as {
-      changes: { branch: string }[]
+      changes: { branch: string; state: string }[]
       journal: { fallbacks: { run: string }[] }
     }
     expect(scoped.changes.map(({ branch }) => branch)).toEqual([selected.branch])
+    expect(scoped.changes[0]?.state).toBe("cancelled")
     expect(scoped.journal.fallbacks.map(({ run }) => run)).toEqual([selected.journal.id])
     const bulk = capture(repo)
     expect(
