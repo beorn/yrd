@@ -7,6 +7,7 @@
  * @level l2
  * @consumer the event queue's compose step (event-run.ts) through verifyCandidate
  * @testonly none
+ * @reach fs-walk <fixture-only: every git listing reads a mkdtemp fixture repository, never the real tree>
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
