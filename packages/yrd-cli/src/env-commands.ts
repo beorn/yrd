@@ -653,6 +653,11 @@ async function requireClean(git: Git, path: string): Promise<void> {
 }
 
 /** Retained environments preserve user work; GitSuper owns populated-submodule removal. */
+/** Quote one path for a POSIX shell command shown to a human. Mirrors git-super's `shellQuote` (#27120 AC1). */
+function quotePath(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
 export async function closeEnvironment(
   operand: string,
   options: EnvCloseOptions,
@@ -707,7 +712,13 @@ export async function closeEnvironment(
   }
   const treeGit = gitIn(path, process, selection)
   const commit = (await treeGit(["rev-parse", "HEAD"])).trim()
-  for (const privatePath of await declaredPrivateSubmodules(treeGit, path, commit)) {
+  // #27120 AC1/AC3: the declared private submodules are passed to `git super worktree remove` as
+  // EXCLUDED, reusing 27058's selector rather than a second list. That declaration is what keeps R2
+  // binding. Without it git-super takes no exclusion path, so an environment whose submodule was
+  // deinit'd would be removed WITH its private store still inside the admin dir — the tool
+  // destroying bytes it never proved, which is the act c8a3b06d forbids.
+  const privateSubmodules = await declaredPrivateSubmodules(treeGit, path, commit)
+  for (const privatePath of privateSubmodules) {
     const gitfile = join(path, privatePath, ".git")
     try {
       lstatSync(gitfile)
@@ -718,9 +729,26 @@ export async function closeEnvironment(
         cause,
       })
     }
+    // #27120 AC1 — Route A is ruled, so this is no longer a pending decision. It stays a REFUSAL
+    // (loud stderr, exit 2) and it now NAMES THE ROUTE; in --json it also carries one structured
+    // class, so a sweep can report the tree by class instead of quoting a per-seat note. Every step
+    // that touches the store is the operator's: this tool never reads, copies, hashes or renames it.
+    const checkout = join(path, privatePath)
+    const store = (
+      await treeGit(["rev-parse", "--path-format=absolute", "--git-path", `modules/${privatePath}`])
+    ).trim()
+    const retire = {
+      class: "private checkout",
+      submodule: privatePath,
+      checkout,
+      store,
+      command: `git super worktree private-store verify ${quotePath(store)} --checkout ${quotePath(checkout)}`,
+    }
+    if (options.json === true) io.stdout(`${JSON.stringify({ kept: path, ...retire })}\n`)
     throw new Error(
-      `environment ${path} cannot close with initialized private submodule ${privatePath}: ` +
-        "custody unproven until 27058's merge exclusion; operator decision pending. Keep this environment until that decision.",
+      `environment ${path} cannot close with initialized private submodule ${privatePath}: private checkout, ` +
+        `custody not proven. Retire it by operator steps: look at and empty ${checkout}; run ${retire.command}; ` +
+        `then remove ${store} once the verifier reports candidate. This tool reads, copies, hashes and renames nothing in the store.`,
     )
   }
   await requireClean(treeGit, path)
@@ -790,6 +818,7 @@ export async function closeEnvironment(
           path,
           "--retain",
           retain,
+          ...privateSubmodules.flatMap((privatePath) => ["--exclude-submodule", privatePath]),
           ...(options.noRehome === true ? ["--no-rehome"] : []),
         ]),
       )
