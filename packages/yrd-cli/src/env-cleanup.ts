@@ -31,6 +31,7 @@ import {
   type StoredCloseRequest,
 } from "./env-close-requests.ts"
 import { environmentIssues, environmentProvenance } from "./env-cleanup-provenance.ts"
+import { mergedCloseKeepReason, readEnvOpenRecord, throwIfStandingLifetime } from "./env-open-record.ts"
 import { repositoryHere } from "./declaration.ts"
 import { issueLookup, type ResolvedIssue } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
@@ -346,6 +347,14 @@ async function fileMergedCloseRequests(
       continue
     }
     try {
+      const gitDir = (
+        await gitIn(row.path, undefined, input.selection, { env: input.env })(["rev-parse", "--absolute-git-dir"])
+      ).trim()
+      const keep = mergedCloseKeepReason(readEnvOpenRecord(gitDir))
+      if (keep !== undefined) {
+        input.record(row.path, "kept", keep)
+        continue
+      }
       // env open ties task/<name> to this path. A later checkout must not
       // turn a personal bay into the merged change's disposable environment.
       const openedForBranch = input.branchRoots.some(
@@ -408,6 +417,46 @@ function identity(file: Readonly<{ path: string; optional: boolean }>): string {
 }
 
 /** One completed round applies the same predicate to current and backlog environments. */
+async function proveEnvironmentRemovable(input: {
+  path: string
+  head: string
+  repo: string
+  env: NodeJS.ProcessEnv | undefined
+  target: string
+  originBranch: string
+  treeGit: ReturnType<typeof gitIn>
+  entry: CachedEnvironment
+  ancestor: (root: string, head: string, target: string) => Promise<void>
+}): Promise<void> {
+  await input.ancestor(input.path, input.head, input.target)
+  const inspection = await createLocalGitWorktreeStore({ repo: input.repo, env: input.env }).inspectRemoval(input.path)
+  for (const component of inspection.consultedRepositories) {
+    if (component.path === ".") continue
+    for (const resource of ["index", `refs/remotes/origin/${input.originBranch}`, "packed-refs"]) {
+      const path = (await input.treeGit.at(component.root)(["rev-parse", "--git-path", resource])).trim()
+      if (path === "") throw new Error(`component ${component.root}: Git returned no ${resource} path`)
+      const absolute = resolve(component.root, path)
+      if (!input.entry.paths.some((file) => file.path === absolute)) {
+        input.entry.paths.push({ path: absolute, optional: resource !== "index" })
+      }
+    }
+  }
+  for (const component of inspection.uninitializedSubmodules) {
+    const path = join(input.path, component, ".git")
+    if (!input.entry.paths.some((file) => file.path === path)) input.entry.paths.push({ path, optional: true })
+  }
+  if (inspection.records.length > 0) throw new Error(`dirty root/components: ${inspection.records.join("; ")}`)
+  if (inspection.notCompared.length > 0) {
+    throw new Error(`repository coverage unproven: ${JSON.stringify(inspection.notCompared)}`)
+  }
+  if (inspection.borrowers.length > 0) throw new Error(`borrowed by ${inspection.borrowers.join(", ")}`)
+  for (const component of inspection.consultedRepositories) {
+    if (component.path === ".") continue
+    if (component.to === undefined) throw new Error(`materialized component ${component.root} has no HEAD`)
+    await input.ancestor(component.root, component.to, `refs/remotes/origin/${input.originBranch}`)
+  }
+}
+
 async function cleanupEnvironments(
   input: Readonly<{
     repo: string
@@ -638,6 +687,9 @@ async function cleanupEnvironments(
       entry.hold = row.hold
       entry.busy = holder
       if (row.hold !== null) throw new Error(`held${row.hold === "" ? "" : `: ${row.hold}`}`)
+      const openingGit = gitIn(row.path, undefined, git.selection, { env: input.env })
+      const openingDir = (await openingGit(["rev-parse", "--absolute-git-dir"])).trim()
+      throwIfStandingLifetime(readEnvOpenRecord(openingDir))
       if (charged >= ENVIRONMENT_BATCH) {
         stoppedAt = index
         break
@@ -706,33 +758,17 @@ async function cleanupEnvironments(
         if (entry.verdict !== undefined) throw new Error(entry.verdict)
       } else {
         try {
-          await ancestor(row.path, head, outcome.target)
-          const inspection = await createLocalGitWorktreeStore({ repo, env: input.env }).inspectRemoval(row.path)
-          for (const component of inspection.consultedRepositories) {
-            if (component.path === ".") continue
-            for (const resource of ["index", `refs/remotes/origin/${config.target.branch}`, "packed-refs"]) {
-              const path = (await treeGit.at(component.root)(["rev-parse", "--git-path", resource])).trim()
-              if (path === "") throw new Error(`component ${component.root}: Git returned no ${resource} path`)
-              const absolute = resolve(component.root, path)
-              if (!entry.paths.some((file) => file.path === absolute)) {
-                entry.paths.push({ path: absolute, optional: resource !== "index" })
-              }
-            }
-          }
-          for (const component of inspection.uninitializedSubmodules) {
-            const path = join(row.path, component, ".git")
-            if (!entry.paths.some((file) => file.path === path)) entry.paths.push({ path, optional: true })
-          }
-          if (inspection.records.length > 0) throw new Error(`dirty root/components: ${inspection.records.join("; ")}`)
-          if (inspection.notCompared.length > 0) {
-            throw new Error(`repository coverage unproven: ${JSON.stringify(inspection.notCompared)}`)
-          }
-          if (inspection.borrowers.length > 0) throw new Error(`borrowed by ${inspection.borrowers.join(", ")}`)
-          for (const component of inspection.consultedRepositories) {
-            if (component.path === ".") continue
-            if (component.to === undefined) throw new Error(`materialized component ${component.root} has no HEAD`)
-            await ancestor(component.root, component.to, `refs/remotes/origin/${config.target.branch}`)
-          }
+          await proveEnvironmentRemovable({
+            path: row.path,
+            head,
+            repo,
+            env: input.env,
+            target: outcome.target,
+            originBranch: config.target.branch,
+            treeGit,
+            entry,
+            ancestor,
+          })
           entry.verdict = undefined
           entry.expensiveKey = expensiveKey()
         } catch (cause) {

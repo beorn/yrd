@@ -310,6 +310,44 @@ describe("yrd env open prepares the retained environment", () => {
     expect(json.stderr()).toContain("task/probe carries no bead id")
   })
 
+  /**
+   * @failure 21122: Slice 3 MERGED-closed every `--bay` because opened-for-branch
+   *          is true by construction; standing homes had no recorded lifetime.
+   * @level l2 (a real env open over a git fixture, in process)
+   * @consumer seats opening a job or standing environment with `yrd env open`
+   * @testonly none
+   */
+  it("records lifetime job by default and standing with --keep (21122)", async () => {
+    const jobWorld = await world("true")
+    const job = capture(jobWorld.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "job-life", "--json"], job.io),
+      job.stderr(),
+    ).toBe(0)
+    const jobOpened = JSON.parse(job.stdout()) as { path: string; branch: string; name: string }
+    expect(jobOpened).toMatchObject({ branch: "task/job-life", name: "job-life" })
+    const jobGitDir = (await gitIn(jobOpened.path)(["rev-parse", "--absolute-git-dir"])).trim()
+    expect(JSON.parse(readFileSync(join(jobGitDir, "yrd-open.json"), "utf8"))).toMatchObject({
+      version: 1,
+      lifetime: "job",
+      bay: "job-life",
+    })
+
+    const keepWorld = await world("true")
+    const keep = capture(keepWorld.work)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "keep-life", "--keep", "--json"], keep.io),
+      keep.stderr(),
+    ).toBe(0)
+    const keepOpened = JSON.parse(keep.stdout()) as { path: string }
+    const keepGitDir = (await gitIn(keepOpened.path)(["rev-parse", "--absolute-git-dir"])).trim()
+    expect(JSON.parse(readFileSync(join(keepGitDir, "yrd-open.json"), "utf8"))).toMatchObject({
+      version: 1,
+      lifetime: "standing",
+      bay: "keep-life",
+    })
+  })
+
   // A bead nested under another opens task/<parent>/<leaf> beside task/<parent>, and git stores a branch as a path,
   // so the raw refusal named neither cause nor way out (@dev/fixer, 25850 beside 25843, 2026-09-25).
   it("refuses a branch beneath an existing branch and names --bay", async () => {

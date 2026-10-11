@@ -30,6 +30,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs"
 import { hostname, tmpdir } from "node:os"
@@ -1219,6 +1220,116 @@ describe("yrd queue up, the service", () => {
         expect(listCloseRequests(workdir), run.stderr()).toEqual([])
         const filed = allCleanupRows(workdir).filter((row) => row.result === "filed" && row.path === environment.path)
         expect(filed, JSON.stringify(allCleanupRows(workdir))).toHaveLength(closes ? 1 : 0)
+        const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && typeof row.request === "object")
+        if (closes) {
+          expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
+          expect(closed?.path).toBe(environment.path)
+        } else {
+          expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeUndefined()
+        }
+      } finally {
+        stop.abort()
+        census.mockRestore()
+      }
+    },
+    120_000,
+  )
+
+  /**
+   * @failure 21122: MERGED-close treated `--bay` as standing (Option 1) or
+   *          closed unrecorded seat homes; lifetime must be recorded at open.
+   * @level l2
+   * @consumer the seat whose job env should delete itself and whose standing
+   *           home must survive the same merge
+   * @testonly none
+   */
+  it.each([
+    {
+      label: "--keep standing survives merge",
+      leaf: "21122-keep",
+      open: ["--bay", "21122-keep", "--keep"],
+      unlinkRecord: false,
+      closes: false,
+      why: "opening lifetime standing",
+    },
+    {
+      label: "--bay --issue without --keep closes",
+      leaf: "21122-issue-job",
+      open: ["--bay", "21122-issue-job", "--issue", "21122-issue-job"],
+      unlinkRecord: false,
+      closes: true,
+      why: undefined,
+    },
+    {
+      label: "unrecorded keeps",
+      leaf: "21122-unrecorded",
+      open: ["--bay", "21122-unrecorded"],
+      unlinkRecord: true,
+      closes: false,
+      why: "opening lifetime unrecorded",
+    },
+    {
+      label: "--issue still files",
+      leaf: "21122-issue-only",
+      open: ["--issue", "21122-issue-only"],
+      unlinkRecord: false,
+      closes: true,
+      why: undefined,
+    },
+  ])(
+    "opening lifetime $label",
+    async ({ leaf, open, unlinkRecord, closes, why }) => {
+      const w = await world()
+      await w.git(["config", "yrd.workdir", w.workdir])
+      const resolver = join(dirname(w.work), "issue-resolver.sh")
+      writeFileSync(resolver, '#!/usr/bin/env bash\nprintf \'{"id":"%s","status":"open"}\' "$1"\n')
+      await redeclare(w, `setup: ':'\nissueResolver: ['bash', '${resolver}']\n`)
+      await w.git(["fetch", "--quiet", "origin", "main"])
+      await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+      const workdir = await workdirOf(w.git, { cwd: w.work })
+      const branch = `task/${leaf}`
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, `${leaf}.txt`), "merged work\n")
+      await w.git(["add", `${leaf}.txt`])
+      await w.git(["commit", "--quiet", "-m", "bound change whose env must close on merge"])
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", {
+        branch,
+        submitter: "@dev/13",
+        target: { branch: "main", remote: "origin" },
+      })
+      const opened = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "open", ...open, "--json"], opened.io), opened.stderr()).toBe(0)
+      const openedEnvironment = JSON.parse(opened.stdout()) as { path: string }
+      const environment = { path: realpathSync(openedEnvironment.path) }
+      if (unlinkRecord) {
+        const gitDir = (await gitIn(environment.path)(["rev-parse", "--absolute-git-dir"])).trim()
+        unlinkSync(join(gitDir, "yrd-open.json"))
+      }
+      await gitIn(environment.path)(["checkout", "--quiet", branch])
+      expect(existsSync(environment.path)).toBe(true)
+      const census = vi
+        .spyOn(removely, "inspectProcessCwds")
+        .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+      const stop = new AbortController()
+      const run = capture(w.work)
+      try {
+        expect(
+          await coreQueueCommand(
+            w.work,
+            run.io,
+            { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+            { json: true, workdir },
+          ),
+          run.stderr(),
+        ).toBe(0)
+        expect(existsSync(environment.path), run.stderr()).toBe(!closes)
+        expect(listCloseRequests(workdir), run.stderr()).toEqual([])
+        const filed = allCleanupRows(workdir).filter((row) => row.result === "filed" && row.path === environment.path)
+        expect(filed, JSON.stringify(allCleanupRows(workdir))).toHaveLength(closes ? 1 : 0)
+        if (!closes) {
+          expect(run.stderr()).toContain(why)
+        }
         const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && typeof row.request === "object")
         if (closes) {
           expect(closed, JSON.stringify(allCleanupRows(workdir))).toBeDefined()
