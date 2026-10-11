@@ -8,9 +8,10 @@
  * @consumer the yrd service tick, before it pages `retired-root-written`
  * @testonly none: the sweep helpers are production API; this test only exercises them
  */
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { legacyQueueRoot, type QueueAddress } from "../src/address.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootSweep } from "../src/retired-root.ts"
@@ -77,5 +78,61 @@ describe("the retired-root sweep over the address-owned root", () => {
     expect(sweep.newest?.path).toBe(lock)
     expect(sweep.branches).toEqual([])
     expect(sweep.live).toBe(true)
+  })
+})
+
+/**
+ * 28601 (@cto ruling eff85d6d0ff8, Piece 1): what the sweep reads at the ROOT is decided by
+ * `lstatSync(root).isFile()` BEFORE the walk, never by the walk's own `ENOTDIR`. Only a REGULAR
+ * file is the retirement tombstone — a symlink to a file, a FIFO and every other non-file,
+ * non-directory node stay LOUD, and a deeper unreadable subtree is unchanged.
+ */
+describe("the retired-root sweep reads an intentional retirement tombstone (28601)", () => {
+  it("is quiet when the root is a regular-file tombstone: nothing to read, nothing unreadable", () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-retired-root-"))
+    const root = legacyQueueRoot(workdir, address)
+    mkdirSync(dirname(root), { recursive: true })
+    writeFileSync(root, "retired 2026-10-10 (28601): archive=/x sha256=deadbeef\n")
+    const sweep = retiredRootSweep(root)
+    expect(sweep.files).toBe(0)
+    expect(sweep.newest).toBeUndefined()
+    expect(sweep.live).toBe(false)
+    expect(sweep.unreadable).toEqual([])
+  })
+
+  it("stays loud when the root is a SYMLINK to a file (not the retirement mark)", () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-retired-root-"))
+    const target = join(workdir, "elsewhere")
+    writeFileSync(target, "not a tombstone\n")
+    const root = legacyQueueRoot(workdir, address)
+    mkdirSync(dirname(root), { recursive: true })
+    symlinkSync(target, root)
+    const sweep = retiredRootSweep(root)
+    expect(sweep.unreadable).toEqual([root])
+    expect(sweep.live).toBe(false)
+  })
+
+  it("stays loud when the root is a FIFO", () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-retired-root-"))
+    const root = legacyQueueRoot(workdir, address)
+    mkdirSync(dirname(root), { recursive: true })
+    const made = spawnSync("mkfifo", [root], { stdio: "ignore" })
+    if (made.status !== 0) return // mkfifo unavailable in this environment: the row is proven by the symlink row above
+    const sweep = retiredRootSweep(root)
+    expect(sweep.unreadable).toEqual([root])
+  })
+
+  it("stays loud on a DEEPER unreadable subtree, even when the root itself is readable", () => {
+    const { root } = legacyRootIn()
+    const blocked = join(root, "logs", "environments", "kept")
+    mkdirSync(blocked, { recursive: true })
+    writeFileSync(join(blocked, "setup.log"), "x\n")
+    chmodSync(blocked, 0o000)
+    try {
+      const sweep = retiredRootSweep(root)
+      expect(sweep.unreadable).toEqual([blocked])
+    } finally {
+      chmodSync(blocked, 0o755)
+    }
   })
 })

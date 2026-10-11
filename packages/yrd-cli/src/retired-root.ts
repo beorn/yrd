@@ -14,7 +14,7 @@
  * written since the cutover and turns it into an incident instead of a find
  * during a verification. It NEVER drains the root — the sweep reads and pages.
  */
-import { readdirSync, statSync, type Dirent } from "node:fs"
+import { lstatSync, readdirSync, statSync, type Dirent } from "node:fs"
 import { basename, dirname, join } from "node:path"
 
 /**
@@ -67,6 +67,15 @@ export type RetiredRootSweep = Readonly<{
  * whose newest write has aged past the window can still be reported as cleared.
  */
 export function retiredRootSweep(root: string, sinceMs: number = Date.parse(RETIRED_ROOT_CUTOVER)): RetiredRootSweep {
+  // A REGULAR FILE at the root path is an intentional retirement TOMBSTONE (28601): nothing
+  // can be created under a non-directory, so a pre-cutover client's `mkdir` fails by name at
+  // the old path, and there is nothing to read — the sweep is quiet without parsing any
+  // content. lstat, never stat: a SYMLINK to a file is not the retirement mark, so it stays
+  // loud below, as do a FIFO and every other non-file, non-directory node. Only a regular
+  // file is a tombstone; the caller's `withheld` path is unchanged for everything else.
+  if (lstatSync(root, { throwIfNoEntry: false })?.isFile() === true) {
+    return { root, files: 0, branches: [], live: false, unreadable: [] }
+  }
   let files = 0
   let newestPath: string | undefined
   let newestMs = Number.NEGATIVE_INFINITY
