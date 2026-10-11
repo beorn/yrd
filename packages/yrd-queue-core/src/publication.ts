@@ -138,10 +138,15 @@ async function verifyExpectedChildRefs(
   )
   const parents = (await options.git(["show", "-s", "--format=%P", options.candidate])).trim().split(/\s+/u)
   const firstParent = parents[0]
+  // Only a gitlink the candidate STILL declares is a publication. A path the candidate takes out
+  // (`newMode` 000000) pushes nothing, so it can never have a frozen push intent row, and demanding
+  // one refuses every removal (28734). Same filter pin-carrier.ts applies to its own rows.
   const changed =
     firstParent === undefined || firstParent === ""
       ? []
-      : (await gitlinkRows(options.git, firstParent, options.candidate)).map((row) => row.path)
+      : (await gitlinkRows(options.git, firstParent, options.candidate))
+          .filter((row) => row.newMode === "160000")
+          .map((row) => row.path)
   const children = intent?.children ?? []
   const known = new Set(children.map((child) => child.path))
   const unexplained = changed.filter((path) => !known.has(path))

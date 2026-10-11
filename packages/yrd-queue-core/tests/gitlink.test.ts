@@ -190,6 +190,19 @@ async function submitGitlink(w: World, branch: string, sha: string): Promise<str
   return head
 }
 
+/** A change that takes the submodule's gitlink OUT of the tree, submitted. */
+async function removeGitlink(w: World, branch: string): Promise<string> {
+  await w.git(["checkout", "--quiet", "-b", branch, "main"])
+  await w.git(["rm", "--quiet", "-r", "--cached", "submodule"])
+  await w.git(["config", "-f", ".gitmodules", "--remove-section", "submodule.submodule"])
+  await w.git(["add", ".gitmodules"])
+  await w.git(["commit", "--quiet", "-m", `${branch}: remove the submodule gitlink`])
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
+  return head
+}
+
 /** A change that touches a file and no gitlink, submitted. */
 async function submitFile(w: World, branch: string): Promise<string> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
@@ -292,6 +305,25 @@ it("refuses a forged git-super success with an empty repository list (27098)", a
     if (priorSha === undefined) delete process.env.YRD_GIT_SUPER_SHA
     else process.env.YRD_GIT_SUPER_SHA = priorSha
   }
+}, 120_000)
+
+/** @failure The independent publication proof demands a frozen push intent row for every gitlink the
+ * candidate changed, so a change that REMOVES a submodule can never satisfy it: nothing is pushed
+ * for a gitlink the candidate takes out, and the queue reports a false "no frozen push intent row".
+ * @level l3 @consumer queue operator and every component author
+ * A removal is not a move. The proof must require intent only for a gitlink the candidate still
+ * declares, exactly as pin-carrier.ts already filters its own rows.
+ */
+it("merges a change that removes a submodule gitlink, which publishes nothing (28734)", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const head = await removeGitlink(w, "task/remove-submodule")
+
+  const outcome = await queueRun({ ...(await w.options()), checks: [], notify: [] })
+
+  expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/remove-submodule"] })
+  const state = await readStatus(eventStore(w), "main", "task/remove-submodule")
+  expect(state).toMatchObject({ status: "merged", commit: head })
 }, 120_000)
 
 /** @failure A queue round omits bounded reuse and refreshes every component despite a warm Equal observation (26263).

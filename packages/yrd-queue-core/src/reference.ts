@@ -496,24 +496,25 @@ async function localSourceMiss(gitIn: (cwd: string) => Git, source: string, sha:
  * reading that failure as "no submodules" would also read an unreadable tree
  * that way. `ls-tree` of the one path answers only the question asked — empty
  * output means absent, and a bad commit makes it fail.
+ *
+ * `--list`, never `--get-regexp`: a manifest that declares no submodule at all
+ * is a real answer too — an empty file, or the one a landing leaves when it
+ * removes the last declared submodule — and `--get-regexp`'s "no match" exit 1
+ * would read that answer as an unreadable tree (28734).
  */
 export async function declaredSubmodules(git: Git, commit: string): Promise<ReadonlyMap<string, string>> {
   const byPath = new Map<string, string>()
   if ((await git(["ls-tree", commit, "--", ".gitmodules"])).trim() === "") return byPath
-  const declared = await git([
-    "config",
-    "--blob",
-    `${commit}:.gitmodules`,
-    "--get-regexp",
-    "^submodule\\..*\\.(path|url)$",
-  ])
+  const declared = await git(["config", "--null", "--blob", `${commit}:.gitmodules`, "--list"])
   const paths = new Map<string, string>()
   const urls = new Map<string, string>()
-  for (const row of declared.split("\n")) {
-    const match = /^submodule\.(.+)\.(path|url)\s+(.+)$/u.exec(row)
+  for (const record of declared.split("\0")) {
+    const separator = record.indexOf("\n")
+    if (separator < 0) continue
+    const match = /^submodule\.(.+)\.(path|url)$/u.exec(record.slice(0, separator))
     const name = match?.[1]
     const key = match?.[2]
-    const value = match?.[3]
+    const value = record.slice(separator + 1)
     if (name === undefined || key === undefined || value === undefined) continue
     ;(key === "path" ? paths : urls).set(name, value)
   }
