@@ -6,12 +6,14 @@
  * @consumer the queue's per-run tree removal and the warm pool's forget()
  * @testonly none
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
+import { PrivateStoreRefusalError } from "git-super/worktree"
 import {
   discardWorktree,
+  isPrivateStoreRefusal,
   prepareWorktree,
   refusePrivateStoreRemoval,
   removeWorktreeRunScaffold,
@@ -115,6 +117,33 @@ describe("a plain removal asks the declaration before it deletes a checkout (286
     await expect(refusePrivateStoreRemoval(testGitIn(repo, undefined, undefined, { env }), linked, repo)).resolves.toBe(
       undefined,
     )
+  })
+
+  it("refuses BY CLASS when a store-bearing admin dir records no readable HEAD (N1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-plain-removal-no-head-"))
+    roots.push(root)
+    const { repo, linked, store } = await fixture(root, "head")
+    // The checkout's `.git` file names its own admin dir; point that admin dir's HEAD at a ref that does not
+    // resolve, so `rev-parse --verify HEAD` FAILS while `modules/` and the store it holds both remain.
+    const admin = readFileSync(join(linked, ".git"), "utf8")
+      .trim()
+      .replace(/^gitdir:\s*/u, "")
+    writeFileSync(join(admin, "HEAD"), "ref: refs/heads/this-branch-does-not-exist\n")
+
+    const error = await refusePrivateStoreRemoval(testGitIn(repo, undefined, undefined, { env }), linked, repo).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+
+    // The CLASS is what lets `discardWorktree` skip the tree and let the round continue: an unreadable HEAD under
+    // a store-bearing admin dir must not become a plain fault that wedges the round (the C4 defect).
+    expect(error).toBeInstanceOf(PrivateStoreRefusalError)
+    expect(isPrivateStoreRefusal(error)).toBe(true)
+    expect(String(error)).toContain(admin)
+    // Pin the CATCH, not the empty-HEAD fallback: an unresolvable HEAD exits non-zero, so the git call throws.
+    expect(String(error)).toContain("cannot be read")
+    expect(existsSync(store)).toBe(true)
+    expect(existsSync(linked)).toBe(true)
   })
 })
 

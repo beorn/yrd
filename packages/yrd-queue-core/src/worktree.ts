@@ -621,7 +621,26 @@ export async function refusePrivateStoreRemoval(git: Git, checkout: string, repo
   // which must stay REMOVABLE: a guard that turned a broken repository into an unremovable one would be the
   // accumulation defect (27120) rebuilt inside its own fix.
   if (adminDir === undefined || !existsSync(join(adminDir, "modules"))) return
-  const head = (await git(["--git-dir", adminDir, "rev-parse", "--verify", "HEAD"])).trim()
+  // 28661 N1 (@cto): a store-bearing admin dir whose recorded HEAD cannot be read is a REFUSAL, not a plain fault
+  // — the class the caller already knows how to skip, and the same answer git-super's prune guard gives. A plain
+  // GitExit here would escape `discardWorktree` and wedge the round, which is exactly the C4 failure this class
+  // exists to prevent; so the class is decided HERE rather than left to the caller's cause walk.
+  let head: string
+  try {
+    head = (await git(["--git-dir", adminDir, "rev-parse", "--verify", "HEAD"])).trim()
+  } catch (cause) {
+    throw new PrivateStoreRefusalError(
+      `cannot remove ${checkout}: its admin dir ${adminDir} holds a submodule store and its recorded HEAD ` +
+        `cannot be read (${messageOf(cause)}); the checkout is kept; inspect that admin dir and its store before ` +
+        `retrying removal`,
+    )
+  }
+  if (head === "") {
+    throw new PrivateStoreRefusalError(
+      `cannot remove ${checkout}: its admin dir ${adminDir} holds a submodule store and records no HEAD; the ` +
+        `checkout is kept; inspect that admin dir and its store before retrying removal`,
+    )
+  }
   await assertNoPrivateStore(seamProcess(git, resolve(repo)), {
     adminDir,
     repository: resolve(repo),

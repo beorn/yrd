@@ -170,7 +170,9 @@ export class WorktreePool {
 
   /**
    * A name this pool owns that no abandoned tree occupies and nothing is on disk at — the only shape safe to
-   * MATERIALIZE at. Never returns an existing path.
+   * MATERIALIZE at. Never returns an existing path; when every candidate is taken it refuses LOUDLY rather than
+   * minting a name its own doc disclaims (28661 N2, @cto). A silent `${base}-spare-101` would materialize over a
+   * tree this pool never proved free — the accumulation defect wearing a fresh name.
    */
   private freshSpare(base: string): string {
     for (let index = 1; index <= SPARE_SCAN; index++) {
@@ -178,7 +180,12 @@ export class WorktreePool {
       if (abandonedPooledTrees.has(candidate)) continue
       if (!existsSync(candidate)) return candidate
     }
-    return `${base}-spare-${SPARE_SCAN + 1}`
+    const abandoned = [...abandonedPooledTrees].filter((path) => path.startsWith(`${base}-spare-`)).sort()
+    throw new Error(
+      `pool has no free spare for ${base}: all ${SPARE_SCAN} spare names are present on disk; abandoned trees ` +
+        `${abandoned.length === 0 ? "(none for this base)" : `(${abandoned.join(", ")})`}; remove one of those ` +
+        `trees before borrowing again`,
+    )
   }
 
   /**
