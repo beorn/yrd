@@ -174,6 +174,7 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     const localPublish = memBackend.publish.bind(memBackend)
     const proxyBackend = {
       ...memBackend,
+      readHistory: vi.fn(memBackend.readHistory.bind(memBackend)),
       listRefs: vi.fn(async (name: string, prefix: string) => {
         listRefsCalls.push(prefix)
         return localRefs(name, prefix)
@@ -285,6 +286,50 @@ describe("Bead 25619: yrd watch call cuts and focus-aware cadence", () => {
     expect(fence.prefixes).not.toContain("refs/yrd/main/")
     expect(fence.prefixes).not.toContain(runnerRef("main"))
     expect(fence.refs.map((row: { ref: string }) => row.ref)).not.toContain(runnerRef("main"))
+
+    // 28615: selected hot/cold bodies and caches remain separate from the global reading.
+    const hotTip = (await localRefs("/repo", changesRef("main", "task/one"))).get(changesRef("main", "task/one"))!
+    const coldRef = `${archivedChangesPrefix("main")}task/cold`
+    const coldTip = (await localRefs("/repo", coldRef)).get(coldRef)!
+    proxyBackend.readHistory.mockClear()
+    const hot = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, {
+      now: 22_000,
+      branch: "task/one",
+    })
+    expect([...hot.changes.keys()]).toEqual(["task/one"])
+    const hotBodies = proxyBackend.readHistory.mock.calls.flatMap(([, tips]: any) => tips)
+    expect(hotBodies).toContain(hotTip)
+    expect(hotBodies).not.toContain(coldTip)
+    expect(hot.journals.absent).toContain("journal detail unavailable")
+    expect(hot.journals.absent).toContain("has no Run trailer")
+    const scopedFence = mockGit.observe.mock.calls.at(-1)?.[0]?.fence
+    expect(scopedFence.prefixes).toContain(changesRef("main", "task/one"))
+    expect(scopedFence.prefixes).toContain(`${archivedChangesPrefix("main")}task/one`)
+    expect(scopedFence.prefixes).not.toContain("refs/heads/")
+    proxyBackend.readHistory.mockClear()
+    const cold = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, {
+      now: 23_000,
+      branch: "task/cold",
+    })
+    expect([...cold.changes.keys()]).toEqual(["task/cold"])
+    const coldBodies = proxyBackend.readHistory.mock.calls.flatMap(([, tips]: any) => tips)
+    expect(coldBodies).toContain(coldTip)
+    expect(coldBodies).not.toContain(hotTip)
+    const globalAgain = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, {
+      now: 24_000,
+    })
+    expect(globalAgain.all).toBe(r1.all)
+    const neighbor = await openEvents({ ...store, ref: changesRef("main", "task/one-2"), writer: "yrd" })
+    await neighbor.append([changeInput("opened", { queueTip, commit: commit2, at: NOW, by: "@dev/7" })], {
+      expect: null,
+    })
+    proxyBackend.readHistory.mockClear()
+    const hotAgain = await readEventListing(mockGit, mockConfig, "/repo", "/tmp/w1", commit1, listingStore, {
+      now: 25_000,
+      branch: "task/one",
+    })
+    expect(hotAgain.all).toBe(hot.all)
+    expect(proxyBackend.readHistory).not.toHaveBeenCalled()
 
     // Call 3 at t=30s: event refs CHANGED!
     // Event refs changed -> triggers full head listing immediately even though < 60s!

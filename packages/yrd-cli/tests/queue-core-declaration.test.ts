@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
+import * as fs from "node:fs"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import {
@@ -56,6 +57,11 @@ import { eventHistoryEntries } from "../src/watch-change.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { workdirOf } from "../src/workdir.ts"
 import type { QueueConfig } from "@yrd/queue-core"
+
+vi.mock("node:fs", async (original) => {
+  const actual = await original<typeof import("node:fs")>()
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync) }
+})
 
 const roots: string[] = []
 afterAll(() => {
@@ -821,6 +827,76 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await coreQueueCommand(repo, human.io, { command: "show", branch }, { queue: "main" })).toBe(0)
     for (const head of [current, cancelled, first]) expect(human.stdout()).toContain(head.slice(0, 12))
   }, 25_000)
+
+  // @failure Branch show reads unrelated raw journals and returns their fallback diagnostics (28615).
+  // @level l2 — existing command boundary with real event refs and observable journal reads.
+  // @consumer A user asking queue show for one branch; bulk show retains global diagnostics.
+  it("reads only the selected branch's journals and keeps bulk show's global diagnostics", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const at = new Date(Date.now() - 60_000)
+    const queueTip = await createQueue(repo, "main", head, at)
+    const logs = join(await workdirOf(git, { cwd: repo }), "logs")
+    const journals = ["task/selected", "task/unrelated"].map((branch, index) => {
+      const journal = openLog(logs, () => new Date(at.getTime() + index + 1))
+      journal.write({ kind: "run", base: head })
+      journal.write({ kind: "change", branch, head, decision: "failed" })
+      return { branch, journal }
+    })
+    for (const { branch, journal } of journals) {
+      await (
+        await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+      ).append(
+        [
+          changeInput("opened", { queueTip, at, commit: head, by: "yrd" }),
+          changeInput("cancelled", { queueTip, at, commit: head, reason: "dropped", run: journal.id }),
+        ],
+        { expect: null },
+      )
+    }
+    const selected = journals[0]!
+    const paths = new Set(journals.map(({ journal }) => journal.path))
+    const read = vi.spyOn(fs, "readFileSync")
+    const shown = capture(repo)
+    try {
+      expect(
+        await coreQueueCommand(
+          repo,
+          shown.io,
+          { command: "show", branch: selected.branch },
+          { json: true, queue: "main" },
+        ),
+        shown.stderr(),
+      ).toBe(0)
+      // Observe I/O, so filtering the broad result after reading everything cannot pass.
+      expect(
+        read.mock.calls.map(([path]) => String(path)).filter((path) => paths.has(path)),
+        shown.stdout(),
+      ).toEqual([selected.journal.path])
+    } finally {
+      read.mockRestore()
+    }
+    const scoped = JSON.parse(shown.stdout()) as {
+      changes: { branch: string; state: string }[]
+      journal: { fallbacks: { run: string }[] }
+    }
+    expect(scoped.changes.map(({ branch }) => branch)).toEqual([selected.branch])
+    expect(scoped.changes[0]?.state).toBe("cancelled")
+    expect(scoped.journal.fallbacks.map(({ run }) => run)).toEqual([selected.journal.id])
+    const bulk = capture(repo)
+    expect(
+      await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: "main" }),
+      bulk.stderr(),
+    ).toBe(0)
+    const global = JSON.parse(bulk.stdout()) as typeof scoped
+    expect(global.changes.map(({ branch }) => branch).sort()).toEqual(journals.map(({ branch }) => branch).sort())
+    expect(global.journal.fallbacks.map(({ run }) => run).sort()).toEqual(
+      journals.map(({ journal }) => journal.id).sort(),
+    )
+    expect(Buffer.byteLength(shown.stdout())).toBeLessThan(Buffer.byteLength(bulk.stdout()))
+  }, 15_000)
 
   it("keeps an equal-head duplicate in the current list and both submissions in show", async () => {
     const repo = await world("{}\n")

@@ -1109,6 +1109,10 @@ export type ReadJournalsOptions = Readonly<{
   now?: Date
   /** How far back the runs read reach; the same seven days `list` windows its ended rows by. */
   sinceMs?: number
+  /** Explicit event-linked runs, including those outside the global reading's time window. */
+  runIds?: readonly string[]
+  /** Keep only this change's facts from a selected round shared with other changes. */
+  branch?: string
 }>
 
 /**
@@ -1123,35 +1127,65 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
   const now = options.now ?? new Date()
   const sinceMs = options.sinceMs ?? 7 * 24 * 60 * 60 * 1000
   let names: readonly string[]
-  try {
-    names = readdirSync(dir)
-  } catch (error) {
-    const why = (error as NodeJS.ErrnoException).code === "ENOENT" ? "there is no such directory" : String(error)
-    return { absent: `no run journal was read: ${dir} — ${why}`, dir, malformed: [], runs: new Map() }
+  if (options.runIds === undefined) {
+    try {
+      names = readdirSync(dir)
+    } catch (error) {
+      const why = (error as NodeJS.ErrnoException).code === "ENOENT" ? "there is no such directory" : String(error)
+      return { absent: `no run journal was read: ${dir} — ${why}`, dir, malformed: [], runs: new Map() }
+    }
+  } else {
+    names = [...new Set(options.runIds)].map((id) => `${id}.jsonl`)
   }
   const ours = names.filter((name) => name.endsWith(".jsonl")).map((name) => name.slice(0, -".jsonl".length))
   const windowed = ours.filter((id) => {
     const startedAt = runStartedAt(id)
-    return startedAt !== undefined && now.getTime() - startedAt.getTime() <= sinceMs
+    return (
+      startedAt !== undefined &&
+      (options.runIds === undefined
+        ? now.getTime() - startedAt.getTime() <= sinceMs
+        : !id.includes("/") && !id.includes("\\"))
+    )
   })
   if (windowed.length === 0) {
-    pruneJournalCache(dir, [])
+    if (options.runIds === undefined) pruneJournalCache(dir, [])
     const held =
-      ours.length === 0
-        ? "it holds no run journal"
-        : `its ${String(ours.length)} run journal(s) are all older than the window`
+      options.runIds !== undefined
+        ? `journal detail unavailable: ${ours.length === 0 ? "no event-linked run selected" : `unrecognized event-linked run identities ${ours.map((id) => JSON.stringify(id)).join(", ")}`}${options.branch === undefined ? "" : ` for ${options.branch}`}`
+        : ours.length === 0
+          ? "it holds no run journal"
+          : `its ${String(ours.length)} run journal(s) are all older than the window`
     return { absent: `no run journal was read: ${dir} — ${held}`, dir, malformed: [], runs: new Map() }
   }
-  pruneJournalCache(dir, windowed)
+  if (options.runIds === undefined) pruneJournalCache(dir, windowed)
   const runs = new Map<string, JournalRun[]>()
   const malformed: { run: string; key: string; message: string }[] = []
   const fallbacks: JournalProjectionFallback[] = []
+  const unavailable: string[] = []
+  if (options.runIds !== undefined) {
+    for (const id of ours.filter((id) => !windowed.includes(id))) {
+      unavailable.push(
+        `journal detail unavailable: event-linked run ${JSON.stringify(id)} has no recognized run identity in ${dir}`,
+      )
+    }
+  }
   for (const id of [...windowed].sort()) {
     const startedAt = runStartedAt(id)
     if (startedAt === undefined) continue
-    const read = cachedRunsIn(dir, id, startedAt)
+    let read: ReturnType<typeof cachedRunsIn>
+    try {
+      read = cachedRunsIn(dir, id, startedAt)
+    } catch (error) {
+      if (options.runIds === undefined) throw error
+      if (options.runIds !== undefined && (error as NodeJS.ErrnoException).code === "ENOENT") {
+        unavailable.push(`journal detail unavailable: selected run ${id} at ${join(dir, `${id}.jsonl`)} is missing`)
+        continue
+      }
+      throw new Error(`cannot read run journal ${join(dir, `${id}.jsonl`)}: ${String(error)}`, { cause: error })
+    }
     if (read.fallback !== undefined) fallbacks.push(read.fallback)
     for (const run of read.runs) {
+      if (options.branch !== undefined && run.branch !== options.branch) continue
       const key = journalKey(run.branch, run.head)
       for (const message of run.malformed ?? []) malformed.push({ key, message, run: run.id })
       const held = runs.get(key)
@@ -1159,7 +1193,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
       else held.unshift(run)
     }
   }
-  return { dir, malformed, runs, fallbacks }
+  return { dir, malformed, runs, fallbacks, ...(unavailable.length === 0 ? {} : { absent: unavailable.join("; ") }) }
 }
 
 /**

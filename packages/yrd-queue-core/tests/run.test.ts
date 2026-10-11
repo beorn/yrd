@@ -27,6 +27,7 @@ import * as gitomic from "gitomic"
 import { openEvents } from "gitomic/events"
 import type { RefUpdate } from "gitomic"
 import { gitEnvironment } from "../src/git.ts"
+import * as gitRunners from "../src/git.ts"
 import { incidentTrailers } from "../src/incident.ts"
 import { readJournals, recentCasRefusals } from "../src/log.ts"
 import { reminderDue } from "../src/override.ts"
@@ -362,8 +363,27 @@ it("runs a check-free event change through one atomic merge", async () => {
   await createWorldEventQueue(w)
   const head = await submitCommit(w, "task/event-run", "one.txt")
   const options = { ...(await w.options({ exit: 0 })), checks: [], notify: undefined }
-
+  // @failure A full-ref runner fence misses queue namespace moves after the observer's exact-ref change (28615).
+  // @level l3 @consumer the queue runner's observer input contract
+  const prefixes: string[][] = []
+  const createRunner = gitRunners.gitIn
+  using _observations = vi.spyOn(gitRunners, "gitIn").mockImplementation((...args) => {
+    const selected = createRunner(...args)
+    const delegate = ((...call: Parameters<typeof selected>) => selected(...call)) as typeof selected
+    const descriptors = Object.getOwnPropertyDescriptors(selected)
+    return Object.defineProperties(delegate, {
+      ...descriptors,
+      observe: {
+        ...descriptors.observe,
+        value: (input: Parameters<typeof selected.observe>[0]) => {
+          prefixes.push([...input.fence.prefixes])
+          return selected.observe(input)
+        },
+      },
+    })
+  })
   const outcome = await queueRun(options)
+  expect(prefixes).toEqual([[`${queueRefPrefix(options.target.branch)}/`]])
 
   expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/event-run"] })
   // @failure 24846: the round's own merge -- the one operation that changes main -- runs

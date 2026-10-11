@@ -545,6 +545,34 @@ describe("a run's journal, read back", () => {
     }
   })
 
+  // 28615: explicit links outlive the global window, and shared rounds do not leak another branch's facts.
+  it("reads linked old journals for only the selected branch and names missing linked files", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const { dir, run } = journalDir(
+      [
+        { kind: "change", branch: "task/one", head: "abc123", decision: "failed" },
+        { kind: "change", branch: "task/two", head: "def456", decision: "failed" },
+      ],
+      at,
+    )
+    const now = new Date(at.getTime() + 8 * 24 * 60 * 60 * 1000)
+    expect(readJournals(dir, { now }).runs.size).toBe(0)
+    const selected = readJournals(dir, { now, runIds: [run, run], branch: "task/one" })
+    expect([...selected.runs.keys()]).toEqual([journalKey("task/one", "abc123")])
+    expect(selected.runs.get(journalKey("task/one", "abc123"))).toHaveLength(1)
+    expect(selected.fallbacks).toHaveLength(1)
+    expect(selected.malformed).toEqual([])
+    expect(readJournals(dir, { now: at }).runs.size).toBe(2)
+    expect(readJournals(dir, { now, runIds: [run], branch: "task/two" }).runs.size).toBe(1)
+    expect(readJournals(dir, { now: at }).runs.size).toBe(2)
+    const missing = "q-20260903T200001000Z-missing"
+    const incomplete = readJournals(dir, { now, runIds: [run, missing], branch: "task/one" })
+    expect(incomplete.runs.size).toBe(1)
+    expect(incomplete.absent).toContain("journal detail unavailable")
+    expect(incomplete.absent).toContain(join(dir, `${missing}.jsonl`))
+    expect(incomplete.absent).toContain("missing")
+  })
+
   it("rereads a journal when the file's mtime or size changes", () => {
     const at = new Date("2026-09-03T20:00:00.000Z")
     const { dir, run } = journalDir([{ branch: "task/one", head: "abc123", kind: "change" }], at)
