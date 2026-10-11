@@ -509,8 +509,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       )
     }
     const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
-    const excludedSubmodules = await declaredPrivateSubmodules(git, resolve(root), base)
-    const result = await workspace.provision({ bay: name, name, branch, base, excludedSubmodules })
+    const result = await workspace.provision({ bay: name, name, branch, base })
     if (result.conclusion !== "success") {
       throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)
     }

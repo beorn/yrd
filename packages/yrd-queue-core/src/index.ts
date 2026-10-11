@@ -171,6 +171,7 @@ export type {
   Journals,
   LogRecord,
 } from "./log.ts"
+export { declaredPrivateSubmodules, refuseMovedPrivateGitlinks } from "./private-submodules.ts"
 export {
   checkedTree,
   claimWorktrees,
