@@ -532,7 +532,7 @@ export async function eventQueueRun(
     version: 1,
     root: { remote: url, targetRef, targetOid: target },
     checked: [],
-    fence: { prefixes: [prefix], refs: [...advertised].map(([ref, oid]) => ({ ref, oid })) },
+    fence: { prefixes: [`${prefix}/`], refs: [...advertised].map(([ref, oid]) => ({ ref, oid })) },
   })
   log.write({
     kind: "observation",

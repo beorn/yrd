@@ -39,6 +39,8 @@ import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./ret
 import { runAdmission } from "./admission.ts"
 import {
   CHANGE_REF_DIAGNOSTICS,
+  EVENT_TRAILERS,
+  trailer,
   archivedChangesPrefix,
   archiveQueue,
   assertPlainEventQueueConfig,
@@ -3810,6 +3812,7 @@ export async function coreQueueCommand(
         const reading = await readEventListing(git, config, repo, workdir, captured.oid, selectedStore, {
           all: true,
           directHistory: request.all === true,
+          ...(request.all === true ? {} : { branch: request.branch }),
         })
         if (reading.observation.contract === "root-v1" && reading.observation.outcome === "invalid") {
           io.stderr(`${reading.observation.message}\n`)
@@ -5262,18 +5265,46 @@ export async function readEventListing(
     forceFresh?: boolean
     draftWindow?: DraftWindow
     onRetry?: (message: string) => void
+    /** Acquire only this change's hot/cold history and its event-linked journals. */
+    branch?: string
   }> = {},
 ): Promise<EventListingResult> {
   const queuePrefix = `${queueRefPrefix(config.target.branch)}/`
   const runnerRefName = `${queueRefPrefix(config.target.branch)}/runner`
   const changePrefix = `${queuePrefix}changes/`
   const coldPrefix = archivedChangesPrefix(config.target.branch)
-  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}`
+  const cacheKey = `${repo}#${config.target.remote}#${config.target.branch}#all:${options.all === true}#directHistory:${options.directHistory === true}#drafts:${options.drafts === true}#branch:${JSON.stringify(options.branch)}`
   const cache = eventListingCaches.get(cacheKey)
   const nowMs =
     typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
   const draftWindow = options.draftWindow ?? "7d"
   const draftWindowChanged = cache !== undefined && cache.draftWindow !== draftWindow
+  const selectedRefs =
+    options.branch === undefined
+      ? undefined
+      : [changesRef(config.target.branch, options.branch), `${coldPrefix}${options.branch}`]
+  const journalsFor = (history: EventListingResult["history"]): Journals => {
+    if (options.branch === undefined) return readJournals(join(workdir, "logs"))
+    const segments = history.get(options.branch) ?? []
+    const ids = segments.flatMap(({ events }) =>
+      events.flatMap((event) => {
+        const id = trailer(event, EVENT_TRAILERS.run)
+        return id === undefined ? [] : [id]
+      }),
+    )
+    const journals = readJournals(join(workdir, "logs"), { runIds: ids, branch: options.branch })
+    const legacy = segments.filter(
+      ({ events }) => !events.some((event) => trailer(event, EVENT_TRAILERS.run) !== undefined),
+    )
+    if (legacy.length === 0) return journals
+    const missing = legacy
+      .map(
+        ({ row, events }) =>
+          `journal detail unavailable: ${options.branch}@${row.head}, segment ${events[0]?.id ?? "without opening identity"}, has no Run trailer; unlinked journal files were not searched`,
+      )
+      .join("; ")
+    return { ...journals, absent: [journals.absent, missing].filter((part) => part !== undefined).join("; ") }
+  }
 
   const observe = async (qRefs: ReadonlyMap<string, string>, bRefs: ReadonlyMap<string, string>) =>
     git.observe({
@@ -5290,9 +5321,7 @@ export async function readEventListing(
         // fence the runner even after removing it from refs below.
         prefixes: [
           ...new Set([
-            "refs/heads/",
-            changePrefix,
-            coldPrefix,
+            ...(selectedRefs === undefined ? ["refs/heads/", changePrefix, coldPrefix] : selectedRefs),
             ...[...qRefs.keys()].filter((ref) => !ref.startsWith(changePrefix) && !ref.startsWith(coldPrefix)),
           ]),
         ],
@@ -5307,7 +5336,15 @@ export async function readEventListing(
   const runnerTip = listedRefs.get(runnerRefName)
   // A heartbeat moves on its own cadence. It must not invalidate change-state
   // caching or make an otherwise stable Git observation fence fail.
-  const queueRefs = new Map([...listedRefs].filter(([ref]) => ref !== runnerRefName))
+  const queueRefs = new Map(
+    [...listedRefs].filter(
+      ([ref]) =>
+        ref !== runnerRefName &&
+        (selectedRefs === undefined ||
+          (!ref.startsWith(changePrefix) && !ref.startsWith(coldPrefix)) ||
+          selectedRefs.includes(ref)),
+    ),
+  )
 
   const eventRefsUnchanged =
     cache !== undefined && cache.targetOid === targetOid && areRefMapsEqual(cache.queueRefs, queueRefs)
@@ -5354,7 +5391,7 @@ export async function readEventListing(
       ...cache.reading,
       ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
       observation: await observe(cache.queueRefs, cache.branchRefs),
-      journals: readJournals(join(workdir, "logs")),
+      journals: journalsFor(cache.reading.history),
     }
   }
 
@@ -5368,7 +5405,7 @@ export async function readEventListing(
     openBranchDeleted ||
     draftWindowChanged
   ) {
-    branchRefs = await listRefs("refs/heads/", store)
+    branchRefs = options.branch === undefined ? await listRefs("refs/heads/", store) : new Map()
     headListingAt = nowMs
   } else {
     branchRefs = cache.branchRefs
@@ -5389,12 +5426,22 @@ export async function readEventListing(
       ...cache.reading,
       ...(runnerTip === undefined ? { runnerTip: undefined } : { runnerTip }),
       observation: await observe(cache.queueRefs, branchRefs),
-      journals: readJournals(join(workdir, "logs")),
+      journals: journalsFor(cache.reading.history),
     }
   }
 
   // 4. Full read
-  const acquired = await readEventQueueWithChanges(store, config.target.branch)
+  const acquired =
+    options.branch === undefined
+      ? await readEventQueueWithChanges(store, config.target.branch)
+      : await Promise.all([
+          readEventQueue(store, config.target.branch),
+          readBranchHistory(store, config.target.branch, options.branch, { invalid: "return" }),
+        ]).then(([queue, selected]) => ({
+          queue,
+          histories: new Map(selected.history === undefined ? [] : [[options.branch as string, selected.history]]),
+          invalid: new Map(selected.invalid === undefined ? [] : [[options.branch as string, selected.invalid]]),
+        }))
   let queue = acquired.queue
   const histories = new Map(acquired.histories)
   const invalid = new Map(acquired.invalid)
@@ -5454,32 +5501,32 @@ export async function readEventListing(
       )
     }
   }
-  const directMerges = await eventDirectMergeCommits(
-    git,
-    config.target.branch,
-    targetOid,
-    queue.declaration,
-    histories,
-    new Set(),
-    { allHistory: options.directHistory },
-  )
+  const directMerges =
+    options.branch === undefined
+      ? await eventDirectMergeCommits(git, config.target.branch, targetOid, queue.declaration, histories, new Set(), {
+          allHistory: options.directHistory,
+        })
+      : []
   const listNow =
     options.now instanceof Date ? options.now : options.now !== undefined ? new Date(options.now) : new Date()
   const heads = new Map([...branchRefs].map(([ref, oid]) => [ref.slice("refs/heads/".length), oid]))
   const since = draftWindow === "all" ? undefined : new Date(listNow.getTime() - 7 * 24 * 60 * 60 * 1000)
-  const drafts = await readDrafts(
-    git,
-    withoutIgnoredDraftHeads(
-      {
-        heads: new Map([...heads].filter(([branch]) => !invalid.has(branch))),
-        changes: [...changes].flatMap(([branch, change]) =>
-          change.commit === undefined ? [] : [{ change: { branch, head: change.commit } }],
-        ),
-      },
-      config.ignore,
-    ),
-    { targetSha: targetOid, since },
-  )
+  const drafts =
+    options.branch === undefined
+      ? await readDrafts(
+          git,
+          withoutIgnoredDraftHeads(
+            {
+              heads: new Map([...heads].filter(([branch]) => !invalid.has(branch))),
+              changes: [...changes].flatMap(([branch, change]) =>
+                change.commit === undefined ? [] : [{ change: { branch, head: change.commit } }],
+              ),
+            },
+            config.ignore,
+          ),
+          { targetSha: targetOid, since },
+        )
+      : { dated: [], undated: [], older: 0 }
   // Status comes only from the event fold (25041): a change whose branch is gone stays open
   // until a queue round records its ending, so a reader never shows a state no event holds.
   const segmentsByBranch = new Map(
@@ -5570,7 +5617,7 @@ export async function readEventListing(
     all,
     document,
     history: titledHistory,
-    journals: readJournals(join(workdir, "logs")),
+    journals: journalsFor(titledHistory),
     drafts,
     pause: operational.stop,
     overrides: operational.overrides,

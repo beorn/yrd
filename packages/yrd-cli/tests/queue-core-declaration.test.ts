@@ -871,7 +871,7 @@ describe("a queue is the selected origin branch carrying config", () => {
         shown.stderr(),
       ).toBe(0)
       // Observe I/O, so filtering the broad result after reading everything cannot pass.
-      expect(read.mock.calls.map(([path]) => String(path)).filter((path) => paths.has(path))).toEqual([
+      expect(read.mock.calls.map(([path]) => String(path)).filter((path) => paths.has(path)), shown.stdout()).toEqual([
         selected.journal.path,
       ])
     } finally {
