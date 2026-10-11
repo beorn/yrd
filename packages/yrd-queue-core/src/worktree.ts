@@ -21,10 +21,10 @@
  * git transcript. The caller hands in a logger only when trace is on.
  */
 
-import { lstatSync, readlinkSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, lstatSync, readFileSync, readlinkSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import type { Process } from "@yrd/process"
-import { createGitWorktreeStore } from "git-super/worktree"
+import { assertNoPrivateStore, createGitWorktreeStore } from "git-super/worktree"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
@@ -594,7 +594,50 @@ export async function prepareWorktree(
   }
 }
 
+/**
+ * 28661: the question every PLAIN removal must ask before it deletes a checkout.
+ *
+ * git-super's primitive refuses a removal that would destroy a declared-private submodule store, and it asks
+ * that question through this one exported guard. A caller that removes the directory itself — `rmSync` plus a
+ * prune here, `safeRemoveSync` in the pool — never reaches the primitive, so it asks the same question through
+ * the same guard rather than removing blind. Reads declarations and existence only: nothing inside the store is
+ * read, copied, hashed or renamed (27058; chief ruling c8a3b06d).
+ */
+export async function refusePrivateStoreRemoval(git: Git, checkout: string, repo: string): Promise<void> {
+  const adminDir = worktreeAdminDir(checkout)
+  // No admin dir, or no submodule store inside it, means there is nothing here to protect and the question is not
+  // asked. That keeps this guard off the path of every ordinary tree — including one whose refs are already broken,
+  // which must stay REMOVABLE: a guard that turned a broken repository into an unremovable one would be the
+  // accumulation defect (27120) rebuilt inside its own fix.
+  if (adminDir === undefined || !existsSync(join(adminDir, "modules"))) return
+  const head = (await git(["--git-dir", adminDir, "rev-parse", "--verify", "HEAD"])).trim()
+  await assertNoPrivateStore(seamProcess(git, resolve(repo)), {
+    adminDir,
+    repository: resolve(repo),
+    head,
+  })
+}
+
+/** A worktree's own Git dir, read from the checkout's `.git` entry alone, so a broken repository is never asked. */
+function worktreeAdminDir(checkout: string): string | undefined {
+  const dotGit = join(checkout, ".git")
+  let state
+  try {
+    state = lstatSync(dotGit)
+  } catch {
+    return undefined
+  }
+  if (state.isDirectory()) return dotGit
+  if (!state.isFile()) return undefined
+  const pointer = /^gitdir:\s*(.+)$/u.exec(readFileSync(dotGit, "utf8").trim())
+  return pointer?.[1] === undefined ? undefined : resolve(checkout, pointer[1])
+}
+
+/** Forget stale registrations under git-super's repository worktree mutation lock (26240). */
 async function removeWorktree(git: Git, path: string, repo: string): Promise<void> {
+  // 28661: `rmSync` below destroys this worktree, and with it any private submodule store inside its admin dir;
+  // the prune then forgets the registration that held the store. Refuse first.
+  await refusePrivateStoreRemoval(git, path, repo)
   // `worktree remove --force` refuses a tree with untracked files it did not
   // make; a check may have written anything, so the directory goes first and
   // git is told to forget the entry afterwards.

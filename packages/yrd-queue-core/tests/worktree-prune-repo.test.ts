@@ -21,6 +21,10 @@ vi.mock("git-super/worktree", () => ({
     store.calls.push(options)
     return { prune: async (): Promise<void> => {} }
   },
+  // 28661: the private-store refusal has its own native test (plain-removal-private-store.test.ts). This row is
+  // about the ARGUMENT pruneWorktrees hands the store, so the guard is stubbed here rather than answered by a
+  // recorder that has no admin dir to inspect.
+  assertNoPrivateStore: async (): Promise<void> => {},
 }))
 
 const CHECKOUT = "/fixture/reference-checkout"

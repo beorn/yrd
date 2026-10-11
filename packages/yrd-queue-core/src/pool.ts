@@ -27,6 +27,7 @@ import { declaredPrivateSubmodules } from "./private-submodules.ts"
 import {
   checkedTree,
   prepareWorktree,
+  refusePrivateStoreRemoval,
   runSetup,
   SetupFailed,
   type PlumbingLog,
@@ -255,6 +256,11 @@ export class WorktreePool {
 
   /** Remove a pooled tree and forget its registration, exactly as a per-run tree's removal does. */
   private async forget(path: string): Promise<void> {
+    // 28661: this pool removal is the same plain shape as a per-run one — the directory goes, and any private
+    // submodule store inside its admin dir with it — so it asks the same guard before it deletes anything.
+    // A checkout that is already gone needs no guard here: the store question then belongs to the prune below,
+    // which asks it itself.
+    if (existsSync(path)) await refusePrivateStoreRemoval(this.options.git, path, this.options.repo)
     // Contained to the pool's own root: every caller reaches here after the tree existed, so that root resolves.
     safeRemoveSync(path, { within: join(this.options.workdir, "worktrees", "pool"), allowMissing: true })
     await this.store(path).prune()
