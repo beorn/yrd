@@ -44,6 +44,19 @@ export async function publishCheckedChildren(
     throw new Error(`publication marker ${options.marker.tip} does not retain candidate ${options.candidate}`)
   }
 
+  // The LOCAL half of the proof runs BEFORE git-super moves any child (28734): a
+  // candidate whose changed gitlinks disagree with its own frozen intent is
+  // refused here, so a refusal can no longer leave a component branch pushed
+  // ahead of the root merge that is waiting on it.
+  const plan = await readFrozenPublicationPlan(options)
+  if (plan.disagreement !== undefined) {
+    return {
+      state: "refused",
+      moved: [],
+      evidence: `frozen push intent coverage refused before publication: ${plan.disagreement}`,
+    }
+  }
+
   // Git-super reads the frozen child intent and retains/verifies each source
   // before moving a child branch. Yrd neither decodes nor recreates that plan.
   const execution = await gitSuperExecution(
@@ -111,7 +124,7 @@ export async function publishCheckedChildren(
   if (execution.exitCode === 0 && (result.state === "updated" || result.state === "unchanged") && !result.partial) {
     // The JSON is a claim, never the proof: confirm the expected child refs from
     // their remotes before recording published.
-    const proof = await verifyExpectedChildRefs(options)
+    const proof = await verifyRemoteChildRefs(options.git, plan.expected)
     if (proof.disagreement === undefined) return { state: "published", moved, evidence }
     evidence = `${evidence}; independent remote proof refused: ${proof.disagreement}`
     return { state: "refused", moved, evidence }
@@ -119,18 +132,24 @@ export async function publishCheckedChildren(
   return { state: "refused", moved, evidence, ...(detail === undefined ? {} : { detail }) }
 }
 
+/** A child ref the frozen push intent expects to find on its remote after the push. */
+type ExpectedChildRef = Readonly<{ destination: string; path: string; remote: string; source: string }>
+
 /**
- * The independent publication proof (27098 step 4). The expected child
- * destinations come from the candidate's OWN frozen push intent joined with the
- * root gitlinks it changed against its first parent — never from git-super's
- * success JSON — and every one is read from its remote. A well-formed `updated`
- * with `repositories: []` therefore cannot pass, and no expected ref is silently
- * skipped. Any disagreement (wrong value, absent ref, unreadable remote, or a
- * changed gitlink the intent never named) refuses; there is no second push planner.
+ * The LOCAL half of the independent publication proof (27098 step 4). The expected child
+ * destinations come from the candidate's OWN frozen push intent joined with the root gitlinks it
+ * changed against its first parent — never from git-super's success JSON. It reads only the
+ * candidate commit, so the caller runs it BEFORE git-super pushes anything: a candidate whose
+ * changed gitlinks disagree with its own frozen intent is refused with no child branch moved
+ * (28734), instead of after a component has already landed.
+ *
+ * Only a gitlink the candidate STILL declares is a publication. A path the candidate takes out
+ * (`newMode` 000000) pushes nothing, so it can never have a frozen push intent row, and demanding
+ * one refuses every removal (28734). Same filter pin-carrier.ts applies to its own rows.
  */
-async function verifyExpectedChildRefs(
+async function readFrozenPublicationPlan(
   options: Readonly<{ git: Git; cwd: string; candidate: string; env?: NodeJS.ProcessEnv }>,
-): Promise<Readonly<{ disagreement?: string }>> {
+): Promise<Readonly<{ disagreement?: string; expected: readonly ExpectedChildRef[] }>> {
   const intent = await readFrozenPushIntent(
     createLocalGitProcess(options.env ?? globalThis.process.env),
     options.cwd,
@@ -138,9 +157,6 @@ async function verifyExpectedChildRefs(
   )
   const parents = (await options.git(["show", "-s", "--format=%P", options.candidate])).trim().split(/\s+/u)
   const firstParent = parents[0]
-  // Only a gitlink the candidate STILL declares is a publication. A path the candidate takes out
-  // (`newMode` 000000) pushes nothing, so it can never have a frozen push intent row, and demanding
-  // one refuses every removal (28734). Same filter pin-carrier.ts applies to its own rows.
   const changed =
     firstParent === undefined || firstParent === ""
       ? []
@@ -151,25 +167,42 @@ async function verifyExpectedChildRefs(
   const known = new Set(children.map((child) => child.path))
   const unexplained = changed.filter((path) => !known.has(path))
   if (unexplained.length > 0) {
-    return { disagreement: `the candidate moved gitlink(s) ${unexplained.join(", ")} with no frozen push intent row` }
+    return {
+      disagreement: `the candidate moved gitlink(s) ${unexplained.join(", ")} with no frozen push intent row`,
+      expected: [],
+    }
   }
-  const expected = children.flatMap((child) =>
-    child.publication === undefined
-      ? []
-      : [
-          {
-            destination: child.publication.destination,
-            path: child.path,
-            remote: child.remote,
-            source: child.publication.source,
-          },
-        ],
-  )
+  return {
+    expected: children.flatMap((child) =>
+      child.publication === undefined
+        ? []
+        : [
+            {
+              destination: child.publication.destination,
+              path: child.path,
+              remote: child.remote,
+              source: child.publication.source,
+            },
+          ],
+    ),
+  }
+}
+
+/**
+ * The REMOTE half of the proof: every expected child ref is read from its own remote and must equal
+ * the frozen source. A well-formed `updated` with `repositories: []` cannot pass, and no expected
+ * ref is silently skipped. Any disagreement (wrong value, absent ref, or unreadable remote)
+ * refuses; there is no second push planner.
+ */
+async function verifyRemoteChildRefs(
+  git: Git,
+  expected: readonly ExpectedChildRef[],
+): Promise<Readonly<{ disagreement?: string }>> {
   const disagreements: string[] = []
   for (const child of expected) {
     let observed: string | undefined
     try {
-      observed = await readRemoteCommit(options.git, child.remote, child.destination)
+      observed = await readRemoteCommit(git, child.remote, child.destination)
     } catch (error) {
       disagreements.push(
         `${child.path} ${child.destination}: unreadable (${error instanceof Error ? error.message : String(error)})`,

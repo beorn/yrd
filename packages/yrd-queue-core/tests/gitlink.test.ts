@@ -36,6 +36,7 @@ import type { Git, QueueRunOptions } from "../src/index.ts"
 import { appendChangeEvent } from "../src/events.ts"
 import { mergeBases } from "../src/git.ts"
 import { publishMovedGitlinks } from "../src/submit.ts"
+import { publishCheckedChildren } from "../src/publication.ts"
 import { gitSuperBin, siblingGitSuperBin, superprojectRoot } from "../../../tests/support/git-super-bin.ts"
 
 // The root Vitest project seals PATH in its setup beforeEach. Reassert this
@@ -325,6 +326,103 @@ it("merges a change that removes a submodule gitlink, which publishes nothing (2
   const state = await readStatus(eventStore(w), "main", "task/remove-submodule")
   expect(state).toMatchObject({ status: "merged", commit: head })
 }, 120_000)
+
+/** @failure The publication proof read the candidate's frozen push intent only AFTER git-super had
+ * already pushed every child branch, so a candidate that failed the LOCAL half of the proof left its
+ * component published ahead of the root merge the queue then refused (28734: a withdrawn landing
+ * pushed km before the proof refused, main going red on a component no root merge carries).
+ * @level l3 @consumer queue operator and every component author
+ * The local half of the proof — every gitlink the candidate still declares must be named by its own
+ * frozen push intent — reads only the candidate commit, so it runs BEFORE the component push and a
+ * refusal moves nothing.
+ */
+it("refuses a changed gitlink with no frozen intent row before pushing any child (28734)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "yrd-core-preplan-"))
+  roots.push(root)
+  const git = gitIn(root)
+  await git(["init", "--quiet", "--initial-branch=main"])
+  await git(["config", "user.email", "queue@yrd.test"])
+  await git(["config", "user.name", "yrd"])
+  // A gitlink needs no checked-out submodule for a tree diff: two real commits name the pins.
+  const submodule = join(root, "submodule")
+  mkdirSync(submodule)
+  const sg = gitIn(submodule)
+  await sg(["init", "--quiet", "--initial-branch=main"])
+  await sg(["config", "user.email", "queue@yrd.test"])
+  await sg(["config", "user.name", "yrd"])
+  writeFileSync(join(submodule, "one.txt"), "one\n")
+  await sg(["add", "--all"])
+  await sg(["commit", "--quiet", "-m", "one"])
+  const pin = (await sg(["rev-parse", "HEAD"])).trim()
+  writeFileSync(join(submodule, "two.txt"), "two\n")
+  await sg(["add", "--all"])
+  await sg(["commit", "--quiet", "-m", "two"])
+  const moved = (await sg(["rev-parse", "HEAD"])).trim()
+
+  writeFileSync(join(root, "root.txt"), "root\n")
+  await git(["add", "--all"])
+  await git(["commit", "--quiet", "-m", "root"])
+  await git(["update-index", "--add", "--cacheinfo", `160000,${pin},vendor/dep`])
+  await git(["commit", "--quiet", "-m", "declare vendor/dep"])
+  // The candidate CHANGES the declared gitlink while carrying no frozen push intent at all.
+  await git(["update-index", "--add", "--cacheinfo", `160000,${moved},vendor/dep`])
+  await git(["commit", "--quiet", "-m", "move vendor/dep"])
+  const candidate = (await git(["rev-parse", "HEAD"])).trim()
+  writeFileSync(join(root, "marker.txt"), "marker\n")
+  await git(["add", "--all"])
+  await git(["commit", "--quiet", "-m", "publication marker"])
+  const markerTip = (await git(["rev-parse", "HEAD"])).trim()
+  const remote = join(root, "origin.git")
+  await gitIn(root)(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await git(["remote", "add", "origin", remote])
+  const markerRef = "refs/yrd/main/changes/task/landing"
+  await git(["push", "--quiet", "origin", `${markerTip}:${markerRef}`])
+
+  // A frozen git-super that RECORDS being asked to push: the ordering claim is precisely that a
+  // refusal of the local half never reaches this binary.
+  const sentinel = join(root, "pushed")
+  const stub = join(root, "sentinel-git-super")
+  writeFileSync(
+    stub,
+    [
+      "#!/usr/bin/env bun",
+      'import { writeFileSync } from "node:fs"',
+      'if (process.argv.includes("push")) {',
+      `  writeFileSync(${JSON.stringify(sentinel)}, "pushed\\n")`,
+      '  process.stdout.write(JSON.stringify({ state: "updated", partial: false, repositories: [] }))',
+      "  process.exit(0)",
+      "}",
+      "process.exit(1)",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  )
+  chmodSync(stub, 0o755)
+  const priorBin = process.env.YRD_GIT_SUPER_BIN
+  const priorSha = process.env.YRD_GIT_SUPER_SHA
+  process.env.YRD_GIT_SUPER_BIN = stub
+  process.env.YRD_GIT_SUPER_SHA = "0".repeat(40)
+  try {
+    const published = await publishCheckedChildren({
+      git,
+      cwd: root,
+      candidate,
+      remote: "origin",
+      branch: "main",
+      marker: { ref: markerRef, tip: markerTip },
+    })
+
+    expect(published.state).toBe("refused")
+    expect(published.evidence).toContain("no frozen push intent row")
+    expect(published.moved).toEqual([])
+    expect(existsSync(sentinel)).toBe(false)
+  } finally {
+    if (priorBin === undefined) delete process.env.YRD_GIT_SUPER_BIN
+    else process.env.YRD_GIT_SUPER_BIN = priorBin
+    if (priorSha === undefined) delete process.env.YRD_GIT_SUPER_SHA
+    else process.env.YRD_GIT_SUPER_SHA = priorSha
+  }
+}, 60_000)
 
 /** @failure A queue round omits bounded reuse and refreshes every component despite a warm Equal observation (26263).
  * @level l3 @consumer queue operator's component refresh budget
