@@ -1445,6 +1445,15 @@ function buildProgram(
       "--retain <directory>",
       "durable GitSuper retention directory; defaults to the workdir retained-modules directory",
     )
+    .option(
+      "--discard-private-store",
+      "delete this environment's declared-private submodule stores instead of refusing; requires --reason, " +
+        "runs synchronously with a complete census and is never delegated",
+    )
+    .option(
+      "--reason <text>",
+      "why the private stores are being destroyed; required with --discard-private-store and journaled before any byte goes",
+    )
     .option("--json", "emit stable JSON")
     .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
 

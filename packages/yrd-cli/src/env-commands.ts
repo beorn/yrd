@@ -73,7 +73,13 @@ export type EnvOpenOptions = Readonly<{
   hold?: string
   keep?: boolean
 }>
-export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string; noRehome?: boolean }>
+export type EnvCloseOptions = Readonly<{
+  json?: boolean
+  retain?: string
+  noRehome?: boolean
+  discardPrivateStore?: boolean
+  reason?: string
+}>
 
 /**
  * The close was ACCEPTED, not done: this caller's same-UID CWD census could not
@@ -812,6 +818,18 @@ export async function closeEnvironment(
   // Both answers come from the same reader, but a store can be private per main while this checkout's own
   // HEAD declares nothing, so R1 answers for the union.
   const privatePaths = [...new Set([...privateSubmodules, ...storeRefusals.map((entry) => entry.path)])]
+  // 28661 / @cto ae7789b8: the pair turns R1's unconditional refusal into a REASONED discard, the same pair
+  // git-super's removal takes. It is deliberately CLI-only: a discard close destroys private bytes, so it runs
+  // only synchronously with a complete census and the operator present, and it is NEVER delegated.
+  const discarding = options.discardPrivateStore === true
+  const discardReason = (options.reason ?? "").trim()
+  if (discarding && discardReason === "") {
+    throw new Error(
+      `environment ${path} was asked to --discard-private-store with no --reason: the reason is required and is journaled before any byte goes. ` +
+        `Pass --reason "<text>" naming why the private stores are being destroyed, or drop the flag and retire the environment by the operator steps the private-store refusal names.`,
+    )
+  }
+  const discarded: { submodule: string; checkout: string; store: string | undefined }[] = []
   for (const privatePath of privatePaths) {
     const checkout = join(path, privatePath)
     const initialized = entryPresent(join(checkout, ".git"), "the private submodule gitfile of")
@@ -831,6 +849,10 @@ export async function closeEnvironment(
         ? []
         : [`run ${verify}`, `then remove the environment admin's modules subtree ${dirname(store)}`]),
     ]
+    if (discarding) {
+      discarded.push({ submodule: privatePath, checkout, store })
+      continue
+    }
     if (options.json === true) {
       io.stdout(
         `${JSON.stringify({ kept: path, class: "private checkout", submodule: privatePath, checkout, store, command: verify })}\n`,
@@ -842,9 +864,20 @@ export async function closeEnvironment(
       { submodule: privatePath, checkout, store, command: verify },
     )
   }
+  if (discarded.length > 0) {
+    // ONE loud line, in the operator's face, naming EVERY private path and the reason it is being destroyed —
+    // never a per-path repeat, and never silence. The reason travels verbatim into git-super's own journal.
+    io.stderr(
+      `yrd: env close DISCARDING ${String(discarded.length)} declared-private store(s) of ${path} under --discard-private-store — reason: ${discardReason}\n` +
+        discarded
+          .map((entry) => `yrd:   ${entry.submodule}${entry.store === undefined ? "" : ` (store ${entry.store})`}\n`)
+          .join(""),
+    )
+  }
   await requireClean(treeGit, path)
   const admission = await admitEnvironmentClose(path, io, censusSource)
   if (admission.kind === "needs-delegation") {
+    if (discarding) throw discardedNeedsCensus(path, admission)
     if (onIncompleteCensus === "refuse") throw uncertified(path, admission)
     return queueDelegatedClose(path, options, io, workdir, commit, admission)
   }
@@ -889,6 +922,7 @@ export async function closeEnvironment(
   const modules = await treeGit(["ls-tree", commit, "--", ".gitmodules"])
   const recheck = await admitEnvironmentClose(path, io, censusSource)
   if (recheck.kind === "needs-delegation") {
+    if (discarding) throw discardedNeedsCensus(path, recheck, "after teardown")
     // Teardown already ran, so delegating now would run it twice in a context
     // that cannot tell what this one did. Refuse loudly and preserve instead.
     throw uncertified(path, recheck, "after teardown")
@@ -910,6 +944,7 @@ export async function closeEnvironment(
           "--retain",
           retain,
           ...(options.noRehome === true ? ["--no-rehome"] : []),
+          ...(discarding ? ["--discard-private-store", "--reason", discardReason] : []),
         ]),
       )
     } catch (error) {
@@ -980,6 +1015,24 @@ function uncertified(
     admission.refusal,
     admission.census,
     `${admission.refusal}${when === "" ? "" : ` ${when}`}; environment ${path} was preserved`,
+  )
+}
+
+/**
+ * 28661 / @cto ae7789b8: a --discard-private-store close is NEVER delegated. It destroys private bytes, so it
+ * runs only synchronously, with a complete census and the operator present — and the route says exactly that,
+ * rather than queueing a request whose own round could not tell what this one did.
+ */
+function discardedNeedsCensus(
+  path: string,
+  admission: Extract<CloseAdmission, { kind: "needs-delegation" }>,
+  when = "",
+): IncompleteCensusError {
+  return new IncompleteCensusError(
+    admission.refusal,
+    admission.census,
+    `a discard close needs a complete census now; retry when the environment is free${when === "" ? "" : ` (${when})`}. ` +
+      `The private stores of ${path} are preserved and nothing was discarded.`,
   )
 }
 
