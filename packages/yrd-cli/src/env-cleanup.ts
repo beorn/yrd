@@ -369,7 +369,12 @@ function namedCloseRefusal(output: string): string | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(output)
-  } catch {
+  } catch (cause) {
+    // A refusal's own text is not always JSON — a plain-`git` refusal, an older yrd, a person's `env close` —
+    // and that is the ordinary "no structured refusal to read" case, so it returns undefined. Anything the
+    // parser fails on for ANOTHER reason is a real fault, and a silent undefined would hide it behind a
+    // "kept: (no class)" line instead of naming it (NO SILENT ERRORS).
+    if (!(cause instanceof SyntaxError)) throw cause
     return undefined
   }
   if (typeof parsed !== "object" || parsed === null) return undefined
