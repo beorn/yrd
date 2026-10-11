@@ -1962,7 +1962,9 @@ export async function eventQueueRun(
       }
       const raises = (await readRootChanges(git, candidate))?.changes ?? []
       tip = await appendOwnedChange(store, queue, branch, tip, { type: "verifying", at: new Date(), commit: candidate })
-      tip = await appendOwnedChange(store, queue, branch, tip, { type: "checking", at: new Date() })
+      // The run that checks it, named on the event: a branch-scoped show reads only event-linked journals (28615),
+      // so a check still running is found through this trailer before any ending event names the run.
+      tip = await appendOwnedChange(store, queue, branch, tip, { type: "checking", at: new Date(), run: log.id })
       const results: EventCheck[] = []
       let attemptedRetry = false
       let decisionResults: EventCheck[] = []

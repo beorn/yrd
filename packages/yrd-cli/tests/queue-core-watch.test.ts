@@ -35,6 +35,7 @@ import {
   createEventQueue,
   createEventStore,
   readConfig,
+  readChangeEvents,
   readEventQueue,
   queueRef,
   writeQueueEvent,
@@ -676,6 +677,26 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
     },
   )
 
+  it("the queue's checking event names the run that checks it, the link a branch-scoped show reads (28615)", async () => {
+    // Yrd CI #521: show reads only event-linked journals (59c8e735d1), and the checking event named no run, so a
+    // check still running read NOT RUN; until the change ended, nothing on its history named the run.
+    const w = await world()
+    const branch = "task/linked"
+    await change(w, branch, false)
+    await drain(w)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const chain = await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+    const tip = await chain.head()
+    if (tip === null) throw new Error("the drained change has no event tip")
+    const events = await readChangeEvents(store, "main", branch, tip)
+    const runOf = (type: string) =>
+      events.find((event) => event.type === type)?.props.find(([name]) => name === "Run")?.[1]
+    expect(events.map(({ type }) => type)).toEqual(expect.arrayContaining(["verifying", "checking", "failed"]))
+    expect(runOf("checking"), JSON.stringify(events.map(({ type, props }) => [type, props]))).toBeDefined()
+    expect(runOf("checking")).toBe(runOf("failed"))
+    expect(readdirSync(join(w.workdir, "logs"))).toContain(`${runOf("checking") ?? "?"}.jsonl`)
+  })
+
   it("says whether a running check's log is not written, empty, or readable in plain show", async () => {
     // 24212: preserving the journal's path alone advertised future output as
     // readable now. Exercise the CLI while the check has no ending record.
@@ -696,6 +717,20 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
       phase: "submit",
       start: new Date().toISOString(),
     })
+    // As the queue does: its checking event names the run, the one link a branch-scoped show reads (28615).
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queue = await readEventQueue(store, "main")
+    const ref = changesRef("main", branch)
+    const chain = await openEvents({ ...store, ref, writer: "yrd" })
+    const before = await chain.head()
+    if (before === null) throw new Error("submitted fixture change has no event tip")
+    await chain.append(
+      [
+        changeInput("verifying", { queueTip: queue.tip, at: new Date(), commit: head }),
+        changeInput("checking", { queueTip: queue.tip, at: new Date(), run: journal.id }),
+      ],
+      { expect: before },
+    )
 
     for (const [body, expected] of [
       [undefined, `running, but no log at ${log} on this machine; the queue writes its logs where it runs`],
