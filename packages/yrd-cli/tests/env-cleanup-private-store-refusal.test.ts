@@ -4,6 +4,7 @@
  *          erase who asked for the close and wedge the cure.
  * @level   l2
  * @consumer the queue round's post-judgment environment cleanup
+ * @reach   fs-walk <fixture-only: close-request and retained-environment directories the fixture makes under the OS temp root>
  * @testonly closeEnvironment is replaced by a stub that throws the wrapped refusal the real close produces
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
