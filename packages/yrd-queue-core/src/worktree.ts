@@ -696,11 +696,19 @@ function messageOf(cause: unknown): string {
  */
 function worktreeAdminDir(checkout: string): string | undefined {
   const dotGit = join(checkout, ".git")
-  if (!existsSync(dotGit)) return undefined
   let state
   try {
     state = lstatSync(dotGit)
   } catch (cause) {
+    // TRUE ABSENCE is decided from lstat's own error, NEVER from `existsSync`: `existsSync` answers FALSE for an
+    // entry the kernel refuses with EACCES, so deciding absence that way reads an unreadable `.git` as "no admin
+    // dir, nothing to protect" and authorizes a blind removal (NO SILENT ERRORS; @dev/fixer's uid-3001
+    // reproduction: `exists false`, `lstat EACCES`, removal ALLOWED with 0 git calls). A name that is genuinely
+    // not there — ENOENT, or ENOTDIR when a path component is not a directory — has no admin dir to protect and
+    // the tree stays removable, which is what keeps an already-removed checkout removable. Every other failure
+    // (EACCES, EPERM, ELOOP, anything unnamed) leaves the store behind that entry UNVERIFIED and refuses BY NAME.
+    const code = (cause as NodeJS.ErrnoException | undefined)?.code
+    if (code === "ENOENT" || code === "ENOTDIR") return undefined
     throw new PrivateStoreRefusalError(
       `cannot remove ${checkout}: its .git entry ${dotGit} cannot be read (${messageOf(cause)}), so a private ` +
         `submodule store in its admin dir cannot be verified; the checkout is kept; inspect ${dotGit} before ` +
