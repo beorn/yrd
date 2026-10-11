@@ -12,10 +12,16 @@ import {
   type QueueRunOutcome,
 } from "@yrd/queue-core"
 import { createLocalGitProcess } from "git-super/process"
-import { createLocalGitWorktreeStore } from "git-super/worktree"
+import { createLocalGitWorktreeStore, PrivateStoreRefusalError } from "git-super/worktree"
 import { inspectProcessCwds, type ProcessCwdProjection } from "removely"
 import { environmentCwdHolder, processCwdCoverage } from "./env-close-holders.ts"
-import { IncompleteCensusError, closeEnvironment, environmentInventory } from "./env-commands.ts"
+import {
+  IncompleteCensusError,
+  PrivateCheckoutRefusalError,
+  closeEnvironment,
+  environmentInventory,
+  privateStoreVerifyCommand,
+} from "./env-commands.ts"
 import {
   ENV_CLOSE_PREDICATE,
   MAX_COVERAGE_ATTEMPTS,
@@ -369,6 +375,37 @@ function namedCloseRefusal(output: string): string | undefined {
   const parts = [`kept: ${row.class}`]
   if (typeof row.store === "string" && row.store !== "") parts.push(`store ${row.store}`)
   if (typeof row.command === "string" && row.command !== "") parts.push(`retire with ${row.command}`)
+  return parts.join("; ")
+}
+
+/**
+ * One named class from a cause that IS a typed private refusal at any depth, or undefined for any other cause.
+ * Read from the guard's own structured payload — never from message prose, and never a second `modules/<name>`
+ * derivation — so the sweep reports `kept: private checkout; store <store>; retire with <command>` for the tree,
+ * not a per-seat note (#27120 AC2). This is the boundary the refusal actually crosses: both the pre-close
+ * inspection and the close THROW it, so the exit-code formatter below is never reached on a refusal.
+ */
+function namedPrivateStoreRefusal(cause: unknown, environment: string): string | undefined {
+  for (let at: unknown = cause; at instanceof Error; at = at.cause) {
+    if (at instanceof PrivateStoreRefusalError) {
+      return at.refusals.length === 0
+        ? undefined
+        : at.refusals.map((entry) => namedPrivateCheckout(join(environment, entry.path), entry.store)).join("; ")
+    }
+    if (at instanceof PrivateCheckoutRefusalError) {
+      return namedPrivateCheckout(at.refusal.checkout, at.refusal.store)
+    }
+  }
+  return undefined
+}
+
+/** The one line a private checkout is reported by: its class, the store, and the route that retires it. */
+function namedPrivateCheckout(checkout: string, store: string | undefined): string {
+  const parts = ["kept: private checkout"]
+  if (store !== undefined) {
+    parts.push(`store ${store}`)
+    parts.push(`retire with ${privateStoreVerifyCommand(store, checkout)}`)
+  }
   return parts.join("; ")
 }
 
@@ -874,7 +911,7 @@ async function cleanupEnvironments(
       } else if ("kept" in result && result.kept === row.path) preserve(row.path, output.trim())
       else throw new Error(`unproven close result ${output}`)
     } catch (cause) {
-      preserve(row.path, String(cause))
+      preserve(row.path, namedPrivateStoreRefusal(cause, row.path) ?? String(cause))
     }
   }
   progress.cursor = stoppedAt < 0 ? 0 : (offset + stoppedAt) % inventory.rows.length

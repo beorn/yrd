@@ -691,6 +691,28 @@ function quotePath(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`
 }
 
+/** The one route a private store is retired by, built here so the refusal and every reporter name the same command. */
+export function privateStoreVerifyCommand(store: string, checkout: string): string {
+  return `git super worktree private-store verify ${quotePath(store)} --checkout ${quotePath(checkout)}`
+}
+
+/**
+ * #27120 AC2: a private checkout `env close` will not retire, as a CLASS a caller reads without parsing this
+ * message or re-deriving `modules/<name>`. The store and the verify route come from the same reader that
+ * refused, so the queue sweep can report the tree by class (`kept: private checkout; store …; retire with …`)
+ * instead of quoting a per-seat note. `store` is absent when the checkout is initialized but its store is
+ * already gone, where there is no store route to name.
+ */
+export class PrivateCheckoutRefusalError extends Error {
+  constructor(
+    message: string,
+    readonly refusal: Readonly<{ submodule: string; checkout: string; store?: string; command?: string }>,
+  ) {
+    super(message)
+    this.name = "PrivateCheckoutRefusalError"
+  }
+}
+
 /**
  * Whether an entry is present, WITHOUT following it: absent when there is nothing at that name, a real fault
  * otherwise. `existsSync` would collapse an unreadable parent into "absent" and let the close proceed past a
@@ -794,10 +816,7 @@ export async function closeEnvironment(
     // exit 2) and it NAMES THE ROUTE at whichever stage the operator is standing in. In --json it
     // also carries one structured class, so a sweep can report the tree by class instead of quoting
     // a per-seat note.
-    const verify =
-      store === undefined
-        ? undefined
-        : `git super worktree private-store verify ${quotePath(store)} --checkout ${quotePath(checkout)}`
+    const verify = store === undefined ? undefined : privateStoreVerifyCommand(store, checkout)
     const stage = initialized
       ? `its checkout ${checkout} is initialized and still holds private content`
       : `its checkout is empty but the private store ${store} is still present, so a removal would destroy it`
@@ -812,9 +831,10 @@ export async function closeEnvironment(
         `${JSON.stringify({ kept: path, class: "private checkout", submodule: privatePath, checkout, store, command: verify })}\n`,
       )
     }
-    throw new Error(
+    throw new PrivateCheckoutRefusalError(
       `environment ${path} cannot close with private submodule ${privatePath}: private checkout, custody not proven — ${stage}. ` +
         `Retire it by operator steps: ${steps.join("; ")}. This tool reads, copies, hashes and renames nothing in the store.`,
+      { submodule: privatePath, checkout, store, command: verify },
     )
   }
   await requireClean(treeGit, path)
