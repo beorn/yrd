@@ -119,26 +119,29 @@ export async function remoteHead(git: Git, remote: string): Promise<string> {
   return branch
 }
 
-export async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git?: Git): Promise<string> {
-  const declared = git !== undefined ? await configValue(git, "yrd.workdir") : undefined
+export async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: Git): Promise<string> {
+  const declared = await configValue(git, "yrd.workdir")
   if (declared !== undefined) return resolve(repositoryHere(cwd) ?? cwd, declared)
   return join(env.XDG_STATE_HOME ?? join(env.HOME ?? homedir(), ".local", "state"), "yrd")
 }
 
 /**
- * The host workdir for a caller that holds no Git of its own: resolve one for the repository containing
- * `cwd` first, so a DECLARED `yrd.workdir` is read.
+ * The host workdir for a caller that holds no Git of its own: resolve one for `cwd` and pass it, so a
+ * DECLARED `yrd.workdir` is read from every scope git reads.
  *
  * `hostWorkdir` reads `yrd.workdir` only from a supplied Git, so a caller that omits one silently takes the
  * `$XDG_STATE_HOME/yrd` fallback — which, on a host that declares its own workdir, is not where its queues
  * live. `yrd queue retire-root` did exactly that and refused its own live root by name on this host (28601):
- * the verb was unusable, and no cwd or environment reached the declared root. Outside a repository there is
- * nothing to read and the fallback is the right answer, so that case is unchanged.
+ * the verb was unusable, and no cwd or environment reached the declared root.
+ *
+ * ONE resolution, inside a repository or outside it: git reads a LOCAL config only inside one, but a GLOBAL
+ * or SYSTEM `yrd.workdir` outside it — exactly as `resolveQueueLocation` resolves its own Git (queue-location
+ * :253) before any inside-repository check. The XDG fallback is right only when NO scope declares the key,
+ * never because the caller happened to stand outside a repository (@cto 044d3ffd change 1).
  */
 export async function hostWorkdirHere(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
-  const inside = repositoryHere(cwd)
-  if (inside === undefined) return hostWorkdir(cwd, env)
-  return hostWorkdir(cwd, env, gitIn(inside, undefined, await resolveGitSelection(cwd, { env }), { env }))
+  const git = gitIn(repositoryHere(cwd) ?? cwd, undefined, await resolveGitSelection(cwd, { env }), { env })
+  return hostWorkdir(cwd, env, git)
 }
 
 /**
