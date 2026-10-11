@@ -64,7 +64,11 @@ function hostedEnv(rootRemote: string, childRemote: string): NodeJS.ProcessEnv {
  * the shape a deferred round's publication leaves on retry (27170 round 2; dev11 run e1975a26).
  */
 async function world(
-  options: Readonly<{ privateChild?: boolean; componentMain?: "descends" | "forks" | "published" }> = {},
+  options: Readonly<{
+    privateChild?: boolean
+    componentMain?: "descends" | "forks" | "published"
+    removesChild?: boolean
+  }> = {},
 ): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-derive-"))
   roots.push(root)
@@ -97,6 +101,13 @@ async function world(
   writeFileSync(join(work, "target.txt"), "base\n")
   writeFileSync(join(work, ".yrd.yml"), "{}\n")
   await git(["submodule", "add", "--quiet", LIB_URL, "lib"])
+  if (options.removesChild === true) {
+    // The removed submodule is NESTED at vendor/<name> - the brain8 shape - so the fixture exercises the RECURSIVE
+    // base-gitlink read; a top-level path passes even with a non-recursive `git ls-tree`. The second submodule also
+    // keeps `.gitmodules` non-empty when its own section goes: emptying it trips the declared-submodule reader
+    // (`git config --get-regexp` exits 1 with no match), which no real repo does.
+    await git(["submodule", "add", "--quiet", LIB_URL, "vendor/nested"])
+  }
   if (options.privateChild === true) {
     // 27147: a child declared private is never materialized; the compose excludes it, and so must the derived one.
     await git(["config", "--file", ".gitmodules", "submodule.vendor/secret.path", "vendor/secret"])
@@ -124,6 +135,16 @@ async function world(
   await git(["add", "lib"])
   await git(["commit", "--quiet", "-m", "bump lib"])
   await git(["push", "--quiet", "origin", "task/bump"])
+  if (options.removesChild === true) {
+    // 28734: the change REMOVES the submodule. `git rm --cached` drops the gitlink from the index while the populated
+    // working tree stays on disk, which is exactly the leftover the compose's own checkout leaves when a candidate
+    // deletes a gitlink (the worktree is created at the target, so the submodule is materialized first).
+    await git(["rm", "--quiet", "--cached", "vendor/nested"])
+    await git(["config", "--file", ".gitmodules", "--remove-section", "submodule.vendor/nested"])
+    await git(["add", ".gitmodules"])
+    await git(["commit", "--quiet", "-m", "remove vendor/nested"])
+    await git(["push", "--quiet", "origin", "task/bump"])
+  }
   const head = (await git(["rev-parse", "HEAD"])).trim()
   await git(["checkout", "--quiet", "main"])
   if (options.componentMain === undefined) return { root, work, git, childRemote, target, head, env }
@@ -164,18 +185,30 @@ async function world(
  * a function of the merged gitlinks: run again on the derived candidate it writes the same bytes. (A derive that
  * copied the pin of the submodule it writes into would never be — the compose's second run catches that.)
  */
-function deriveScript(root: string, variant: "ok" | "root" | "fail" = "ok"): string {
+function deriveScript(
+  root: string,
+  variant: "ok" | "root" | "fail" | "quiet" | "perfile" | "staged" = "ok",
+): string {
   const script = join(root, `derive-${variant}.sh`)
+  const touchesLib = variant === "ok" || variant === "root" || variant === "fail"
   writeFileSync(
     script,
     [
       "#!/bin/sh",
       "set -e",
-      'pin=$(git -C "$YRD_REPO/lib" show HEAD:lib.txt)',
+      touchesLib ? 'pin=$(git -C "$YRD_REPO/lib" show HEAD:lib.txt)' : "",
       variant === "fail" ? 'echo "derive broke on purpose" >&2; exit 7' : "",
-      'printf "derived-from: %s\\n" "$pin" > "$YRD_REPO/lib/derived.txt"',
+      touchesLib ? 'printf "derived-from: %s\\n" "$pin" > "$YRD_REPO/lib/derived.txt"' : "",
       variant === "root" ? 'printf "root\\n" > "$YRD_REPO/root-derived.txt"' : "",
-      'echo "chore(lib): derived.txt follows lib ${pin}"',
+      variant === "quiet" ? 'echo "chore: nothing to derive"' : "",
+      // The leftover is reported as every file under the removed path once the directory no longer holds a `.git`
+      // file, so this variant reaches git's per-file form of the same leftover (the collapsed `vendor/nested/`
+      // entry is the other form, which `quiet` reaches).
+      variant === "perfile" ? 'rm -f "$YRD_REPO/vendor/nested/.git"\necho "chore: nothing to derive"' : "",
+      variant === "staged"
+        ? 'blob=$(printf "edited\\n" | git -C "$YRD_REPO" hash-object -w --stdin)\ngit -C "$YRD_REPO" update-index --add --cacheinfo 100644,$blob,vendor/nested/keep.txt\necho "chore: staged a tracked change under the removed submodule"'
+        : "",
+      touchesLib ? 'echo "chore(lib): derived.txt follows lib ${pin}"' : "",
       "",
     ].join("\n"),
     { mode: 0o755 },
@@ -448,4 +481,46 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
     expect(log).toBeDefined()
     expect(readFileSync(log as string, "utf8")).toContain("derive broke on purpose")
   })
+
+  /** @failure 28734: a candidate that REMOVES a submodule leaves the submodule's populated working tree behind, the
+   * compose reports it as one untracked `lib/` entry, and the guard blamed the derive for a change the CHECKOUT made —
+   * so no submodule removal could land through the queue.
+   * @level l2 @consumer the event queue's compose step (event-run.ts) through verifyCandidate and deriveInWorktree
+   */
+  it("admits the leftover of a submodule the candidate removes, and a run that only reconciled it derives nothing", async () => {
+    const w = await world({ removesChild: true })
+    const verified = await compose(w, deriveScript(w.root, "quiet"), "removed")
+    expect(verified.state).toBe("verified")
+    expect(verified.verifying.state).toBe("verified")
+    const candidate = (verified.verifying as Readonly<{ candidate: string }>).candidate
+    // The landed candidate is the plain compose: the REMOVED submodule is gone and nothing was derived on a carrier.
+    expect((await w.git(["ls-tree", candidate, "vendor/nested"])).trim()).toBe("")
+    expect(verified.verifying.gitlinks.some((row) => row.path === "vendor/nested")).toBe(false)
+  })
+
+  /** @failure 28734: git reports the removed submodule's leftover in two shapes - the collapsed `vendor/nested/`
+   * entry (the directory still holds a `.git` file) and one entry per file under it. Both are the checkout's, so
+   * both must be admitted; a fix that only matched the collapsed entry would still refuse the real case.
+   * @level l2 @consumer the event queue's compose step (event-run.ts) through verifyCandidate and deriveInWorktree
+   */
+  it("admits the per-file form of the removed submodule's leftover", async () => {
+    const w = await world({ removesChild: true })
+    const verified = await compose(w, deriveScript(w.root, "perfile"), "perfile")
+    expect(verified.state).toBe("verified")
+    const candidate = (verified.verifying as Readonly<{ candidate: string }>).candidate
+    expect((await w.git(["ls-tree", candidate, "vendor/nested"])).trim()).toBe("")
+  })
+
+  /** @failure 28734: the exception for a removed submodule admits only untracked content under it. A TRACKED change
+   * under the removed path is a real root change and must keep refusing, or the guard would swallow any write that
+   * happened to land under a path a candidate deleted.
+   * @level l2 @consumer the event queue's compose step (event-run.ts) through verifyCandidate and deriveInWorktree
+   */
+  it("still refuses a tracked change under the path of a submodule the candidate removes", async () => {
+    const w = await world({ removesChild: true })
+    await expect(compose(w, deriveScript(w.root, "staged"), "staged")).rejects.toThrow(
+      /vendor\/nested\/keep\.txt.*outside every submodule; root derivation is not admitted yet/u,
+    )
+  })
+
 })

@@ -20,6 +20,10 @@
  * two-parent merge that freezes its own publication intent. Any other exit, a
  * change outside a submodule, or a command that is not there stops the
  * compose by name: the change is stuck, the queue's, never the submitter's.
+ * A submodule the CANDIDATE removes is the one exception: its populated
+ * leftover directory is the checkout's, not the derive's, so an untracked
+ * change under a path the target declared as a gitlink is admitted, and a run
+ * that only reconciled it derived nothing (28734, @cto 2026-10-11).
  */
 import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
@@ -123,22 +127,55 @@ export async function deriveInWorktree(options: DeriveInWorktree): Promise<Deriv
   const status = (await root(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"])).split(
     "\n",
   )
-  const changedPaths = status.filter((line) => line.trim() !== "").map((line) => line.slice(3).trim())
-  if (changedPaths.length === 0) return undefined
+  const lines = status.filter((line) => line.trim() !== "")
+  if (lines.length === 0) return undefined
+  // `git status --porcelain=v1` prints two status columns, a space, then the path.
+  const changes = lines.map((line) => ({ path: line.slice(3).trim(), untracked: line.startsWith("??") }))
   const gitlinks = new Set(
     (await root(["ls-files", "-s"]))
       .split("\n")
       .filter((line) => line.startsWith("160000 "))
       .map((line) => line.split("\t")[1] ?? ""),
   )
-  const outside = changedPaths.filter((path) => !gitlinks.has(path))
+  // A gitlink the TARGET declared and the candidate no longer does: the compose's checkout leaves that submodule's
+  // populated working tree behind (git cannot rmdir a non-empty directory), which `git status` reports as one untracked
+  // entry (`vendor/brain8/`). The leftover is the CHECKOUT's, not the derive's (28734, @cto 2026-10-11), so the path is
+  // in scope while every change under it is untracked working-tree content. A TRACKED change under it, or a path the
+  // target never declared, still refuses exactly as before.
+  const baseGitlinks = new Set(
+    // `-r` lists gitlinks by their FULL paths and never descends into one, so a NESTED gitlink (`vendor/brain8`) is
+    // read; without it only the root tree's immediate entries are listed and every nested path is missed.
+    (await root(["ls-tree", "-r", "--full-tree", options.targetHead]))
+      .split("\n")
+      .filter((line) => line.startsWith("160000 "))
+      .map((line) => (line.split("\t")[1] ?? "").trim()),
+  )
+  // The leftover is reported either as the collapsed directory (`vendor/brain8/`, when the directory holds a `.git`
+  // file) or as every file under it, so a changed path is judged by its ancestors: under a gitlink the candidate no
+  // longer declares is in scope, under one it still declares is not.
+  const underRemovedGitlink = (path: string) => {
+    const segments = path.replace(/\/+$/u, "").split("/")
+    for (let depth = segments.length; depth > 0; depth--) {
+      const ancestor = segments.slice(0, depth).join("/")
+      if (gitlinks.has(ancestor)) return false
+      if (baseGitlinks.has(ancestor)) return true
+    }
+    return false
+  }
+  const outside = changes.filter(
+    (change) => !gitlinks.has(change.path) && !(change.untracked && underRemovedGitlink(change.path)),
+  )
   if (outside.length > 0) {
     throw new DeriveFailed(
       candidate,
-      `\`${derive.run}\` changed ${outside.join(", ")} outside every submodule; root derivation is not admitted yet (27176 first slice): a derive may only regenerate files inside a submodule`,
+      `\`${derive.run}\` changed ${outside.map((change) => change.path).join(", ")} outside every submodule; root derivation is not admitted yet (27176 first slice): a derive may only regenerate files inside a submodule`,
       ran,
     )
   }
+  // Only a candidate gitlink is a submodule the derive may commit on; the admitted leftover is not one, so a run that
+  // merely reconciled it derived nothing.
+  const changedPaths = changes.filter((change) => gitlinks.has(change.path)).map((change) => change.path)
+  if (changedPaths.length === 0) return undefined
   const subject = await subjectOf(derive, candidate, ran)
   const submodules: Derived["submodules"][number][] = []
   for (const path of [...changedPaths].sort()) {
