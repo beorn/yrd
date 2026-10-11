@@ -9,8 +9,8 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
-import { refusePrivateStoreRemoval } from "../src/worktree.ts"
+import { afterAll, describe, expect, it, vi } from "vitest"
+import { discardWorktree, refusePrivateStoreRemoval, type Worktree } from "../src/worktree.ts"
 import { testGitIn } from "../../../tests/support/test-git-in.ts"
 
 const roots: string[] = []
@@ -103,5 +103,38 @@ describe("a plain removal asks the declaration before it deletes a checkout (286
     await expect(refusePrivateStoreRemoval(testGitIn(repo, undefined, undefined, { env }), linked, repo)).resolves.toBe(
       undefined,
     )
+  })
+})
+
+// C4: a REFUSED removal must not wedge the round. `discardWorktree` is what every cleanup caller now uses: the
+// tree is skipped, named ONCE, and the caller continues with its own verdict intact.
+describe("a refused discard skips the tree, names it once and lets the round continue (28661 C4)", () => {
+  it("keeps the worktree, warns once, and resolves instead of throwing", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-discard-refused-"))
+    roots.push(root)
+    const { repo, linked, store } = await fixture(root, "head")
+    const git = testGitIn(repo, undefined, undefined, { env })
+    const tree: Worktree = {
+      path: linked,
+      commit: "HEAD",
+      excludedSubmodules: [],
+      remove: async () => {
+        await refusePrivateStoreRemoval(git, linked, repo)
+        rmSync(linked, { force: true, recursive: true })
+      },
+    }
+    const warned: string[] = []
+    const spy = vi.spyOn(console, "warn").mockImplementation((line?: unknown) => {
+      warned.push(String(line))
+    })
+    try {
+      await expect(discardWorktree(tree)).resolves.toBeUndefined()
+      await expect(discardWorktree(tree)).resolves.toBeUndefined()
+    } finally {
+      spy.mockRestore()
+    }
+    expect(existsSync(linked)).toBe(true)
+    expect(existsSync(store)).toBe(true)
+    expect(warned.filter((line) => line.includes(linked))).toHaveLength(1)
   })
 })

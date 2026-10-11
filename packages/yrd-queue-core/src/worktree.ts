@@ -24,7 +24,7 @@
 import { existsSync, lstatSync, readFileSync, readlinkSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import type { Process } from "@yrd/process"
-import { assertNoPrivateStore, createGitWorktreeStore } from "git-super/worktree"
+import { assertNoPrivateStore, createGitWorktreeStore, PrivateStoreRefusalError } from "git-super/worktree"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
@@ -616,6 +616,43 @@ export async function refusePrivateStoreRemoval(git: Git, checkout: string, repo
     repository: resolve(repo),
     head,
   })
+}
+
+/**
+ * 28661 C4: discard a prepared worktree at the end of a round. A removal REFUSED because the tree's admin dir
+ * holds a declared-private submodule store must not wedge the round: the tree is skipped, named once, and the
+ * round's own verdict stands. Every other failure still throws — the CLASS is the whole difference, so no
+ * caller matches message text.
+ */
+export async function discardWorktree(tree: Worktree): Promise<void> {
+  try {
+    await tree.remove()
+  } catch (cause) {
+    if (!isPrivateStoreRefusal(cause)) throw cause
+    nameAbandonedTree(tree.path, messageOf(cause))
+  }
+}
+
+/** True when a removal was refused to protect a private submodule store, at ANY depth of the cause chain. */
+export function isPrivateStoreRefusal(cause: unknown): boolean {
+  for (let at: unknown = cause; at instanceof Error; at = at.cause) {
+    if (at instanceof PrivateStoreRefusalError) return true
+  }
+  return false
+}
+
+/** Paths already named, so an abandoned tree is announced once per process rather than once per round. */
+const namedAbandonedTrees = new Set<string>()
+
+/** One loud line: the tree stays, the queue continues, and the cure is the operator's. */
+export function nameAbandonedTree(path: string, why: string): void {
+  if (namedAbandonedTrees.has(path)) return
+  namedAbandonedTrees.add(path)
+  console.warn(`yrd: kept worktree ${path}: ${why}; the queue skips it and continues\n`)
+}
+
+function messageOf(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause)
 }
 
 /** A worktree's own Git dir, read from the checkout's `.git` entry alone, so a broken repository is never asked. */

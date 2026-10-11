@@ -175,7 +175,9 @@ export { declaredPrivateSubmodules, refuseMovedPrivateGitlinks } from "./private
 export {
   checkedTree,
   claimWorktrees,
+  discardWorktree,
   freshWorktree,
+  isPrivateStoreRefusal,
   prepareWorktree,
   registeredWorktrees,
   runSetup,

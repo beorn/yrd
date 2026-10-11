@@ -11,7 +11,7 @@ import {
   type Git,
   type GitInvocationOptions,
 } from "./git.ts"
-import { freshWorktree, type FreshWorktree, type Worktree } from "./worktree.ts"
+import { freshWorktree, type FreshWorktree, type Worktree, discardWorktree } from "./worktree.ts"
 import { populateReferenceStores } from "./reference.ts"
 import { anchorPreviewCustody } from "./preview-custody.ts"
 import { DeriveFailed, deriveInWorktree, type Derived, type DeriveSpec } from "./derive.ts"
@@ -105,7 +105,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
     }
     result = await superMerge(options, worktree.path, options.head, options.message, worktree.excludedSubmodules)
   } catch (error) {
-    await worktree.remove()
+    await discardWorktree(worktree)
     throw error
   }
   const evidence = {
@@ -118,7 +118,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
   }
   if (result.state !== "updated" || result.partial) {
     if (result.detail === undefined) {
-      await worktree.remove()
+      await discardWorktree(worktree)
       throw new Error(`git-super merge of ${options.head} returned ${result.state} without a failure detail`)
     }
     return {
@@ -128,7 +128,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
     }
   }
   if (result.commit === undefined) {
-    await worktree.remove()
+    await discardWorktree(worktree)
     throw new Error(`git-super merge of ${options.head} reported updated without a commit`)
   }
   let derived: (Derived & Readonly<{ composed: string; recomposed: string }>) | undefined
@@ -152,7 +152,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
         }),
       )
     } catch (error) {
-      await worktree.remove()
+      await discardWorktree(worktree)
       throw error
     }
     if (outcome !== undefined) {
@@ -168,7 +168,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
       if (recomposed.state !== "updated" || recomposed.partial || recomposed.commit === undefined) {
         // The CHANGE is stuck by name, never the run: the service exited on this very refusal on 2026-10-02
         // 18:02 PDT (27170 round 2) because it surfaced as a run error the runner could not judge.
-        await worktree.remove()
+        await discardWorktree(worktree)
         throw new DeriveFailed(
           composed,
           `composing the carrier ${outcome.carrier.slice(0, 12)} into ${composed.slice(0, 12)} returned ${recomposed.state}${
@@ -197,11 +197,11 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
           }),
         )
       } catch (error) {
-        await worktree.remove()
+        await discardWorktree(worktree)
         throw error
       }
       if (again !== undefined) {
-        await worktree.remove()
+        await discardWorktree(worktree)
         throw new DeriveFailed(
           recomposed.commit,
           `a second run on the derived candidate changed ${again.submodules.map((row) => row.path).join(", ")} again; derive must be a function of the merged gitlinks`,
@@ -244,7 +244,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
       // recomposed tree git-super built, so a different tree is stopped by name, never landed.
       const landableTree = (await inWorktree(["rev-parse", `${landable}^{tree}`])).trim()
       if (landableTree !== tree) {
-        await worktree.remove()
+        await discardWorktree(worktree)
         throw new DeriveFailed(
           recomposed.commit as string,
           `the re-parented candidate ${landable.slice(0, 12)} carries tree ${landableTree.slice(0, 12)}, not the recomposed tree ${tree.slice(0, 12)}; the re-parent must compose nothing`,
@@ -334,7 +334,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
         }),
       )
     } catch (error) {
-      await worktree.remove()
+      await discardWorktree(worktree)
       throw error
     }
   }
@@ -369,7 +369,7 @@ export async function verifyCandidate(options: VerificationOptions): Promise<Ver
       swallowed: [],
     }
   }
-  await worktree.remove()
+  await discardWorktree(worktree)
   return {
     state: "verified",
     verifying: {

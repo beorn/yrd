@@ -13,6 +13,7 @@ import {
   SetupFailed,
   type PrepareWorktree,
   type PreparedWorktree,
+  discardWorktree,
 } from "./worktree.ts"
 
 /** Execution inputs only: no queue steps, refs, publication or merge capability. */
@@ -375,9 +376,9 @@ export async function programRootCheck(input: ProgramRootCheck): Promise<CheckRe
   } finally {
     try {
       try {
-        if (subject !== undefined) await subject.remove()
+        if (subject !== undefined) await discardWorktree(subject)
       } finally {
-        if (program !== undefined) await program.remove()
+        if (program !== undefined) await discardWorktree(program)
       }
     } finally {
       if (run.queueRun === true) {

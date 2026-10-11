@@ -2,7 +2,7 @@
 import type { Process } from "@yrd/process"
 import { gitIn, resolveGitSelection, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
 import type { RootChanges } from "./root-changes.ts"
-import { freshWorktree, type PlumbingLog } from "./worktree.ts"
+import { freshWorktree, type PlumbingLog, discardWorktree } from "./worktree.ts"
 
 export async function settledBaseCommit(
   options: Readonly<{
@@ -58,7 +58,7 @@ export async function settledBaseCommit(
       await options.git(["fetch", "--quiet", composing.path, commit])
     }
   } finally {
-    await composing.remove()
+    await discardWorktree(composing)
   }
   return commit
 }

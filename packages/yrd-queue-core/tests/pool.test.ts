@@ -12,7 +12,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterAll, expect, it } from "vitest"
 import type { Git } from "../src/git.ts"
@@ -133,4 +133,56 @@ it("refuses reuse only for a tracked change inside a submodule, never for an unt
   expect(notes.join(" ")).toContain("tracked modification")
   expect(existsSync(join(third.path, WITNESS))).toBe(false)
   await third.remove()
+})
+
+// C4: a pooled tree whose removal is REFUSED to protect a private store is skipped, named once, and the round
+// continues on a spare path. It is never counted as free capacity and never retried in a later round.
+it("abandons a pooled tree it may not delete, and continues on a spare path", async () => {
+  const { git, repo, pool, notes } = await poolFixture()
+  // A PUBLIC child the tree actually materializes, so a tracked change in it refuses reuse by name...
+  const sub = join(repo, "..", "sub")
+  mkdirSync(sub)
+  writeFileSync(join(sub, "lib.ts"), "export const lib = 1\n")
+  const subGit = gitIn(sub)
+  await subGit(["init", "--quiet", "--initial-branch=main"])
+  await subGit(["config", "user.email", "pool@yrd.test"])
+  await subGit(["config", "user.name", "pool-fixture"])
+  await subGit(["add", "lib.ts"])
+  await subGit(["commit", "--quiet", "-m", "sub"])
+  await git(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", sub, "vendor/pkg"])
+  await git(["commit", "--quiet", "-m", "add submodule"])
+  // ...and a PRIVATE child, declared and never initialized, whose store the guard protects.
+  writeFileSync(
+    join(repo, ".gitmodules"),
+    '[submodule "vendor/pkg"]\n\tpath = vendor/pkg\n\turl = ' +
+      sub +
+      '\n[submodule "vendor/secret"]\n\tpath = vendor/secret\n\turl = https://example.invalid/secret.git\n\tprivate = true\n',
+  )
+  await git(["add", ".gitmodules"])
+  await git(["update-index", "--add", "--cacheinfo", "160000," + "1".repeat(40) + ",vendor/secret"])
+  await git(["commit", "--quiet", "-m", "declare the private child"])
+  const commit = (await git(["rev-parse", "HEAD"])).trim()
+
+  const first = await borrowWithCache(pool, commit)
+  // The store the guard protects, placed in THIS tree's own admin dir, where prune and rmSync would take it.
+  const admin = (
+    await git(["rev-parse", "--path-format=absolute", "--git-path", join("worktrees", basename(first))])
+  ).trim()
+  mkdirSync(join(admin, "modules", "vendor", "secret"), { recursive: true })
+  // A TRACKED change inside the public child: reuse is refused by name, so the round must discard the tree.
+  writeFileSync(join(first, "vendor", "pkg", "lib.ts"), "export const lib = 2\n")
+
+  const second = await pool.borrow({ commit, role: "candidate", targetSha: commit })
+  expect(notes.join(" ")).toContain("tracked modification")
+  expect(existsSync(first), "the tree is skipped, never deleted").toBe(true)
+  expect(existsSync(join(admin, "modules", "vendor", "secret"))).toBe(true)
+  expect(second.path, "an abandoned tree is not free capacity").not.toBe(first)
+  expect(second.path).toContain("-spare-")
+  expect(notes.join(" ")).toContain("keeps it and continues")
+
+  const third = await pool.borrow({ commit, role: "candidate", targetSha: commit })
+  // Named ONCE: a later round must not retry a removal nobody has cured.
+  expect(notes.filter((note) => note.includes("keeps it and continues"))).toHaveLength(1)
+  await third.remove()
+  await second.remove()
 })

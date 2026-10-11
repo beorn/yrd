@@ -22,6 +22,7 @@ import { join, resolve } from "node:path"
 import { safeRemoveSync } from "removely"
 import type { Process } from "@yrd/process"
 import { createGitWorktreeStore } from "git-super/worktree"
+import { isPrivateStoreRefusal, nameAbandonedTree } from "./worktree.ts"
 import { gitIn, seamProcess, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
 import { declaredPrivateSubmodules } from "./private-submodules.ts"
 import {
@@ -83,9 +84,19 @@ export type WorktreePoolOptions = Readonly<{
 export class WorktreePool {
   constructor(private readonly options: WorktreePoolOptions) {}
 
+  /**
+   * Pooled trees this pool has stopped using: a removal was REFUSED to protect a private submodule store
+   * (28661). They are never handed to a round again (not free capacity) and never retried in a later round,
+   * because the cure is the operator's: empty the checkout, verify the store, remove it.
+   */
+  private readonly abandoned = new Set<string>()
+
   /** A prepared tree of `commit` for `role`, warm when it can be, fresh when it must be. */
   async borrow(input: BorrowPooled): Promise<PreparedWorktree> {
     const path = pooledWorktreePath(this.options.workdir, this.options.ref, input.role)
+    // An abandoned tree is not capacity: the round runs on a spare path this pool owns rather than reusing or
+    // re-deleting bytes no caller proved (28661 C4).
+    if (this.abandoned.has(path)) return await this.materialize(this.sparePath(path), input)
     if (!existsSync(path)) return await this.materialize(path, input)
     let cause: string
     try {
@@ -95,22 +106,48 @@ export class WorktreePool {
       // judge either. The rebuild below is fresh-by-construction, so it is safe
       // to abandon the directory, and the cause is named rather than swallowed.
       this.note(input, `pooled ${input.role} tree could not be inspected: ${messageOf(error)}`)
-      await this.forget(path)
-      return await this.materialize(path, input)
+      return await this.materialize(await this.discard(path, input), input)
     }
     if (cause !== "") {
       this.note(input, cause)
-      await this.forget(path)
-      return await this.materialize(path, input)
+      return await this.materialize(await this.discard(path, input), input)
     }
     try {
       await this.reset(path, input)
     } catch (error) {
       this.note(input, `pooled ${input.role} tree could not be reset: ${messageOf(error)}`)
-      await this.forget(path)
-      return await this.materialize(path, input)
+      return await this.materialize(await this.discard(path, input), input)
     }
     return await this.setupAt(path, input)
+  }
+
+  /**
+   * Discard a pooled tree and hand back the path the round should materialize at. A removal refused to protect
+   * a private submodule store ABANDONS the tree — skipped, named once, never counted as free capacity, never
+   * retried next round — and the round continues on a spare path. Every other failure still throws.
+   */
+  private async discard(path: string, input: BorrowPooled): Promise<string> {
+    try {
+      await this.forget(path)
+      return path
+    } catch (error) {
+      if (!isPrivateStoreRefusal(error)) throw error
+      this.abandoned.add(path)
+      const why = `pooled ${input.role} tree ${path} could not be removed: ${messageOf(error)}; the queue keeps it and continues`
+      if (input.note ?? this.options.note) this.note(input, why)
+      else nameAbandonedTree(path, messageOf(error))
+      return this.sparePath(path)
+    }
+  }
+
+  /** A path this pool owns that no abandoned tree occupies; the pool root stays the bound every removal uses. */
+  private sparePath(path: string): string {
+    let index = 1
+    for (;;) {
+      const candidate = `${path}-spare-${index}`
+      if (!existsSync(candidate) && !this.abandoned.has(candidate)) return candidate
+      index++
+    }
   }
 
   /**

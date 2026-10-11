@@ -3,6 +3,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   gitIn,
+  isPrivateStoreRefusal,
   readBranchHistory,
   type Git,
   type GitRunner,
@@ -270,6 +271,36 @@ async function consumeCloseRequests(
             request.path,
             "kept",
             `coverage refused ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${cause.refusal}`,
+            fingerprint,
+          )
+          restoreCloseRequest(staged, file, attempts)
+        }
+        continue
+      }
+      if (isPrivateStoreRefusal(cause)) {
+        // 28661 C4: a close refused to protect a declared-private submodule store is not the queue's to fix.
+        // The tree stays, the round CONTINUES, and the request stays standing so the operator's cure is done
+        // once and the next round closes it - bounded exactly like the coverage refusal, so it is named and
+        // never nagged. Dropping it as "retired" would erase who asked for the close.
+        const attempts = (request.coverageAttempts ?? 0) + 1
+        const refused = { ...request, coverageAttempts: attempts }
+        if (attempts >= MAX_COVERAGE_ATTEMPTS) {
+          journal(
+            file,
+            refused,
+            request.path,
+            "retired",
+            `a private submodule store refused the close ${attempts} times; last: ${String(cause)}`,
+            fingerprint,
+          )
+          dropCloseRequest(staged)
+        } else {
+          journal(
+            file,
+            refused,
+            request.path,
+            "kept",
+            `a private submodule store refused the close ${attempts} of ${MAX_COVERAGE_ATTEMPTS}; retried next round: ${String(cause)}`,
             fingerprint,
           )
           restoreCloseRequest(staged, file, attempts)

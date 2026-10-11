@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { pushRefUpdates } from "git-super/push"
 import { retryTransientPush } from "./transient-push.ts"
+import { discardWorktree } from "./worktree.ts"
 import { refuseMovedPrivateGitlinks } from "./private-submodules.ts"
 import {
   Conflict,
