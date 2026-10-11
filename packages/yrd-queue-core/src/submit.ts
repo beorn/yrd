@@ -19,11 +19,11 @@
  * queue event tip (event format) prevents a stop racing with publication.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { pushRefUpdates } from "git-super/push"
 import { retryTransientPush } from "./transient-push.ts"
-import { discardWorktree } from "./worktree.ts"
+import { discardWorktree, removeWorktreeRunScaffold } from "./worktree.ts"
 import { refuseMovedPrivateGitlinks } from "./private-submodules.ts"
 import {
   Conflict,
@@ -909,7 +909,9 @@ async function composeSubmit(
       )
     }
   } finally {
-    rmSync(scratch, { recursive: true, force: true })
+    // 28661 C4: `discardWorktree` may have KEPT the failed candidate to protect a private-store custody
+    // question; a blanket `rmSync(scratch, { recursive: true })` would delete the kept checkout anyway.
+    removeWorktreeRunScaffold(scratch)
   }
   return verifying
 }

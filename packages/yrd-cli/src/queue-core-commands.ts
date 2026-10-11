@@ -21,7 +21,6 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs"
@@ -188,6 +187,7 @@ import {
   RUN_INDEX_CODES,
   openEvents,
   discardWorktree,
+  removeWorktreeRunScaffold,
   type SubmitGitlink,
 } from "@yrd/queue-core"
 import { formatQueueAddress, formatStoredQueueAddress, parseQueueAddress, parseRunAddress } from "./address.ts"
@@ -3662,7 +3662,9 @@ export async function coreQueueCommand(
           try {
             if (prepared !== undefined) await discardWorktree(prepared)
           } finally {
-            rmSync(worktrees, { force: true, recursive: true })
+            // 28661 C4: this used to be `rmSync(worktrees, { recursive: true })`, which walked straight past
+            // the private-store refusal `discardWorktree` just reported and deleted the kept checkout anyway.
+            removeWorktreeRunScaffold(worktrees)
           }
         }
         emit(

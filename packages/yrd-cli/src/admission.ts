@@ -1,7 +1,14 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type ProcessResult } from "@yrd/process"
-import { discardWorktree, freshWorktree, type AdmissionVerdict, type Git, type QueueConfig } from "@yrd/queue-core"
+import {
+  discardWorktree,
+  freshWorktree,
+  removeWorktreeRunScaffold,
+  type AdmissionVerdict,
+  type Git,
+  type QueueConfig,
+} from "@yrd/queue-core"
 
 function cannotJudge(command: string, reason: string, stderr = ""): AdmissionVerdict {
   return {
@@ -89,6 +96,8 @@ export async function runAdmission(
   } catch (cause) {
     return cannotJudge(config.run, `target ${targetHead} at ${repo} could not run: ${String(cause)}`)
   } finally {
-    rmSync(scratch, { recursive: true, force: true })
+    // 28661 C4: `discardWorktree` may have KEPT the target tree to protect a private-store custody question;
+    // a blanket `rmSync(scratch, { recursive: true })` would delete the kept checkout anyway.
+    removeWorktreeRunScaffold(scratch)
   }
 }

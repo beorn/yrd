@@ -180,6 +180,7 @@ export {
   isPrivateStoreRefusal,
   prepareWorktree,
   registeredWorktrees,
+  removeWorktreeRunScaffold,
   runSetup,
   SetupFailed,
   worktreeWithoutSubmodules,

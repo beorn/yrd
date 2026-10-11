@@ -17,7 +17,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import { readJournals, type Git, type LogRecord } from "@yrd/queue-core"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
@@ -488,5 +488,72 @@ describe("one generic temp root (27721)", () => {
     )
     expect(bareExit).toBe(0)
     expect(readFileSync(seen, "utf8")).toBe(join(w.workdir, "tmp"))
+  })
+})
+
+// 28661 C4 (review2 HOLD): the check's ENCLOSING cleanup was one `rmSync(worktrees, { recursive: true })`. It ran
+// after `discardWorktree` had already refused — and reported — a private-store removal, so it deleted the very
+// checkout the round had kept, plus the retained working files inside it. This drives the real `coreQueueCommand`
+// `check` caller over a declared-private submodule and proves the refusal now survives the sweep.
+describe("the check's enclosing cleanup keeps a refused checkout (28661 C4)", () => {
+  it("reports pass while the kept checkout, its retained bytes and its store all remain", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-cli-check-private-"))
+    roots.push(root)
+    const seed = gitIn(root)
+    const remote = join(root, "remote.git")
+    const work = join(root, "work")
+    await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+    await seed(["clone", "--quiet", remote, work])
+    const git = gitIn(work)
+    await git(["config", "user.email", "queue@yrd.test"])
+    await git(["config", "user.name", "yrd"])
+    // The check's own run lays down the private administrative store and a retained file in the checkout. Only
+    // synthetic bytes are ever written, and nothing inside the store is read, copied, renamed or hashed (27058).
+    const marker = join(root, "paths.json")
+    const script = join(root, "protect.ts")
+    writeFileSync(
+      script,
+      `import { mkdirSync, readFileSync, writeFileSync } from "node:fs"\n` +
+        `import { join, resolve } from "node:path"\n` +
+        `const cwd = process.cwd()\n` +
+        `const admin = resolve(cwd, /^gitdir:\\s*(.+)$/u.exec(readFileSync(join(cwd, ".git"), "utf8").trim())[1])\n` +
+        `const store = join(admin, "modules", "vendor", "secret")\n` +
+        `mkdirSync(store, { recursive: true })\n` +
+        `writeFileSync(join(cwd, "precious.txt"), "synthetic retained bytes")\n` +
+        `writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ cwd, store }))\n`,
+    )
+    writeFileSync(join(work, ".yrd.yml"), `checks:\n  - {protect: {run: "bun ${script}"}}\n`)
+    writeFileSync(
+      join(work, ".gitmodules"),
+      '[submodule "vendor/secret"]\n\tpath = vendor/secret\n\turl = https://example.invalid/secret.git\n\tprivate = true\n',
+    )
+    await git(["add", ".yrd.yml", ".gitmodules"])
+    await git(["update-index", "--add", "--cacheinfo", `160000,${"1".repeat(40)},vendor/secret`])
+    await git(["commit", "--quiet", "-m", "declare a private submodule and the check that stores it"])
+    await git(["push", "--quiet", "origin", "main"])
+    await birthEventQueue(work, "main", { localStore: false })
+    const workdir = join(root, "queue")
+    mkdirSync(workdir, { recursive: true })
+
+    const warned: string[] = []
+    const spy = vi.spyOn(console, "warn").mockImplementation((line?: unknown) => {
+      warned.push(String(line))
+    })
+    let stdout = ""
+    const io: YrdCliIO = { cwd: work, color: false, stdout: (text) => void (stdout += text), stderr: () => {} }
+    let exit: number | undefined
+    try {
+      exit = await coreQueueCommand(work, io, { command: "check", names: ["protect"] }, { workdir })
+    } finally {
+      spy.mockRestore()
+    }
+
+    const paths = JSON.parse(readFileSync(marker, "utf8")) as Readonly<{ cwd: string; store: string }>
+    expect(exit, "a refused removal must not replace the check's verdict").toBe(0)
+    expect(stdout).toContain("protect pass")
+    expect(warned.join("\n"), "the kept tree is named once").toContain(paths.cwd)
+    expect(existsSync(paths.cwd), "the refused checkout survives the enclosing sweep").toBe(true)
+    expect(existsSync(join(paths.cwd, "precious.txt")), "the bytes the refusal retained survive").toBe(true)
+    expect(existsSync(paths.store), "the store the guard protects survives").toBe(true)
   })
 })

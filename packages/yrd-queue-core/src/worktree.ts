@@ -21,8 +21,17 @@
  * git transcript. The caller hands in a logger only when trace is on.
  */
 
-import { existsSync, lstatSync, readFileSync, readlinkSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
-import { join, resolve } from "node:path"
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  rmdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
+import { dirname, join, resolve } from "node:path"
 import type { Process } from "@yrd/process"
 import { assertNoPrivateStore, createGitWorktreeStore, PrivateStoreRefusalError } from "git-super/worktree"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
@@ -698,6 +707,73 @@ export function removeEmptyWorktreeRunDirectory(directory: string): void {
       return
     }
     throw error
+  }
+}
+
+/**
+ * 28661 C4: clear a round's worktrees SCAFFOLD without deleting a checkout the round kept.
+ *
+ * The enclosing cleanup used to be `rmSync(directory, { recursive: true })`, and that walks straight past
+ * the removal policy: `discardWorktree` refuses to remove a checkout whose admin dir holds a
+ * declared-private submodule store and NAMES it kept, and the enclosing sweep deleted it a moment later —
+ * the checkout, the retained working files inside it, and the store's custody question with them. So the
+ * sweep is structural: every FILE goes, and every directory that is itself a checkout survives WHOLE, with
+ * everything under it.
+ *
+ * The tell is the policy's own: a checkout is the directory carrying a `.git` entry, exactly what
+ * {@link worktreeAdminDir} reads. Keeping EVERY such directory is a superset of keeping the ones the policy
+ * would preserve, so this cannot under-protect, and a tree that survives without having been named is named
+ * here. It is the same tree whether it is a legacy check's, a program root's `P`/`C`, or one left by a
+ * preparation that failed after its worktree existed: none of them is scaffold.
+ *
+ * Never throws on a kept tree and never touches the caller's verdict — a cleanup that replaced a pass or a
+ * SetupFailed with its own error would be the very defect this closes (C4).
+ */
+export function removeWorktreeRunScaffold(directory: string): void {
+  if (!existsSync(directory)) return
+  const root = resolve(directory)
+  const kept: string[] = []
+  const checkouts = (current: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const child = join(current, entry.name)
+      if (existsSync(join(child, ".git"))) {
+        kept.push(resolve(child))
+        // Loud, and once per path: this tree outlives the round and its custody is the operator's (27058).
+        nameAbandonedTree(child, "left by a removal this round did not complete")
+        continue
+      }
+      checkouts(child)
+    }
+  }
+  checkouts(directory)
+  // Every checkout, and every ancestor on the way to the sweep root, stays: a kept checkout needs its scaffold.
+  const surviving = new Set<string>()
+  for (const checkout of kept) {
+    for (let at = checkout; ; at = dirname(at)) {
+      surviving.add(at)
+      if (at === root || at === dirname(at)) break
+    }
+  }
+  const clear = (current: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const child = join(current, entry.name)
+      if (surviving.has(resolve(child))) continue
+      if (entry.isDirectory()) {
+        clear(child)
+        rmdirSync(child)
+      } else {
+        rmSync(child, { force: true })
+      }
+    }
+  }
+  clear(directory)
+  try {
+    rmdirSync(directory)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    // ENOENT: already gone. ENOTEMPTY/EEXIST: a named checkout holds it open, and the warn above is its record.
+    if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") throw error
   }
 }
 

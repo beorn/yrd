@@ -14,6 +14,7 @@ import {
   discardWorktree,
   prepareWorktree,
   refusePrivateStoreRemoval,
+  removeWorktreeRunScaffold,
   SetupFailed,
   type Worktree,
 } from "../src/worktree.ts"
@@ -40,6 +41,8 @@ const author = ["-c", "user.email=plain-removal@yrd.test", "-c", "user.name=yrd"
 async function fixture(
   root: string,
   declare: "never" | "head" | "main",
+  // The linked worktree's own parent, so a caller can put it INSIDE a scaffold directory it then sweeps (28661 C4).
+  linkedUnder: string = root,
 ): Promise<Readonly<{ repo: string; linked: string; store: string }>> {
   const repo = join(root, "product")
   const component = join(root, "component")
@@ -57,7 +60,7 @@ async function fixture(
   await repoGit([...author, "commit", "--quiet", "--message", "root"])
   await repoGit(["submodule", "add", "--name", "dep", component, "vendor/dep"])
   await repoGit([...author, "commit", "--quiet", "--message", "add the submodule"])
-  const linked = join(root, "linked")
+  const linked = join(linkedUnder, "linked")
   await repoGit(["worktree", "add", "--quiet", "--detach", linked, "HEAD"])
   const linkedGit = testGitIn(linked, undefined, undefined, { env })
   await linkedGit(["submodule", "update", "--init", "vendor/dep"])
@@ -184,5 +187,60 @@ describe("a refused cleanup keeps the preparation verdict (28661 C4)", () => {
     expect(String(failure)).not.toContain("private submodule store")
     expect(existsSync(path), "a refused cleanup leaves the tree in place").toBe(true)
     expect(existsSync(store), "the store the guard protects survives").toBe(true)
+  })
+})
+
+// C4: the ENCLOSING cleanup — not just the per-tree discard — must not walk past the refusal. The check
+// command, submit's compose scratch and admission's scratch all swept their root with one `rmSync(..., recursive)`,
+// which deleted the very checkout `discardWorktree` had just reported kept (review2 HOLD, 28661).
+describe("the enclosing scaffold sweep keeps a checkout the removal policy preserved (28661 C4)", () => {
+  it("clears the scaffold but leaves the kept checkout, its retained bytes and its store whole", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-scaffold-sweep-"))
+    roots.push(root)
+    const scratch = join(root, "scratch")
+    mkdirSync(scratch, { recursive: true })
+    const { repo, linked, store } = await fixture(root, "head", scratch)
+    // Scaffold a round's root the way every caller lays one out: a claim file, a helper dir, and the tree.
+    writeFileSync(join(scratch, ".pid"), "1\n")
+    mkdirSync(join(scratch, "hooks-disabled"))
+    const retained = join(linked, "precious.txt")
+    writeFileSync(retained, "synthetic retained bytes")
+    const git = testGitIn(repo, undefined, undefined, { env })
+    const tree: Worktree = {
+      path: linked,
+      commit: "HEAD",
+      excludedSubmodules: [],
+      remove: async () => {
+        await refusePrivateStoreRemoval(git, linked, repo)
+        rmSync(linked, { force: true, recursive: true })
+      },
+    }
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      await discardWorktree(tree)
+      removeWorktreeRunScaffold(scratch)
+    } finally {
+      spy.mockRestore()
+    }
+
+    expect(existsSync(linked), "the refused checkout survives the enclosing sweep").toBe(true)
+    expect(existsSync(retained), "the bytes the refusal retained survive").toBe(true)
+    expect(existsSync(store), "the store the guard protects survives").toBe(true)
+    expect(existsSync(scratch), "a kept checkout keeps its scaffold").toBe(true)
+    expect(existsSync(join(scratch, ".pid")), "the claim file goes, so the run is reapable").toBe(false)
+    expect(existsSync(join(scratch, "hooks-disabled")), "ordinary scaffold goes").toBe(false)
+  })
+
+  it("removes the whole root once nothing was kept", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-scaffold-clear-"))
+    roots.push(root)
+    const scratch = join(root, "scratch")
+    mkdirSync(join(scratch, "check", "abc123"), { recursive: true })
+    writeFileSync(join(scratch, ".pid"), "1\n")
+    writeFileSync(join(scratch, "check", "abc123", "junk.txt"), "junk")
+
+    removeWorktreeRunScaffold(scratch)
+
+    expect(existsSync(scratch)).toBe(false)
   })
 })
