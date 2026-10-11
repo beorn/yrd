@@ -272,4 +272,51 @@ describe("the enclosing scaffold sweep keeps a checkout the removal policy prese
 
     expect(existsSync(scratch)).toBe(false)
   })
+
+  // The gate's own id, on the refusal a person reads: gate-report finds a vendor refusal only through a literal
+  // `@gate/` id in the source (tools/gate-report.ts gateIdSites, --recurse-submodules), and the operator reads
+  // the same string.
+  it("names the gate id and the override in the refusal it prints", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-plain-removal-gate-id-"))
+    roots.push(root)
+    const { repo, linked, store } = await fixture(root, "head")
+
+    const error = await refusePrivateStoreRemoval(testGitIn(repo, undefined, undefined, { env }), linked, repo).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+
+    expect(String(error)).toContain("@gate/git-worktree-private-store:")
+    expect(String(error)).toContain('--discard-private-store --reason "<text>"')
+    expect(existsSync(store)).toBe(true)
+  })
+
+  // The same pair git-super's removal takes, on the repo-side guard: a reason is REQUIRED (an empty one is a
+  // refusal, not consent), and a reasoned discard journals the actor and the reason before any byte goes.
+  it("passes the declaration only for a reasoned override, and journals the actor and the reason", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-plain-removal-discard-"))
+    roots.push(root)
+    const { repo, linked, store } = await fixture(root, "head")
+    const journal: Array<Readonly<{ store: string; reason: string; actor: string | null }>> = []
+
+    const refused = await refusePrivateStoreRemoval(testGitIn(repo, undefined, undefined, { env }), linked, repo, {
+      discardPrivateStore: { reason: "  " },
+    }).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+    expect(refused).toBeInstanceOf(PrivateStoreRefusalError)
+    expect(existsSync(store)).toBe(true)
+
+    await refusePrivateStoreRemoval(testGitIn(repo, undefined, undefined, { env }), linked, repo, {
+      discardPrivateStore: { reason: "abandoned unpushed draft", actor: "seat-under-test" },
+      journal: (record) => journal.push(record),
+    })
+
+    expect(journal).toHaveLength(1)
+    expect(journal[0]?.store).toBe(store)
+    expect(journal[0]?.reason).toBe("abandoned unpushed draft")
+    expect(journal[0]?.actor).toBe("seat-under-test")
+    expect(existsSync(store)).toBe(true)
+  })
 })
