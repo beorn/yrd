@@ -38,6 +38,7 @@ describe("the journal record-kind vocabulary", () => {
       "override",
       "branch-deleted",
       "branch-kept",
+      "local-branch-retirement",
       "notice-unrecorded",
       "remote-calls",
     ])
