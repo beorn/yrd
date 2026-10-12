@@ -92,6 +92,7 @@ import {
   readConfig,
   readJournals,
   readRunLog,
+  readStatus,
   remoteUrl,
   subjects,
   targetName,
@@ -900,20 +901,59 @@ export async function coreQueueCommand(
       const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
       outcome = await queueRun({
         ...baseOptions,
-        authorStore: {
-          repo: authorRepo,
-          git: gitIn(authorRepo, undefined, selection, { env }),
-          actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
-          protections: (branch, tip, issue) =>
-            io.localBranchProtections?.({
-              repo: authorRepo,
-              branch,
-              tip,
-              issue,
-            }) ?? Promise.resolve([]),
-        },
         afterRun: async (outcome) => {
           await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
+          // A merged bay must close before its branch is judged for retirement.
+          // Append to this round's journal while queueRun still owns its finish.
+          const retirementLog: Parameters<typeof retireLocalBranch>[0]["log"] = {
+            write(record) {
+              const row = { ...record, run: outcome.run, at: new Date().toISOString() }
+              appendFileSync(outcome.log, `${JSON.stringify(row)}\n`)
+              baseOptions.render(row)
+              onRecord?.(row)
+              return row
+            },
+          }
+          if (outcome.merged.length > 0) {
+            const authorGit = gitIn(authorRepo, undefined, selection, { env })
+            try {
+              // One fetch makes the published target available in the author store.
+              await authorGit(["fetch", "--no-tags", await remoteUrl(git, config.target.remote), outcome.target])
+              for (const branch of outcome.merged) {
+                try {
+                  const change = await readStatus(eventStore, config.target.branch, branch)
+                  const tip = change.commit
+                  if (tip === undefined) throw new Error(`merged change ${branch} has no kept head`)
+                  await retireLocalBranch({
+                    repo: authorRepo,
+                    git: authorGit,
+                    actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
+                    branch,
+                    tip,
+                    owner: change.submitter,
+                    issue: change.issue,
+                    reason: "merged",
+                    date: new Date().toISOString().slice(0, 10),
+                    log: retirementLog,
+                    protections: () =>
+                      io.localBranchProtections?.({ repo: authorRepo, branch, tip, issue: change.issue }) ??
+                      Promise.resolve([]),
+                    disposition: { kind: "merged", base: outcome.base, target: outcome.target },
+                  })
+                } catch (error) {
+                  retirementLog.write({
+                    kind: "warning",
+                    branch,
+                    scope: "local-branch-retirement",
+                    reason: String(error),
+                  })
+                }
+              }
+            } catch (error) {
+              // The merge is durable; a housekeeping failure cannot undo its result.
+              retirementLog.write({ kind: "warning", scope: "local-branch-retirement", reason: String(error) })
+            }
+          }
           // The round ALSO drains its own raw output, one ROUND_REMOVAL_BATCH per
           // round (28499, @cto 2026-10-10T22:53Z), beside cleanupEnvironments: both
           // are post-judgment disposal. A disposal step must never stop the merge
@@ -1325,6 +1365,8 @@ export async function coreQueueCommand(
       log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
       const removed: { branch: string; head: string; archiveRef: string }[] = []
       const kept: { branch: string; head: string; reason: string }[] = []
+      const failed: { branch: string; head: string; reason: string }[] = []
+      const unclassified: { branch: string; head: string; reason: string; cure: string }[] = []
       let excluded = 0
       try {
         for (const [ref, head] of heads) {
@@ -1338,11 +1380,15 @@ export async function coreQueueCommand(
           try {
             bound =
               change?.issue ??
-              (local ? issue : undefined) ??
-              (await issueOf(authorGit, branch, head, target, undefined, resolveIssue))?.issue
+              (local ? issue : (await issueOf(authorGit, branch, head, target, undefined, resolveIssue))?.issue)
           } catch (error) {
-            // delete-fallback-allow: this branch is kept and immediately continued; a failed binding read can only exclude it from retirement.
-            kept.push({ branch, head, reason: `issue binding unreadable: ${String(error)}` })
+            // delete-fallback-allow: an unreadable binding is reported as unclassified and immediately continued, so it only shrinks the branches retired.
+            unclassified.push({
+              branch,
+              head,
+              reason: `issue binding unreadable: ${String(error)}`,
+              cure: `fix the issue trailer, or yrd drop ${branch} --local --tip ${head}`,
+            })
             continue
           }
           if (local && issue !== undefined && bound !== issue) {
@@ -1375,9 +1421,10 @@ export async function coreQueueCommand(
             log,
             protections: () =>
               io.localBranchProtections?.({ repo: authorRepo, branch, tip, issue: bound }) ?? Promise.resolve([]),
-            disposition: { kind: "closed", store: eventStore, queue: config.target.branch },
+            disposition: { kind: "closed", store: eventStore, queue: config.target.branch, target },
           })
           if (result.outcome === "removed") removed.push({ branch, head: tip, archiveRef: result.archiveRef })
+          else if (result.outcome === "failed") failed.push({ branch, head, reason: result.reason })
           else kept.push({ branch, head, reason: result.reason })
         }
       } finally {
@@ -1391,15 +1438,19 @@ export async function coreQueueCommand(
         excluded,
         removed,
         kept,
+        failed,
+        unclassified,
       }
       emit(
         io,
         options.json,
         report,
-        `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excluded} target or out-of-scope branches; retired ${removed.length}, kept ${kept.length}` +
-          kept.map((row) => `\nkept ${row.branch}: ${row.reason}`).join(""),
+        `${scope}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excluded} target or out-of-scope branches; retired ${removed.length}, kept ${kept.length}, failed ${failed.length}, unclassified ${unclassified.length}` +
+          kept.map((row) => `\nkept ${row.branch}: ${row.reason}`).join("") +
+          failed.map((row) => `\nfailed ${row.branch}: ${row.reason}`).join("") +
+          unclassified.map((row) => `\nunclassified ${row.branch}: ${row.reason}; ${row.cure}`).join(""),
       )
-      return kept.length === 0 ? 0 : 1
+      return failed.length === 0 ? 0 : 1
     }
     case "drop": {
       const eventStore = createEventStore(repo, config.target.remote, selection)

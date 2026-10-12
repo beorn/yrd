@@ -350,7 +350,7 @@ it("local retirement keeps protected tips and preserves custody before removing 
     date: "2026-10-12",
     log,
     protections: async () => protections,
-    disposition: { kind: "merged" as const, target: w.target },
+    disposition: { kind: "merged" as const, base: w.target, target: w.target },
   }
   expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: expect.stringContaining("held") })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
@@ -375,11 +375,12 @@ it("local retirement keeps protected tips and preserves custody before removing 
     reason: "issue closed",
     disposition: {
       kind: "closed",
+      target: w.target,
       queue: "main",
       store: createEventStore(w.work, "missing-origin", gitIn(w.work).selection),
     },
   })
-  expect(unavailableOrigin).toMatchObject({ outcome: "kept", reason: expect.stringContaining("missing-origin") })
+  expect(unavailableOrigin).toMatchObject({ outcome: "failed", reason: expect.stringContaining("missing-origin") })
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
   expect(await refAt(w.git, unavailableOrigin.archiveRef)).toBe(head)
   const closed = await retireLocalBranch({
@@ -387,31 +388,94 @@ it("local retirement keeps protected tips and preserves custody before removing 
     tip: head,
     date: "2026-10-13",
     reason: "issue closed",
-    disposition: { kind: "closed", queue: "main", store: createEventStore(w.work, "origin", gitIn(w.work).selection) },
+    disposition: {
+      kind: "closed",
+      target: w.target,
+      queue: "main",
+      store: createEventStore(w.work, "origin", gitIn(w.work).selection),
+    },
   })
   expect(closed.outcome).toBe("removed")
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
   const origin = gitIn(w.remote)
   expect(await refAt(origin, closed.archiveRef)).toBe(head)
   expect(await refAt(origin, `refs/heads/${branch}`)).toBe(head)
+  const mergedBranch = "task/closed-but-merged"
+  await w.git(["branch", mergedBranch, w.target])
+  const queueStore = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const queueBefore = await refAt(origin, queueRef("main"))
+  const localOnly = await retireLocalBranch({
+    ...input,
+    branch: mergedBranch,
+    tip: w.target,
+    date: "2026-10-14",
+    reason: "issue closed after merge",
+    disposition: { kind: "closed", target: w.target, queue: "main", store: queueStore },
+  })
+  expect(localOnly.outcome).toBe("removed")
+  expect(await refAt(w.git, localOnly.archiveRef)).toBe(w.target)
+  expect(await refAt(origin, localOnly.archiveRef)).toBeUndefined()
+  expect(await refAt(origin, queueRef("main"))).toBe(queueBefore)
   const rows = readRunLog(dirname(log.path), log.id)
-  expect(rows.map((row) => row.outcome)).toEqual(["kept", "kept", "removed", "kept", "kept", "removed"])
+  expect(rows.filter((row) => row.kind === "local-branch-retirement").map((row) => row.outcome)).toEqual([
+    "kept",
+    "kept",
+    "removed",
+    "kept",
+    "failed",
+    "removed",
+    "removed",
+  ])
   expect(rows.at(-1)).toMatchObject({
     kind: "local-branch-retirement",
     actor: "@dev/2",
     issue: "@i/10-yrd/1",
-    head,
-    reason: "issue closed",
+    head: w.target,
+    branch: mergedBranch,
+    reason: "issue closed after merge",
   })
 })
 
-/** @failure Merge cleanup silently leaves component branches without explaining missing ownership.
- * @level l2 @consumer local retirement after a merged root change
- * Existing retirement fixtures have no gitlinks, so they cannot prove component preservation or its report.
+/** @failure A conflicting archive ref is treated as a durable protection, leaving cleanup with exit 0.
+ * @level l2 @consumer the local-retirement journal reader and cleanup caller
  */
-it("merged local retirement preserves and reports component branches without ownership", async () => {
+it("classifies archive custody conflicts as failed while preserving the local branch", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const branch = "task/archive-conflict"
+  const conflictingTip = await submitCommit(w, "task/archive-other", "other.txt")
+  await w.git(["branch", branch, w.target])
+  const archiveRef = `refs/archive/2026-10-15/dev-2/${branch}`
+  await w.git(["update-ref", archiveRef, conflictingTip])
+  const log = openLog(join(w.workdir, "retirement-conflict"))
+  const result = await retireLocalBranch({
+    repo: w.work,
+    git: w.git,
+    branch,
+    tip: w.target,
+    actor: "@dev/2",
+    reason: "merged",
+    date: "2026-10-15",
+    issue: "@i/10-yrd/1",
+    log,
+    protections: async () => [],
+    disposition: { kind: "merged", base: w.target, target: w.target },
+  })
+  expect(result).toMatchObject({ outcome: "failed", reason: expect.stringContaining("already holds") })
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
+  expect(readRunLog(dirname(log.path), log.id)).toContainEqual(
+    expect.objectContaining({ kind: "local-branch-retirement", outcome: "failed", branch, head: w.target }),
+  )
+})
+
+/** @failure Merge cleanup reports unchanged components or misses changed component branches.
+ * @level l2 @consumer local retirement after a merged root change
+ * The result must track gitlinks changed by this branch relative to its reviewed base, not every linked child.
+ */
+it("merged local retirement reports only changed component branches without ownership", async () => {
   const w = await world()
   const child = join(w.workdir, "child")
+  const untouched = join(w.workdir, "untouched")
   await w.git(["init", "--quiet", "--initial-branch=main", child])
   const childGit = gitIn(child)
   await childGit(["config", "user.email", "queue@yrd.test"])
@@ -419,11 +483,25 @@ it("merged local retirement preserves and reports component branches without own
   await childGit(["commit", "--allow-empty", "--quiet", "-m", "child"])
   const childTip = (await childGit(["rev-parse", "HEAD"])).trim()
   await childGit(["branch", "task/unknown-owner", childTip])
+  await w.git(["init", "--quiet", "--initial-branch=main", untouched])
+  const untouchedGit = gitIn(untouched)
+  await untouchedGit(["config", "user.email", "queue@yrd.test"])
+  await untouchedGit(["config", "user.name", "yrd"])
+  await untouchedGit(["commit", "--allow-empty", "--quiet", "-m", "untouched"])
+  const untouchedTip = (await untouchedGit(["rev-parse", "HEAD"])).trim()
   await w.git(["config", "-f", ".gitmodules", "submodule.child.path", "child"])
   await w.git(["config", "-f", ".gitmodules", "submodule.child.url", child])
+  await w.git(["config", "-f", ".gitmodules", "submodule.untouched.path", "untouched"])
+  await w.git(["config", "-f", ".gitmodules", "submodule.untouched.url", untouched])
   await w.git(["add", ".gitmodules"])
   await w.git(["update-index", "--add", "--cacheinfo", `160000,${childTip},child`])
-  await w.git(["commit", "--quiet", "-m", "root with component"])
+  await w.git(["update-index", "--add", "--cacheinfo", `160000,${untouchedTip},untouched`])
+  await w.git(["commit", "--quiet", "-m", "root with components"])
+  const base = (await w.git(["rev-parse", "HEAD"])).trim()
+  await childGit(["commit", "--allow-empty", "--quiet", "-m", "changed child"])
+  const changedTip = (await childGit(["rev-parse", "HEAD"])).trim()
+  await w.git(["update-index", "--cacheinfo", `160000,${changedTip},child`])
+  await w.git(["commit", "--quiet", "-m", "root moved one component"])
   const tip = (await w.git(["rev-parse", "HEAD"])).trim()
   const branch = "task/merged-root"
   await w.git(["branch", branch, tip])
@@ -439,54 +517,32 @@ it("merged local retirement preserves and reports component branches without own
     issue: "@i/10-yrd/1",
     log,
     protections: async () => [],
-    disposition: { kind: "merged", target: tip },
+    disposition: { kind: "merged", base, target: tip },
   })
   expect(result.outcome).toBe("removed")
   expect(await refAt(childGit, "refs/heads/task/unknown-owner")).toBe(childTip)
-  expect(readRunLog(dirname(log.path), log.id)).toContainEqual(
-    expect.objectContaining({
-      kind: "warning",
-      branch,
-      scope: "local-branch-retirement",
-      reason: expect.stringContaining("Component branches left unchanged for child"),
-    }),
-  )
-})
+  const warning = readRunLog(dirname(log.path), log.id).find((row) => row.kind === "warning" && row.branch === branch)
+  expect(warning?.reason).toContain("Component branches left unchanged for child")
+  expect(warning?.reason).not.toContain("untouched")
 
-/** @failure A merged task keeps its author branch or retires a protected one.
- * @level l2 @consumer queue caller with its explicit author-store authority
- */
-it.each([false, true])("queue retirement respects the author store and its protection=%s", async (protectedBranch) => {
-  const w = await world()
-  await createWorldEventQueue(w)
-  const branch = "task/author-retirement"
-  const head = await submitCommit(w, branch, "one.txt")
-  const authorRepo = join(dirname(w.work), "author")
-  await w.git(["clone", "--quiet", w.remote, authorRepo])
-  const authorGit = gitIn(authorRepo)
-  await authorGit(["branch", branch, head])
-  const outcome = await queueRun({
-    ...(await w.options({ exit: 0 })),
-    authorStore: {
-      repo: authorRepo,
-      git: authorGit,
-      actor: "@dev/2",
-      protections: async () => (protectedBranch ? ["owner lease"] : []),
-    },
-  })
-  expect(outcome).toMatchObject({ exitCode: 0, merged: [branch] })
-  expect(await refAt(authorGit, `refs/heads/${branch}`)).toBe(protectedBranch ? head : undefined)
-  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
-  // AC5: removing the author's local ref must not remove the readable merged change.
-  expect(await readStatus(createEventStore(authorRepo, "origin", authorGit.selection), "main", branch)).toMatchObject({
-    status: "merged",
-    commit: head,
+  const unchangedBranch = "task/merged-unchanged-root"
+  await w.git(["branch", unchangedBranch, tip])
+  const unchangedLog = openLog(join(w.workdir, "retirement-unchanged"))
+  const unchanged = await retireLocalBranch({
+    repo: w.work,
+    git: w.git,
+    branch: unchangedBranch,
+    tip,
+    actor: "@dev/2",
+    reason: "merged",
+    date: "2026-10-13",
     issue: "@i/10-yrd/1",
+    log: unchangedLog,
+    protections: async () => [],
+    disposition: { kind: "merged", base: tip, target: tip },
   })
-  const records = readRunLog(dirname(outcome.log), outcome.run)
-  expect(records.filter((row) => row.kind === "local-branch-retirement")).toEqual([
-    expect.objectContaining({ outcome: protectedBranch ? "kept" : "removed", branch, head, issue: "@i/10-yrd/1" }),
-  ])
+  expect(unchanged.outcome).toBe("removed")
+  expect(readRunLog(dirname(unchangedLog.path), unchangedLog.id).some((row) => row.kind === "warning")).toBe(false)
 })
 
 /** @failure Submit and the queue drift to different composition paths.

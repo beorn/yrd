@@ -8,6 +8,7 @@
  */
 import {
   existsSync,
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -18,6 +19,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import * as fs from "node:fs"
+import * as removely from "removely"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import {
@@ -42,6 +44,7 @@ import {
   readEventQueueWithChanges,
   readRemoteCalls,
   readRunLog,
+  readStatus,
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
   watchRows,
@@ -51,6 +54,7 @@ import { outsideRepositoryRoot } from "../../../tests/support/outside-repository
 import { openEvents } from "gitomic/events"
 import { assertEventListingFence, coreQueueCommand, openEventDetail } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
+import { readEnvOpenRecord } from "../src/env-open-record.ts"
 import { issueLookup, issueResolver } from "../src/issue-resolver.ts"
 import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
@@ -63,6 +67,8 @@ vi.mock("node:fs", async (original) => {
   const actual = await original<typeof import("node:fs")>()
   return { ...actual, readFileSync: vi.fn(actual.readFileSync) }
 })
+
+vi.mock("removely", async (original) => ({ ...(await original<typeof import("removely")>()) }))
 
 const roots: string[] = []
 afterAll(() => {
@@ -1448,7 +1454,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(
       await runYrdProcess(["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--json"], output.io),
       output.stderr(),
-    ).toBe(1)
+    ).toBe(0)
     const report = JSON.parse(output.stdout()) as {
       removed: { branch: string; head: string; archiveRef: string }[]
       kept: { branch: string; reason: string }[]
@@ -1500,6 +1506,163 @@ describe("a queue is the selected origin branch carrying config", () => {
         outcome: "removed",
       }),
     )
+  })
+
+  /** @failure Retirement runs before bay cleanup, leaving the merged author ref forever.
+   * @level l3 @consumer queue run's author cleanup and retained change history
+   * Existing core fixtures have no checked-out author worktree.
+   */
+  it.each(["bay", "pool"])("retires after merged %s cleanup in the same native CLI round", async (kind) => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    const branch = "task/merge-retirement"
+    let author: string
+    if (kind === "bay") {
+      const opened = capture(repo)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "merge-retirement", "--json"], opened.io),
+        opened.stderr(),
+      ).toBe(0)
+      author = (JSON.parse(opened.stdout()) as { path: string }).path
+      const gitDir = (await gitIn(author)(["rev-parse", "--absolute-git-dir"])).trim()
+      const opening = join(gitDir, "yrd-open.json")
+      const recorded = readEnvOpenRecord(gitDir)
+      if (recorded.status !== "recorded") throw new Error("fixture bay omitted its opening record")
+      writeFileSync(opening, JSON.stringify({ ...recorded.record, at: "2026-01-01T00:00:00.000Z" }))
+    } else {
+      author = join(dirname(repo), "pool-slot")
+      await git(["worktree", "add", "--quiet", "-b", branch, author, "main"])
+    }
+    const authorGit = gitIn(author)
+    writeFileSync(join(author, "work.txt"), kind)
+    await authorGit(["add", "work.txt"])
+    await authorGit(["commit", "--quiet", "-m", "work\n\nRefs: @example/28791-merge"])
+    const head = (await authorGit(["rev-parse", "HEAD"])).trim()
+    const submitted = capture(author)
+    expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
+    using census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const run = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "main", "--json"], run.io), run.stderr()).toBe(
+      0,
+    )
+    const outcome = JSON.parse(run.stdout()) as { log: string; run: string; merged: string[] }
+    expect(outcome.merged).toEqual([branch])
+    expect(existsSync(author)).toBe(kind === "pool")
+    expect((await git(["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`])).trim()).toBe(
+      kind === "pool" ? head : "",
+    )
+    const records = readRunLog(dirname(outcome.log), outcome.run)
+    const retirement = records.find((row) => row.kind === "local-branch-retirement" && row.branch === branch)
+    expect(retirement).toMatchObject({ outcome: kind === "pool" ? "kept" : "removed", branch, head })
+    if (kind === "bay") {
+      const archive = retirement!.archive
+      if (typeof archive !== "string") throw new Error("retirement journal omitted its archive ref")
+      expect((await git(["rev-parse", archive])).trim()).toBe(head)
+      const closed = records.findIndex(
+        (row) => row.scope === "environment-cleanup" && row.path === author && row.result === "closed",
+      )
+      expect(closed).toBeGreaterThanOrEqual(0)
+      expect(records.indexOf(retirement!)).toBeGreaterThan(closed)
+    } else expect(retirement!.reason).toContain("checked out")
+    expect(await readStatus(createEventStore(repo, "origin", git.selection), "main", branch)).toMatchObject({
+      status: "merged",
+      commit: head,
+      issue: "@example/28791-merge",
+    })
+  })
+
+  /** @failure Protected and unrelated unreadable branches make successful issue cleanup retry forever.
+   * @level l3 @consumer issue closer inspecting native drop reports and exit status
+   */
+  it("lists unrelated conflicting trailers as unclassified while retiring the issue branch", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const issue = "@example/28791-classified"
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    await git(["checkout", "--quiet", "-b", "task/classified"])
+    await git(["commit", "--quiet", "--allow-empty", "-m", `work\n\nRefs: ${issue}`])
+    await git(["checkout", "--quiet", "-b", "task/unclassified", "main"])
+    await git(["commit", "--quiet", "--allow-empty", "-m", "one\n\nRefs: @example/other-one"])
+    await git(["commit", "--quiet", "--allow-empty", "-m", "two\n\nRefs: @example/other-two"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const output = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--json"], output.io),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      removed: [{ branch: "task/classified" }],
+      kept: [],
+      failed: [],
+      unclassified: [
+        {
+          branch: "task/unclassified",
+          head,
+          reason: expect.stringContaining("conflicting"),
+          cure: expect.stringContaining(`yrd drop task/unclassified --local --tip ${head}`),
+        },
+      ],
+    })
+    expect((await git(["rev-parse", "refs/heads/task/unclassified"])).trim()).toBe(head)
+    const manual = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", "task/unclassified", "--local", "--tip", head, "--submitter", "fixture", "--json"],
+        manual.io,
+      ),
+      manual.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(manual.stdout())).toMatchObject({
+      removed: [{ branch: "task/unclassified", head }],
+      kept: [],
+      failed: [],
+      unclassified: [],
+    })
+  })
+
+  /** @failure A publication failure is labelled kept or exits successfully, hiding the need to retry.
+   * @level l3 @consumer issue closer and the persisted cleanup journal
+   */
+  it("reports failed origin custody with exit 1 and succeeds when retried", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const issue = "@example/28791-retry"
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    await git(["checkout", "--quiet", "-b", "task/retry"])
+    await git(["commit", "--quiet", "--allow-empty", "-m", `work\n\nRefs: ${issue}`])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const hook = join(dirname(repo), "remote.git", "hooks", "pre-receive")
+    writeFileSync(hook, "#!/bin/sh\necho fixture-origin-refusal >&2\nexit 1\n")
+    chmodSync(hook, 0o755)
+    const args = ["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--json"]
+    const failed = capture(repo)
+    expect(await runYrdProcess(args, failed.io), failed.stderr()).toBe(1)
+    expect(JSON.parse(failed.stdout())).toMatchObject({
+      removed: [],
+      kept: [],
+      failed: [{ branch: "task/retry", head, reason: expect.stringContaining("fixture-origin-refusal") }],
+    })
+    expect((await git(["rev-parse", "refs/heads/task/retry"])).trim()).toBe(head)
+    const logs = join(await workdirOf(git, { cwd: repo }), "logs")
+    const records = readdirSync(logs)
+      .filter((name) => name.endsWith(".jsonl"))
+      .flatMap((name) => readRunLog(logs, name.slice(0, -6)))
+    expect(records).toContainEqual(
+      expect.objectContaining({ kind: "local-branch-retirement", branch: "task/retry", outcome: "failed" }),
+    )
+    unlinkSync(hook)
+    const retry = capture(repo)
+    expect(await runYrdProcess(args, retry.io), retry.stderr()).toBe(0)
+    expect(JSON.parse(retry.stdout())).toMatchObject({
+      removed: [{ branch: "task/retry", head }],
+      kept: [],
+      failed: [],
+    })
   })
 
   it("submits an unpublished branch, then drops its open change and branch atomically", async () => {

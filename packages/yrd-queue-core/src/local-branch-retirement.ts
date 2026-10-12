@@ -1,5 +1,5 @@
 import { archiveRefFor, ensureArchiveRef } from "git-super/archive-ref"
-import { readCommitSubmodules } from "git-super/commit-graph"
+import { changedCommitGitlinks } from "git-super/commit-graph"
 import { createGitWorktreeStore, worktreeOperationBranch } from "git-super/worktree"
 import { drop, type QueueLocation } from "./events.ts"
 import { isAncestor, refAt, seamProcess, type Git } from "./git.ts"
@@ -22,19 +22,20 @@ export type LocalBranchRetirement = Readonly<{
    */
   protections(): Promise<readonly string[]>
   disposition:
-    | Readonly<{ kind: "merged"; target: string }>
-    | Readonly<{ kind: "closed"; store: QueueLocation; queue: string }>
+    | Readonly<{ kind: "merged"; base: string; target: string }>
+    | Readonly<{ kind: "closed"; target: string; store: QueueLocation; queue: string }>
 }>
 
 export type LocalBranchRetirementResult = Readonly<{
-  outcome: "removed" | "kept"
+  outcome: "removed" | "kept" | "failed"
   archiveRef: string
   reason: string
 }>
 
 /** One policy for local retirement; git-super owns archive/ref mechanics.
- * Closed work first publishes its archive and ending to origin. Remote branch
- * deletion and worktree removal are deliberately outside this operation.
+ * Unmerged closed work first publishes its archive and ending to origin; a
+ * closed tip already in the target is archived locally without a queue write.
+ * Remote branch deletion and worktree removal are deliberately outside this operation.
  */
 export async function retireLocalBranch(input: LocalBranchRetirement): Promise<LocalBranchRetirementResult> {
   const { repo, git, branch, tip, actor, issue, reason, date, disposition } = input
@@ -60,7 +61,11 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     await git(["check-ref-format", "--branch", branch])
     await git(["check-ref-format", archiveRef])
     if (disposition.kind === "merged") {
-      const components = await readCommitSubmodules(seamProcess(git, repo), repo, tip)
+      const mergeBase = (await git(["merge-base", disposition.base, tip])).trim()
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(mergeBase)) {
+        throw new Error(`cannot resolve merge base between ${disposition.base} and ${tip}`)
+      }
+      const components = await changedCommitGitlinks(seamProcess(git, repo), repo, mergeBase, tip)
       if (components.length > 0) {
         input.log.write({
           kind: "warning",
@@ -78,9 +83,11 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     }
     if (kept === undefined) {
       const custody = ensureArchiveRef(repo, archiveRef, tip)
-      if (!custody.ok) kept = custody.reason
+      if (!custody.ok) throw new Error(custody.reason)
     }
-    if (kept === undefined && disposition.kind === "closed") {
+    const alreadyMerged =
+      kept === undefined && disposition.kind === "closed" && (await isAncestor(git, tip, disposition.target))
+    if (kept === undefined && disposition.kind === "closed" && !alreadyMerged) {
       await drop(disposition.store, {
         queue: disposition.queue,
         branch,
@@ -98,7 +105,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
       result = { outcome: "removed", archiveRef, reason }
     }
   } catch (error) {
-    result = { outcome: "kept", archiveRef, reason: error instanceof Error ? error.message : String(error) }
+    result = { outcome: "failed", archiveRef, reason: error instanceof Error ? error.message : String(error) }
   }
   // A failed journal write must propagate, never relabel an already removed ref as kept.
   input.log.write({
