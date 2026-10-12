@@ -14,7 +14,8 @@ import {
   type GitObservation,
   type GitSelection,
 } from "./git.ts"
-import { queueFormat, queueRef } from "./events.ts"
+import { queueFormat, queueRef, readStatus } from "./events.ts"
+import { retireLocalBranch } from "./local-branch-retirement.ts"
 import { eventQueueRun } from "./event-run.ts"
 import { removeEmptyWorktreeRunDirectory } from "./worktree.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
@@ -71,6 +72,13 @@ export type QueueRunOptions = Readonly<{
    * is complete only after this returns; later writes invalidate its projection.
    */
   afterRun?: (outcome: QueueRunOutcome) => Promise<void>
+  /** Authoring store selected by the caller, never inferred from the queue-owned clone. */
+  authorStore?: Readonly<{
+    repo: string
+    git: Git
+    actor: string
+    protections(branch: string): Promise<readonly string[]>
+  }>
   /** The logger the worktree plumbing narrates to; pass one only at trace. */
   plumbing?: PlumbingLog
   git?: Git
@@ -209,6 +217,36 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   try {
     const outcome = await queueRunWithLog(options, log)
     try {
+      if (options.authorStore !== undefined) {
+        const author = options.authorStore
+        const selection = options.selection ?? (await resolveGitSelection(options.repo, { env: options.env }))
+        const events = createEventStore(options.repo, options.target.remote, selection)
+        for (const branch of outcome.merged) {
+          try {
+            const change = await readStatus(events, options.target.branch, branch)
+            if (change.commit === undefined) throw new Error(`merged change ${branch} has no kept head`)
+            // The author store may not have the queue's newly published merge yet.
+            const queueGit = options.git ?? gitIn(options.repo, undefined, selection, { env: options.env })
+            await author.git(["fetch", "--no-tags", await remoteUrl(queueGit, options.target.remote), outcome.target])
+            await retireLocalBranch({
+              repo: author.repo,
+              git: author.git,
+              actor: author.actor,
+              branch,
+              tip: change.commit,
+              issue: change.issue,
+              reason: "merged",
+              date: new Date().toISOString().slice(0, 10),
+              log,
+              protections: () => author.protections(branch),
+              disposition: { kind: "merged", target: outcome.target },
+            })
+          } catch (error) {
+            // The merge is already durable. A housekeeping failure cannot undo its result.
+            log.write({ kind: "warning", branch, scope: "local-branch-retirement", reason: String(error) })
+          }
+        }
+      }
       await options.afterRun?.(outcome)
     } catch (cause) {
       throw new QueueRunAfterRunFailed(outcome, cause)

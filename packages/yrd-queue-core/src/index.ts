@@ -358,3 +358,5 @@ export {
 
 export { yrdQueueRunnerDeclarations } from "./runner-declarations.ts"
 export type { YrdQueueRunnerDeclaration } from "./runner-declarations.ts"
+export { retireLocalBranch } from "./local-branch-retirement.ts"
+export type { LocalBranchRetirement, LocalBranchRetirementResult } from "./local-branch-retirement.ts"

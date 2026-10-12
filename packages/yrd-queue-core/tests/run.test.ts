@@ -29,7 +29,7 @@ import type { RefUpdate } from "gitomic"
 import { gitEnvironment } from "../src/git.ts"
 import * as gitRunners from "../src/git.ts"
 import { incidentTrailers } from "../src/incident.ts"
-import { readJournals, recentCasRefusals } from "../src/log.ts"
+import { openLog, readRunLog, readJournals, recentCasRefusals } from "../src/log.ts"
 import { reminderDue } from "../src/override.ts"
 import {
   changeName,
@@ -49,6 +49,7 @@ import {
   readEventOps,
   readConfig,
   readStatus,
+  retireLocalBranch,
   refAt,
   runCheck,
   runDiedInPreamble,
@@ -326,6 +327,113 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
   })
   return head
 }
+
+/** @failure Local retirement loses protected work or deletes before remote custody.
+ * @level l2 @consumer merge cleanup and explicit post-close issue drop
+ * Primitive tests cannot prove their ordering through the shared Yrd policy.
+ */
+it("local retirement keeps protected tips and preserves custody before removing a branch", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const log = openLog(join(w.workdir, "retirement"))
+  const branch = "task/local-retirement"
+  await w.git(["branch", branch, w.target])
+  let protections = ["held by owner"]
+  const input = {
+    repo: w.work,
+    git: w.git,
+    branch,
+    tip: w.target,
+    actor: "@dev/2",
+    issue: "@i/10-yrd/1",
+    reason: "merged",
+    date: "2026-10-12",
+    log,
+    protections: async () => protections,
+    disposition: { kind: "merged" as const, target: w.target },
+  }
+  expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: expect.stringContaining("held") })
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
+  protections = []
+  let protectionReads = 0
+  expect(
+    await retireLocalBranch({ ...input, protections: async () => (++protectionReads === 1 ? [] : ["lease acquired"]) }),
+  ).toMatchObject({ outcome: "kept", reason: "lease acquired" })
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
+  const merged = await retireLocalBranch(input)
+  expect(merged.outcome).toBe("removed")
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
+  expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
+
+  const head = await submitCommit(w, branch, "one.txt")
+  expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: expect.stringContaining("moved") })
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
+  const unavailableOrigin = await retireLocalBranch({
+    ...input,
+    tip: head,
+    date: "2026-10-13",
+    reason: "issue closed",
+    disposition: {
+      kind: "closed",
+      queue: "main",
+      store: createEventStore(w.work, "missing-origin", gitIn(w.work).selection),
+    },
+  })
+  expect(unavailableOrigin).toMatchObject({ outcome: "kept", reason: expect.stringContaining("missing-origin") })
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
+  expect(await refAt(w.git, unavailableOrigin.archiveRef)).toBe(head)
+  const closed = await retireLocalBranch({
+    ...input,
+    tip: head,
+    date: "2026-10-13",
+    reason: "issue closed",
+    disposition: { kind: "closed", queue: "main", store: createEventStore(w.work, "origin", gitIn(w.work).selection) },
+  })
+  expect(closed.outcome).toBe("removed")
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
+  const origin = gitIn(w.remote)
+  expect(await refAt(origin, closed.archiveRef)).toBe(head)
+  expect(await refAt(origin, `refs/heads/${branch}`)).toBe(head)
+  const rows = readRunLog(dirname(log.path), log.id)
+  expect(rows.map((row) => row.outcome)).toEqual(["kept", "kept", "removed", "kept", "kept", "removed"])
+  expect(rows.at(-1)).toMatchObject({
+    kind: "local-branch-retirement",
+    actor: "@dev/2",
+    issue: "@i/10-yrd/1",
+    head,
+    reason: "issue closed",
+  })
+})
+
+/** @failure A merged task keeps its author branch or retires a protected one.
+ * @level l2 @consumer queue caller with its explicit author-store authority
+ */
+it.each([false, true])("queue retirement respects the author store and its protection=%s", async (protectedBranch) => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const branch = "task/author-retirement"
+  const head = await submitCommit(w, branch, "one.txt")
+  const authorRepo = join(dirname(w.work), "author")
+  await w.git(["clone", "--quiet", w.remote, authorRepo])
+  const authorGit = gitIn(authorRepo)
+  await authorGit(["branch", branch, head])
+  const outcome = await queueRun({
+    ...(await w.options({ exit: 0 })),
+    authorStore: {
+      repo: authorRepo,
+      git: authorGit,
+      actor: "@dev/2",
+      protections: async () => (protectedBranch ? ["owner lease"] : []),
+    },
+  })
+  expect(outcome).toMatchObject({ exitCode: 0, merged: [branch] })
+  expect(await refAt(authorGit, `refs/heads/${branch}`)).toBe(protectedBranch ? head : undefined)
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
+  const records = readRunLog(dirname(outcome.log), outcome.run)
+  expect(records.filter((row) => row.kind === "local-branch-retirement")).toEqual([
+    expect.objectContaining({ outcome: protectedBranch ? "kept" : "removed", branch, head, issue: "@i/10-yrd/1" }),
+  ])
+})
 
 /** @failure Submit and the queue drift to different composition paths.
  * @level l2 @consumer the submitter and the queue runner

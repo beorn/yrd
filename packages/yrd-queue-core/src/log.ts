@@ -178,6 +178,8 @@ export const LOG_KINDS = [
   // branch moved or was already gone, and `saw` says which, a sha or "absent".
   "branch-deleted",
   "branch-kept",
+  // Local archive-first retirement, including protected/refused attempts, with actor and issue.
+  "local-branch-retirement",
   // A notice delivered for an ending after a resubmission opened a new change above it (26989): the `opened`
   // clears the ending's notices, so its `notified` cannot be recorded. Names the delivery and the `opened` event.
   "notice-unrecorded",
