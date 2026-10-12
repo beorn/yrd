@@ -237,14 +237,23 @@ function buildProgram(
       .option("--reason <text>", "why the change leaves the line, written on the record")
   const queueEnd = async (
     branch: string | undefined,
-    options: PauseOptions & { issue?: string },
+    options: PauseOptions & { issue?: string; local?: boolean; tip?: string },
     command: "withdraw" | "drop",
   ): Promise<void> => {
     if ((branch === undefined) === (options.issue === undefined)) {
       throw new Error("drop needs exactly one branch or --issue <id>")
     }
-    let subject: { command: "withdraw" | "drop"; branch: string } | { command: "drop-issue"; issue: string }
-    if (branch !== undefined) subject = { command, branch }
+    if (options.local === true && (branch === undefined || options.tip === undefined)) {
+      throw new Error("drop --local needs a branch and --tip <expected-commit>")
+    }
+    if (options.tip !== undefined && options.local !== true) throw new Error("--tip requires drop --local")
+    let subject:
+      | { command: "withdraw" | "drop"; branch: string }
+      | { command: "drop-issue"; issue: string }
+      | { command: "drop-local"; branch: string; tip: string }
+    if (command === "drop" && options.local === true && branch !== undefined && options.tip !== undefined) {
+      subject = { command: "drop-local", branch, tip: options.tip }
+    } else if (branch !== undefined) subject = { command, branch }
     else if (command === "drop" && options.issue !== undefined) {
       subject = { command: "drop-issue", issue: options.issue }
     } else throw new Error("withdraw needs a branch")
@@ -1290,7 +1299,9 @@ function buildProgram(
   withdrawOptions(
     program
       .command("drop [branch]")
-      .description("end a change, or archive and retire local branches after issue close")
+      .description("end a change, or archive and retire local branches")
+      .option("--local", "archive and retire only the named local branch; requires --tip")
+      .option("--tip <commit>", "expected full local commit for --local; an advanced branch is kept")
       .option(
         "--issue <id>",
         "archive issue-bound local branches locally and on origin, then retire eligible local refs",

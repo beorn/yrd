@@ -1424,11 +1424,16 @@ describe("a queue is the selected origin branch carrying config", () => {
     await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
     const issue = "@example/28791-retirement"
     const saved = new Map<string, string>()
-    for (const branch of ["task/local-only", "task/advanced"]) {
+    for (const branch of ["task/local-only", "task/manual-only", "task/advanced"]) {
       await git(["checkout", "--quiet", "-b", branch, "main"])
       writeFileSync(join(repo, "work.txt"), branch)
       await git(["add", "work.txt"])
-      await git(["commit", "--quiet", "-m", `work\n\nRefs: ${issue}`])
+      await git([
+        "commit",
+        "--quiet",
+        "-m",
+        `work\n\nRefs: ${branch === "task/manual-only" ? "@example/other-issue" : issue}`,
+      ])
       saved.set(branch, (await git(["rev-parse", "HEAD"])).trim())
       if (branch === "task/advanced") {
         const submitted = capture(repo)
@@ -1464,6 +1469,20 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(
       (await listChanges(createEventStore(repo, "origin", git.selection), "main")).get("task/local-only"),
     ).toMatchObject({ status: "cancelled", reason: "dropped", issue })
+    // Manual cleanup is exact-branch/exact-tip, and does not expand to the issue's other refs.
+    const manual = capture(repo)
+    const manualHead = saved.get("task/manual-only")!
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", "task/manual-only", "--local", "--tip", manualHead, "--submitter", "fixture", "--json"],
+        manual.io,
+      ),
+      manual.stderr(),
+    ).toBe(0)
+    const manualReport = JSON.parse(manual.stdout()) as { removed: { branch: string; archiveRef: string }[] }
+    expect(manualReport.removed).toEqual([expect.objectContaining({ branch: "task/manual-only" })])
+    expect((await git(["ls-remote", "origin", manualReport.removed[0]!.archiveRef])).split("\t")[0]).toBe(manualHead)
+    expect((await git(["rev-parse", "refs/heads/task/advanced"])).trim()).toBe(advanced)
   })
 
   it("submits an unpublished branch, then drops its open change and branch atomically", async () => {
