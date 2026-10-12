@@ -1305,13 +1305,16 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   const result = await publishWithTransientRetry<Appended>(
     (prepared) =>
       chain.transact(decide, `${write.type} ${queue}`, {
-        afterStage: async (staged) => prepared({ head: staged.next, events: staged.events, retries: 0 }),
+        afterStage: (staged) => {
+          prepared({ head: staged.next, events: staged.events, retries: 0 })
+          return Promise.resolve()
+        },
       }),
     {
       repository: store.remote,
       ref,
       landed: async (landed) => {
-        const fetchRefs = store.backend.fetchRefs
+        const fetchRefs = store.backend.fetchRefs?.bind(store.backend)
         if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs for the queue-event landed probe")
         return (await fetchRefs(store.repo, ref, store.remote)).get(ref) === landed.head ? landed : undefined
       },

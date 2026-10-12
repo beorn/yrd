@@ -1099,7 +1099,10 @@ async function submitEvent(
           (prepared) =>
             chain.transact(decideSubmit, `submit ${request.branch}`, {
               also,
-              afterStage: async (staged) => prepared({ head: staged.next, events: staged.events, retries: 0 }),
+              afterStage: (staged) => {
+                prepared({ head: staged.next, events: staged.events, retries: 0 })
+                return Promise.resolve()
+              },
             }),
           {
             repository: remote,
@@ -1110,7 +1113,7 @@ async function submitEvent(
       } else {
         const tip = archived.at(-1)?.id
         if (tip === undefined) throw new Error(`${coldRef}: archived history has no tip`)
-        const publishCustody = store.backend.publish
+        const publishCustody = store.backend.publish?.bind(store.backend)
         if (publishCustody === undefined) throw new TypeError(`${coldRef}: backend cannot publish atomic custody`)
         const staged = await chain.stage(decideSubmit(archived), { expect: tip })
         const archivedResult = { head: staged.head, events: staged.events, retries: 0 }
