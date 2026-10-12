@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os"
 import { dirname, join, sep } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
-import { Conflict } from "gitomic"
+import { Conflict, PublicationRejected } from "gitomic"
 import { openEvents } from "gitomic/events"
 import * as events from "../src/events.ts"
 import { createProcess, type Process } from "@yrd/process"
@@ -34,6 +34,7 @@ import {
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { runnerFor } from "../src/git.ts"
 import { requireFrozenGitSuper } from "../src/git-super-selection.ts"
+import { transientPushRetry } from "../src/transient-push.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -1052,6 +1053,142 @@ describe("event submit", () => {
     expect(
       (await listChangeHistories(store(w), "main")).histories.get("task/retry")?.events.map((event) => event.type),
     ).toEqual(["opened"])
+  })
+
+  const GITHUB_5XX = [
+    "remote: Internal Server Error",
+    "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 500",
+    "remote: Request ID: 8B8E:93E9C:1C9E26:269104:6AC672BE",
+  ].join("\n")
+
+  function stubTransientBackoff(): () => void {
+    const sleep = transientPushRetry.sleep
+    transientPushRetry.sleep = async () => {}
+    return () => {
+      transientPushRetry.sleep = sleep
+    }
+  }
+
+  function silenceStderr(): () => void {
+    const write = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: unknown, encoding?: unknown, callback?: unknown) => {
+      if (typeof encoding === "function") encoding()
+      if (typeof callback === "function") callback()
+      return true
+    }) as typeof process.stderr.write
+    return () => {
+      process.stderr.write = write
+    }
+  }
+
+  /** @failure 28805, @cto: submitEvent published its opened event with a bare
+   * `chain.transact`, so a 500 that arrived AFTER the push landed threw and the
+   * submitter could not tell "it did not record" from "the answer is unknown" — a
+   * re-run then appends a SECOND opened event. Through the one funnel the landed
+   * probe returns the staged event and the change chain carries exactly one append.
+   * @level l2 @consumer yrd submit
+   */
+  it("lands exactly one submit event when the 500 arrives after the push landed", async () => {
+    const restoreSleep = stubTransientBackoff()
+    const restoreStderr = silenceStderr()
+    try {
+      const w = await world()
+      const branch = "task/submit-5xx-landed"
+      await branchWithCommit(w, branch, "one.txt")
+      const backend = runnerFor(w.git).backend
+      const publish = backend.publish
+      if (publish === undefined) throw new Error("fixture lacks the submit publisher")
+      const ref = changesRef("main", branch)
+      let published = 0
+      let thrown = false
+      using _rejected = vi.spyOn(backend, "publish").mockImplementation(async (...args) => {
+        const landed = await publish(...args)
+        if (args[1].some((update) => update.ref === ref)) {
+          published++
+          if (!thrown) {
+            // The push APPLIED; the 500 rides the response.
+            thrown = true
+            throw new PublicationRejected(args[1], [GITHUB_5XX], GITHUB_5XX)
+          }
+        }
+        return landed
+      })
+      const submitted = await submit(w.git, "origin", {
+        branch,
+        submitter: "@dev/5",
+        target: { branch: "main", remote: "origin" },
+      })
+      // The landed probe returned the staged event, so this append published ONCE and never re-ran.
+      expect(published).toBe(1)
+      expect(await readStatus(store(w), "main", branch)).toMatchObject({ status: "queued" })
+      const history = (await listChangeHistories(store(w), "main")).histories.get(branch)
+      expect(history?.events.map((event) => event.type)).toEqual(["opened"])
+      expect(history?.events[0]?.id).toBe(submitted.opened)
+    } finally {
+      restoreStderr()
+      restoreSleep()
+    }
+  })
+
+  /** @failure 28805 addition 1, @cto: exhaustion is the CALLER's decision. A submit
+   * whose change-ref push never lands must fail LOUD, naming the ambiguity (the
+   * submission may or may not have been recorded), and a re-submit after that exit
+   * must be safe — decideSubmit sees the already-queued head and appends nothing.
+   * @level l2 @consumer yrd submit
+   */
+  it("fails loud on an exhausted submit 5xx, and a re-submit appends no second event", async () => {
+    const restoreSleep = stubTransientBackoff()
+    const restoreStderr = silenceStderr()
+    try {
+      const w = await world()
+      const branch = "task/submit-5xx-exhausted"
+      const head = await branchWithCommit(w, branch, "one.txt")
+      const request = { branch, submitter: "@dev/5", target: { branch: "main", remote: "origin" } }
+      const backend = runnerFor(w.git).backend
+      const publish = backend.publish
+      const fetchRefs = backend.fetchRefs
+      if (publish === undefined || fetchRefs === undefined) throw new Error("fixture lacks the submit ref operations")
+      const ref = changesRef("main", branch)
+      let uploads = 0
+      // Arm the outage only once the change-ref push has been attempted, so the
+      // pre-submit reads that build the preview still succeed.
+      let armed = false
+      using _rejected = vi.spyOn(backend, "publish").mockImplementation(async (...args) => {
+        const landed = await publish(...args)
+        if (args[1].some((update) => update.ref === ref)) {
+          uploads++
+          armed = true
+          // The push APPLIED; the 500 rides every response.
+          throw new PublicationRejected(args[1], [GITHUB_5XX], GITHUB_5XX)
+        }
+        return landed
+      })
+      // The same outage also breaks the landed probe's own read: an unanswered probe
+      // is an unknown, so the funnel settles on the original 5xx at once (28793 round 2).
+      using dark = vi.spyOn(backend, "fetchRefs").mockImplementation(async (...args) => {
+        const asked = Array.isArray(args[1]) ? args[1] : [args[1]]
+        if (armed && asked.includes(ref)) throw new Error("fatal: Connection reset by peer")
+        return fetchRefs(...args)
+      })
+      await expect(submit(w.git, "origin", request)).rejects.toThrow(
+        /GitHub returned Internal Server Error on the submit of task\/submit-5xx-exhausted; it may or may not have been recorded\. Run `yrd status task\/submit-5xx-exhausted` before submitting again\./,
+      )
+      // The probe failed, so work was never re-run: exactly one push was attempted.
+      expect(uploads).toBe(1)
+
+      // Once the outage clears, the re-run is safe: the head is already queued, so
+      // decideSubmit writes no second submit.
+      dark.mockRestore()
+      const replayed = await submit(w.git, "origin", request)
+      expect(replayed).toMatchObject({ head, retry: true })
+      expect(uploads).toBe(1)
+      expect(
+        (await listChangeHistories(store(w), "main")).histories.get(branch)?.events.map((event) => event.type),
+      ).toEqual(["opened"])
+    } finally {
+      restoreStderr()
+      restoreSleep()
+    }
   })
 
   /** @failure An unticked Start row opens a change, or an unreadable policy silently admits without a recorded warning.

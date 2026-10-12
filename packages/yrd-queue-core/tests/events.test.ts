@@ -3,13 +3,14 @@
 // @level l1
 // @consumer yrd list, submit and the queue runner on ADR-0016 event queues
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { Event, EventInput } from "gitomic/events"
 import { listRefs, openEvents } from "gitomic/events"
 import { createMemBackend } from "gitomic/mem"
-import { Conflict, open } from "gitomic"
-import type { GitomicBackend } from "gitomic"
+import { Conflict, open, PublicationRejected } from "gitomic"
+import type { GitomicBackend, RefUpdate } from "gitomic"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
+import { transientPush5xxOf, transientPushRetry } from "../src/transient-push.ts"
 import { readEventChain, readEventChains } from "../src/event-read.ts"
 import { eventListRows, eventRows } from "../src/event-table.ts"
 import { classifyQueueRef, pauseRef, runIndexRef } from "../src/refs.ts"
@@ -55,6 +56,9 @@ function remoteMemStore(repo: string) {
   const localPublish = backend.publish
   if (localRefs === undefined || localPublish === undefined) throw new Error("mem backend lacks event ref operations")
   let beforePublish: (() => Promise<void>) | undefined
+  // A hook that runs AFTER the ref actually moves, so a test can land a write and
+  // THEN raise the remote's 5xx — the ambiguous case (28805) the landed probe exists for.
+  let afterPublish: ((updates: readonly RefUpdate[]) => Promise<void>) | undefined
   const proxy: GitomicBackend = {
     ...backend,
     listRefs: (name, prefix) => localRefs(name, prefix),
@@ -62,7 +66,11 @@ function remoteMemStore(repo: string) {
       const hook = beforePublish
       beforePublish = undefined
       if (hook !== undefined) await hook()
-      return localPublish(name, updates)
+      const published = await localPublish(name, updates)
+      const landed = afterPublish
+      afterPublish = undefined
+      if (landed !== undefined) await landed(updates)
+      return published
     },
     fetchRefs: async (name, refs, _remote, options) => {
       if (typeof refs === "string") return localRefs(name, refs)
@@ -83,6 +91,7 @@ function remoteMemStore(repo: string) {
     store,
     location: { ...store, remote: "origin", selection: gitIn(repo).selection },
     beforeNextPublish: (hook: () => Promise<void>) => (beforePublish = hook),
+    afterNextPublish: (hook: (updates: readonly RefUpdate[]) => Promise<void>) => (afterPublish = hook),
   }
 }
 
@@ -2330,6 +2339,113 @@ describe("the queue-format boundary", () => {
     const events = await (await openEvents({ ...location, ref: queueRef("lab") })).events()
     expect(events.map((event) => event.type)).toEqual(["created", "observed", "notified"])
     expect(events[1]?.links).toEqual([commit])
+  })
+
+  const GITHUB_5XX = [
+    "remote: Internal Server Error",
+    "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 500",
+    "remote: Request ID: 8B8E:93E9C:1C9E26:269104:6AC672BE",
+  ].join("\n")
+
+  function stubTransientBackoff(): () => void {
+    const sleep = transientPushRetry.sleep
+    transientPushRetry.sleep = async () => {}
+    return () => {
+      transientPushRetry.sleep = sleep
+    }
+  }
+
+  function silenceStderr(): () => void {
+    const write = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: unknown, encoding?: unknown, callback?: unknown) => {
+      if (typeof encoding === "function") encoding()
+      if (typeof callback === "function") callback()
+      return true
+    }) as typeof process.stderr.write
+    return () => {
+      process.stderr.write = write
+    }
+  }
+
+  /** @failure 28805, @cto: writeQueueEvent published its queue event with a bare
+   * `chain.transact`, so a 500 that arrived AFTER the push landed threw and the
+   * reader could not tell "the event did not land" from "the answer is unknown" —
+   * a re-run then appends a SECOND event. Through the one funnel the landed probe
+   * returns the staged event and the chain carries exactly one append.
+   * @level l1 @consumer every yrd CLI and runner that writes a queue event
+   */
+  it("lands exactly one queue event when the 500 arrives after the push landed", async () => {
+    const { store, location, afterNextPublish } = remoteMemStore("yrd-queue-event-5xx-landed")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const restoreSleep = stubTransientBackoff()
+    const restoreStderr = silenceStderr()
+    try {
+      let publishes = 0
+      afterNextPublish(async (updates) => {
+        publishes++
+        // The push APPLIED (this hook runs after the ref moved); the 500 rides the response.
+        throw new PublicationRejected(updates, [GITHUB_5XX], GITHUB_5XX)
+      })
+      const written = await writeQueueEvent(location, "lab", {
+        type: "observed",
+        commit,
+        branch: "task/direct",
+        by: "yrd-run",
+        at: new Date("2026-09-22T14:01:00.000Z"),
+      })
+      const events = await (await openEvents({ ...location, ref: queueRef("lab") })).events()
+      expect(events.map((event) => event.type)).toEqual(["created", "observed"])
+      expect(events.at(-1)?.id).toBe(written)
+      expect(publishes).toBe(1)
+    } finally {
+      restoreStderr()
+      restoreSleep()
+    }
+  })
+
+  /** @failure 28805 addition 1, @cto: exhaustion is the CALLER's decision. A queue
+   * event whose push never lands must surface the ORIGINAL 5xx from
+   * writeQueueEvent — recognizable by the caller's own probe — not be swallowed or
+   * turned into a second append.
+   * @level l1 @consumer every yrd CLI and runner that writes a queue event
+   */
+  it("surfaces an exhausted queue-event 5xx for the caller to decide", async () => {
+    const { store, location } = remoteMemStore("yrd-queue-event-5xx-exhausted")
+    const target = await open({ ...store, ref: "refs/heads/lab" })
+    const commit = (await target.transact(async (map) => map.set(".yrd.yml", "target: lab"), "declare")).oid
+    await seedEventQueue(location, "lab", commit, new Date("2026-09-22T14:00:00.000Z"))
+    const restoreSleep = stubTransientBackoff()
+    const restoreStderr = silenceStderr()
+    try {
+      let publishes = 0
+      using _never = vi.spyOn(store.backend, "publish").mockImplementation(async () => {
+        publishes++
+        throw new PublicationRejected([], [GITHUB_5XX], GITHUB_5XX)
+      })
+      const failure = await writeQueueEvent(location, "lab", {
+        type: "observed",
+        commit,
+        branch: "task/direct",
+        by: "yrd-run",
+        at: new Date("2026-09-22T14:01:00.000Z"),
+      }).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      // The caller maps the exhaustion itself: the original 5xx is still recognizable.
+      expect(transientPush5xxOf(failure)).toMatchObject({
+        line: expect.stringContaining("Internal Server Error"),
+        requestId: "8B8E:93E9C:1C9E26:269104:6AC672BE",
+      })
+      expect(publishes).toBe(transientPushRetry.attempts)
+      const events = await (await openEvents({ ...location, ref: queueRef("lab") })).events()
+      expect(events.map((event) => event.type)).toEqual(["created"])
+    } finally {
+      restoreStderr()
+      restoreSleep()
+    }
   })
 
   it("records one notify-floors snapshot, dedups a replay, and refuses a malformed one loudly", async () => {

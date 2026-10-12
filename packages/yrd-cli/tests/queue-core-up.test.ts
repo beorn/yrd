@@ -89,6 +89,7 @@ import { changesSuffix } from "../src/watch-list.tsx"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import { readRunnerFacts } from "../src/watch-runner.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
+import { transientPushRetry } from "../../yrd-queue-core/src/transient-push.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
 
@@ -2562,6 +2563,80 @@ describe("yrd queue up, the service", () => {
     // The budget of the service case above: accepted submits push where refused
     // ones did not, and under a loaded host this case measured 4-6 s, at the
     // 5 s default.
+  }, 15_000)
+
+  /** @failure 28805 addition 1, @cto: a persistent GitHub 5xx on the queue-event
+   * publish is ambiguous — the pause MAY or MAY NOT have been recorded — so the
+   * CLI must fail LOUD and name the ambiguity, never swallow it or read it as a
+   * judgement. The landed probe shares the outage here, which settles the funnel
+   * on the original 5xx at once.
+   * @level l2 @consumer the operator running `yrd queue pause`/`resume`
+   */
+  it("fails loud, naming the ambiguity, when the pause publish exhausts a 5xx", async () => {
+    const sleep = transientPushRetry.sleep
+    transientPushRetry.sleep = async () => {}
+    const write = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: unknown, encoding?: unknown, callback?: unknown) => {
+      if (typeof encoding === "function") encoding()
+      if (typeof callback === "function") callback()
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const w = await world()
+      const ref = queueRef("main")
+      const github5xx = [
+        "remote: Internal Server Error",
+        "fatal: unable to access 'https://github.com/beorn/hh.git/': The requested URL returned error: 500",
+      ].join("\n")
+      const originalBackend = gitomic.createShellBackend
+      let uploads = 0
+      let outage = false
+      using _backend = vi.spyOn(gitomic, "createShellBackend").mockImplementation((options) => {
+        const backend = originalBackend(options)
+        const publish = backend.publish
+        const fetchRefs = backend.fetchRefs
+        if (publish === undefined || fetchRefs === undefined) {
+          throw new Error("fixture needs Gitomic publish and ref reads")
+        }
+        return {
+          ...backend,
+          publish: async (repo, updates, remote) => {
+            const landed = await publish(repo, updates, remote)
+            if (updates.some((update) => update.ref === ref)) {
+              uploads++
+              outage = true
+              // The push APPLIED; the 500 rides every response.
+              throw new gitomic.PublicationRejected(updates, [github5xx], github5xx)
+            }
+            return landed
+          },
+          fetchRefs: async (repo, refs, remote, fetchOptions) => {
+            const asked = Array.isArray(refs) ? refs : [refs]
+            if (outage && asked.includes(ref)) throw new Error("fatal: Connection reset by peer")
+            return fetchRefs(repo, refs, remote, fetchOptions)
+          },
+        }
+      })
+      const run = capture(w.work)
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { by: "@chief", command: "pause", reason: "repair" },
+          {
+            workdir: w.workdir,
+          },
+        ),
+      ).toBe(1)
+      expect(run.stderr()).toContain("GitHub returned Internal Server Error on the pause of")
+      expect(run.stderr()).toContain("it may or may not have been recorded")
+      expect(run.stderr()).toContain("Read the standing pause state (yrd pause) before retrying")
+      // The probe failed, so the push was never re-run: exactly one attempt.
+      expect(uploads).toBe(1)
+    } finally {
+      process.stderr.write = write
+      transientPushRetry.sleep = sleep
+    }
   }, 15_000)
 
   // 27187: the target's declaration is read by the SUBMITTER's Yrd. A key the
