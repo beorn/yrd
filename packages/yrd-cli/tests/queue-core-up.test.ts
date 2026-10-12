@@ -199,6 +199,17 @@ function cleanupRows(root: string): readonly Record<string, unknown>[] {
   return allCleanupRows(root).filter((row) => row.census !== undefined)
 }
 
+/** Exercise retirement rules after the independently tested opening grace. */
+async function ageOpening(path: string): Promise<void> {
+  const gitDir = (await gitIn(path)(["rev-parse", "--absolute-git-dir"])).trim()
+  const recordPath = join(gitDir, "yrd-open.json")
+  const opening = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>
+  writeFileSync(
+    recordPath,
+    JSON.stringify({ ...opening, at: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() }),
+  )
+}
+
 /** A logger that keeps every row it is handed, so a test can read what the service said and at what level. */
 function logRows(): Readonly<{
   log: ConditionalLogger
@@ -267,6 +278,8 @@ async function world(eventQueue = true): Promise<World> {
   await seed(["clone", "--quiet", remote, work])
   const git = gitIn(work)
   await identity(git)
+  // Kept environments must not collide across independent fixture worlds.
+  await git(["config", "worktree.poolRoot", join(root, "worktrees")])
   await git(["checkout", "--quiet", "-b", "main"])
   writeFileSync(join(work, ".yrd.yml"), DECLARATION)
   await git(["add", ".yrd.yml"])
@@ -546,6 +559,118 @@ async function gitlinkVectorWorld(
 }
 
 describe("yrd queue up, the service", () => {
+  /**
+   * @failure An external declared use has no process cwd holder between
+   *          commands, so automatic cleanup destroys its environment.
+   * @level l2
+   * @consumer the host declaring a persistent working directory
+   * @testonly none
+   */
+  it("a declared seat cwd survives cleanup without a process holder", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const opened = capture(w.work)
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", head, "--bay", "declared-use", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const gitDir = (await gitIn(path)(["rev-parse", "--absolute-git-dir"])).trim()
+    const recordPath = join(gitDir, "yrd-open.json")
+    const opening = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>
+    writeFileSync(
+      recordPath,
+      JSON.stringify({ ...opening, at: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() }),
+    )
+    mkdirSync(join(path, "working"))
+    const uses = vi.fn(async () => [{ path: join(path, "working"), reason: "declared working directory" }])
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const stop = new AbortController()
+    const run = capture(w.work)
+    run.io.liveEnvironmentUse = uses
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          run.io,
+          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+          { json: true, workdir },
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(existsSync(path), run.stderr()).toBe(true)
+      expect(run.stderr()).toContain("declared working directory")
+      expect(uses).toHaveBeenCalledTimes(1)
+    } finally {
+      stop.abort()
+      census.mockRestore()
+    }
+  }, 120_000)
+
+  /**
+   * @failure Automatic cleanup destroys a clean environment between opening
+   *          and its first edit, including time spent waiting for a review.
+   * @level l2
+   * @consumer the author starting work in an unheld environment
+   * @testonly none
+   */
+  it("a newly opened environment survives cleanup inside the grace window and becomes eligible after it", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    await redeclare(w, "setup: ':'\n")
+    const workdir = await workdirOf(w.git, { cwd: w.work })
+    const opened = capture(w.work)
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", head, "--bay", "fresh-work", "--json"], opened.io),
+      opened.stderr(),
+    ).toBe(0)
+    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const gitDir = (await gitIn(path)(["rev-parse", "--absolute-git-dir"])).trim()
+    const openingPath = join(gitDir, "yrd-open.json")
+    const opening = JSON.parse(readFileSync(openingPath, "utf8")) as { at: string }
+    const census = vi
+      .spyOn(removely, "inspectProcessCwds")
+      .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
+    const round = async (): Promise<Capture> => {
+      const stop = new AbortController()
+      const run = capture(w.work)
+      try {
+        expect(
+          await coreQueueCommand(
+            w.work,
+            run.io,
+            { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+            { json: true, workdir },
+          ),
+          run.stderr(),
+        ).toBe(0)
+        return run
+      } finally {
+        stop.abort()
+      }
+    }
+    try {
+      const fresh = await round()
+      expect(existsSync(path), fresh.stderr()).toBe(true)
+      expect(fresh.stderr()).toContain(`fresh: opened ${opening.at}`)
+      writeFileSync(
+        openingPath,
+        JSON.stringify({ ...opening, at: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() }),
+      )
+      const aged = await round()
+      expect(existsSync(path), aged.stderr()).toBe(false)
+      expect(aged.stderr()).toContain("native retained removal proof accepted")
+    } finally {
+      census.mockRestore()
+    }
+  }, 120_000)
+
   it("reuses a dirty environment verdict until its index changes", async () => {
     const w = await world()
     await w.git(["config", "yrd.workdir", w.workdir])
@@ -558,6 +683,7 @@ describe("yrd queue up, the service", () => {
       opened.stderr(),
     ).toBe(0)
     const environment = JSON.parse(opened.stdout()) as { path: string }
+    await ageOpening(environment.path)
     writeFileSync(join(environment.path, "dirty.txt"), "work to preserve\n")
     const census = vi
       .spyOn(removely, "inspectProcessCwds")
@@ -630,6 +756,7 @@ describe("yrd queue up, the service", () => {
         opened.stderr(),
       ).toBe(0)
       const environment = JSON.parse(opened.stdout()) as { path: string }
+      await ageOpening(environment.path)
       expect(existsSync(environment.path)).toBe(true)
       // The host may deny unrelated processes' CWDs. The projection is this
       // external capability boundary; queue, registry and retained removal stay real.
@@ -917,6 +1044,7 @@ describe("yrd queue up, the service", () => {
       opened.stderr(),
     ).toBe(0)
     const environment = JSON.parse(opened.stdout()) as { path: string }
+    await ageOpening(environment.path)
     const uid = process.getuid?.()
     if (uid === undefined) throw new Error("this queue case needs a real unix uid")
     const roundCensus = vi
@@ -1092,6 +1220,7 @@ describe("yrd queue up, the service", () => {
         run.stderr(),
       ).toBe(0)
       const environment = JSON.parse(run.stdout()) as { path: string }
+      await ageOpening(environment.path)
       expect(existsSync(environment.path)).toBe(true)
       return environment.path
     }
@@ -1158,13 +1287,18 @@ describe("yrd queue up, the service", () => {
    * @consumer the seat whose change just landed and whose env should delete itself
    * @testonly none
    */
-  it.each([
-    { bay: "21122-merge", closes: true, linkedRoot: false },
-    { bay: "21122-personal", closes: false, linkedRoot: false },
-    { bay: "21122-merge", closes: true, linkedRoot: true },
-  ])(
-    "a merge closes only its original environment ($bay, linked root $linkedRoot)",
-    async ({ bay, closes, linkedRoot }) => {
+  it.each(
+    [
+      { bay: "21122-merge", closes: true, linkedRoot: false },
+      { bay: "21122-personal", closes: false, linkedRoot: false },
+      { bay: "21122-merge", closes: true, linkedRoot: true },
+      { bay: "21122-merge", closes: false, linkedRoot: false, fresh: true },
+      { bay: "21122-merge", closes: false, linkedRoot: true, liveUse: true },
+      { bay: "21122-merge", closes: false, linkedRoot: false, failingReader: true },
+    ].map((row) => ({ fresh: false, liveUse: false, failingReader: false, ...row })),
+  )(
+    "a merge closes only its original environment ($bay, linked root $linkedRoot, fresh $fresh, live use $liveUse, failed reader $failingReader)",
+    async ({ bay, closes, linkedRoot, fresh, liveUse, failingReader }) => {
       const w = await world()
       if (linkedRoot) {
         const physical = join(dirname(w.work), "physical-bays")
@@ -1198,6 +1332,7 @@ describe("yrd queue up, the service", () => {
       const openedEnvironment = JSON.parse(opened.stdout()) as { path: string }
       const environment = { path: realpathSync(openedEnvironment.path) }
       if (linkedRoot) expect(environment.path).not.toBe(openedEnvironment.path)
+      if (!fresh) await ageOpening(environment.path)
       // Same live checkout in all cases; the environment's opening differs.
       await gitIn(environment.path)(["checkout", "--quiet", "task/21122-merge"])
       expect(existsSync(environment.path)).toBe(true)
@@ -1206,6 +1341,12 @@ describe("yrd queue up, the service", () => {
         .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
       const stop = new AbortController()
       const run = capture(w.work)
+      if (liveUse || failingReader) {
+        run.io.liveEnvironmentUse = vi.fn(async () => {
+          if (failingReader) throw new Error("declaration read failed")
+          return [{ path: openedEnvironment.path, reason: "declared work" }]
+        })
+      }
       try {
         expect(
           await coreQueueCommand(
@@ -1218,6 +1359,12 @@ describe("yrd queue up, the service", () => {
         ).toBe(0)
         expect(existsSync(environment.path), run.stderr()).toBe(!closes)
         expect(listCloseRequests(workdir), run.stderr()).toEqual([])
+        if (liveUse || failingReader) expect(run.io.liveEnvironmentUse).toHaveBeenCalledTimes(1)
+        if (liveUse) expect(run.stderr()).toContain("live use: declared work")
+        if (failingReader) {
+          expect(run.stderr()).toContain("live environment-use reader unavailable: Error: declaration read failed")
+        }
+        if (fresh) expect(run.stderr()).toContain("fresh: opened")
         const filed = allCleanupRows(workdir).filter((row) => row.result === "filed" && row.path === environment.path)
         expect(filed, JSON.stringify(allCleanupRows(workdir))).toHaveLength(closes ? 1 : 0)
         const closed = allCleanupRows(workdir).find((row) => row.result === "closed" && typeof row.request === "object")
@@ -1302,6 +1449,7 @@ describe("yrd queue up, the service", () => {
       expect(await runYrdProcess(["bun", "yrd", "env", "open", ...open, "--json"], opened.io), opened.stderr()).toBe(0)
       const openedEnvironment = JSON.parse(opened.stdout()) as { path: string }
       const environment = { path: realpathSync(openedEnvironment.path) }
+      await ageOpening(environment.path)
       if (unlinkRecord) {
         const gitDir = (await gitIn(environment.path)(["rev-parse", "--absolute-git-dir"])).trim()
         unlinkSync(join(gitDir, "yrd-open.json"))
@@ -1369,6 +1517,7 @@ describe("yrd queue up, the service", () => {
       opened.stderr(),
     ).toBe(0)
     const environment = JSON.parse(opened.stdout()) as { path: string }
+    await ageOpening(environment.path)
     const census = vi
       .spyOn(removely, "inspectProcessCwds")
       .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
@@ -1529,6 +1678,7 @@ describe("yrd queue up, the service", () => {
       opened.stderr(),
     ).toBe(0)
     const environment = (JSON.parse(opened.stdout()) as { path: string }).path
+    await ageOpening(environment)
     const census = vi
       .spyOn(removely, "inspectProcessCwds")
       .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
@@ -1577,6 +1727,7 @@ describe("yrd queue up, the service", () => {
       opened.stderr(),
     ).toBe(0)
     const environment = JSON.parse(opened.stdout()) as { path: string }
+    await ageOpening(environment.path)
     // Expiry/truncation: the reflog still has entries, but no all-zero creation
     // line, so Git can no longer prove which commits this environment created.
     const environmentGit = gitIn(environment.path)
@@ -1632,6 +1783,7 @@ describe("yrd queue up, the service", () => {
       opened.stderr(),
     ).toBe(0)
     const environment = JSON.parse(opened.stdout()) as { path: string }
+    await ageOpening(environment.path)
     // The environment's own name carries no issue; only the branch it held does.
     // It moved to an issue-bound branch and was then detached, so the reflog is
     // the sole surviving record that it ever held task/27601-branchthen.
@@ -6345,6 +6497,7 @@ describe("yrd queue run --tier long", () => {
       opened.stderr(),
     ).toBe(0)
     const environment = (JSON.parse(opened.stdout()) as { path: string }).path
+    await ageOpening(environment)
     // Only the repository the command stands in holds this environment.
     expect(await w.git(["worktree", "list", "--porcelain", "-z"])).not.toContain(environment)
     expect(await siblingGit(["worktree", "list", "--porcelain", "-z"])).toContain(environment)

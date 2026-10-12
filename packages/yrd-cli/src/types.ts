@@ -43,4 +43,8 @@ export type YrdCliIO = {
   color?: boolean
   /** The terminal's width in cells, for the pages that lay out to it; absent, they assume 120. */
   columns?: number
+  /** Read current external uses once per cleanup round. Paths are absolute;
+   * reasons are opaque text. An unavailable reader preserves automatic
+   * candidates, while an absent reader supplies no external protection. */
+  liveEnvironmentUse?: () => Promise<readonly Readonly<{ path: string; reason: string }>[]>
 }

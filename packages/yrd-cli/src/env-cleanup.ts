@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs"
-import { basename, dirname, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   gitIn,
@@ -37,7 +37,12 @@ import {
   type StoredCloseRequest,
 } from "./env-close-requests.ts"
 import { environmentIssues, environmentProvenance } from "./env-cleanup-provenance.ts"
-import { mergedCloseKeepReason, readEnvOpenRecord, throwIfStandingLifetime } from "./env-open-record.ts"
+import {
+  mergedCloseKeepReason,
+  readEnvOpenRecord,
+  throwIfStandingLifetime,
+  type EnvOpenRecordRead,
+} from "./env-open-record.ts"
 import { repositoryHere } from "./declaration.ts"
 import { issueLookup, type ResolvedIssue } from "./issue-resolver.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
@@ -69,6 +74,8 @@ type CachedEnvironment = {
  * this path measured 4 per row).
  */
 const ENVIRONMENT_BATCH = 8
+// Covers opening through the first commit, including time waiting for review.
+const FRESH_ENVIRONMENT_GRACE_MS = 24 * 60 * 60 * 1000
 
 /**
  * Resume state for the sweep. The cursor is a HINT read from the run's own
@@ -436,6 +443,7 @@ async function fileMergedCloseRequests(
     selection: GitSelection
     env?: NodeJS.ProcessEnv
     record: (path: string, result: string, why: string) => void
+    automaticKeep: (path: string, opening: EnvOpenRecordRead) => string | undefined
   }>,
 ): Promise<void> {
   if (input.merged.length === 0) return
@@ -453,7 +461,8 @@ async function fileMergedCloseRequests(
       const gitDir = (
         await gitIn(row.path, undefined, input.selection, { env: input.env })(["rev-parse", "--absolute-git-dir"])
       ).trim()
-      const keep = mergedCloseKeepReason(readEnvOpenRecord(gitDir))
+      const opening = readEnvOpenRecord(gitDir)
+      const keep = input.automaticKeep(row.path, opening) ?? mergedCloseKeepReason(opening)
       if (keep !== undefined) {
         input.record(row.path, "kept", keep)
         continue
@@ -501,6 +510,14 @@ async function fileMergedCloseRequests(
   }
 }
 
+/**
+ * Automatic merged-close filing and the sweep share one protection predicate:
+ * external live uses (realpath equal to or inside the environment) and a 24-hour
+ * opening-time grace. Read external uses once per round before filing; failure
+ * keeps automatic candidates with a named reason. Explicit close intent keeps
+ * its own lifecycle. Held/standing, busy, dirty, unmerged and open-issue checks
+ * still determine eligibility after protection expires.
+ */
 export function createEnvironmentCleanup() {
   const cache = new Map<string, CachedEnvironment>()
   const progress: CleanupProgress = { cursor: 0, hint: undefined, loaded: false }
@@ -671,6 +688,48 @@ async function cleanupEnvironments(
     }
     if (result.code === 1) throw new Error(`commit ${head} in ${root} is not on target ${target}`)
   }
+  let liveUses: readonly Readonly<{ path: string; reason: string }>[] = []
+  let liveUseFailure: string | undefined
+  if (io.liveEnvironmentUse !== undefined) {
+    try {
+      const uses: unknown = await io.liveEnvironmentUse()
+      if (!Array.isArray(uses)) throw new Error("expected an array of absolute paths and reasons")
+      liveUses = uses.map((use: unknown) => {
+        if (
+          typeof use !== "object" ||
+          use === null ||
+          !("path" in use) ||
+          typeof use.path !== "string" ||
+          !isAbsolute(use.path) ||
+          !("reason" in use) ||
+          typeof use.reason !== "string" ||
+          use.reason.trim() === ""
+        ) {
+          throw new Error("expected each use to have an absolute path and a nonempty reason")
+        }
+        return { path: realpathSync(use.path), reason: use.reason }
+      })
+    } catch (cause) {
+      liveUseFailure = `live environment-use reader unavailable: ${String(cause)}`
+    }
+  }
+  const automaticKeep = (path: string, opening: EnvOpenRecordRead): string | undefined => {
+    if (liveUseFailure !== undefined) return liveUseFailure
+    if (liveUses.length > 0) {
+      const environment = realpathSync(path)
+      const use = liveUses.find((candidate) => {
+        const inside = relative(environment, candidate.path)
+        return inside === "" || (inside !== ".." && !inside.startsWith(`..${sep}`) && !isAbsolute(inside))
+      })
+      if (use !== undefined) return `live use: ${use.reason} (${use.path})`
+    }
+    if (opening.status === "recorded") {
+      const openedAt = Date.parse(opening.record.at)
+      if (!Number.isFinite(openedAt)) return `opening timestamp unproven: ${JSON.stringify(opening.record.at)}`
+      if (Date.now() - openedAt < FRESH_ENVIRONMENT_GRACE_MS) return `fresh: opened ${opening.record.at}`
+    }
+    return undefined
+  }
   // File before census so a round that cannot certify still leaves the request
   // for the next consume.
   await fileMergedCloseRequests({
@@ -682,6 +741,7 @@ async function cleanupEnvironments(
     selection: input.selection,
     env: input.env,
     record,
+    automaticKeep,
   })
   let snapshot: ProcessCwdProjection
   try {
@@ -792,7 +852,10 @@ async function cleanupEnvironments(
       if (row.hold !== null) throw new Error(`held${row.hold === "" ? "" : `: ${row.hold}`}`)
       const openingGit = gitIn(row.path, undefined, git.selection, { env: input.env })
       const openingDir = (await openingGit(["rev-parse", "--absolute-git-dir"])).trim()
-      throwIfStandingLifetime(readEnvOpenRecord(openingDir))
+      const opening = readEnvOpenRecord(openingDir)
+      throwIfStandingLifetime(opening)
+      const protection = automaticKeep(row.path, opening)
+      if (protection !== undefined) throw new Error(protection)
       if (charged >= ENVIRONMENT_BATCH) {
         stoppedAt = index
         break
@@ -893,6 +956,8 @@ async function cleanupEnvironments(
       if (current === undefined || current.hold !== null || current.head !== head) {
         throw new Error("registration, hold or HEAD changed before close")
       }
+      const finalProtection = automaticKeep(row.path, readEnvOpenRecord(openingDir))
+      if (finalProtection !== undefined) throw new Error(finalProtection)
       let output = ""
       const exit = await closeEnvironment(
         row.path,
