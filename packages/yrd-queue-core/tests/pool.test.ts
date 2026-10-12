@@ -10,9 +10,9 @@
  * second borrow, with no refusal note on the way.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { basename, join } from "node:path"
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import { homedir, tmpdir } from "node:os"
+import { basename, dirname, join, resolve, sep } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterAll, expect, it } from "vitest"
 import type { Git } from "../src/git.ts"
@@ -22,23 +22,30 @@ import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { gitSuperBin, gitSuperSha } from "../../../tests/support/git-super-bin.ts"
 
 const scratch: string[] = []
+/** Fixtures deliberately OUTSIDE tmpdir(), where removely's default allowed root refuses them. */
+const outsideScratch: string[] = []
 
 afterAll(() => {
   for (const dir of scratch) safeRemoveSync(dir, { within: realpathSync(tmpdir()), allowMissing: true })
+  for (const dir of outsideScratch) {
+    const parent = realpathSync(dirname(dir))
+    safeRemoveSync(dir, { within: parent, allowedRoots: [parent], allowMissing: true })
+  }
 })
 
 const WITNESS = join("node_modules", "cache-witness")
 
 /** A repository and a pool over it, with the notes each borrow left behind. */
-async function poolFixture(): Promise<{
+async function poolFixture(outside?: string): Promise<{
   git: Git
   repo: string
   pool: WorktreePool
   newPool: () => WorktreePool
   notes: string[]
 }> {
-  const root = mkdtempSync(join(tmpdir(), "yrd-pool-"))
-  scratch.push(root)
+  const root = outside ?? mkdtempSync(join(tmpdir(), "yrd-pool-"))
+  if (outside === undefined) scratch.push(root)
+  else outsideScratch.push(root)
   const repo = join(root, "repo")
   mkdirSync(repo)
   const env = {
@@ -134,4 +141,51 @@ it("refuses reuse only for a tracked change inside a submodule, never for an unt
   expect(notes.join(" ")).toContain("tracked modification")
   expect(existsSync(join(third.path, WITNESS))).toBe(false)
   await third.remove()
+})
+
+/**
+ * A scratch root OUTSIDE `tmpdir()`, which is the whole point of the 28751 case:
+ * removely's DEFAULT `allowedRoots` is [tmpdir()], so a fixture under mkdtemp()
+ * proves nothing about the real pool, whose trees live at
+ * /hh/var/yrd-workdir/<repo>/worktrees/pool while the service's TMPDIR is
+ * /hh/dev/.git/yrd/tmp. `homedir()` is NOT reliably outside it — the Vitest home
+ * guard pins HOME to `<run root>/home`, i.e. INSIDE tmpdir(), measured 2026-10-10
+ * — so prefer tmpdir()'s own parent, outside by construction, and fall back to
+ * homedir() where that parent is not writable.
+ */
+function scratchOutsideTmpdir(): string {
+  const tmp = resolve(tmpdir())
+  const candidates = [dirname(tmp), homedir()].filter((candidate) => {
+    const parent = resolve(candidate)
+    return parent !== tmp && !parent.startsWith(`${tmp}${sep}`)
+  })
+  const refused: string[] = []
+  for (const parent of candidates) {
+    try {
+      accessSync(parent, constants.W_OK)
+      return mkdtempSync(join(parent, ".yrd-pool-selftest-"))
+    } catch {
+      // silent-fallback-allow: a directory this process cannot write is not the
+      // fixture's host, so the next candidate must carry it; the throw below
+      // names every host refused rather than leaving a bare empty result.
+      refused.push(parent)
+    }
+  }
+  throw new Error(`pool fixture: no writable root outside ${tmp} to host the 28751 case; refused ${refused.join(", ")}`)
+}
+
+it("discards a dirty warm tree whose pool root is outside tmpdir (28751: allowedRoots)", async () => {
+  const { git, notes, pool, repo } = await poolFixture(scratchOutsideTmpdir())
+  const commit = await withLocalSubmodule(repo, git)
+
+  const first = await borrowWithCache(pool, commit)
+  // A tracked change is what refuses reuse; the REMOVAL that follows it is the
+  // one whose containment root is outside removely's default allowed roots.
+  writeFileSync(join(first, "vendor", "pkg", "lib.ts"), "export const lib = 2\n")
+
+  const second = await pool.borrow({ commit, role: "candidate", targetSha: commit })
+  expect(notes.join(" ")).toContain("tracked modification")
+  expect(second.path).toBe(first)
+  expect(existsSync(join(second.path, WITNESS))).toBe(false)
+  await second.remove()
 })

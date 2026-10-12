@@ -252,7 +252,11 @@ export class WorktreePool {
   /** Remove a pooled tree and forget its registration, exactly as a per-run tree's removal does. */
   private async forget(path: string): Promise<void> {
     // Contained to the pool's own root: every caller reaches here after the tree existed, so that root resolves.
-    safeRemoveSync(path, { within: join(this.options.workdir, "worktrees", "pool"), allowMissing: true })
+    // `allowedRoots` must ALSO name that root: removely's DEFAULT is [tmpdir()], and the queue
+    // service's TMPDIR (/hh/dev/.git/yrd/tmp) never contains the pool, so the first discard
+    // outside tmpdir threw and exited the whole queue 2 (28751).
+    const within = join(this.options.workdir, "worktrees", "pool")
+    safeRemoveSync(path, { within, allowedRoots: [within], allowMissing: true })
     await this.store(path).prune()
   }
 
