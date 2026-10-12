@@ -1,5 +1,5 @@
 import { archiveRefFor, ensureArchiveRef } from "git-super/archive-ref"
-import { createGitWorktreeStore } from "git-super/worktree"
+import { createGitWorktreeStore, worktreeOperationBranch } from "git-super/worktree"
 import { drop, type QueueLocation } from "./events.ts"
 import { isAncestor, refAt, seamProcess, type Git } from "./git.ts"
 import type { QueueRunLog } from "./log.ts"
@@ -43,8 +43,13 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     if (reasons.length > 0) return reasons.join("; ")
     const saw = await refAt(git, `refs/heads/${branch}`)
     if (saw !== tip) return `branch moved: expected ${tip}, found ${saw ?? "absent"}`
-    const checkedOut = (await store.list()).find((row) => row.branch === `refs/heads/${branch}`)
-    if (checkedOut !== undefined) return `branch is checked out at ${checkedOut.path}`
+    for (const row of await store.list()) {
+      if (row.branch === `refs/heads/${branch}`) return `branch is checked out at ${row.path}`
+      if (row.branch === undefined) {
+        const operation = worktreeOperationBranch(row.path)
+        if (operation?.branch === branch) return `branch is held by ${operation.operation} at ${row.path}`
+      }
+    }
     return undefined
   }
   let result: LocalBranchRetirementResult
