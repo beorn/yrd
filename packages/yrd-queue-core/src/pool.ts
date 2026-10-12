@@ -18,7 +18,7 @@
  */
 
 import { existsSync } from "node:fs"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import type { Process } from "@yrd/process"
 import { createGitWorktreeStore } from "git-super/worktree"

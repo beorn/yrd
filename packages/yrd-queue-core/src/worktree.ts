@@ -24,7 +24,6 @@
 import {
   existsSync,
   lstatSync,
-  readFileSync,
   readdirSync,
   readlinkSync,
   rmdirSync,
@@ -614,10 +613,6 @@ export function nameAbandonedTree(path: string, why: string): void {
   if (namedAbandonedTrees.has(path)) return
   namedAbandonedTrees.add(path)
   console.warn(`yrd: kept worktree ${path}: ${why}; the queue skips it and continues\n`)
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause)
 }
 
 /** Forget stale registrations under git-super's repository worktree mutation lock (26240). */
