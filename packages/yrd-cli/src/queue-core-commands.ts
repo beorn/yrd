@@ -3957,8 +3957,16 @@ export async function coreQueueCommand(
                       // A warning the row’s own `diagnostic:` line already states is not repeated here: a
                       // reverted-paths reason is printed there in full, and a policy or could-not-judge
                       // sentence is folded into it. The raw JSON keeps every stored Reason verbatim.
+                      // The folded sentence is matched as a WHOLE `; `-separated segment that names the
+                      // admission and ends at the reason, never a bare substring: a short event reason
+                      // that merely occurs inside a longer, unrelated diagnostic must still print.
                       const stated =
-                        reason !== undefined && (reverted.includes(reason) || row.diagnostic?.includes(reason) === true)
+                        reason !== undefined &&
+                        (reverted.includes(reason) ||
+                          (row.diagnostic !== undefined &&
+                            row.diagnostic
+                              .split("; ")
+                              .some((part) => part.startsWith("admission ") && part.endsWith(`: ${reason}`))))
                       const detail = summarised
                         ? row.revertWarning === undefined
                           ? "the stored reason is the diagnostic above"

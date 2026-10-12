@@ -296,7 +296,14 @@ async function walk(level: Level): Promise<void> {
       row.oldMode !== GITLINK && row.newMode !== GITLINK && !(row.newSha === row.oldSha && row.newMode === row.oldMode),
   )
   const base = judged.length === 0 ? undefined : await advanceBase(level)
-  const touched = judged.length === 0 ? undefined : await touchedPaths(level, base)
+  const touched =
+    judged.length === 0
+      ? undefined
+      : await touchedPaths(
+          level,
+          base,
+          judged.map((row) => row.path),
+        )
   for (const row of judged) await assessPath(level, row, base, touched)
 }
 
@@ -313,11 +320,34 @@ async function walk(level: Level): Promise<void> {
  * undefined, so every path falls back to the per-path walk under the cap — never a silent widening of
  * the proof.
  */
-async function touchedPaths(level: Level, base: string | undefined): Promise<ReadonlySet<string> | undefined> {
+async function touchedPaths(
+  level: Level,
+  base: string | undefined,
+  paths: readonly string[],
+): Promise<ReadonlySet<string> | undefined> {
   const revision = base === undefined ? level.target : `${base}..${level.target}`
+  // The traversal is limited to the level's judged paths, fed on stdin so a compose with thousands of
+  // changed paths never hits an argv limit and `--literal-pathspecs` keeps every path byte a name
+  // rather than a pattern (a `*` or a leading `:` in a filename is a name, not a glob). `--no-renames`
+  // is load-bearing: with rename detection a target that renamed a path away lists only the NEW name,
+  // so a candidate that restores the OLD path's blob is wrongly called untouched and skipped (#28195).
+  const input = [revision, "--", ...paths].join("\n") + "\n"
   let out: string
   try {
-    out = await level.git(["log", "--first-parent", "-m", "--name-only", "--format=", "-z", revision])
+    out = await level.git(
+      [
+        "--literal-pathspecs",
+        "log",
+        "--first-parent",
+        "-m",
+        "--name-only",
+        "--no-renames",
+        "--format=",
+        "-z",
+        "--stdin",
+      ],
+      input,
+    )
   } catch (error) {
     level.report.gaps.push({
       kind: "unjudged",
@@ -329,10 +359,13 @@ async function touchedPaths(level: Level, base: string | undefined): Promise<Rea
     // every path on the per-path walk under the cap, the conservative proof, never a silent narrowing.
     return undefined
   }
+  // `-z` names arrive verbatim, so only empty fields (and a leading newline git may emit) are dropped.
+  // A `trimEnd()` here would shorten a path that legitimately ends in a space and the lookup would
+  // miss it in silence (#28195).
   return new Set(
     out
       .split("\0")
-      .map((row) => row.replace(/^\n+/u, "").trimEnd())
+      .map((row) => row.replace(/^\n+/u, ""))
       .filter((row) => row !== ""),
   )
 }

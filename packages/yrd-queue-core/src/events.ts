@@ -172,14 +172,14 @@ export type EventChange = Readonly<{
   /** A readable historical chain with no opened event; the fold remains authoritative. */
   diagnostic?: string
   /**
-   * The latest admitted `admission-warning` (#28195): its kind, the event that carries it, and the
+   * The latest admitted `reverted-paths` warning (#28195): the event that carries it, and the
    * raw `Reason:` that event stores. A `reverted-paths` reason is kept HERE, out of {@link
    * EventChange.diagnostic}, because it is the one diagnostic a listing summarises from the
    * reason’s own payload instead of folding ~100 KB of gap prose per row; the stored `Reason:` on
    * the event is unchanged, and `show` renders it in full.
    */
   admissionWarning?: Readonly<{
-    kind: "policy-warning" | "reverted-paths" | "cannot-judge"
+    kind: "reverted-paths"
     event: string
     reason: string
   }>

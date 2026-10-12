@@ -216,6 +216,48 @@ describe("revert guard (27363)", () => {
     expect(report.paths.map((row) => row.path)).toContain("vendor/dep/vendor/inner/x.txt")
   })
 
+  /** A standalone repository the guard judges at the ROOT level, with a worktree per commit asked for. */
+  async function flatWorld(): Promise<Readonly<{ repo: string; checkoutAt: (commit: string) => Promise<string> }>> {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-revert-flat-"))
+    roots.push(repo)
+    const git = gitIn(repo, undefined, undefined, { env })
+    await git(["init", "--quiet", "--initial-branch=main"])
+    const checkoutAt = async (sha: string): Promise<string> => {
+      const dir = join(repo, `flat-${sha.slice(0, 12)}`)
+      await git(["worktree", "add", "--quiet", "--detach", dir, sha])
+      return dir
+    }
+    return { checkoutAt, repo }
+  }
+
+  it("touched: a path the target RENAMED AWAY is still judged when the candidate restores its blob (28195)", async () => {
+    const w = await flatWorld()
+    const git = gitIn(w.repo, undefined, undefined, { env })
+    const base = await commit(w.repo, { "a.txt": "base\n" }, "base")
+    // The target’s own advance is a rename. Rename detection would list only `b.txt`, so a set built
+    // without `--no-renames` calls `a.txt` untouched and skips the one path this compose restored.
+    await git(["mv", "a.txt", "b.txt"])
+    await git([...author, "commit", "--quiet", "--message", "target renames a.txt to b.txt"])
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    // A candidate cut from BELOW the rename whose tree is the pre-rename tree: it puts the old path
+    // back with the old blob, which is the revert the guard exists to catch.
+    const report = await detect({ checkoutAt: w.checkoutAt, target }, base, base)
+    expect(report.coverage).toBe("complete")
+    expect(report.paths.map((row) => row.path)).toContain("a.txt")
+    expect(revertGuardAction(report, "refuse")).toBe("stick")
+  })
+
+  it("touched: a path ending in a space that the target changed is still walked (28195)", async () => {
+    const w = await flatWorld()
+    const base = await commit(w.repo, { "c d ": "base\n" }, "base")
+    const target = await commit(w.repo, { "c d ": "target\n" }, "target advance")
+    // `-z` names arrive verbatim; a `trimEnd()` on the parse shortens this path to `c d`, so the set
+    // lookup misses and the restored path is skipped in silence.
+    const report = await detect({ checkoutAt: w.checkoutAt, target }, base, base)
+    expect(report.coverage).toBe("complete")
+    expect(report.paths.map((row) => row.path)).toContain("c d ")
+  })
+
   it("the durable finding is silent only for a complete, hit-free report", () => {
     expect(revertedPathsFinding(undefined)).toBeUndefined()
     expect(
@@ -438,9 +480,16 @@ describe("revert guard review regressions (27363)", () => {
     })
     expect(report.coverage).toBe("complete")
     // touched-or-not is decided by ONE `log --first-parent --name-only` per level; NO path takes the
-    // per-path `rev-list` walk, so the 12 added paths never each scan the target's history (#28195).
+    // per-path `rev-list` walk, so the 12 added paths never each scan the target’s history (#28195).
     expect(calls.filter((args) => args[0] === "rev-list")).toEqual([])
-    expect(calls.filter((args) => args[0] === "log")).toHaveLength(1)
+    // The one traversal is found by subcommand, never by argv[0], because `--literal-pathspecs` is a
+    // leading global flag. It is path-limited (paths on stdin) and rename-blind, so it names EVERY path
+    // the range moved rather than only a rename’s destination (#28195).
+    const traversals = calls.filter((args) => args.includes("log"))
+    expect(traversals).toHaveLength(1)
+    expect(traversals[0]?.includes("--stdin")).toBe(true)
+    expect(traversals[0]?.includes("--literal-pathspecs")).toBe(true)
+    expect(traversals[0]?.includes("--no-renames")).toBe(true)
   })
 })
 

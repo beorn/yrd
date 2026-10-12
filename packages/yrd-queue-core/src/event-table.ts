@@ -11,7 +11,7 @@ import { clocks, type Row } from "./table.ts"
  */
 function revertWarningOf(change: EventChange): Row<ChangeStatus>["revertWarning"] {
   const warning = change.admissionWarning
-  if (warning === undefined || warning.kind !== "reverted-paths") return undefined
+  if (warning === undefined) return undefined
   const notice = revertedPathsNotice(warning.reason)
   return { event: warning.event, ...(notice === undefined ? {} : { notice }) }
 }
