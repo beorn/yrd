@@ -87,6 +87,7 @@ import {
   QueueRunEventRetryExhausted,
   readConfig,
   readJournals,
+  RAW_FALLBACK_ROUNDS,
   readRunLog,
   remoteUrl,
   subjects,
@@ -5129,14 +5130,19 @@ function journalFor(item: WatchRow, journals: Journals): JournalRun | undefined 
  * sees no `live` and no `run` can tell a queue with nothing running from a
  * machine that holds no journal at all.
  */
-function journalFact(
-  journals: Journals,
-): Readonly<{ dir: string; absent?: string; malformed?: Journals["malformed"]; fallbacks?: Journals["fallbacks"] }> {
+function journalFact(journals: Journals): Readonly<{
+  dir: string
+  absent?: string
+  malformed?: Journals["malformed"]
+  fallbacks?: Journals["fallbacks"]
+  unread?: number
+}> {
   return {
     dir: journals.dir,
     ...(journals.absent === undefined ? {} : { absent: journals.absent }),
     ...(journals.malformed.length === 0 ? {} : { malformed: journals.malformed }),
     ...(journals.fallbacks === undefined ? {} : { fallbacks: journals.fallbacks }),
+    ...(journals.unread === undefined ? {} : { unread: journals.unread }),
   }
 }
 
@@ -5152,15 +5158,26 @@ function journalFact(
  * defect once while a NEW one still reaches the reader the round it appears.
  */
 function narrateJournalReading(io: YrdCliIO, journals: Journals, said: Set<string>): void {
-  const counts = new Map<string, number>()
-  for (const fallback of journals.fallbacks ?? []) {
-    counts.set(fallback.reason, (counts.get(fallback.reason) ?? 0) + 1)
-  }
-  for (const [reason, count] of counts) {
-    const line = `yrd: run journals in ${journals.dir}: read raw facts for ${count} round(s) (projection ${reason}); per-run details are in --json journal.fallbacks\n`
-    if (said.has(line)) continue
-    said.add(line)
-    io.stderr(line)
+  // ONE line, with its counts, whatever the window holds: every round of a
+  // queue whose projections are absent falls back together, and 3,006 lines of
+  // the same sentence is the cost this states instead (@i/10-yrd/28799).
+  const parts = [
+    ...(journals.fallbacks?.reasons ?? []).map(
+      ({ reason, count, example }) =>
+        `the projection was ${reason} for ${String(count)} round(s) — those facts were rebuilt by reading their raw journals (e.g. ${example})`,
+    ),
+    ...(journals.unread === undefined || journals.unread === 0
+      ? []
+      : [
+          `${String(journals.unread)} further round(s) in the window were left unread (a round whose projection is missing is parsed only inside the newest ${String(RAW_FALLBACK_ROUNDS)})`,
+        ]),
+  ]
+  if (parts.length > 0) {
+    const line = `yrd: run journals in ${journals.dir}: ${parts.join("; ")}\n`
+    if (!said.has(line)) {
+      said.add(line)
+      io.stderr(line)
+    }
   }
   for (const defect of journals.malformed) {
     const line = `yrd: run journal ${defect.run} has a row that could not be read for ${defect.key}: ${defect.message}; the row was skipped — fix the writer (26230)\n`

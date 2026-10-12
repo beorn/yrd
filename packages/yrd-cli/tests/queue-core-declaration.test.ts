@@ -880,11 +880,11 @@ describe("a queue is the selected origin branch carrying config", () => {
     }
     const scoped = JSON.parse(shown.stdout()) as {
       changes: { branch: string; state: string }[]
-      journal: { fallbacks: { run: string }[] }
+      journal: { fallbacks?: { count: number; reasons: readonly { count: number }[] } }
     }
     expect(scoped.changes.map(({ branch }) => branch)).toEqual([selected.branch])
     expect(scoped.changes[0]?.state).toBe("cancelled")
-    expect(scoped.journal.fallbacks.map(({ run }) => run)).toEqual([selected.journal.id])
+    expect(scoped.journal.fallbacks).toMatchObject({ count: 1, reasons: [{ count: 1 }] })
     const bulk = capture(repo)
     expect(
       await coreQueueCommand(repo, bulk.io, { command: "show", all: true }, { json: true, queue: "main" }),
@@ -892,9 +892,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).toBe(0)
     const global = JSON.parse(bulk.stdout()) as typeof scoped
     expect(global.changes.map(({ branch }) => branch).sort()).toEqual(journals.map(({ branch }) => branch).sort())
-    expect(global.journal.fallbacks.map(({ run }) => run).sort()).toEqual(
-      journals.map(({ journal }) => journal.id).sort(),
-    )
+    expect(global.journal.fallbacks).toMatchObject({ count: journals.length, reasons: [{ count: journals.length }] })
     expect(Buffer.byteLength(shown.stdout())).toBeLessThan(Buffer.byteLength(bulk.stdout()))
   }, 15_000)
 

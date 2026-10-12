@@ -414,7 +414,7 @@ describe("a run's journal, read back", () => {
     try {
       const journals = readJournals(dir, { now: at })
       expect(read.mock.calls.filter(([path]) => String(path) === log.path)).toHaveLength(0)
-      expect(journals.fallbacks).toEqual([])
+      expect(journals.fallbacks).toBeUndefined()
       const run = journals.runs.get(journalKey("task/one", "abc123"))?.[0]
       expect(run).toMatchObject({ id: log.id, decision: "failed", startedAt: at, at })
       expect(run?.steps[0]?.startedAt).toEqual(at)
@@ -532,7 +532,10 @@ describe("a run's journal, read back", () => {
     }
     try {
       const journals = readJournals(dir, { now: at })
-      expect(journals.fallbacks).toMatchObject([{ run: log.id, reason, detail: expect.any(String) }])
+      expect(journals.fallbacks).toMatchObject({
+        count: 1,
+        reasons: [{ reason, count: 1, example: expect.any(String) }],
+      })
       if (fault === "truncation") expect(journals.runs.size).toBe(0)
       else {
         const branch = ["same-size-edit", "append-during-load", "replacement"].includes(fault) ? "task/two" : "task/one"
@@ -560,7 +563,7 @@ describe("a run's journal, read back", () => {
     const selected = readJournals(dir, { now, runIds: [run, run], branch: "task/one" })
     expect([...selected.runs.keys()]).toEqual([journalKey("task/one", "abc123")])
     expect(selected.runs.get(journalKey("task/one", "abc123"))).toHaveLength(1)
-    expect(selected.fallbacks).toHaveLength(1)
+    expect(selected.fallbacks).toMatchObject({ count: 1, reasons: [{ count: 1 }] })
     expect(selected.malformed).toEqual([])
     expect(readJournals(dir, { now: at }).runs.size).toBe(2)
     expect(readJournals(dir, { now, runIds: [run], branch: "task/two" }).runs.size).toBe(1)

@@ -161,7 +161,7 @@ describe("readRunnerFacts", () => {
       try {
         const detail = readJournals(dir, { now: NOW })
         const runner = await readRunnerFacts(workdir, NOW)
-        expect(detail.fallbacks).toEqual([])
+        expect(detail.fallbacks).toBeUndefined()
         expect(runner.projectionFallback).toBeUndefined()
         const runs = [...detail.runs.values()].flat()
         expect(runs).toHaveLength(sample.rounds)

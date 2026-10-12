@@ -20,6 +20,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -45,7 +46,7 @@ import {
 } from "@yrd/queue-core"
 import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import { openLog } from "../../yrd-queue-core/src/log.ts"
+import { openLog, RAW_FALLBACK_ROUNDS } from "../../yrd-queue-core/src/log.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -234,28 +235,41 @@ describe("event queue observation refusals", () => {
   // watch deduplication without adding a test-only production surface.
   it("names raw journal fallback in list JSON and once across watch refreshes", async () => {
     const w = await world()
-    const journal = openLog(join(w.workdir, "logs"))
-    journal.write({ kind: "run", target: "main", queue: "main" })
-    const second = openLog(join(w.workdir, "logs"), () => new Date(Date.now() + 1))
-    second.write({ kind: "run", target: "main", queue: "main" })
+    // The read is scoped to the rounds this listing names (@i/10-yrd/28799),
+    // so the journal that carries the fallback has to be a round of a listed
+    // change. Its projection is moved aside — the inode is preserved, so the
+    // completed read below still reuses it — to put the read on the raw path.
+    await change(w, "task/fallback", false)
+    await drain(w)
+    const logs = join(w.workdir, "logs")
+    const run = readdirSync(logs)
+      .filter((name) => name.endsWith(".jsonl"))
+      .sort()
+      .at(-1)!
+      .slice(0, -".jsonl".length)
+    const artifact = join(logs, `${run}.projection.json`)
+    const held = `${artifact}.held`
+    renameSync(artifact, held)
     const json = capture(w.work)
     expect(await coreQueueCommand(w.work, json.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const listed = JSON.parse(json.stdout()) as {
-      journal: { fallbacks: readonly { run: string; reason: string; detail: string }[] }
+      journal: {
+        fallbacks?: { count: number; reasons: readonly { reason: string; count: number; example: string }[] }
+        unread?: number
+      }
       runner: { projectionFallback?: { run: string; reason: string } }
     }
-    expect(listed.journal.fallbacks).toMatchObject([
-      { run: journal.id, reason: "missing" },
-      { run: second.id, reason: "missing" },
-    ])
-    expect(listed.journal.fallbacks[0]?.detail).toContain(`${journal.id}.projection.json`)
-    expect(listed.runner.projectionFallback).toMatchObject({ run: second.id, reason: "missing" })
+    // ONE counted fact per reason, never one entry per round: the whole point
+    // of 28799 is that 3,006 of these are the same sentence.
+    expect(listed.journal.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "missing", count: 1 }] })
+    expect(listed.journal.fallbacks?.reasons[0]?.example).toContain(`${run}.projection.json`)
+    expect(listed.runner.projectionFallback).toMatchObject({ run, reason: "missing" })
     expect(json.stderr()).toBe("")
 
     const human = capture(w.work)
     expect(await coreQueueCommand(w.work, human.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
     expect(human.stderr()).toContain(
-      `run journals in ${join(w.workdir, "logs")}: read raw facts for 2 round(s) (projection missing)`,
+      `run journals in ${logs}: the projection was missing for 1 round(s) — those facts were rebuilt by reading their raw journals`,
     )
     const watched = capture(w.work)
     rendered.onWait = async () => {
@@ -275,20 +289,81 @@ describe("event queue observation refusals", () => {
       expect(
         watched
           .stderr()
-          .split(`run journals in ${join(w.workdir, "logs")}: read raw facts for 2 round(s) (projection missing)`),
+          .split(
+            `run journals in ${logs}: the projection was missing for 1 round(s) — those facts were rebuilt by reading their raw journals`,
+          ),
       ).toHaveLength(2)
     } finally {
       rendered.onWait = undefined
     }
-    journal.finish()
-    second.finish()
+    renameSync(held, artifact)
     const completed = capture(w.work)
     expect(await coreQueueCommand(w.work, completed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
       0,
     )
     const completedDocument = JSON.parse(completed.stdout()) as typeof listed
-    expect(completedDocument.journal.fallbacks).toEqual([])
+    expect(completedDocument.journal.fallbacks).toBeUndefined()
     expect(completedDocument.runner.projectionFallback).toBeUndefined()
+  })
+
+  // 28799: the raw fallback is bounded, and the bound never reaches the newest
+  // rounds. The operator's own queue carried 3,007 unprojected rounds in one
+  // seven-day window; reading every one raw cost ~1 s and 971 kB of `--json`.
+  // The newest rounds are still read — a current fact is never bounded away —
+  // and the rest are counted, never dropped in silence.
+  it("reads a missing projection raw only inside the newest rounds and counts the rest", async () => {
+    const w = await world()
+    await change(w, "task/current", false)
+    await drain(w)
+    const logs = join(w.workdir, "logs")
+    const run = readdirSync(logs)
+      .filter((name) => name.endsWith(".jsonl"))
+      .sort()
+      .at(-1)!
+      .slice(0, -".jsonl".length)
+    // The current round's own projection is moved aside too: it must still be
+    // read raw, because it is the one fact a page cannot do without.
+    renameSync(join(logs, `${run}.projection.json`), join(logs, `${run}.projection.json.held`))
+    const unprojected: string[] = []
+    // Six more than the bound, so six rounds fall outside it.
+    for (let older = 2; older <= RAW_FALLBACK_ROUNDS + 6; older++) {
+      const notice = openLog(logs, () => new Date(Date.now() - older * 60_000))
+      notice.write({ kind: "run", target: "main", queue: "main" })
+      notice.write({ kind: "message", says: "this round names no change", to: "notify", delivered: true })
+      // No `finish()`: these rounds never wrote a disposable projection.
+      unprojected.push(join(logs, `${notice.id}.jsonl`))
+    }
+    // Pushed newest first, so the LAST one is the round the bound leaves out.
+    const oldest = unprojected.at(-1) as string
+    const read = vi.spyOn(fs, "readFileSync")
+    try {
+      const listing = capture(w.work)
+      expect(await coreQueueCommand(w.work, listing.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
+        0,
+      )
+      const document = JSON.parse(listing.stdout()) as {
+        changes: { branch: string }[]
+        journal: {
+          dir: string
+          unread?: number
+          fallbacks?: { count: number; reasons: readonly { reason: string; count: number }[] }
+        }
+      }
+      expect(document.changes.map(({ branch }) => branch)).toContain("task/current")
+      expect(document.journal.dir).toBe(logs)
+      // The newest RAW_FALLBACK_ROUNDS unprojected rounds were read raw —
+      // the current round among them — and the ONE older than the bound was not.
+      expect(document.journal.fallbacks).toMatchObject({
+        count: RAW_FALLBACK_ROUNDS,
+        reasons: [{ reason: "missing", count: RAW_FALLBACK_ROUNDS }],
+      })
+      expect(document.journal.unread).toBe(6)
+      expect(read.mock.calls.filter(([path]) => String(path) === oldest)).toHaveLength(0)
+      // The current round's raw journal WAS parsed: the bound never reaches it.
+      expect(read.mock.calls.map(([path]) => String(path))).toContain(join(logs, `${run}.jsonl`))
+    } finally {
+      read.mockRestore()
+    }
   })
 
   // AC2/3/5: the command's two readers must both skip completed raw journals.
@@ -318,11 +393,11 @@ describe("event queue observation refusals", () => {
       expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
       const document = JSON.parse(listed.stdout()) as {
         changes: { branch: string; state: string }[]
-        journal: { fallbacks: unknown[] }
+        journal: { fallbacks?: unknown }
       }
       expect(document.changes.filter((row) => row.branch === "task/failure")).toHaveLength(1)
       expect(document.changes[0]?.state).toBe("failed")
-      expect(document.journal.fallbacks).toEqual([])
+      expect(document.journal.fallbacks).toBeUndefined()
       const watched = capture(w.work)
       rendered.onWait = async () => {
         if (rendered.load === undefined) throw new Error("watch supplied no refresh loader")

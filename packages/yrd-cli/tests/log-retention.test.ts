@@ -166,7 +166,7 @@ describe("pruneRoundOutput (bounded removal through removely)", () => {
     expect(existsSync(journal)).toBe(true)
     expect(existsSync(projection)).toBe(true)
     const reading = readJournals(logs, { now: ago(30) })
-    expect(reading.fallbacks).toEqual([])
+    expect(reading.fallbacks).toBeUndefined()
     expect([...reading.runs.values()].flat()).toHaveLength(1)
     expect(reading.runs.get(journalKey("task/retained", "abc123"))).toMatchObject([{ decision: "failed" }])
     expect(first.remaining.map((entry) => entry.path)).toEqual([next])

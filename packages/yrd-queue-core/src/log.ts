@@ -552,8 +552,26 @@ export type Journals = Readonly<{
    * nobody prints is exactly the silent error this reader must not commit.
    */
   malformed: readonly Readonly<{ run: string; key: string; message: string }>[]
-  /** Selected journals read raw, with the reason their disposable projection was not reusable. */
-  fallbacks?: readonly JournalProjectionFallback[]
+  /**
+   * How many round journals had to be read RAW because their disposable
+   * projection could not be reused, and why — ONE counted fact per reason,
+   * never one entry per journal.
+   *
+   * Every round of a long-lived queue falls back together when the projections
+   * are absent (they arrived on 2026-10-10, so the whole prior window reads
+   * raw), and a per-journal list of that is the same sentence megabytes over
+   * (@i/10-yrd/28799: 3,006 entries, 971 kB of `--json`, on every read). The
+   * count is what a reader acts on; the example is what a repair needs.
+   */
+  fallbacks?: JournalProjectionFallbackSummary
+  /**
+   * Round journals inside the same seven-day window that this read did NOT
+   * open: a journal whose projection could not be reused is parsed only inside
+   * the newest {@link RAW_FALLBACK_ROUNDS}, and a selection reads only the runs
+   * it was given. Present only when that left something behind; a narrowing
+   * nobody states is exactly the silent "no results" this reader must not commit.
+   */
+  unread?: number
   /** Every run that wrote about a change, newest run first, keyed `<branch>@<head>`. */
   runs: ReadonlyMap<string, readonly JournalRun[]>
 }>
@@ -641,6 +659,25 @@ export type JournalProjectionFallback = Readonly<{
   run: string
   reason: "missing" | "partial" | "corrupt" | "incompatible" | "source-changed" | "unreadable" | "unsupported-identity"
   detail: string
+}>
+
+/**
+ * A whole read's projection fallbacks, counted — the shape every reader of
+ * {@link Journals.fallbacks} gets instead of one {@link JournalProjectionFallback}
+ * per journal. Bounded by the number of DISTINCT reasons (at most seven), so it
+ * is the same size whether one round fell back or all 3,006 did
+ * (@i/10-yrd/28799).
+ */
+export type JournalProjectionFallbackSummary = Readonly<{
+  /** Round journals read raw, each counted once under its own reason. */
+  count: number
+  /** One entry per distinct reason, with its count and ONE example detail. */
+  reasons: readonly Readonly<{
+    reason: JournalProjectionFallback["reason"]
+    count: number
+    /** The first detail seen for this reason: the path and the error, as the per-journal read would have said it. */
+    example: string
+  }>[]
 }>
 
 export type JournalProjectionRead =
@@ -897,11 +934,56 @@ function pruneJournalCache(dir: string, windowed: readonly string[]): void {
   }
 }
 
+/**
+ * The round journals a directory holds inside the same seven-day window a read
+ * applies — the set a SELECTION left behind, counted rather than opened.
+ *
+ * A directory that cannot be listed reads as none; the selection it was
+ * counted against is what the caller asked for, and its own absence is already
+ * the answer {@link readJournals} gives for a missing directory.
+ */
+function journalsInWindow(dir: string, now: Date, sinceMs: number): readonly string[] {
+  let names: readonly string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return []
+  }
+  return names
+    .filter((name) => name.endsWith(".jsonl"))
+    .map((name) => name.slice(0, -".jsonl".length))
+    .filter((id) => {
+      const startedAt = runStartedAt(id)
+      return startedAt !== undefined && now.getTime() - startedAt.getTime() <= sinceMs
+    })
+}
+
+/**
+ * Count a read's projection fallbacks by reason, keeping ONE example detail
+ * per reason. A reader acts on the count and repairs from the example; the
+ * per-journal rest is the same sentence repeated once per round
+ * (@i/10-yrd/28799).
+ */
+function summariseFallbacks(fallbacks: readonly JournalProjectionFallback[]): JournalProjectionFallbackSummary {
+  const byReason = new Map<JournalProjectionFallback["reason"], { count: number; example: string }>()
+  for (const fallback of fallbacks) {
+    const held = byReason.get(fallback.reason)
+    if (held === undefined) byReason.set(fallback.reason, { count: 1, example: fallback.detail })
+    else held.count += 1
+  }
+  return {
+    count: fallbacks.length,
+    reasons: [...byReason].map(([reason, held]) => ({ reason, count: held.count, example: held.example })),
+  }
+}
+
 function cachedRunsIn(
   dir: string,
   id: string,
   startedAt: Date,
-): Readonly<{ runs: readonly JournalRun[]; fallback?: JournalProjectionFallback }> {
+  /** Whether a journal whose projection cannot be reused may be read raw at all. */
+  allowRaw = true,
+): Readonly<{ runs: readonly JournalRun[]; fallback?: JournalProjectionFallback; bounded?: true }> {
   const path = journalPath(dir, id)
   const projection = readJournalProjection(dir, id)
   if (projection.kind === "projection") return { runs: projection.runs }
@@ -909,6 +991,9 @@ function cachedRunsIn(
   if (hit !== undefined && projection.source !== undefined && sameJournalSource(hit.source, projection.source)) {
     return { runs: hit.runs, fallback: projection.fallback }
   }
+  // The bound is applied BEFORE the raw read, never to its result: past this
+  // line lies the parse that makes a fallback expensive (@i/10-yrd/28799).
+  if (!allowRaw) return { runs: [], bounded: true }
   const runs = [...runsIn(readRunLog(dir, id), id, startedAt)]
   if (projection.source !== undefined) {
     try {
@@ -1105,6 +1190,20 @@ export function recentPublicationRejected(
     .rejection
 }
 
+/**
+ * How many of a read's oldest rounds may still be read RAW when their
+ * disposable projection is missing, before the rest are counted instead of
+ * parsed.
+ *
+ * The newest rounds are always inside it, so a current fact is never bounded
+ * away; the bound exists because a queue that ran for weeks before its
+ * projections existed carried 3,007 unprojected rounds in one seven-day window,
+ * and reading every one of them raw cost most of a second and 971 kB of
+ * `--json` for a page of forty rows (@i/10-yrd/28799). The queue writes roughly
+ * six hundred rounds a day, so this window is the last ten hours of them.
+ */
+export const RAW_FALLBACK_ROUNDS = 250
+
 export type ReadJournalsOptions = Readonly<{
   now?: Date
   /** How far back the runs read reach; the same seven days `list` windows its ended rows by. */
@@ -1126,6 +1225,7 @@ export type ReadJournalsOptions = Readonly<{
 export function readJournals(dir: string, options: ReadJournalsOptions = {}): Journals {
   const now = options.now ?? new Date()
   const sinceMs = options.sinceMs ?? 7 * 24 * 60 * 60 * 1000
+  const selected = new Set(options.runIds ?? [])
   let names: readonly string[]
   if (options.runIds === undefined) {
     try {
@@ -1158,10 +1258,17 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     return { absent: `no run journal was read: ${dir} — ${held}`, dir, malformed: [], runs: new Map() }
   }
   if (options.runIds === undefined) pruneJournalCache(dir, windowed)
+  // A journal whose projection cannot be reused is read RAW, and that parse is
+  // the whole cost of the fallback (3,006 of them were 971 kB of `--json` and
+  // most of a second, @i/10-yrd/28799). The newest rounds are ALWAYS read: a
+  // current fact must never be bounded away. An older round whose projection is
+  // gone is counted instead, never dropped in silence.
+  const readable = new Set([...windowed].sort().slice(-RAW_FALLBACK_ROUNDS))
   const runs = new Map<string, JournalRun[]>()
   const malformed: { run: string; key: string; message: string }[] = []
   const fallbacks: JournalProjectionFallback[] = []
   const unavailable: string[] = []
+  let bounded = 0
   if (options.runIds !== undefined) {
     for (const id of ours.filter((id) => !windowed.includes(id))) {
       unavailable.push(
@@ -1174,7 +1281,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     if (startedAt === undefined) continue
     let read: ReturnType<typeof cachedRunsIn>
     try {
-      read = cachedRunsIn(dir, id, startedAt)
+      read = cachedRunsIn(dir, id, startedAt, options.runIds !== undefined || readable.has(id))
     } catch (error) {
       if (options.runIds === undefined) throw error
       if (options.runIds !== undefined && (error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -1182,6 +1289,10 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
         continue
       }
       throw new Error(`cannot read run journal ${join(dir, `${id}.jsonl`)}: ${String(error)}`, { cause: error })
+    }
+    if (read.bounded === true) {
+      bounded += 1
+      continue
     }
     if (read.fallback !== undefined) fallbacks.push(read.fallback)
     for (const run of read.runs) {
@@ -1193,7 +1304,20 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
       else held.unshift(run)
     }
   }
-  return { dir, malformed, runs, fallbacks, ...(unavailable.length === 0 ? {} : { absent: unavailable.join("; ") }) }
+  // A selection reads only the runs it was given, and the raw fallback reaches
+  // only the newest rounds; either way the rounds left in the same window are
+  // COUNTED here, never dropped in silence.
+  const unread =
+    (options.runIds === undefined ? 0 : journalsInWindow(dir, now, sinceMs).filter((id) => !selected.has(id)).length) +
+    bounded
+  return {
+    dir,
+    malformed,
+    runs,
+    ...(fallbacks.length === 0 ? {} : { fallbacks: summariseFallbacks(fallbacks) }),
+    ...(unread === 0 ? {} : { unread }),
+    ...(unavailable.length === 0 ? {} : { absent: unavailable.join("; ") }),
+  }
 }
 
 /**

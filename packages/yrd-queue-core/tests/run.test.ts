@@ -798,13 +798,10 @@ it("keeps a merged outcome and names raw fallback when projection publication fa
   expect([...journals.runs.values()].flat()).toContainEqual(
     expect.objectContaining({ branch: "task/projection-fault", decision: "merged" }),
   )
-  expect(journals.fallbacks).toContainEqual(
-    expect.objectContaining({
-      run: outcome.run,
-      reason: "unreadable",
-      detail: expect.stringContaining(".projection.json"),
-    }),
-  )
+  expect(journals.fallbacks).toMatchObject({
+    count: 1,
+    reasons: [{ reason: "unreadable", count: 1, example: expect.stringContaining(".projection.json") }],
+  })
 })
 
 it("closes the round's journal with every remote call it made, counted from git's trace2 log", async () => {
