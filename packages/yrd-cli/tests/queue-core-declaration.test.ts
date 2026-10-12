@@ -1084,6 +1084,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const head = (await git(["rev-parse", "HEAD"])).trim()
     const queueTip = await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
     const branch = "task/reverted"
+    const policyReason = "the compose touched a protected path"
     const reason =
       '0 reverted/swallowed path(s); {"count":0,"counts":{"reverted":0,"swallowed":0,"gaps":684,' +
       '"unjudged":684,"bounded":0},"coverage":"incomplete","paths":[],"swallowed":[],"gaps":' +
@@ -1094,6 +1095,13 @@ describe("a queue is the selected origin branch carrying config", () => {
     ).append(
       [
         changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "yrd" }),
+        changeInput("admission-warning", {
+          queueTip,
+          at: new Date("2026-09-22T14:01:30.000Z"),
+          commit: head,
+          reason: policyReason,
+          warningKind: "policy-warning",
+        }),
         changeInput("admission-warning", {
           queueTip,
           at: new Date("2026-09-22T14:02:00.000Z"),
@@ -1114,13 +1122,16 @@ describe("a queue is the selected origin branch carrying config", () => {
         changes: readonly { branch: string; diagnostic?: string; diagnosticSummary?: string }[]
       }
     ).changes.find((candidate) => candidate.branch === branch)
+    // A change carrying BOTH kinds: the policy warning folds into `diagnostic`, the revert finding is
+    // the one line, and each reaches the listing exactly once.
     expect(row).toMatchObject({
+      diagnostic: expect.stringContaining(policyReason),
       diagnosticSummary: expect.stringContaining(
         "reverted paths: 0 reverted, 0 swallowed, 684 gap(s) (684 unjudged, 0 bounded) · coverage incomplete",
       ),
     })
     // ONE line per row: neither the stored payload nor its gap prose reaches the listing.
-    expect(row?.diagnostic).toBeUndefined()
+    expect(listed.stdout().split(policyReason).length - 1).toBe(1)
     expect(listed.stdout()).not.toContain("path cap P_max=500")
     // `show` renders that stored reason in FULL, exactly once, beside the same one-line finding.
     const shown = capture(repo)
@@ -1128,6 +1139,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       0,
     )
     expect(shown.stdout().split(reason).length - 1).toBe(1)
+    expect(shown.stdout().split(policyReason).length - 1).toBe(1)
     expect(shown.stdout()).toContain("coverage incomplete · diagnostic ")
   })
 

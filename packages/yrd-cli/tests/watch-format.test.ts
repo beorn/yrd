@@ -58,7 +58,7 @@ describe("the compose revert finding’s one line (28195)", () => {
       },
     }
     const olderLine = diagnosticLines(older).join("\n")
-    expect(olderLine).toContain("counts not recorded (row written before yrd ")
+    expect(olderLine).toContain("counts not recorded (the row predates count recording)")
     expect(olderLine).toContain("32+ gap(s) stored, truncated")
     expect(olderLine).not.toContain("684")
 

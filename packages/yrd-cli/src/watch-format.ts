@@ -11,7 +11,6 @@
 import { homedir } from "node:os"
 import { clocks, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
 import { STATE_WORDS, type DisplayState } from "./watch-words.ts"
-import { formatYrdRuntimeVersion } from "./version.ts"
 
 export {
   LEGEND_STATES,
@@ -66,21 +65,12 @@ export function skewMarker(row: Pick<Row, "unknownKinds">): string {
   return (row.unknownKinds?.length ?? 0) === 0 ? "" : " · reader skew"
 }
 
-let readerBuild: string | undefined
-
-/**
- * This reader’s own build identity, read once per process. A row written before the counts were
- * recorded says so by naming the build that reads it (#28195), and a running build never changes.
- */
-function readerBuildIdentity(): string {
-  return (readerBuild ??= formatYrdRuntimeVersion())
-}
-
 /**
  * One line for the compose revert detector’s stored finding (#28195): counts by kind, the coverage
  * verdict, and the `admission-warning` event that carries it. Every number comes from the reason’s
- * structured payload — its gap prose is never parsed — and a row written before the counts were
- * recorded says THAT in words instead of showing a number it does not have.
+ * structured payload — its gap prose is never parsed — and a row whose payload carries no counts
+ * says what is true of the ROW instead of naming a build it cannot know (a newer reader reads old
+ * rows too, so this reader’s own sha would name the wrong cut).
  */
 export function revertWarningLine(row: Pick<Row, "revertWarning">): string {
   const warning = row.revertWarning
@@ -92,7 +82,7 @@ export function revertWarningLine(row: Pick<Row, "revertWarning">): string {
       ? notice === undefined
         ? ["the stored reason carries no readable counts payload"]
         : [
-            `counts not recorded (row written before ${readerBuildIdentity()})`,
+            "counts not recorded (the row predates count recording)",
             `${String(notice.gapsStored)}${notice.truncated ? "+" : ""} gap(s) stored${notice.truncated ? ", truncated" : ""}`,
           ]
       : [

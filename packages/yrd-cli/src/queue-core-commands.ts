@@ -3954,11 +3954,18 @@ export async function coreQueueCommand(
                       const summarised =
                         event.type === "admission-warning" &&
                         event.props.find(([key]) => key === "Warning-Kind")?.[1] === "reverted-paths"
+                      // A warning the row’s own `diagnostic:` line already states is not repeated here: a
+                      // reverted-paths reason is printed there in full, and a policy or could-not-judge
+                      // sentence is folded into it. The raw JSON keeps every stored Reason verbatim.
+                      const stated =
+                        reason !== undefined && (reverted.includes(reason) || row.diagnostic?.includes(reason) === true)
                       const detail = summarised
                         ? row.revertWarning === undefined
                           ? "the stored reason is the diagnostic above"
                           : revertWarningLine(row)
-                        : reason
+                        : stated
+                          ? "the stored reason is the diagnostic above"
+                          : reason
                       return `  ${at ?? "Time absent"} ${event.type}${event.writer == null ? "" : ` by ${event.writer}`}${detail === undefined ? "" : ` — ${detail}`}`
                     }),
                     ...(index !== 0 || request.branch === undefined || reading.changes.get(request.branch) === undefined
