@@ -21,15 +21,7 @@
  * git transcript. The caller hands in a logger only when trace is on.
  */
 
-import {
-  existsSync,
-  lstatSync,
-  readdirSync,
-  readlinkSync,
-  rmdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs"
+import { existsSync, lstatSync, readdirSync, readlinkSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import type { Process } from "@yrd/process"
 import { createGitWorktreeStore } from "git-super/worktree"
