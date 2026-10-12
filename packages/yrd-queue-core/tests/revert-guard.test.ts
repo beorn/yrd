@@ -10,6 +10,7 @@
  *          component, and the fleet-wide km write deferral repeats unseen.
  * @level l1 (real repositories; local git only, no compose)
  * @consumer `yrd submit` and every queue compose (verifying.ts)
+ * @reach fs-walk <fixture-only: temporary repositories created by this test; no authored source tree scan>
  * @testonly none
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
