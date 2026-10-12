@@ -1960,11 +1960,12 @@ export async function appendChangeEvent(
   branch: string,
   selectedTip: string,
   write: ChangeWrite,
+  onPrepared?: (oid: Oid, runNumber?: number) => void,
 ): Promise<string> {
   if (write.writer === QUEUE_RUN_WRITER) {
     throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
   }
-  return (await appendDecision(store, queue, branch, selectedTip, write)).event
+  return (await appendDecision(store, queue, branch, selectedTip, write, onPrepared)).event
 }
 
 /** Allocate a run number in the same leased push as this round's first change event. */
@@ -1975,11 +1976,12 @@ export async function appendNumberedChangeEvent(
   selectedTip: string,
   write: ChangeWrite,
   identity: RunIndexIdentity,
+  onPrepared?: (oid: Oid, runNumber?: number) => void,
 ): Promise<Readonly<{ event: string; number: number }>> {
   if (write.writer === QUEUE_RUN_WRITER) {
     throw new TypeError(`${QUEUE_RUN_WRITER} writer is reserved for an atomic published merge`)
   }
-  const result = await appendDecision(store, queue, branch, selectedTip, write, undefined, identity)
+  const result = await appendDecision(store, queue, branch, selectedTip, write, onPrepared, identity)
   if (result.number === undefined) throw new Error(`${runIndexRef(queue)}: numbered publication returned no run number`)
   return { event: result.event, number: result.number }
 }
@@ -2000,7 +2002,7 @@ export async function appendPublishedMerge(
     /** Prepared legacy pause/override fences while those refs remain authoritative. */
     opsFences?: readonly AlsoRef[]
   }>,
-  onPrepared?: (oid: Oid) => void,
+  onPrepared?: (oid: Oid, runNumber?: number) => void,
 ): Promise<string> {
   return (await publishedMergeDecision(store, queue, branch, selectedTip, request, onPrepared)).event
 }
@@ -2013,7 +2015,7 @@ export async function appendNumberedPublishedMerge(
   selectedTip: string,
   request: Parameters<typeof appendPublishedMerge>[4],
   identity: RunIndexIdentity,
-  onPrepared?: (oid: Oid) => void,
+  onPrepared?: (oid: Oid, runNumber?: number) => void,
 ): Promise<Readonly<{ event: string; number: number }>> {
   const result = await publishedMergeDecision(store, queue, branch, selectedTip, request, onPrepared, identity)
   if (result.number === undefined) throw new Error(`${runIndexRef(queue)}: numbered merge returned no run number`)
@@ -2026,7 +2028,7 @@ async function publishedMergeDecision(
   branch: string,
   selectedTip: string,
   request: Parameters<typeof appendPublishedMerge>[4],
-  onPrepared?: (oid: Oid) => void,
+  onPrepared?: (oid: Oid, runNumber?: number) => void,
   numbered?: RunIndexIdentity,
 ): Promise<Readonly<{ event: string; number?: number }>> {
   if (request.commit === request.targetExpect) {
@@ -2096,7 +2098,7 @@ async function appendDecision(
   branch: string,
   selectedTip: string,
   write: ChangeWrite,
-  onPrepared?: (oid: Oid) => void,
+  onPrepared?: (oid: Oid, runNumber?: number) => void,
   numbered?: RunIndexIdentity,
   retry?: Readonly<{ deadline: number; attempts: number; budgetMs: number }>,
 ): Promise<Readonly<{ event: string; number?: number }>> {
@@ -2143,9 +2145,11 @@ async function appendDecision(
     }
     if (indexRead === undefined) throw new Error(`${indexRef}: numbered queue read was absent`)
     const staged = await chain.stage(planned, { expect: selectedTip })
-    onPrepared?.(staged.head)
     const updates = [...(also ?? []), ...((await write.prepareAlso?.(staged.head)) ?? [])]
     const index = await stageRunIndexEntry(store, queue, indexRead.tip(), numbered, queueTip, write.at)
+    // The staged head AND the run number it consumed are one atomic push; a
+    // caller probing a transport failure needs both (28793).
+    onPrepared?.(staged.head, index.number)
     try {
       await staged.publish({ also: [{ ref: indexRef, expect: indexRead.tip(), oid: index.next }, ...updates] })
     } catch (error) {
