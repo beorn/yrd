@@ -18,7 +18,10 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   detectReverted,
+  REVERTED_PATHS_PAYLOAD_CAP,
   revertedPathsFinding,
+  revertedPathsCounts,
+  revertedPathsNotice,
   revertedPathsReason,
   revertGuardAction,
   type RevertGuardReport,
@@ -213,6 +216,62 @@ describe("revert guard (27363)", () => {
     expect(report.paths.map((row) => row.path)).toContain("vendor/dep/vendor/inner/x.txt")
   })
 
+  /** A standalone repository the guard judges at the ROOT level, with a worktree per commit asked for. */
+  async function flatWorld(): Promise<Readonly<{ repo: string; checkoutAt: (commit: string) => Promise<string> }>> {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-revert-flat-"))
+    roots.push(repo)
+    const git = gitIn(repo, undefined, undefined, { env })
+    await git(["init", "--quiet", "--initial-branch=main"])
+    const checkoutAt = async (sha: string): Promise<string> => {
+      const dir = join(repo, `flat-${sha.slice(0, 12)}`)
+      await git(["worktree", "add", "--quiet", "--detach", dir, sha])
+      return dir
+    }
+    return { checkoutAt, repo }
+  }
+
+  it("touched: a path the target RENAMED AWAY is still judged when the candidate restores its blob (28195)", async () => {
+    const w = await flatWorld()
+    const git = gitIn(w.repo, undefined, undefined, { env })
+    const base = await commit(w.repo, { "a.txt": "base\n" }, "base")
+    // The target’s own advance is a rename. Rename detection would list only `b.txt`, so a set built
+    // without `--no-renames` calls `a.txt` untouched and skips the one path this compose restored.
+    await git(["mv", "a.txt", "b.txt"])
+    await git([...author, "commit", "--quiet", "--message", "target renames a.txt to b.txt"])
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    // A candidate cut from BELOW the rename whose tree is the pre-rename tree: it puts the old path
+    // back with the old blob, which is the revert the guard exists to catch.
+    const report = await detect({ checkoutAt: w.checkoutAt, target }, base, base)
+    expect(report.coverage).toBe("complete")
+    expect(report.paths.map((row) => row.path)).toContain("a.txt")
+    expect(revertGuardAction(report, "refuse")).toBe("stick")
+  })
+
+  it("touched: a path ending in a space that the target changed is still walked (28195)", async () => {
+    const w = await flatWorld()
+    const base = await commit(w.repo, { "c d ": "base\n" }, "base")
+    const target = await commit(w.repo, { "c d ": "target\n" }, "target advance")
+    // `-z` names arrive verbatim; a `trimEnd()` on the parse shortens this path to `c d`, so the set
+    // lookup misses and the restored path is skipped in silence.
+    const report = await detect({ checkoutAt: w.checkoutAt, target }, base, base)
+    expect(report.coverage).toBe("complete")
+    expect(report.paths.map((row) => row.path)).toContain("c d ")
+  })
+
+  it("touched: a judged path containing a newline is still judged (28195)", async () => {
+    const w = await flatWorld()
+    // `--stdin` is newline-delimited, so this name cannot be expressed as a pathspec: git splits it
+    // into `a` and `b.txt`, matches neither, and the traversal returns nothing for it. The set then
+    // calls the path untouched and `assessPath` skips it — a revert no per-path walk would have missed.
+    const odd = "a\nb.txt"
+    const base = await commit(w.repo, { [odd]: "base\n" }, "base")
+    const target = await commit(w.repo, { [odd]: "target\n" }, "target advance")
+    const report = await detect({ checkoutAt: w.checkoutAt, target }, base, base)
+    expect(report.coverage).toBe("complete")
+    expect(report.paths.map((row) => row.path)).toContain(odd)
+    expect(revertGuardAction(report, "refuse")).toBe("stick")
+  })
+
   it("the durable finding is silent only for a complete, hit-free report", () => {
     expect(revertedPathsFinding(undefined)).toBeUndefined()
     expect(
@@ -260,6 +319,60 @@ describe("revert guard (27363)", () => {
     expect(reason).toContain("a.txt@d0")
     expect(reason).toContain('"gaps"')
     expect(revertedPathsFinding(capped)?.reason).toContain("a.txt@d0")
+  })
+
+  it("counts every kind BEFORE the payload’s cap, and a reader takes them from the payload alone (28195)", () => {
+    const many: RevertGuardReport = {
+      base: { base: "a".repeat(40), state: "single" },
+      count: 1,
+      coverage: "incomplete",
+      gaps: [
+        ...Array.from({ length: 40 }, (_, index) => ({
+          kind: "unjudged" as const,
+          depth: 1,
+          path: `content/a${String(index)}.json`,
+          reason: "path cap P_max=500",
+        })),
+        { kind: "bounded" as const, depth: 0, path: "kept.txt", reason: "target history window W=50 exhausted" },
+      ],
+      paths: [{ base: "b", candidate: "c", mode: "100644", path: "vendor/dep/a.txt", target: "t" }],
+      swallowed: [{ candidate: "x", incoming: "y", path: "vendor/dep", target: "z" }],
+    }
+    expect(revertedPathsCounts(many)).toEqual({ reverted: 1, swallowed: 1, gaps: 41, unjudged: 40, bounded: 1 })
+    expect(revertedPathsFinding(many)?.counts.gaps).toBe(41)
+    const reason = revertedPathsReason(many)
+    expect(reason).toContain('"counts":{"reverted":1,"swallowed":1,"gaps":41,"unjudged":40,"bounded":1}')
+    // The stored lists are capped and the counts are not, so a reader states 41 gaps while the payload
+    // holds only the cap: a truncated total is named, never counted out of the gap prose.
+    expect(revertedPathsNotice(reason)).toEqual({
+      counts: { reverted: 1, swallowed: 1, gaps: 41, unjudged: 40, bounded: 1 },
+      coverage: "incomplete",
+      gapsStored: REVERTED_PATHS_PAYLOAD_CAP,
+      truncated: true,
+    })
+    // A row written before the counts were recorded: coverage and the capped total are still read,
+    // the counts are simply not there, and nothing is invented for them.
+    const older = `0 reverted/swallowed path(s); {"count":0,"coverage":"incomplete","paths":[],"swallowed":[],"gaps":${JSON.stringify(
+      Array.from({ length: REVERTED_PATHS_PAYLOAD_CAP }, (_, index) => ({
+        kind: "unjudged",
+        depth: 1,
+        reason: "path cap P_max=500",
+        path: `content/a${String(index)}.json`,
+      })),
+    )}}; gaps: path cap P_max=500 [content/a0.json@d1], …`
+    expect(revertedPathsNotice(older)).toEqual({
+      coverage: "incomplete",
+      gapsStored: REVERTED_PATHS_PAYLOAD_CAP,
+      truncated: true,
+    })
+    // A path whose own bytes carry braces and quotes cannot break the object scan.
+    const braced = revertedPathsReason({
+      ...many,
+      paths: [{ base: "b", candidate: "c", mode: "100644", path: 'a{b}"c/d.txt', target: "t" }],
+    })
+    expect(revertedPathsNotice(braced)?.counts?.gaps).toBe(41)
+    // Not a revert reason at all.
+    expect(revertedPathsNotice("admission policy warning task/x@abc123: no kind")).toBeUndefined()
   })
 
   it("policy: a hit warns by default and sticks only under refuse, and a gap never goes clean", () => {
@@ -359,6 +472,38 @@ describe("revert guard review regressions (27363)", () => {
     expect(revertedPathsFinding(report)).toBeDefined()
     expect(revertGuardAction(report, "observe")).toBe("warn")
     expect(revertGuardAction(report, "refuse")).toBe("stick")
+  })
+
+  it("add-only: the untouched paths cost one traversal per level, not one walk per path", async () => {
+    const w = await addOnlyWorld()
+    const root = await w.checkoutAt(w.candidate)
+    const calls: (readonly string[])[] = []
+    const git = gitIn(root, undefined, undefined, {
+      env,
+      onInvocation: (invocation) => {
+        calls.push(invocation.args)
+      },
+    })
+    const report = await detectReverted({
+      bounds: { depth: 3, pathCap: 1, window: 50 },
+      candidate: w.candidate,
+      git,
+      head: w.head,
+      root,
+      targetHead: w.target,
+    })
+    expect(report.coverage).toBe("complete")
+    // touched-or-not is decided by ONE `log --first-parent --name-only` per level; NO path takes the
+    // per-path `rev-list` walk, so the 12 added paths never each scan the target’s history (#28195).
+    expect(calls.filter((args) => args[0] === "rev-list")).toEqual([])
+    // The one traversal is found by subcommand, never by argv[0], because `--literal-pathspecs` is a
+    // leading global flag. It is path-limited (paths on stdin) and rename-blind, so it names EVERY path
+    // the range moved rather than only a rename’s destination (#28195).
+    const traversals = calls.filter((args) => args.includes("log"))
+    expect(traversals).toHaveLength(1)
+    expect(traversals[0]?.includes("--stdin")).toBe(true)
+    expect(traversals[0]?.includes("--literal-pathspecs")).toBe(true)
+    expect(traversals[0]?.includes("--no-renames")).toBe(true)
   })
 })
 
@@ -621,3 +766,93 @@ async function targetAdvanceWorld(): Promise<RegressionWorld> {
   const head = await pin(product, "vendor/dep", dep, candidatePin, "candidate keeps the pre-advance value")
   return { candidate: head, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
 }
+
+/**
+ * #28195, the add-only shape: the candidate CONTAINS the target pin (a fast-forward), exactly the
+ * specimen (terminfo.dev 7c2d2dfe -> 871cb62e, target an ancestor of the candidate), and only ADDS
+ * paths absent from the target with no target history to walk.
+ */
+async function addOnlyWorld(): Promise<RegressionWorld> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-revert-addonly-"))
+  roots.push(root)
+  const dep = join(root, "dep")
+  mkdirSync(dep)
+  await gitIn(dep, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(dep, { "keep.txt": "keep\n" }, "base")
+  const targetPin = await commit(dep, { "keep.txt": "keep\n", "advance.txt": "adv\n" }, "target advance")
+  const added: Record<string, string> = {}
+  for (let at = 0; at < 12; at += 1) added[`content/artifacts/a-${String(at)}.json`] = `{"n":${String(at)}}\n`
+  const candidatePin = await commit(dep, added, "add-only content")
+  const product = join(root, "product")
+  mkdirSync(product)
+  await gitIn(product, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(product, { "readme.txt": "product\n" }, "product base")
+  const target = await pin(product, "vendor/dep", dep, targetPin, "target pins the advance")
+  const head = await pin(product, "vendor/dep", dep, candidatePin, "head asks for the add-only compose")
+  return { candidate: head, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
+}
+
+/**
+ * #28195, the discrimination: the target DELETED a path (its own advance) and the candidate, a child
+ * of the target pin, restores the older value. The path is present at the candidate and ABSENT at the
+ * target — an add-only diff row — yet it hides a revert and must still be judged and refused.
+ */
+async function targetDeletedWorld(): Promise<RegressionWorld> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-revert-deleted-"))
+  roots.push(root)
+  const dep = join(root, "dep")
+  mkdirSync(dep)
+  await gitIn(dep, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(dep, { "a.txt": "one\n", "keep.txt": "keep\n" }, "base")
+  rmSync(join(dep, "a.txt"))
+  const targetPin = await commit(dep, { "keep.txt": "keep\n" }, "target deletes a.txt")
+  const candidatePin = await commit(dep, { "a.txt": "one\n" }, "candidate restores a.txt")
+  const product = join(root, "product")
+  mkdirSync(product)
+  await gitIn(product, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(product, { "readme.txt": "product\n" }, "product base")
+  const target = await pin(product, "vendor/dep", dep, targetPin, "target pins the deletion")
+  const head = await pin(product, "vendor/dep", dep, candidatePin, "head asks for the restore")
+  return { candidate: head, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
+}
+
+describe("revert guard path cap (28195)", () => {
+  it("add-only: absent paths spend no cap, name no gap, and the landing is clean", async () => {
+    const w = await addOnlyWorld()
+    const root = await w.checkoutAt(w.candidate)
+    // pathCap 1 with 12 added paths: pre-#28195 this spent the single unit and marked 11 paths
+    // kind:unjudged / reason:path cap P_max=1, so an add-only landing reported coverage incomplete.
+    const report = await detectReverted({
+      bounds: { depth: 3, pathCap: 1, window: 50 },
+      candidate: w.candidate,
+      git: gitIn(root, undefined, undefined, { env }),
+      head: w.head,
+      root,
+      targetHead: w.target,
+    })
+    expect(report.coverage).toBe("complete")
+    expect(report.gaps).toEqual([])
+    expect(report.paths).toEqual([])
+    expect(report.swallowed).toEqual([])
+    expect(revertedPathsFinding(report)).toBeUndefined()
+    expect(revertGuardAction(report, "observe")).toBe("clean")
+    expect(revertGuardAction(report, "refuse")).toBe("clean")
+  })
+
+  it("restored-older-value: an added path the target deleted is still judged and still refused", async () => {
+    const w = await targetDeletedWorld()
+    const root = await w.checkoutAt(w.candidate)
+    const report = await detectReverted({
+      bounds: { depth: 3, pathCap: 500, window: 50 },
+      candidate: w.candidate,
+      git: gitIn(root, undefined, undefined, { env }),
+      head: w.head,
+      root,
+      targetHead: w.target,
+    })
+    expect(report.paths.map((row) => row.path)).toContain("vendor/dep/a.txt")
+    expect(revertedPathsFinding(report)?.reason).toContain("vendor/dep/a.txt")
+    expect(revertGuardAction(report, "observe")).toBe("warn")
+    expect(revertGuardAction(report, "refuse")).toBe("stick")
+  })
+})

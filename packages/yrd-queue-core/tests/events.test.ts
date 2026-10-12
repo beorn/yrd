@@ -400,7 +400,15 @@ describe("ADR-0016 event fold", () => {
         [A],
       ),
     )
-    expect(reverted.diagnostic).toMatch(/admission reverted paths/u)
+    // #28195: the revert finding is carried STRUCTURED — kind, event, reason — and stays out of the
+    // folded `diagnostic` string, so a listing summarises it from the reason’s own payload instead of
+    // re-reading ~100 KB of gap prose per row. The old-shape record below still folds as a diagnostic.
+    expect(reverted.diagnostic).toBeUndefined()
+    expect(reverted.admissionWarning).toMatchObject({
+      kind: "reverted-paths",
+      event: B,
+      reason: "km: 9 reverted path(s) (coverage complete)",
+    })
 
     // An unknown kind is still refused BY NAME (a throw, not a diagnostic).
     expect(() =>
@@ -1653,7 +1661,14 @@ describe("the queue-format boundary", () => {
         [A],
       ),
     )
-    expect(reverted.diagnostic).toContain("admission reverted paths")
+    // #28195: kind, event and the raw reason live on the change itself; `diagnostic` keeps the
+    // sentences that are not this one.
+    expect(reverted.diagnostic).toBeUndefined()
+    expect(reverted.admissionWarning).toMatchObject({
+      kind: "reverted-paths",
+      event: B,
+      reason: "1 reverted/swallowed path(s): child/a.txt",
+    })
 
     // Old shape, unchanged: an admission warning with no Warning-Kind still folds.
     const old = evolve(
@@ -1669,6 +1684,45 @@ describe("the queue-format boundary", () => {
       ),
     )
     expect(old.diagnostic).toContain("admission could not judge")
+  })
+
+  it("gives a row the reverted-paths finding as a structured notice, counts and all (28195)", () => {
+    const opened = evolve(initial, event("opened", A, [["Commit", A]], [A]))
+    const payload = `0 reverted/swallowed path(s); {"count":0,"counts":{"reverted":0,"swallowed":0,"gaps":684,"unjudged":684,"bounded":0},"coverage":"incomplete","paths":[],"swallowed":[],"gaps":${JSON.stringify(
+      Array.from({ length: 32 }, (_, index) => ({
+        kind: "unjudged",
+        depth: 1,
+        reason: "path cap P_max=500",
+        path: `content/a${String(index)}.json`,
+      })),
+    )}}; gaps: path cap P_max=500 [content/a0.json@d1], …`
+    const reverted = evolve(
+      opened,
+      event(
+        "admission-warning",
+        B,
+        [
+          ["Commit", A],
+          ["Reason", payload],
+          ["Warning-Kind", "reverted-paths"],
+        ],
+        [A],
+      ),
+    )
+    // The fold keeps the reason out of `diagnostic`; the row states the finding from the payload’s own
+    // counts, and names the stored gap list as capped rather than counting its prose.
+    expect(reverted.diagnostic).toBeUndefined()
+    const [row] = eventRows(new Map([["task/reverted", reverted]]))
+    expect(row?.diagnostic).toBeUndefined()
+    expect(row?.revertWarning).toEqual({
+      event: B,
+      notice: {
+        counts: { reverted: 0, swallowed: 0, gaps: 684, unjudged: 684, bounded: 0 },
+        coverage: "incomplete",
+        gapsStored: 32,
+        truncated: true,
+      },
+    })
   })
 
   it("refuses a stuck event if a queue resume raced its causal queue tip", async () => {

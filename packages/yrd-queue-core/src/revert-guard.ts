@@ -97,7 +97,12 @@ export type RevertGuardReport = Readonly<{
 }>
 
 export type RevertGuardBounds = Readonly<{
-  /** Interior paths examined before the proof is named incomplete. */
+  /**
+   * Interior paths WITH target history judged before the proof is named incomplete. A path the
+   * target's window never touched cannot hide a revert, so it is judged clean without spending a
+   * unit and without naming a gap (#28195): the cap bounds real judgments, not the path count, so an
+   * add-only landing no longer reports incomplete for paths it could never hide behind.
+   */
   pathCap: number
   /** Gitlink recursion depth; the root level is 0. */
   depth: number
@@ -291,7 +296,84 @@ async function walk(level: Level): Promise<void> {
       row.oldMode !== GITLINK && row.newMode !== GITLINK && !(row.newSha === row.oldSha && row.newMode === row.oldMode),
   )
   const base = judged.length === 0 ? undefined : await advanceBase(level)
-  for (const row of judged) await assessPath(level, row, base)
+  const touched =
+    judged.length === 0
+      ? undefined
+      : await touchedPaths(
+          level,
+          base,
+          judged.map((row) => row.path),
+        )
+  for (const row of judged) await assessPath(level, row, base, touched)
+}
+
+/**
+ * The paths the target's first-parent range touched, in ONE traversal per level (#28195).
+ *
+ * `firstParentTouching` per path is `rev-list --first-parent --max-count=W <revision> -- <path>`, so
+ * for a path the range never moved git scans the WHOLE range to find nothing — before this, one such
+ * walk ran per changed path up to the cap. One `log --first-parent --name-only` over the SAME
+ * revision range answers "touched or not" for every changed path at once, so an untouched path costs
+ * nothing and only a touched path takes the per-path walk under P_max. `-m` adds each merge's
+ * first-parent diff, so the set is a superset of what that per-path walk can report: only membership
+ * is proved here, never absence-by-omission. A failed traversal is a named `unjudged` gap and returns
+ * undefined, so every path falls back to the per-path walk under the cap — never a silent widening of
+ * the proof.
+ */
+async function touchedPaths(
+  level: Level,
+  base: string | undefined,
+  paths: readonly string[],
+): Promise<ReadonlySet<string> | undefined> {
+  // `--stdin` is newline-delimited, so a path containing a newline cannot be expressed as a pathspec:
+  // git splits it at the newline and matches neither half, and the traversal would return nothing for
+  // a path the per-path walk finds — a silent narrowing of the proof, which this function must never
+  // do. Serve the whole level from that per-path walk instead (the conservative proof), exactly as an
+  // unreadable range does; it is bounded by P_max and the window, and a cap it cannot serve is named.
+  if (paths.some((path) => path.includes("\n"))) return undefined
+  const revision = base === undefined ? level.target : `${base}..${level.target}`
+  // The traversal is limited to the level's judged paths, fed on stdin so a compose with thousands of
+  // changed paths never hits an argv limit and `--literal-pathspecs` keeps every path byte a name
+  // rather than a pattern (a `*` or a leading `:` in a filename is a name, not a glob). `--no-renames`
+  // is load-bearing: with rename detection a target that renamed a path away lists only the NEW name,
+  // so a candidate that restores the OLD path's blob is wrongly called untouched and skipped (#28195).
+  const input = [revision, "--", ...paths].join("\n") + "\n"
+  let out: string
+  try {
+    out = await level.git(
+      [
+        "--literal-pathspecs",
+        "log",
+        "--first-parent",
+        "-m",
+        "--name-only",
+        "--no-renames",
+        "--format=",
+        "-z",
+        "--stdin",
+      ],
+      input,
+    )
+  } catch (error) {
+    level.report.gaps.push({
+      kind: "unjudged",
+      depth: level.depth,
+      path: level.prefix === "" ? "." : level.prefix,
+      reason: `target first-parent range unreadable: ${detail(error)}`,
+    })
+    // silent-fallback-allow: the unreadable range was just recorded as a named unjudged gap; undefined keeps
+    // every path on the per-path walk under the cap, the conservative proof, never a silent narrowing.
+    return undefined
+  }
+  // `-z` names arrive verbatim, so only empty fields (and a leading newline git may emit) are dropped.
+  // A `trimEnd()` here would shorten a path that legitimately ends in a space and the lookup would
+  // miss it in silence (#28195).
+  return new Set(
+    out
+      .split("\0")
+      .map((row) => row.replace(/^\n+/u, ""))
+      .filter((row) => row !== ""),
+  )
 }
 
 /**
@@ -320,8 +402,20 @@ async function advanceBase(level: Level): Promise<string | undefined> {
   }
 }
 
-async function assessPath(level: Level, row: RawRow, base: string | undefined): Promise<void> {
+async function assessPath(
+  level: Level,
+  row: RawRow,
+  base: string | undefined,
+  touched: ReadonlySet<string> | undefined,
+): Promise<void> {
   const full = level.prefix + row.path
+  // #28195: only a path the target's first-parent range touched can hold a value the target put
+  // back. `touched` is that set, computed in ONE traversal per level (touchedPaths); a path absent
+  // from it cannot hide a revert, so it spends no P_max unit, names no gap and takes no per-path
+  // walk — the cap keeps bounding real judgments and an add-only landing stays cheap. When the
+  // traversal failed, `touched` is undefined: every path falls back to the per-path walk under the
+  // cap (the conservative proof), with the failure already named as a gap.
+  if (touched !== undefined && !touched.has(row.path)) return
   if (level.budget.remaining <= 0) {
     level.report.gaps.push({
       kind: "unjudged",
@@ -442,6 +536,39 @@ async function firstParentTouching(
 }
 
 /**
+ * Exact counts by kind for one report, computed BEFORE any cap (#28195). The durable
+ * `reverted-paths` reason stores these beside its capped path and gap lists, so a listing can
+ * state the whole finding without counting the reason’s prose back up.
+ */
+export type RevertedPathsCounts = Readonly<{
+  /** Paths the candidate put back to a value the target’s history held before its own advance. */
+  reverted: number
+  /** Component pins the compose left equal to the target’s while the incoming pin differed. */
+  swallowed: number
+  /** Every named limit on the proof, both kinds. */
+  gaps: number
+  /** The `unjudged` gaps: the guard could not run its proof at all. */
+  unjudged: number
+  /** The `bounded` gaps: the proof ran to its declared window and found nothing. */
+  bounded: number
+}>
+
+/** How many paths and gaps the reason’s payload stores; the counts above are never capped. */
+export const REVERTED_PATHS_PAYLOAD_CAP = 32
+
+/** Exact counts by kind, read from the report itself and never from its rendering. */
+export function revertedPathsCounts(report: RevertGuardReport): RevertedPathsCounts {
+  const ofKind = (want: RevertGuardGap["kind"]): number => report.gaps.filter((gap) => gap.kind === want).length
+  return Object.freeze({
+    reverted: report.paths.length,
+    swallowed: report.swallowed.length,
+    gaps: report.gaps.length,
+    unjudged: ofKind("unjudged"),
+    bounded: ofKind("bounded"),
+  })
+}
+
+/**
  * The durable-warning finding for a report, or undefined when there is nothing to say.
  * A `complete` report with no hit is the ONLY silent case, and a report is `complete` when
  * every gap is `bounded` (#28000) — so a search that reached its declared window `W` warns
@@ -449,19 +576,29 @@ async function firstParentTouching(
  * any `unjudged` gap (unreadable tree/history, an unpicked base, a cap that skipped work),
  * always names itself.
  */
-export function revertedPathsFinding(
-  report: RevertGuardReport | undefined,
-): Readonly<{ reason: string; count: number; coverage: "complete" | "incomplete" }> | undefined {
+export function revertedPathsFinding(report: RevertGuardReport | undefined):
+  | Readonly<{
+      reason: string
+      count: number
+      counts: RevertedPathsCounts
+      coverage: "complete" | "incomplete"
+    }>
+  | undefined {
   if (report === undefined) return undefined
   const hit = report.paths.length > 0 || report.swallowed.length > 0
   if (!hit && report.coverage === "complete") return undefined
-  return { coverage: report.coverage, count: report.paths.length, reason: revertedPathsReason(report) }
+  return {
+    coverage: report.coverage,
+    count: report.paths.length,
+    counts: revertedPathsCounts(report),
+    reason: revertedPathsReason(report),
+  }
 }
 
 /** A compact, machine-readable `Reason:` for the durable `reverted-paths` warning. */
 export function revertedPathsReason(report: RevertGuardReport): string {
   const paths = [...report.paths.map((row) => row.path), ...report.swallowed.map((row) => row.path)]
-  const gaps = report.gaps.slice(0, 32).map((gap) => ({
+  const gaps = report.gaps.slice(0, REVERTED_PATHS_PAYLOAD_CAP).map((gap) => ({
     kind: gap.kind,
     depth: gap.depth,
     reason: gap.reason,
@@ -469,9 +606,10 @@ export function revertedPathsReason(report: RevertGuardReport): string {
   }))
   const payload = JSON.stringify({
     count: report.paths.length,
+    counts: revertedPathsCounts(report),
     coverage: report.coverage,
-    paths: report.paths.slice(0, 32).map((row) => row.path),
-    swallowed: report.swallowed.slice(0, 32).map((row) => row.path),
+    paths: report.paths.slice(0, REVERTED_PATHS_PAYLOAD_CAP).map((row) => row.path),
+    swallowed: report.swallowed.slice(0, REVERTED_PATHS_PAYLOAD_CAP).map((row) => row.path),
     ...(gaps.length === 0 ? {} : { gaps }),
     ...(report.base.state === "single" ? {} : { base: report.base.state }),
   })
@@ -483,6 +621,95 @@ export function revertedPathsReason(report: RevertGuardReport): string {
           .map((gap) => (gap.path === "" ? gap.reason : `${gap.reason} [${gap.path}@d${String(gap.depth)}]`))
           .join(", ")}`
   return `${String(paths.length)} reverted/swallowed path(s)${named === "" ? "" : `: ${named}`}; ${payload}${gapText}`
+}
+
+/**
+ * What a stored `reverted-paths` reason says, read from its structured payload alone (#28195).
+ * The prose around the payload — the leading count sentence and the trailing gap text — is never
+ * parsed: the payload is the writer’s own record, and a reader that counted gap prose back up
+ * would be a second derivation that breaks the day the prose is reworded. `undefined` means the
+ * string carries no such payload at all.
+ */
+export type RevertedPathsNotice = Readonly<{
+  /** Exact counts by kind, present only when the row was written by a build that recorded them. */
+  counts?: RevertedPathsCounts
+  /** The writer’s verdict for the change, as the payload records it. */
+  coverage: "complete" | "incomplete"
+  /** Gaps the payload stores, which its own writer capped at {@link REVERTED_PATHS_PAYLOAD_CAP}. */
+  gapsStored: number
+  /** The stored gap list reached the cap, so the true total is `gapsStored` or more. */
+  truncated: boolean
+}>
+
+/** The payload’s opening bytes: the writer emits `count` first, so nothing precedes the object. */
+const REVERTED_PATHS_PAYLOAD = '{"count":'
+
+export function revertedPathsNotice(reason: string): RevertedPathsNotice | undefined {
+  const start = reason.indexOf(REVERTED_PATHS_PAYLOAD)
+  if (start === -1) return undefined
+  const body = jsonObjectAt(reason, start)
+  if (body === undefined) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    // silent-fallback-allow: a payload this reader cannot parse is reported as no payload at all,
+    // and every caller then says the counts were not recorded rather than showing a guessed number.
+    return undefined
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined
+  const fields = parsed as Record<string, unknown>
+  const coverage = fields["coverage"]
+  if (coverage !== "complete" && coverage !== "incomplete") return undefined
+  const gaps = fields["gaps"]
+  const gapsStored = Array.isArray(gaps) ? gaps.length : 0
+  const counts = countsOf(fields["counts"])
+  return {
+    ...(counts === undefined ? {} : { counts }),
+    coverage,
+    gapsStored,
+    truncated: gapsStored >= REVERTED_PATHS_PAYLOAD_CAP,
+  }
+}
+
+/** The balanced `{...}` starting at `start`, with quoted strings and escapes respected. */
+function jsonObjectAt(text: string, start: number): string | undefined {
+  let depth = 0
+  let quoted = false
+  let escaped = false
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index]
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (char === "\\") escaped = true
+      else if (char === '"') quoted = false
+      continue
+    }
+    if (char === '"') quoted = true
+    else if (char === "{") depth += 1
+    else if (char === "}") {
+      depth -= 1
+      if (depth === 0) return text.slice(start, index + 1)
+    }
+  }
+  // silent-fallback-allow: an unterminated object is not a payload; the caller says the counts
+  // were not recorded, which is the same word it uses for a row with no payload at all.
+  return undefined
+}
+
+/** A `counts` member, or undefined when it is absent or is not five whole non-negative numbers. */
+function countsOf(value: unknown): RevertedPathsCounts | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  const { reverted, swallowed, gaps, unjudged, bounded } = value as Record<string, unknown>
+  const each = [reverted, swallowed, gaps, unjudged, bounded]
+  if (each.some((held) => typeof held !== "number" || !Number.isSafeInteger(held) || held < 0)) return undefined
+  return Object.freeze({
+    reverted: reverted as number,
+    swallowed: swallowed as number,
+    gaps: gaps as number,
+    unjudged: unjudged as number,
+    bounded: bounded as number,
+  })
 }
 
 /** What the guard asks of a compose: nothing, a durable warning, or the named stick before CAS. */

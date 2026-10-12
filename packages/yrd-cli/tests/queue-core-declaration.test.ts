@@ -1075,6 +1075,74 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(detail.note).toContain(join(await workdirOf(git), "checks", `${branch}@${head}`))
   }, 15_000)
 
+  // @failure a listing printed ~100 KB of gap prose per reverted-paths row, and one show printed the
+  //          same stored report twice (28195).
+  it("states a reverted-paths warning as one line in the listing and the stored reason once in show (28195)", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const queueTip = await createQueue(repo, "main", head, new Date("2026-09-22T14:00:00.000Z"))
+    const branch = "task/reverted"
+    const policyReason = "the compose touched a protected path"
+    const reason =
+      '0 reverted/swallowed path(s); {"count":0,"counts":{"reverted":0,"swallowed":0,"gaps":684,' +
+      '"unjudged":684,"bounded":0},"coverage":"incomplete","paths":[],"swallowed":[],"gaps":' +
+      '[{"kind":"unjudged","depth":1,"reason":"path cap P_max=500","path":"content/a.json"}]}; ' +
+      "gaps: path cap P_max=500 [content/a.json@d1]"
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: new Date("2026-09-22T14:01:00.000Z"), commit: head, by: "yrd" }),
+        changeInput("admission-warning", {
+          queueTip,
+          at: new Date("2026-09-22T14:01:30.000Z"),
+          commit: head,
+          reason: policyReason,
+          warningKind: "policy-warning",
+        }),
+        changeInput("admission-warning", {
+          queueTip,
+          at: new Date("2026-09-22T14:02:00.000Z"),
+          commit: head,
+          reason,
+          warningKind: "reverted-paths",
+        }),
+      ],
+      { expect: null },
+    )
+    const listed = capture(repo)
+    expect(
+      await coreQueueCommand(repo, listed.io, { command: "list", all: true }, { json: true, queue: "main" }),
+      listed.stderr(),
+    ).toBe(0)
+    const row = (
+      JSON.parse(listed.stdout()) as {
+        changes: readonly { branch: string; diagnostic?: string; diagnosticSummary?: string }[]
+      }
+    ).changes.find((candidate) => candidate.branch === branch)
+    // A change carrying BOTH kinds: the policy warning folds into `diagnostic`, the revert finding is
+    // the one line, and each reaches the listing exactly once.
+    expect(row).toMatchObject({
+      diagnostic: expect.stringContaining(policyReason),
+      diagnosticSummary: expect.stringContaining(
+        "reverted paths: 0 reverted, 0 swallowed, 684 gap(s) (684 unjudged, 0 bounded) · coverage incomplete",
+      ),
+    })
+    // ONE line per row: neither the stored payload nor its gap prose reaches the listing.
+    expect(listed.stdout().split(policyReason).length - 1).toBe(1)
+    expect(listed.stdout()).not.toContain("path cap P_max=500")
+    // `show` renders that stored reason in FULL, exactly once, beside the same one-line finding.
+    const shown = capture(repo)
+    expect(await coreQueueCommand(repo, shown.io, { command: "show", branch }, { queue: "main" }), shown.stderr()).toBe(
+      0,
+    )
+    expect(shown.stdout().split(reason).length - 1).toBe(1)
+    expect(shown.stdout().split(policyReason).length - 1).toBe(1)
+    expect(shown.stdout()).toContain("coverage incomplete · diagnostic ")
+  })
+
   // @failure a malformed event ref took down list/show/watch and hid healthy changes (25658).
   it("lists an invalid chain by name beside healthy and no-opened chains, with show and fence parity", async () => {
     const repo = await world("{}\n")

@@ -988,6 +988,7 @@ function SingleWatchPane({
       moving ||
       heldDetail.tipAt !== selected.row.at?.getTime() ||
       heldDetail.detail.row.diagnostic !== selected.row.diagnostic ||
+      heldDetail.detail.row.revertWarning?.event !== selected.row.revertWarning?.event ||
       // Journal reads allocate fresh objects; compare records, not their allocation identity.
       JSON.stringify(heldDetail.detail.row.diagnostics) !== JSON.stringify(selected.row.diagnostics))
   useEffect(() => {

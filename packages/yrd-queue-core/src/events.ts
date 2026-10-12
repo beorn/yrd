@@ -172,6 +172,18 @@ export type EventChange = Readonly<{
   reason?: string
   /** A readable historical chain with no opened event; the fold remains authoritative. */
   diagnostic?: string
+  /**
+   * The latest admitted `reverted-paths` warning (#28195): the event that carries it, and the
+   * raw `Reason:` that event stores. A `reverted-paths` reason is kept HERE, out of {@link
+   * EventChange.diagnostic}, because it is the one diagnostic a listing summarises from the
+   * reason’s own payload instead of folding ~100 KB of gap prose per row; the stored `Reason:` on
+   * the event is unchanged, and `show` renders it in full.
+   */
+  admissionWarning?: Readonly<{
+    kind: "reverted-paths"
+    event: string
+    reason: string
+  }>
   ignored?: Readonly<{ reason: string; by: string }>
   deferred?: Readonly<{
     id: string
@@ -633,6 +645,7 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
         notices: _previousNotices,
         lastNotifiable: _previousNotifiable,
         diagnostic: _previousDiagnostic,
+        admissionWarning: _previousAdmissionWarning,
         run: _previousRun,
         ...fresh
       } = next
@@ -667,15 +680,16 @@ export function evolve(state: EventChange, event: EventShape): EventChange {
       if (warningKind !== undefined && warningKind !== "policy-warning" && warningKind !== "reverted-paths") {
         throw new Error(`event ${event.id} admission-warning has unknown Warning-Kind: ${warningKind}`)
       }
+      const admitted: "policy-warning" | "reverted-paths" | "cannot-judge" = warningKind ?? "cannot-judge"
+      // #28195: the revert detector’s reason is the one warning a listing summarises, so it is kept
+      // STRUCTURED — kind, the event that carries it, the reason — and stays out of `diagnostic`.
+      // `diagnostic` keeps its un-foldable sentences; the raw `Reason:` remains the stored record.
+      if (admitted === "reverted-paths") {
+        return { ...next, admissionWarning: { kind: admitted, event: event.id, reason } }
+      }
       return diagnose(
         next,
-        `admission ${
-          warningKind === "policy-warning"
-            ? "policy warning"
-            : warningKind === "reverted-paths"
-              ? "reverted paths"
-              : "could not judge"
-        } ${head.slice(0, 12)}: ${reason}`,
+        `admission ${admitted === "policy-warning" ? "policy warning" : "could not judge"} ${head.slice(0, 12)}: ${reason}`,
       )
     }
     case "verifying":

@@ -26,6 +26,50 @@ import {
 } from "../src/watch-format.ts"
 import { journalRun } from "../../../tests/support/journal-run.ts"
 
+describe("the compose revert finding’s one line (28195)", () => {
+  it("states counts by kind, the verdict and the event, and says when a row has no counts", () => {
+    const counted = {
+      branch: "task/x",
+      head: "abc1234567",
+      revertWarning: {
+        event: "e".repeat(40),
+        notice: {
+          counts: { reverted: 1, swallowed: 0, gaps: 684, unjudged: 684, bounded: 0 },
+          coverage: "incomplete" as const,
+          gapsStored: 32,
+          truncated: true,
+        },
+      },
+    }
+    const line = diagnosticLines(counted).join("\n")
+    expect(line).toContain(
+      "task/x@abc1234567: ⚠ reverted paths: 1 reverted, 0 swallowed, 684 gap(s) (684 unjudged, 0 bounded)",
+    )
+    expect(line).toContain("coverage incomplete")
+    expect(line).toContain("diagnostic " + "e".repeat(40))
+
+    // A row written before the counts were recorded: no number is invented from the gap prose, and
+    // the stored total is named as the capped list it is.
+    const older = {
+      ...counted,
+      revertWarning: {
+        event: "f".repeat(40),
+        notice: { coverage: "incomplete" as const, gapsStored: 32, truncated: true },
+      },
+    }
+    const olderLine = diagnosticLines(older).join("\n")
+    expect(olderLine).toContain("counts not recorded (the row predates count recording)")
+    expect(olderLine).toContain("32+ gap(s) stored, truncated")
+    expect(olderLine).not.toContain("684")
+
+    // A reason this reader cannot read as a payload at all is never filled in with numbers.
+    const unreadable = { ...counted, revertWarning: { event: "f".repeat(40) } }
+    const unreadableLine = diagnosticLines(unreadable).join("\n")
+    expect(unreadableLine).toContain("the stored reason carries no readable counts payload")
+    expect(unreadableLine).toContain("diagnostic " + "f".repeat(40))
+  })
+})
+
 describe("ref-write diagnostic lines", () => {
   it("names an absent decision only when the run journal was actually read", () => {
     const diagnostic = {

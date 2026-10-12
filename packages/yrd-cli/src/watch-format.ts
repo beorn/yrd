@@ -65,13 +65,57 @@ export function skewMarker(row: Pick<Row, "unknownKinds">): string {
   return (row.unknownKinds?.length ?? 0) === 0 ? "" : " · reader skew"
 }
 
+/**
+ * One line for the compose revert detector’s stored finding (#28195): counts by kind, the coverage
+ * verdict, and the `admission-warning` event that carries it. Every number comes from the reason’s
+ * structured payload — its gap prose is never parsed — and a row whose payload carries no counts
+ * says what is true of the ROW instead of naming a build it cannot know (a newer reader reads old
+ * rows too, so this reader’s own sha would name the wrong cut).
+ */
+export function revertWarningLine(row: Pick<Row, "revertWarning">): string {
+  const warning = row.revertWarning
+  if (warning === undefined) throw new Error("revertWarningLine needs a row whose revertWarning is set")
+  const notice = warning.notice
+  const counts = notice?.counts
+  const found: string[] =
+    counts === undefined
+      ? notice === undefined
+        ? ["the stored reason carries no readable counts payload"]
+        : [
+            "counts not recorded (the row predates count recording)",
+            `${String(notice.gapsStored)}${notice.truncated ? "+" : ""} gap(s) stored${notice.truncated ? ", truncated" : ""}`,
+          ]
+      : [
+          `${String(counts.reverted)} reverted, ${String(counts.swallowed)} swallowed, ` +
+            `${String(counts.gaps)} gap(s) (${String(counts.unjudged)} unjudged, ${String(counts.bounded)} bounded)`,
+        ]
+  return [
+    `reverted paths: ${found.join(" · ")}`,
+    ...(notice === undefined ? [] : [`coverage ${notice.coverage}`]),
+    `diagnostic ${warning.event}`,
+  ].join(" · ")
+}
+
+/**
+ * Whether a row carries any recorded warning at all (#28195): the folded diagnostic text, the
+ * ref-write warnings of its run, or the structured notice of a `reverted-paths` warning. A row with
+ * a revert finding and no other defect has no `diagnostic` string, so a marker that keyed on that
+ * string alone would silently drop its ⚠.
+ */
+export function hasWarning(row: Pick<Row, "diagnostic" | "diagnostics" | "revertWarning">): boolean {
+  return row.diagnostic !== undefined || row.revertWarning !== undefined || (row.diagnostics?.length ?? 0) > 0
+}
+
 /** Full recorded warnings, shared by plain output and the selected change detail. */
 export function diagnosticLines(
-  row: Pick<Row, "branch" | "head" | "diagnostics" | "diagnostic">,
+  row: Pick<Row, "branch" | "head" | "diagnostics" | "diagnostic" | "revertWarning">,
   journal?: JournalRun,
 ): readonly string[] {
   return [
     ...(row.diagnostic === undefined ? [] : [`${row.branch}@${row.head}: ⚠ ${row.diagnostic}`]),
+    // #28195: the listing states a revert finding in ONE line; `yrd queue show` renders the stored
+    // reason itself, in full, for the one row asked.
+    ...(row.revertWarning === undefined ? [] : [`${row.branch}@${row.head}: ⚠ ${revertWarningLine(row)}`]),
     ...(row.diagnostics ?? []).flatMap((record) => {
       const usable = (value: unknown): value is string => typeof value === "string" && value.trim() !== ""
       const text = usable(record.text) ? record.text : undefined
