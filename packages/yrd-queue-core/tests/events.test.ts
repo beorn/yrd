@@ -1290,6 +1290,60 @@ describe("the queue-format boundary", () => {
     }
   })
 
+  // @failure Local retirement deletes the remote branch or has no origin archive/event custody (28791).
+  // @level l1
+  // @consumer Yrd local branch retirement; positional drop continues to delete the remote branch.
+  it.each(["draft", "submitted"] as const)(
+    "archives a %s local retirement without deleting the remote branch",
+    async (state) => {
+      const { store, location } = remoteMemStore(`yrd-local-retirement-${state}`)
+      const target = await open({ ...store, ref: "refs/heads/lab" })
+      const base = (await target.transact(async (map) => map.set("base", "one"), "base")).oid
+      const queueTip = await seedEventQueue(location, "lab", base, new Date("2026-09-22T14:00:00.000Z"))
+      const branch = "task/local-drop"
+      const source = await open({ ...store, ref: `refs/heads/${branch}` })
+      const head = (await source.transact(async (map) => map.set("work", "one"), "work")).oid
+      if (state === "submitted") {
+        await (
+          await openEvents({ ...store, ref: changesRef("lab", branch) })
+        ).append(
+          [
+            changeInput("opened", {
+              queueTip,
+              at: new Date("2026-09-22T14:01:00.000Z"),
+              commit: head,
+              by: "@dev/2",
+              issue: "28791",
+            }),
+          ],
+          { expect: null },
+        )
+      }
+      const archiveRef = "refs/archive/2026-10-12/dev-2/task/local-drop"
+      const request = {
+        queue: "lab",
+        branch,
+        by: "@dev/2",
+        issue: "28791",
+        note: "issue closed",
+        localArchive: { ref: archiveRef, tip: head },
+      }
+      const result = await drop(location, request)
+      const refs = await listRefs("refs/", store)
+      expect(refs.get(`refs/heads/${branch}`)).toBe(head)
+      expect(refs.get(archiveRef)).toBe(head)
+      const history = await (await openEvents({ ...store, ref: changesRef("lab", branch) })).events()
+      expect(history.at(-1)).toMatchObject({ id: result.event, type: "cancelled", links: [head] })
+      expect(await readStatus(location, "lab", branch)).toMatchObject({
+        status: "cancelled",
+        reason: "dropped",
+        issue: "28791",
+      })
+      expect(await drop(location, request)).toEqual(result)
+      expect((await listRefs("refs/", store)).get(`refs/heads/${branch}`)).toBe(head)
+    },
+  )
+
   it("drops a branch in the same publish as an ending that keeps its last commit", async () => {
     const { store, location } = remoteMemStore("yrd-event-drop")
     const target = await open({ ...store, ref: "refs/heads/lab" })

@@ -47,4 +47,10 @@ export type YrdCliIO = {
    * reasons are opaque text. An unavailable reader preserves automatic
    * candidates, while an absent reader supplies no external protection. */
   liveEnvironmentUse?: () => Promise<readonly Readonly<{ path: string; reason: string }>[]>
+  /** Fresh host holds, leases and live/dirty work associated with this exact local branch.
+   * Rejections preserve the branch; no host callback means a standalone repository with no host policy.
+   */
+  localBranchProtections?: (
+    input: Readonly<{ repo: string; branch: string; tip: string; issue?: string }>,
+  ) => Promise<readonly string[]>
 }

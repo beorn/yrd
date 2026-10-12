@@ -235,17 +235,42 @@ function buildProgram(
       .option("--notify <seat>", "the coordination seat recorded as Recipient:; no notice is sent (27262)")
       .option("--queue <value>", QUEUE_HELP)
       .option("--reason <text>", "why the change leaves the line, written on the record")
-  const queueEnd = async (branch: string, options: PauseOptions, command: "withdraw" | "drop"): Promise<void> => {
+  const queueEnd = async (
+    branch: string | undefined,
+    options: PauseOptions & { issue?: string; local?: boolean; tip?: string },
+    command: "withdraw" | "drop",
+  ): Promise<void> => {
+    if (options.local !== true && (branch === undefined) === (options.issue === undefined)) {
+      throw new Error("drop needs exactly one branch or --issue <id>")
+    }
+    if (options.local === true && (branch === undefined || options.tip === undefined)) {
+      throw new Error("drop --local needs a branch and --tip <expected-commit>")
+    }
+    if (options.tip !== undefined && options.local !== true) throw new Error("--tip requires drop --local")
+    let subject:
+      | { command: "withdraw" | "drop"; branch: string }
+      | { command: "drop-issue"; issue: string }
+      | { command: "drop-local"; branch: string; tip: string; issue?: string }
+    if (command === "drop" && options.local === true && branch !== undefined && options.tip !== undefined) {
+      subject = {
+        command: "drop-local",
+        branch,
+        tip: options.tip,
+        ...(options.issue === undefined ? {} : { issue: options.issue }),
+      }
+    } else if (branch !== undefined) subject = { command, branch }
+    else if (command === "drop" && options.issue !== undefined) {
+      subject = { command: "drop-issue", issue: options.issue }
+    } else throw new Error("withdraw needs a branch")
     const location = await resolveQueueLocation(cwd(), options.queue, env)
     setExit(
       await coreQueueCommand(
         location.repo,
         io,
         {
-          branch,
+          ...subject,
           by: resolveSubmitter(options.submitter, env),
           ...(options.notify === undefined ? {} : { recipient: options.notify }),
-          command,
           ...(options.reason === undefined ? {} : { reason: options.reason }),
         },
         {
@@ -1277,7 +1302,12 @@ function buildProgram(
   // recipient are separate facts on BOTH endings, so drop must not carry its own
   // table that names neither --submitter (@dev/11 27262 HOLD fba7572b).
   withdrawOptions(
-    program.command("drop <branch>").description("end an event change and delete its branch in one leased publish"),
+    program
+      .command("drop [branch]")
+      .description("end a change, or archive and retire local branches")
+      .option("--local", "archive and retire only the named local branch; requires --tip")
+      .option("--tip <commit>", "expected full local commit for --local; an advanced branch is kept")
+      .option("--issue <id>", "retire issue-bound local refs; with --local, carry the reviewed issue identity"),
   ).action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
 
   program
@@ -1571,7 +1601,9 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
 }
 
 /** The process entry, shared by `yrd` and `git-yrd`. */
-export async function runYrdExecutable(host: Pick<YrdCliIO, "liveEnvironmentUse"> = {}): Promise<never> {
+export async function runYrdExecutable(
+  host: Pick<YrdCliIO, "liveEnvironmentUse" | "localBranchProtections"> = {},
+): Promise<never> {
   const color = process.env.NO_COLOR === undefined && (process.stdout.isTTY || process.env.FORCE_COLOR !== undefined)
   const io: YrdCliIO = {
     ...host,

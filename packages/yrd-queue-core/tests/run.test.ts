@@ -29,7 +29,7 @@ import type { RefUpdate } from "gitomic"
 import { gitEnvironment } from "../src/git.ts"
 import * as gitRunners from "../src/git.ts"
 import { incidentTrailers } from "../src/incident.ts"
-import { readJournals, recentCasRefusals } from "../src/log.ts"
+import { openLog, readRunLog, readJournals, recentCasRefusals } from "../src/log.ts"
 import { reminderDue } from "../src/override.ts"
 import {
   changeName,
@@ -49,6 +49,7 @@ import {
   readEventOps,
   readConfig,
   readStatus,
+  retireLocalBranch,
   refAt,
   runCheck,
   runDiedInPreamble,
@@ -326,6 +327,223 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
   })
   return head
 }
+
+/** @failure Local retirement loses protected work or deletes before remote custody.
+ * @level l2 @consumer merge cleanup and explicit post-close issue drop
+ * Primitive tests cannot prove their ordering through the shared Yrd policy.
+ */
+it("local retirement keeps protected tips and preserves custody before removing a branch", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const log = openLog(join(w.workdir, "retirement"))
+  const branch = "task/local-retirement"
+  await w.git(["branch", branch, w.target])
+  let protections = ["held by owner"]
+  const input = {
+    repo: w.work,
+    git: w.git,
+    branch,
+    tip: w.target,
+    actor: "@dev/2",
+    issue: "@i/10-yrd/1",
+    reason: "merged",
+    date: "2026-10-12",
+    log,
+    protections: async () => protections,
+    disposition: { kind: "merged" as const, base: w.target, target: w.target },
+  }
+  expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: expect.stringContaining("held") })
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
+  protections = []
+  let protectionReads = 0
+  expect(
+    await retireLocalBranch({ ...input, protections: async () => (++protectionReads === 1 ? [] : ["lease acquired"]) }),
+  ).toMatchObject({ outcome: "kept", reason: "lease acquired" })
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
+  const merged = await retireLocalBranch(input)
+  expect(merged.outcome).toBe("removed")
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
+  expect(await refAt(w.git, merged.archiveRef)).toBe(w.target)
+
+  const head = await submitCommit(w, branch, "one.txt")
+  expect(await retireLocalBranch(input)).toMatchObject({ outcome: "kept", reason: expect.stringContaining("moved") })
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
+  const unavailableOrigin = await retireLocalBranch({
+    ...input,
+    tip: head,
+    date: "2026-10-13",
+    reason: "issue closed",
+    disposition: {
+      kind: "closed",
+      target: w.target,
+      queue: "main",
+      store: createEventStore(w.work, "missing-origin", gitIn(w.work).selection),
+    },
+  })
+  expect(unavailableOrigin).toMatchObject({ outcome: "failed", reason: expect.stringContaining("missing-origin") })
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
+  expect(await refAt(w.git, unavailableOrigin.archiveRef)).toBe(head)
+  const closed = await retireLocalBranch({
+    ...input,
+    tip: head,
+    date: "2026-10-13",
+    reason: "issue closed",
+    disposition: {
+      kind: "closed",
+      target: w.target,
+      queue: "main",
+      store: createEventStore(w.work, "origin", gitIn(w.work).selection),
+    },
+  })
+  expect(closed.outcome).toBe("removed")
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBeUndefined()
+  const origin = gitIn(w.remote)
+  expect(await refAt(origin, closed.archiveRef)).toBe(head)
+  expect(await refAt(origin, `refs/heads/${branch}`)).toBe(head)
+  const mergedBranch = "task/closed-but-merged"
+  await w.git(["branch", mergedBranch, w.target])
+  const queueStore = createEventStore(w.work, "origin", gitIn(w.work).selection)
+  const queueBefore = await refAt(origin, queueRef("main"))
+  const localOnly = await retireLocalBranch({
+    ...input,
+    branch: mergedBranch,
+    tip: w.target,
+    date: "2026-10-14",
+    reason: "issue closed after merge",
+    disposition: { kind: "closed", target: w.target, queue: "main", store: queueStore },
+  })
+  expect(localOnly.outcome).toBe("removed")
+  expect(await refAt(w.git, localOnly.archiveRef)).toBe(w.target)
+  expect(await refAt(origin, localOnly.archiveRef)).toBeUndefined()
+  expect(await refAt(origin, queueRef("main"))).toBe(queueBefore)
+  const rows = readRunLog(dirname(log.path), log.id)
+  expect(rows.filter((row) => row.kind === "local-branch-retirement").map((row) => row.outcome)).toEqual([
+    "kept",
+    "kept",
+    "removed",
+    "kept",
+    "failed",
+    "removed",
+    "removed",
+  ])
+  expect(rows.at(-1)).toMatchObject({
+    kind: "local-branch-retirement",
+    actor: "@dev/2",
+    issue: "@i/10-yrd/1",
+    head: w.target,
+    branch: mergedBranch,
+    reason: "issue closed after merge",
+  })
+})
+
+/** @failure A conflicting archive ref is treated as a durable protection, leaving cleanup with exit 0.
+ * @level l2 @consumer the local-retirement journal reader and cleanup caller
+ */
+it("classifies archive custody conflicts as failed while preserving the local branch", async () => {
+  const w = await world()
+  await createWorldEventQueue(w)
+  const branch = "task/archive-conflict"
+  const conflictingTip = await submitCommit(w, "task/archive-other", "other.txt")
+  await w.git(["branch", branch, w.target])
+  const archiveRef = `refs/archive/2026-10-15/dev-2/${branch}`
+  await w.git(["update-ref", archiveRef, conflictingTip])
+  const log = openLog(join(w.workdir, "retirement-conflict"))
+  const result = await retireLocalBranch({
+    repo: w.work,
+    git: w.git,
+    branch,
+    tip: w.target,
+    actor: "@dev/2",
+    reason: "merged",
+    date: "2026-10-15",
+    issue: "@i/10-yrd/1",
+    log,
+    protections: async () => [],
+    disposition: { kind: "merged", base: w.target, target: w.target },
+  })
+  expect(result).toMatchObject({ outcome: "failed", reason: expect.stringContaining("already holds") })
+  expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(w.target)
+  expect(readRunLog(dirname(log.path), log.id)).toContainEqual(
+    expect.objectContaining({ kind: "local-branch-retirement", outcome: "failed", branch, head: w.target }),
+  )
+})
+
+/** @failure Merge cleanup reports unchanged components or misses changed component branches.
+ * @level l2 @consumer local retirement after a merged root change
+ * The result must track gitlinks changed by this branch relative to its reviewed base, not every linked child.
+ */
+it("merged local retirement reports only changed component branches without ownership", async () => {
+  const w = await world()
+  const child = join(w.workdir, "child")
+  const untouched = join(w.workdir, "untouched")
+  await w.git(["init", "--quiet", "--initial-branch=main", child])
+  const childGit = gitIn(child)
+  await childGit(["config", "user.email", "queue@yrd.test"])
+  await childGit(["config", "user.name", "yrd"])
+  await childGit(["commit", "--allow-empty", "--quiet", "-m", "child"])
+  const childTip = (await childGit(["rev-parse", "HEAD"])).trim()
+  await childGit(["branch", "task/unknown-owner", childTip])
+  await w.git(["init", "--quiet", "--initial-branch=main", untouched])
+  const untouchedGit = gitIn(untouched)
+  await untouchedGit(["config", "user.email", "queue@yrd.test"])
+  await untouchedGit(["config", "user.name", "yrd"])
+  await untouchedGit(["commit", "--allow-empty", "--quiet", "-m", "untouched"])
+  const untouchedTip = (await untouchedGit(["rev-parse", "HEAD"])).trim()
+  await w.git(["config", "-f", ".gitmodules", "submodule.child.path", "child"])
+  await w.git(["config", "-f", ".gitmodules", "submodule.child.url", child])
+  await w.git(["config", "-f", ".gitmodules", "submodule.untouched.path", "untouched"])
+  await w.git(["config", "-f", ".gitmodules", "submodule.untouched.url", untouched])
+  await w.git(["add", ".gitmodules"])
+  await w.git(["update-index", "--add", "--cacheinfo", `160000,${childTip},child`])
+  await w.git(["update-index", "--add", "--cacheinfo", `160000,${untouchedTip},untouched`])
+  await w.git(["commit", "--quiet", "-m", "root with components"])
+  const base = (await w.git(["rev-parse", "HEAD"])).trim()
+  await childGit(["commit", "--allow-empty", "--quiet", "-m", "changed child"])
+  const changedTip = (await childGit(["rev-parse", "HEAD"])).trim()
+  await w.git(["update-index", "--cacheinfo", `160000,${changedTip},child`])
+  await w.git(["commit", "--quiet", "-m", "root moved one component"])
+  const tip = (await w.git(["rev-parse", "HEAD"])).trim()
+  const branch = "task/merged-root"
+  await w.git(["branch", branch, tip])
+  const log = openLog(join(w.workdir, "retirement"))
+  const result = await retireLocalBranch({
+    repo: w.work,
+    git: w.git,
+    branch,
+    tip,
+    actor: "@dev/2",
+    reason: "merged",
+    date: "2026-10-12",
+    issue: "@i/10-yrd/1",
+    log,
+    protections: async () => [],
+    disposition: { kind: "merged", base, target: tip },
+  })
+  expect(result.outcome).toBe("removed")
+  expect(await refAt(childGit, "refs/heads/task/unknown-owner")).toBe(childTip)
+  const warning = readRunLog(dirname(log.path), log.id).find((row) => row.kind === "warning" && row.branch === branch)
+  expect(warning?.reason).toContain("Component branches left unchanged for child")
+  expect(warning?.reason).not.toContain("untouched")
+
+  const unchangedBranch = "task/merged-unchanged-root"
+  await w.git(["branch", unchangedBranch, tip])
+  const unchangedLog = openLog(join(w.workdir, "retirement-unchanged"))
+  const unchanged = await retireLocalBranch({
+    repo: w.work,
+    git: w.git,
+    branch: unchangedBranch,
+    tip,
+    actor: "@dev/2",
+    reason: "merged",
+    date: "2026-10-13",
+    issue: "@i/10-yrd/1",
+    log: unchangedLog,
+    protections: async () => [],
+    disposition: { kind: "merged", base: tip, target: tip },
+  })
+  expect(unchanged.outcome).toBe("removed")
+  expect(readRunLog(dirname(unchangedLog.path), unchangedLog.id).some((row) => row.kind === "warning")).toBe(false)
+})
 
 /** @failure Submit and the queue drift to different composition paths.
  * @level l2 @consumer the submitter and the queue runner
