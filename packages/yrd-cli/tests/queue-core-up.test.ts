@@ -595,9 +595,14 @@ describe("yrd queue up, the service", () => {
     const sibling = `${path}-neighbor`
     mkdirSync(sibling)
     try {
-      const addresses = [join(path, "working"), path, alias, sibling]
+      const missingChild = join(alias, "not-created", "working")
+      const missingOther = join(dirname(path), "retired-work", "not-created")
+      const addresses = [join(path, "working"), path, alias, missingChild, sibling]
       for (const [index, address] of addresses.entries()) {
-        uses.mockResolvedValue([{ path: address, reason: "declared working directory" }])
+        uses.mockResolvedValue([
+          { path: address, reason: "declared working directory" },
+          ...(address === sibling ? [{ path: missingOther, reason: "retired declared working directory" }] : []),
+        ])
         const stop = new AbortController()
         const run = capture(w.work)
         run.io.liveEnvironmentUse = uses
@@ -611,8 +616,9 @@ describe("yrd queue up, the service", () => {
             ),
             run.stderr(),
           ).toBe(0)
-          expect(existsSync(path), run.stderr()).toBe(address !== sibling)
-          if (address !== sibling) expect(run.stderr()).toContain("live use: declared working directory")
+          const protects = address !== sibling
+          expect(existsSync(path), run.stderr()).toBe(protects)
+          if (protects) expect(run.stderr()).toContain("live use: declared working directory")
           else expect(run.stderr()).toContain("native retained removal proof accepted")
           expect(uses).toHaveBeenCalledTimes(index + 1)
         } finally {

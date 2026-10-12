@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs"
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import {
   gitIn,
@@ -12,7 +12,7 @@ import {
 } from "@yrd/queue-core"
 import { createLocalGitProcess } from "git-super/process"
 import { createLocalGitWorktreeStore, PrivateStoreRefusalError } from "git-super/worktree"
-import { inspectProcessCwds, type ProcessCwdProjection } from "removely"
+import { inspectProcessCwds, resolveContainedPath, type ProcessCwdProjection } from "removely"
 import { environmentCwdHolder, processCwdCoverage } from "./env-close-holders.ts"
 import {
   IncompleteCensusError,
@@ -707,7 +707,7 @@ async function cleanupEnvironments(
         ) {
           throw new Error("expected each use to have an absolute path and a nonempty reason")
         }
-        return { path: realpathSync(use.path), reason: use.reason }
+        return { path: resolveContainedPath(use.path, parse(use.path).root, { allowRoot: true }), reason: use.reason }
       })
     } catch (cause) {
       liveUseFailure = `live environment-use reader unavailable: ${String(cause)}`
