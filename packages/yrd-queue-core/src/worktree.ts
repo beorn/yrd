@@ -21,24 +21,14 @@
  * git transcript. The caller hands in a logger only when trace is on.
  */
 
-import {
-  existsSync,
-  lstatSync,
-  readFileSync,
-  readdirSync,
-  readlinkSync,
-  rmdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs"
+import { existsSync, lstatSync, readdirSync, readlinkSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import type { Process } from "@yrd/process"
-import { assertNoPrivateStore, createGitWorktreeStore, PrivateStoreRefusalError } from "git-super/worktree"
+import { createGitWorktreeStore } from "git-super/worktree"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
 import { GIT_SUPER_ABSENT_STORE, populateReferenceStores, ReferenceUnpopulated } from "./reference.ts"
-import { declaredPrivateSubmodules } from "./private-submodules.ts"
 import {
   GitExit,
   gitIn,
@@ -72,10 +62,10 @@ export type Worktree = Readonly<{
   /** The commit it holds. */
   commit: string
   /**
-   * The root-relative submodule paths `commit` declares `private = true`, left
-   * empty and uninitialized (27147). Read once, here, at the commit the tree
-   * holds; every later git-super call in the same compose passes this list, so
-   * no call excludes a path the tree materialized or the reverse.
+   * The root-relative submodule paths this tree holds uninitialized and asks
+   * every later git-super call in the same compose to exclude
+   * (`--exclude-submodule`, 27147). The queue chooses none of its own, so a
+   * tree it builds carries an empty list.
    */
   excludedSubmodules: readonly string[]
   /** Remove the worktree and everything under it. */
@@ -129,7 +119,7 @@ export async function freshWorktree(
   // Query the selected commit, not the reference checkout's working tree.
   // An invalid commit makes ls-tree fail; only empty output means absence.
   const modules = await git(["ls-tree", commit, "--", ".gitmodules"])
-  let excluded: readonly string[] = []
+  const excluded: readonly string[] = []
   if (modules.trim() === "") {
     // A commit that declares no submodules has no boundary for git-super to
     // cross. `worktreeWithoutSubmodules` re-asks that question rather than
@@ -137,9 +127,6 @@ export async function freshWorktree(
     // take the plain path with a submodule-bearing commit.
     await worktreeWithoutSubmodules(git, git, commit, ["add", "--quiet", "--detach", path, commit])
   } else {
-    // 27147: a submodule the commit declares `private = true` is never
-    // materialized, and its store is never populated or read.
-    excluded = await declaredPrivateSubmodules(git, resolve(repo), commit)
     if (options.populateReference === true) {
       const selection =
         options.selection ?? (await resolveGitSelection(repo, { process: options.process, env: options.env }))
@@ -605,84 +592,9 @@ export async function prepareWorktree(
   }
 }
 
-/**
- * 28661: the question every PLAIN removal must ask before it deletes a checkout.
- *
- * git-super's primitive refuses a removal that would destroy a declared-private submodule store, and it asks
- * that question through this one exported guard. A caller that removes the directory itself — `rmSync` plus a
- * prune here, `safeRemoveSync` in the pool — never reaches the primitive, so it asks the same question through
- * the same guard rather than removing blind. Reads declarations and existence only: nothing inside the store is
- * read, copied, hashed or renamed (27058; chief ruling c8a3b06d).
- *
- * It takes NO override, deliberately (@cto 3c77f2f1, Y1): the queue has no discard path, structurally. A discard
- * is a person destroying private bytes, and it runs only through the surfaces that own it — `yrd env close
- * <path> --discard-private-store --reason "<text>"` for an environment, `git super worktree remove <path>
- * --discard-private-store --reason "<text>"` for a plain worktree. An override option here would be how a queued
- * discard arrives later, with nobody present to read the reason.
- */
-export async function refusePrivateStoreRemoval(git: Git, checkout: string, repo: string): Promise<void> {
-  const adminDir = worktreeAdminDir(checkout)
-  // No admin dir, or no submodule store inside it, means there is nothing here to protect and the question is not
-  // asked. That keeps this guard off the path of every ordinary tree — including one whose refs are already broken,
-  // which must stay REMOVABLE: a guard that turned a broken repository into an unremovable one would be the
-  // accumulation defect (27120) rebuilt inside its own fix.
-  if (adminDir === undefined || !existsSync(join(adminDir, "modules"))) return
-  // 28661 N1 (@cto): a store-bearing admin dir whose recorded HEAD cannot be read is a REFUSAL, not a plain fault
-  // — the class the caller already knows how to skip, and the same answer git-super's prune guard gives. A plain
-  // GitExit here would escape `discardWorktree` and wedge the round, which is exactly the C4 failure this class
-  // exists to prevent; so the class is decided HERE rather than left to the caller's cause walk.
-  let head: string
-  try {
-    head = (await git(["--git-dir", adminDir, "rev-parse", "--verify", "HEAD"])).trim()
-  } catch (cause) {
-    throw new PrivateStoreRefusalError(
-      `@gate/git-worktree-private-store: cannot remove ${checkout}: its admin dir ${adminDir} holds a submodule ` +
-        `store and its recorded HEAD cannot be read (${messageOf(cause)}); the checkout is kept; inspect that ` +
-        `admin dir and its store before retrying removal: the queue itself has no discard path, so a store is ` +
-        `destroyed only on purpose, by ` +
-        '`yrd env close <path> --discard-private-store --reason "<text>"` for an environment, or by ' +
-        '`git super worktree remove <path> --discard-private-store --reason "<text>"` for a plain worktree — ' +
-        `each running the operator custody steps its own refusal names`,
-    )
-  }
-  if (head === "") {
-    throw new PrivateStoreRefusalError(
-      `@gate/git-worktree-private-store: cannot remove ${checkout}: its admin dir ${adminDir} holds a submodule ` +
-        `store and records no HEAD; the checkout is kept; inspect that admin dir and its store before retrying ` +
-        `removal: the queue itself has no discard path, so a store is destroyed only on purpose, by ` +
-        '`yrd env close <path> --discard-private-store --reason "<text>"` for an environment, or by ' +
-        '`git super worktree remove <path> --discard-private-store --reason "<text>"` for a plain worktree — ' +
-        `each running the operator custody steps its own refusal names`,
-    )
-  }
-  await assertNoPrivateStore(seamProcess(git, resolve(repo)), {
-    adminDir,
-    repository: resolve(repo),
-    head,
-  })
-}
-
-/**
- * 28661 C4: discard a prepared worktree at the end of a round. A removal REFUSED because the tree's admin dir
- * holds a declared-private submodule store must not wedge the round: the tree is skipped, named once, and the
- * round's own verdict stands. Every other failure still throws — the CLASS is the whole difference, so no
- * caller matches message text.
- */
+/** Discard a prepared worktree at the end of a round. */
 export async function discardWorktree(tree: Worktree): Promise<void> {
-  try {
-    await tree.remove()
-  } catch (cause) {
-    if (!isPrivateStoreRefusal(cause)) throw cause
-    nameAbandonedTree(tree.path, messageOf(cause))
-  }
-}
-
-/** True when a removal was refused to protect a private submodule store, at ANY depth of the cause chain. */
-export function isPrivateStoreRefusal(cause: unknown): boolean {
-  for (let at: unknown = cause; at instanceof Error; at = at.cause) {
-    if (at instanceof PrivateStoreRefusalError) return true
-  }
-  return false
+  await tree.remove()
 }
 
 /** Paths already named, so an abandoned tree is announced once per process rather than once per round. */
@@ -695,51 +607,8 @@ export function nameAbandonedTree(path: string, why: string): void {
   console.warn(`yrd: kept worktree ${path}: ${why}; the queue skips it and continues\n`)
 }
 
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause)
-}
-
-/**
- * A worktree's own Git dir, read from the checkout's `.git` entry alone, so a broken repository is never asked.
- *
- * 28661 C4 (NO SILENT ERRORS): an ABSENT `.git` is a real answer — no admin dir, so no store to protect and the
- * tree stays removable (an already-removed checkout and any ordinary non-checkout both land here). Any OTHER
- * lstat failure leaves whatever store that admin dir may hold UNVERIFIED, so it REFUSES by name: returning
- * `undefined` there reads as "nothing to protect" and lets the caller delete the tree — and the store's custody
- * with it — blind, which is the data loss this guard exists to prevent.
- */
-function worktreeAdminDir(checkout: string): string | undefined {
-  const dotGit = join(checkout, ".git")
-  let state
-  try {
-    state = lstatSync(dotGit)
-  } catch (cause) {
-    // TRUE ABSENCE is decided from lstat's own error, NEVER from `existsSync`: `existsSync` answers FALSE for an
-    // entry the kernel refuses with EACCES, so deciding absence that way reads an unreadable `.git` as "no admin
-    // dir, nothing to protect" and authorizes a blind removal (NO SILENT ERRORS; @dev/fixer's uid-3001
-    // reproduction: `exists false`, `lstat EACCES`, removal ALLOWED with 0 git calls). A name that is genuinely
-    // not there — ENOENT, or ENOTDIR when a path component is not a directory — has no admin dir to protect and
-    // the tree stays removable, which is what keeps an already-removed checkout removable. Every other failure
-    // (EACCES, EPERM, ELOOP, anything unnamed) leaves the store behind that entry UNVERIFIED and refuses BY NAME.
-    const code = (cause as NodeJS.ErrnoException | undefined)?.code
-    if (code === "ENOENT" || code === "ENOTDIR") return undefined
-    throw new PrivateStoreRefusalError(
-      `cannot remove ${checkout}: its .git entry ${dotGit} cannot be read (${messageOf(cause)}), so a private ` +
-        `submodule store in its admin dir cannot be verified; the checkout is kept; inspect ${dotGit} before ` +
-        `retrying removal`,
-    )
-  }
-  if (state.isDirectory()) return dotGit
-  if (!state.isFile()) return undefined
-  const pointer = /^gitdir:\s*(.+)$/u.exec(readFileSync(dotGit, "utf8").trim())
-  return pointer?.[1] === undefined ? undefined : resolve(checkout, pointer[1])
-}
-
 /** Forget stale registrations under git-super's repository worktree mutation lock (26240). */
 async function removeWorktree(git: Git, path: string, repo: string): Promise<void> {
-  // 28661: `rmSync` below destroys this worktree, and with it any private submodule store inside its admin dir;
-  // the prune then forgets the registration that held the store. Refuse first.
-  await refusePrivateStoreRemoval(git, path, repo)
   // `worktree remove --force` refuses a tree with untracked files it did not
   // make; a check may have written anything, so the directory goes first and
   // git is told to forget the entry afterwards.
@@ -768,17 +637,14 @@ export function removeEmptyWorktreeRunDirectory(directory: string): void {
  * 28661 C4: clear a round's worktrees SCAFFOLD without deleting a checkout the round kept.
  *
  * The enclosing cleanup used to be `rmSync(directory, { recursive: true })`, and that walks straight past
- * the removal policy: `discardWorktree` refuses to remove a checkout whose admin dir holds a
- * declared-private submodule store and NAMES it kept, and the enclosing sweep deleted it a moment later —
- * the checkout, the retained working files inside it, and the store's custody question with them. So the
- * sweep is structural: every FILE goes, and every directory that is itself a checkout survives WHOLE, with
- * everything under it.
+ * a removal a round did not complete. So the sweep is structural: every FILE goes, and every directory
+ * that is itself a checkout survives WHOLE, with everything under it.
  *
- * The tell is the policy's own: a checkout is the directory carrying a `.git` entry, exactly what
- * {@link worktreeAdminDir} reads. Keeping EVERY such directory is a superset of keeping the ones the policy
- * would preserve, so this cannot under-protect, and a tree that survives without having been named is named
- * here. It is the same tree whether it is a legacy check's, a program root's `P`/`C`, or one left by a
- * preparation that failed after its worktree existed: none of them is scaffold.
+ * The tell is simple: a checkout is the directory carrying a `.git` entry. Keeping EVERY such directory is
+ * a superset of keeping the ones a removal would preserve, so this cannot under-protect, and a tree that
+ * survives without having been named is named here. It is the same tree whether it is a legacy check's, a
+ * program root's `P`/`C`, or one left by a preparation that failed after its worktree existed: none of
+ * them is scaffold.
  *
  * Never throws on a kept tree and never touches the caller's verdict — a cleanup that replaced a pass or a
  * SetupFailed with its own error would be the very defect this closes (C4).

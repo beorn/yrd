@@ -1,16 +1,14 @@
 /**
- * A submodule the repository declares `private = true` in its own `.gitmodules`
- * section is never materialized by a Yrd environment (27147). Yrd holds no list
- * of its own: git-super's reader reports the flag at the commit, and Yrd hands
- * the paths back to git-super as `excludedSubmodules`.
+ * A submodule the repository declares `private = true` in its own `.gitmodules` section (27147). git-super
+ * owns the declaration reader; Yrd keeps no list of its own.
  */
 
-import { readPrivateSubmodulePaths } from "git-super/commit-graph"
+import { readPrivateSubmodules } from "git-super/commit-graph"
 import { seamProcess, type Git } from "./git.ts"
 
 /** The paths `commit`'s `.gitmodules` declares private, sorted; empty when it declares none. */
 export async function declaredPrivateSubmodules(git: Git, repo: string, commit: string): Promise<string[]> {
-  return readPrivateSubmodulePaths(seamProcess(git, repo), repo, commit)
+  return (await readPrivateSubmodules(seamProcess(git, repo), repo, commit)).map((entry) => entry.path)
 }
 
 /**

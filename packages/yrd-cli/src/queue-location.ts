@@ -5,7 +5,6 @@ import {
   configValue,
   gitIn,
   populateReferenceStores,
-  declaredPrivateSubmodules,
   queueName,
   remoteUrl,
   resolveGitSelection,
@@ -201,8 +200,6 @@ async function ensureOwnedClone(
     )
   }
   const referenceStores = await populateReferenceStores({
-    // 27147: the queue never populates or reads a store for a submodule its HEAD declares private.
-    excludedSubmodules: await declaredPrivateSubmodules(git, repo, "HEAD"),
     gitIn: (cwd) => gitIn(cwd, undefined, selection, { env }),
     repo,
   })

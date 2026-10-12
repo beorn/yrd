@@ -177,7 +177,6 @@ export {
   claimWorktrees,
   discardWorktree,
   freshWorktree,
-  isPrivateStoreRefusal,
   prepareWorktree,
   registeredWorktrees,
   removeWorktreeRunScaffold,

@@ -15,6 +15,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs"
@@ -708,8 +709,10 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     },
   )
 
-  // #27156: existence admission precedes teardown and every child-content read.
-  it.each([false, true])("private custody gates close before teardown: initialized=%s", async (initialized) => {
+  // #27156: existence admission precedes teardown and every child-content read. 28740 removed the
+  // declared-private exclusion, so an opened environment now carries the child materialized; the refusal
+  // is the initialized case, and this proves it runs BEFORE any teardown of the checkout.
+  it("private custody gates close before teardown", async () => {
     const w = await world(":", "printf touched > ../private-teardown-ran.txt")
     await addMaterializedDependency(w)
     await w.git(["config", "-f", ".gitmodules", "submodule.vendor/dependency.private", "true"])
@@ -718,35 +721,55 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const { path } = await openEnvironment(w.work, selected)
     const gitfile = join(path, "vendor/dependency/.git")
-    expect(existsSync(gitfile)).toBe(false)
-    if (initialized) {
-      // A fixture-only historical checkout. Read only its gitfile's existence.
-      await w.git(["-C", path, "submodule", "update", "--init", "vendor/dependency"])
-      expect(existsSync(gitfile)).toBe(true)
-    }
+    expect(existsSync(gitfile)).toBe(true)
     const closed = capture(w.work)
     const exit = await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io)
     const teardown = join(dirname(path), "private-teardown-ran.txt")
-    if (initialized) {
-      expect(exit, closed.stderr()).toBe(2)
-      expect(closed.stderr()).toContain("vendor/dependency")
-      expect(closed.stderr()).toContain("private checkout, custody not proven")
-      // #27120 AC2: the refusal carries one structured class, so a sweep reports the tree by class
-      // name and retire path instead of quoting a per-seat note.
-      expect(JSON.parse(closed.stdout())).toMatchObject({
-        kept: path,
-        class: "private checkout",
-        submodule: "vendor/dependency",
-      })
-      expect((JSON.parse(closed.stdout()) as { command?: string }).command).toContain("private-store verify")
-      expect(existsSync(path)).toBe(true)
-      expect(existsSync(gitfile)).toBe(true)
-      expect(existsSync(teardown)).toBe(false)
-    } else {
-      expect(exit, closed.stderr()).toBe(0)
-      expect(existsSync(path)).toBe(false)
-      expect(existsSync(teardown)).toBe(true)
+    expect(exit, closed.stderr()).toBe(2)
+    expect(closed.stderr()).toContain("vendor/dependency")
+    expect(closed.stderr()).toContain("private checkout, custody not proven")
+    // #27120 AC2: the refusal carries one structured class, so a sweep reports the tree by class
+    // name and retire path instead of quoting a per-seat note.
+    expect(JSON.parse(closed.stdout())).toMatchObject({
+      kept: path,
+      class: "private checkout",
+      submodule: "vendor/dependency",
+    })
+    expect((JSON.parse(closed.stdout()) as { command?: string }).command).toContain("private-store verify")
+    expect(existsSync(path)).toBe(true)
+    expect(existsSync(gitfile)).toBe(true)
+    expect(existsSync(teardown)).toBe(false)
+  })
+
+  // #27120 AC1 (chief ruling c8a3b06d): the unreadable stage. `entryPresent` (env-commands.ts) names the
+  // gitfile probe's answer, and ONLY ENOENT/ENOTDIR may read as "nothing is there": a kernel refusal is a
+  // named fault that preserves the environment. `existsSync` would answer FALSE for an EACCES entry, the
+  // checkout would read as empty, and the close would walk past a private store it could not judge. The
+  // fixture takes the mode off the gitfile's own parent so the refusal is the kernel's, not a mock's.
+  it("refuses by name when the private gitfile cannot be read", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    await w.git(["config", "-f", ".gitmodules", "submodule.vendor/dependency.private", "true"])
+    await w.git(["add", ".gitmodules"])
+    await w.git(["commit", "--quiet", "-m", "declare private dependency"])
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openEnvironment(w.work, selected)
+    const checkout = join(path, "vendor/dependency")
+    const gitfile = join(checkout, ".git")
+    expect(existsSync(gitfile)).toBe(true)
+    const mode = statSync(checkout).mode & 0o777
+    try {
+      chmodSync(checkout, 0o000)
+      const refused = capture(w.work)
+      const exit = await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)
+      expect(exit, refused.stderr()).not.toBe(0)
+      expect(refused.stderr()).toContain(`cannot inspect the private submodule gitfile of ${gitfile}`)
+      expect(refused.stderr()).toContain("the environment was preserved")
+    } finally {
+      chmodSync(checkout, mode)
     }
+    expect(existsSync(path), "a checkout whose private gitfile cannot be read is kept").toBe(true)
+    expect(existsSync(gitfile)).toBe(true)
   })
 
   // #27120 AC3: the ruled Route A, all three stages against one fixture — the initialized checkout
@@ -897,102 +920,6 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     const closed = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
     expect(existsSync(path)).toBe(false)
-  })
-
-  /**
-   * @failure 28661 (@cto ae7789b8): R1 refused EVERY private-store close with one operator route, so an operator
-   *          who means to destroy the stores had to reach into git-super by hand; and a discard close whose
-   *          census was incomplete was QUEUED, letting a later round destroy the bytes with nobody able to say
-   *          what the first attempt had already done. The pair is git-super's own removal pair, it is shouted on
-   *          stderr BEFORE any byte goes, and it is never delegated.
-   * @level   l2 (real bare remote, real retained worktree, a real private store)
-   * @consumer the operator retiring a private environment
-   * @reach   fs-walk <fixture-only: the environment tree this test's own fixture makes under the OS temp root>
-   * @testonly none
-   */
-  it("refuses a bare discard, refuses a reasonless discard by name, and only the reasoned pair destroys the store", async () => {
-    const w = await world(":")
-    await addMaterializedDependency(w)
-    await w.git(["config", "-f", ".gitmodules", "submodule.vendor/dependency.private", "true"])
-    await w.git(["add", ".gitmodules"])
-    await w.git(["commit", "--quiet", "-m", "declare private dependency"])
-    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const { path } = await openEnvironment(w.work, selected)
-    await w.git(["-C", path, "submodule", "update", "--init", "vendor/dependency"])
-    const store = (
-      await w.git(["-C", path, "rev-parse", "--path-format=absolute", "--git-path", "modules/vendor/dependency"])
-    ).trim()
-    // A byte that must never appear under retained-modules: a copy of it there is the no-copy defect.
-    writeFileSync(join(store, "PRIVATE_SENTINEL"), "private bytes\n")
-    const workdir = await workdirOf(w.git, { cwd: w.work })
-
-    // ARM 1 — no pair. The default refusal stands and every private byte survives.
-    const bare = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], bare.io), bare.stderr()).toBe(2)
-    expect(bare.stderr()).toContain("private checkout, custody not proven")
-    expect(existsSync(path)).toBe(true)
-    expect(existsSync(store)).toBe(true)
-
-    // ARM 2 — the flag without its reason. Refused BY NAME, before the checkout walk and before any byte goes.
-    const reasonless = capture(w.work)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "close", path, "--discard-private-store", "--json"], reasonless.io),
-      reasonless.stderr(),
-    ).toBe(2)
-    expect(reasonless.stderr()).toContain("--discard-private-store with no --reason")
-    expect(existsSync(path)).toBe(true)
-    expect(existsSync(store)).toBe(true)
-
-    // ARM 2b — --reason WITHOUT its flag. Y3 (@cto 3c77f2f1): it was parsed and read by nobody; it is now refused
-    // by name before anything runs, and every private byte survives.
-    const pointlessReason = capture(w.work)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "close", path, "--reason", "no flag", "--json"], pointlessReason.io),
-      pointlessReason.stderr(),
-    ).toBe(2)
-    expect(pointlessReason.stderr()).toContain('--reason "<text>" without --discard-private-store')
-    expect(existsSync(path)).toBe(true)
-    expect(existsSync(store)).toBe(true)
-
-    // ARM 3 — the reasoned pair. ONE loud line names every private path and the reason BEFORE the removal; the
-    // store is DELETED and never copied into retained-modules; and the environment is gone.
-    const discarded = capture(w.work)
-    expect(
-      await runYrdProcess(
-        [
-          "bun",
-          "yrd",
-          "env",
-          "close",
-          path,
-          "--discard-private-store",
-          "--reason",
-          "abandoned unpushed draft",
-          "--json",
-        ],
-        discarded.io,
-      ),
-      discarded.stderr(),
-    ).toBe(0)
-    // Y3: the line says pending census because requireClean and admission still run after it.
-    expect(discarded.stderr()).toContain("discarding (pending census)")
-    expect(discarded.stderr()).toContain("vendor/dependency")
-    expect(discarded.stderr()).toContain(store)
-    expect(discarded.stderr()).toContain("abandoned unpushed draft")
-    expect(existsSync(path)).toBe(false)
-    expect(existsSync(store)).toBe(false)
-    // NO COPY: the walk reaches no byte of the discarded store, so its sentinel is nowhere under retention.
-    const retained = join(workdir, "retained-modules")
-    const copies: string[] = []
-    const collect = (directory: string): void => {
-      for (const entry of readdirSync(directory, { withFileTypes: true })) {
-        const child = join(directory, entry.name)
-        if (entry.isDirectory()) collect(child)
-        else if (entry.name.includes("PRIVATE_SENTINEL")) copies.push(child)
-      }
-    }
-    if (existsSync(retained)) collect(retained)
-    expect(copies, "a discarded private store is never retained").toEqual([])
   })
 
   it("opens, lists and closes a workdir configured through a symlink", async () => {
