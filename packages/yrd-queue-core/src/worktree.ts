@@ -241,7 +241,7 @@ export async function freshWorktree(
     excludedSubmodules: excluded,
     path,
     remove: async () => {
-      await removeWorktree(git, path, repo)
+      await removeWorktree(git, path, repo, options)
       plumbing?.trace?.("released worktree", { commit, path })
     },
   }
@@ -607,13 +607,43 @@ export function nameAbandonedTree(path: string, why: string): void {
   console.warn(`yrd: kept worktree ${path}: ${why}; the queue skips it and continues\n`)
 }
 
-/** Forget stale registrations under git-super's repository worktree mutation lock (26240). */
-async function removeWorktree(git: Git, path: string, repo: string): Promise<void> {
-  // `worktree remove --force` refuses a tree with untracked files it did not
-  // make; a check may have written anything, so the directory goes first and
-  // git is told to forget the entry afterwards.
-  rmSync(path, { force: true, recursive: true })
-  await pruneWorktrees(git, repo)
+/**
+ * Remove one worktree and forget its registration, inside git-super's repository worktree mutation
+ * lock (26240) and through its removal primitive.
+ *
+ * A check may have written anything, so the tree is not clean when it goes. `remove` handles that
+ * itself: it renames the whole directory aside — untracked files ride along — leaves a `.git` stub,
+ * and runs `git worktree remove --force` against the stub, which is why the entry is forgotten and
+ * the staged copy deleted in that order. A hand-rolled `rmSync` could not see the admin-dir custody
+ * or the private-store refusal the primitive checks first (28665).
+ *
+ * `repo` must be a CHECKOUT, never a git dir (27392): git-super's store reads `<repo>/.git` for its
+ * own metadata pointer, so handing it `--git-common-dir` made a linked (commondir) worktree die
+ * ENOENT. Every caller here already holds the reference checkout.
+ *
+ * The store asks Git about the TREE as well as the reference — its own `rev-parse --show-toplevel`
+ * at `path` is what decides the path is a worktree root at all — so the seam answers for both roots,
+ * each with a runner bound to its own cwd. That runner is built only when the store asks for it, so
+ * a call whose store is stubbed still reaches no Git.
+ *
+ * This is NOT the cure for the 28661 prune hole: `store.remove` forgets one named registration, and
+ * a bare `git worktree prune` can still destroy a store no preview named.
+ */
+async function removeWorktree(git: Git, path: string, repo: string, options: FreshWorktree): Promise<void> {
+  const checkout = resolve(repo)
+  const at = async (cwd: string): Promise<Git> => {
+    const selection =
+      options.selection ?? (await resolveGitSelection(cwd, { process: options.process, env: options.env }))
+    return gitIn(cwd, options.process, selection, {
+      ...(options.env === undefined ? {} : { env: options.env }),
+      ...options.gitOptions,
+    })
+  }
+  // No options, so no borrowers or compaction result to read.
+  await createGitWorktreeStore({
+    gitProcess: seamProcess(git, checkout, { also: [path], at }),
+    repo: checkout,
+  }).remove(path)
 }
 
 /** An ended run drops its parent only after every child worktree is gone. */
@@ -695,17 +725,6 @@ export function removeWorktreeRunScaffold(directory: string): void {
     // ENOENT: already gone. ENOTEMPTY/EEXIST: a named checkout holds it open, and the warn above is its record.
     if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") throw error
   }
-}
-
-/** Forget stale registrations under git-super's repository worktree mutation lock (26240). */
-async function pruneWorktrees(git: Git, repo: string): Promise<void> {
-  // git-super's `repo` is a CHECKOUT, not a git dir (27392): its store reads
-  // `<repo>/.git` for its own metadata pointer. Deriving `--git-common-dir`
-  // here handed it the git dir itself, which the store then read as
-  // `<gitdir>/.git` and died ENOENT from a linked (commondir) worktree. The
-  // caller already holds the reference checkout, so thread it through instead.
-  const checkout = resolve(repo)
-  await createGitWorktreeStore({ gitProcess: seamProcess(git, checkout), repo: checkout }).prune()
 }
 
 /**

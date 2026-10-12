@@ -8,7 +8,7 @@
 
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { acquireExclusive } from "git-super/exclusive"
 import { safeRemoveSync } from "removely"
 import { afterAll, describe, expect, it, vi } from "vitest"
@@ -426,7 +426,7 @@ describe("queue worktree removal shares git-super's worktree lock", () => {
     return first === running
   }
 
-  it("remove drops the directory first and waits to forget registration", async () => {
+  it("remove waits for git-super's worktree lock before touching the tree or its registration", async () => {
     const { commit, git, lock, repo, root } = await lockedRepository("remove")
     const worktree = await freshWorktree(git, repo, commit, join(root, "candidate"))
     expect(await registered(git)).toContain(worktree.path)
@@ -436,12 +436,41 @@ describe("queue worktree removal shares git-super's worktree lock", () => {
     try {
       removing = worktree.remove()
       expect(await stillRunningAfter(removing, 500)).toBe(true)
-      expect(existsSync(worktree.path)).toBe(false)
+      // The whole removal now runs under that one lock (28665): it used to delete the directory first
+      // and only then wait to forget the registration, so another lock holder could observe a tree
+      // whose bytes were gone and whose registration still stood. A holder now sees neither move
+      // until it releases, and the tree is deleted and forgotten together once it does.
+      expect(existsSync(worktree.path)).toBe(true)
       expect(await registered(git)).toContain(worktree.path)
     } finally {
       held.release()
     }
     await removing
+    expect(existsSync(worktree.path)).toBe(false)
+    expect(await registered(git)).not.toContain(worktree.path)
+  })
+
+  it("removes from a reference checkout that is itself a linked worktree", async () => {
+    // Every yrd environment is a linked worktree of the code superproject, so git-super's removal
+    // runs `git worktree remove` against the COMMON dir, which is outside the reference's own root.
+    // A seam that answers only for the reference checkout and the tree refuses that ask, and the
+    // removal dies with the tree still standing (28665).
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "yrd-worktree-linked-")))
+    roots.push(base)
+    const origin = join(base, "origin")
+    const commit = await repository(origin, "one.txt")
+    const reference = join(base, "reference")
+    await gitIn(origin)(["worktree", "add", "--detach", "--quiet", reference, commit])
+    const git = gitIn(reference)
+    const common = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    expect(resolve(common)).not.toBe(resolve(reference))
+
+    const worktree = await freshWorktree(git, reference, commit, join(base, "candidate"))
+    expect(await registered(git)).toContain(worktree.path)
+
+    await worktree.remove()
+
+    expect(existsSync(worktree.path)).toBe(false)
     expect(await registered(git)).not.toContain(worktree.path)
   })
 })

@@ -1014,28 +1014,59 @@ export class GitExit extends Error {
  * each request in the cwd that request named (`at`). A seam that answered only
  * for the reference - or ran every request there - refused the pooled cwd and
  * made every warm borrow a silent fresh materialization (#28503, @dev/4
- * 2026-10-10). A cwd outside the named roots is ground this run does not own,
- * and still throws rather than being answered from the wrong checkout.
+ * 2026-10-10). A cwd outside the named roots is ground this run does not own
+ * and still throws rather than being answered from the wrong checkout - with
+ * one exception the removal found (28665): the reference repository's own git
+ * dir, which the store names for `worktree remove`/`worktree list` and which
+ * for a linked worktree (every yrd environment) is not beneath the reference.
  */
 export function seamProcess(
   git: Git,
   repo: string,
-  options: Readonly<{ also?: readonly string[]; at?: (cwd: string) => Git }> = {},
+  options: Readonly<{ also?: readonly string[]; at?: (cwd: string) => Git | Promise<Git> }> = {},
 ): GitProcess {
   const roots = [resolve(repo), ...(options.also ?? []).map((other) => resolve(other))]
   // A root owns everything beneath it: a worktree's submodules are worktrees of
   // their own under it, and materializing reads the reference checkout's own
   // submodule copies. A path outside every root is still refused.
   const owns = (asked: string): boolean => roots.some((root) => asked === root || asked.startsWith(root + sep))
+  // The store's own removal and registration reads name the repository's COMMON dir, not the reference.
+  // For a linked worktree - which every yrd environment is - that dir sits outside the reference's root
+  // (the reference's `.git` is a file there, not the store). Those requests carry the repository in
+  // their args, so the reference runner answers them and they run in the reference checkout: the same
+  // repository. Derived from the reference itself, once, and only after a request has already fallen
+  // outside every named root.
+  let commonDir: string | undefined
+  let commonDirCause: string | undefined
+  let commonDirRead = false
+  const ownedByTheRepository = async (asked: string): Promise<boolean> => {
+    if (!commonDirRead) {
+      commonDirRead = true
+      try {
+        commonDir = resolve((await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim())
+      } catch (error) {
+        // Kept, never swallowed: a refusal that could not read the common dir says why (28665).
+        commonDirCause = error instanceof Error ? error.message : String(error)
+      }
+    }
+    // EXACTLY the common dir, never a path beneath it: submodule git dirs live under `.git/modules/<name>`,
+    // and those are OTHER repositories - a request for one of them, run in the reference checkout, can
+    // reach the wrong repository. A root owning everything beneath it is true of checkouts, not git dirs.
+    return asked === commonDir
+  }
   return {
     async run(request) {
       const asked = resolve(request.repo)
-      if (!owns(asked)) {
+      const named = owns(asked)
+      if (!named && !(await ownedByTheRepository(asked))) {
         throw new Error(
-          `git-super's worktree store asked Git about ${request.repo}; its seam answers for ${roots.join(", ")} only`,
+          `git-super's worktree store asked Git about ${request.repo}; its seam answers for ${roots.join(", ")} only, or the reference repository's own git dir${commonDirCause === undefined ? "" : ` (unread: ${commonDirCause})`}`,
         )
       }
-      const bound = asked === resolve(repo) ? git : options.at?.(request.repo)
+      // `at` may answer asynchronously: a caller that has to resolve a Git selection for the other
+      // root first (removal asks about the TREE, 28665) resolves it only when the store asks, so a
+      // stubbed store still makes no Git calls.
+      const bound = asked === resolve(repo) || !named ? git : await options.at?.(request.repo)
       if (bound === undefined) {
         throw new Error(
           `git-super's worktree store asked Git about ${request.repo}, which this seam was given no Git runner for`,

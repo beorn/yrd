@@ -1,12 +1,14 @@
 /**
  * @reach fs-walk <fixture-only: the Git handle is an in-memory recorder and the git-super store is a stub>
- * @failure  pruneWorktrees derives the git COMMON DIR and hands it to
+ * @failure  removeWorktree derives the git COMMON DIR and hands it to
  *           createGitWorktreeStore as its `repo`, but git-super's `repo` is a
  *           CHECKOUT — its store reads `<repo>/.git`, so with `repo` = the git
  *           dir it reads `<gitdir>/.git` and `yrd submit` from a linked
  *           (commondir) worktree dies ENOENT lstat '<gitdir>/.git' (27392).
+ *           The property now rides on the removal primitive, which the store
+ *           call reaches through the same `repo` argument (28665).
  * @level    l1 (pure — the store is replaced; the argument is the subject)
- * @consumer freshWorktree.remove -> removeWorktree -> pruneWorktrees
+ * @consumer freshWorktree.remove -> removeWorktree -> git-super removal primitive
  * @testonly none
  */
 
@@ -19,14 +21,14 @@ const store = vi.hoisted(() => ({ calls: [] as Array<Readonly<{ repo: string }>>
 vi.mock("git-super/worktree", () => ({
   createGitWorktreeStore: (options: Readonly<{ repo: string }>) => {
     store.calls.push(options)
-    return { prune: async (): Promise<void> => {} }
+    return { remove: async (): Promise<void> => {} }
   },
 }))
 
 const CHECKOUT = "/fixture/reference-checkout"
 const COMMIT = "d7273ea86df701a590e5b480e7bb1eab2b6145a9"
 
-/** Answers the one question pruneWorktrees asked, plus the plain worktree add. */
+/** Answers what materializing a fresh worktree asks; removal itself never reaches Git. */
 function recorder(): Git {
   return async (args) => {
     if (args[0] === "ls-tree") return ""
@@ -35,7 +37,7 @@ function recorder(): Git {
   }
 }
 
-describe("pruneWorktrees names a CHECKOUT, not a git dir, as git-super's repo (27392)", () => {
+describe("removeWorktree names a CHECKOUT, not a git dir, as git-super's repo (27392)", () => {
   it("hands the reference checkout to createGitWorktreeStore when releasing a worktree", async () => {
     store.calls.length = 0
     const worktree = await freshWorktree(recorder(), CHECKOUT, COMMIT, "/fixture/run/wt")

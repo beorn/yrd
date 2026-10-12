@@ -1596,3 +1596,20 @@ describe("readRemoteCommit on a store with a dangling ref (hh 25051)", () => {
     expect(readFileSync(handedInvocation!.artifacts!.stderr, "utf8")).toBe("")
   })
 })
+
+it("seamProcess answers for the reference repository's own git dir, and never a path beneath it (28665)", async () => {
+  // A linked worktree's common dir sits outside the reference's root, and git-super's removal and
+  // registration reads name it. A path BENEATH that common dir is a DIFFERENT repository - submodule
+  // git dirs live under `.git/modules/<name>` - so it must be refused rather than answered from the
+  // reference checkout, which would reach the wrong repository wherever a request leans on cwd.
+  const common = "/fixture/super/.git"
+  const git: gitRunner.Git = async (args) => (args[0] === "rev-parse" ? `${common}\n` : "")
+  const process = gitRunner.seamProcess(git, "/fixture/linked", { also: ["/fixture/tree"], at: () => git })
+
+  await expect(process.run({ args: ["worktree", "list"], repo: common })).resolves.toMatchObject({ code: 0 })
+  await expect(process.run({ args: ["worktree", "list"], repo: "/fixture/tree" })).resolves.toMatchObject({ code: 0 })
+  await expect(process.run({ args: ["worktree", "list"], repo: `${common}/modules/other` })).rejects.toThrow(
+    /modules\/other/u,
+  )
+  await expect(process.run({ args: ["worktree", "list"], repo: "/fixture/elsewhere" })).rejects.toThrow(/elsewhere/u)
+})

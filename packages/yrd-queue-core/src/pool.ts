@@ -19,7 +19,6 @@
 
 import { existsSync } from "node:fs"
 import { join } from "node:path"
-import { safeRemoveSync } from "removely"
 import type { Process } from "@yrd/process"
 import { createGitWorktreeStore } from "git-super/worktree"
 import { gitIn, seamProcess, type Git, type GitInvocationOptions, type GitSelection } from "./git.ts"
@@ -251,13 +250,17 @@ export class WorktreePool {
 
   /** Remove a pooled tree and forget its registration, exactly as a per-run tree's removal does. */
   private async forget(path: string): Promise<void> {
-    // Contained to the pool's own root: every caller reaches here after the tree existed, so that root resolves.
-    // `allowedRoots` must ALSO name that root: removely's DEFAULT is [tmpdir()], and the queue
-    // service's TMPDIR (/hh/dev/.git/yrd/tmp) never contains the pool, so the first discard
-    // outside tmpdir threw and exited the whole queue 2 (28751).
-    const within = join(this.options.workdir, "worktrees", "pool")
-    safeRemoveSync(path, { within, allowedRoots: [within], allowMissing: true })
-    await this.store(path).prune()
+    // Through git-super's removal primitive, which renames the tree aside so whatever a check wrote
+    // rides along, forgets the registration, then deletes the staged copy. It owns the admin-dir
+    // custody and the private-store refusal that a bare filesystem delete could not see (28665).
+    //
+    // The `safeRemoveSync` this replaces had to name its own root in `allowedRoots`, because
+    // removely's DEFAULT is [tmpdir()] and the queue service's TMPDIR (/hh/dev/.git/yrd/tmp) never
+    // contains the pool: the first discard outside tmpdir threw and exited the whole queue 2
+    // (28751). Whole classes of that fix are the primitive's now, so no caller here names a root.
+    //
+    // No options, so no borrowers or compaction result to read.
+    await this.store(path).remove(path)
   }
 
   /**
