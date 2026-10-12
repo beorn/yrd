@@ -590,24 +590,36 @@ describe("yrd queue up, the service", () => {
     const census = vi
       .spyOn(removely, "inspectProcessCwds")
       .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
-    const stop = new AbortController()
-    const run = capture(w.work)
-    run.io.liveEnvironmentUse = uses
+    const alias = join(dirname(path), "declared-use-alias")
+    symlinkSync(path, alias, "dir")
+    const sibling = `${path}-neighbor`
+    mkdirSync(sibling)
     try {
-      expect(
-        await coreQueueCommand(
-          w.work,
-          run.io,
-          { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
-          { json: true, workdir },
-        ),
-        run.stderr(),
-      ).toBe(0)
-      expect(existsSync(path), run.stderr()).toBe(true)
-      expect(run.stderr()).toContain("declared working directory")
-      expect(uses).toHaveBeenCalledTimes(1)
+      const addresses = [join(path, "working"), path, alias, sibling]
+      for (const [index, address] of addresses.entries()) {
+        uses.mockResolvedValue([{ path: address, reason: "declared working directory" }])
+        const stop = new AbortController()
+        const run = capture(w.work)
+        run.io.liveEnvironmentUse = uses
+        try {
+          expect(
+            await coreQueueCommand(
+              w.work,
+              run.io,
+              { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+              { json: true, workdir },
+            ),
+            run.stderr(),
+          ).toBe(0)
+          expect(existsSync(path), run.stderr()).toBe(address !== sibling)
+          if (address !== sibling) expect(run.stderr()).toContain("live use: declared working directory")
+          else expect(run.stderr()).toContain("native retained removal proof accepted")
+          expect(uses).toHaveBeenCalledTimes(index + 1)
+        } finally {
+          stop.abort()
+        }
+      }
     } finally {
-      stop.abort()
       census.mockRestore()
     }
   }, 120_000)
@@ -1295,10 +1307,11 @@ describe("yrd queue up, the service", () => {
       { bay: "21122-merge", closes: false, linkedRoot: false, fresh: true },
       { bay: "21122-merge", closes: false, linkedRoot: true, liveUse: true },
       { bay: "21122-merge", closes: false, linkedRoot: false, failingReader: true },
-    ].map((row) => ({ fresh: false, liveUse: false, failingReader: false, ...row })),
+      { bay: "21122-merge", closes: false, linkedRoot: false, invalidReader: true },
+    ].map((row) => ({ fresh: false, liveUse: false, failingReader: false, invalidReader: false, ...row })),
   )(
-    "a merge closes only its original environment ($bay, linked root $linkedRoot, fresh $fresh, live use $liveUse, failed reader $failingReader)",
-    async ({ bay, closes, linkedRoot, fresh, liveUse, failingReader }) => {
+    "a merge closes only its original environment ($bay, linked root $linkedRoot, fresh $fresh, live use $liveUse, failed reader $failingReader, invalid reader $invalidReader)",
+    async ({ bay, closes, linkedRoot, fresh, liveUse, failingReader, invalidReader }) => {
       const w = await world()
       if (linkedRoot) {
         const physical = join(dirname(w.work), "physical-bays")
@@ -1341,9 +1354,11 @@ describe("yrd queue up, the service", () => {
         .mockResolvedValue({ complete: true, unreadable: [], mechanism: "proc", rows: [] })
       const stop = new AbortController()
       const run = capture(w.work)
-      if (liveUse || failingReader) {
+      let merged: readonly string[] = []
+      if (liveUse || failingReader || invalidReader) {
         run.io.liveEnvironmentUse = vi.fn(async () => {
           if (failingReader) throw new Error("declaration read failed")
+          if (invalidReader) return [{ path: "relative/working", reason: "declared work" }]
           return [{ path: openedEnvironment.path, reason: "declared work" }]
         })
       }
@@ -1352,14 +1367,24 @@ describe("yrd queue up, the service", () => {
           await coreQueueCommand(
             w.work,
             run.io,
-            { command: "up", intervalSeconds: 0, stop: stop.signal, afterRound: () => stop.abort() },
+            {
+              command: "up",
+              intervalSeconds: 0,
+              stop: stop.signal,
+              afterRound: (outcome) => {
+                merged = outcome.merged
+                stop.abort()
+              },
+            },
             { json: true, workdir },
           ),
           run.stderr(),
         ).toBe(0)
+        expect(merged, run.stderr()).toEqual(["task/21122-merge"])
         expect(existsSync(environment.path), run.stderr()).toBe(!closes)
         expect(listCloseRequests(workdir), run.stderr()).toEqual([])
-        if (liveUse || failingReader) expect(run.io.liveEnvironmentUse).toHaveBeenCalledTimes(1)
+        if (liveUse || failingReader || invalidReader) expect(run.io.liveEnvironmentUse).toHaveBeenCalledTimes(1)
+        if (invalidReader) expect(run.stderr()).toContain("live environment-use reader unavailable")
         if (liveUse) expect(run.stderr()).toContain("live use: declared work")
         if (failingReader) {
           expect(run.stderr()).toContain("live environment-use reader unavailable: Error: declaration read failed")
@@ -1571,6 +1596,7 @@ describe("yrd queue up, the service", () => {
       openedLender.stderr(),
     ).toBe(0)
     const lender = (JSON.parse(openedLender.stdout()) as { path: string }).path
+    await ageOpening(lender)
     const openedBorrower = capture(w.work)
     expect(
       await runYrdProcess(
@@ -6545,11 +6571,17 @@ describe("yrd queue run --tier long", () => {
     const workdir = await workdirOf(w.git, { cwd: w.work })
     const environments = join(workdir, "environments")
     mkdirSync(environments, { recursive: true })
+    await w.git(["config", "worktree.poolRoot", environments])
     const head = (await w.git(["rev-parse", "HEAD"])).trim()
     const paths: string[] = []
     for (let index = 0; index < 16; index++) {
       const path = join(environments, `27600-open-${String(index)}`)
-      await w.git(["worktree", "add", "--quiet", "--detach", path, head])
+      const opened = capture(w.work)
+      expect(
+        await runYrdProcess(["bun", "yrd", "env", "open", head, "--bay", basename(path), "--json"], opened.io),
+        opened.stderr(),
+      ).toBe(0)
+      expect((JSON.parse(opened.stdout()) as { path: string }).path).toBe(path)
       paths.push(path)
     }
     const census = vi
@@ -6698,7 +6730,9 @@ describe("yrd queue run --tier long", () => {
         await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", bay, "--json"], opened.io),
         opened.stderr(),
       ).toBe(0)
-      return (JSON.parse(opened.stdout()) as { path: string }).path
+      const path = (JSON.parse(opened.stdout()) as { path: string }).path
+      await ageOpening(path)
+      return path
     }
     const closedIssue = await open("27601-closed")
     const corrupt = await open("corrupt-retained")
@@ -6755,7 +6789,9 @@ describe("yrd queue run --tier long", () => {
         await runYrdProcess(["bun", "yrd", "env", "open", selected, "--bay", bay, "--json"], opened.io),
         opened.stderr(),
       ).toBe(0)
-      return (JSON.parse(opened.stdout()) as { path: string }).path
+      const path = (JSON.parse(opened.stdout()) as { path: string }).path
+      await ageOpening(path)
+      return path
     }
     const closedIssue = await open("27601-closed")
     const absent = await open("absent-retained")

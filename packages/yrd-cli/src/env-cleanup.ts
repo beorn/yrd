@@ -850,17 +850,18 @@ async function cleanupEnvironments(
       entry.hold = row.hold
       entry.busy = holder
       if (row.hold !== null) throw new Error(`held${row.hold === "" ? "" : `: ${row.hold}`}`)
+      // Opening-record lookup spawns Git too: protected rows consume the batch.
+      if (charged >= ENVIRONMENT_BATCH) {
+        stoppedAt = index
+        break
+      }
+      charged++
       const openingGit = gitIn(row.path, undefined, git.selection, { env: input.env })
       const openingDir = (await openingGit(["rev-parse", "--absolute-git-dir"])).trim()
       const opening = readEnvOpenRecord(openingDir)
       throwIfStandingLifetime(opening)
       const protection = automaticKeep(row.path, opening)
       if (protection !== undefined) throw new Error(protection)
-      if (charged >= ENVIRONMENT_BATCH) {
-        stoppedAt = index
-        break
-      }
-      charged++
       const treeGit = gitIn(row.path, undefined, git.selection, { env: input.env })
       const head = row.head
       if (head === undefined) throw new Error(`registered environment ${row.path} has no HEAD`)
