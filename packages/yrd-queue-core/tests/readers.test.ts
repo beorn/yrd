@@ -576,6 +576,32 @@ describe("a run's journal, read back", () => {
     expect(incomplete.absent).toContain("missing")
   })
 
+  // 28799 review finding 2: a selection that early-returns must still COUNT the
+  // rounds it left, and a window that cannot be listed must say so rather than
+  // read as a count of nothing.
+  it("counts the window a selection left behind, and says when it could not list it", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const { dir } = journalDir([{ kind: "change", branch: "task/one", head: "abc123", decision: "merged" }], at)
+
+    const none = readJournals(dir, { now: at, runIds: [] })
+
+    expect(none.absent).toContain("no event-linked run selected")
+    // The round is in the window and the selection named no run, so the read
+    // left it: it is counted, not silently absent from the answer.
+    expect(none.unread).toBe(1)
+
+    const notADirectory = join(scratch("journal-is-a-file"), "logs")
+    writeFileSync(notADirectory, "")
+
+    const unlistable = readJournals(notADirectory, { now: at, runIds: [] })
+
+    // Nothing was read, so nothing is claimed as read — and the failed listing
+    // is stated, never folded into a count that would read as complete.
+    expect(unlistable.unread).toBeUndefined()
+    expect(unlistable.absent).toContain("left behind could not be counted")
+    expect(unlistable.absent).toContain(notADirectory)
+  })
+
   it("rereads a journal when the file's mtime or size changes", () => {
     const at = new Date("2026-09-03T20:00:00.000Z")
     const { dir, run } = journalDir([{ branch: "task/one", head: "abc123", kind: "change" }], at)

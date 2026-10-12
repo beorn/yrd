@@ -46,7 +46,7 @@ import {
 } from "@yrd/queue-core"
 import { openEvents } from "gitomic/events"
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
-import { openLog, RAW_FALLBACK_ROUNDS } from "../../yrd-queue-core/src/log.ts"
+import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -306,35 +306,31 @@ describe("event queue observation refusals", () => {
     expect(completedDocument.runner.projectionFallback).toBeUndefined()
   })
 
-  // 28799: the raw fallback is bounded, and the bound never reaches the newest
-  // rounds. The operator's own queue carried 3,007 unprojected rounds in one
-  // seven-day window; reading every one raw cost ~1 s and 971 kB of `--json`.
-  // The newest rounds are still read — a current fact is never bounded away —
-  // and the rest are counted, never dropped in silence.
-  it("reads a missing projection raw only inside the newest rounds and counts the rest", async () => {
+  // 28799 review finding 1: the raw fallback has NO cutoff. An old round can be
+  // the only journal a currently listed change has, so a bound that reached it
+  // would drop that change's fact while the page still read complete. The
+  // change's own round here is older than 256 unprojected rounds naming none.
+  it("reads a listed change's own journal raw however many newer unprojected rounds precede it", async () => {
     const w = await world()
-    await change(w, "task/current", false)
+    await change(w, "task/old-fact", false)
     await drain(w)
+    const head = (await w.git(["rev-parse", "task/old-fact"])).trim()
     const logs = join(w.workdir, "logs")
-    const run = readdirSync(logs)
-      .filter((name) => name.endsWith(".jsonl"))
-      .sort()
-      .at(-1)!
-      .slice(0, -".jsonl".length)
-    // The current round's own projection is moved aside too: it must still be
-    // read raw, because it is the one fact a page cannot do without.
-    renameSync(join(logs, `${run}.projection.json`), join(logs, `${run}.projection.json.held`))
-    const unprojected: string[] = []
-    // Six more than the bound, so six rounds fall outside it.
-    for (let older = 2; older <= RAW_FALLBACK_ROUNDS + 6; older++) {
-      const notice = openLog(logs, () => new Date(Date.now() - older * 60_000))
+    // The listed change's OWN journal, with no `finish()` so it carries no
+    // disposable projection, and OLDER than every round written below.
+    const own = openLog(logs, () => new Date(Date.now() - 300 * 60_000))
+    own.write({ kind: "run", target: "main", queue: "main" })
+    own.write({ kind: "message", branch: "task/old-fact", head, says: "failed", to: "notify", delivered: true })
+    const ownPath = join(logs, `${own.id}.jsonl`)
+    // 256 rounds NEWER than the change's own, none of them naming a change.
+    const newer: string[] = []
+    for (let offset = 1; offset <= 256; offset++) {
+      const notice = openLog(logs, () => new Date(Date.now() + offset * 60_000))
       notice.write({ kind: "run", target: "main", queue: "main" })
       notice.write({ kind: "message", says: "this round names no change", to: "notify", delivered: true })
       // No `finish()`: these rounds never wrote a disposable projection.
-      unprojected.push(join(logs, `${notice.id}.jsonl`))
+      newer.push(join(logs, `${notice.id}.jsonl`))
     }
-    // Pushed newest first, so the LAST one is the round the bound leaves out.
-    const oldest = unprojected.at(-1) as string
     const read = vi.spyOn(fs, "readFileSync")
     try {
       const listing = capture(w.work)
@@ -342,25 +338,21 @@ describe("event queue observation refusals", () => {
         0,
       )
       const document = JSON.parse(listing.stdout()) as {
-        changes: { branch: string }[]
-        journal: {
-          dir: string
-          unread?: number
-          fallbacks?: { count: number; reasons: readonly { reason: string; count: number }[] }
-        }
+        changes: { branch: string; state: string }[]
+        journal: { dir: string; unread?: number }
       }
-      expect(document.changes.map(({ branch }) => branch)).toContain("task/current")
+      const row = document.changes.find(({ branch }) => branch === "task/old-fact")
+      expect(row).toBeDefined()
       expect(document.journal.dir).toBe(logs)
-      // The newest RAW_FALLBACK_ROUNDS unprojected rounds were read raw —
-      // the current round among them — and the ONE older than the bound was not.
-      expect(document.journal.fallbacks).toMatchObject({
-        count: RAW_FALLBACK_ROUNDS,
-        reasons: [{ reason: "missing", count: RAW_FALLBACK_ROUNDS }],
-      })
-      expect(document.journal.unread).toBe(6)
-      expect(read.mock.calls.filter(([path]) => String(path) === oldest)).toHaveLength(0)
-      // The current round's raw journal WAS parsed: the bound never reaches it.
-      expect(read.mock.calls.map(([path]) => String(path))).toContain(join(logs, `${run}.jsonl`))
+      // Nothing in the window was left unread, and every unprojected round —
+      // the change's own among the 256 newer ones — was parsed RAW.
+      expect(document.journal.unread).toBeUndefined()
+      expect(read.mock.calls.map(([path]) => String(path))).toContain(ownPath)
+      expect(newer.filter((path) => read.mock.calls.some(([call]) => String(call) === path))).toHaveLength(256)
+      // The fact itself reached the row. A cutoff that reached this round would
+      // have left the change reading its Git-derived state instead, while the
+      // page still read complete.
+      expect(row?.state).toBe("failed")
     } finally {
       read.mockRestore()
     }

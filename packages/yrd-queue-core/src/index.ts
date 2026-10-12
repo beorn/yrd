@@ -153,7 +153,6 @@ export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckVi
 export {
   CHANGE_REF_DIAGNOSTICS,
   LOG_KINDS,
-  RAW_FALLBACK_ROUNDS,
   journalKey,
   openLog,
   readJournals,

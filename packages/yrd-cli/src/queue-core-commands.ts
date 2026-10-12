@@ -87,7 +87,6 @@ import {
   QueueRunEventRetryExhausted,
   readConfig,
   readJournals,
-  RAW_FALLBACK_ROUNDS,
   readRunLog,
   remoteUrl,
   subjects,
@@ -5169,7 +5168,7 @@ function narrateJournalReading(io: YrdCliIO, journals: Journals, said: Set<strin
     ...(journals.unread === undefined || journals.unread === 0
       ? []
       : [
-          `${String(journals.unread)} further round(s) in the window were left unread (a round whose projection is missing is parsed only inside the newest ${String(RAW_FALLBACK_ROUNDS)})`,
+          `${String(journals.unread)} round(s) in the same window were not read: a selection opens only the runs its rows name, and the rest are counted here rather than read`,
         ]),
   ]
   if (parts.length > 0) {

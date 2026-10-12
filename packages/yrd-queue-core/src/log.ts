@@ -566,10 +566,14 @@ export type Journals = Readonly<{
   fallbacks?: JournalProjectionFallbackSummary
   /**
    * Round journals inside the same seven-day window that this read did NOT
-   * open: a journal whose projection could not be reused is parsed only inside
-   * the newest {@link RAW_FALLBACK_ROUNDS}, and a selection reads only the runs
-   * it was given. Present only when that left something behind; a narrowing
-   * nobody states is exactly the silent "no results" this reader must not commit.
+   * open, and why: a SELECTION reads only the runs it was given. Present only
+   * when that left something behind; a narrowing nobody states is exactly the
+   * silent "no results" this reader must not commit.
+   *
+   * A GLOBAL read leaves nothing unread: every round in the window is opened,
+   * and a round whose projection is gone is read RAW rather than skipped, so no
+   * listed change loses the fact its own journal holds, including one whose
+   * journal is older than every round beside it (@i/10-yrd/28799 finding 1).
    */
   unread?: number
   /** Every run that wrote about a change, newest run first, keyed `<branch>@<head>`. */
@@ -938,17 +942,13 @@ function pruneJournalCache(dir: string, windowed: readonly string[]): void {
  * The round journals a directory holds inside the same seven-day window a read
  * applies — the set a SELECTION left behind, counted rather than opened.
  *
- * A directory that cannot be listed reads as none; the selection it was
- * counted against is what the caller asked for, and its own absence is already
- * the answer {@link readJournals} gives for a missing directory.
+ * A directory that cannot be listed is NOT "none". The caller is about to state
+ * how many rounds it left behind, and reading a listing failure as an empty
+ * window would turn a permission or I/O failure into a complete-looking count
+ * (@i/10-yrd/28799 finding 2). It throws, and {@link unreadInWindow} says so.
  */
 function journalsInWindow(dir: string, now: Date, sinceMs: number): readonly string[] {
-  let names: readonly string[]
-  try {
-    names = readdirSync(dir)
-  } catch {
-    return []
-  }
+  const names = readdirSync(dir)
   return names
     .filter((name) => name.endsWith(".jsonl"))
     .map((name) => name.slice(0, -".jsonl".length))
@@ -956,6 +956,29 @@ function journalsInWindow(dir: string, now: Date, sinceMs: number): readonly str
       const startedAt = runStartedAt(id)
       return startedAt !== undefined && now.getTime() - startedAt.getTime() <= sinceMs
     })
+}
+
+/**
+ * How many rounds of the same window a SELECTION left behind — and, when that
+ * window could not be listed at all, the sentence saying so instead of a zero
+ * that reads as "this read reached everything" (@i/10-yrd/28799 finding 2).
+ */
+function unreadInWindow(
+  dir: string,
+  now: Date,
+  sinceMs: number,
+  selected: ReadonlySet<string>,
+): Readonly<{ count: number; failure?: string }> {
+  let ids: readonly string[]
+  try {
+    ids = journalsInWindow(dir, now, sinceMs)
+  } catch (error) {
+    return {
+      count: 0,
+      failure: `the rounds this read left behind could not be counted: ${dir} — ${String(error)}`,
+    }
+  }
+  return { count: ids.filter((id) => !selected.has(id)).length }
 }
 
 /**
@@ -981,9 +1004,7 @@ function cachedRunsIn(
   dir: string,
   id: string,
   startedAt: Date,
-  /** Whether a journal whose projection cannot be reused may be read raw at all. */
-  allowRaw = true,
-): Readonly<{ runs: readonly JournalRun[]; fallback?: JournalProjectionFallback; bounded?: true }> {
+): Readonly<{ runs: readonly JournalRun[]; fallback?: JournalProjectionFallback }> {
   const path = journalPath(dir, id)
   const projection = readJournalProjection(dir, id)
   if (projection.kind === "projection") return { runs: projection.runs }
@@ -991,9 +1012,10 @@ function cachedRunsIn(
   if (hit !== undefined && projection.source !== undefined && sameJournalSource(hit.source, projection.source)) {
     return { runs: hit.runs, fallback: projection.fallback }
   }
-  // The bound is applied BEFORE the raw read, never to its result: past this
-  // line lies the parse that makes a fallback expensive (@i/10-yrd/28799).
-  if (!allowRaw) return { runs: [], bounded: true }
+  // Every round whose projection cannot be reused is read RAW. There is no
+  // cutoff: an old round can be the ONLY journal a currently listed change has,
+  // and a bound that reached it would drop that change's fact while the page
+  // still read complete (@i/10-yrd/28799 finding 1).
   const runs = [...runsIn(readRunLog(dir, id), id, startedAt)]
   if (projection.source !== undefined) {
     try {
@@ -1190,20 +1212,6 @@ export function recentPublicationRejected(
     .rejection
 }
 
-/**
- * How many of a read's oldest rounds may still be read RAW when their
- * disposable projection is missing, before the rest are counted instead of
- * parsed.
- *
- * The newest rounds are always inside it, so a current fact is never bounded
- * away; the bound exists because a queue that ran for weeks before its
- * projections existed carried 3,007 unprojected rounds in one seven-day window,
- * and reading every one of them raw cost most of a second and 971 kB of
- * `--json` for a page of forty rows (@i/10-yrd/28799). The queue writes roughly
- * six hundred rounds a day, so this window is the last ten hours of them.
- */
-export const RAW_FALLBACK_ROUNDS = 250
-
 export type ReadJournalsOptions = Readonly<{
   now?: Date
   /** How far back the runs read reach; the same seven days `list` windows its ended rows by. */
@@ -1226,6 +1234,10 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
   const now = options.now ?? new Date()
   const sinceMs = options.sinceMs ?? 7 * 24 * 60 * 60 * 1000
   const selected = new Set(options.runIds ?? [])
+  // What a SELECTION leaves behind in the same window, counted ONCE and before
+  // any early return can drop the count (@i/10-yrd/28799 finding 2).
+  const left: Readonly<{ count: number; failure?: string }> =
+    options.runIds === undefined ? { count: 0 } : unreadInWindow(dir, now, sinceMs, selected)
   let names: readonly string[]
   if (options.runIds === undefined) {
     try {
@@ -1255,20 +1267,25 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
         : ours.length === 0
           ? "it holds no run journal"
           : `its ${String(ours.length)} run journal(s) are all older than the window`
-    return { absent: `no run journal was read: ${dir} — ${held}`, dir, malformed: [], runs: new Map() }
+    const absent = `no run journal was read: ${dir} — ${held}`
+    return {
+      absent: left.failure === undefined ? absent : `${absent}; ${left.failure}`,
+      dir,
+      malformed: [],
+      runs: new Map(),
+      ...(left.count === 0 ? {} : { unread: left.count }),
+    }
   }
   if (options.runIds === undefined) pruneJournalCache(dir, windowed)
   // A journal whose projection cannot be reused is read RAW, and that parse is
-  // the whole cost of the fallback (3,006 of them were 971 kB of `--json` and
-  // most of a second, @i/10-yrd/28799). The newest rounds are ALWAYS read: a
-  // current fact must never be bounded away. An older round whose projection is
-  // gone is counted instead, never dropped in silence.
-  const readable = new Set([...windowed].sort().slice(-RAW_FALLBACK_ROUNDS))
+  // the whole cost of the fallback (3,006 of them were 971 kB of `--json`,
+  // @i/10-yrd/28799). Every round in the window gets it: the summary bounds what
+  // a read PRINTS, never which facts it reads (@i/10-yrd/28799 finding 1).
   const runs = new Map<string, JournalRun[]>()
   const malformed: { run: string; key: string; message: string }[] = []
   const fallbacks: JournalProjectionFallback[] = []
   const unavailable: string[] = []
-  let bounded = 0
+  if (left.failure !== undefined) unavailable.push(left.failure)
   if (options.runIds !== undefined) {
     for (const id of ours.filter((id) => !windowed.includes(id))) {
       unavailable.push(
@@ -1281,7 +1298,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     if (startedAt === undefined) continue
     let read: ReturnType<typeof cachedRunsIn>
     try {
-      read = cachedRunsIn(dir, id, startedAt, options.runIds !== undefined || readable.has(id))
+      read = cachedRunsIn(dir, id, startedAt)
     } catch (error) {
       if (options.runIds === undefined) throw error
       if (options.runIds !== undefined && (error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -1289,10 +1306,6 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
         continue
       }
       throw new Error(`cannot read run journal ${join(dir, `${id}.jsonl`)}: ${String(error)}`, { cause: error })
-    }
-    if (read.bounded === true) {
-      bounded += 1
-      continue
     }
     if (read.fallback !== undefined) fallbacks.push(read.fallback)
     for (const run of read.runs) {
@@ -1304,12 +1317,9 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
       else held.unshift(run)
     }
   }
-  // A selection reads only the runs it was given, and the raw fallback reaches
-  // only the newest rounds; either way the rounds left in the same window are
-  // COUNTED here, never dropped in silence.
-  const unread =
-    (options.runIds === undefined ? 0 : journalsInWindow(dir, now, sinceMs).filter((id) => !selected.has(id)).length) +
-    bounded
+  // A selection reads only the runs it was given; the rounds it left in the same
+  // window are COUNTED here, never dropped in silence.
+  const unread = left.count
   return {
     dir,
     malformed,
