@@ -1,8 +1,9 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
 import { Conflict, RetriesExhausted } from "./git.ts"
 import { listRefs, openEvents } from "./git.ts"
+import { publishWithTransientRetry } from "./transient-push.ts"
 import { readEventChain, readEventChains } from "./event-read.ts"
-import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
+import type { AlsoRef, Appended, Decide, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
 
 import {
   assertBranch,
@@ -1204,7 +1205,7 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
   if (Number.isNaN(write.at.getTime())) throw new TypeError("Time: needs a valid instant")
   const chain = await openEvents({ ...store, ref, writer: write.by })
   let existing: string | undefined
-  const result = await chain.transact(async (events) => {
+  const decide: Decide = async (events) => {
     const current = projectEventQueue(events, ref, store.repo)
     if ((write.type === "paused" || write.type === "resumed") && current.opsCutover === undefined) {
       throw new Error(`${ref}: ${write.type} needs ops-cutover; pre-cutover pause and release authoring is retired`)
@@ -1295,7 +1296,27 @@ export async function writeQueueEvent(store: QueueLocation, queue: string, write
     }
     projectEventQueue([...events, pending], ref, store.repo)
     return [input]
-  }, `${write.type} ${queue}`)
+  }
+  // ONE funnel for a queue-event publication (28805, @cto): a persistent GitHub
+  // 5xx on the queue ref's push used to throw bare, so a reader could not tell
+  // "the event did not land" from "the answer is unknown". The funnel retries it
+  // and, when a 500 arrived AFTER the push landed, returns the staged event
+  // rather than re-running the write. Exhaustion is the CALLER's decision.
+  const result = await publishWithTransientRetry<Appended>(
+    (prepared) =>
+      chain.transact(decide, `${write.type} ${queue}`, {
+        afterStage: async (staged) => prepared({ head: staged.next, events: staged.events, retries: 0 }),
+      }),
+    {
+      repository: store.remote,
+      ref,
+      landed: async (landed) => {
+        const fetchRefs = store.backend.fetchRefs
+        if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs for the queue-event landed probe")
+        return (await fetchRefs(store.repo, ref, store.remote)).get(ref) === landed.head ? landed : undefined
+      },
+    },
+  )
   const written = existing ?? result.events[0]?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: ${write.type} event was not written`)
   return written

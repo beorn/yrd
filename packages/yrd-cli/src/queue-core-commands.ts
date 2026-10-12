@@ -69,6 +69,7 @@ import {
   readEventOps,
   readEventQueueWithChanges,
   setBranchIgnored,
+  transientPush5xxOf,
   writeQueueEvent,
   writeQueueOverride,
   prepareWorktree,
@@ -1349,6 +1350,17 @@ export async function coreQueueCommand(
       } catch (error) {
         if (error instanceof QueuePaused || error instanceof QueueNotPaused) {
           io.stderr(`yrd: ${error.message}\n`)
+          return 1
+        }
+        // Exhaustion is this caller's decision (28805): a persistent GitHub 5xx on
+        // the queue-event publish is ambiguous, not a judgement. Fail loud, naming
+        // the ambiguity, so the operator reads the standing state before retrying.
+        const exhausted = transientPush5xxOf(error)
+        if (exhausted !== undefined) {
+          io.stderr(
+            `yrd: GitHub returned ${exhausted.line} on the ${request.command} of ${targetLabel}; ` +
+              "it may or may not have been recorded. Read the standing pause state (yrd pause) before retrying.\n",
+          )
           return 1
         }
         throw error

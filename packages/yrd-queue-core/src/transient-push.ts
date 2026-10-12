@@ -168,3 +168,53 @@ export async function retryTransientPush<T>(
   }
   throw new Error("transient 5xx retry fell through")
 }
+
+/**
+ * One funnel for a queue publication that can take a GitHub 5xx (28805).
+ *
+ * `work` runs the publish and is handed a `prepared` callback it MUST call with
+ * the value that a success returns — the staged commit it is about to publish.
+ * The funnel runs `work` under `retryTransientPush`; on a 5xx it asks `landed`
+ * whether that staged value is already live on the remote, and returns it as the
+ * success value when it is, so the write is never re-run blind (28793).
+ *
+ * Exhaustion is the CALLER's decision: this returns the original 5xx unchanged,
+ * and the caller maps it — a runner HOLD (28793) or a loud CLI failure. A
+ * `landed` probe that itself throws gives up on the original 5xx and never
+ * re-runs `work` (28793 round 2), inherited here for every site.
+ */
+export async function publishWithTransientRetry<T>(
+  work: (prepared: (staged: T) => void) => Promise<T>,
+  options: Readonly<{
+    repository: string
+    ref: string
+    text?: (result: T) => string
+    note?: (attempt: TransientPushAttempt, probeError?: string) => void
+    landed?: (staged: T, hit: TransientPush5xx) => Promise<T | undefined>
+  }>,
+): Promise<T> {
+  let staged: T | undefined
+  const probe = options.landed
+  return retryTransientPush(
+    () => {
+      staged = undefined
+      return work((value) => {
+        staged = value
+      })
+    },
+    {
+      repository: options.repository,
+      ref: options.ref,
+      ...(options.text === undefined ? {} : { text: options.text }),
+      ...(options.note === undefined ? {} : { note: options.note }),
+      ...(probe === undefined
+        ? {}
+        : {
+            landed: async (hit: TransientPush5xx): Promise<T | undefined> => {
+              if (staged === undefined) return undefined
+              return probe(staged, hit)
+            },
+          }),
+    },
+  )
+}

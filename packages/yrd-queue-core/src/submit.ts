@@ -22,7 +22,7 @@
 import { existsSync, mkdirSync, mkdtempSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { pushRefUpdates } from "git-super/push"
-import { retryTransientPush } from "./transient-push.ts"
+import { publishWithTransientRetry, retryTransientPush, transientPush5xxOf } from "./transient-push.ts"
 import { discardWorktree, removeWorktreeRunScaffold } from "./worktree.ts"
 import { refuseMovedPrivateGitlinks } from "./private-submodules.ts"
 import {
@@ -33,6 +33,7 @@ import {
   openEvents,
   selectionFor,
   runnerFor,
+  type Appended,
   type Event,
 } from "./git.ts"
 import { readConfig, targetName, type Target } from "./config.ts"
@@ -1094,26 +1095,58 @@ async function submitEvent(
     let result
     try {
       if (archived === undefined) {
-        result = await chain.transact(decideSubmit, `submit ${request.branch}`, { also })
+        result = await publishWithTransientRetry<Appended>(
+          (prepared) =>
+            chain.transact(decideSubmit, `submit ${request.branch}`, {
+              also,
+              afterStage: async (staged) => prepared({ head: staged.next, events: staged.events, retries: 0 }),
+            }),
+          {
+            repository: remote,
+            ref,
+            landed: async (landed) => ((await readRemoteCommit(git, remote, ref)) === landed.head ? landed : undefined),
+          },
+        )
       } else {
         const tip = archived.at(-1)?.id
         if (tip === undefined) throw new Error(`${coldRef}: archived history has no tip`)
-        if (store.backend.publish === undefined) {
-          throw new TypeError(`${coldRef}: backend cannot publish atomic custody`)
-        }
+        const publishCustody = store.backend.publish
+        if (publishCustody === undefined) throw new TypeError(`${coldRef}: backend cannot publish atomic custody`)
         const staged = await chain.stage(decideSubmit(archived), { expect: tip })
-        await store.backend.publish(
-          root,
-          [
-            { ref, expect: "0".repeat(staged.head.length), oid: staged.head },
-            { ref: coldRef, expect: tip, oid: null },
-            ...also.map((update) => ({ ...update, expect: update.expect ?? "0".repeat(staged.head.length) })),
-          ],
-          remote,
+        const archivedResult = { head: staged.head, events: staged.events, retries: 0 }
+        result = await publishWithTransientRetry<Appended>(
+          (prepared) => {
+            prepared(archivedResult)
+            return publishCustody(
+              root,
+              [
+                { ref, expect: "0".repeat(staged.head.length), oid: staged.head },
+                { ref: coldRef, expect: tip, oid: null },
+                ...also.map((update) => ({ ...update, expect: update.expect ?? "0".repeat(staged.head.length) })),
+              ],
+              remote,
+            ).then(() => archivedResult)
+          },
+          {
+            repository: remote,
+            ref,
+            landed: async (landed) => ((await readRemoteCommit(git, remote, ref)) === landed.head ? landed : undefined),
+          },
         )
-        result = { head: staged.head, events: staged.events, retries: 0 }
       }
     } catch (error) {
+      // Exhaustion is this caller's decision (28805): a persistent 5xx on the submit
+      // event publish is not a judgement. Fail loud, naming the ambiguity, so the
+      // submitter runs `yrd status` before re-submitting — and the re-submit is safe
+      // because decideSubmit sees an already-queued head and writes no second submit.
+      const exhausted = transientPush5xxOf(error)
+      if (exhausted !== undefined) {
+        throw new Error(
+          `GitHub returned ${exhausted.line} on the submit of ${request.branch}; it may or may not have been recorded. ` +
+            `Run \`yrd status ${request.branch}\` before submitting again.`,
+          { cause: error },
+        )
+      }
       if (
         !(error instanceof Conflict) ||
         error.refs.length === 0 ||
