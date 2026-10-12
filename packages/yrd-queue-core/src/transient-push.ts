@@ -79,6 +79,15 @@ function errorText(error: unknown): string {
   return parts.join("\n")
 }
 
+/**
+ * The transient 5xx this error reports, or undefined when it is another failure
+ * (24395 item 4). A caller uses it to tell an exhausted retry of a 5xx from every
+ * other refusal, so a persistent remote error becomes a hold, never a stopped line.
+ */
+export function transientPush5xxOf(error: unknown): TransientPush5xx | undefined {
+  return matchTransientPush5xx(errorText(error))
+}
+
 function noteAttempt(attempt: TransientPushAttempt): void {
   const request = attempt.requestId ?? "none"
   process.stderr.write(
@@ -89,6 +98,18 @@ function noteAttempt(attempt: TransientPushAttempt): void {
 /**
  * Run `work` up to three times when its throw or result text matches a 5xx.
  * Unrecognized failures propagate on the first attempt.
+ *
+ * `landed` is the ambiguous-5xx probe (@cto, 28793): a 500 can arrive AFTER
+ * GitHub applied the push, so this retry asks the remote whether the write
+ * landed before it re-runs `work` — after the backoff wait, and before it gives
+ * up on the last attempt. When the probe returns the staged write the attempt is
+ * a success and `work` is NEVER re-run: a blind re-run would either fail the
+ * lease (and stop the line) or append a second event.
+ *
+ * A probe that FAILS is itself unknown (@cto): an unanswered probe cannot say
+ * whether the push landed, so `work` is not re-run either. The failure is
+ * recorded in the attempt note and the original 5xx is settled at once, which
+ * both callers turn into a HOLD.
  */
 export async function retryTransientPush<T>(
   work: () => Promise<T>,
@@ -96,29 +117,54 @@ export async function retryTransientPush<T>(
     repository: string
     ref: string
     text?: (result: T) => string
-    note?: (attempt: TransientPushAttempt) => void
+    note?: (attempt: TransientPushAttempt, probeError?: string) => void
+    landed?: (hit: TransientPush5xx) => Promise<T | undefined>
   }>,
 ): Promise<T> {
   const attempts = transientPushRetry.attempts
   for (let attempt = 1; attempt <= attempts; attempt++) {
+    let hit: TransientPush5xx
+    let settled: { readonly kind: "result"; readonly value: T } | { readonly kind: "throw"; readonly error: unknown }
     try {
-      const result = await work()
-      const hit = matchTransientPush5xx(options.text?.(result) ?? "")
-      if (hit === undefined) return result
-      const record = { ...hit, attempt, attempts, repository: options.repository, ref: options.ref }
-      noteAttempt(record)
-      options.note?.(record)
-      if (attempt === attempts) return result
+      const value = await work()
+      const matched = matchTransientPush5xx(options.text?.(value) ?? "")
+      if (matched === undefined) return value
+      hit = matched
+      settled = { kind: "result", value }
     } catch (error) {
-      const hit = matchTransientPush5xx(errorText(error))
-      if (hit === undefined) throw error
-      const record = { ...hit, attempt, attempts, repository: options.repository, ref: options.ref }
-      noteAttempt(record)
-      options.note?.(record)
-      if (attempt === attempts) throw error
+      const matched = matchTransientPush5xx(errorText(error))
+      if (matched === undefined) throw error
+      hit = matched
+      settled = { kind: "throw", error }
     }
-    const wait = transientPushRetry.backoffMs[attempt]
-    if (wait !== undefined) await transientPushRetry.sleep(wait)
+    const record = { ...hit, attempt, attempts, repository: options.repository, ref: options.ref }
+    const last = attempt === attempts
+    if (!last) {
+      const wait = transientPushRetry.backoffMs[attempt]
+      if (wait !== undefined) await transientPushRetry.sleep(wait)
+    }
+    let landed: T | undefined
+    let probeError: string | undefined
+    if (options.landed !== undefined) {
+      try {
+        landed = await options.landed(hit)
+      } catch (error) {
+        probeError = errorText(error) || `${error instanceof Error ? error.name : "the landed probe failed"}`
+        const request = hit.requestId === undefined ? "" : ` request-id=${hit.requestId}`
+        process.stderr.write(
+          `yrd: landed probe failed after a transient 5xx on ${options.ref} (attempt ${String(attempt)}/${String(attempts)}${request}): ${probeError}\n`,
+        )
+      }
+    }
+    noteAttempt(record)
+    options.note?.(record, probeError)
+    if (landed !== undefined) return landed
+    // Not landed, or the probe could not answer: settle with the original 5xx
+    // rather than re-run a push we cannot prove did not land.
+    if (probeError !== undefined || last) {
+      if (settled.kind === "throw") throw settled.error
+      return settled.value
+    }
   }
   throw new Error("transient 5xx retry fell through")
 }

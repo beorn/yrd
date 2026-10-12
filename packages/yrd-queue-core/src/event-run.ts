@@ -7,6 +7,7 @@ import {
   isTransientPushHold,
   matchTransientPush5xx,
   retryTransientPush,
+  transientPush5xxOf,
   TRANSIENT_PUSH_HOLD,
   type TransientPush5xx,
   type TransientPushAttempt,
@@ -198,6 +199,32 @@ export class LegacyOverridePresent extends Error {
     readonly oid: string,
   ) {
     super(`legacy override ref ${ref} at ${oid} remains; @chief must verify, fold or delete it`)
+  }
+}
+
+/**
+ * The change-ref event publication exhausted its in-round 5xx retry budget (28793).
+ *
+ * Reported, not thrown past the round: the change loop's catch maps it to a HOLD
+ * (exit 0 + unhealthy health doc) in ONE place, never exit 2, so a persistent
+ * remote error cannot stop a supervised line. The event that would record a stuck
+ * status rides the SAME atomic push that just failed, so this hold is recorded
+ * locally only and the queue retries the publication on its own cadence.
+ */
+class ChangeRefPublicationHeld extends Error {
+  override readonly name = "ChangeRefPublicationHeld"
+
+  constructor(
+    readonly branch: string,
+    readonly marker: string,
+    readonly ref: string,
+    readonly hit: TransientPush5xx,
+    options: { cause: unknown },
+  ) {
+    super(
+      `${branch}: ${TRANSIENT_PUSH_HOLD} on the change-ref publication for ${ref} at ${marker}: ${hit.line}`,
+      options,
+    )
   }
 }
 
@@ -429,20 +456,90 @@ export async function eventQueueRun(
   }
   const owned = new Set<string>()
   let runNumber: number | undefined
+  // The exact change event (and the run number it consumed) staged by the last
+  // appendOwnedChangeOnce. An ambiguous 5xx reads it to tell "the push landed
+  // anyway" from "a rival moved the ref" without re-staging (28793, @cto).
+  let preparedChange: Readonly<{ oid: string; number?: number }> | undefined
   const recordRunNumber = (number: number): void => {
     if (runNumber !== undefined) throw new Error(`${runIndexRef(queue)}: run ${log.id} was numbered twice`)
     runNumber = number
     log.write({ kind: "run-number", number, queue, ref: runIndexRef(queue) })
   }
-  const appendOwnedChange = async (...args: Parameters<typeof appendChangeEvent>): Promise<string> => {
+  const appendOwnedChangeOnce = async (...args: Parameters<typeof appendChangeEvent>): Promise<string> => {
+    const onPrepared = (oid: string, number?: number): void => {
+      preparedChange = { oid, ...(number === undefined ? {} : { number }) }
+    }
     const oid =
       runNumber === undefined
         ? await (async () => {
-            const written = await appendNumberedChangeEvent(...args, runIdentity)
+            const written = await appendNumberedChangeEvent(
+              args[0],
+              args[1],
+              args[2],
+              args[3],
+              args[4],
+              runIdentity,
+              onPrepared,
+            )
             recordRunNumber(written.number)
             return written.event
           })()
-        : await appendChangeEvent(...args)
+        : await appendChangeEvent(args[0], args[1], args[2], args[3], args[4], onPrepared)
+    owned.add(oid)
+    return oid
+  }
+  // A GitHub 5xx on the change-ref push (refs/yrd/<queue>/changes/<branch>) is a
+  // transient remote error, not a judgement (28793). The merge publication has been
+  // retried in-round since 27995, but this append — the event that moves the change
+  // ref on submit, verifying, checking and every ending, and the queue and run-index
+  // refs riding in the same atomic push — was bare: one 5xx threw out of the round,
+  // the round could not judge, and the service exited 2, which is off Hab's relaunch
+  // allowlist, so the line stopped with nothing relaunching it. Retry it the same
+  // way, bounded, counting each attempt into the round log; an unrecognized refusal
+  // and a 4xx still propagate on the first attempt. A 500 that ARRIVED AFTER the push
+  // landed is not a failure at all: the landed probe reads the remote and returns the
+  // staged event, so the retry neither fails the lease nor appends a second event.
+  // Exhaustion is a HOLD, mapped once in the change loop's catch, never exit 2.
+  const appendOwnedChange = async (...args: Parameters<typeof appendChangeEvent>): Promise<string> => {
+    const [, evQueue, evBranch, evMarker] = args
+    const ref = changesRef(evQueue, evBranch)
+    preparedChange = undefined
+    let oid: string
+    try {
+      oid = await retryTransientPush(() => appendOwnedChangeOnce(...args), {
+        repository: options.target.remote,
+        ref,
+        note: (attempt: TransientPushAttempt, probeError?: string): void => {
+          log.write({
+            kind: "warning",
+            subject: "transient-push-5xx",
+            branch: evBranch,
+            ref,
+            marker: evMarker,
+            attempt: attempt.attempt,
+            requestId: attempt.requestId,
+            line: attempt.line,
+            repository: attempt.repository,
+            ...(probeError === undefined ? {} : { probeError }),
+          })
+        },
+        landed: async (): Promise<string | undefined> => {
+          if (preparedChange === undefined) return undefined
+          const remote = await readRemoteCommit(git, options.target.remote, ref)
+          if (remote === undefined || remote !== preparedChange.oid) return undefined
+          if (runNumber === undefined && preparedChange.number !== undefined) {
+            recordRunNumber(preparedChange.number)
+          }
+          return preparedChange.oid
+        },
+      })
+    } catch (error) {
+      const hit = transientPush5xxOf(error)
+      if (hit !== undefined) throw new ChangeRefPublicationHeld(evBranch, evMarker, ref, hit, { cause: error })
+      throw error
+    }
+    // The landed probe can return a staged event without re-running the append,
+    // so name it here too: a later reconcile in this round reads `owned`.
     owned.add(oid)
     return oid
   }
@@ -1315,7 +1412,7 @@ export async function eventQueueRun(
     marker: string,
     hit: TransientPush5xx,
     via: string,
-    already: EventChange,
+    already: Readonly<{ status: string; reason?: string }>,
   ): Promise<QueueRunOutcome> => {
     const request = hit.requestId === undefined ? "" : `; Request ID: ${hit.requestId}`
     const oneLine =
@@ -1331,6 +1428,19 @@ export async function eventQueueRun(
         requestId: hit.requestId,
         line: hit.line,
         reason: "hold remains; probe still 5xx",
+      })
+      return result(0, observedMerged, failed, [branch])
+    }
+    if (via === "change-ref publication") {
+      // The atomic push that would carry a stuck event IS the one that just
+      // failed (28793): record the hold locally, do not push again, and let the
+      // next round retry the publication. The change keeps its standing status.
+      writeStuck(branch, head, {
+        code: "yrd-publication-5xx",
+        subject: oneLine,
+        via,
+        next: "nothing: the queue retries this publication on its own cadence; no resume is needed",
+        saw: hit.line,
       })
       return result(0, observedMerged, failed, [branch])
     }
@@ -1442,7 +1552,7 @@ export async function eventQueueRun(
     ) {
       return stopRejectedMerge(priorRejection)
     }
-    const noteTransient = (attempt: TransientPushAttempt): void => {
+    const noteTransient = (attempt: TransientPushAttempt, probeError?: string): void => {
       log.write({
         kind: "warning",
         subject: "transient-push-5xx",
@@ -1454,6 +1564,7 @@ export async function eventQueueRun(
         requestId: attempt.requestId,
         line: attempt.line,
         repository: attempt.repository,
+        ...(probeError === undefined ? {} : { probeError }),
       })
     }
     let child
@@ -1513,6 +1624,7 @@ export async function eventQueueRun(
       return result(2, observedMerged, failed, [branch])
     }
     let preparedMerge: string | undefined
+    let preparedMergeNumber: number | undefined
     let ended: string | undefined
     try {
       ended = await retryTransientPush(
@@ -1531,12 +1643,29 @@ export async function eventQueueRun(
                 run: log.id,
                 ...(reason === undefined ? {} : { reason }),
               },
-              (oid) => {
+              (oid, number) => {
                 preparedMerge = oid
+                preparedMergeNumber = number
               },
             ),
           ),
-        { repository: options.target.remote, ref, note: noteTransient },
+        {
+          repository: options.target.remote,
+          ref,
+          note: noteTransient,
+          // The same ambiguous-5xx probe the change path carries (28793, @cto): a
+          // 500 after the atomic push landed returns the staged merge instead of
+          // re-running it, so the merge is never duplicated nor the lease lost.
+          landed: async (): Promise<string | undefined> => {
+            if (preparedMerge === undefined) return undefined
+            const remote = await readRemoteCommit(git, options.target.remote, ref)
+            if (remote === undefined || remote !== preparedMerge) return undefined
+            if (runNumber === undefined && preparedMergeNumber !== undefined) {
+              recordRunNumber(preparedMergeNumber)
+            }
+            return preparedMerge
+          },
+        },
       )
     } catch (error) {
       if (error instanceof QueuePaused) {
@@ -2625,6 +2754,22 @@ export async function eventQueueRun(
       if (published !== undefined) return published
     } catch (error) {
       if (error instanceof QueueAuthorityUnreadable) throw error
+      // ONE place a persistent change-ref 5xx becomes a HOLD, not exit 2 (28793,
+      // @cto). It is recognized BEFORE any further remote read, and holds on the
+      // state this round already read: the same outage that failed the push would
+      // fail a fresh readStatus too, and letting that throw would exit the runner —
+      // the exact outcome this bead removes (@dev/6 P1). Every other error still
+      // reconciles against the remote below; nothing is swallowed.
+      if (error instanceof ChangeRefPublicationHeld) {
+        return holdTransientPublication(
+          error.branch,
+          head,
+          error.marker,
+          error.hit,
+          "change-ref publication",
+          selectedChange,
+        )
+      }
       let current
       try {
         current = await readStatus(store, queue, branch)
