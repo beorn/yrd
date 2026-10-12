@@ -77,7 +77,7 @@ export type QueueRunOptions = Readonly<{
     repo: string
     git: Git
     actor: string
-    protections(branch: string): Promise<readonly string[]>
+    protections(branch: string, tip: string, issue?: string): Promise<readonly string[]>
   }>
   /** The logger the worktree plumbing narrates to; pass one only at trace. */
   plumbing?: PlumbingLog
@@ -224,7 +224,8 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
         for (const branch of outcome.merged) {
           try {
             const change = await readStatus(events, options.target.branch, branch)
-            if (change.commit === undefined) throw new Error(`merged change ${branch} has no kept head`)
+            const tip = change.commit
+            if (tip === undefined) throw new Error(`merged change ${branch} has no kept head`)
             // The author store may not have the queue's newly published merge yet.
             const queueGit = options.git ?? gitIn(options.repo, undefined, selection, { env: options.env })
             await author.git(["fetch", "--no-tags", await remoteUrl(queueGit, options.target.remote), outcome.target])
@@ -233,12 +234,13 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
               git: author.git,
               actor: author.actor,
               branch,
-              tip: change.commit,
+              tip,
+              owner: change.submitter,
               issue: change.issue,
               reason: "merged",
               date: new Date().toISOString().slice(0, 10),
               log,
-              protections: () => author.protections(branch),
+              protections: () => author.protections(branch, tip, change.issue),
               disposition: { kind: "merged", target: outcome.target },
             })
           } catch (error) {

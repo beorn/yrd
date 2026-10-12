@@ -10,6 +10,7 @@ export type LocalBranchRetirement = Readonly<{
   branch: string
   tip: string
   actor: string
+  owner?: string
   issue?: string
   reason: string
   date: string
@@ -92,6 +93,7 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     branch,
     head: tip,
     actor,
+    owner: input.owner,
     issue,
     archive: archiveRef,
     reason: result.reason,

@@ -32,6 +32,7 @@ import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import { issueResolver } from "./issue-resolver.ts"
+import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
 import { RETIRED_ROOT_CUTOVER, retiredRootBeside, retiredRootSweep } from "./retired-root.ts"
@@ -879,8 +880,21 @@ export async function coreQueueCommand(
         options.log,
         options.populateReference,
       )
+      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd()) ?? repo
       outcome = await queueRun({
         ...baseOptions,
+        authorStore: {
+          repo: authorRepo,
+          git: gitIn(authorRepo, undefined, selection, { env }),
+          actor: env?.YRD_DEFAULT_SUBMITTER?.trim() || "yrd",
+          protections: (branch, tip, issue) =>
+            io.localBranchProtections?.({
+              repo: authorRepo,
+              branch,
+              tip,
+              issue,
+            }) ?? Promise.resolve([]),
+        },
         afterRun: async (outcome) => {
           await cleanupEnvironments({ repo, git, config, workdir, outcome, io, env, selection, resolveIssue })
           // The round ALSO drains its own raw output, one ROUND_REMOVAL_BATCH per
