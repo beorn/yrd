@@ -175,10 +175,7 @@ async function world(
  * a function of the merged gitlinks: run again on the derived candidate it writes the same bytes. (A derive that
  * copied the pin of the submodule it writes into would never be — the compose's second run catches that.)
  */
-function deriveScript(
-  root: string,
-  variant: "ok" | "root" | "fail" | "quiet" | "perfile" | "staged" = "ok",
-): string {
+function deriveScript(root: string, variant: "ok" | "root" | "fail" | "quiet" | "perfile" | "staged" = "ok"): string {
   const script = join(root, `derive-${variant}.sh`)
   const touchesLib = variant === "ok" || variant === "root" || variant === "fail"
   writeFileSync(
@@ -488,5 +485,4 @@ describe("derive: the compose regenerates what the merged gitlinks decide", () =
       /vendor\/nested\/keep\.txt.*outside every submodule; root derivation is not admitted yet/u,
     )
   })
-
 })
