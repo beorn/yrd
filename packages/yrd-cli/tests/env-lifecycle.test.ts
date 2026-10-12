@@ -15,6 +15,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs"
@@ -738,6 +739,37 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     expect(existsSync(path)).toBe(true)
     expect(existsSync(gitfile)).toBe(true)
     expect(existsSync(teardown)).toBe(false)
+  })
+
+  // #27120 AC1 (chief ruling c8a3b06d): the unreadable stage. `entryPresent` (env-commands.ts) names the
+  // gitfile probe's answer, and ONLY ENOENT/ENOTDIR may read as "nothing is there": a kernel refusal is a
+  // named fault that preserves the environment. `existsSync` would answer FALSE for an EACCES entry, the
+  // checkout would read as empty, and the close would walk past a private store it could not judge. The
+  // fixture takes the mode off the gitfile's own parent so the refusal is the kernel's, not a mock's.
+  it("refuses by name when the private gitfile cannot be read", async () => {
+    const w = await world(":")
+    await addMaterializedDependency(w)
+    await w.git(["config", "-f", ".gitmodules", "submodule.vendor/dependency.private", "true"])
+    await w.git(["add", ".gitmodules"])
+    await w.git(["commit", "--quiet", "-m", "declare private dependency"])
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const { path } = await openEnvironment(w.work, selected)
+    const checkout = join(path, "vendor/dependency")
+    const gitfile = join(checkout, ".git")
+    expect(existsSync(gitfile)).toBe(true)
+    const mode = statSync(checkout).mode & 0o777
+    try {
+      chmodSync(checkout, 0o000)
+      const refused = capture(w.work)
+      const exit = await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], refused.io)
+      expect(exit, refused.stderr()).not.toBe(0)
+      expect(refused.stderr()).toContain(`cannot inspect the private submodule gitfile of ${gitfile}`)
+      expect(refused.stderr()).toContain("the environment was preserved")
+    } finally {
+      chmodSync(checkout, mode)
+    }
+    expect(existsSync(path), "a checkout whose private gitfile cannot be read is kept").toBe(true)
+    expect(existsSync(gitfile)).toBe(true)
   })
 
   // #27120 AC3: the ruled Route A, all three stages against one fixture — the initialized checkout
