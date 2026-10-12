@@ -240,7 +240,7 @@ function buildProgram(
     options: PauseOptions & { issue?: string; local?: boolean; tip?: string },
     command: "withdraw" | "drop",
   ): Promise<void> => {
-    if ((branch === undefined) === (options.issue === undefined)) {
+    if (options.local !== true && (branch === undefined) === (options.issue === undefined)) {
       throw new Error("drop needs exactly one branch or --issue <id>")
     }
     if (options.local === true && (branch === undefined || options.tip === undefined)) {
@@ -250,9 +250,14 @@ function buildProgram(
     let subject:
       | { command: "withdraw" | "drop"; branch: string }
       | { command: "drop-issue"; issue: string }
-      | { command: "drop-local"; branch: string; tip: string }
+      | { command: "drop-local"; branch: string; tip: string; issue?: string }
     if (command === "drop" && options.local === true && branch !== undefined && options.tip !== undefined) {
-      subject = { command: "drop-local", branch, tip: options.tip }
+      subject = {
+        command: "drop-local",
+        branch,
+        tip: options.tip,
+        ...(options.issue === undefined ? {} : { issue: options.issue }),
+      }
     } else if (branch !== undefined) subject = { command, branch }
     else if (command === "drop" && options.issue !== undefined) {
       subject = { command: "drop-issue", issue: options.issue }
@@ -1302,10 +1307,7 @@ function buildProgram(
       .description("end a change, or archive and retire local branches")
       .option("--local", "archive and retire only the named local branch; requires --tip")
       .option("--tip <commit>", "expected full local commit for --local; an advanced branch is kept")
-      .option(
-        "--issue <id>",
-        "archive issue-bound local branches locally and on origin, then retire eligible local refs",
-      ),
+      .option("--issue <id>", "retire issue-bound local refs; with --local, carry the reviewed issue identity"),
   ).action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
 
   program

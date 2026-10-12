@@ -396,7 +396,15 @@ export type CoreQueueCommand =
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string; recipient?: string }>
   | Readonly<{ command: "drop"; branch: string; by: string; reason?: string; recipient?: string }>
   | Readonly<{ command: "drop-issue"; issue: string; by: string; reason?: string; recipient?: string }>
-  | Readonly<{ command: "drop-local"; branch: string; tip: string; by: string; reason?: string; recipient?: string }>
+  | Readonly<{
+      command: "drop-local"
+      branch: string
+      tip: string
+      issue?: string
+      by: string
+      reason?: string
+      recipient?: string
+    }>
   | Readonly<{ command: "ignore"; branch: string; by: string; reason: string }>
   | Readonly<{ command: "unignore"; branch: string; by: string }>
   | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
@@ -1289,9 +1297,10 @@ export async function coreQueueCommand(
         throw new Error(`${NAMED[request.command]} requires the authoring repository as cwd`)
       }
       const authorGit = gitIn(authorRepo, undefined, selection, { env })
-      const issue = local
-        ? undefined
-        : normalizeIssueReference(resolveIssue === undefined ? request.issue : await resolveIssue(request.issue))
+      const issue =
+        request.issue === undefined
+          ? undefined
+          : normalizeIssueReference(resolveIssue === undefined ? request.issue : await resolveIssue(request.issue))
       if (local && (request.branch === config.target.branch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(request.tip))) {
         throw new Error("drop --local requires a non-target branch and a full expected commit oid")
       }
@@ -1319,10 +1328,17 @@ export async function coreQueueCommand(
           const change = reading.histories.get(branch)?.state
           let bound: string | undefined
           try {
-            bound = change?.issue ?? (await issueOf(authorGit, branch, head, target, undefined, resolveIssue))?.issue
+            bound =
+              change?.issue ??
+              (local ? issue : undefined) ??
+              (await issueOf(authorGit, branch, head, target, undefined, resolveIssue))?.issue
           } catch (error) {
             // delete-fallback-allow: this branch is kept and immediately continued; a failed binding read can only exclude it from retirement.
             kept.push({ branch, head, reason: `issue binding unreadable: ${String(error)}` })
+            continue
+          }
+          if (local && issue !== undefined && bound !== issue) {
+            kept.push({ branch, head, reason: `recorded issue ${bound ?? "absent"} differs from reviewed ${issue}` })
             continue
           }
           if (!local && bound !== issue) {
