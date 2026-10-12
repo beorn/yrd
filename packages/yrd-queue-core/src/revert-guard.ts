@@ -325,6 +325,12 @@ async function touchedPaths(
   base: string | undefined,
   paths: readonly string[],
 ): Promise<ReadonlySet<string> | undefined> {
+  // `--stdin` is newline-delimited, so a path containing a newline cannot be expressed as a pathspec:
+  // git splits it at the newline and matches neither half, and the traversal would return nothing for
+  // a path the per-path walk finds — a silent narrowing of the proof, which this function must never
+  // do. Serve the whole level from that per-path walk instead (the conservative proof), exactly as an
+  // unreadable range does; it is bounded by P_max and the window, and a cap it cannot serve is named.
+  if (paths.some((path) => path.includes("\n"))) return undefined
   const revision = base === undefined ? level.target : `${base}..${level.target}`
   // The traversal is limited to the level's judged paths, fed on stdin so a compose with thousands of
   // changed paths never hits an argv limit and `--literal-pathspecs` keeps every path byte a name

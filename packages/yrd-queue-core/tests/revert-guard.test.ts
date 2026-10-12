@@ -258,6 +258,20 @@ describe("revert guard (27363)", () => {
     expect(report.paths.map((row) => row.path)).toContain("c d ")
   })
 
+  it("touched: a judged path containing a newline is still judged (28195)", async () => {
+    const w = await flatWorld()
+    // `--stdin` is newline-delimited, so this name cannot be expressed as a pathspec: git splits it
+    // into `a` and `b.txt`, matches neither, and the traversal returns nothing for it. The set then
+    // calls the path untouched and `assessPath` skips it — a revert no per-path walk would have missed.
+    const odd = "a\nb.txt"
+    const base = await commit(w.repo, { [odd]: "base\n" }, "base")
+    const target = await commit(w.repo, { [odd]: "target\n" }, "target advance")
+    const report = await detect({ checkoutAt: w.checkoutAt, target }, base, base)
+    expect(report.coverage).toBe("complete")
+    expect(report.paths.map((row) => row.path)).toContain(odd)
+    expect(revertGuardAction(report, "refuse")).toBe("stick")
+  })
+
   it("the durable finding is silent only for a complete, hit-free report", () => {
     expect(revertedPathsFinding(undefined)).toBeUndefined()
     expect(
