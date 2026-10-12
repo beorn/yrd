@@ -6,7 +6,7 @@ import { Conflict, PublicationRejected, RetriesExhausted, openEvents } from "./g
 import {
   isTransientPushHold,
   matchTransientPush5xx,
-  retryTransientPush,
+  publishWithTransientRetry,
   transientPush5xxOf,
   TRANSIENT_PUSH_HOLD,
   type TransientPush5xx,
@@ -457,36 +457,35 @@ export async function eventQueueRun(
   const owned = new Set<string>()
   let runNumber: number | undefined
   // The exact change event (and the run number it consumed) staged by the last
-  // appendOwnedChangeOnce. An ambiguous 5xx reads it to tell "the push landed
-  // anyway" from "a rival moved the ref" without re-staging (28793, @cto).
-  let preparedChange: Readonly<{ oid: string; number?: number }> | undefined
+  // appendOwnedChangeOnce. The funnel's landed probe reads it to tell "the push
+  // landed anyway" from "a rival moved the ref" without re-staging (28793, @cto).
+  type StagedChange = Readonly<{ oid: string; number?: number }>
   const recordRunNumber = (number: number): void => {
     if (runNumber !== undefined) throw new Error(`${runIndexRef(queue)}: run ${log.id} was numbered twice`)
     runNumber = number
     log.write({ kind: "run-number", number, queue, ref: runIndexRef(queue) })
   }
-  const appendOwnedChangeOnce = async (...args: Parameters<typeof appendChangeEvent>): Promise<string> => {
+  const appendOwnedChangeOnce = async (
+    prepared: (staged: StagedChange) => void,
+    ...args: Parameters<typeof appendChangeEvent>
+  ): Promise<StagedChange> => {
     const onPrepared = (oid: string, number?: number): void => {
-      preparedChange = { oid, ...(number === undefined ? {} : { number }) }
+      prepared({ oid, ...(number === undefined ? {} : { number }) })
     }
-    const oid =
-      runNumber === undefined
-        ? await (async () => {
-            const written = await appendNumberedChangeEvent(
-              args[0],
-              args[1],
-              args[2],
-              args[3],
-              args[4],
-              runIdentity,
-              onPrepared,
-            )
-            recordRunNumber(written.number)
-            return written.event
-          })()
-        : await appendChangeEvent(args[0], args[1], args[2], args[3], args[4], onPrepared)
-    owned.add(oid)
-    return oid
+    if (runNumber !== undefined) {
+      return { oid: await appendChangeEvent(args[0], args[1], args[2], args[3], args[4], onPrepared) }
+    }
+    const written = await appendNumberedChangeEvent(
+      args[0],
+      args[1],
+      args[2],
+      args[3],
+      args[4],
+      runIdentity,
+      onPrepared,
+    )
+    recordRunNumber(written.number)
+    return { oid: written.event, number: written.number }
   }
   // A GitHub 5xx on the change-ref push (refs/yrd/<queue>/changes/<branch>) is a
   // transient remote error, not a judgement (28793). The merge publication has been
@@ -503,10 +502,9 @@ export async function eventQueueRun(
   const appendOwnedChange = async (...args: Parameters<typeof appendChangeEvent>): Promise<string> => {
     const [, evQueue, evBranch, evMarker] = args
     const ref = changesRef(evQueue, evBranch)
-    preparedChange = undefined
-    let oid: string
+    let staged: StagedChange
     try {
-      oid = await retryTransientPush(() => appendOwnedChangeOnce(...args), {
+      staged = await publishWithTransientRetry<StagedChange>((prepared) => appendOwnedChangeOnce(prepared, ...args), {
         repository: options.target.remote,
         ref,
         note: (attempt: TransientPushAttempt, probeError?: string): void => {
@@ -523,14 +521,13 @@ export async function eventQueueRun(
             ...(probeError === undefined ? {} : { probeError }),
           })
         },
-        landed: async (): Promise<string | undefined> => {
-          if (preparedChange === undefined) return undefined
+        landed: async (candidate): Promise<StagedChange | undefined> => {
           const remote = await readRemoteCommit(git, options.target.remote, ref)
-          if (remote === undefined || remote !== preparedChange.oid) return undefined
-          if (runNumber === undefined && preparedChange.number !== undefined) {
-            recordRunNumber(preparedChange.number)
+          if (remote === undefined || remote !== candidate.oid) return undefined
+          if (runNumber === undefined && candidate.number !== undefined) {
+            recordRunNumber(candidate.number)
           }
-          return preparedChange.oid
+          return candidate
         },
       })
     } catch (error) {
@@ -540,14 +537,21 @@ export async function eventQueueRun(
     }
     // The landed probe can return a staged event without re-running the append,
     // so name it here too: a later reconcile in this round reads `owned`.
-    owned.add(oid)
-    return oid
+    owned.add(staged.oid)
+    return staged.oid
   }
-  const appendOwnedMerge = async (...args: Parameters<typeof appendPublishedMerge>): Promise<string> => {
-    const oid =
+  type StagedMerge = Readonly<{ oid: string; number?: number }>
+  const appendOwnedMergeOnce = async (
+    prepared: (staged: StagedMerge) => void,
+    ...args: Parameters<typeof appendPublishedMerge>
+  ): Promise<StagedMerge> => {
+    const [store, targetQueue, branch, selectedTip, request] = args
+    const onPrepared = (oid: string, number?: number): void => {
+      prepared({ oid, ...(number === undefined ? {} : { number }) })
+    }
+    const staged =
       runNumber === undefined
         ? await (async () => {
-            const [store, targetQueue, branch, selectedTip, request, onPrepared] = args
             const written = await appendNumberedPublishedMerge(
               store,
               targetQueue,
@@ -558,11 +562,11 @@ export async function eventQueueRun(
               onPrepared,
             )
             recordRunNumber(written.number)
-            return written.event
+            return { oid: written.event, number: written.number }
           })()
-        : await appendPublishedMerge(...args)
-    owned.add(oid)
-    return oid
+        : { oid: await appendPublishedMerge(store, targetQueue, branch, selectedTip, request, onPrepared) }
+    owned.add(staged.oid)
+    return staged
   }
   const rivalOrThrow = async (
     branch: string,
@@ -1569,7 +1573,7 @@ export async function eventQueueRun(
     }
     let child
     try {
-      child = await retryTransientPush(
+      child = await publishWithTransientRetry(
         () =>
           timedStep(log, { branch, head, name: "publish", phase: "merge" }, () =>
             publishCheckedChildren({
@@ -1624,13 +1628,16 @@ export async function eventQueueRun(
       return result(2, observedMerged, failed, [branch])
     }
     let preparedMerge: string | undefined
-    let preparedMergeNumber: number | undefined
     let ended: string | undefined
     try {
-      ended = await retryTransientPush(
-        () =>
+      const stagedMerge = await publishWithTransientRetry<StagedMerge>(
+        (prepared) =>
           timedStep(log, { branch, head, name: "merge", phase: "merge" }, () =>
-            appendOwnedMerge(
+            appendOwnedMergeOnce(
+              (staged) => {
+                preparedMerge = staged.oid
+                prepared(staged)
+              },
               store,
               queue,
               branch,
@@ -1643,10 +1650,6 @@ export async function eventQueueRun(
                 run: log.id,
                 ...(reason === undefined ? {} : { reason }),
               },
-              (oid, number) => {
-                preparedMerge = oid
-                preparedMergeNumber = number
-              },
             ),
           ),
         {
@@ -1656,17 +1659,17 @@ export async function eventQueueRun(
           // The same ambiguous-5xx probe the change path carries (28793, @cto): a
           // 500 after the atomic push landed returns the staged merge instead of
           // re-running it, so the merge is never duplicated nor the lease lost.
-          landed: async (): Promise<string | undefined> => {
-            if (preparedMerge === undefined) return undefined
+          landed: async (candidate) => {
             const remote = await readRemoteCommit(git, options.target.remote, ref)
-            if (remote === undefined || remote !== preparedMerge) return undefined
-            if (runNumber === undefined && preparedMergeNumber !== undefined) {
-              recordRunNumber(preparedMergeNumber)
+            if (remote === undefined || remote !== candidate.oid) return undefined
+            if (runNumber === undefined && candidate.number !== undefined) {
+              recordRunNumber(candidate.number)
             }
-            return preparedMerge
+            return candidate
           },
         },
       )
+      ended = stagedMerge.oid
     } catch (error) {
       if (error instanceof QueuePaused) {
         // The operator stopped the line after this round read its authority. Hold it as state, not a stuck run.

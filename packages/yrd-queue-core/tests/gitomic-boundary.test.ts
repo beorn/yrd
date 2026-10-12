@@ -134,6 +134,27 @@ describe("the Yrd Gitomic boundary", () => {
     expect(publication).toContain('["push", "--recurse-submodules=only", options.remote')
   })
 
+  it("funnels every queue publication through the one transient-push owner (28805)", () => {
+    // @source-grep: the retry that owns a queue publication's GitHub 5xx has ONE
+    // home — transient-push.ts's publishWithTransientRetry — and a second wiring
+    // of retryTransientPush at a queue-event site is the defect 28805 closed. An
+    // event journey cannot tell the two wirings apart; this census can.
+    const submit = source("submit.ts")
+    const [gitlinkPublication, queueSubmission] = submit.split("export type SubmitInspection")
+    for (const [name, text] of [
+      ["submit.ts (queue submission)", queueSubmission ?? ""],
+      ["events.ts", source("events.ts")],
+      ["event-run.ts", source("event-run.ts")],
+    ] as const) {
+      expect(text, name).toContain("publishWithTransientRetry")
+      expect(text, name).not.toContain("retryTransientPush(")
+    }
+    // The gitlink retention reference is the one published ref that is idempotent
+    // (an identical value already there is accepted again, exact-remote-reads),
+    // so its own bounded retry stays — asserted above, never folded onto the funnel.
+    expect(gitlinkPublication ?? "", "gitlink retention publication").toContain("retryTransientPush(")
+  })
+
   it("imports Gitomic only through the configured git seam", () => {
     const modules = ["yrd-queue-core", "yrd-cli"].flatMap((name) => {
       const directory = new URL(`../../${name}/src/`, import.meta.url)
