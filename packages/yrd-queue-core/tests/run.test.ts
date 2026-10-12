@@ -405,6 +405,54 @@ it("local retirement keeps protected tips and preserves custody before removing 
   })
 })
 
+/** @failure Merge cleanup silently leaves component branches without explaining missing ownership.
+ * @level l2 @consumer local retirement after a merged root change
+ * Existing retirement fixtures have no gitlinks, so they cannot prove component preservation or its report.
+ */
+it("merged local retirement preserves and reports component branches without ownership", async () => {
+  const w = await world()
+  const child = join(w.workdir, "child")
+  await w.git(["init", "--quiet", "--initial-branch=main", child])
+  const childGit = gitIn(child)
+  await childGit(["config", "user.email", "queue@yrd.test"])
+  await childGit(["config", "user.name", "yrd"])
+  await childGit(["commit", "--allow-empty", "--quiet", "-m", "child"])
+  const childTip = (await childGit(["rev-parse", "HEAD"])).trim()
+  await childGit(["branch", "task/unknown-owner", childTip])
+  await w.git(["config", "-f", ".gitmodules", "submodule.child.path", "child"])
+  await w.git(["config", "-f", ".gitmodules", "submodule.child.url", child])
+  await w.git(["add", ".gitmodules"])
+  await w.git(["update-index", "--add", "--cacheinfo", `160000,${childTip},child`])
+  await w.git(["commit", "--quiet", "-m", "root with component"])
+  const tip = (await w.git(["rev-parse", "HEAD"])).trim()
+  const branch = "task/merged-root"
+  await w.git(["branch", branch, tip])
+  const log = openLog(join(w.workdir, "retirement"))
+  const result = await retireLocalBranch({
+    repo: w.work,
+    git: w.git,
+    branch,
+    tip,
+    actor: "@dev/2",
+    reason: "merged",
+    date: "2026-10-12",
+    issue: "@i/10-yrd/1",
+    log,
+    protections: async () => [],
+    disposition: { kind: "merged", target: tip },
+  })
+  expect(result.outcome).toBe("removed")
+  expect(await refAt(childGit, "refs/heads/task/unknown-owner")).toBe(childTip)
+  expect(readRunLog(dirname(log.path), log.id)).toContainEqual(
+    expect.objectContaining({
+      kind: "warning",
+      branch,
+      scope: "local-branch-retirement",
+      reason: expect.stringContaining("Component branches left unchanged for child"),
+    }),
+  )
+})
+
 /** @failure A merged task keeps its author branch or retires a protected one.
  * @level l2 @consumer queue caller with its explicit author-store authority
  */

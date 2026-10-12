@@ -1,4 +1,5 @@
 import { archiveRefFor, ensureArchiveRef } from "git-super/archive-ref"
+import { readCommitSubmodules } from "git-super/commit-graph"
 import { createGitWorktreeStore, worktreeOperationBranch } from "git-super/worktree"
 import { drop, type QueueLocation } from "./events.ts"
 import { isAncestor, refAt, seamProcess, type Git } from "./git.ts"
@@ -58,6 +59,19 @@ export async function retireLocalBranch(input: LocalBranchRetirement): Promise<L
     if (actor.trim() === "" || reason.trim() === "") throw new Error("retirement requires an actor and reason")
     await git(["check-ref-format", "--branch", branch])
     await git(["check-ref-format", archiveRef])
+    if (disposition.kind === "merged") {
+      const components = await readCommitSubmodules(seamProcess(git, repo), repo, tip)
+      if (components.length > 0) {
+        input.log.write({
+          kind: "warning",
+          branch,
+          scope: "local-branch-retirement",
+          reason:
+            `Component branches left unchanged for ${components.map((entry) => entry.path).join(", ")}: ` +
+            `submission records no author branch names (repository ${repo}, commit ${tip}); component refs were not inspected.`,
+        })
+      }
+    }
     let kept = await protection()
     if (kept === undefined && disposition.kind === "merged" && !(await isAncestor(git, tip, disposition.target))) {
       kept = `tip ${tip} is not merged into ${disposition.target}`
