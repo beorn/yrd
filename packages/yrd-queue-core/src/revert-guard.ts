@@ -97,7 +97,12 @@ export type RevertGuardReport = Readonly<{
 }>
 
 export type RevertGuardBounds = Readonly<{
-  /** Interior paths examined before the proof is named incomplete. */
+  /**
+   * Interior paths WITH target history judged before the proof is named incomplete. A path the
+   * target's window never touched cannot hide a revert, so it is judged clean without spending a
+   * unit and without naming a gap (#28195): the cap bounds real judgments, not the path count, so an
+   * add-only landing no longer reports incomplete for paths it could never hide behind.
+   */
   pathCap: number
   /** Gitlink recursion depth; the root level is 0. */
   depth: number
@@ -291,7 +296,45 @@ async function walk(level: Level): Promise<void> {
       row.oldMode !== GITLINK && row.newMode !== GITLINK && !(row.newSha === row.oldSha && row.newMode === row.oldMode),
   )
   const base = judged.length === 0 ? undefined : await advanceBase(level)
-  for (const row of judged) await assessPath(level, row, base)
+  const touched = judged.length === 0 ? undefined : await touchedPaths(level, base)
+  for (const row of judged) await assessPath(level, row, base, touched)
+}
+
+/**
+ * The paths the target's first-parent range touched, in ONE traversal per level (#28195).
+ *
+ * `firstParentTouching` per path is `rev-list --first-parent --max-count=W <revision> -- <path>`, so
+ * for a path the range never moved git scans the WHOLE range to find nothing — before this, one such
+ * walk ran per changed path up to the cap. One `log --first-parent --name-only` over the SAME
+ * revision range answers "touched or not" for every changed path at once, so an untouched path costs
+ * nothing and only a touched path takes the per-path walk under P_max. `-m` adds each merge's
+ * first-parent diff, so the set is a superset of what that per-path walk can report: only membership
+ * is proved here, never absence-by-omission. A failed traversal is a named `unjudged` gap and returns
+ * undefined, so every path falls back to the per-path walk under the cap — never a silent widening of
+ * the proof.
+ */
+async function touchedPaths(level: Level, base: string | undefined): Promise<ReadonlySet<string> | undefined> {
+  const revision = base === undefined ? level.target : `${base}..${level.target}`
+  let out: string
+  try {
+    out = await level.git(["log", "--first-parent", "-m", "--name-only", "--format=", "-z", revision])
+  } catch (error) {
+    level.report.gaps.push({
+      kind: "unjudged",
+      depth: level.depth,
+      path: level.prefix === "" ? "." : level.prefix,
+      reason: `target first-parent range unreadable: ${detail(error)}`,
+    })
+    // silent-fallback-allow: the unreadable range was just recorded as a named unjudged gap; undefined keeps
+    // every path on the per-path walk under the cap, the conservative proof, never a silent narrowing.
+    return undefined
+  }
+  return new Set(
+    out
+      .split("\0")
+      .map((row) => row.replace(/^\n+/u, "").trimEnd())
+      .filter((row) => row !== ""),
+  )
 }
 
 /**
@@ -320,8 +363,20 @@ async function advanceBase(level: Level): Promise<string | undefined> {
   }
 }
 
-async function assessPath(level: Level, row: RawRow, base: string | undefined): Promise<void> {
+async function assessPath(
+  level: Level,
+  row: RawRow,
+  base: string | undefined,
+  touched: ReadonlySet<string> | undefined,
+): Promise<void> {
   const full = level.prefix + row.path
+  // #28195: only a path the target's first-parent range touched can hold a value the target put
+  // back. `touched` is that set, computed in ONE traversal per level (touchedPaths); a path absent
+  // from it cannot hide a revert, so it spends no P_max unit, names no gap and takes no per-path
+  // walk — the cap keeps bounding real judgments and an add-only landing stays cheap. When the
+  // traversal failed, `touched` is undefined: every path falls back to the per-path walk under the
+  // cap (the conservative proof), with the failure already named as a gap.
+  if (touched !== undefined && !touched.has(row.path)) return
   if (level.budget.remaining <= 0) {
     level.report.gaps.push({
       kind: "unjudged",

@@ -360,6 +360,31 @@ describe("revert guard review regressions (27363)", () => {
     expect(revertGuardAction(report, "observe")).toBe("warn")
     expect(revertGuardAction(report, "refuse")).toBe("stick")
   })
+
+  it("add-only: the untouched paths cost one traversal per level, not one walk per path", async () => {
+    const w = await addOnlyWorld()
+    const root = await w.checkoutAt(w.candidate)
+    const calls: (readonly string[])[] = []
+    const git = gitIn(root, undefined, undefined, {
+      env,
+      onInvocation: (invocation) => {
+        calls.push(invocation.args)
+      },
+    })
+    const report = await detectReverted({
+      bounds: { depth: 3, pathCap: 1, window: 50 },
+      candidate: w.candidate,
+      git,
+      head: w.head,
+      root,
+      targetHead: w.target,
+    })
+    expect(report.coverage).toBe("complete")
+    // touched-or-not is decided by ONE `log --first-parent --name-only` per level; NO path takes the
+    // per-path `rev-list` walk, so the 12 added paths never each scan the target's history (#28195).
+    expect(calls.filter((args) => args[0] === "rev-list")).toEqual([])
+    expect(calls.filter((args) => args[0] === "log")).toHaveLength(1)
+  })
 })
 
 type RegressionWorld = Readonly<{
@@ -621,3 +646,93 @@ async function targetAdvanceWorld(): Promise<RegressionWorld> {
   const head = await pin(product, "vendor/dep", dep, candidatePin, "candidate keeps the pre-advance value")
   return { candidate: head, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
 }
+
+/**
+ * #28195, the add-only shape: the candidate CONTAINS the target pin (a fast-forward), exactly the
+ * specimen (terminfo.dev 7c2d2dfe -> 871cb62e, target an ancestor of the candidate), and only ADDS
+ * paths absent from the target with no target history to walk.
+ */
+async function addOnlyWorld(): Promise<RegressionWorld> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-revert-addonly-"))
+  roots.push(root)
+  const dep = join(root, "dep")
+  mkdirSync(dep)
+  await gitIn(dep, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(dep, { "keep.txt": "keep\n" }, "base")
+  const targetPin = await commit(dep, { "keep.txt": "keep\n", "advance.txt": "adv\n" }, "target advance")
+  const added: Record<string, string> = {}
+  for (let at = 0; at < 12; at += 1) added[`content/artifacts/a-${String(at)}.json`] = `{"n":${String(at)}}\n`
+  const candidatePin = await commit(dep, added, "add-only content")
+  const product = join(root, "product")
+  mkdirSync(product)
+  await gitIn(product, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(product, { "readme.txt": "product\n" }, "product base")
+  const target = await pin(product, "vendor/dep", dep, targetPin, "target pins the advance")
+  const head = await pin(product, "vendor/dep", dep, candidatePin, "head asks for the add-only compose")
+  return { candidate: head, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
+}
+
+/**
+ * #28195, the discrimination: the target DELETED a path (its own advance) and the candidate, a child
+ * of the target pin, restores the older value. The path is present at the candidate and ABSENT at the
+ * target — an add-only diff row — yet it hides a revert and must still be judged and refused.
+ */
+async function targetDeletedWorld(): Promise<RegressionWorld> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-revert-deleted-"))
+  roots.push(root)
+  const dep = join(root, "dep")
+  mkdirSync(dep)
+  await gitIn(dep, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(dep, { "a.txt": "one\n", "keep.txt": "keep\n" }, "base")
+  rmSync(join(dep, "a.txt"))
+  const targetPin = await commit(dep, { "keep.txt": "keep\n" }, "target deletes a.txt")
+  const candidatePin = await commit(dep, { "a.txt": "one\n" }, "candidate restores a.txt")
+  const product = join(root, "product")
+  mkdirSync(product)
+  await gitIn(product, undefined, undefined, { env })(["init", "--quiet", "--initial-branch=main"])
+  await commit(product, { "readme.txt": "product\n" }, "product base")
+  const target = await pin(product, "vendor/dep", dep, targetPin, "target pins the deletion")
+  const head = await pin(product, "vendor/dep", dep, candidatePin, "head asks for the restore")
+  return { candidate: head, checkoutAt: (sha) => regressionCheckout(root, product, sha), head, root, target }
+}
+
+describe("revert guard path cap (28195)", () => {
+  it("add-only: absent paths spend no cap, name no gap, and the landing is clean", async () => {
+    const w = await addOnlyWorld()
+    const root = await w.checkoutAt(w.candidate)
+    // pathCap 1 with 12 added paths: pre-#28195 this spent the single unit and marked 11 paths
+    // kind:unjudged / reason:path cap P_max=1, so an add-only landing reported coverage incomplete.
+    const report = await detectReverted({
+      bounds: { depth: 3, pathCap: 1, window: 50 },
+      candidate: w.candidate,
+      git: gitIn(root, undefined, undefined, { env }),
+      head: w.head,
+      root,
+      targetHead: w.target,
+    })
+    expect(report.coverage).toBe("complete")
+    expect(report.gaps).toEqual([])
+    expect(report.paths).toEqual([])
+    expect(report.swallowed).toEqual([])
+    expect(revertedPathsFinding(report)).toBeUndefined()
+    expect(revertGuardAction(report, "observe")).toBe("clean")
+    expect(revertGuardAction(report, "refuse")).toBe("clean")
+  })
+
+  it("restored-older-value: an added path the target deleted is still judged and still refused", async () => {
+    const w = await targetDeletedWorld()
+    const root = await w.checkoutAt(w.candidate)
+    const report = await detectReverted({
+      bounds: { depth: 3, pathCap: 500, window: 50 },
+      candidate: w.candidate,
+      git: gitIn(root, undefined, undefined, { env }),
+      head: w.head,
+      root,
+      targetHead: w.target,
+    })
+    expect(report.paths.map((row) => row.path)).toContain("vendor/dep/a.txt")
+    expect(revertedPathsFinding(report)?.reason).toContain("vendor/dep/a.txt")
+    expect(revertGuardAction(report, "observe")).toBe("warn")
+    expect(revertGuardAction(report, "refuse")).toBe("stick")
+  })
+})
