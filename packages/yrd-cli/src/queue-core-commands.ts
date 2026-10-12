@@ -49,6 +49,9 @@ import {
   claimWorktrees,
   directMergeLine,
   drop,
+  issueOf,
+  normalizeIssueReference,
+  retireLocalBranch,
   pauseLine,
   eventDirectMergeCommits,
   eventListRows,
@@ -392,6 +395,7 @@ export type CoreQueueCommand =
     }>
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string; recipient?: string }>
   | Readonly<{ command: "drop"; branch: string; by: string; reason?: string; recipient?: string }>
+  | Readonly<{ command: "drop-issue"; issue: string; by: string; reason?: string; recipient?: string }>
   | Readonly<{ command: "ignore"; branch: string; by: string; reason: string }>
   | Readonly<{ command: "unignore"; branch: string; by: string }>
   | Readonly<{ command: "run"; tier?: "normal" | "long"; stopAtMs?: number }>
@@ -534,6 +538,7 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   check: "check",
   archive: "queue archive",
   drop: "drop",
+  "drop-issue": "drop --issue",
   ignore: "ignore",
   ls: "queue ls",
   pause: "queue pause",
@@ -833,6 +838,7 @@ export async function coreQueueCommand(
     request.command === "resume" ||
     request.command === "withdraw" ||
     request.command === "drop" ||
+    request.command === "drop-issue" ||
     request.command === "ignore" ||
     request.command === "unignore" ||
     request.command === "merge" ||
@@ -1271,6 +1277,75 @@ export async function coreQueueCommand(
           : `unignored ${request.branch} by ${request.by}`,
       )
       return 0
+    }
+    case "drop-issue": {
+      const authorRepo = repositoryHere(io.cwd ?? globalThis.process.cwd())
+      if (authorRepo === undefined) throw new Error("drop --issue requires the authoring repository as cwd")
+      const authorGit = gitIn(authorRepo, undefined, selection, { env })
+      const issue = normalizeIssueReference(
+        resolveIssue === undefined ? request.issue : await resolveIssue(request.issue),
+      )
+      const eventStore = createEventStore(authorRepo, await remoteUrl(git, config.target.remote), selection)
+      const reading = await readEventQueueWithChanges(eventStore, config.target.branch)
+      const heads = await listRefs("refs/heads/", createLocalEventStore(authorRepo, selection))
+      const target = await readRemoteCommit(authorGit, eventStore.remote, `refs/heads/${config.target.branch}`)
+      if (target === undefined) {
+        throw new Error(`drop --issue: target ${eventStore.remote}#${config.target.branch} is absent`)
+      }
+      const log = openLog(join(workdir, "logs"))
+      const removed: { branch: string; head: string; archiveRef: string }[] = []
+      const kept: { branch: string; head: string; reason: string }[] = []
+      let excluded = 0
+      try {
+        for (const [ref, head] of heads) {
+          const branch = ref.slice("refs/heads/".length)
+          if (branch === config.target.branch) {
+            excluded++
+            continue
+          }
+          const change = reading.histories.get(branch)?.state
+          let bound: string | undefined
+          try {
+            bound = change?.issue ?? (await issueOf(authorGit, branch, head, target, undefined, resolveIssue))?.issue
+          } catch (error) {
+            kept.push({ branch, head, reason: `issue binding unreadable: ${String(error)}` })
+            continue
+          }
+          if (bound !== issue) {
+            excluded++
+            continue
+          }
+          const tip = change?.commit ?? head
+          const result = await retireLocalBranch({
+            repo: authorRepo,
+            git: authorGit,
+            branch,
+            tip,
+            actor: request.by,
+            owner: change?.submitter ?? (await authorGit(["show", "-s", "--format=%an", tip])).trim(),
+            issue,
+            reason: request.reason ?? "issue closed or dropped",
+            date: new Date().toISOString().slice(0, 10),
+            log,
+            protections: () =>
+              io.localBranchProtections?.({ repo: authorRepo, branch, tip, issue }) ?? Promise.resolve([]),
+            disposition: { kind: "closed", store: eventStore, queue: config.target.branch },
+          })
+          if (result.outcome === "removed") removed.push({ branch, head: tip, archiveRef: result.archiveRef })
+          else kept.push({ branch, head, reason: result.reason })
+        }
+      } finally {
+        log.finish()
+      }
+      const report = { issue, repo: authorRepo, examined: heads.size, excluded, removed, kept }
+      emit(
+        io,
+        options.json,
+        report,
+        `issue ${issue}: inspected ${heads.size} local branches in ${authorRepo}; excluded ${excluded} target or differently bound branches; retired ${removed.length}, kept ${kept.length}` +
+          kept.map((row) => `\nkept ${row.branch}: ${row.reason}`).join(""),
+      )
+      return kept.length === 0 ? 0 : 1
     }
     case "drop": {
       const eventStore = createEventStore(repo, config.target.remote, selection)

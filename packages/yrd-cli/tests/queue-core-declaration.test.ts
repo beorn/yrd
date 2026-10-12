@@ -1413,6 +1413,59 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(rows.filter((row) => row.state === "direct").map((row) => row.head)).toEqual([direct[1], direct[0]])
   }, 15_000)
 
+  /**
+   * @failure Post-close cleanup either misses never-submitted work or removes a submitted branch that advanced.
+   * @level l3
+   * @consumer The closer running yrd drop --issue after durable issue closure
+   */
+  it("drop by issue archives unpublished local work and keeps an advanced submitted branch", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    const issue = "@example/28791-retirement"
+    const saved = new Map<string, string>()
+    for (const branch of ["task/local-only", "task/advanced"]) {
+      await git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(repo, "work.txt"), branch)
+      await git(["add", "work.txt"])
+      await git(["commit", "--quiet", "-m", `work\n\nRefs: ${issue}`])
+      saved.set(branch, (await git(["rev-parse", "HEAD"])).trim())
+      if (branch === "task/advanced") {
+        const submitted = capture(repo)
+        expect(await runYrdProcess(["bun", "yrd", "submit", "--json"], submitted.io), submitted.stderr()).toBe(0)
+        await git(["commit", "--quiet", "--allow-empty", "-m", "new work after submission"])
+      }
+    }
+    const advanced = (await git(["rev-parse", "HEAD"])).trim()
+    await git(["checkout", "--quiet", "main"])
+    const output = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "drop", "--issue", issue, "--submitter", "fixture", "--json"], output.io),
+      output.stderr(),
+    ).toBe(1)
+    const report = JSON.parse(output.stdout()) as {
+      removed: { branch: string; head: string; archiveRef: string }[]
+      kept: { branch: string; reason: string }[]
+    }
+    expect(report.removed).toEqual([
+      expect.objectContaining({ branch: "task/local-only", head: saved.get("task/local-only") }),
+    ])
+    expect(report.kept).toEqual([
+      expect.objectContaining({ branch: "task/advanced", reason: expect.stringContaining("branch moved") }),
+    ])
+    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/task/local-only"])).trim()).toBe("")
+    expect((await git(["rev-parse", "refs/heads/task/advanced"])).trim()).toBe(advanced)
+    const archive = report.removed[0]!.archiveRef
+    expect((await git(["rev-parse", archive])).trim()).toBe(saved.get("task/local-only"))
+    expect((await git(["ls-remote", "origin", archive])).split("\t")[0]).toBe(saved.get("task/local-only"))
+    expect((await git(["ls-remote", "origin", "refs/heads/task/advanced"])).split("\t")[0]).toBe(
+      saved.get("task/advanced"),
+    )
+    expect(
+      (await listChanges(createEventStore(repo, "origin", git.selection), "main")).get("task/local-only"),
+    ).toMatchObject({ status: "cancelled", reason: "dropped", issue })
+  })
+
   it("submits an unpublished branch, then drops its open change and branch atomically", async () => {
     const repo = await world("{}\n")
     const git = gitIn(repo)

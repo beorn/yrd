@@ -235,17 +235,28 @@ function buildProgram(
       .option("--notify <seat>", "the coordination seat recorded as Recipient:; no notice is sent (27262)")
       .option("--queue <value>", QUEUE_HELP)
       .option("--reason <text>", "why the change leaves the line, written on the record")
-  const queueEnd = async (branch: string, options: PauseOptions, command: "withdraw" | "drop"): Promise<void> => {
+  const queueEnd = async (
+    branch: string | undefined,
+    options: PauseOptions & { issue?: string },
+    command: "withdraw" | "drop",
+  ): Promise<void> => {
+    if ((branch === undefined) === (options.issue === undefined)) {
+      throw new Error("drop needs exactly one branch or --issue <id>")
+    }
+    let subject: { command: "withdraw" | "drop"; branch: string } | { command: "drop-issue"; issue: string }
+    if (branch !== undefined) subject = { command, branch }
+    else if (command === "drop" && options.issue !== undefined) {
+      subject = { command: "drop-issue", issue: options.issue }
+    } else throw new Error("withdraw needs a branch")
     const location = await resolveQueueLocation(cwd(), options.queue, env)
     setExit(
       await coreQueueCommand(
         location.repo,
         io,
         {
-          branch,
+          ...subject,
           by: resolveSubmitter(options.submitter, env),
           ...(options.notify === undefined ? {} : { recipient: options.notify }),
-          command,
           ...(options.reason === undefined ? {} : { reason: options.reason }),
         },
         {
@@ -1277,7 +1288,13 @@ function buildProgram(
   // recipient are separate facts on BOTH endings, so drop must not carry its own
   // table that names neither --submitter (@dev/11 27262 HOLD fba7572b).
   withdrawOptions(
-    program.command("drop <branch>").description("end an event change and delete its branch in one leased publish"),
+    program
+      .command("drop [branch]")
+      .description("end a change, or archive and retire local branches after issue close")
+      .option(
+        "--issue <id>",
+        "archive issue-bound local branches locally and on origin, then retire eligible local refs",
+      ),
   ).action(async (branch, options) => queueEnd(branch as string, options as PauseOptions, "drop"))
 
   program
