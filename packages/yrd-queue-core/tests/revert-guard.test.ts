@@ -18,7 +18,10 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   detectReverted,
+  REVERTED_PATHS_PAYLOAD_CAP,
   revertedPathsFinding,
+  revertedPathsCounts,
+  revertedPathsNotice,
   revertedPathsReason,
   revertGuardAction,
   type RevertGuardReport,
@@ -260,6 +263,60 @@ describe("revert guard (27363)", () => {
     expect(reason).toContain("a.txt@d0")
     expect(reason).toContain('"gaps"')
     expect(revertedPathsFinding(capped)?.reason).toContain("a.txt@d0")
+  })
+
+  it("counts every kind BEFORE the payload’s cap, and a reader takes them from the payload alone (28195)", () => {
+    const many: RevertGuardReport = {
+      base: { base: "a".repeat(40), state: "single" },
+      count: 1,
+      coverage: "incomplete",
+      gaps: [
+        ...Array.from({ length: 40 }, (_, index) => ({
+          kind: "unjudged" as const,
+          depth: 1,
+          path: `content/a${String(index)}.json`,
+          reason: "path cap P_max=500",
+        })),
+        { kind: "bounded" as const, depth: 0, path: "kept.txt", reason: "target history window W=50 exhausted" },
+      ],
+      paths: [{ base: "b", candidate: "c", mode: "100644", path: "vendor/dep/a.txt", target: "t" }],
+      swallowed: [{ candidate: "x", incoming: "y", path: "vendor/dep", target: "z" }],
+    }
+    expect(revertedPathsCounts(many)).toEqual({ reverted: 1, swallowed: 1, gaps: 41, unjudged: 40, bounded: 1 })
+    expect(revertedPathsFinding(many)?.counts.gaps).toBe(41)
+    const reason = revertedPathsReason(many)
+    expect(reason).toContain('"counts":{"reverted":1,"swallowed":1,"gaps":41,"unjudged":40,"bounded":1}')
+    // The stored lists are capped and the counts are not, so a reader states 41 gaps while the payload
+    // holds only the cap: a truncated total is named, never counted out of the gap prose.
+    expect(revertedPathsNotice(reason)).toEqual({
+      counts: { reverted: 1, swallowed: 1, gaps: 41, unjudged: 40, bounded: 1 },
+      coverage: "incomplete",
+      gapsStored: REVERTED_PATHS_PAYLOAD_CAP,
+      truncated: true,
+    })
+    // A row written before the counts were recorded: coverage and the capped total are still read,
+    // the counts are simply not there, and nothing is invented for them.
+    const older = `0 reverted/swallowed path(s); {"count":0,"coverage":"incomplete","paths":[],"swallowed":[],"gaps":${JSON.stringify(
+      Array.from({ length: REVERTED_PATHS_PAYLOAD_CAP }, (_, index) => ({
+        kind: "unjudged",
+        depth: 1,
+        reason: "path cap P_max=500",
+        path: `content/a${String(index)}.json`,
+      })),
+    )}}; gaps: path cap P_max=500 [content/a0.json@d1], …`
+    expect(revertedPathsNotice(older)).toEqual({
+      coverage: "incomplete",
+      gapsStored: REVERTED_PATHS_PAYLOAD_CAP,
+      truncated: true,
+    })
+    // A path whose own bytes carry braces and quotes cannot break the object scan.
+    const braced = revertedPathsReason({
+      ...many,
+      paths: [{ base: "b", candidate: "c", mode: "100644", path: 'a{b}"c/d.txt', target: "t" }],
+    })
+    expect(revertedPathsNotice(braced)?.counts?.gaps).toBe(41)
+    // Not a revert reason at all.
+    expect(revertedPathsNotice("admission policy warning task/x@abc123: no kind")).toBeUndefined()
   })
 
   it("policy: a hit warns by default and sticks only under refuse, and a gap never goes clean", () => {

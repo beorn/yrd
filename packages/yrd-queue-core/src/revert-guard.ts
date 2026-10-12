@@ -497,6 +497,39 @@ async function firstParentTouching(
 }
 
 /**
+ * Exact counts by kind for one report, computed BEFORE any cap (#28195). The durable
+ * `reverted-paths` reason stores these beside its capped path and gap lists, so a listing can
+ * state the whole finding without counting the reason’s prose back up.
+ */
+export type RevertedPathsCounts = Readonly<{
+  /** Paths the candidate put back to a value the target’s history held before its own advance. */
+  reverted: number
+  /** Component pins the compose left equal to the target’s while the incoming pin differed. */
+  swallowed: number
+  /** Every named limit on the proof, both kinds. */
+  gaps: number
+  /** The `unjudged` gaps: the guard could not run its proof at all. */
+  unjudged: number
+  /** The `bounded` gaps: the proof ran to its declared window and found nothing. */
+  bounded: number
+}>
+
+/** How many paths and gaps the reason’s payload stores; the counts above are never capped. */
+export const REVERTED_PATHS_PAYLOAD_CAP = 32
+
+/** Exact counts by kind, read from the report itself and never from its rendering. */
+export function revertedPathsCounts(report: RevertGuardReport): RevertedPathsCounts {
+  const ofKind = (want: RevertGuardGap["kind"]): number => report.gaps.filter((gap) => gap.kind === want).length
+  return Object.freeze({
+    reverted: report.paths.length,
+    swallowed: report.swallowed.length,
+    gaps: report.gaps.length,
+    unjudged: ofKind("unjudged"),
+    bounded: ofKind("bounded"),
+  })
+}
+
+/**
  * The durable-warning finding for a report, or undefined when there is nothing to say.
  * A `complete` report with no hit is the ONLY silent case, and a report is `complete` when
  * every gap is `bounded` (#28000) — so a search that reached its declared window `W` warns
@@ -504,19 +537,29 @@ async function firstParentTouching(
  * any `unjudged` gap (unreadable tree/history, an unpicked base, a cap that skipped work),
  * always names itself.
  */
-export function revertedPathsFinding(
-  report: RevertGuardReport | undefined,
-): Readonly<{ reason: string; count: number; coverage: "complete" | "incomplete" }> | undefined {
+export function revertedPathsFinding(report: RevertGuardReport | undefined):
+  | Readonly<{
+      reason: string
+      count: number
+      counts: RevertedPathsCounts
+      coverage: "complete" | "incomplete"
+    }>
+  | undefined {
   if (report === undefined) return undefined
   const hit = report.paths.length > 0 || report.swallowed.length > 0
   if (!hit && report.coverage === "complete") return undefined
-  return { coverage: report.coverage, count: report.paths.length, reason: revertedPathsReason(report) }
+  return {
+    coverage: report.coverage,
+    count: report.paths.length,
+    counts: revertedPathsCounts(report),
+    reason: revertedPathsReason(report),
+  }
 }
 
 /** A compact, machine-readable `Reason:` for the durable `reverted-paths` warning. */
 export function revertedPathsReason(report: RevertGuardReport): string {
   const paths = [...report.paths.map((row) => row.path), ...report.swallowed.map((row) => row.path)]
-  const gaps = report.gaps.slice(0, 32).map((gap) => ({
+  const gaps = report.gaps.slice(0, REVERTED_PATHS_PAYLOAD_CAP).map((gap) => ({
     kind: gap.kind,
     depth: gap.depth,
     reason: gap.reason,
@@ -524,9 +567,10 @@ export function revertedPathsReason(report: RevertGuardReport): string {
   }))
   const payload = JSON.stringify({
     count: report.paths.length,
+    counts: revertedPathsCounts(report),
     coverage: report.coverage,
-    paths: report.paths.slice(0, 32).map((row) => row.path),
-    swallowed: report.swallowed.slice(0, 32).map((row) => row.path),
+    paths: report.paths.slice(0, REVERTED_PATHS_PAYLOAD_CAP).map((row) => row.path),
+    swallowed: report.swallowed.slice(0, REVERTED_PATHS_PAYLOAD_CAP).map((row) => row.path),
     ...(gaps.length === 0 ? {} : { gaps }),
     ...(report.base.state === "single" ? {} : { base: report.base.state }),
   })
@@ -538,6 +582,95 @@ export function revertedPathsReason(report: RevertGuardReport): string {
           .map((gap) => (gap.path === "" ? gap.reason : `${gap.reason} [${gap.path}@d${String(gap.depth)}]`))
           .join(", ")}`
   return `${String(paths.length)} reverted/swallowed path(s)${named === "" ? "" : `: ${named}`}; ${payload}${gapText}`
+}
+
+/**
+ * What a stored `reverted-paths` reason says, read from its structured payload alone (#28195).
+ * The prose around the payload — the leading count sentence and the trailing gap text — is never
+ * parsed: the payload is the writer’s own record, and a reader that counted gap prose back up
+ * would be a second derivation that breaks the day the prose is reworded. `undefined` means the
+ * string carries no such payload at all.
+ */
+export type RevertedPathsNotice = Readonly<{
+  /** Exact counts by kind, present only when the row was written by a build that recorded them. */
+  counts?: RevertedPathsCounts
+  /** The writer’s verdict for the change, as the payload records it. */
+  coverage: "complete" | "incomplete"
+  /** Gaps the payload stores, which its own writer capped at {@link REVERTED_PATHS_PAYLOAD_CAP}. */
+  gapsStored: number
+  /** The stored gap list reached the cap, so the true total is `gapsStored` or more. */
+  truncated: boolean
+}>
+
+/** The payload’s opening bytes: the writer emits `count` first, so nothing precedes the object. */
+const REVERTED_PATHS_PAYLOAD = '{"count":'
+
+export function revertedPathsNotice(reason: string): RevertedPathsNotice | undefined {
+  const start = reason.indexOf(REVERTED_PATHS_PAYLOAD)
+  if (start === -1) return undefined
+  const body = jsonObjectAt(reason, start)
+  if (body === undefined) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    // silent-fallback-allow: a payload this reader cannot parse is reported as no payload at all,
+    // and every caller then says the counts were not recorded rather than showing a guessed number.
+    return undefined
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined
+  const fields = parsed as Record<string, unknown>
+  const coverage = fields["coverage"]
+  if (coverage !== "complete" && coverage !== "incomplete") return undefined
+  const gaps = fields["gaps"]
+  const gapsStored = Array.isArray(gaps) ? gaps.length : 0
+  const counts = countsOf(fields["counts"])
+  return {
+    ...(counts === undefined ? {} : { counts }),
+    coverage,
+    gapsStored,
+    truncated: gapsStored >= REVERTED_PATHS_PAYLOAD_CAP,
+  }
+}
+
+/** The balanced `{...}` starting at `start`, with quoted strings and escapes respected. */
+function jsonObjectAt(text: string, start: number): string | undefined {
+  let depth = 0
+  let quoted = false
+  let escaped = false
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index]
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (char === "\\") escaped = true
+      else if (char === '"') quoted = false
+      continue
+    }
+    if (char === '"') quoted = true
+    else if (char === "{") depth += 1
+    else if (char === "}") {
+      depth -= 1
+      if (depth === 0) return text.slice(start, index + 1)
+    }
+  }
+  // silent-fallback-allow: an unterminated object is not a payload; the caller says the counts
+  // were not recorded, which is the same word it uses for a row with no payload at all.
+  return undefined
+}
+
+/** A `counts` member, or undefined when it is absent or is not five whole non-negative numbers. */
+function countsOf(value: unknown): RevertedPathsCounts | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  const { reverted, swallowed, gaps, unjudged, bounded } = value as Record<string, unknown>
+  const each = [reverted, swallowed, gaps, unjudged, bounded]
+  if (each.some((held) => typeof held !== "number" || !Number.isSafeInteger(held) || held < 0)) return undefined
+  return Object.freeze({
+    reverted: reverted as number,
+    swallowed: swallowed as number,
+    gaps: gaps as number,
+    unjudged: unjudged as number,
+    bounded: bounded as number,
+  })
 }
 
 /** What the guard asks of a compose: nothing, a durable warning, or the named stick before CAS. */

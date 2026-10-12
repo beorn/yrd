@@ -200,7 +200,15 @@ import type { DraftWindow, WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot, WatchSource } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
-import { STATE_WORDS, clock, diagnosticLines, firstLine, mediaDuration, timingLine } from "./watch-format.ts"
+import {
+  STATE_WORDS,
+  clock,
+  diagnosticLines,
+  firstLine,
+  mediaDuration,
+  revertWarningLine,
+  timingLine,
+} from "./watch-format.ts"
 import { readRunnerFacts, readRunnerService, type RunnerFacts } from "./watch-runner.ts"
 import { runnerOf } from "./watch-runner-reading.ts"
 import { readPublishedRunner, RunnerPublisher } from "./runner-publication.ts"
@@ -3195,7 +3203,14 @@ export async function coreQueueCommand(
           data: {
             ...statusFact(),
             observation,
-            changes: documentRows.map((row) => row.row),
+            // #28195: a listing states a row’s warning in ONE summary line — counts by kind, the
+            // coverage verdict, the admission-warning event — built from the row’s structured notice
+            // and never from the reason’s prose. `yrd queue show` renders the stored reason in full.
+            changes: documentRows.map((row) =>
+              row.row.revertWarning === undefined
+                ? row.row
+                : { ...row.row, diagnosticSummary: revertWarningLine(row.row) },
+            ),
             journal: journalFact(journals),
             // The runner belongs to the whole queue, even when a selector hides every row.
             ...(runnerStatus === undefined ? {} : { runner: runnerStatus }),
@@ -3916,16 +3931,35 @@ export async function coreQueueCommand(
             : histories
                 .map(({ events, ...row }, index) => {
                   const view = views.get(`${row.branch}@${row.head}`)
+                  // #28195: the row’s stored diagnostic is its reverted-paths reason, and `show` renders
+                  // that reason in FULL exactly once, from the event that carries it. The raw event line
+                  // below states the same finding as the one-line summary, so the report is neither
+                  // dropped nor printed twice; `list` shows that one line and never the full reason.
+                  const reverted = events.flatMap((event) => {
+                    if (event.type !== "admission-warning") return []
+                    if (event.props.find(([key]) => key === "Warning-Kind")?.[1] !== "reverted-paths") return []
+                    const reason = event.props.find(([key]) => key === "Reason")?.[1]
+                    return reason === undefined ? [] : [reason]
+                  })
                   return [
                     rowLine({ row }),
                     ...(view?.note === undefined ? [] : [`  (${view.note})`]),
                     ...(view?.checks ?? []).flatMap(checkLines),
                     ...(row.diagnostic === undefined ? [] : [`  diagnostic: ${row.diagnostic}`]),
+                    ...(reverted.length === 0 ? [] : [`  diagnostic: ${reverted.join("; ")}`]),
                     `  queue: ${config.target.branch}`,
                     ...events.map((event) => {
                       const at = event.props.find(([key]) => key === "Time")?.[1]
                       const reason = event.props.find(([key]) => key === "Reason")?.[1]
-                      return `  ${at ?? "Time absent"} ${event.type}${event.writer == null ? "" : ` by ${event.writer}`}${reason === undefined ? "" : ` — ${reason}`}`
+                      const summarised =
+                        event.type === "admission-warning" &&
+                        event.props.find(([key]) => key === "Warning-Kind")?.[1] === "reverted-paths"
+                      const detail = summarised
+                        ? row.revertWarning === undefined
+                          ? "the stored reason is the diagnostic above"
+                          : revertWarningLine(row)
+                        : reason
+                      return `  ${at ?? "Time absent"} ${event.type}${event.writer == null ? "" : ` by ${event.writer}`}${detail === undefined ? "" : ` — ${detail}`}`
                     }),
                     ...(index !== 0 || request.branch === undefined || reading.changes.get(request.branch) === undefined
                       ? []

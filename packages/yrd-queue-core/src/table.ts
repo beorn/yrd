@@ -3,6 +3,7 @@ import { journalKey, type JournalRun, type Journals, type LogRecord } from "./lo
 import { incidentLine, type Incident } from "./incident.ts"
 import { CHANGE_STATUSES, isOpen, type ChangeStatus, type EventChange } from "./events.ts"
 import type { Git } from "./git.ts"
+import type { RevertedPathsNotice } from "./revert-guard.ts"
 
 export type NextOwner = Readonly<{ owner: string; because: string }>
 
@@ -44,6 +45,13 @@ export type Row<Status extends string = ChangeStatus | "direct" | "invalid"> = R
   unknownKinds?: readonly string[]
   /** A selected chain that cannot fold, or retained merged endings whose equality cannot be proved. */
   diagnostic?: string
+  /**
+   * The compose revert detector’s latest durable warning (#28195): the `admission-warning` event
+   * that carries it, and the structured notice its `Reason:` payload holds. Present only for a
+   * `reverted-paths` warning, whose reason text stays that event’s stored record (rendered in full
+   * by `yrd queue show`), so a listing states the finding without re-reading the gap prose.
+   */
+  revertWarning?: Readonly<{ event: string; notice?: RevertedPathsNotice }>
   /** Immutable ending identity distinguishing retained ambiguous merged rows. */
   ending?: string
   /** Exact selected event chain and fold error when state is invalid. */

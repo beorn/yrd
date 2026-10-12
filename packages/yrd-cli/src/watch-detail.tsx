@@ -55,6 +55,7 @@ import {
   CHECK_GLYPH,
   clock,
   diagnosticLines,
+  hasWarning,
   mediaDuration,
   RUNNER_GLYPH,
   stateColor,
@@ -467,7 +468,7 @@ export function WatchDetail({
         >
           <TabList flexWrap="wrap">
             <Tab key={CHANGES_TAB} value={CHANGES_TAB}>
-              Timeline{(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? "" : " ⚠"}
+              Timeline{hasWarning(row) ? " ⚠" : ""}
               {"\n"}
               <Text color="$fg-muted">{cutCounter(detail)}</Text>
             </Tab>
@@ -480,11 +481,11 @@ export function WatchDetail({
           <Box height={1} flexShrink={0} />
           <TabPanel key={CHANGES_TAB} value={CHANGES_TAB}>
             <DetailScroll controller={changesScroll}>
-              {(row.diagnostics?.length ?? 0) === 0 && row.diagnostic === undefined ? null : (
+              {hasWarning(row) ? (
                 <Text color="$fg-warning" wrap="wrap">
                   {diagnosticLines(row, detail.journal).join("\n")}
                 </Text>
-              )}
+              ) : null}
               <ChangeBox detail={detail} diffOpen={diffOpen} diff={diff} onToggleDiff={onToggleDiff} />
             </DetailScroll>
           </TabPanel>

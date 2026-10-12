@@ -1,7 +1,20 @@
 /** Event-chain changes in the shared table shape. Status comes only from the event fold. */
 import type { ChangeStatus, EventChange } from "./events.ts"
 import type { Draft } from "./drafts.ts"
+import { revertedPathsNotice } from "./revert-guard.ts"
 import { clocks, type Row } from "./table.ts"
+
+/**
+ * The structured notice for a change’s latest `reverted-paths` warning (#28195): the event that
+ * carries it, and what its stored reason payload says. `notice` is absent when that reason carries
+ * no readable payload — a renderer says so rather than filling the numbers in.
+ */
+function revertWarningOf(change: EventChange): Row<ChangeStatus>["revertWarning"] {
+  const warning = change.admissionWarning
+  if (warning === undefined || warning.kind !== "reverted-paths") return undefined
+  const notice = revertedPathsNotice(warning.reason)
+  return { event: warning.event, ...(notice === undefined ? {} : { notice }) }
+}
 
 function noticeOutcome(
   branch: string,
@@ -74,6 +87,7 @@ export function eventRows(
     if (change.commit === undefined) {
       throw new Error(`event change ${branch} has no submitted commit`)
     }
+    const revertWarning = revertWarningOf(change)
     const adoptedTimes = change.adoptedPhases
     const startedAt =
       adoptedTimes === undefined
@@ -105,6 +119,7 @@ export function eventRows(
         : { reason: `deferred ${change.deferred.check}: ${change.deferred.reason}` }),
       ...(change.ignored === undefined ? {} : { ignored: change.ignored }),
       ...(change.diagnostic === undefined ? {} : { diagnostic: change.diagnostic }),
+      ...(revertWarning === undefined ? {} : { revertWarning }),
       ...noticeOutcome(branch, change),
     })
   }

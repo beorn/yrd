@@ -38,7 +38,9 @@ import {
   ageRunText,
   clock,
   friendlyPath,
+  hasWarning,
   queueRunText,
+  revertWarningLine,
   runIdentifier,
   stateColor,
   stateGlyph,
@@ -594,7 +596,8 @@ export const ListRow = memo(function ListRow({
           ? "not yet read"
           : row.head.slice(0, 12)
         : `${row.head.slice(0, 12)} (subject not fetched)`)
-  const shownTitle = row.diagnostic === undefined ? title : `${row.diagnostic} · ${title}`
+  const warnings = row.diagnostic ?? (row.revertWarning === undefined ? undefined : revertWarningLine(row))
+  const shownTitle = warnings === undefined ? title : `${warnings} · ${title}`
   const computedTaskWidth =
     layout.taskWidth ??
     Math.max(
@@ -654,7 +657,7 @@ export const ListRow = memo(function ListRow({
           task: (
             <Box flexDirection="row" minWidth={0} overflow="hidden">
               <Text color={forced ?? held} wrap="truncate" minWidth={0}>
-                {`${row.diagnostic !== undefined || (row.diagnostics?.length ?? 0) > 0 ? "\u26A0\uFE0E " : ""}${shownTitle}`}
+                {`${hasWarning(row) ? "\u26A0\uFE0E " : ""}${shownTitle}`}
               </Text>
               {displayBranch === "" ? null : (
                 <Text color={forced ?? held ?? "$fg-muted"} flexShrink={0}>
