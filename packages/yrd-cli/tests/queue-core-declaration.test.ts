@@ -41,6 +41,7 @@ import {
   readEventQueue,
   readEventQueueWithChanges,
   readRemoteCalls,
+  readRunLog,
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
   watchRows,
@@ -1483,6 +1484,22 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(manualReport.removed).toEqual([expect.objectContaining({ branch: "task/manual-only" })])
     expect((await git(["ls-remote", "origin", manualReport.removed[0]!.archiveRef])).split("\t")[0]).toBe(manualHead)
     expect((await git(["rev-parse", "refs/heads/task/advanced"])).trim()).toBe(advanced)
+    // AC5: the command's journal must remain readable by the existing projection reader.
+    // Custody assertions alone miss a writer that omits the required run header.
+    const logs = join(await workdirOf(git, { cwd: repo }), "logs")
+    const records = readdirSync(logs)
+      .filter((name) => name.endsWith(".jsonl"))
+      .flatMap((name) => readRunLog(logs, name.slice(0, -".jsonl".length)))
+    expect(records.filter((row) => row.subject === "journal-projection")).toEqual([])
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        kind: "local-branch-retirement",
+        branch: "task/local-only",
+        issue,
+        head: saved.get("task/local-only"),
+        outcome: "removed",
+      }),
+    )
   })
 
   it("submits an unpublished branch, then drops its open change and branch atomically", async () => {

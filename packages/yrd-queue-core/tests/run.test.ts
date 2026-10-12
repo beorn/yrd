@@ -477,6 +477,12 @@ it.each([false, true])("queue retirement respects the author store and its prote
   expect(outcome).toMatchObject({ exitCode: 0, merged: [branch] })
   expect(await refAt(authorGit, `refs/heads/${branch}`)).toBe(protectedBranch ? head : undefined)
   expect(await refAt(w.git, `refs/heads/${branch}`)).toBe(head)
+  // AC5: removing the author's local ref must not remove the readable merged change.
+  expect(await readStatus(createEventStore(authorRepo, "origin", authorGit.selection), "main", branch)).toMatchObject({
+    status: "merged",
+    commit: head,
+    issue: "@i/10-yrd/1",
+  })
   const records = readRunLog(dirname(outcome.log), outcome.run)
   expect(records.filter((row) => row.kind === "local-branch-retirement")).toEqual([
     expect.objectContaining({ outcome: protectedBranch ? "kept" : "removed", branch, head, issue: "@i/10-yrd/1" }),

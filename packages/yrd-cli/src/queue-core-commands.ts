@@ -1315,6 +1315,14 @@ export async function coreQueueCommand(
         throw new Error(`${NAMED[request.command]}: target ${eventStore.remote}#${config.target.branch} is absent`)
       }
       const log = openLog(join(workdir, "logs"))
+      log.write({
+        kind: "run",
+        command: NAMED[request.command],
+        target: targetLabel,
+        base: target,
+        config: config.blob,
+      })
+      log.write({ kind: "queue", queue: `${eventStore.remote}#${config.target.branch}` })
       const removed: { branch: string; head: string; archiveRef: string }[] = []
       const kept: { branch: string; head: string; reason: string }[] = []
       let excluded = 0
