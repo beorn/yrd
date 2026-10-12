@@ -1,5 +1,6 @@
 /** Yrd's event meaning. Gitomic owns the commits and CAS; this module owns the fold. */
 import { Conflict, RetriesExhausted } from "./git.ts"
+import { ARCHIVE_REF_PREFIX } from "git-super/archive-ref"
 import { listRefs, openEvents } from "./git.ts"
 import { readEventChain, readEventChains } from "./event-read.ts"
 import type { AlsoRef, Event, EventInput, GitomicBackend, Oid } from "./git.ts"
@@ -912,7 +913,16 @@ export function createLocalEventStore(
 ): LocalQueueReadStore {
   return { repo, selection, backend }
 }
-export type DropRequest = Readonly<{ queue: string; branch: string; by: string; note?: string; recipient?: string }>
+export type DropRequest = Readonly<{
+  queue: string
+  branch: string
+  by: string
+  note?: string
+  recipient?: string
+  issue?: string
+  /** Publish custody for local retirement; leave the remote branch and candidate refs intact. */
+  localArchive?: Readonly<{ ref: string; tip: string }>
+}>
 export type Dropped = Readonly<{ queue: string; branch: string; head: string; event: string }>
 export type SetBranchIgnoredRequest = Readonly<
   { queue: string; branch: string; by: string } & ({ ignored: true; reason: string } | { ignored: false })
@@ -2185,7 +2195,7 @@ async function appendDecision(
   return { event: written }
 }
 
-/** End a branch and delete its name in the same leased publish. */
+/** End a branch and publish its disposition atomically: remote deletion, or custody for local retirement. */
 export async function drop(store: QueueLocation, request: DropRequest): Promise<Dropped> {
   const { queue, branch } = request
   const format = await queueFormat(store, queue)
@@ -2207,9 +2217,33 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   const history = selected?.events ?? []
   const state = selected?.state ?? initial
   const branchRef = `refs/heads/${branch}`
+  const archive = request.localArchive
+  let archiveUpdate: AlsoRef | undefined
+  if (archive !== undefined) {
+    if (!archive.ref.startsWith(`${ARCHIVE_REF_PREFIX}/`) || !COMMIT_OID.test(archive.tip)) {
+      throw new TypeError(`local retirement ${branch}: expected an archive ref and full commit oid`)
+    }
+    const previous = (await listRefs(archive.ref, store)).get(archive.ref)
+    if (previous !== undefined && previous !== archive.tip) {
+      throw new Error(
+        `local retirement ${branch}: archive ${archive.ref} already holds ${previous}, not ${archive.tip}`,
+      )
+    }
+    archiveUpdate = { ref: archive.ref, expect: previous ?? null, oid: archive.tip }
+  }
+  const verifyCustody = async (eventTip: string): Promise<void> => {
+    if (archive === undefined) return
+    const [archives, events] = await Promise.all([listRefs(archive.ref, store), listRefs(ref, store)])
+    if (archives.get(archive.ref) !== archive.tip || events.get(ref) !== eventTip) {
+      throw new Error(
+        `local retirement ${branch}: origin custody did not read back; ${archive.ref} expected ${archive.tip}, ` +
+          `read ${archives.get(archive.ref) ?? "absent"}; ${ref} expected ${eventTip}, read ${events.get(ref) ?? "absent"}; keep the local branch`,
+      )
+    }
+  }
   const fetchRefs = store.backend.fetchRefs
   if (fetchRefs === undefined) throw new Error("Gitomic backend lacks fetchRefs for dropped branch commit")
-  const head = (await fetchRefs(store.repo, branchRef, store.remote)).get(branchRef)
+  const head = archive?.tip ?? (await fetchRefs(store.repo, branchRef, store.remote)).get(branchRef)
   if (state.ending !== undefined && head !== undefined) {
     const kept = history.flatMap((event) => event.links)
     if (!kept.includes(head)) {
@@ -2250,15 +2284,15 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
       throw new Error("Gitomic backend lacks publish for dropped branch deletion")
     }
     if (selectedTip === null) throw new Error(`${ref} in ${store.repo}: ended change has no chain tip`)
-    await store.backend.publish(
-      store.repo,
-      [
-        { ref, expect: selectedTip, oid: selectedTip },
-        { ref: branchRef, expect: head, oid: null },
-      ],
-      store.remote,
-    )
-    await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [head])
+    const disposition =
+      archiveUpdate === undefined
+        ? { ref: branchRef, expect: head, oid: null }
+        : { ref: archiveUpdate.ref, expect: archiveUpdate.expect ?? "0".repeat(head.length), oid: head }
+    await store.backend.publish(store.repo, [{ ref, expect: selectedTip, oid: selectedTip }, disposition], store.remote)
+    await verifyCustody(selectedTip)
+    if (archive === undefined) {
+      await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [head])
+    }
     return { queue, branch, event: state.ending.id, head }
   }
   const at = new Date()
@@ -2276,16 +2310,30 @@ export async function drop(store: QueueLocation, request: DropRequest): Promise<
   })
   const planned =
     selectedTip === null
-      ? [changeInput("opened", { queueTip, at, commit: keptHead, by: request.by }), input]
+      ? [
+          changeInput("opened", {
+            queueTip,
+            at,
+            commit: keptHead,
+            by: request.by,
+            ...(request.issue === undefined ? {} : { issue: request.issue }),
+          }),
+          input,
+        ]
       : decide(history, input)
   const result = await chain.append(planned, {
     expect: selectedTip,
     // The event keeps H, so this branch delete only removes its name.
-    ...(head === undefined ? {} : { also: [{ ref: branchRef, expect: head, oid: null }] }),
+    ...(archiveUpdate === undefined
+      ? head === undefined
+        ? {}
+        : { also: [{ ref: branchRef, expect: head, oid: null }] }
+      : { also: [archiveUpdate] }),
   })
   const written = result.events.findLast((event) => event.type === "cancelled")?.id
   if (written === undefined) throw new Error(`${ref} in ${store.repo}: dropped event was not written`)
-  if (head !== undefined) {
+  await verifyCustody(written)
+  if (head !== undefined && archive === undefined) {
     await deleteCandidateRefsForShas(gitIn(store.repo, undefined, store.selection), store.repo, store.remote, [head])
   }
   return { queue, branch, event: written, head: keptHead }
