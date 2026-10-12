@@ -517,6 +517,11 @@ async function fileMergedCloseRequests(
  * keeps automatic candidates with a named reason. Explicit close intent keeps
  * its own lifecycle. Held/standing, busy, dirty, unmerged and open-issue checks
  * still determine eligibility after protection expires.
+ * Regressions in tests/queue-core-up.test.ts:
+ * - a declared seat cwd survives cleanup without a process holder
+ * - a newly opened environment survives cleanup inside the grace window and becomes eligible after it
+ * The hh host integration covers its resolver in tools/yrd-runtime-json-output.slow.test.ts:
+ * - a declared Hab slot preserves its environment through a round and a changed declaration releases it
  */
 export function createEnvironmentCleanup() {
   const cache = new Map<string, CachedEnvironment>()
