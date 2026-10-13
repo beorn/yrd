@@ -52,7 +52,12 @@ import {
 import { testGitIn as gitIn } from "../../../tests/support/test-git-in.ts"
 import { outsideRepositoryRoot } from "../../../tests/support/outside-repository.ts"
 import { openEvents } from "gitomic/events"
-import { assertEventListingFence, coreQueueCommand, openEventDetail } from "../src/queue-core-commands.ts"
+import {
+  assertEventListingFence,
+  coreQueueCommand,
+  openEventDetail,
+  readEventListing,
+} from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { readEnvOpenRecord } from "../src/env-open-record.ts"
 import { issueLookup, issueResolver } from "../src/issue-resolver.ts"
@@ -1256,6 +1261,39 @@ describe("a queue is the selected origin branch carrying config", () => {
       }),
     ])
   }, 20_000)
+
+  // 25655: migrated endings retain their original times. The default list's
+  // @failure A warm recent-history cache keeps an ending visible after its recorded Time leaves the window.
+  // @level l2; @consumer queue list/watch using an unchanged event inventory
+  it("expires cached endings at the recorded-time window boundary", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const store = createEventStore(repo, "origin", git.selection)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const config = await readConfig(git, head, { branch: "main", remote: "origin" })
+    if (config === undefined) throw new Error("fixture declaration absent")
+    const now = Date.now()
+    const ended = new Date(now - 7 * 86400000 + 500)
+    const queueTip = await createQueue(repo, "main", head, new Date(ended.getTime() - 60_000))
+    const branch = "task/window-boundary"
+    await (
+      await openEvents({ ...store, ref: changesRef("main", branch), writer: "yrd" })
+    ).append(
+      [
+        changeInput("opened", { queueTip, at: ended, commit: head, by: "yrd" }),
+        changeInput("merged", { queueTip, at: ended, commit: head }),
+      ],
+      { expect: null },
+    )
+    const workdir = await workdirOf(git, { cwd: repo })
+    const first = await readEventListing(git, config, repo, workdir, head, store, { now, recent: { env: process.env } })
+    expect(first.all.map((row) => row.branch)).toContain(branch)
+    const warm = await readEventListing(git, config, repo, workdir, head, store, {
+      now: now + 1000,
+      recent: { env: process.env },
+    })
+    expect(warm.all.map((row) => row.branch)).not.toContain(branch)
+  })
 
   // 25655: migrated endings retain their original times. The default list's
   // seven-day window must not make their full change histories unshowable.

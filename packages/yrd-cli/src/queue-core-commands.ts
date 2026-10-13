@@ -5722,6 +5722,12 @@ export async function readEventListing(
     typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : Date.now()
   const draftWindow = options.draftWindow ?? "7d"
   const draftWindowChanged = cache !== undefined && cache.draftWindow !== draftWindow
+  const recentWindowExpired =
+    recent !== undefined &&
+    cache !== undefined &&
+    cache.reading.all.some(
+      (row) => row.endedAt !== undefined && row.endedAt.getTime() < nowMs - 7 * 24 * 60 * 60 * 1000,
+    )
   const selectedRefs =
     options.branch === undefined
       ? undefined
@@ -5847,6 +5853,7 @@ export async function readEventListing(
   // 2. An unchanged event-ref fetch reuses the last round if head listing is recent
   if (
     options?.forceFresh !== true &&
+    !recentWindowExpired &&
     eventRefsUnchanged &&
     headListingRecent &&
     !openBranchDeleted &&
@@ -5881,6 +5888,7 @@ export async function readEventListing(
   // If event refs were unchanged and branch heads also didn't change:
   if (
     options?.forceFresh !== true &&
+    !recentWindowExpired &&
     eventRefsUnchanged &&
     !openBranchDeleted &&
     areRefMapsEqual(cache?.branchRefs, branchRefs) &&
