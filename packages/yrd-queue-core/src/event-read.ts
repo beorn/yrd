@@ -1,5 +1,4 @@
 /** Yrd's one policy for reading Gitomic event chains. */
-import { parseCommit, readRawCommits, type CommitMeta, type ReadRawCommitsOptions } from "gitomic"
 import type { Process, ProcessResult } from "@yrd/process"
 import {
   chainsUnder,
@@ -12,6 +11,10 @@ import {
   type GitSelection,
   type Oid,
   openEvents,
+  parseCommit,
+  readRawCommits,
+  type CommitMeta,
+  type ReadRawCommitsOptions,
 } from "./git.ts"
 
 /** The wave size a complete read pages at, one git process per wave. */
