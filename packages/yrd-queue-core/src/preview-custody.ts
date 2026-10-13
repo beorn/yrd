@@ -304,10 +304,17 @@ async function sweepOrphans(
   stores: ReadonlySet<string>,
   leftover: PreviewCustodyOptions["leftover"],
 ): Promise<void> {
+  // Both callers hold the clone writer lock, after their root changes. Share
+  // this observation only for this sweep; a later invocation reads it again.
+  const liveRoots = new Set<string>()
+  for (const root of await refsUnder(rootGit, clonePrefix)) {
+    // Keep refAt's tag peeling and loud errors for unusual root objects.
+    if (root.type === "commit" || (await refAt(rootGit, root.name)) !== undefined) liveRoots.add(root.name)
+  }
   for (const store of stores) {
     const storeGit = gitIn(store)
     for (const ref of await refsUnder(storeGit, clonePrefix)) {
-      if ((await refAt(rootGit, ref.name)) !== undefined) continue
+      if (liveRoots.has(ref.name)) continue
       try {
         await storeGit(["update-ref", "-d", ref.name, ref.oid])
       } catch (error) {
@@ -317,12 +324,17 @@ async function sweepOrphans(
   }
 }
 
-async function refsUnder(git: Git, prefix: string): Promise<readonly Readonly<{ name: string; oid: string }>[]> {
-  const listed = (await git(["for-each-ref", "--format=%(refname) %(objectname)", prefix])).trim()
+async function refsUnder(
+  git: Git,
+  prefix: string,
+): Promise<readonly Readonly<{ name: string; oid: string; type: string }>[]> {
+  const listed = (await git(["for-each-ref", "--format=%(refname) %(objectname) %(objecttype)", prefix])).trim()
   if (listed === "") return []
   return listed.split("\n").map((line) => {
-    const [name, oid] = line.split(" ")
-    if (name === undefined || oid === undefined) throw new Error(`for-each-ref ${prefix} printed ${line}`)
-    return { name, oid }
+    const [name, oid, type] = line.split(" ")
+    if (name === undefined || oid === undefined || type === undefined) {
+      throw new Error(`for-each-ref ${prefix} printed ${line}`)
+    }
+    return { name, oid, type }
   })
 }

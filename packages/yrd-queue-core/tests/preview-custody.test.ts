@@ -231,7 +231,23 @@ describe("anchorPreviewCustody (27510)", () => {
     await custody(product, first.root, "task/a")
     const second = await candidate(product, "second")
 
-    await custody(product, second.root, "task/b")
+    // 29088: custody must not probe each root separately for every component.
+    // Behavioral custody assertions alone pass despite the roots × stores cost.
+    let rootProbes = 0
+    await custody(product, second.root, "task/b", {
+      gitIn: (cwd) => async (args, input) => {
+        if (
+          cwd === product &&
+          args[0] === "rev-parse" &&
+          args.includes("--verify") &&
+          args.some((arg) => arg.startsWith("refs/yrd/preview/"))
+        ) {
+          rootProbes++
+        }
+        return gitIn(cwd)(args, input)
+      },
+    })
+    expect(rootProbes, "one new-root check; the sweep shares its root observation").toBeLessThanOrEqual(1)
 
     expect(await anchorsIn(product)).toEqual({
       [anchor(product, "task/a", first.root)]: first.root,
@@ -249,6 +265,49 @@ describe("anchorPreviewCustody (27510)", () => {
 
     expect(Object.keys(await anchorsIn(join(product, "vendor/dep")))).toEqual([anchor(product, "task/a", first.root)])
   }, 60_000)
+
+  /** @failure A shared root observation drops tag peeling, hides errors, or deletes under an unreadable root list.
+   * @level l2 @consumer submit preview custody, 29088 lock-bound root observation. */
+  it.each(["missing", "tag", "blob", "unreadable"] as const)(
+    "sweeps with a %s root using the existing custody and error semantics",
+    async (kind) => {
+      const product = await author_clone()
+      const first = await candidate(product, "first")
+      const git = gitIn(product)
+      const name = anchor(product, "task/other", first.root)
+      const store = join(product, "vendor/dep")
+      const named: string[] = []
+      if (kind === "tag") {
+        await git([...author, "tag", "-a", "preview-tag", first.root, "-m", "preview root"])
+        await git(["update-ref", "--create-reflog", name, "refs/tags/preview-tag"])
+      } else if (kind === "blob") {
+        const blob = (await git(["hash-object", "-w", "--stdin"], "not a commit\n")).trim()
+        await git(["update-ref", "--create-reflog", name, blob])
+      }
+      await gitIn(store)(["update-ref", name, first.dep])
+      await custody(product, first.root, "task/a", {
+        leftover: (why) => void named.push(why),
+        gitIn: (cwd) => async (args, input) => {
+          if (
+            kind === "unreadable" &&
+            cwd === product &&
+            args[0] === "for-each-ref" &&
+            args.at(-1) === `refs/yrd/preview/${previewCloneKey(join(product, ".git"))}/`
+          ) {
+            throw new Error("injected root listing failure")
+          }
+          return gitIn(cwd)(args, input)
+        },
+      })
+      expect((await anchorsIn(store))[name]).toBe(kind === "missing" ? undefined : first.dep)
+      if (kind === "tag") expect(named.join("\n")).not.toContain("orphan sweep")
+      if (kind === "blob" || kind === "unreadable") {
+        expect(named.join("\n")).toContain("orphan sweep")
+        expect(named.join("\n")).toContain(kind === "blob" ? name : "injected root listing failure")
+      }
+    },
+    60_000,
+  )
 
   it("retires an ended subject's custody root first, then sweeps its components", async () => {
     const product = await author_clone()
