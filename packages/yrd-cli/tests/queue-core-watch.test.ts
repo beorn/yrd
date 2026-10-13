@@ -1306,7 +1306,10 @@ describe("the drafts a watch reads (24196)", () => {
       )
 
     const page = capture(w.work)
-    expect(await coreQueueCommand(w.work, page.io, { command: "list" }, { workdir: w.workdir }), page.stderr()).toBe(0)
+    expect(
+      await coreQueueCommand(w.work, page.io, { command: "list", all: true }, { workdir: w.workdir }),
+      page.stderr(),
+    ).toBe(0)
     const json = capture(w.work)
     expect(
       await coreQueueCommand(w.work, json.io, { command: "list" }, { json: true, workdir: w.workdir }),
