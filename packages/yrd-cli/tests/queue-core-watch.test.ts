@@ -229,6 +229,57 @@ async function drain(w: World): Promise<void> {
   )
 }
 
+/**
+ * A Git executable that moves a ref EXACTLY at the fetch boundary — the one
+ * instant between a listing's advertisement and its fetch — and passes every
+ * other call, and the real result, straight through. It counts the fetches that
+ * name `names`; while fewer than `moves` have run (one by default,
+ * `Number.POSITIVE_INFINITY` to keep a queue hot for every attempt) it moves
+ * `ref` between `from` and `to`, alternating each time. `moved()` reads the
+ * moves back for a row to assert the race happened. A listing handed the
+ * executable as its `selection` meets a race that is caused, never faked.
+ */
+function movingOnFetchGit(
+  w: World,
+  options: Readonly<{
+    remote: string
+    ref: string
+    from: string
+    to: string
+    names: string
+    moves?: number
+  }>,
+): Readonly<{ executable: string; moved(): number }> {
+  const count = join(w.workdir, "moving-git-count")
+  const executable = join(w.workdir, "moving-git.ts")
+  writeFileSync(
+    executable,
+    `#!${process.execPath}
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
+const args = process.argv.slice(2)
+if (args.includes("fetch") && args.some((arg) => arg.includes(${JSON.stringify(options.names)}))) {
+  const before = existsSync(${JSON.stringify(count)}) ? Number(readFileSync(${JSON.stringify(count)}, "utf8")) : 0
+  const next = before + 1
+  writeFileSync(${JSON.stringify(count)}, String(next))
+  if (next <= ${String(options.moves ?? 1)}) {
+    const moving = next % 2 === 1
+    const applied = Bun.spawnSync(["git", "--git-dir", ${JSON.stringify(options.remote)}, "update-ref", ${JSON.stringify(options.ref)}, moving ? ${JSON.stringify(options.to)} : ${JSON.stringify(options.from)}, moving ? ${JSON.stringify(options.from)} : ${JSON.stringify(options.to)}], { stdout: "pipe", stderr: "pipe" })
+    if (applied.exitCode !== 0) throw new Error(new TextDecoder().decode(applied.stderr))
+  }
+}
+const result = Bun.spawnSync(["git", ...args], { stdin: "inherit", stdout: "pipe", stderr: "pipe" })
+process.stdout.write(result.stdout)
+process.stderr.write(result.stderr)
+process.exit(result.exitCode)
+`,
+  )
+  chmodSync(executable, 0o755)
+  return {
+    executable,
+    moved: () => Math.min(fs.existsSync(count) ? Number(readFileSync(count, "utf8")) : 0, options.moves ?? 1),
+  }
+}
+
 describe("event queue observation refusals", () => {
   // AC4: reader-level fallback facts were invisible in the actual list/watch
   // outputs. One real command journey proves JSON facts, human narration and
@@ -684,6 +735,237 @@ process.exit(result.exitCode)
       }
     },
   )
+
+  /**
+   * @failure A second change's event refs moving between the watcher's own
+   *          advertisement and its fetch killed the watch with exit 2 (28941).
+   *          The multi-prefix reader refuses to mix an advertisement with a
+   *          later fetch and says "retry the reading", but the listing never
+   *          retried that refusal, so an ordinary queue advance — another
+   *          change landing on the same queue — ended a reviewer's watcher.
+   * @level    l2 (a real remote and a clone under a temporary root;
+   *           `coreQueueCommand` driven directly, no process boundary)
+   * @consumer a seat waiting on `yrd list <branch> --watch` while other changes
+   *           land on the same queue; it re-inventories instead of exiting.
+   */
+  it("re-inventories when another change's ref moves between the advertisement and the fetch", async () => {
+    const w = await world()
+    const branch = "task/watched"
+    await change(w, branch, true)
+    await change(w, "task/unrelated", true)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queue = await readEventQueue(store, "main")
+    // The WATCHED change reaches its ending at its advertised tip, so a watch
+    // that survives the unrelated move ends on this round with the ending's code.
+    const ref = changesRef("main", branch)
+    const chain = await openEvents({ ...store, ref, writer: "yrd" })
+    const before = await chain.head()
+    if (before === null) throw new Error("submitted fixture change has no event tip")
+    const commit = (await w.git(["rev-parse", branch])).trim()
+    await chain.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit })], { expect: before })
+    const after = await chain.head()
+    if (after === null) throw new Error("merged fixture change has no event tip")
+    const remote = join(dirname(w.work), "remote.git")
+    // The watched change is already at its merged tip on the remote: nothing
+    // about it moves, so a surviving watch ends on its first round.
+
+    // A SECOND change whose ref moves exactly between the reader's advertisement
+    // and its fetch: advertised at the old tip, fetched at the new one.
+    const otherRef = changesRef("main", "task/unrelated")
+    const other = await openEvents({ ...store, ref: otherRef, writer: "yrd" })
+    const otherBefore = await other.head()
+    if (otherBefore === null) throw new Error("second fixture change has no event tip")
+    const otherCommit = (await w.git(["rev-parse", "task/unrelated"])).trim()
+    await other.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit: otherCommit })], {
+      expect: otherBefore,
+    })
+    const otherAfter = await other.head()
+    if (otherAfter === null) throw new Error("second merged fixture change has no event tip")
+    // Advertised at the submitted tip; the executable moves it to the merged
+    // tip exactly when the reader fetches.
+    await w.git(["--git-dir", remote, "update-ref", otherRef, otherBefore, otherAfter])
+
+    // The selected Git executable only schedules the real ref update at the
+    // fetch boundary; it fabricates no Git result or event.
+    const moving = movingOnFetchGit(w, {
+      remote,
+      ref: otherRef,
+      from: otherBefore,
+      to: otherAfter,
+      names: "task/unrelated",
+    })
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const deadline = setTimeout(() => stop.abort(), 5_000)
+    const watched = coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "list", terms: [branch], watch: true, stop: stop.signal, intervalSeconds: 1 },
+      {
+        json: true,
+        workdir: w.workdir,
+        selection: {
+          executable: moving.executable,
+          contract: "native",
+          scope: "default",
+          origin: "fetch-race fixture",
+        },
+      },
+    ).finally(() => clearTimeout(deadline))
+    // The watch survives the unrelated move and reaches ITS change's ending.
+    await expect(watched).resolves.toBe(0)
+    expect(moving.moved()).toBe(1)
+    const rounds = run
+      .stdout()
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { changes: readonly { branch: string; state: string }[] })
+    expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+  })
+
+  /**
+   * @failure A selected ref that moves inside EVERY advertisement-to-fetch
+   *          window is a re-inventory that can never agree; an unbounded loop
+   *          with no output is the silent shape, so it gives up LOUDLY, naming
+   *          the attempt count and the refs that kept moving (28941, @cto's
+   *          bound ruling). A one-shot has no next tick, so it ends the command.
+   * @level    l2 (a real remote and a clone under a temporary root;
+   *           `coreQueueCommand` driven directly, no process boundary)
+   * @consumer a caller running `yrd list <branch>` while a hot queue outruns one
+   *           reading; it fails counted, and `runYrdProcess` maps the thrown
+   *           error to the exit 2 the command already took for this conflict.
+   */
+  it("gives up loudly with the attempt count when a selected ref moves on every fetch", async () => {
+    const w = await world()
+    const branch = "task/watched"
+    // The watched change stays QUEUED: only the other change moves, so the only
+    // reason the reading cannot agree is the one this bead is about.
+    await change(w, branch, true)
+    await change(w, "task/unrelated", true)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queue = await readEventQueue(store, "main")
+    const remote = join(dirname(w.work), "remote.git")
+    // A second change's ref with two valid tips to alternate between.
+    const otherRef = changesRef("main", "task/unrelated")
+    const other = await openEvents({ ...store, ref: otherRef, writer: "yrd" })
+    const otherBefore = await other.head()
+    if (otherBefore === null) throw new Error("second fixture change has no event tip")
+    const otherCommit = (await w.git(["rev-parse", "task/unrelated"])).trim()
+    await other.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit: otherCommit })], {
+      expect: otherBefore,
+    })
+    const otherAfter = await other.head()
+    if (otherAfter === null) throw new Error("second merged fixture change has no event tip")
+    // Advertised at the submitted tip; the executable moves it at EVERY fetch,
+    // so no advertisement can ever match the fetch that follows it.
+    await w.git(["--git-dir", remote, "update-ref", otherRef, otherBefore, otherAfter])
+    const moving = movingOnFetchGit(w, {
+      remote,
+      ref: otherRef,
+      from: otherBefore,
+      to: otherAfter,
+      names: "task/unrelated",
+      moves: Number.POSITIVE_INFINITY,
+    })
+    const run = capture(w.work)
+    const oneShot = coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "list", terms: [branch] },
+      {
+        workdir: w.workdir,
+        selection: {
+          executable: moving.executable,
+          contract: "native",
+          scope: "default",
+          origin: "fetch-race fixture",
+        },
+      },
+    )
+    await expect(oneShot).rejects.toThrow(
+      /event refs moved after the selected inventory 8 times in a row; giving up: refs\/yrd\/main\/changes\/task\/unrelated/u,
+    )
+    // The count is narrated while it retries, then named once when it stops.
+    expect(run.stderr()).toContain("(retry 7/8)")
+    expect(run.stderr()).toContain("task/unrelated")
+  })
+
+  /**
+   * @failure A watch is a LOOP: a queue advancing faster than one listing can
+   *          read it must not end it. The exhaustion is said and the watch takes
+   *          its next tick, then reaches the change's own ending (28941, @cto's
+   *          ruling that a hot queue must never end a watch).
+   * @level    l2 (a real remote and a clone under a temporary root;
+   *           `coreQueueCommand` driven directly, no process boundary)
+   * @consumer a seat waiting on `yrd list <branch> --watch` while other changes
+   *           land on the same queue; the watch outlives every exhaustion.
+   */
+  it("keeps watching past an exhaustion and reaches the change's ending", async () => {
+    const w = await world()
+    const branch = "task/watched"
+    await change(w, branch, true)
+    await change(w, "task/unrelated", true)
+    const store = createEventStore(w.work, "origin", gitIn(w.work).selection)
+    const queue = await readEventQueue(store, "main")
+    const remote = join(dirname(w.work), "remote.git")
+    // The WATCHED change is already merged on the remote: nothing about it
+    // moves, so once the queue rests the watch ends on its change's ending.
+    const ref = changesRef("main", branch)
+    const chain = await openEvents({ ...store, ref, writer: "yrd" })
+    const before = await chain.head()
+    if (before === null) throw new Error("submitted fixture change has no event tip")
+    const commit = (await w.git(["rev-parse", branch])).trim()
+    await chain.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit })], { expect: before })
+    // A SECOND change's ref moves inside the first eight advertisement-to-fetch
+    // windows — exactly the readings one listing takes — and then rests, so the
+    // next round can agree and read the watched ending.
+    const otherRef = changesRef("main", "task/unrelated")
+    const other = await openEvents({ ...store, ref: otherRef, writer: "yrd" })
+    const otherBefore = await other.head()
+    if (otherBefore === null) throw new Error("second fixture change has no event tip")
+    const otherCommit = (await w.git(["rev-parse", "task/unrelated"])).trim()
+    await other.append([changeInput("merged", { queueTip: queue.tip, at: new Date(), commit: otherCommit })], {
+      expect: otherBefore,
+    })
+    const otherAfter = await other.head()
+    if (otherAfter === null) throw new Error("second merged fixture change has no event tip")
+    await w.git(["--git-dir", remote, "update-ref", otherRef, otherBefore, otherAfter])
+    const moving = movingOnFetchGit(w, {
+      remote,
+      ref: otherRef,
+      from: otherBefore,
+      to: otherAfter,
+      names: "task/unrelated",
+      moves: 8,
+    })
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const deadline = setTimeout(() => stop.abort(), 10_000)
+    const watched = coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "list", terms: [branch], watch: true, stop: stop.signal, intervalSeconds: 1 },
+      {
+        json: true,
+        workdir: w.workdir,
+        selection: {
+          executable: moving.executable,
+          contract: "native",
+          scope: "default",
+          origin: "fetch-race fixture",
+        },
+      },
+    ).finally(() => clearTimeout(deadline))
+    // The watch says the exhaustion once and then reaches ITS change's ending.
+    await expect(watched).resolves.toBe(0)
+    expect(run.stderr()).toContain("8 times in a row")
+    const rounds = run
+      .stdout()
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { changes: readonly { branch: string; state: string }[] })
+    expect(rounds.at(-1)).toMatchObject({ changes: [{ branch, state: "merged" }] })
+  })
 
   // The producer owns its protocol; ordinary Git calls still use the real
   // selected executable. These defects cross run creation and the watch lifecycle.

@@ -57,6 +57,7 @@ import {
   eventListRows,
   eventRows,
   enumerateChangeSegments,
+  EventRefsMoved,
   isOpen,
   createEventStore,
   createLocalEventStore,
@@ -3850,8 +3851,39 @@ export async function coreQueueCommand(
       const stopped = (): boolean => request.stop?.aborted === true
       let first = true
       let declared = captured
+      /** Wait out one interval, then re-read the declaration the next tick reads. */
+      const pauseAndRefresh = async (): Promise<YrdCliExitCode | undefined> => {
+        await new Promise((resolve) => {
+          setTimeout(resolve, interval)
+        })
+        if (stopped()) return 0
+        const refreshed = await declaration()
+        if (refreshed === undefined) return noQueueOnTarget(targetLabel)
+        declared = refreshed
+        return undefined
+      }
+      /**
+       * One listing round, taking the ONE failure a watch survives (28941): a
+       * queue too hot for a single reading says the exhaustion and the loop takes
+       * its next tick — a watch is a LOOP and a hot queue must never end one.
+       * Every other failure still ends the watch.
+       */
+      const roundOrSayExhausted = async (): Promise<ListingRound | undefined> => {
+        try {
+          return await round(declared)
+        } catch (error) {
+          if (!(error instanceof EventListingAcquireExhausted)) throw error
+          io.stderr(`yrd: ${error.message}\n`)
+          return undefined
+        }
+      }
       for (;;) {
-        const one = await round(declared)
+        const one = await roundOrSayExhausted()
+        if (one === undefined) {
+          const ended = await pauseAndRefresh()
+          if (ended !== undefined) return ended
+          continue
+        }
         // A selector that matches nothing would otherwise wait forever for a
         // change that is not there. It is refused loudly, with what was asked
         // for and where it was looked for.
@@ -3874,13 +3906,8 @@ export async function coreQueueCommand(
           if (ending !== undefined) return ending
         }
         if (stopped()) return 0
-        await new Promise((resolve) => {
-          setTimeout(resolve, interval)
-        })
-        if (stopped()) return 0
-        const refreshed = await declaration()
-        if (refreshed === undefined) return noQueueOnTarget(targetLabel)
-        declared = refreshed
+        const ended = await pauseAndRefresh()
+        if (ended !== undefined) return ended
         // The drafts are not what a selector waits on: a head that cannot be
         // fetched is said, once, and never ends the watch or changes its code.
         await sightDrafts(one).catch((error: unknown) => {
@@ -6003,17 +6030,40 @@ export async function readEventListing(
   }
 
   // 4. Full read
-  const acquired =
-    options.branch === undefined
-      ? await readEventQueueWithChanges(store, config.target.branch)
-      : await Promise.all([
-          readEventQueue(store, config.target.branch),
-          readBranchHistory(store, config.target.branch, options.branch, { invalid: "return" }),
-        ]).then(([queue, selected]) => ({
-          queue,
-          histories: new Map(selected.history === undefined ? [] : [[options.branch as string, selected.history]]),
-          invalid: new Map(selected.invalid === undefined ? [] : [[options.branch as string, selected.invalid]]),
-        }))
+  // Between this listing's own advertisement and its fetch, an ordinary queue
+  // move can land: the multi-prefix reader refuses to mix the two — an
+  // `EventRefsMoved` conflict — rather than return a selection that never
+  // existed. A second change landing on the same queue must not kill a watcher,
+  // so the acquisition re-inventories until its advertisement and its fetch
+  // agree (28941): every attempt takes a FRESH inventory and never reuses the
+  // refused one, and a queue still moving after EVENT_LISTING_ACQUIRE_ATTEMPTS
+  // gives up loudly instead of spinning.
+  const readingBranch = options.branch
+  const acquire =
+    readingBranch === undefined
+      ? () => readEventQueueWithChanges(store, config.target.branch)
+      : () =>
+          Promise.all([
+            readEventQueue(store, config.target.branch),
+            readBranchHistory(store, config.target.branch, readingBranch, { invalid: "return" }),
+          ]).then(([queue, selected]) => ({
+            queue,
+            histories: new Map(selected.history === undefined ? [] : [[readingBranch, selected.history]]),
+            invalid: new Map(selected.invalid === undefined ? [] : [[readingBranch, selected.invalid]]),
+          }))
+  let acquired: Awaited<ReturnType<typeof acquire>>
+  for (let attempt = 1; ; attempt++) {
+    try {
+      acquired = await acquire()
+      break
+    } catch (error) {
+      if (!(error instanceof EventRefsMoved)) throw error
+      if (attempt >= EVENT_LISTING_ACQUIRE_ATTEMPTS) throw new EventListingAcquireExhausted(attempt, error.movedRefs)
+      options.onRetry?.(
+        `event refs moved after the selected inventory (retry ${String(attempt)}/${String(EVENT_LISTING_ACQUIRE_ATTEMPTS)}): ${error.movedRefs.join(", ")}\n`,
+      )
+    }
+  }
   let queue = acquired.queue
   const histories = new Map(acquired.histories)
   const invalid = new Map(acquired.invalid)
@@ -6222,6 +6272,26 @@ class EventListingMoved extends Error {
       read === undefined
         ? `${ref} appeared during event list at ${observed}; read the queue again`
         : `${ref} moved during event list: read ${read}, observed ${observed ?? "absent"}`,
+    )
+  }
+}
+
+/**
+ * How many times a listing re-inventories when a selected ref keeps moving
+ * inside EVERY advertisement-to-fetch window. Eight running is the regime where
+ * the queue advances faster than one listing can read it: the retry gives up
+ * loudly rather than spin (28941).
+ */
+const EVENT_LISTING_ACQUIRE_ATTEMPTS = 8
+
+/** A selected ref moved inside every advertisement-to-fetch window, so the re-inventory gave up. */
+class EventListingAcquireExhausted extends Error {
+  constructor(
+    readonly attempts: number,
+    readonly refs: readonly string[],
+  ) {
+    super(
+      `event refs moved after the selected inventory ${String(attempts)} times in a row; giving up: ${refs.join(", ")}`,
     )
   }
 }
