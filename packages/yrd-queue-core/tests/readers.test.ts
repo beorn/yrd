@@ -687,6 +687,58 @@ describe("a run's journal, read back", () => {
     expect(second.fallbacks).toBeUndefined()
   })
 
+  it("repairs a source-changed projection of a TERMINAL round from the raw journal (28918)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-source-changed-terminal"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    // A mid-run snapshot exists (finish persisted), then finish()'s failure handler
+    // APPENDED one more row (log.ts:318) — the real shape 28918 reproduces: the
+    // journal is now strictly longer than the projection's recorded source.
+    log.finish()
+    log.write({ kind: "warning", subject: "journal-projection", reason: "finish persist failed" })
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const before = fs.readFileSync(artifact, "utf8")
+
+    // The round's writer is GONE: the source can no longer move, so the rebuild is stable.
+    const first = readJournals(dir, { now: at, runTerminal: () => true })
+    expect(first.fallbacks).toMatchObject({
+      count: 1,
+      reasons: [{ reason: "source-changed", count: 1 }],
+      persisted: 1,
+    })
+    expect(fs.readFileSync(artifact, "utf8")).not.toBe(before)
+    // One repair per terminal journal: the next read finds the projection present.
+    const second = readJournals(dir, { now: at, runTerminal: () => true })
+    expect(second.fallbacks).toBeUndefined()
+    expect(second.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+  })
+
+  it("leaves a source-changed projection of a LIVE round alone — its journal can still grow (28918)", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const dir = join(scratch("projection-source-changed-live"), "logs")
+    const log = openLog(dir, () => at)
+    log.write({ kind: "run", base: "aaa", queue: "q", target: "main" })
+    log.write({ kind: "change", branch: "task/one", head: "abc123", decision: "failed" })
+    log.finish()
+    log.write({ kind: "warning", subject: "journal-projection", reason: "finish persist failed" })
+    const artifact = log.path.replace(/\.jsonl$/u, ".projection.json")
+    const before = fs.readFileSync(artifact, "utf8")
+
+    // An explicit not-terminal probe, and nothing injected at all, both mean "not
+    // proven terminal": the artifact is left alone and the read still carries the facts.
+    const injected = readJournals(dir, { now: at, runTerminal: () => false })
+    expect(injected.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "source-changed", count: 1 }] })
+    expect(injected.fallbacks?.persisted).toBeUndefined()
+    expect(injected.runs.get(journalKey("task/one", "abc123"))?.[0]).toMatchObject({ id: log.id, decision: "failed" })
+    expect(fs.readFileSync(artifact, "utf8")).toBe(before)
+
+    const absent = readJournals(dir, { now: at })
+    expect(absent.fallbacks).toMatchObject({ count: 1, reasons: [{ reason: "source-changed", count: 1 }] })
+    expect(fs.readFileSync(artifact, "utf8")).toBe(before)
+  })
+
   it.each([
     ["missing", "missing"],
     ["partial", "partial"],
