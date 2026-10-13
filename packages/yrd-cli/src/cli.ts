@@ -1394,9 +1394,12 @@ function buildProgram(
       // A removal that FAILS is named here, and makes the verb exit non-zero: the
       // queue round must survive it (@cto 2026-10-10T23:16Z), but the operator's
       // explicit drain is the one place a failure is a failure.
-      if (result.failures.length > 0) {
+      if (result.failures.length > 0 || result.failuresOmitted > 0) {
         for (const failure of result.failures) {
           io.stderr(`yrd: could not remove ${failure.path}: ${failure.error}\n`)
+        }
+        if (result.failuresOmitted > 0) {
+          io.stderr(`yrd: ${result.failuresOmitted} more removal failure(s) past the bounded row\n`)
         }
         setExit(1)
       }
@@ -1417,6 +1420,7 @@ function buildProgram(
               remaining: result.remaining.length,
               ...(result.missing.length === 0 ? {} : { missing: result.missing }),
               ...(result.failures.length === 0 ? {} : { failures: result.failures }),
+              ...(result.failuresOmitted === 0 ? {} : { failuresOmitted: result.failuresOmitted }),
               ...(dryRun === true ? { list: result.planned.map((entry) => entry.path) } : {}),
             })}\n`
           : retentionHumanLines(
@@ -1424,6 +1428,7 @@ function buildProgram(
                 windowMs: result.windowMs,
                 removed: result.removed,
                 failures: result.failures,
+                failuresOmitted: result.failuresOmitted,
                 remaining: result.remaining,
                 missing: result.missing,
               },

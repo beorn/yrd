@@ -80,6 +80,11 @@ export type RetentionResult = Readonly<{
   windowMs: number
   removed: readonly ExpiredRoundOutput[]
   failures: readonly RetentionFailure[]
+  /**
+   * Failures past the bounded `failures` row (28836): the row names the oldest `limit` and this counts the rest, so
+   * a long stuck prefix can never grow the observation row while the omitted work stays visible.
+   */
+  failuresOmitted: number
   remaining: readonly ExpiredRoundOutput[]
   missing: readonly string[]
 }>
@@ -223,15 +228,25 @@ export async function pruneRoundOutput(
   const scan = expiredRoundOutput({ roots: input.roots, now: input.now, windowMs })
   const selected = scan.entries
   const planned = input.limit === undefined ? selected : selected.slice(0, input.limit)
+  // 28836: the budget counts successful REMOVALS, not attempts. Walk `selected` oldest-first and pass over a
+  // failure, so a directory that will not remove can never fill the prefix and starve the entries behind it.
+  const budget = input.limit ?? selected.length
   const removed: ExpiredRoundOutput[] = []
-  const failures: RetentionFailure[] = []
+  const attemptedFailures: RetentionFailure[] = []
   if (input.dryRun !== true) {
-    for (let index = 0; index < planned.length; index += ROUND_REMOVAL_BATCH) {
-      const batch = await removeExpiredRoundOutput({ selected: planned.slice(index, index + ROUND_REMOVAL_BATCH) })
+    let index = 0
+    while (index < selected.length && removed.length < budget) {
+      const take = Math.min(ROUND_REMOVAL_BATCH, budget - removed.length, selected.length - index)
+      if (take <= 0) break
+      const batch = await removeExpiredRoundOutput({ selected: selected.slice(index, index + take) })
       removed.push(...batch.removed)
-      failures.push(...batch.failures)
+      attemptedFailures.push(...batch.failures)
+      index += take
     }
   }
+  // Bound the failure row (@cto 2bfbca04): name the oldest `budget` failures and count the rest.
+  const failures = attemptedFailures.slice(0, budget)
+  const failuresOmitted = attemptedFailures.length - failures.length
   const removedPaths = new Set(removed.map((entry) => entry.path))
   return {
     windowMs,
@@ -239,6 +254,7 @@ export async function pruneRoundOutput(
     planned,
     removed,
     failures,
+    failuresOmitted,
     remaining: selected.filter((entry) => !removedPaths.has(entry.path)),
     missing: scan.missing,
   }
@@ -270,6 +286,7 @@ export function retentionObservation(result: RetentionResult, input: Readonly<{ 
     // A removal that FAILED is in the row (@cto 2026-10-10T23:16Z): a reader must
     // see the path and the error, never a "removed 3" hiding a fourth that stayed.
     ...(result.failures.length === 0 ? {} : { failures: result.failures }),
+    ...(result.failuresOmitted === 0 ? {} : { failuresOmitted: result.failuresOmitted }),
     // An optional root that was not on disk is named in the row: "removed 0"
     // must never be the only fact a reader has about where the sweep looked.
     ...(result.missing.length === 0 ? {} : { missing: result.missing }),
@@ -317,6 +334,7 @@ const NOTHING_SWEPT: RetentionResult = {
   windowMs: ROUND_OUTPUT_WINDOW_MS,
   removed: [],
   failures: [],
+  failuresOmitted: 0,
   remaining: [],
   missing: [],
 }
@@ -353,7 +371,7 @@ function writeRetentionRow(workdir: string, row: Record<string, unknown>): void 
  * reported below.
  */
 export function retentionRowWorthWriting(result: RetentionResult): boolean {
-  return result.removed.length > 0 || result.failures.length > 0
+  return result.removed.length > 0 || result.failures.length > 0 || result.failuresOmitted > 0
 }
 
 /**
@@ -412,6 +430,11 @@ export async function sweepRoundOutputInRound(
   }
   for (const failure of result.failures) {
     report(`yrd: log retention could not remove ${failure.path}: ${failure.error}; the next round retries\n`)
+  }
+  if (result.failuresOmitted > 0) {
+    report(
+      `yrd: log retention: ${result.failuresOmitted} more removal failure(s) past the bounded row; the next round retries\n`,
+    )
   }
   try {
     appendRetentionObservation(input.workdir, result, input.now)
