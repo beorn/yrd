@@ -4718,6 +4718,10 @@ export function summarize(kind: string, rest: Readonly<Record<string, unknown>>)
     case "result":
       return `${String(rest.name)} ${String(rest.result)} for ${where}${rest.whose === undefined ? "" : `, ${String(rest.whose)}'s`}`
     case "settle":
+      // Legacy reader only (28899): no producer since 884d23eb; the last
+      // retained settle row was written 2026-09-24 and 2,504 remain in
+      // retained queue journals. Delete with the validator branches in
+      // yrd-queue-core log.ts once no retained journal holds a settle row.
       // The arrow form says a pin MOVED. A nested pin left behind its own main
       // did not move, and rendering it as a raise would put a landing in the log
       // that never happened.
