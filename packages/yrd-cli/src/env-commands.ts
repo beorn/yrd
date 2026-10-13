@@ -869,8 +869,12 @@ export async function closeEnvironment(
   // in for. The worktree stays dirty by design — the bytes are in the durable preserve refs, and the
   // removal below is what retires them. A preserve that cannot complete throws (loud) and blocks the
   // removal, so no path discards uncommitted work silently.
+  const preservedRefs: string[] = []
   if (options.preserve === true) {
     const preserved = await preserveSlotState(path, slotNameFromResolvedPath(root, path), root)
+    for (const ref of [preserved.ref, ...preserved.submodules.map((entry) => entry.ref)]) {
+      if (ref !== undefined && ref !== "" && !preservedRefs.includes(ref)) preservedRefs.push(ref)
+    }
     io.stderr(
       preserved.preserved
         ? `yrd: env close preserved ${preserved.reason ?? "dirty"} state of ${path} before removal: ${preserved.ref ?? "(no ref)"} (${(preserved.sha ?? "").slice(0, 12)})${preserved.submodules.length === 0 ? "" : `; submodules: ${preserved.submodules.map((entry) => `${entry.path}@${entry.sha.slice(0, 12)}`).join(", ")}`}\n`
@@ -929,7 +933,12 @@ export async function closeEnvironment(
     // that cannot tell what this one did. Refuse loudly and preserve instead.
     throw uncertified(path, recheck, "after teardown")
   }
-  if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true) {
+  // 29073 (@cto ruling): with --preserve the no-submodule path takes the SAME git-super worktree
+  // remove as the submodule path, so the verified-ref dirt gate has ONE implementation in ONE
+  // process and yrd never re-derives it. The cost is an empty or absent modules retention and one
+  // proof line for a tree that declares no .gitmodules. WITHOUT --preserve the plain path is
+  // unchanged: a clean no-submodule close never reaches git-super.
+  if (modules.trim() !== "" || options.retain !== undefined || options.noRehome === true || options.preserve === true) {
     const retain =
       options.retain === undefined
         ? join(workdir, "retained-modules")
@@ -946,6 +955,7 @@ export async function closeEnvironment(
           "--retain",
           retain,
           ...(options.noRehome === true ? ["--no-rehome"] : []),
+          ...preservedRefs.flatMap((ref) => ["--preserved", ref]),
         ]),
       )
     } catch (error) {
