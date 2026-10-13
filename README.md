@@ -118,6 +118,8 @@ Later commits and branch renames retain the binding. Conflicts name both issues 
 
 The target's `.yrd.yml` may declare `issueResolver: [issue-lookup, --json]`. Yrd appends each raw binding or `--issue` value as one argument and expects JSON with a nonempty `id` string on stdout.
 
+When `yrd drop --issue` classifies many branches, it appends every distinct raw binding in one invocation. A batch-aware resolver returns a JSON array with one entry per argument: an object with a nonempty `id` string for a match, or `null` for no match. A resolver that still returns the single-reference object is called once per reference instead.
+
 Yrd compares those IDs and writes the canonical ID in new environment and pin-only binding commits. The candidate's declaration cannot change this rule for its own submission.
 
 A missing issue, failed command, timeout or invalid result refuses and names the raw reference and target command.

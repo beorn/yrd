@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url"
 import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure, pidPresence, processStartIdentity } from "@yrd/process"
-import { issueResolver } from "./issue-resolver.ts"
+import { issueLookupBatch, issueResolver } from "./issue-resolver.ts"
 import { repositoryHere } from "./declaration.ts"
 import { createEnvironmentCleanup } from "./env-cleanup.ts"
 import { sweepRoundOutputInRound } from "./log-retention.ts"
@@ -49,7 +49,7 @@ import {
   claimWorktrees,
   directMergeLine,
   drop,
-  issueOf,
+  issueCandidatesOf,
   normalizeIssueReference,
   retireLocalBranch,
   pauseLine,
@@ -158,6 +158,7 @@ import {
   type JournalRun,
   type JournalSummary,
   type Git,
+  type IssueCandidate,
   type IssueResolution,
   type AdmissionOutcome,
   type Submitted,
@@ -1378,6 +1379,16 @@ export async function coreQueueCommand(
       const failed: { branch: string; head: string; reason: string }[] = []
       const unclassified: { branch: string; head: string; reason: string; cure: string }[] = []
       let excluded = 0
+      type DropEntry = {
+        branch: string
+        head: string
+        changeCommit?: string
+        changeSubmitter?: string
+        candidates?: readonly IssueCandidate[]
+        bound?: string
+        classificationError?: unknown
+      }
+      const entries: DropEntry[] = []
       try {
         for (const [ref, head] of heads) {
           const branch = ref.slice("refs/heads/".length)
@@ -1386,20 +1397,132 @@ export async function coreQueueCommand(
             continue
           }
           const change = reading.histories.get(branch)?.state
-          let bound: string | undefined
+          const entry: DropEntry = {
+            branch,
+            head,
+            ...(change?.commit === undefined ? {} : { changeCommit: change.commit }),
+            ...(change?.submitter === undefined ? {} : { changeSubmitter: change.submitter }),
+          }
+          if (local || change?.issue !== undefined) {
+            entries.push({ ...entry, bound: change?.issue ?? issue })
+            continue
+          }
           try {
-            bound =
-              change?.issue ??
-              (local ? issue : (await issueOf(authorGit, branch, head, target, undefined, resolveIssue))?.issue)
+            entries.push({ ...entry, candidates: await issueCandidatesOf(authorGit, branch, head, target) })
           } catch (error) {
-            // delete-fallback-allow: an unreadable binding is reported as unclassified and immediately continued, so it only shrinks the branches retired.
+            // delete-fallback-allow: an unreadable binding is reported as unclassified below, so it only shrinks the branches retired.
+            entries.push({ ...entry, classificationError: error })
+          }
+        }
+        const candidateRaws = [
+          ...new Set(entries.flatMap((entry) => entry.candidates?.map((candidate) => candidate.issue) ?? [])),
+        ]
+        const resolvedIssues = new Map<string, string>()
+        const unresolvedIssues = new Map<string, string>()
+        if (candidateRaws.length > 0) {
+          if (resolveIssue === undefined) {
+            for (const raw of candidateRaws) resolvedIssues.set(raw, raw)
+          } else if (candidateRaws.length === 1) {
+            for (const raw of candidateRaws) {
+              try {
+                resolvedIssues.set(raw, normalizeIssueReference(await resolveIssue(raw)))
+              } catch (error) {
+                // delete-fallback-allow: an unresolved reference is named below, so it only shrinks the branches retired.
+                unresolvedIssues.set(raw, String(error))
+              }
+            }
+          } else {
+            const batchLookup = issueLookupBatch(config, repo, env)
+            let batch: ReadonlyMap<string, { id: string }> | undefined
+            let batchError: unknown
+            if (batchLookup !== undefined) {
+              try {
+                batch = await batchLookup(candidateRaws)
+              } catch (error) {
+                // delete-fallback-allow: a failed batch read names every candidate unresolved below, so it only shrinks the branches retired.
+                batchError = error
+              }
+            }
+            if (batchError !== undefined) {
+              for (const raw of candidateRaws) unresolvedIssues.set(raw, String(batchError))
+            } else if (batch !== undefined) {
+              for (const raw of candidateRaws) {
+                const resolved = batch.get(raw)
+                if (resolved === undefined) {
+                  unresolvedIssues.set(
+                    raw,
+                    `target .yrd.yml issueResolver ${JSON.stringify(config.issueResolver)} returned no result for ${JSON.stringify(raw)}`,
+                  )
+                } else {
+                  resolvedIssues.set(raw, normalizeIssueReference(resolved.id))
+                }
+              }
+            } else {
+              for (const raw of candidateRaws) {
+                try {
+                  resolvedIssues.set(raw, normalizeIssueReference(await resolveIssue(raw)))
+                } catch (error) {
+                  // delete-fallback-allow: an unresolved reference is named below, so it only shrinks the branches retired.
+                  unresolvedIssues.set(raw, String(error))
+                }
+              }
+            }
+          }
+        }
+        for (const entry of entries) {
+          const { branch, head } = entry
+          let bound = entry.bound
+          if (entry.classificationError !== undefined) {
             unclassified.push({
               branch,
               head,
-              reason: `issue binding unreadable: ${String(error)}`,
+              reason: `issue binding unreadable: ${String(entry.classificationError)}`,
               cure: `fix the issue trailer, or yrd drop ${branch} --local --tip ${head}`,
             })
             continue
+          }
+          if (entry.candidates !== undefined) {
+            try {
+              let binding: { issue: string; commit?: string } | undefined
+              for (const candidate of entry.candidates) {
+                const unresolved = unresolvedIssues.get(candidate.issue)
+                if (unresolved !== undefined) {
+                  throw new Error(
+                    `cannot resolve issue ${JSON.stringify(candidate.issue)} for ${branch}: ${unresolved}`,
+                  )
+                }
+                const canonical = resolvedIssues.get(candidate.issue)
+                if (canonical === undefined) {
+                  throw new Error(
+                    `cannot resolve issue ${JSON.stringify(candidate.issue)} for ${branch}: resolver returned no result`,
+                  )
+                }
+                if (candidate.source === "legacy-branch") {
+                  bound = canonical
+                  continue
+                }
+                if (binding === undefined) binding = { issue: canonical, commit: candidate.commit }
+                else if (binding.issue !== canonical) {
+                  const trailer = candidate.trailer ?? "Refs/Resolves"
+                  throw new Error(
+                    `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${canonical} at ${candidate.commit}; ` +
+                      `the second binding is a ${trailer} trailer, and a Refs or Resolves trailer always binds; ` +
+                      `keep a follow-up link without binding it with a "Follow-up: ${canonical}" line, ` +
+                      `then fix trailer at ${candidate.commit}`,
+                  )
+                }
+              }
+              if (binding !== undefined) bound = binding.issue
+            } catch (error) {
+              // delete-fallback-allow: an unreadable binding is reported as unclassified and immediately continued, so it only shrinks the branches retired.
+              unclassified.push({
+                branch,
+                head,
+                reason: `issue binding unreadable: ${String(error)}`,
+                cure: `fix the issue trailer, or yrd drop ${branch} --local --tip ${head}`,
+              })
+              continue
+            }
           }
           if (local && issue !== undefined && bound !== issue) {
             kept.push({ branch, head, reason: `recorded issue ${bound ?? "absent"} differs from reviewed ${issue}` })
@@ -1409,7 +1532,7 @@ export async function coreQueueCommand(
             excluded++
             continue
           }
-          const tip = change?.commit ?? (local ? request.tip : head)
+          const tip = entry.changeCommit ?? (local ? request.tip : head)
           if (local && tip !== request.tip) {
             kept.push({
               branch,
@@ -1424,7 +1547,7 @@ export async function coreQueueCommand(
             branch,
             tip,
             actor: request.by,
-            owner: change?.submitter ?? (await authorGit(["show", "-s", "--format=%an", tip])).trim(),
+            owner: entry.changeSubmitter ?? (await authorGit(["show", "-s", "--format=%an", tip])).trim(),
             issue: bound,
             reason: request.reason ?? (local ? "explicit local branch cleanup" : "issue closed or dropped"),
             date: new Date().toISOString().slice(0, 10),

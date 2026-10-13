@@ -55,7 +55,7 @@ import { openEvents } from "gitomic/events"
 import { assertEventListingFence, coreQueueCommand, openEventDetail } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import { readEnvOpenRecord } from "../src/env-open-record.ts"
-import { issueLookup, issueResolver } from "../src/issue-resolver.ts"
+import { issueLookup, issueLookupBatch, issueResolver } from "../src/issue-resolver.ts"
 import { SERVICE } from "../src/queue-health.ts"
 import { resolveQueueLocation } from "../src/queue-location.ts"
 import { eventHistoryEntries } from "../src/watch-change.ts"
@@ -449,6 +449,33 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(readFileSync(join(repo, "resolver-calls"), "utf8").trim().split("\n")).toHaveLength(2)
     expect(await lookup(id)).toEqual({ id, status: "closed" })
     expect(readFileSync(join(repo, "resolver-calls"), "utf8").trim().split("\n")).toHaveLength(3)
+  })
+
+  it("resolves a batch of issue references and reports a legacy single-object resolver", async () => {
+    const batchCommand = [
+      "sh",
+      "-c",
+      'printf \'[{"id":"@example/28001-batch","status":"closed"},null]\\n\'',
+      "resolver",
+    ]
+    const batchRepo = await world(`issueResolver: ${JSON.stringify(batchCommand)}\n`)
+    const batchGit = gitIn(batchRepo)
+    const batchConfig = await readConfig(batchGit, "HEAD", { branch: "main", remote: "origin" })
+    if (batchConfig === undefined) throw new Error("fixture lost target declaration")
+    const batch = issueLookupBatch(batchConfig, batchRepo)
+    if (batch === undefined) throw new Error("fixture lost target issue resolver")
+    await expect(batch(["28001", "28003"])).resolves.toEqual(
+      new Map([["28001", { id: "@example/28001-batch", status: "closed" }]]),
+    )
+
+    const legacyCommand = ["sh", "-c", 'printf \'{"id":"@example/28001-batch"}\\n\'', "resolver"]
+    const legacyRepo = await world(`issueResolver: ${JSON.stringify(legacyCommand)}\n`)
+    const legacyGit = gitIn(legacyRepo)
+    const legacyConfig = await readConfig(legacyGit, "HEAD", { branch: "main", remote: "origin" })
+    if (legacyConfig === undefined) throw new Error("fixture lost target declaration")
+    const legacyBatch = issueLookupBatch(legacyConfig, legacyRepo)
+    if (legacyBatch === undefined) throw new Error("fixture lost target issue resolver")
+    await expect(legacyBatch(["28001", "28003"])).resolves.toBeUndefined()
   })
 
   it("refuses an option-shaped raw issue before invoking the target resolver", async () => {
@@ -1587,6 +1614,143 @@ describe("a queue is the selected origin branch carrying config", () => {
       }),
     )
   })
+
+  /**
+   * @failure Drop by issue spawns the target resolver once per candidate branch,
+   *          so a slow issue index leaves most branches unclassified.
+   * @level l3
+   * @consumer The closer running yrd drop --issue after durable issue closure
+   */
+  it("drop by issue resolves every candidate binding in one resolver read", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const script = join(dirname(repo), "batch-issue-resolver.sh")
+    writeFileSync(
+      script,
+      [
+        "#!/usr/bin/env bash",
+        'if [ "$#" -gt 1 ]; then',
+        '  printf \'%s\\n\' "$*" >> "$(dirname "$0")/resolver-batch-calls"',
+        "  printf '['",
+        "  first=1",
+        '  for raw in "$@"; do',
+        "    if [ \"$first\" -eq 0 ]; then printf ','; fi",
+        "    first=0",
+        '    case "$raw" in',
+        '      28001) printf \'{"id":"@example/28001-batch","status":"closed"}\' ;;',
+        '      28002) printf \'{"id":"@example/28002-other","status":"open"}\' ;;',
+        "      *) printf 'null' ;;",
+        "    esac",
+        "  done",
+        "  printf ']\\n'",
+        "  exit 0",
+        "fi",
+        'case "$1" in',
+        '  @example/28001-batch) printf \'{"id":"@example/28001-batch","status":"closed"}\\n\' ;;',
+        '  28001) printf \'{"id":"@example/28001-batch","status":"closed"}\\n\' ;;',
+        '  28002) printf \'{"id":"@example/28002-other","status":"open"}\\n\' ;;',
+        "  *) printf 'cannot resolve %s\\n' \"$1\" >&2; exit 31 ;;",
+        "esac",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(script, 0o755)
+    writeFileSync(join(repo, ".yrd.yml"), `issueResolver: ${JSON.stringify(["bash", script])}\n`)
+    await git(["add", ".yrd.yml"])
+    await git(["commit", "--quiet", "-m", "declare batch issue resolver"])
+    await git(["push", "--quiet", "origin", "main"])
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    for (const [branch, trailer] of [
+      ["task/28001-alpha", undefined],
+      ["task/28002-beta", undefined],
+      ["task/28003-gamma", "28003"],
+    ] as const) {
+      await git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(repo, "work.txt"), branch)
+      await git(["add", "work.txt"])
+      await git(["commit", "--quiet", "-m", trailer === undefined ? "work" : `work\n\nRefs: ${trailer}`])
+    }
+    await git(["checkout", "--quiet", "main"])
+    const output = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", "--issue", "@example/28001-batch", "--submitter", "fixture", "--json"],
+        output.io,
+      ),
+      output.stderr(),
+    ).toBe(0)
+    const report = JSON.parse(output.stdout()) as {
+      removed: { branch: string }[]
+      unclassified: { branch: string; reason: string }[]
+    }
+    expect(report.removed.map((row) => row.branch)).toEqual(["task/28001-alpha"])
+    expect(report.unclassified).toEqual([
+      expect.objectContaining({ branch: "task/28003-gamma", reason: expect.stringContaining("28003") }),
+    ])
+    const batchCalls = readFileSync(join(dirname(repo), "resolver-batch-calls"), "utf8")
+      .trim()
+      .split("\n")
+    expect(batchCalls).toHaveLength(1)
+    expect(new Set(batchCalls[0]!.split(" "))).toEqual(new Set(["28001", "28002", "28003"]))
+    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/task/28001-alpha"])).trim()).toBe("")
+    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/task/28002-beta"])).trim()).toBe(
+      "refs/heads/task/28002-beta",
+    )
+    expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/task/28003-gamma"])).trim()).toBe(
+      "refs/heads/task/28003-gamma",
+    )
+  }, 60_000)
+
+  /**
+   * @failure A stalling target resolver makes drop by issue wait once per
+   *          candidate branch instead of bounding the whole classification.
+   * @level l3
+   * @consumer The closer running yrd drop --issue after durable issue closure
+   */
+  it("drop by issue bounds a stalling resolver and names every unresolved branch", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const script = join(dirname(repo), "stalling-issue-resolver.sh")
+    writeFileSync(
+      script,
+      [
+        "#!/usr/bin/env bash",
+        'if [ "$#" -eq 1 ]; then',
+        '  case "$1" in',
+        '    @example/*) printf \'{"id":"%s","status":"closed"}\\n\' "$1"; exit 0 ;;',
+        "  esac",
+        "fi",
+        "sleep 30",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(script, 0o755)
+    writeFileSync(join(repo, ".yrd.yml"), `issueResolver: ${JSON.stringify(["bash", script])}\n`)
+    await git(["add", ".yrd.yml"])
+    await git(["commit", "--quiet", "-m", "declare stalling issue resolver"])
+    await git(["push", "--quiet", "origin", "main"])
+    await createQueue(repo, "main", (await git(["rev-parse", "HEAD"])).trim(), new Date())
+    const branches = ["task/28101-one", "task/28102-two", "task/28103-three"]
+    for (const branch of branches) {
+      await git(["checkout", "--quiet", "-b", branch, "main"])
+      await git(["commit", "--quiet", "--allow-empty", "-m", "work"])
+    }
+    await git(["checkout", "--quiet", "main"])
+    const output = capture(repo)
+    const started = Date.now()
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "drop", "--issue", "@example/28101-stalled", "--submitter", "fixture", "--json"],
+        output.io,
+      ),
+      output.stderr(),
+    ).toBe(0)
+    const elapsedMs = Date.now() - started
+    const report = JSON.parse(output.stdout()) as { unclassified: { branch: string; reason: string }[] }
+    expect(report.unclassified.map((row) => row.branch).sort()).toEqual([...branches].sort())
+    for (const row of report.unclassified) expect(row.reason).toContain("issue binding unreadable")
+    expect(elapsedMs).toBeLessThan(25_000)
+  }, 90_000)
 
   /** @failure Retirement runs before bay cleanup, leaving the merged author ref forever.
    * @level l3 @consumer queue run's author cleanup and retained change history

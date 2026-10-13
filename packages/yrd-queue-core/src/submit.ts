@@ -1243,6 +1243,46 @@ async function submitEvent(
  * branch rename loses the binding. Conflicting explicit/declared issues refuse.
  * An unbound branch may use a declaration or the reported legacy name fallback.
  */
+export type IssueCandidate = Readonly<
+  { issue: string; source: "binding"; commit: string; trailer?: string } | { issue: string; source: "legacy-branch" }
+>
+
+/**
+ * Read a branch's unresolved binding candidates in Git's history order.
+ * Callers that can resolve many references in one read use this instead of
+ * invoking a resolver while walking each branch.
+ */
+export async function issueCandidatesOf(
+  git: Git,
+  branch: string,
+  head: string,
+  targetHead: string,
+): Promise<readonly IssueCandidate[]> {
+  let base: string
+  try {
+    const found = await mergeBase(git, head, targetHead)
+    if (found === undefined) throw new Error("no merge base")
+    base = found
+  } catch (cause) {
+    throw new Error(
+      `cannot read issue binding for ${branch} at ${head} against target ${targetHead}: ${String(cause)}`,
+      { cause },
+    )
+  }
+  const candidates: IssueCandidate[] = []
+  for await (const candidate of issueBindingsOf(git, [`${base}..${head}`, `^${targetHead}`], branch)) {
+    candidates.push({
+      issue: candidate.issue,
+      source: "binding",
+      commit: candidate.commit,
+      ...(candidate.trailer === undefined ? {} : { trailer: candidate.trailer }),
+    })
+  }
+  if (candidates.length > 0) return candidates
+  const legacy = /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+  return legacy === undefined ? [] : [{ issue: legacy, source: "legacy-branch" }]
+}
+
 export async function issueOf(
   git: Git,
   branch: string,
@@ -1259,20 +1299,12 @@ export async function issueOf(
       `issue for ${branch} must be a nonempty single-line value without surrounding whitespace or control characters`,
     )
   }
-  let base: string
-  try {
-    const found = await mergeBase(git, head, targetHead)
-    if (found === undefined) throw new Error("no merge base")
-    base = found
-  } catch (cause) {
-    throw new Error(
-      `cannot read issue binding for ${branch} at ${head} against target ${targetHead}: ${String(cause)}`,
-      { cause },
-    )
-  }
+  const candidates = await issueCandidatesOf(git, branch, head, targetHead)
   let binding: IssueResolution | undefined
-  for await (const candidate of issueBindingsOf(git, [`${base}..${head}`, `^${targetHead}`], branch, resolveIssue)) {
-    const { issue, commit } = candidate
+  for (const candidate of candidates) {
+    if (candidate.source !== "binding") continue
+    const issue = await canonicalIssue(candidate.issue, branch, resolveIssue)
+    const commit = candidate.commit
     if (binding === undefined) binding = { issue, source: "binding", commit }
     else if (binding.issue !== issue) {
       const trailer = candidate.trailer ?? "Refs/Resolves"
@@ -1294,10 +1326,10 @@ export async function issueOf(
     return binding
   }
   if (declared !== undefined) return { issue: await canonicalIssue(declared, branch, resolveIssue), source: "declared" }
-  const legacy = /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+  const legacy = candidates.find((candidate) => candidate.source === "legacy-branch")
   return legacy === undefined
     ? undefined
-    : { issue: await canonicalIssue(legacy, branch, resolveIssue), source: "legacy-branch" }
+    : { issue: await canonicalIssue(legacy.issue, branch, resolveIssue), source: "legacy-branch" }
 }
 
 /** Read all explicit bindings through the submit decoder, preserving Git's commit order. */

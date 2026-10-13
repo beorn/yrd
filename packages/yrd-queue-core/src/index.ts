@@ -215,6 +215,7 @@ export {
   freshnessLine,
   submit,
   issueOf,
+  issueCandidatesOf,
   issueBindingsOf,
   normalizeIssueReference,
 } from "./submit.ts"
@@ -224,6 +225,7 @@ export type {
   AdmissionOutcome,
   MovedGitlink,
   AdmissionVerdict,
+  IssueCandidate,
   IssueResolution,
   IssueResolver,
   Submitted,
