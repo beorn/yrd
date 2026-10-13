@@ -450,6 +450,13 @@ describe("event queue observation refusals", () => {
         rendered.onWait = undefined
       }
       expect(read.mock.calls.filter(([path]) => paths.has(String(path)))).toHaveLength(0)
+      const item = rendered.snapshot?.rows.find(({ row }) => row.branch === "task/failure")
+      const open = rendered.sources?.[0]?.open ?? rendered.open
+      if (item === undefined || open === undefined) throw new Error("watch did not expose its listed row and detail opener")
+      const detail = await open(item)
+      expect(detail.journal?.id).toBe(item.run?.id ?? item.row.run)
+      expect(detail.journal?.steps.length).toBeGreaterThan(0)
+      expect(read.mock.calls.filter(([path]) => paths.has(String(path)))).toHaveLength(1)
     } finally {
       read.mockRestore()
     }
